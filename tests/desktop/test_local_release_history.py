@@ -37,7 +37,7 @@ class LocalHistoryTests(unittest.TestCase):
             native=dict(profile='macos-arm64',projectRoot=str(self.root),home=str(self.home),cwd=str(self.base),
                 rootIdentity=dict(device=str(r.st_dev),inode=str(r.st_ino),mode=r.st_mode,uid=r.st_uid,gid=r.st_gid),
                 leaseFd=fd,nonce='1'*32,clock=dict(workEndNs=str(now+60_000_000_000),hardEndNs=str(now+62_000_000_000))))
-    def run_original(self,action='enroll',fault=None):
+    def run_original(self,action='enroll',fault=None,expect_unknown=False):
         parent=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
         fcntl.flock(parent,fcntl.LOCK_EX|fcntl.LOCK_NB)
         loan=os.dup(parent);os.set_inheritable(loan,True)
@@ -54,7 +54,7 @@ class LocalHistoryTests(unittest.TestCase):
             try:
                 with self.assertRaises(BlockingIOError):fcntl.flock(independent,fcntl.LOCK_EX|fcntl.LOCK_NB)
             finally:os.close(independent)
-            expected={'lease-ready':'key-material','empty-journal-ready':'key-enrolled','durable-genesis':'checkpoint-settled','history-head':'checkpoint-settled'}[kind]
+            expected={'lease-ready':'key-material','empty-journal-ready':'key-enrolled','durable-genesis':'checkpoint-settled','history-head':'checkpoint-settled','abandoned-head':'checkpoint-settled'}[kind]
             value=dict(protocol=wire.PROTOCOL,operationId=engine.request.operation_id,ownerGeneration=engine.request.owner_generation,
                 nonce=engine.request.native['nonce'],requestSha256=engine.request.digest,kind=expected,
                 step=engine.input.reply_step,payload=ENROLLMENT if expected=='key-material' else {})
@@ -92,7 +92,8 @@ class LocalHistoryTests(unittest.TestCase):
         self.assertEqual([r['sequence'] for r in rows],list(range(len(rows))))
         self.assertEqual(rows[0]['kind'],'accepted')
         self.assertEqual(rows[-1]['kind'],'terminal')
-        self.assertTrue(engine.service.closed())
+        import traceback
+        self.assertEqual(engine.service.closed(),not expect_unknown, "".join(traceback.format_exception(engine.service.primary)) if engine.service.primary else None)
         self.assertTrue(engine.input.closed and engine.input.lease_closed)
         self.assertEqual(engine.input.buffer,bytearray())
         if fault=='key-suffix':self.assertEqual(taken,[bytearray(32)])

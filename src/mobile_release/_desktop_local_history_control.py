@@ -88,6 +88,8 @@ class LocalHistoryInput(_SavedCommandInput):
         self._owner();op = self.require_operation();op.checkpoint()
         self._require(self.reply_kind is None and not self.material_pending and not self.buffer)
         route = (("lease-ready","key-material"),("empty-journal-ready","key-enrolled"),("durable-genesis","checkpoint-settled")) if self.initial.context["action"] == "enroll" else (("lease-ready","key-material"),("history-head","checkpoint-settled"))
+        if self.initial.context["action"]=="abandon-inputs":
+            route += (("abandoned-head","checkpoint-settled"),)
         admitted = self.reply_step < len(route) and route[self.reply_step] == (event,expected)
         self._require(admitted)
         self.reply_kind=expected;self.reply_step+=1;self.material_pending=self.material_receiving=True

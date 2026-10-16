@@ -58,3 +58,56 @@ test('failed cancellation retains original and only explicit retry sends another
  await h.controller.cancel();assert.equal(calls,2);assert.equal(h.controller.getSnapshot().status.operation.phase,'terminal');assert.equal(h.controller.getSnapshot().blocked,true);
  }finally{h.controller.dispose();}
 });
+
+const candidate=()=>({operationId:UUID,candidateSha256:'a'.repeat(64),sourceCommit:'b'.repeat(40),sourceTree:'c'.repeat(40),applicationId:'dev.example.app',version:{name:'1.2.3',build:12},files:[{fileName:'app-release.aab',bytes:1073741824,sha256:'d'.repeat(64)},{fileName:'store-metadata.zip',bytes:536870912,sha256:'e'.repeat(64)},{fileName:'validation-report.json',bytes:65536,sha256:'f'.repeat(64)}],observation:'current-bundle-only',priorCreateFinality:'not-established'});
+function inputHistory(request,phase='inputs-ready'){
+ return {...op(request),operationId:'c'.repeat(32),phase:'terminal',intentUsable:false,outcome:'complete',result:{schemaVersion:1,scope:'local-release-history',enrolled:true,headSequence:3,history:[{operationId:UUID,phase,recoveryRequired:phase!=='settled-failure'}],limitations:['no-store-authority','no-build-or-publishing','keychain-intact-rollback-boundary'],...(request.action==='review-inputs'||request.action==='abandon-inputs'?{candidateInputs:phase==='inputs-ready'?candidate():null}:{})}};
+}
+test('candidate history uses exact action grammar and current-bundle-only result, never ordinary verification authority',()=>{
+ const request=localHistoryRequest('p1','review-inputs',UUID);
+ assert.equal(localHistoryRequest('p1','review-inputs'),null);
+ assert.equal(encodeLocalHistoryRequest('prepare_local_release_history',{projectId:'p1',executionMode:'local',action:'verify',candidateOperationId:UUID}),null);
+ assert.equal(localHistoryRequest('p1','review-inputs',UUID.replace('4234','1234')),null);
+ const complete=inputHistory(request);assert.ok(parseLocalHistoryStatus(status(1,complete)));
+ for(const mutate of [r=>r.candidateInputs.applicationId='_bad.app',r=>r.candidateInputs.applicationId='dev._bad',r=>r.candidateInputs.priorCreateFinality='complete',r=>r.candidateInputs.operationId='99999999-1234-4234-8234-123456789abc',r=>r.candidateInputs.files.reverse(),r=>r.candidateInputs.files[0].bytes++,r=>r.candidateInputs.sourceCommit='not-a-commit',r=>r.candidateInputs.files[0].path='/tmp/private',r=>r.candidateInputs=null,r=>r.history[0].phase='prepared']){
+  const bad=copy(complete);mutate(bad.result);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ const old=inputHistory(localHistoryRequest('p1','verify'));old.result.candidateInputs=candidate();assert.equal(parseLocalHistoryStatus(status(1,old)),null);
+ for(const phase of ['inputs-pending','settled-failure'])assert.ok(parseLocalHistoryStatus(status(1,inputHistory(request,phase))));
+ const abandon=localHistoryRequest('p1','abandon-inputs',UUID);
+ assert.ok(parseLocalHistoryStatus(status(1,inputHistory(abandon,'settled-failure'))));
+ assert.equal(parseLocalHistoryStatus(status(1,inputHistory(abandon,'inputs-pending'))),null);
+});
+test('candidate review and abandonment bind consent to the selected original and preserve ordinary history behavior',async()=>{
+ for(const action of ['review-inputs','abandon-inputs']){
+  const h=await fixture();try{
+   h.emit(status(1,inputHistory(localHistoryRequest('p1','verify'))));
+   assert.equal(h.controller.selectCandidate(action,UUID),true);await h.controller.prepare();
+   assert.equal(h.latest().operation.context.candidateOperationId,UUID);
+   let called=0;h.api.startLocalReleaseHistory=async request=>{called++;assert.equal(request.consentVersion,'local-android-candidate-inputs-v1');return status(3,{...h.latest().operation,phase:'running',intentUsable:false});};
+   h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(called,1);
+  }finally{h.controller.dispose();}
+ }
+});
+test('candidate selection cannot follow an older project or prepared intent into another action',async()=>{
+ const h=await fixture();try{
+  h.emit(status(1,inputHistory(localHistoryRequest('earlier','verify'))));assert.equal(h.controller.selectCandidate('review-inputs',UUID),false);
+  h.emit(status(2,inputHistory(localHistoryRequest('p1','verify'))));assert.equal(h.controller.selectCandidate('review-inputs','99999999-1234-4234-8234-123456789abc'),false);
+  assert.equal(h.controller.selectCandidate('review-inputs',UUID),true);await h.controller.prepare();h.controller.acknowledge(true);
+  h.controller.setSelectionPending(true);h.project('p2');h.controller.setSelectionPending(false);await h.controller.start();
+  assert.equal(h.counts().start,0);assert.equal(h.counts().cancel,1);assert.deepEqual(copy(h.controller.getSnapshot().request),{projectId:'p2',executionMode:'local',action:'verify'});
+ }finally{h.controller.dispose();}
+});
+
+test('abandonment requires the latest history operation, unlike read-only review',async()=>{
+ const h=await fixture();try{
+  const earlier=inputHistory(localHistoryRequest('p1','verify'));
+  const later='99999999-1234-4234-8234-123456789abc';
+  earlier.result.headSequence=4;earlier.result.history.push({operationId:later,phase:'inputs-pending',recoveryRequired:true});
+  h.emit(status(1,earlier));assert.equal(h.controller.selectCandidate('abandon-inputs',UUID),false);
+  assert.equal(h.controller.selectCandidate('review-inputs',UUID),true);
+  const result=inputHistory(localHistoryRequest('p1','abandon-inputs',UUID),'settled-failure');
+  result.result.headSequence=4;result.result.history.push({operationId:later,phase:'inputs-pending',recoveryRequired:true});
+  assert.equal(parseLocalHistoryStatus(status(2,result)),null);
+ }finally{h.controller.dispose();}
+});

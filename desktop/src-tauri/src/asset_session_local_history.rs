@@ -6,9 +6,13 @@ use crate::local_release_history_protocol as wire;
 /// window alive or make a cycle through the retained Saved Session.
 pub(crate) struct LocalHistoryConsent {
     document:std::sync::Weak<Inner>,pub(super) context:Option<Arc<NativeContext>>,action:wire::Action,
-    pub(super) project_id:String,registration:u32,pub(super) root:asset_source::RegisteredRoot,
+    pub(super) project_id:String,pub(super) candidate_operation_id:Option<String>,registration:u32,pub(super) root:asset_source::RegisteredRoot,
 }
 impl LocalHistoryConsent {
+    pub(crate) fn action(&self)->wire::Action{self.action}
+    fn matches_context(&self,context:&wire::Context)->bool{
+        context.valid()&&self.action==context.action&&self.project_id==context.project_id&&self.candidate_operation_id==context.candidate_operation_id
+    }
     fn matches(&self,document:&Arc<Inner>,state:&DocumentState,registration:u32,root:&asset_source::RegisteredRoot)->bool{
         self.document.upgrade().is_some_and(|original|Arc::ptr_eq(&original,document))
             && self.selection_matches(state,registration,root)
@@ -19,12 +23,12 @@ impl LocalHistoryConsent {
             && state.lifetime.original_bound() && !state.lost_observed && !state.unknown && !state.exhausted
             && !state.stopping && !state.quit_pending && !state.retiring && !state.lock_pending
     }
-    pub(crate) fn current(&self,project_id:&str,action:wire::Action,registration:u32,root:&asset_source::RegisteredRoot)->bool{
+    pub(crate) fn current(&self,context:&wire::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool{
         let Some(document)=self.document.upgrade() else{return false;};
         let Ok(state)=document.state.lock() else{return false;};
-        self.action==action && self.project_id==project_id && self.matches(&document,&state,registration,root)
+        self.matches_context(context) && self.matches(&document,&state,registration,root)
             && document.bridge.registry_generation()==registration
-            && document.bridge.native_project(project_id).is_ok_and(|(g,r)|g==registration&&r==*root)
+            && document.bridge.native_project(&context.project_id).is_ok_and(|(g,r)|g==registration&&r==*root)
     }
 }
 impl DocumentBinding {
@@ -45,7 +49,7 @@ impl DocumentBinding {
         // Enrollment has no asset draft/credential prerequisite. An optional
         // existing asset context is only a change snapshot, never local authority.
         let consent=Arc::new(LocalHistoryConsent{document:Arc::downgrade(&self.inner),context:state.context.clone(),
-            action:args.action,project_id:args.project_id.clone(),registration,root:root.clone()});
+            action:args.action,project_id:args.project_id.clone(),candidate_operation_id:args.candidate_operation_id.clone(),registration,root:root.clone()});
         self.inner.bridge.local_history.prepare(args,registration,root,gate,consent)
     }
     pub(crate) fn start_local_release_history(&self,args:wire::Start)->Result<wire::Status,BridgeError>{
@@ -102,8 +106,7 @@ impl LocalHistoryConsent {
         let document=self.document.upgrade().ok_or_else(crate::local_release_history_owner::unavailable)?;
         let state=document.state.lock().map_err(|_|BridgeError::cleanup_unknown())?;
         let(c,g,r)=claim.context();
-        if !std::ptr::eq(self,claim.consent().as_ref())||!self.matches(&document,&state,g,r)||c.project_id!=self.project_id
-            ||c.action!=self.action||!document.bridge.local_history.claim_matches(&claim)||!claim.current(){return Err(crate::local_release_history_owner::unavailable());}
+        if !std::ptr::eq(self,claim.consent().as_ref())||!self.matches(&document,&state,g,r)||!self.matches_context(c)||!document.bridge.local_history.claim_matches(&claim)||!claim.current(){return Err(crate::local_release_history_owner::unavailable());}
         let bytes=claim.own_backing().ok_or_else(BridgeError::cleanup_unknown)?;
         let admission=lookup_memory::local_history_admission(&document,&state,self,bytes).map_err(|_|BridgeError::cleanup_unknown())?;
         let input=crate::vault_keyring_macos::LocalInput::admitted(LocalHistoryKeyGrant{claim});Ok((input,admission))
@@ -113,8 +116,7 @@ impl LocalHistoryConsent {
         let document=self.document.upgrade().ok_or(Problem::Unavailable)?;
         let state=document.state.lock().map_err(|_|Problem::CleanupUnknown)?;
         let(c,g,r)=claim.context();
-        if !std::ptr::eq(self,claim.consent().as_ref())||!self.matches(&document,&state,g,r)||c.project_id!=self.project_id
-            ||c.action!=self.action||!document.bridge.local_history.helper_matches(claim){return Err(Problem::Interrupted);}
+        if !std::ptr::eq(self,claim.consent().as_ref())||!self.matches(&document,&state,g,r)||!self.matches_context(c)||!document.bridge.local_history.helper_matches(claim){return Err(Problem::Interrupted);}
         claim.claim(go)
     }
 }
@@ -130,9 +132,19 @@ mod tests {
         let mut state=super::super::tests::empty_state();
         state.lifetime.crash_hook_installed();state.lifetime.started(true);state.lifetime.finished(true);
         let mut consent=LocalHistoryConsent{document:std::sync::Weak::new(),context:None,action:wire::Action::Enroll,
-            project_id:"registered-project".into(),registration:7,root:root.clone()};
+            project_id:"registered-project".into(),candidate_operation_id:None,registration:7,root:root.clone()};
         assert!(consent.selection_matches(&state,7,&root));
-        assert!(!consent.current("registered-project",wire::Action::Enroll,7,&root)); // No synthetic Document grant.
+        let mut context=wire::Context{project_id:consent.project_id.clone(),execution_mode:wire::ExecutionMode::Local,
+            action:wire::Action::ReviewInputs,candidate_operation_id:Some("12345678-1234-4234-9234-123456789abc".into())};
+        assert!(!consent.matches_context(&context));
+        consent.action=wire::Action::ReviewInputs;consent.candidate_operation_id=context.candidate_operation_id.clone();
+        assert!(consent.matches_context(&context));
+        context.candidate_operation_id=Some("12345678-1234-4234-9234-123456789abd".into());
+        assert!(!consent.matches_context(&context));
+        context.candidate_operation_id=consent.candidate_operation_id.clone();context.action=wire::Action::AbandonInputs;
+        assert!(!consent.matches_context(&context));
+        consent.action=wire::Action::Enroll;consent.candidate_operation_id=None;
+        assert!(!consent.current(&wire::Context{project_id:"registered-project".into(),execution_mode:wire::ExecutionMode::Local,action:wire::Action::Enroll,candidate_operation_id:None},7,&root)); // No synthetic Document grant.
         let context=Arc::new(NativeContext{revision:1,project_id:"unrelated-assets".into(),project:root.clone(),registry_generation:7,
             draft:Vec::new(),platform:Platform::Android,stage:Stage::Candidate,purpose:Purpose::Signing,execution_mode:commands::ExecutionMode::Github});
         state.context=Some(context.clone());

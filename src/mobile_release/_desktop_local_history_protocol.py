@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from .local_release_journal import canonical, _enrollment
+from .local_release_journal import canonical, _enrollment, _uuid
 PROTOCOL = "mrk-local-release-history/1"
 WORK_SECONDS, FINALITY_SECONDS = 60, 62
 REQUEST_LIMIT, RESPONSE_LIMIT = 16 * 1024, 32 * 1024
@@ -37,9 +37,14 @@ def root(value):
             and value["mode"] & 0o7022 == 0 and integer(value["uid"], (1 << 32)-1, 1)
             and integer(value["gid"], (1 << 32)-1))
     return value
+def candidate_action(value):
+    return type(value) is dict and value.get("action") in {"review-inputs","abandon-inputs"}
 def context(value):
-    require(type(value) is dict and set(value) == {"projectId", "executionMode", "action"}
-            and token(value["projectId"]) and value["executionMode"] == "local" and value["action"] in {"enroll", "verify"})
+    extra={"candidateOperationId"} if candidate_action(value) else set()
+    require(type(value) is dict and set(value)=={"projectId","executionMode","action"}|extra
+            and token(value["projectId"]) and value["executionMode"]=="local"
+            and value["action"] in {"enroll","verify","review-inputs","abandon-inputs"})
+    if extra: require(_uuid(value["candidateOperationId"]))
     return value
 @dataclass(frozen=True)
 class LocalHistoryRequest:
@@ -68,8 +73,9 @@ def parse_request(raw):
     return LocalHistoryRequest(value["operationId"], value["ownerGeneration"], context(value["context"]), n, hashlib.sha256(raw).hexdigest())
 
 def response(request, kind, payload, sequence):
-    require(type(request) is LocalHistoryRequest and kind in {"accepted", "lease-ready", "empty-journal-ready", "durable-genesis", "history-head", "terminal"}
+    require(type(request) is LocalHistoryRequest and kind in {"accepted", "lease-ready", "empty-journal-ready", "durable-genesis", "history-head", "abandoned-head", "terminal"}
             and integer(sequence, 7))
+    if kind=="abandoned-head": require(request.context["action"]=="abandon-inputs")
     raw = canonical({"protocol": PROTOCOL, "operationId": request.operation_id, "ownerGeneration": request.owner_generation,
                      "sequence": sequence, "kind": kind, "nonce": request.native["nonce"], "requestSha256": request.digest, "payload": payload}) + b"\n"
     require(len(raw) <= (16*1024 if kind == "terminal" else 1024)); return raw

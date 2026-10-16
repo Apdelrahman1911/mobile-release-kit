@@ -1917,6 +1917,7 @@ mod lookup_memory {
         if let Some(context)=&consent.context{census.context(context)?;}
         census.arc_cells::<LocalHistoryConsent>()?;
         census.add(consent.project_id.capacity())?;census.add(consent.root.path.capacity())?;
+        if let Some(id)=&consent.candidate_operation_id{census.add(id.capacity())?;}
         if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
         census.add(std::mem::size_of::<Census<'_>>())?;census.add(actual)?;
         Admission::checked(census.bytes,0)

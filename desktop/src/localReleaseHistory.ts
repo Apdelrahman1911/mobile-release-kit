@@ -1,6 +1,6 @@
 // UI coordination only. The native saved-command Session owns work and cleanup.
 import { sameOfflineData } from './offlinePreflightProtocol.ts';
-import { parseLocalHistoryRequest, parseLocalHistoryStatus, LOCAL_HISTORY_CONSENT } from './localReleaseHistoryProtocol.ts';
+import { parseLocalHistoryRequest, parseLocalHistoryStatus, localHistoryConsent, candidateHistoryAction } from './localReleaseHistoryProtocol.ts';
 import type { BridgeMode } from './types.ts';
 import type { LocalHistoryIdentity, LocalHistoryApi, LocalHistoryStatus, PrepareLocalHistory, LocalHistoryAction } from './localReleaseHistoryTypes.ts';
 type Port=LocalHistoryApi&{mode:BridgeMode};
@@ -11,12 +11,12 @@ const identity=(v:LocalHistoryIdentity)=>({operationId:v.operationId,ownerGenera
 const sameId=(a:LocalHistoryIdentity|null|undefined,b:LocalHistoryIdentity|null|undefined)=>!!a&&!!b&&a.operationId===b.operationId&&a.ownerGeneration===b.ownerGeneration;
 const error='The original local history operation is unverified. Keep its status and cancel; another run is not safe until native cleanup is confirmed.';
 export function localHistoryOwnerReason(s:LocalHistoryState):string|null{return s.blocked||s.unconfirmed||s.pending||active(s.status)?'A local release-history intent or operation is retained. Cancel or finish it before other work.':null;}
-export function localHistoryRequest(projectId:string|null, action:LocalHistoryAction):PrepareLocalHistory|null{
- return parseLocalHistoryRequest({projectId,executionMode:'local',action});
+export function localHistoryRequest(projectId:string|null, action:LocalHistoryAction,candidateOperationId?:string):PrepareLocalHistory|null{
+ return parseLocalHistoryRequest({projectId,executionMode:'local',action,...(candidateHistoryAction(action)?{candidateOperationId}:{})});
 }
 export class LocalReleaseHistoryController {
  private state:LocalHistoryState={mode:'unavailable',request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
- private action:LocalHistoryAction='verify'; private selectionPending=false;
+ private action:LocalHistoryAction='verify'; private candidateOperationId:string|undefined; private candidateProjectId:string|null=null; private selectionPending=false;
  private api:Port|null=null;private unlisten:(()=>void)|null=null;private listeners=new Set<()=>void>();private disposed=false;private epoch=0;private reading=false;
  private attempt:{request:PrepareLocalHistory;epoch:number;after:number;previous:LocalHistoryIdentity|null;id:LocalHistoryIdentity|null;retired:boolean;started:boolean}|null=null;
  private cancelClaim:string|null=null;private failedCancel:string|null=null;private timer:ReturnType<typeof setTimeout>|null=null;
@@ -27,11 +27,18 @@ export class LocalReleaseHistoryController {
  private now(){return(this.source.now??(()=>performance.now()))();}
  private update(patch:Partial<LocalHistoryState>){this.state=Object.freeze({...this.state,...patch});if(!this.disposed)for(const listener of this.listeners)listener();}
  private clearTimer(){if(this.timer!==null)clearTimeout(this.timer);this.timer=null;}
- syncProject=()=>{const next=this.selectionPending?null:localHistoryRequest(this.source.projectId(),this.action);if(!sameOfflineData(next,this.state.request)){this.invalidate();this.update({request:next});}};
+ syncProject=()=>{const projectId=this.source.projectId();if(this.candidateProjectId!==null&&this.candidateProjectId!==projectId){this.action='verify';this.candidateOperationId=undefined;this.candidateProjectId=null;}const next=this.selectionPending?null:localHistoryRequest(projectId,this.action,this.candidateOperationId);if(!sameOfflineData(next,this.state.request)){this.invalidate();this.update({request:next});}};
  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
- setAction=(action:LocalHistoryAction)=>{if(action!==this.action){this.action=action;this.syncProject();}};
+ setAction=(action:LocalHistoryAction)=>{if(action!==this.action||this.candidateOperationId!==undefined){this.action=action;this.candidateOperationId=undefined;this.candidateProjectId=null;this.syncProject();}};
+ selectCandidate=(action:'review-inputs'|'abandon-inputs',operationId:string):boolean=>{
+  const op=this.state.status?.operation;
+  if(localHistoryOwnerReason(this.state)||this.state.historical||!op?.result||op.context.projectId!==this.source.projectId())return false;
+  const row=op.result.history.find(row=>row.operationId===operationId);
+  if(!row||!['inputs-pending','inputs-ready','settled-failure'].includes(row.phase)||action==='abandon-inputs'&&(row.phase==='settled-failure'||op.result.history.at(-1)!==row))return false;
+  this.action=action;this.candidateOperationId=operationId;this.candidateProjectId=op.context.projectId;this.syncProject();return this.state.request?.candidateOperationId===operationId&&this.state.request.action===action;
+ };
  setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};
  beginConnection=()=>{this.invalidate();if(localHistoryOwnerReason(this.state)){this.update({blocked:true});return;}this.unlisten?.();this.unlisten=null;this.api=null;this.update({mode:'unavailable',status:null});};
  async connect(api:Port){if(this.disposed||this.api===api)return;if(this.api)this.beginConnection();if(this.api||this.state.blocked)return;this.api=api;this.update({mode:api.mode});if(api.mode!=='native')return;
@@ -62,7 +69,7 @@ export class LocalReleaseHistoryController {
  async start(){this.syncProject();const a=this.attempt,api=this.api,op=this.state.status?.operation;
   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});
-  try{this.receive(await api.startLocalReleaseHistory({...a.id,consentVersion:LOCAL_HISTORY_CONSENT}));}catch{this.fail();}finally{this.update({pending:false});}}
+  try{this.receive(await api.startLocalReleaseHistory({...a.id,consentVersion:localHistoryConsent(a.request)}));}catch{this.fail();}finally{this.update({pending:false});}}
  cancel=()=>{this.invalidate();return this.cancelOriginal(true);};
  private async cancelOriginal(explicitRetry:boolean){const api=this.api,id=this.attempt?.id??this.state.status?.operation;if(!api||!id||this.state.status?.operation?.phase==='terminal')return;
   const key=id.operationId+id.ownerGeneration;if(this.cancelClaim===key||!explicitRetry&&this.failedCancel===key)return;this.cancelClaim=key;this.failedCancel=null;this.clearTimer();this.update({acknowledged:false,consentUntil:null});

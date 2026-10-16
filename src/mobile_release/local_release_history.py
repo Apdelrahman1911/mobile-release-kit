@@ -39,7 +39,7 @@ class LocalHistoryRun:
         self.request,self.guard,self.source=request,guard,source
         self.operation=self
         self.root=Path(request.native["projectRoot"])
-        self.invocation=self.journal=None
+        self.invocation=self.journal=self.bundle=None
         self.primary=self.report=None
         self._ran=self._close_claimed=False
         self._request_bytes=wire.canonical([request.context,request.native])
@@ -63,6 +63,29 @@ class LocalHistoryRun:
         home=len(Path(self.request.native["home"]).parts)
         wire.require(project+1+home+5+6 <=256)
         wire.require(513*8192*8 + 32768 <=96*1024*1024)  # raw+closed-shape decoded/parser reserve.
+    def _candidate_inputs(self, enrollment):
+        action=self.request.context["action"]
+        operation_id=self.request.context["candidateOperationId"]
+        rows=[row for row,_ in self.journal._rows if row["operationId"]==operation_id]
+        wire.require(bool(rows))
+        last=rows[-1]
+        if action=="abandon-inputs":
+            wire.require(self.journal._rows[-1][0] is last and last["phase"] in {"inputs-pending","inputs-ready"})
+            head=self.journal._append(expected_head=self.journal.head(),operation_id=operation_id,
+                phase="settled-failure",payload={"phase":last["phase"],"reason":"cancelled"})
+            self.source.exchange("abandoned-head",head,"checkpoint-settled")
+            self.checkpoint();return None
+        wire.require(action=="review-inputs")
+        if last["phase"]=="inputs-pending":return None
+        if last["phase"]=="settled-failure":
+            wire.require(last["payload"]["phase"] in {"inputs-pending","inputs-ready"})
+            return None
+        wire.require(last["phase"]=="inputs-ready" and len(rows)==2 and rows[0]["phase"]=="inputs-pending")
+        from .local_candidate_bundle import CandidateBundleReview
+        bundle=CandidateBundleReview(self,operation_id=operation_id,enrollment=enrollment,
+            pending=rows[0]["payload"],candidate_sha256=last["payload"]["candidateSha256"])
+        bundle.acquire()
+        return bundle.finish()
     def run(self):
         wire.require(not self._ran);self._ran=True
         self._resource_admission();self.checkpoint()
@@ -91,9 +114,14 @@ class LocalHistoryRun:
                         self.source.exchange("history-head",head,"checkpoint-settled")
                     self.checkpoint()
                     wire.require(self.journal.head()==head)
+                    candidate=None
+                    if wire.candidate_action(self.request.context):
+                        candidate=self._candidate_inputs(enrollment)
+                        head=self.journal.head()
                     result={"schemaVersion":1,"scope":"local-release-history","enrolled":True,
                         "headSequence":head["sequence"],"history":self.journal.history_summary(),
                         "limitations":["no-store-authority","no-build-or-publishing","keychain-intact-rollback-boundary"]}
+                    if wire.candidate_action(self.request.context):result["candidateInputs"]=candidate
                     self.journal.close();self.checkpoint()
                     self.report=result
         except BaseException as error:
@@ -104,6 +132,7 @@ class LocalHistoryRun:
             wire.require(self.closed());return
         self._close_claimed=True
         actions=[]
+        if self.bundle is not None and not self.bundle.closed:actions.append(self.bundle.close)
         if self.journal is not None and not self.journal.closed:actions.append(self.journal.close)
         if self.invocation is not None:actions.append(self.invocation.cleanup)
         try:_attempt_all(self.guard,actions)
@@ -118,7 +147,9 @@ class LocalHistoryRun:
         p=None if i is None else i._original_project
         project=(p is None or p.claimed and all(slot.number is None and slot.close_state=="CLOSED"
                                                for slot in (*p.directory.slots,p.meta)))
-        return self._close_claimed and journal and invocation and project
+        bundle=(self.bundle is None or self.bundle.closed and self.bundle.iterator is None and self.bundle.scan_state in {"new","closed"}
+                and all(slot.state in {"UNACQUIRED","CLOSED"} for slot in self.bundle.reader.descriptors))
+        return self._close_claimed and journal and invocation and project and bundle
     def terminal(self):
         v=self.guard.lifetime_ledger.verdict()
         if v.commands or v.profile_calls:self.guard._abort(wire.ProtocolError());v=self.guard.lifetime_ledger.verdict()

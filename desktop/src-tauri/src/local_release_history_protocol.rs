@@ -8,6 +8,7 @@ use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error
 
 pub(crate) const PROTOCOL: &str = "mrk-local-release-history/1";
 pub(crate) const CONSENT: &str = "local-release-history-v1";
+pub(crate) const CANDIDATE_CONSENT: &str = "local-android-candidate-inputs-v1";
 pub(crate) const EVENT: &str = "local-release-history-state-changed";
 pub(crate) const IPC_LIMIT: usize = 8192;
 pub(crate) const REQUEST_LIMIT: usize = 16 * 1024;
@@ -28,16 +29,39 @@ fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_as
 #[serde(rename_all="lowercase")]
 pub(crate) enum ExecutionMode { Local }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all="lowercase")]
-pub(crate) enum Action { Enroll, Verify }
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub(crate) struct Context {pub(crate) project_id:String,pub(crate) execution_mode:ExecutionMode,pub(crate) action:Action}
-impl Context {pub(crate) fn valid(&self)->bool{valid_id(&self.project_id)}}
-#[derive(Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub(crate) struct Prepare {pub(crate) project_id:String,pub(crate) execution_mode:ExecutionMode,pub(crate) action:Action}
-impl Prepare {pub(crate) fn context(&self)->Context{Context{project_id:self.project_id.clone(),execution_mode:self.execution_mode,action:self.action}}}
+#[serde(rename_all="kebab-case")]
+pub(crate) enum Action { Enroll, Verify, ReviewInputs, AbandonInputs }
+impl Action {
+    pub(crate) fn candidate(self)->bool{matches!(self,Self::ReviewInputs|Self::AbandonInputs)}
+    pub(crate) fn consent(self)->&'static str{if self.candidate(){CANDIDATE_CONSENT}else{CONSENT}}
+}
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all="camelCase")]
+pub(crate) struct Context {
+    pub(crate) project_id:String,pub(crate) execution_mode:ExecutionMode,pub(crate) action:Action,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub(crate) candidate_operation_id:Option<String>,
+}
+impl Context {pub(crate) fn valid(&self)->bool{valid_id(&self.project_id)&&if self.action.candidate(){
+    self.candidate_operation_id.as_deref().is_some_and(journal_uuid)
+}else{self.candidate_operation_id.is_none()}}}
+impl<'de> Deserialize<'de> for Context {
+    fn deserialize<D:serde::Deserializer<'de>>(decoder:D)->Result<Self,D::Error>{
+        let value=Value::deserialize(decoder)?;
+        #[derive(Deserialize)]
+        #[serde(rename_all="camelCase",deny_unknown_fields)]
+        struct Data{project_id:String,execution_mode:ExecutionMode,action:Action,candidate_operation_id:Option<String>}
+        let data=Data::deserialize(&value).map_err(serde::de::Error::custom)?;
+        let expected=if data.action.candidate(){&["projectId","executionMode","action","candidateOperationId"][..]}
+            else{&["projectId","executionMode","action"][..]};
+        let result=Self{project_id:data.project_id,execution_mode:data.execution_mode,action:data.action,candidate_operation_id:data.candidate_operation_id};
+        if !keys(&value,expected)||!result.valid(){return Err(serde::de::Error::custom("invalid local history context"));}Ok(result)
+    }
+}
+// Prepare and retained Context share one closed grammar, including absence (not
+// null) of candidateOperationId for the two original actions.
+pub(crate) type Prepare=Context;
+impl Context {pub(crate) fn context(&self)->Context{self.clone()}}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Start { pub(crate) operation_id: String, pub(crate) owner_generation: String, consent_version: String }
@@ -45,15 +69,15 @@ pub(crate) struct Start { pub(crate) operation_id: String, pub(crate) owner_gene
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Cancel { pub(crate) operation_id: String, pub(crate) owner_generation: String }
 pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
-    if !keys(value, &["projectId", "executionMode", "action"]) { return Err(invalid()); }
     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
     if !input.context().valid() { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || input.consent_version != CONSENT { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|CANDIDATE_CONSENT) { return Err(invalid()); } Ok(input)
 }
+impl Start {pub(crate) fn consents(&self,action:Action)->bool{self.consent_version==action.consent()}}
 pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration"]) { return Err(invalid()); }
     let input = Cancel::deserialize(value).map_err(|_| invalid())?;
@@ -130,7 +154,43 @@ enum Limitation {NoStoreAuthority,NoBuildOrPublishing,KeychainIntactRollbackBoun
 const LIMITATIONS:[Limitation;3]=[Limitation::NoStoreAuthority,Limitation::NoBuildOrPublishing,Limitation::KeychainIntactRollbackBoundary];
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-pub(crate) struct ResultData {schema_version:u32,scope:String,enrolled:bool,head_sequence:u32,history:Vec<HistoryRow>,limitations:Vec<Limitation>}
+pub(crate) struct ResultData {schema_version:u32,scope:String,enrolled:bool,head_sequence:u32,history:Vec<HistoryRow>,limitations:Vec<Limitation>,
+    // None=old grammar absent; Some(None)=new grammar explicit null. Bare
+    // Option cannot preserve that boundary through Deserialize/Serialize.
+    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="candidate_field")]
+    candidate_inputs:Option<Option<CandidateInputs>>,
+}
+fn candidate_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Option<CandidateInputs>>,D::Error>{
+    Ok(Some(Option::<CandidateInputs>::deserialize(decoder)?))
+}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct CandidateInputs {operation_id:String,candidate_sha256:String,source_commit:String,source_tree:String,
+    application_id:String,version:CandidateVersion,files:[CandidateFile;3],observation:String,prior_create_finality:String}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(deny_unknown_fields)]
+struct CandidateVersion{name:String,build:u32}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct CandidateFile{file_name:String,bytes:u64,sha256:String}
+impl CandidateInputs {
+    fn valid(&self,operation:&str)->bool{
+        let git=|v:&str|v.len()==40&&v.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b));
+        let mut count=0;
+        // Same selected Android application/version grammar as AndroidBuild.
+        let app=self.application_id.len()<=255&&self.application_id.split('.').all(|part|{
+            count+=1;part.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                &&part.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_')})&&count>=2;
+        self.operation_id==operation&&journal_uuid(operation)&&sha(&self.candidate_sha256)&&git(&self.source_commit)&&git(&self.source_tree)
+            &&app&&!self.version.name.is_empty()&&self.version.name.len()<=64
+            &&self.version.name.bytes().all(|b|b.is_ascii_alphanumeric()||b".+-".contains(&b))
+            &&(1..=2_100_000_000).contains(&self.version.build)
+            &&self.files.iter().zip([("app-release.aab",1_073_741_824),("store-metadata.zip",536_870_912),("validation-report.json",65_536)])
+                .all(|(file,(name,max))|file.file_name==name&&(1..=max).contains(&file.bytes)&&sha(&file.sha256))
+            &&self.observation=="current-bundle-only"&&self.prior_create_finality=="not-established"
+    }
+}
+
 fn journal_uuid(v:&str)->bool{let b=v.as_bytes();b.len()==36&&b[8]==b'-'&&b[13]==b'-'&&b[18]==b'-'&&b[23]==b'-'&&b[14]==b'4'
     &&matches!(b[19],b'8'|b'9'|b'a'|b'b')&&b.iter().enumerate().all(|(i,c)|matches!(i,8|13|18|23)||c.is_ascii_digit()||(b'a'..=b'f').contains(c))}
 impl ResultData {fn valid(&self)->bool{self.schema_version==1&&self.scope=="local-release-history"&&self.enrolled
@@ -138,6 +198,20 @@ impl ResultData {fn valid(&self)->bool{self.schema_version==1&&self.scope=="loca
     &&self.limitations==LIMITATIONS&&self.history.iter().enumerate().all(|(i,r)|journal_uuid(&r.operation_id)
         &&!self.history[..i].iter().any(|p|p.operation_id==r.operation_id)
         &&r.recovery_required!=matches!(r.phase,HistoryPhase::SettledSuccess|HistoryPhase::SettledFailure))}}
+impl ResultData {
+    fn matches_context(&self,context:&Context)->bool{
+        if !self.valid(){return false;}
+        if !context.action.candidate(){return self.candidate_inputs.is_none();}
+        let Some(id)=context.candidate_operation_id.as_deref() else{return false;};
+        let Some(row)=self.history.iter().find(|row|row.operation_id==id) else{return false;};
+        match(context.action,row.phase,&self.candidate_inputs){
+            (Action::ReviewInputs,HistoryPhase::InputsReady,Some(Some(bundle)))=>bundle.valid(id),
+            (Action::ReviewInputs,HistoryPhase::InputsPending|HistoryPhase::SettledFailure,Some(None))=>true,
+            (Action::AbandonInputs,HistoryPhase::SettledFailure,Some(None))=>self.history.last().is_some_and(|row|row.operation_id==id),
+            _=>false,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum CoreStop { None, Cancelled, TimedOut }
@@ -163,7 +237,7 @@ impl Terminal {
             || self.lifetime.commands != 0 { return false; }
         if self.outcome == Outcome::Complete {
             return self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
-                && self.result.as_ref().is_some_and(|r| r.valid());
+                && self.result.as_ref().is_some_and(|r| r.matches_context(context));
         }
         if self.result.is_some() || self.reason == Reason::None { return false; }
         if self.outcome == Outcome::Unknown { return self.reason == Reason::CleanupUnknown && !self.lifetime.settled(); }
@@ -184,15 +258,15 @@ struct Accepted { schema_version: u32, context: Context }
 pub(crate) struct Head {pub(crate) sequence:u32,pub(crate) sha256:String}
 impl Head {pub(crate) fn valid(&self)->bool{(1..=513).contains(&self.sequence)&&sha(&self.sha256)}}
 #[derive(Clone,Debug,PartialEq,Eq)]
-pub(crate) enum Event {LeaseReady,EmptyJournalReady,DurableGenesis(Head),HistoryHead(Head)}
+pub(crate) enum Event {LeaseReady,EmptyJournalReady,DurableGenesis(Head),HistoryHead(Head),AbandonedHead(Head)}
 pub(crate) enum Frame {Accepted,Event(Event),Terminal(Terminal)}
 #[derive(Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct Envelope{protocol:String,operation_id:String,owner_generation:String,nonce:String,request_sha256:String,sequence:u32,kind:String,payload:Value}
-pub(crate) struct Decoder {next:u32,failed:bool,terminal:bool}
+pub(crate) struct Decoder {next:u32,failed:bool,terminal:bool,candidate_head:Option<Head>}
 impl Decoder {
     pub(crate) fn finish(&mut self)->bool{if !self.terminal{self.failed=true;}!self.failed&&self.terminal}
-    pub(crate) fn new()->Self{Self{next:0,failed:false,terminal:false}}
+    pub(crate) fn new()->Self{Self{next:0,failed:false,terminal:false,candidate_head:None}}
     pub(crate) fn decode(&mut self,bytes:&[u8],operation:&str,generation:&str,context:&Context,nonce:&str,digest:&str)->Result<Frame,BridgeError>{
         if self.failed||self.terminal{return Err(BridgeError::protocol());}
         let result=(||{
@@ -202,12 +276,16 @@ impl Decoder {
             let e=Envelope::deserialize(&value).map_err(|_|BridgeError::protocol())?;
             if e.protocol!=PROTOCOL||e.operation_id!=operation||e.owner_generation!=generation||e.nonce!=nonce
                 ||e.request_sha256!=digest||e.sequence!=self.next||self.next>=8{return Err(BridgeError::protocol());}
-            let expected=match (context.action,self.next){(_,0)=>"accepted",(_,1)=>"lease-ready",(Action::Enroll,2)=>"empty-journal-ready",(Action::Enroll,3)=>"durable-genesis",(Action::Verify,2)=>"history-head",_=>"terminal"};
+            let expected=match (context.action,self.next){(_,0)=>"accepted",(_,1)=>"lease-ready",(Action::Enroll,2)=>"empty-journal-ready",(Action::Enroll,3)=>"durable-genesis",(Action::Verify|Action::ReviewInputs|Action::AbandonInputs,2)=>"history-head",(Action::AbandonInputs,3)=>"abandoned-head",_=>"terminal"};
             if e.kind=="terminal" {
                 if self.next==0||!keys(&e.payload,&["schemaVersion","context","outcome","reason","result","lifetime"])
                     ||!e.payload.get("lifetime").is_some_and(|l|keys(l,&["complete","fatal","contained","commandDispatched","commands","profileCalls","inputClosed","handlersRestored","invocationClosed","stopObserved"])) {return Err(BridgeError::protocol());}
                 let t=Terminal::deserialize(&e.payload).map_err(|_|BridgeError::protocol())?;
                 if !t.valid(context)||t.outcome==Outcome::Complete&&expected!="terminal"{return Err(BridgeError::protocol());}
+                if t.outcome==Outcome::Complete&&context.action.candidate()
+                    &&!self.candidate_head.as_ref().is_some_and(|head|t.result.as_ref().is_some_and(|r|r.head_sequence==head.sequence)){
+                    return Err(BridgeError::protocol());
+                }
                 self.terminal=true;return Ok(Frame::Terminal(t));
             }
             if e.kind!=expected||bytes.len()>1024{return Err(BridgeError::protocol());}
@@ -216,8 +294,16 @@ impl Decoder {
                     if a.schema_version!=1||a.context!=*context||!a.context.valid(){return Err(BridgeError::protocol());}Ok(Frame::Accepted)},
                 "lease-ready"|"empty-journal-ready"=>{if !keys(&e.payload,&[]){return Err(BridgeError::protocol());}
                     Ok(Frame::Event(if e.kind=="lease-ready"{Event::LeaseReady}else{Event::EmptyJournalReady}))},
-                "durable-genesis"|"history-head"=>{let h=Head::deserialize(&e.payload).map_err(|_|BridgeError::protocol())?;
+                "durable-genesis"|"history-head"|"abandoned-head"=>{let h=Head::deserialize(&e.payload).map_err(|_|BridgeError::protocol())?;
                     if !h.valid()||e.kind=="durable-genesis"&&h.sequence!=1{return Err(BridgeError::protocol());}
+                    if e.kind=="abandoned-head" {
+                        if !self.candidate_head.as_ref().is_some_and(|previous|previous.sequence<513&&h.sequence==previous.sequence+1){return Err(BridgeError::protocol());}
+                        self.candidate_head=Some(h.clone());return Ok(Frame::Event(Event::AbandonedHead(h)));
+                    }
+                    if context.action.candidate(){
+                        if context.action==Action::AbandonInputs&&h.sequence==513{return Err(BridgeError::protocol());}
+                        self.candidate_head=Some(h.clone());
+                    }
                     Ok(Frame::Event(if e.kind=="durable-genesis"{Event::DurableGenesis(h)}else{Event::HistoryHead(h)}))},
                 _=>Err(BridgeError::protocol()),
             }
@@ -248,7 +334,7 @@ pub(crate) struct Status {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn context(action:Action)->Context {Context{project_id:"registered-project".into(),execution_mode:ExecutionMode::Local,action}}
+    fn context(action:Action)->Context {Context{project_id:"registered-project".into(),execution_mode:ExecutionMode::Local,action,candidate_operation_id:action.candidate().then(||"12345678-1234-4234-9234-123456789abc".into())}}
     fn frame(c:&Context,sequence:u32,kind:&str,payload:Value)->Vec<u8>{let mut v=serde_json::to_vec(&json!({"protocol":PROTOCOL,
         "operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"nonce":"c".repeat(32),"requestSha256":"d".repeat(64),
         "sequence":sequence,"kind":kind,"payload":payload})).unwrap();v.push(b'\n');let _=c;v}
@@ -281,6 +367,90 @@ mod tests {
         let mut d=Decoder::new();assert!(decode(&mut d,&c,0,"accepted",accepted).is_ok());assert!(!d.finish());
         assert!(raw_request(br#"{"projectId":"a","projectId":"b","executionMode":"local","action":"enroll"}"#).is_err());
         assert!(prepare(&json!({"projectId":"p","executionMode":"github","action":"enroll"})).is_err());
+    }
+    fn candidate_result(c:&Context,phase:&str)->Value{
+        let mut r=result();r["headSequence"]=json!(3);
+        r["history"]=json!([{"operationId":c.candidate_operation_id,"phase":phase,"recoveryRequired":phase!="settled-failure"}]);
+        r["candidateInputs"]=if phase=="inputs-ready"{json!({"operationId":c.candidate_operation_id,
+            "candidateSha256":"a".repeat(64),"sourceCommit":"b".repeat(40),"sourceTree":"c".repeat(40),
+            "applicationId":"dev.example.app","version":{"name":"1.2.3","build":12},
+            "files":[{"fileName":"app-release.aab","bytes":1073741824u64,"sha256":"d".repeat(64)},
+                {"fileName":"store-metadata.zip","bytes":536870912u64,"sha256":"e".repeat(64)},
+                {"fileName":"validation-report.json","bytes":65536,"sha256":"f".repeat(64)}],
+            "observation":"current-bundle-only","priorCreateFinality":"not-established"})}else{Value::Null};r
+    }
+    #[test]
+    fn local_release_history_candidate_context_and_consent_are_action_specific(){
+        for action in [Action::Enroll,Action::Verify,Action::ReviewInputs,Action::AbandonInputs]{
+            let c=context(action);let value=serde_json::to_value(&c).unwrap();
+            assert_eq!(prepare(&value).unwrap(),c);assert_eq!(Context::deserialize(&value).unwrap(),c);
+            assert_eq!(value.as_object().unwrap().len(),if action.candidate(){4}else{3});
+            for token in [CONSENT,CANDIDATE_CONSENT]{
+                let input=start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":token})).unwrap();
+                assert_eq!(input.consents(action),token==action.consent());
+            }
+            let mut bad=value.clone();bad["candidateOperationId"]=Value::Null;
+            assert!(prepare(&bad).is_err()&&Context::deserialize(&bad).is_err());
+            if action.candidate(){
+                let mut bad=value.clone();bad.as_object_mut().unwrap().remove("candidateOperationId");assert!(prepare(&bad).is_err());
+                let mut bad=value;bad["candidateOperationId"]=json!("12345678-1234-1234-9234-123456789abc");assert!(prepare(&bad).is_err());
+            }
+        }
+    }
+    #[test]
+    fn local_release_history_candidate_summary_cannot_create_old_finality_or_change_roster(){
+        let c=context(Action::ReviewInputs);let ready=candidate_result(&c,"inputs-ready");
+        let check=|v:&Value|ResultData::deserialize(v).is_ok_and(|r|r.matches_context(&c));
+        assert!(check(&ready));
+        for phase in ["inputs-pending","settled-failure"]{
+            let value=candidate_result(&c,phase);let parsed=ResultData::deserialize(&value).unwrap();
+            assert!(parsed.matches_context(&c));assert!(serde_json::to_value(parsed).unwrap()["candidateInputs"].is_null());
+        }
+        let mut missing=ready.clone();missing.as_object_mut().unwrap().remove("candidateInputs");assert!(!check(&missing));
+        let mut null=ready.clone();null["candidateInputs"]=Value::Null;assert!(!check(&null));
+        let mut old=result();old["candidateInputs"]=Value::Null;
+        assert!(!ResultData::deserialize(&old).unwrap().matches_context(&context(Action::Verify)));
+        assert!(!serde_json::to_value(ResultData::deserialize(&result()).unwrap()).unwrap().as_object().unwrap().contains_key("candidateInputs"));
+        for (field,value) in [("priorCreateFinality",json!("complete")),("observation",json!("build-complete")),
+            ("operationId",json!("12345678-1234-4234-9234-123456789abd")),("applicationId",json!("_dev.example")),
+            ("sourceCommit",json!("a".repeat(64)))]{
+            let mut bad=ready.clone();bad["candidateInputs"][field]=value;assert!(!check(&bad));
+        }
+        for i in 0..3{
+            let mut bad=ready.clone();let n=bad["candidateInputs"]["files"][i]["bytes"].as_u64().unwrap();
+            bad["candidateInputs"]["files"][i]["bytes"]=json!(n+1);assert!(!check(&bad));
+        }
+        let mut bad=ready.clone();bad["candidateInputs"]["files"].as_array_mut().unwrap().reverse();assert!(!check(&bad));
+        let mut bad=ready.clone();bad["candidateInputs"]["path"]=json!("/arbitrary");assert!(!check(&bad));
+        let c=context(Action::AbandonInputs);let mut value=candidate_result(&c,"settled-failure");
+        assert!(ResultData::deserialize(&value).unwrap().matches_context(&c));
+        value["headSequence"]=json!(4);value["history"].as_array_mut().unwrap().push(json!({"operationId":"12345678-1234-4234-9234-123456789abd","phase":"inputs-pending","recoveryRequired":true}));
+        assert!(!ResultData::deserialize(&value).unwrap().matches_context(&c));
+    }
+    #[test]
+    fn local_release_history_candidate_phases_bind_successor_and_terminal_head(){
+        fn prefix(c:&Context,head:u32)->Decoder{
+            let mut d=Decoder::new();decode(&mut d,c,0,"accepted",json!({"schemaVersion":1,"context":c})).unwrap();
+            decode(&mut d,c,1,"lease-ready",json!({})).unwrap();
+            decode(&mut d,c,2,"history-head",json!({"sequence":head,"sha256":"e".repeat(64)})).unwrap();d
+        }
+        for action in [Action::ReviewInputs,Action::AbandonInputs]{
+            let c=context(action);let mut d=prefix(&c,2);let mut t=terminal(&c);
+            t["result"]=candidate_result(&c,if action==Action::ReviewInputs{"inputs-pending"}else{"settled-failure"});
+            let end=if action==Action::AbandonInputs{
+                assert!(decode(&mut d,&c,3,"abandoned-head",json!({"sequence":3,"sha256":"f".repeat(64)})).is_ok());4
+            }else{t["result"]["headSequence"]=json!(2);3};
+            assert!(decode(&mut d,&c,end,"terminal",t.clone()).is_ok()&&d.finish());
+            let mut d=prefix(&c,2);if action==Action::AbandonInputs{decode(&mut d,&c,3,"abandoned-head",json!({"sequence":3,"sha256":"f".repeat(64)})).unwrap();}
+            t["result"]["headSequence"]=json!(4);assert!(decode(&mut d,&c,end,"terminal",t).is_err());
+        }
+        let c=context(Action::AbandonInputs);
+        for next in [2,4,514]{let mut d=prefix(&c,2);assert!(decode(&mut d,&c,3,"abandoned-head",json!({"sequence":next,"sha256":"f".repeat(64)})).is_err());}
+        let mut d=Decoder::new();decode(&mut d,&c,0,"accepted",json!({"schemaVersion":1,"context":c})).unwrap();decode(&mut d,&c,1,"lease-ready",json!({})).unwrap();
+        assert!(decode(&mut d,&c,2,"history-head",json!({"sequence":513,"sha256":"e".repeat(64)})).is_err());
+        let c=context(Action::ReviewInputs);let mut d=prefix(&c,513);let mut t=terminal(&c);t["result"]=candidate_result(&c,"inputs-pending");t["result"]["headSequence"]=json!(513);
+        assert!(decode(&mut d,&c,3,"terminal",t).is_ok());
+        let c=context(Action::Verify);let mut d=prefix(&c,2);assert!(decode(&mut d,&c,3,"abandoned-head",json!({"sequence":3,"sha256":"f".repeat(64)})).is_err());
     }
     #[test]
     fn local_release_history_public_summary_cannot_hide_recovery_or_exceed_journal_bound(){

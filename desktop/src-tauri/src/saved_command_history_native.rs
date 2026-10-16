@@ -15,13 +15,13 @@ pub(super) struct State {
 }
 struct Attempt {book:Mutex<keyring::LookupBook>,handle:AsyncMutex<Option<JoinHandle<Result<(),keyring::Problem>>>>,
     joined:AtomicBool,failed:AtomicBool,step:Step}
-#[derive(Clone,Copy,PartialEq,Eq)]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
 enum Step {KeyAbsent,GenesisAbsent,KeyRead,KeyAdd,AnchorAdd,AnchorRead,NextAbsent}
 impl State {pub(super) fn new()->Self{Self{source:None,runtime:None,attempts:Vec::new(),key:None,locator:[0;32],enrollment:None,finished:false,failed:false,acquire_refused:false,closure_ok:false}}}
 fn consent(owner:&Session)->Result<&Arc<crate::asset_session::LocalHistoryConsent>,BridgeError>{
     let Context::LocalReleaseHistory(context)=&owner.context else{return Err(BridgeError::protocol());};
     let c=owner.local_history_consent.as_ref().ok_or_else(BridgeError::protocol)?;
-    if !c.current(&context.project_id,context.action,owner.registration,&owner.project)
+    if !c.current(context,owner.registration,&owner.project)
         || *owner.stop.borrow() || Instant::now()>=owner.clocks.work || owner.resource_unknown.load(Ordering::SeqCst){return Err(owner.domain.unavailable());}
     Ok(c)
 }
@@ -157,16 +157,26 @@ impl HelperClaim {
 }
 impl Claim {pub(crate) fn matches_owner(&self,saved:&SavedCommandOwner)->bool{HelperClaim{owner:self.owner.clone(),attempt:self.attempt.clone()}.matches_owner(saved)}}
 
+// Closed action-specific actual helper roster; no phase may select an arbitrary
+// operation or enroll/replace a key while reviewing or abandoning inputs.
+fn helper_step(action:history_wire::Action,index:usize)->Option<Step>{
+    use history_wire::Action;
+    match(action,index){
+        (Action::Enroll,0)=>Some(Step::KeyAbsent),(Action::Enroll,1)=>Some(Step::GenesisAbsent),
+        (Action::Enroll,2)=>Some(Step::KeyAdd),(Action::Enroll,3)=>Some(Step::AnchorAdd),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs,0)=>Some(Step::KeyRead),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs,1)=>Some(Step::AnchorRead),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs,2)=>Some(Step::NextAbsent),
+        (Action::AbandonInputs,3)=>Some(Step::AnchorAdd),_=>None,
+    }
+}
+
 async fn helper(owner:&Arc<Session>,step:Step,sequence:u32,digest:Option<[u8;32]>)->Result<keyring::LocalResult,BridgeError>{
     check_source(owner)?;
     let (context,operation,value,loan,attempt)={
         let mut n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
         let Context::LocalReleaseHistory(context)=&owner.context else{return Err(BridgeError::protocol());};
-        let expected=match(context.action,n.attempts.len()){
-            (history_wire::Action::Enroll,0)=>Step::KeyAbsent,(history_wire::Action::Enroll,1)=>Step::GenesisAbsent,
-            (history_wire::Action::Enroll,2)=>Step::KeyAdd,(history_wire::Action::Enroll,3)=>Step::AnchorAdd,
-            (history_wire::Action::Verify,0)=>Step::KeyRead,(history_wire::Action::Verify,1)=>Step::AnchorRead,
-            (history_wire::Action::Verify,2)=>Step::NextAbsent,_=>return Err(BridgeError::protocol()),};
+        let expected=helper_step(context.action,n.attempts.len()).ok_or_else(BridgeError::protocol)?;
         if expected!=step||n.failed||n.finished||n.attempts.iter().any(|a|!a.joined.load(Ordering::SeqCst)||a.failed.load(Ordering::SeqCst)){
             return Err(BridgeError::protocol());
         }
@@ -259,7 +269,8 @@ async fn write_reply(owner:&Session,writer:&mut ChildStdin,kind:&str,step:u8,pay
 }
 pub(super) async fn write_phases(_inner:&Arc<Inner>,owner:&Arc<Session>,writer:&mut ChildStdin)->Result<(),BridgeError>{
     let Context::LocalReleaseHistory(context)=&owner.context else{return Err(BridgeError::protocol());};
-    let total=if context.action==history_wire::Action::Enroll{3}else{2};let mut stop=owner.stop.subscribe();
+    let total=if matches!(context.action,history_wire::Action::Enroll|history_wire::Action::AbandonInputs){3}else{2};let mut stop=owner.stop.subscribe();
+    let mut verified_head:Option<history_wire::Head>=None;
     for step in 1..=total{
         let event=loop{
             let notified=owner.history.changed.notified();
@@ -290,9 +301,17 @@ pub(super) async fn write_phases(_inner:&Arc<Inner>,owner:&Arc<Session>,writer:&
                 helper(owner,Step::AnchorAdd,1,Some(digest(&head.sha256)?)).await?;
                 write_reply(owner,writer,"checkpoint-settled",step,serde_json::json!({}),false).await?;
             },
-            (history_wire::Action::Verify,2,history_wire::Event::HistoryHead(head))=>{
+            (history_wire::Action::Verify|history_wire::Action::ReviewInputs|history_wire::Action::AbandonInputs,2,history_wire::Event::HistoryHead(head))=>{
+                if context.action==history_wire::Action::AbandonInputs&&head.sequence==513{return Err(BridgeError::protocol());}
                 helper(owner,Step::AnchorRead,head.sequence,Some(digest(&head.sha256)?)).await?;
                 if head.sequence<513{helper(owner,Step::NextAbsent,head.sequence+1,None).await?;}
+                if context.action==history_wire::Action::AbandonInputs{verified_head=Some(head);}
+                write_reply(owner,writer,"checkpoint-settled",step,serde_json::json!({}),false).await?;
+            },
+            (history_wire::Action::AbandonInputs,3,history_wire::Event::AbandonedHead(head))=>{
+                let previous=verified_head.take().ok_or_else(BridgeError::protocol)?;
+                if previous.sequence>=513||head.sequence!=previous.sequence+1{return Err(BridgeError::protocol());}
+                helper(owner,Step::AnchorAdd,head.sequence,Some(digest(&head.sha256)?)).await?;
                 write_reply(owner,writer,"checkpoint-settled",step,serde_json::json!({}),false).await?;
             },_=>return Err(BridgeError::protocol()),
         }
@@ -342,6 +361,22 @@ impl Attempt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_release_history_candidate_helper_rosters_never_enroll(){
+        use history_wire::Action;
+        for action in [Action::Verify,Action::ReviewInputs,Action::AbandonInputs]{
+            assert_eq!(helper_step(action,0),Some(Step::KeyRead));
+            assert_eq!(helper_step(action,1),Some(Step::AnchorRead));
+            assert_eq!(helper_step(action,2),Some(Step::NextAbsent));
+            assert_eq!(helper_step(action,3),if action==Action::AbandonInputs{Some(Step::AnchorAdd)}else{None});
+            assert_eq!(helper_step(action,4),None);
+        }
+        assert_eq!(helper_step(Action::Enroll,0),Some(Step::KeyAbsent));
+        assert_eq!(helper_step(Action::Enroll,1),Some(Step::GenesisAbsent));
+        assert_eq!(helper_step(Action::Enroll,2),Some(Step::KeyAdd));
+        assert_eq!(helper_step(Action::Enroll,3),Some(Step::AnchorAdd));
+        assert_eq!(helper_step(Action::Enroll,4),None);
+    }
     #[test]
     fn local_release_history_pre_admission_refusal_has_no_worker_to_join(){
         let mut state=State::new();assert!(state.untouched());state.failed=true;assert!(!state.untouched());

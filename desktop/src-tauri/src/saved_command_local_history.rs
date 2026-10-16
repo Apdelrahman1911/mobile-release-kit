@@ -28,7 +28,8 @@ impl SavedCommandOwner {
     pub(crate) fn start_history(&self,input:history_wire::Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:history_wire::Availability)
         ->Result<crate::local_release_history_owner::Admitted,BridgeError>{
         self.require_domain(SavedCommandDomain::LocalReleaseHistory)?;
-        self.prepared_history_consent(&input.operation_id,&input.owner_generation)?;
+        let consent=self.prepared_history_consent(&input.operation_id,&input.owner_generation)?;
+        if !input.consents(consent.action()){return Err(history_wire::invalid());}
         let a=self.start(Start{operation_id:input.operation_id,owner_generation:input.owner_generation},admitted_at,registered,Availability::from_history(gate))?;
         Ok(crate::local_release_history_owner::Admitted::new(a.status.history()?,a.release))
     }
