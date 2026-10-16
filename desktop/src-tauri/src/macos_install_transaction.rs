@@ -405,6 +405,8 @@ struct CapsuleWire {
     schema_version: u32, kind: String, target: String, invocation: String, request_id: String, intended_action: ActionData,
     previous: Option<ReleaseData>, next: ReleaseData, actual_current: Option<ReleaseData>,
     intent_sha256: String, state_sha256: Option<String>, outcome: WorkerOutcome, writer: WorkerFacts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launcher: Option<crate::macos_applications_launcher::ObservationData>,
 }
 #[derive(Debug)]
 pub struct CapsuleData { wire: CapsuleWire, body_sha256: String }
@@ -422,6 +424,7 @@ impl CapsuleData {
         for name in ["previous", "actualCurrent"] { record_field(&value, name, true)?; }
         for name in ["next", "writer"] { record_field(&value, name, false)?; }
         field(&value, "stateSha256")?; field(field(&value, "writer")?, "exitCode")?;
+        if value.get("launcher").is_some() { record_field(&value, "launcher", false)?; }
         let wire: CapsuleWire = decode(value)?;
         header(wire.schema_version, &wire.kind, CAPSULE_KIND, &wire.target, &wire.invocation, &wire.request_id, expected)?;
         pair(expected, wire.intended_action, wire.previous.as_ref(), &wire.next, current)?;
@@ -433,15 +436,31 @@ impl CapsuleData {
             && wire.writer.payload_write_count <= wire.writer.payload_write_bytes
             && wire.writer.payload_write_bytes <= PAYLOAD_LIMIT,
             TransactionDataError::Binding)?;
+        require(wire.launcher.as_ref().is_none_or(|row| row.valid_data()
+            && wire.writer.payload_write_bytes.checked_add(row.write_bytes).is_some_and(|n| n <= PAYLOAD_LIMIT)),
+            TransactionDataError::Binding)?;
+        if let Some(row) = &wire.launcher {
+            require(match wire.outcome {
+                WorkerOutcome::Applied | WorkerOutcome::SamePackage | WorkerOutcome::RestoredApp => row.complete_data(false),
+                WorkerOutcome::InverseRecorded => row.complete_data(true),
+                _ => true,
+            }, TransactionDataError::Binding)?;
+        }
         Ok(Self { wire, body_sha256: digest(bytes) })
     }
     pub fn digest_data(&self) -> &str { &self.body_sha256 }
     pub fn invocation_data(&self) -> &str { &self.wire.invocation }
     pub fn request_id_data(&self) -> &str { &self.wire.request_id }
     pub fn intent_digest_data(&self) -> &str { &self.wire.intent_sha256 }
+    pub fn launcher_data(&self) -> Option<&crate::macos_applications_launcher::ObservationData> { self.wire.launcher.as_ref() }
     pub fn encode_data(intent: &IntentData, previous: Option<(&StateData, &CapsuleData)>, state: Option<&StateData>,
         actual_current: Option<&ReleaseData>, outcome: RecordedOutcomeData, observed: WriterObservationData,
         expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        Self::encode_with_launcher_data(intent, previous, state, actual_current, outcome, observed, None, expected)
+    }
+    pub fn encode_with_launcher_data(intent: &IntentData, previous: Option<(&StateData, &CapsuleData)>, state: Option<&StateData>,
+        actual_current: Option<&ReleaseData>, outcome: RecordedOutcomeData, observed: WriterObservationData,
+        launcher: Option<crate::macos_applications_launcher::ObservationData>, expected: &ReleaseSetData) -> Result<Vec<u8>> {
         let wire_outcome = match outcome {
             RecordedOutcomeData::Applied => WorkerOutcome::Applied, RecordedOutcomeData::SamePackage => WorkerOutcome::SamePackage,
             RecordedOutcomeData::RestoredApp => WorkerOutcome::RestoredApp, RecordedOutcomeData::InverseRecorded => WorkerOutcome::InverseRecorded,
@@ -455,7 +474,7 @@ impl CapsuleData {
             writer: WorkerFacts { returned: observed.returned, exit_code: observed.exit_code,
                 original_joined: observed.original_joined, result_eof: observed.result_eof,
                 original_closes_known: observed.original_closes_known, within_original_deadline: observed.within_original_deadline,
-                payload_write_count: observed.payload_write_count, payload_write_bytes: observed.payload_write_bytes } };
+                payload_write_count: observed.payload_write_count, payload_write_bytes: observed.payload_write_bytes }, launcher };
         let bytes = encode(&wire, CAPSULE_LIMIT)?;
         let capsule = Self::parse_data(&bytes, expected)?;
         let correspondence = correspondence_data(intent, previous, state, Some(&capsule));
@@ -959,6 +978,63 @@ mod tests {
             assert!(StateData::parse_data(&bytes(&value), &e).is_err());
         }
     }
+    #[test]
+    fn optional_launcher_capsule_binds_finality_and_separately_accounts_noop_restoration() {
+        use crate::macos_applications_launcher::{ObservationData, OutcomeData};
+        let expected = expected();
+        let old = state(3, 3);
+        let i = intent("same-package-noop", Some(&old));
+        let mut s = state(3, 9); s["intendedAction"] = json!("same-package-noop");
+        record_previous(&mut s, &old);
+        let legacy = capsule(&i, &s, "same-package");
+        let ip = IntentData::parse_data(&bytes(&i), &expected).unwrap();
+        let old_state = StateData::parse_data(&bytes(&old), &expected).unwrap();
+        let old_capsule = CapsuleData::parse_recorded_data(&bytes(&prior_capsule(&old)), &expected).unwrap();
+        let sp = StateData::parse_data(&bytes(&s), &expected).unwrap();
+        let writer = || WriterObservationData { returned:true,exit_code:Some(0),original_joined:true,result_eof:true,
+            original_closes_known:true,within_original_deadline:true,payload_write_count:0,payload_write_bytes:0 };
+        let previous = Some((&old_state, &old_capsule));
+        let legacy_encoded = CapsuleData::encode_data(&ip, previous, Some(&sp), Some(expected.current_data()),
+            RecordedOutcomeData::SamePackage, writer(), &expected).unwrap();
+        assert_eq!(legacy_encoded, CapsuleData::encode_with_launcher_data(&ip, previous, Some(&sp), Some(expected.current_data()),
+            RecordedOutcomeData::SamePackage, writer(), None, &expected).unwrap());
+        assert!(serde_json::from_slice::<Value>(&legacy_encoded).unwrap().get("launcher").is_none());
+        assert!(CapsuleData::parse_data(&bytes(&legacy), &expected).unwrap().launcher_data().is_none());
+        let observation = ObservationData { outcome:OutcomeData::Restored,write_count:2,write_bytes:17,
+            originals_closed:true,within_original_deadline:true,readback_verified:true,workspace_cleared:true };
+        let encoded = CapsuleData::encode_with_launcher_data(&ip, previous, Some(&sp), Some(expected.current_data()),
+            RecordedOutcomeData::SamePackage, writer(), Some(observation.clone()), &expected).unwrap();
+        let value: Value = serde_json::from_slice(&encoded).unwrap();
+        let parsed = CapsuleData::parse_data(&encoded, &expected).unwrap();
+        assert_eq!(parsed.launcher_data(), Some(&observation));
+        assert_eq!(value["writer"]["payloadWriteCount"], json!(0));
+        assert_eq!(value["writer"]["payloadWriteBytes"], json!(0));
+        assert_eq!(correspondence_data(&ip, previous, Some(&sp), Some(&parsed)), CorrespondenceData::MatchingRecordedData);
+        for key in ["originalsClosed", "withinOriginalDeadline", "readbackVerified", "workspaceCleared"] {
+            let mut failed = value.clone(); failed["launcher"][key] = json!(false);
+            assert!(CapsuleData::parse_data(&bytes(&failed), &expected).is_err());
+        }
+        for outcome in ["inverse-restored", "refused", "unknown"] {
+            let mut failed = value.clone(); failed["launcher"]["outcome"] = json!(outcome);
+            assert!(CapsuleData::parse_data(&bytes(&failed), &expected).is_err());
+        }
+        for bad in [Value::Null, positional(&value["launcher"], &["outcome", "writeCount", "writeBytes", "originalsClosed",
+            "withinOriginalDeadline", "readbackVerified", "workspaceCleared"])] {
+            let mut failed = value.clone(); failed["launcher"] = bad;
+            assert!(CapsuleData::parse_data(&bytes(&failed), &expected).is_err());
+        }
+        let mut unknown = value.clone(); unknown["launcher"]["trusted"] = json!(true);
+        assert!(CapsuleData::parse_data(&bytes(&unknown), &expected).is_err());
+        let mut inflated = value.clone(); inflated["writer"]["payloadWriteCount"] = json!(1);
+        inflated["writer"]["payloadWriteBytes"] = json!(PAYLOAD_LIMIT);
+        assert!(CapsuleData::parse_data(&bytes(&inflated), &expected).is_err());
+        let mut violated = writer(); violated.payload_write_count = 1; violated.payload_write_bytes = 1;
+        assert!(CapsuleData::encode_with_launcher_data(&ip, previous, Some(&sp), Some(expected.current_data()),
+            RecordedOutcomeData::SamePackage, violated, Some(observation), &expected).is_err());
+        // Absence remains legacy DATA; native callers MUST use their actual
+        // authenticated inventory to require this observation for enrollment.
+    }
+
     #[test]
     fn constructed_action_chain_keeps_runtime_identity_and_exact_linked_worker_evidence() {
         // These are comparison DATA, not package trust, native writes, or an

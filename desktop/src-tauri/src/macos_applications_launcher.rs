@@ -119,6 +119,45 @@ pub fn decide(action: ActionData, current: Option<&LauncherInventory<'_>>,
     }
 }
 
+/// Closed observational DATA, not authority to publish or a worker's claim
+/// about its future join. Parent independently binds it to the signed inventory
+/// and actual current Applications original before recording success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutcomeData { VerifiedExisting, Published, Restored, InverseRestored, Refused, Unknown }
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObservationData {
+    pub outcome: OutcomeData,
+    pub write_count: u64,
+    pub write_bytes: u64,
+    pub originals_closed: bool,
+    pub within_original_deadline: bool,
+    pub readback_verified: bool,
+    pub workspace_cleared: bool,
+}
+impl ObservationData {
+    pub fn valid_data(&self) -> bool {
+        // One new copied launcher; inverse uses the retained old original,
+        // never a second arbitrary copy or widened payload quota.
+        let limit = LIMITS.iter().copied().sum::<u64>() + TICKET_LIMIT;
+        (self.write_count == 0) == (self.write_bytes == 0)
+            && self.write_count <= self.write_bytes && self.write_bytes <= limit
+            && match self.outcome {
+                OutcomeData::VerifiedExisting => self.write_count == 0,
+                OutcomeData::Published | OutcomeData::Restored => self.write_count > 0,
+                _ => true,
+            }
+    }
+    pub fn complete_data(&self, inverse: bool) -> bool {
+        self.valid_data() && self.originals_closed && self.within_original_deadline
+            && self.readback_verified && self.workspace_cleared
+            && if inverse { self.outcome == OutcomeData::InverseRestored }
+                else { matches!(self.outcome, OutcomeData::VerifiedExisting | OutcomeData::Published | OutcomeData::Restored) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,4 +256,36 @@ mod tests {
                 if action == ActionData::Update { Decision::ReplaceEnrolled } else { Decision::Refuse });
         }
     }
+    #[test]
+    fn launcher_observation_preserves_zero_core_noop_and_requires_actual_finality() {
+        use OutcomeData::*;
+        for outcome in [VerifiedExisting, Published, Restored, InverseRestored, Refused, Unknown] {
+            let writes = u64::from(matches!(outcome, Published | Restored));
+            let base = ObservationData { outcome, write_count: writes, write_bytes: writes,
+                originals_closed: true, within_original_deadline: true, readback_verified: true, workspace_cleared: true };
+            assert!(base.valid_data());
+            assert_eq!(base.complete_data(false), matches!(outcome, VerifiedExisting | Published | Restored));
+            assert_eq!(base.complete_data(true), outcome == InverseRestored);
+            for cut in 0..4 {
+                let mut failed = base.clone();
+                match cut { 0 => failed.originals_closed = false, 1 => failed.within_original_deadline = false,
+                    2 => failed.readback_verified = false, _ => failed.workspace_cleared = false };
+                assert!(!failed.complete_data(false)); assert!(!failed.complete_data(true));
+            }
+            for (count, bytes) in [(0, 1), (1, 0), (2, 1), (u64::MAX, u64::MAX)] {
+                let mut bad = base.clone(); bad.write_count = count; bad.write_bytes = bytes;
+                assert!(!bad.valid_data());
+            }
+        }
+        let value = serde_json::json!({"outcome":"restored","writeCount":1,"writeBytes":4,
+            "originalsClosed":true,"withinOriginalDeadline":true,"readbackVerified":true,"workspaceCleared":true});
+        assert!(serde_json::from_value::<ObservationData>(value.clone()).unwrap().complete_data(false));
+        for key in ["writeCount", "writeBytes", "originalsClosed", "withinOriginalDeadline", "readbackVerified", "workspaceCleared"] {
+            let mut missing = value.clone(); missing.as_object_mut().unwrap().remove(key);
+            assert!(serde_json::from_value::<ObservationData>(missing).is_err());
+        }
+        let mut extra = value; extra["trusted"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ObservationData>(extra).is_err());
+    }
+
 }

@@ -1396,6 +1396,9 @@ mod installer {
                 "runtimeManifestSha256":option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")})
         }
     }
+    #[allow(dead_code)]
+    mod applications { include!("../macos_applications_native.rs"); }
+
     // B3 shares the existing original descriptor book, copier and fixed roots.
     // None of these private DATA arguments authenticates a producer. The only
     // entry caller must first admit its genuine completed-package expectation.
@@ -9286,7 +9289,7 @@ mod installer {
             data(AppIdentityData::from_original_fields_data(i64::from(stat.st_dev), stat.st_ino,
                 u32::from(stat.st_mode), stat.st_uid, stat.st_gid, stat.st_flags))
         }
-        fn audit_tree(book: &mut Install, root: usize, prefix: &str, index: &installation_record::InventoryIndex<'_>, depth: usize) -> Result<()> {
+        pub(super) fn audit_tree(book: &mut Install, root: usize, prefix: &str, index: &installation_record::InventoryIndex<'_>, depth: usize) -> Result<()> {
             audit_tree_mode(book,root,prefix,index,depth,None)
         }
         fn audit_tree_mode(book:&mut Install,root:usize,prefix:&str,index:&installation_record::InventoryIndex<'_>,depth:usize,
@@ -10791,7 +10794,7 @@ mod installer {
                 && before.uid == after.uid && before.gid == after.gid && before.links == after.links
                 && before.size == after.size && before.mtime == after.mtime && before.mtime_ns == after.mtime_ns
         }
-        fn rebind_renamed(book: &mut Install, original: usize, parent: usize, name: &str) -> Result<()> {
+        pub(super) fn rebind_renamed(book: &mut Install, original: usize, parent: usize, name: &str) -> Result<()> {
             let before = book.identity(original)?;
             let actual = stat::fstat(book.fd(original)?).map_err(|_| "maintenance-renamed-stat")?;
             let named = book.named(Some(parent),name).map_err(|_| "maintenance-renamed-name")?;
@@ -13976,7 +13979,7 @@ mod installer {
         fn removal_payload_phase_allows_unlink_data(phase:RemovalPayloadPhase,deletion_record_settled:bool,first:bool)->bool {
             phase==RemovalPayloadPhase::Removing && deletion_record_settled && !first
         }
-        fn removal_payload_parent_change_data(before:Identity,flags:u32,actual:Identity,actual_flags:u32,named:Identity,named_flags:u32)->bool {
+        pub(super) fn removal_payload_parent_change_data(before:Identity,flags:u32,actual:Identity,actual_flags:u32,named:Identity,named_flags:u32)->bool {
             before.dev==actual.dev && before.ino==actual.ino && before.mode==actual.mode
                 && before.uid==actual.uid && before.gid==actual.gid && flags==actual_flags && actual_flags==named_flags
                 && actual==named && actual.mode&0o170000==0o040000
