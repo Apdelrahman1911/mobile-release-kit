@@ -222,6 +222,7 @@ CUT_POSTINSTALL = (b'#!/bin/sh\nset -eu\nd="${0%/*}"\np="${1%/*}/Install.pkg"\n'
 
 
 def recovery_mode(op):
+    if op.phase == "candidate-baseline": return True
     return op.environment.get("GITHUB_REF") == RECOVERY_REF
 
 
@@ -332,6 +333,9 @@ def io(op, label, function, *args, **kwargs):
 
 
 def roles(op):
+    if op.phase == "candidate-baseline":
+        return ("app-absence-image-create", "app-absence-image-verify", "app-absence-baseline-attach",
+                "app-absence-baseline", "app-absence-baseline-detach")
     if recovery_mode(op):
         if op.phase == PREPARE:
             return PREPARE_ROLES + tuple("app-absence-cut-" + cut + "-" + role for cut in CUTS
@@ -895,7 +899,7 @@ def preparation_input(op):
                  and package_sha == row.get("fixturePackageSha256") and package["identity"][6] == row.get("fixturePackageBytes"), "restore-chain-cut-originals")
             retained_cuts[cut] = package
         op.app_absence["cutPackages"] = retained_cuts
-        if op.phase == "package-install":
+        if op.phase in ("package-install", "candidate-baseline"):
             op.app_absence["future"]["cutCopies"] = sum(row["fixturePackageBytes"] for row in cuts.values())
             reserve(op)
     op.app_absence["preparation"] = data
@@ -906,7 +910,8 @@ def preparation_input(op):
 def receipt_data(op, value, phase, expected_roles):
     need(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1
          and value.get("phase") == phase and value.get("target") == op.target
-         and value.get("source") == value.get("workflowSource") == op.image_source
+         and value.get("source") == value.get("workflowSource")
+         and value.get("source") == (op.environment["GITHUB_SHA"] if op.phase == "candidate-baseline" else op.image_source)
          and value.get("workflow") == op.environment["GITHUB_WORKFLOW_REF"]
          and value.get("runId") == op.environment["GITHUB_RUN_ID"] and value.get("runAttempt") == op.environment["GITHUB_RUN_ATTEMPT"]
          and value.get("packageRole") == "ordinary-image" and value.get("cleanupErrors") == []
@@ -1109,10 +1114,16 @@ def baseline_read(op, expected_sha):
              and parent_identity == {"device": parent_after.st_dev, "inode": parent_after.st_ino, "mode": parent_after.st_mode,
                                      "uid": parent_after.st_uid, "gid": parent_after.st_gid}, "app-absence-baseline-original-post")
     value = op.stager.maintenance_json(body, RECORD_LIMIT)
+    baseline_value_data(value, op.app_absence["nativeBinding"], parent_identity)
+    return {"bytes": len(body), "sha256": expected_sha, "identity": list(op.app_absence_api.signature(actual))}
+
+
+
+def baseline_value_data(value, native_binding, parent_identity):
     need(type(value) is dict and set(value) == {"schemaVersion", "kind", "binding", "rootNonce", "parentIdentity", "privateIdentity",
          "siblingCensusSha256", "siblingCount", "rootAbsent", "transportState"}
          and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["kind"] == "app-absence-baseline"
-         and value["binding"] == op.app_absence["nativeBinding"] and nonzero_hex_data(value["rootNonce"], 32)
+         and value["binding"] == native_binding and nonzero_hex_data(value["rootNonce"], 32)
          and nonzero_hex_data(value["siblingCensusSha256"], 64) and type(value["siblingCount"]) is int and 0 <= value["siblingCount"] <= 512
          and value["rootAbsent"] is True and value["transportState"] == "pending-original-exit", "app-absence-baseline-binding")
     for key in ("parentIdentity", "privateIdentity"):
@@ -1124,7 +1135,188 @@ def baseline_read(op, expected_sha):
     need(value["parentIdentity"] == parent_identity and value["privateIdentity"]["gid"] == 0
          and stat.S_IMODE(value["privateIdentity"]["mode"]) == 0o700, "app-absence-baseline-parent-original")
     need(value["parentIdentity"]["device"] == value["privateIdentity"]["device"], "app-absence-baseline-volume")
-    return {"bytes": len(body), "sha256": expected_sha, "identity": list(op.app_absence_api.signature(actual))}
+    return value
+
+
+def candidate_baseline(op, acquisition_entry, acquisition_status, producer, nomination, helper_tree):
+    """Internal baseline phase on an already admitted existing Operation.
+
+    This is not a CLI/profile admission. The caller still must admit the two
+    SOURCE roots/host and prepared observer before invoking it. No Installer
+    for P is entered here; only the fixed nonshipping baseline package runs.
+    """
+    environment = op.environment
+    helper_source = environment.get("GITHUB_SHA")
+    run, attempt = environment.get("GITHUB_RUN_ID"), environment.get("GITHUB_RUN_ATTEMPT")
+    need(op.phase == "candidate-baseline" and op.app_absence is None and not op.calls and not op.errors
+         and op.work_entry is not None and op.target_entry is not None
+         and str(op.checkout) == "/Users/runner/work/mobile-release-kit/mobile-release-kit"
+         and op.stager.DESKTOP == op.checkout / "desktop"
+         and environment.get("GITHUB_EVENT_NAME") == "push"
+         and environment.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-candidate-consume"
+         and environment.get("GITHUB_WORKFLOW_SHA") == helper_source
+         and environment.get("GITHUB_WORKFLOW_REF") == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-consume.yml@refs/heads/verify/desktop-macos-candidate-consume"
+         and nonzero_hex_data(helper_source,40) and nonzero_hex_data(helper_tree,40)
+         and op.image_source == nomination['source'] and op.target == nomination['target']
+         and not op.credential_calls and not op.credential_contexts
+         and op.entry_registry.get(id(acquisition_entry)) is acquisition_entry
+         and op.entry_registry.get(id(acquisition_status)) is acquisition_status
+         and len(op.entries) <= 24576 and sum(entry["fd"] is not None for entry in op.entries) <= 96,
+         "candidate-baseline-owner-admission")
+    need(op.read(acquisition_status) == b"0\n", "candidate-baseline-acquisition-caller-zero")
+    body = op.read(acquisition_entry)
+    need(0 < len(body) <= RECORD_LIMIT, "candidate-baseline-acquisition-bound")
+    acquired = candidate_acquisition_data(op.app_absence_api.tool_json(body), nomination,
+                                          helper_source, helper_tree, run, attempt)
+    binding = binding_data(dict(fixtureSource=nomination['source'], productSource=nomination['source'],
+                                runId=run, runAttempt=attempt, target=op.target))
+    now = time.monotonic_ns()
+    op.app_absence = dict(binding=binding, started=now, observed=now, workSeconds=660, hardSeconds=720,
+        outputs=[], roots=[], mount=None, pendingRoot=None, complete=False, pendingCut=None,
+        future={key:OUTPUTS[key] for key in ('copies','product','image')}, summary=None)
+    op.package_started = op.package_observed = now
+    op.package_endpoint = now + 660_000_000_000
+    # Hold the real prior owner output through native baseline and final POST.
+    op.package_sources.extend(((acquisition_entry, body), (acquisition_status, b"0\n")))
+    reserve(op)
+    image_prepare(op, producer)
+    actual = op.app_absence['nativeBinding']
+    need(all(actual[key] == acquired[part]['sha256'] for key,part in
+         (('packageSha256','package'),('producerDescriptorSha256','descriptor'),
+          ('producerSignatureSha256','signature'),('inventorySha256','inventory')))
+         and actual['runtimeManifestSha256'] == acquired['runtimeManifestSha256'],
+         "candidate-baseline-acquired-product")
+    baseline(op)
+    detach(op, "app-absence-baseline-detach")
+    need(io(op, "candidate-baseline-post", baseline_read, op, op.app_absence['baselineSha256'])
+         == op.app_absence['baselineOriginal'] and op.read(acquisition_entry) == body,
+         "candidate-baseline-final-original")
+    post(op); op.package_post()
+    op.app_absence['candidateAcquisition'] = acquired
+    op.app_absence['complete'] = True
+
+
+def candidate_baseline_result(op, nomination, helper_tree):
+    # Called only after this SAME Operation.finish joined original closes.
+    state = op.app_absence
+    need(op.phase == 'candidate-baseline' and state is not None and state['complete']
+         and finish_ready(op) and state['mount']['detached']
+         and op.receipt.get('originalClosesKnown') is True and op.receipt.get('targetRetired') is True
+         and not op.errors and not op.credential_calls and not op.credential_contexts
+         and all(entry['closed'] and entry['fd'] is None for entry in op.entries),
+         'candidate-baseline-owner-finality')
+    value = dict(schemaVersion=1, scope='candidate-closed-baseline',
+        acquisition=state['candidateAcquisition'], binding=state['nativeBinding'],
+        baselineSha256=state['baselineSha256'], baselineOriginal=state['baselineOriginal'],
+        baselineObservation=state['baselineObservation'], helperSource=op.environment['GITHUB_SHA'],
+        helperTree=helper_tree, consumerRunId=op.environment['GITHUB_RUN_ID'],
+        consumerRunAttempt=op.environment['GITHUB_RUN_ATTEMPT'],
+        originalCalls=[dict(role=row['role'], entered=True, returned=row['returned'],
+            capturesSettled=row['capturesSettled'], returncode=row['returncode']) for row in op.calls],
+        originalClosesKnown=True, originalMountDetached=True, productReady=False)
+    return candidate_baseline_receipt_data(value, nomination, value['helperSource'], helper_tree,
+                                            value['consumerRunId'], value['consumerRunAttempt'])
+
+
+def candidate_acquisition_data(acquisition, nomination, helper_source, helper_tree, run, attempt):
+    fields = {'schemaVersion','scope','nomination','helperSource','helperTree','consumerRunId','consumerRunAttempt',
+              'package','descriptor','signature','inventory','runtimeManifestSha256','nativeProducerSignatureVerified',
+              'originalMountDetached','originalClosesKnown','installerEntered','productReady'}
+    need(type(acquisition) is dict and set(acquisition) == fields and type(acquisition['schemaVersion']) is int
+         and acquisition['schemaVersion'] == 1 and acquisition['scope'] == 'candidate-closed-acquisition'
+         and acquisition['nomination'] == nomination
+         and nonzero_hex_data(acquisition['runtimeManifestSha256'],64)
+         and (acquisition['helperSource'],acquisition['helperTree'],acquisition['consumerRunId'],acquisition['consumerRunAttempt'])
+             == (helper_source,helper_tree,run,attempt)
+         and acquisition['nativeProducerSignatureVerified'] is acquisition['originalMountDetached']
+             is acquisition['originalClosesKnown'] is True
+         and acquisition['installerEntered'] is acquisition['productReady'] is False,
+         'candidate-baseline-acquisition-original')
+    for key, name, cap in (('package','Install.pkg',PRODUCT_LIMIT), ('descriptor','producer.json',16384),
+                           ('signature','producer.sig',512), ('inventory','install-inventory.json',12*MIB)):
+        row = acquisition[key]
+        need(type(row) is dict and set(row) == {'name','bytes','sha256'} and row['name'] == name
+             and type(row['bytes']) is int and 0 < row['bytes'] <= cap
+             and nonzero_hex_data(row['sha256'],64), 'candidate-baseline-acquisition-shape')
+    return acquisition
+
+
+def candidate_baseline_receipt_data(value, nomination, helper_source, helper_tree, run, attempt):
+    """Closed sequential baseline phase, never an old package-install receipt.
+
+    Caller separately holds the actual caller0 and root-owned baseline original.
+    This DATA is not permission to synthesize a baseline or skip its native run.
+    """
+    fields = {"schemaVersion", "scope", "acquisition", "binding", "baselineSha256", "baselineOriginal",
+              "baselineObservation", "helperSource", "helperTree", "consumerRunId", "consumerRunAttempt",
+              "originalCalls", "originalClosesKnown", "originalMountDetached", "productReady"}
+    need(type(value) is dict and set(value) == fields and type(value['schemaVersion']) is int
+         and value['schemaVersion'] == 1 and value['scope'] == 'candidate-closed-baseline'
+         and (value['helperSource'],value['helperTree'],value['consumerRunId'],value['consumerRunAttempt'])
+             == (helper_source,helper_tree,run,attempt)
+         and value['originalClosesKnown'] is value['originalMountDetached'] is True
+         and value['productReady'] is False, 'candidate-baseline-closed-phase')
+    acquisition = candidate_acquisition_data(value['acquisition'], nomination, helper_source, helper_tree, run, attempt)
+    binding = value['binding']
+    need(type(binding) is dict and set(binding) == set(BINDING_FIELDS), 'candidate-baseline-binding-fields')
+    binding_data({key:binding[key] for key in ('fixtureSource','productSource','runId','runAttempt','target')})
+    need(binding['fixtureSource'] == nomination['source'] and binding['target'] == nomination['target']
+         and (binding['runId'],binding['runAttempt']) == (run,attempt)
+         and all(nonzero_hex_data(binding[key],64) for key in BINDING_FIELDS[5:])
+         and all(binding[key] == acquisition[part]['sha256'] for key,part in
+             (('packageSha256','package'),('producerDescriptorSha256','descriptor'),
+              ('producerSignatureSha256','signature'),('inventorySha256','inventory')))
+         and binding['runtimeManifestSha256'] == acquisition['runtimeManifestSha256'],
+         'candidate-baseline-source-product')
+    observation = value['baselineObservation']
+    need(type(observation) is dict and set(observation) == set(BINDING_FIELDS) | {'schemaVersion','kind','phase',
+         'baselineSha256','recordSha256','proof','originalOuterExitRequired','systemServiceExitClaimed','productReady'}
+         and type(observation['schemaVersion']) is int and observation['schemaVersion'] == 1
+         and observation['kind'] == 'app-absence-phase-observation' and observation['phase'] == 'baseline'
+         and all(observation[key] == item for key,item in binding.items())
+         and observation['baselineSha256'] == observation['recordSha256'] == value['baselineSha256']
+         and nonzero_hex_data(value['baselineSha256'],64)
+         and type(observation['proof']) is dict and set(observation['proof']) == set(PROOFS['baseline'])
+         and all(item is True for item in observation['proof'].values())
+         and observation['originalOuterExitRequired'] is True
+         and observation['systemServiceExitClaimed'] is observation['productReady'] is False,
+         'candidate-baseline-native-observation')
+    original = value['baselineOriginal']
+    need(type(original) is dict and set(original) == {'bytes','sha256','identity'}
+         and type(original['bytes']) is int and 0 < original['bytes'] <= RECORD_LIMIT
+         and original['sha256'] == value['baselineSha256'] and type(original['identity']) is list
+         and len(original['identity']) == 9 and all(type(item) is int for item in original['identity']),
+         'candidate-baseline-original-shape')
+    roles = ('app-absence-image-create','app-absence-image-verify','app-absence-baseline-attach',
+             'app-absence-baseline','app-absence-baseline-detach')
+    calls = value['originalCalls']
+    need(type(calls) is list and len(calls) == len(roles), 'candidate-baseline-original-count')
+    for row,role in zip(calls,roles):
+        need(type(row) is dict and set(row) == {'role','entered','returned','capturesSettled','returncode'}
+             and row['role'] == role and row['entered'] is row['returned'] is row['capturesSettled'] is True
+             and type(row['returncode']) is int and row['returncode'] == 0, 'candidate-baseline-original-finality')
+    return value
+
+
+def candidate_initial_data(observed, baseline, census):
+    binding = baseline['binding']
+    need(type(observed) is dict and observed.get('schemaVersion') == 2
+         and observed.get('originalInstallerReturnedZero') is observed.get('originalWriterJoined') is True
+         and observed.get('originalInstallerResult',{}).get('action') == 'fresh-install'
+         and observed['originalInstallerResult'].get('writerState') == 'installed'
+         and observed.get('sourceCommit') == binding['productSource']
+         and observed.get('completedPackageSha256') == binding['packageSha256']
+         and observed.get('inventorySha256') == binding['inventorySha256']
+         and observed.get('runtimeManifestSha256') == binding['runtimeManifestSha256']
+         and type(observed.get('installationMetadata')) is list and len(observed['installationMetadata']) == 1,
+         'candidate-initial-fresh-only')
+    request = observed.get('requestId')
+    need(nonzero_hex_data(request,32) and type(census) is dict and set(census) == {request}
+         and census[request] == {key:observed['installerResultExport'][key] for key in ('bytes','sha256','identity')},
+         'candidate-initial-original-export')
+    return {'requestId':request, 'invocation':observed['invocation'],
+            'stateSha256':observed['originalInstallerResult']['stateSha256'],
+            'resultSha256':census[request]['sha256'], 'instance':observed['installationMetadata'][0]['instance']}
 
 
 def root_call(op, phase):

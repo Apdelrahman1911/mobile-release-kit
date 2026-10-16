@@ -2329,7 +2329,7 @@ class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
     def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET, support_started=None):
-        need(phase in PHASES + SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
+        need(phase in ("candidate-baseline",) + PHASES + SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
         self.arch, self.runner_arch, self.release_input = build_profile(target)
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
@@ -7788,6 +7788,17 @@ class Operation:
         self.sha256 = final["imageSha256"]
         self.same_package_complete = True
         self.notary_clock()
+
+    def candidate_baseline(self, acquisition_entry, acquisition_status, producer, nomination, helper_tree):
+        # Internal sequential-owner seam only. admit()/CLI do not admit this
+        # phase; no native activation without the separate source/host bootstrap.
+        need(self.phase == "candidate-baseline" and self.app_absence_module is not None,
+             "candidate-baseline-fixed-phase")
+        try:
+            self.app_absence_module.candidate_baseline(self, acquisition_entry, acquisition_status, producer, nomination, helper_tree)
+        finally:
+            self.finish()
+        return self.app_absence_module.candidate_baseline_result(self, nomination, helper_tree)
 
     def package_install(self):
         self.stage = "package-final-audit"

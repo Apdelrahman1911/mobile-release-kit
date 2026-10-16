@@ -1412,6 +1412,7 @@ class Resume:
             need(self.outer.read(message_entry) == message, 'resume-producer-message-post')
             need(post() == facts, 'resume-producer-mounted-signature-post')
             readback = self.prepare_readback(result, inventory)
+            if readback is False: return
             input_parent = self.fresh_directory(self.parent, 'input')
             self.publish_owned(input_parent['path'] / self.stager.INSTALLATION_INVENTORY_NAME, inventory)
             args = argparse.Namespace(target=self.target, fixture=False, input=self.work / 'input', expected_source=self.origin['source'],

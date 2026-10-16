@@ -203,6 +203,57 @@ class CandidateConsumerTests(unittest.TestCase):
         self.assertTrue(owner.mount_detached)
         owner.fresh_directory.assert_not_called()
 
+    def test_acquire_only_shared_native_owner_detaches_before_input_and_refuses_unknown_close(self):
+        # Same actual native method, no process/transport execution in this fixture.
+        image = b'inert-image'
+        message = R.producer_message_data(b'inert-descriptor')
+        info = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o555,
+                               st_uid=0, st_gid=0, st_nlink=1, st_size=0, st_mtime_ns=0, st_ctime_ns=0)
+        directory = {'fd': -1, 'identity': R.identity(info)}
+        outer = SimpleNamespace(directories={Path('/'): directory},
+                                read=lambda entry: image if entry['path'].suffix == '.dmg' else message)
+        mounted = SimpleNamespace(check=lambda: None, finish=mock.Mock(return_value=True))
+        def quote(book, operation, path, *args, **kwargs):
+            if operation == 'directory': return directory
+            return {'identity': (1, 2), 'path': path}, image if path.suffix == '.dmg' else message
+        calls = []
+        def command(role, argv, timeout):
+            calls.append(role)
+            body = (b'-----BEGIN PUBLIC KEY-----\ninert\n-----END PUBLIC KEY-----\n'
+                    if role == 'producer-key' else b'Verified OK\n' if role == 'producer-signature' else b'')
+            return SimpleNamespace(returncode=0, stdout=body, stderr=b'')
+        owner = SimpleNamespace(work=Path('/inert'), root=Path('/helper'), image_name='arm64.dmg',
+            target='aarch64-apple-darwin', publish_image=mock.Mock(), outer=outer, private={},
+            quota=SimpleNamespace(call=quote), mount_path=lambda: Path('/Volumes/inert'),
+            transport_facts=lambda entry: 'same', transport_roster=lambda entry: ({}, 'same'),
+            command=command, fresh_book=lambda **kw: mounted, point=lambda: None,
+            host=SimpleNamespace(filesystem=lambda fd: {'flags': 0}), publish_owned=mock.Mock(),
+            read_mounted=lambda *args: ({'producer.json': (b'inert-descriptor', 0o444)}, {},
+                dict(package={'sha256':'1'*64},descriptor={'sha256':'2'*64},signature={'sha256':'3'*64},
+                    inventory={'sha256':'4'*64},release={'runtimeManifestSha256':'5'*64}), b'inventory'),
+            stager=SimpleNamespace(distribution_mount_data=lambda *args: '/dev/inert'),
+            fresh_directory=mock.Mock(side_effect=AssertionError('input published before guard')),
+            clock=SimpleNamespace(finality=False))
+        owner.purpose = 'acquire'
+        owner.prepare_readback = lambda result, inventory: C.CandidateResume.prepare_readback(owner, result, inventory)
+        with ExitStack() as patches:
+            patches.enter_context(mock.patch.object(R.os, 'fstat', return_value=info))
+            patches.enter_context(mock.patch.object(R.os, 'stat', return_value=info))
+            patches.enter_context(mock.patch.object(R.os, 'fstatvfs', return_value=SimpleNamespace(f_flag=0)))
+            patches.enter_context(mock.patch.object(R.os, 'listdir', return_value=['Install.pkg', 'producer.json', 'producer.sig']))
+            patches.enter_context(mock.patch.object(R, 'mount_data'))
+            patches.enter_context(mock.patch.object(R, 'transport_transition_data'))
+            R.Resume.install_image(owner, image, {})
+            self.assertEqual(owner.acquisition_result['runtimeManifestSha256'],'5'*64)
+            self.assertEqual(calls, ['attach','producer-key','producer-signature','detach'])
+            self.assertTrue(owner.mount_detached)
+            calls.clear(); mounted.finish.return_value=False
+            with self.assertRaisesRegex(ValueError, 'resume-mounted-close-unknown'):
+                R.Resume.install_image(owner,image,{})
+        self.assertEqual(calls, ['attach', 'producer-key', 'producer-signature'])
+        self.assertFalse(owner.installer_entered)
+        owner.fresh_directory.assert_not_called()
+
     def test_consume_preserves_failure_finality_and_entry_remains_closed(self):
         for close_known in (True, False):
             owner = instance()

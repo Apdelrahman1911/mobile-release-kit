@@ -32,6 +32,10 @@ LEGACY_PATH = 'desktop/tools/macos_fixed_carrier_resume.py'
 PARSER_PATH = 'desktop/tools/macos_candidate_carrier.py'
 STAGER_PATH = 'desktop/tools/stage_macos_installed.py'
 CONSUMER_PATH = 'desktop/tools/macos_candidate_consumer.py'
+FIXTURE_PATH = 'desktop/tools/macos_app_absence_fixture.py'
+BASELINE_RECEIPT = 'candidate-baseline.json'
+BASELINE_STATUS = 'candidate-baseline.status'
+PURPOSES = ('install', 'acquire', 'restore-install')
 CANDIDATE_SOURCE_INPUTS = (
     ('desktop/macos-installed-inputs/build-release.json', 4096),
     ('desktop/macos-installed-inputs/build-release-intel.json', 4096),
@@ -174,9 +178,13 @@ class CandidateResume(resume.Resume):
     """
     command_roles = (*resume.Resume.command_roles, 'helper-source', 'candidate-source')
 
-    def __init__(self, helper_root, candidate_root, work, clock, factory, *, nomination=None, quota=None):
+    def __init__(self, helper_root, candidate_root, work, clock, factory, *, nomination=None, quota=None, purpose="install"):
         resume.need(helper_root == HELPER_ROOT and candidate_root == CANDIDATE_ROOT,
                     'candidate-separate-source-roots')
+        resume.need(type(purpose) is str and purpose in PURPOSES, "candidate-purpose")
+        self.__purpose = purpose
+        self.baseline = self.baseline_entry = self.baseline_receipt = self.fixture_api = None
+        self.acquisition_result = None
         self.__nomination = None if nomination is None else MappingProxyType(candidate.candidate_selection_data(nomination))
         self.__binding = None
         self.candidate_root = candidate_root
@@ -185,6 +193,10 @@ class CandidateResume(resume.Resume):
         self.__acquisition_entered = False
         self.__installation_entered = False
         super().__init__(helper_root, work, clock, factory, quota=quota)
+
+    @property
+    def purpose(self):
+        return self.__purpose
 
     @property
     def nomination(self):
@@ -243,7 +255,9 @@ class CandidateResume(resume.Resume):
         self.source(CONSUMER_PATH, 64 << 10)
         self.child_sources = {LEGACY_PATH: self.source(LEGACY_PATH, resume.SOURCE_LIMIT),
                               PARSER_PATH: self.source(PARSER_PATH, PARSER_SOURCE_LIMIT)}
-        self.child_bootstrap = acquisition_bootstrap(self.root, self.child_sources)
+        self.child_bootstrap = (acquisition_bootstrap(self.root, self.child_sources)
+                                if self.purpose != "restore-install" else "")
+        fixture_body = self.source(FIXTURE_PATH, 128 << 10) if self.purpose == "restore-install" else None
         bodies = {}
         for relative, cap in ((STAGER_PATH, resume.SOURCE_MODULE_LIMIT), *CANDIDATE_SOURCE_INPUTS):
             entry, body = self.quota.call(self.outer, 'file', self.candidate_root / relative, cap, uid=os.getuid())
@@ -251,6 +265,8 @@ class CandidateResume(resume.Resume):
         # The candidate's code is not executed until its real Git tree and every
         # source byte here match the exact service-nominated checkout.
         self.verify_sources()
+        if fixture_body is not None:
+            self.fixture_api = resume.load_module("_mrk_candidate_fixture", self.root / FIXTURE_PATH, fixture_body)
         self.stager = resume.load_module('_mrk_candidate_stager', self.candidate_root / STAGER_PATH, bodies[STAGER_PATH])
         resume.need(self.stager.DESKTOP == self.candidate_root / 'desktop', 'candidate-stager-source-root')
         self.selection = self.stager.source_build_selection(self.target)
@@ -313,6 +329,10 @@ class CandidateResume(resume.Resume):
             'schemaVersion': 1, 'role': 'candidate', 'target': self.target, 'bytes': selected['artifactBytes'],
             'sha256': selected['artifactSha256'], 'closedMetadataMatched': True, 'originalClosesKnown': True},
             'candidate-original-acquisition')
+        return self.read_candidate_zip()
+
+    def read_candidate_zip(self):
+        selected = self.nomination
         name = target_names(self.target) + '-candidate.zip'
         entry, body = self.quota.call(self.outer, 'file', self.work / name, selected['artifactBytes'], modes=(0o600,))
         self.private[name] = entry['identity']
@@ -324,6 +344,57 @@ class CandidateResume(resume.Resume):
                                                    for name, body in sorted(values.items())])
         self.__artifact_admitted = True
         return values
+
+    def reuse_candidate(self):
+        resume.need(self.purpose == "restore-install" and self.baseline_receipt is not None
+                    and not self.__acquisition_entered and not self.__artifact_admitted,
+                    "candidate-reuse-order")
+        self.__acquisition_entered = True
+        return self.read_candidate_zip()
+
+    def admit_baseline(self):
+        """Actual held root-owned baseline; no pathname-only or old producer receipt."""
+        resume.need(self.purpose == "restore-install" and self.fixture_api is not None
+                    and self.baseline_receipt is None and self.__source_loaded,
+                    "candidate-baseline-order")
+        # Two receipt originals plus Library/Application Support/baseline,
+        # with the complete remaining native seventeen originals still funded.
+        resume.need(self.quota.reserved + 5 + 17 <= resume.MAX_ORIGINALS,
+                    'candidate-baseline-original-budget')
+        api = self.fixture_api
+        status, body = self.quota.call(self.outer, 'file', self.work / BASELINE_STATUS, 4, modes=(0o600,))
+        resume.need(body == b'0\n', 'candidate-baseline-caller-zero')
+        record, body = self.quota.call(self.outer, 'file', self.work / BASELINE_RECEIPT, 65536, modes=(0o600,))
+        value = api.candidate_baseline_receipt_data(self.stager.maintenance_json(body, 65536),
+            self.nomination, self.helper_source, self.helper_tree, self.run_id, self.run_attempt)
+        path = Path('/Library/Application Support') / api.baseline_name_data(
+            {key: value['binding'][key] for key in ('fixtureSource','productSource','runId','runAttempt','target')})
+        entry, baseline_body = self.quota.call(self.outer, 'file', path, api.RECORD_LIMIT, uid=0, modes=(0o444,))
+        library = self.outer.directories[Path('/Library')]
+        resume.need(library['identity'][3] == 0 and not library['identity'][2] & 0o022,
+                    'candidate-baseline-protected-ancestor')
+        parent = self.outer.directories[path.parent]
+        parent_id = dict(zip(('device','inode','mode','uid','gid'), parent['identity']))
+        resume.need(parent_id['uid'] == 0 and not parent_id['mode'] & 0o022
+                    and entry['identity'][4] == 0 and entry['identity'][5] == 1,
+                    'candidate-baseline-protected-original')
+        api.baseline_value_data(self.stager.maintenance_json(baseline_body, api.RECORD_LIMIT),
+                                value['binding'], parent_id)
+        observed = {'bytes':len(baseline_body), 'sha256':resume.sha(baseline_body), 'identity':list(entry['identity'])}
+        resume.need(observed == value['baselineOriginal'] and observed['sha256'] == value['baselineSha256'],
+                    'candidate-baseline-original-binding')
+        self.baseline, self.baseline_entry = value, entry
+        self.baseline_receipt = (record, body, status)
+        self.point()
+
+    def baseline_post(self):
+        resume.need(self.purpose == 'restore-install' and self.baseline_entry is not None,
+                    'candidate-baseline-not-admitted')
+        record, receipt, status = self.baseline_receipt
+        self.point()
+        resume.need(self.outer.read(record) == receipt and self.outer.read(status) == b'0\n'
+                    and resume.sha(self.outer.read(self.baseline_entry)) == self.baseline['baselineSha256'],
+                    'candidate-baseline-original-post')
 
     def read_mounted(self, mounted, directory, mount, image, preview):
         resume.need(self.__binding is None and self.__artifact_admitted, 'candidate-mounted-once')
@@ -364,6 +435,17 @@ class CandidateResume(resume.Resume):
         return super().install_image(image, preview)
 
     def prepare_readback(self, result, inventory):
+        # This hook runs only AFTER actual mounted producer signature POST.
+        if self.purpose == 'acquire':
+            self.acquisition_result = {key: result[key] for key in ('package','descriptor','signature','inventory')}
+            self.acquisition_result.update(runtimeManifestSha256=result['release']['runtimeManifestSha256'])
+            return False  # Existing owner detaches without ever entering Installer.
+        if self.purpose == 'restore-install':
+            self.baseline_post()
+            expected = self.baseline['acquisition']
+            resume.need(all(result[key] == expected[key] for key in ('package','descriptor','signature','inventory'))
+                        and result['release']['runtimeManifestSha256'] == expected['runtimeManifestSha256'],
+                        'candidate-baseline-product')
         # Do not manufacture legacy P0/ce644 release evidence.
         return None
 
@@ -374,7 +456,38 @@ class CandidateResume(resume.Resume):
         observed = self.stager.observation_command(args)
         resume.need(observed['originalInstallerResult']['action'] == 'fresh-install'
                     and len(observed['installationMetadata']) == 1, 'candidate-readback-not-fresh')
+        if self.purpose == 'restore-install':
+            self.baseline_post()
+            self._initial = self.fixture_api.candidate_initial_data(observed, self.baseline,
+                                                                    self.stager.same_package_result_census())
         return observed
+
+    def retire(self):
+        if self.purpose == 'install':
+            return super().retire()
+        self.point()
+        keep = {target_names(self.target) + '-candidate.zip'}
+        if self.purpose == 'restore-install': keep.update((BASELINE_RECEIPT, BASELINE_STATUS))
+        for book in self.quota.books:
+            if isinstance(book, resume.FixedSudoOriginals): continue
+            for entry in book.entries:
+                if entry['kind'] != 'directory': book.close(entry)
+        resume.need(all(not book.errors for book in self.quota.books), 'candidate-retirement-close')
+        for spelling, before in self.private.items():
+            if spelling in keep: continue
+            path = self.work / spelling
+            parent = self.outer.directories[path.parent]
+            resume.need(resume.identity(os.stat(path.name, dir_fd=parent['fd'], follow_symlinks=False)) == before,
+                        'candidate-retirement-original')
+            os.unlink(path.name, dir_fd=parent['fd'])
+        input_parent = self.outer.directories.get(self.work / 'input')
+        if input_parent is not None:
+            resume.need(os.listdir(input_parent['fd']) == [], 'candidate-input-retirement-roster')
+            self.outer.close(input_parent)
+            resume.need(input_parent['closed'], 'candidate-input-retirement-close')
+            os.rmdir('input', dir_fd=self.parent['fd'])
+        self.outer.check()
+        resume.need(set(os.listdir(self.parent['fd'])) == keep, 'candidate-retained-handoff-roster')
 
     def consume(self, retained, host_bytes):
         """One attempt after the external original source/host bootstrap.
@@ -391,22 +504,32 @@ class CandidateResume(resume.Resume):
             # producer key/message/read3, input directory/inventory/status3 and
             # the three transport iterators. These are lifetime cells, not live
             # FD credits; every later acquisition still uses OriginalQuota.
-            resume.need(self.quota.reserved + 20 <= resume.MAX_ORIGINALS, 'candidate-original-ledger-capacity')
+            pending = 17 if self.purpose == 'restore-install' else 20
+            resume.need(self.quota.reserved + pending <= resume.MAX_ORIGINALS, 'candidate-original-ledger-capacity')
             self.admit_resources(retained, host_bytes)
-            artifact = self.acquire_candidate()
+            artifact = self.reuse_candidate() if self.purpose == 'restore-install' else self.acquire_candidate()
             preview = candidate.candidate_preview_data(artifact['PREVIEW.json'], self.nomination)
             self.admit_resources(retained, host_bytes, image_bytes=len(artifact['MobileReleaseKit.dmg']))
             self.verify_sources()
             self.install_image(artifact['MobileReleaseKit.dmg'], preview)
             self.verify_sources()
+            if self.purpose == 'restore-install': self.baseline_post()
             self.point(); self.clock.finality = True
             self.retire()
             resume.need(self.quota.finish(), 'candidate-original-final-closes')
             self.clock.check()
             resume.need(all(row['returned'] and row['capturesSettled'] for row in self.calls)
-                        and self.installer_zero and self.readback_known and self.mount_detached,
+                        and self.mount_detached and ((not self.installer_entered and self.acquisition_result is not None)
+                        if self.purpose == 'acquire' else (self.installer_zero and self.readback_known)),
                         'candidate-original-terminal-finality')
-            return {'scope': 'candidate-fresh-installer-observation', 'target': self.target,
+            if self.purpose == 'acquire':
+                return {'schemaVersion':1, 'scope':'candidate-closed-acquisition', 'nomination':self.nomination,
+                    'helperSource':self.helper_source, 'helperTree':self.helper_tree,
+                    'consumerRunId':self.run_id, 'consumerRunAttempt':self.run_attempt,
+                    **self.acquisition_result, 'nativeProducerSignatureVerified':True,
+                    'originalMountDetached':True, 'originalClosesKnown':True, 'installerEntered':False,
+                    'productReady':False}
+            result = {'scope': 'candidate-fresh-installer-observation', 'target': self.target,
                     'producerSource': self.nomination['source'], 'producerTree': self.nomination['tree'],
                     'artifactId': self.nomination['artifactId'], 'artifactSha256': self.nomination['artifactSha256'],
                     'producerRunId': self.nomination['runId'], 'producerRunAttempt': self.nomination['runAttempt'],
@@ -416,6 +539,12 @@ class CandidateResume(resume.Resume):
                     'originalMountDetached': True, 'originalClosesKnown': True,
                     'workloadsKnownSettled': True, 'privateOutputsRetired': True,
                     'productReady': False, 'uiQualified': False, 'p0Qualified': False}
+            if self.purpose == 'restore-install':
+                result['scope'] = 'candidate-baseline-fresh-installer-observation'
+                result['privateOutputsRetired'] = False  # Prior original handoffs remain for the chain.
+                result['baselineSha256'] = self.baseline['baselineSha256']
+                result['initial'] = resume.decode(resume.canonical(self._initial))
+            return result
         except BaseException as error:
             primary = error
             raise
@@ -524,21 +653,29 @@ def bind_host():
             'runId': context['runId'], 'runAttempt': context['runAttempt']}
 
 
-def main():
+def main(purpose="install"):
     """Hosted acquire/install only. No workflow currently activates this entry."""
+    resume.need(type(purpose) is str and purpose in PURPOSES, 'candidate-purpose')
     context = entry_context(())
     clock = resume.Deadline(started=STARTED_NS)
     quota = resume.OriginalQuota()
     session, primary = None, None
     try:
-        clock.check(); quota.reserve(1)
-        os.mkdir(context['work'], 0o700)
+        clock.check()
+        if purpose != 'restore-install':
+            quota.reserve(1)
+            os.mkdir(context['work'], 0o700)
         quota.reserve(1)  # Consuming bootstrap source FD, retained re-read below.
         session = CandidateResume(HELPER_ROOT, CANDIDATE_ROOT, context['work'], clock,
-                                  resume.bootstrap_originals(HELPER_ROOT), quota=quota)
+                                  resume.bootstrap_originals(HELPER_ROOT), quota=quota, purpose=purpose)
         session.helper_source = context['helperSource']
         session.run_id, session.run_attempt = context['runId'], context['runAttempt']
         session.load_nomination(context['target'])
+        if purpose == 'restore-install':
+            resume.need(session.parent['identity'][3:5] == (os.getuid(), os.getgid())
+                        and stat.S_IMODE(session.parent['identity'][2]) == 0o700
+                        and set(os.listdir(session.parent['fd'])) == {target_names(context['target'])+'-candidate.zip', BASELINE_RECEIPT, BASELINE_STATUS},
+                        'candidate-reuse-work-roster')
         modules = {}
         for path in HELPER_SOURCE_INPUTS:
             body = session.source(path, resume.SOURCE_MODULE_LIMIT)
@@ -579,9 +716,13 @@ def main():
         sudo = quota.book(lambda: resume.FixedSudoOriginals(session.host_module, session.host, clock, os.getuid()))
         sudo.acquire(quota)
         session.load_sources()
-        ca = resume.admit_pinned_tls_roots(session)
-        session.token = os.environ.pop('GITHUB_TOKEN', None)
-        resume.request_headers(authenticated=True, token=session.token)
+        if purpose == 'restore-install':
+            ca = b''  # No network/acquisition child, no unused CA originals.
+            session.admit_baseline()
+        else:
+            ca = resume.admit_pinned_tls_roots(session)
+            session.token = os.environ.pop('GITHUB_TOKEN', None)
+            resume.request_headers(authenticated=True, token=session.token)
         session.verify_sources()
         retained = sum(len(body) for _, body in session.sources) + len(session.child_bootstrap.encode('utf-8'))
         retained += len(ca) + len(host_body) + len(cfg) + (2 << 20)
