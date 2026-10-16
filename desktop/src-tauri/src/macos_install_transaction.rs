@@ -137,6 +137,32 @@ impl RecoveryReferenceData {
     }
 }
 
+/// Restore-only correlation to a new immutable original-preservation receipt.
+/// Native custody must bind that receipt's ownAttempt and every older original;
+/// this DATA reference cannot retrospectively prove who created a file.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoreReferenceData {
+    torn_invocation: String, receipt_invocation: String, receipt_sha256: String,
+}
+impl RestoreReferenceData {
+    pub fn new_data(torn: &str, receipt: &str, sha256: &str) -> Result<Self> {
+        let value=Self {torn_invocation:torn.into(),receipt_invocation:receipt.into(),receipt_sha256:sha256.into()};
+        require(value.valid(),TransactionDataError::Binding)?;Ok(value)
+    }
+    fn valid(&self) -> bool {hex(&self.torn_invocation,32) && hex(&self.receipt_invocation,32)
+        && self.torn_invocation!=self.receipt_invocation && hex(&self.receipt_sha256,64)}
+    pub fn torn_invocation_data(&self) -> &str {&self.torn_invocation}
+    pub fn receipt_invocation_data(&self) -> &str {&self.receipt_invocation}
+    pub fn receipt_sha256_data(&self) -> &str {&self.receipt_sha256}
+    pub fn receipt_name_data(&self) -> String {format!(".restore-recovery-{}.json",self.receipt_invocation)}
+    pub fn preserved_stage_name_data(&self) -> String {format!(".restore-recovery-{}.stage",self.torn_invocation)}
+    pub fn preserved_intent_name_data(&self,invocation:&str) -> Result<String> {
+        require(hex(invocation,32),TransactionDataError::Binding)?;
+        Ok(format!(".restore-recovery-{}-{invocation}.intent.json",self.torn_invocation))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct IntentWire {
@@ -144,6 +170,8 @@ struct IntentWire {
     previous: Option<ReleaseData>, next: ReleaseData, previous_state: Option<StateLink>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recovery: Option<RecoveryReferenceData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restore_recovery: Option<RestoreReferenceData>,
 }
 /// Validated comparison input only; no Deserialize bypass or mutation methods.
 #[derive(Debug)]
@@ -162,6 +190,7 @@ impl IntentData {
         record_field(&value, "previous", true)?; record_field(&value, "next", false)?;
         record_field(&value, "previousState", true)?;
         if value.get("recovery").is_some() { record_field(&value,"recovery",false)?; }
+        if value.get("restoreRecovery").is_some() { record_field(&value,"restoreRecovery",false)?; }
         let wire: IntentWire = decode(value)?;
         header(wire.schema_version, &wire.kind, INTENT_KIND, &wire.target, &wire.invocation, &wire.request_id, expected)?;
         pair(expected, wire.action, wire.previous.as_ref(), &wire.next, current)?;
@@ -172,17 +201,43 @@ impl IntentData {
         require(wire.recovery.as_ref().is_none_or(|r| r.valid()
             && wire.action == ActionData::SamePackageNoop && r.torn_invocation != wire.invocation),
             TransactionDataError::Binding)?;
+        require(wire.restore_recovery.as_ref().is_none_or(|r|r.valid() && wire.recovery.is_none()
+            && wire.action==ActionData::RestoreFixedApp && r.receipt_invocation==wire.invocation
+            && wire.previous_state.as_ref().is_some_and(|old|old.invocation!=r.torn_invocation)),
+            TransactionDataError::Binding)?;
         Ok(Self { wire, body_sha256: digest(bytes) })
     }
     pub fn invocation_data(&self) -> &str { &self.wire.invocation }
     pub fn request_id_data(&self) -> &str { &self.wire.request_id }
     pub fn digest_data(&self) -> &str { &self.body_sha256 }
     pub fn recovery_data(&self) -> Option<&RecoveryReferenceData> { self.wire.recovery.as_ref() }
+    pub fn restore_recovery_data(&self) -> Option<&RestoreReferenceData> {self.wire.restore_recovery.as_ref()}
     pub fn action_data(&self) -> ActionData { self.wire.action }
     pub fn next_data(&self) -> &ReleaseData { &self.wire.next }
     pub fn previous_data(&self) -> Option<&ReleaseData> { self.wire.previous.as_ref() }
     pub fn previous_state_data(&self) -> Option<(&str, &str)> {
         self.wire.previous_state.as_ref().map(|link| (link.invocation.as_str(), link.sha256.as_str()))
+    }
+    /// Reconstruct only the canonical body of a receipt-bound historical
+    /// Restore retry. The caller must first authenticate that receipt's actual
+    /// ownAttempt original. This recorded comparison is NOT active admission;
+    /// current-only parse/RestorePrepublicationData still gate new work.
+    pub fn restore_retry_body_recorded_data(base:&Self, invocation:&str, request:&str,
+        previous:(&StateData,&CapsuleData),reference:&RestoreReferenceData,
+        expected:&ReleaseSetData) -> Result<Vec<u8>> {
+        require(base.action_data()==ActionData::RestoreFixedApp && base.recovery_data().is_none()
+            && base.restore_recovery_data().is_none_or(|old|old.torn_invocation!=invocation)
+            && previous_matches(base,Some(previous))
+            && expected.contains_data(base.next_data()) && reference.valid()
+            && reference.torn_invocation==base.invocation_data()
+            && reference.receipt_invocation==invocation && invocation!=base.invocation_data()
+            && request!=base.request_id_data(),TransactionDataError::Binding)?;
+        let mut wire=base.wire.clone();wire.invocation=invocation.into();wire.request_id=request.into();
+        wire.restore_recovery=Some(reference.clone());
+        let bytes=encode(&wire,INTENT_LIMIT)?;
+        let parsed=Self::parse_recorded_data(&bytes,expected)?;
+        require(previous_matches(&parsed,Some(previous)),TransactionDataError::Binding)?;
+        Ok(bytes)
     }
     /// Construct comparison DATA only after the original observer selected the
     /// action. A previous successful WORKER capsule is necessary; no file is
@@ -194,6 +249,16 @@ impl IntentData {
     pub fn encode_with_recovery_data(invocation: &str, request_id: &str, action: ActionData,
         previous: Option<(&StateData, &CapsuleData)>, recovery: Option<&RecoveryReferenceData>,
         expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        Self::encode_with_references_data(invocation,request_id,action,previous,recovery,None,expected)
+    }
+    pub fn encode_with_restore_recovery_data(invocation:&str,request_id:&str,
+        previous:(&StateData,&CapsuleData),reference:&RestoreReferenceData,expected:&ReleaseSetData) -> Result<Vec<u8>> {
+        Self::encode_with_references_data(invocation,request_id,ActionData::RestoreFixedApp,
+            Some(previous),None,Some(reference),expected)
+    }
+    fn encode_with_references_data(invocation:&str,request_id:&str,action:ActionData,
+        previous:Option<(&StateData,&CapsuleData)>,recovery:Option<&RecoveryReferenceData>,
+        restore:Option<&RestoreReferenceData>,expected:&ReleaseSetData) -> Result<Vec<u8>> {
         require(recovery.is_none_or(|r| previous.is_some_and(|(state,_)|
             r.stage_invocation == state.current_data().instance_data())),TransactionDataError::Binding)?;
         let wire = IntentWire { schema_version: 2, kind: INTENT_KIND.into(),
@@ -201,7 +266,7 @@ impl IntentData {
             previous: previous.map(|(state, _)| state.wire.current.release.clone()),
             next: expected.current_data().clone(), previous_state: previous.map(|(state, _)| StateLink {
                 invocation: state.wire.invocation.clone(), sha256: state.body_sha256.clone() }),
-            recovery:recovery.cloned() };
+            recovery:recovery.cloned(),restore_recovery:restore.cloned() };
         let bytes = encode(&wire, INTENT_LIMIT)?;
         let parsed = Self::parse_data(&bytes, expected)?;
         require(previous_matches(&parsed, previous), TransactionDataError::Binding)?;
@@ -303,6 +368,8 @@ struct StateWire {
     previous_evidence: Vec<EvidenceRef>, residue: Option<Residue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recovery: Option<RecoveryReferenceData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restore_recovery: Option<RestoreReferenceData>,
 }
 #[derive(Debug)]
 pub struct StateData { wire: StateWire, body_sha256: String }
@@ -314,6 +381,7 @@ impl StateData {
         records(&value, "previousEvidence", INVOCATION_LIMIT - 1)?;
         record_field(&value, "residue", true)?;
         if value.get("recovery").is_some() { record_field(&value,"recovery",false)?; }
+        if value.get("restoreRecovery").is_some() { record_field(&value,"restoreRecovery",false)?; }
         if !field(&value, "residue")?.is_null() { record_field(field(&value, "residue")?, "release", false)?; }
         let wire: StateWire = decode(value)?;
         header(wire.schema_version, &wire.kind, STATE_KIND, &wire.target, &wire.invocation, &wire.request_id, expected)?;
@@ -362,6 +430,10 @@ impl StateData {
             && r.stage_invocation == wire.current.instance && r.torn_invocation != wire.invocation
             && !wire.previous_evidence.iter().any(|old|old.invocation == r.torn_invocation)),
             TransactionDataError::Binding)?;
+        require(wire.restore_recovery.as_ref().is_none_or(|r|r.valid() && wire.recovery.is_none()
+            && wire.intended_action==ActionData::RestoreFixedApp && wire.phase==StatePhase::MutationRecorded
+            && r.receipt_invocation==wire.invocation
+            && !wire.previous_evidence.iter().any(|old|old.invocation==r.torn_invocation)),TransactionDataError::Binding)?;
         Ok(Self { wire, body_sha256: digest(bytes) })
     }
     pub fn invocation_data(&self) -> &str { &self.wire.invocation }
@@ -369,6 +441,7 @@ impl StateData {
     pub fn digest_data(&self) -> &str { &self.body_sha256 }
     pub fn action_data(&self) -> ActionData { self.wire.intended_action }
     pub fn recovery_data(&self) -> Option<&RecoveryReferenceData> { self.wire.recovery.as_ref() }
+    pub fn restore_recovery_data(&self) -> Option<&RestoreReferenceData> {self.wire.restore_recovery.as_ref()}
     pub fn current_data(&self) -> GenerationData { GenerationData(self.wire.current.clone()) }
     pub fn retained_data(&self) -> impl Iterator<Item = GenerationData> + '_ {
         self.wire.retained.iter().cloned().map(GenerationData)
@@ -409,7 +482,7 @@ impl StateData {
         let wire = StateWire { schema_version: 2, kind: STATE_KIND.into(), target: intent.wire.target.clone(),
             invocation: intent.wire.invocation.clone(), request_id: intent.wire.request_id.clone(), capsule_invocation: intent.wire.invocation.clone(),
             intended_action: intent.wire.action, phase: StatePhase::MutationRecorded, current: current.0.clone(),
-            retained, previous_evidence: Self::next_evidence(previous)?, residue: None, recovery:intent.wire.recovery.clone() };
+            retained, previous_evidence: Self::next_evidence(previous)?, residue: None, recovery:intent.wire.recovery.clone(),restore_recovery:intent.wire.restore_recovery.clone() };
         let bytes = encode(&wire, STATE_LIMIT)?; Self::parse_data(&bytes, expected)?; Ok(bytes)
     }
     /// Only the known one-inverse path may supply these observations. A failed
@@ -423,7 +496,7 @@ impl StateData {
             intended_action: intent.wire.action, phase: StatePhase::InverseRecorded,
             current: previous.0.wire.current.clone(), retained: previous.0.wire.retained.clone(),
             previous_evidence: Self::next_evidence(Some(previous))?, residue: Some(Residue {
-                invocation: intent.wire.invocation.clone(), release: intent.wire.next.clone(), staging_present, runtime_present }), recovery:None };
+                invocation: intent.wire.invocation.clone(), release: intent.wire.next.clone(), staging_present, runtime_present }), recovery:None,restore_recovery:None };
         let bytes = encode(&wire, STATE_LIMIT)?; Self::parse_data(&bytes, expected)?; Ok(bytes)
     }
 }
@@ -467,6 +540,100 @@ impl NoopRecoveryData {
             (false,Some(old)) if old==previous && canonical==self.expected_state=>Ok(NoopStatePlacementData::Swapped),
             _=>Err(TransactionDataError::Transition),
         }
+    }
+}
+
+/// Restore's pre-publication comparison is intentionally distinct from Noop
+/// State-swap recovery. Native admission must still verify the signed app-only
+/// prefix, complete stage-created receipt, unchanged launcher, original custody
+/// and whole namespace. This type supplies neither effect nor replay authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreOriginalPlacementData { Original, Preserved }
+impl RestoreOriginalPlacementData {
+    pub fn compare_data(expected:crate::macos_applications_launcher::OriginalIdentityData,
+        original:Option<crate::macos_applications_launcher::OriginalIdentityData>,
+        preserved:Option<crate::macos_applications_launcher::OriginalIdentityData>)->Result<Self> {
+        require(expected.valid_data(),TransactionDataError::Binding)?;
+        match (original,preserved) {
+            (Some(value),None) if value==expected=>Ok(Self::Original),
+            (None,Some(value)) if value==expected=>Ok(Self::Preserved),
+            _=>Err(TransactionDataError::Transition),
+        }
+    }
+}
+pub struct RestorePrepublicationData {
+    torn_invocation: String, torn_request: String, torn_sha256: String,
+    previous_invocation: String, previous_state_sha256: String, previous_capsule_sha256: String,
+    runtime_instance: String, release: ReleaseData,
+}
+impl RestorePrepublicationData {
+    pub fn from_recorded_data(torn: &IntentData, previous: (&StateData, &CapsuleData),
+        expected: &ReleaseSetData) -> Result<Self> {
+        require(torn.restore_recovery_data().is_none(),TransactionDataError::Binding)?;
+        Self::from_current_recorded(torn,previous,expected)
+    }
+    /// Comparison only, after the native caller has fully audited the exact
+    /// referenced prior preservation group. A complete receipt by itself is
+    /// insufficient. The current-source/no-State-change requirements remain.
+    pub fn from_preserved_retry_data(torn:&IntentData,prior_base:&IntentData,
+        previous:(&StateData,&CapsuleData),expected:&ReleaseSetData)->Result<Self> {
+        require(torn.restore_recovery_data().is_some_and(|reference|
+            reference.torn_invocation==prior_base.invocation_data()&&reference.receipt_invocation==torn.invocation_data())
+            && prior_base.action_data()==ActionData::RestoreFixedApp&&prior_base.recovery_data().is_none()
+            && previous_matches(prior_base,Some(previous))&&prior_base.next_data()==torn.next_data()
+            && torn.request_id_data()!=prior_base.request_id_data(),TransactionDataError::Binding)?;
+        Self::from_current_recorded(torn,previous,expected)
+    }
+    fn from_current_recorded(torn:&IntentData,previous:(&StateData,&CapsuleData),expected:&ReleaseSetData)->Result<Self> {
+        require(torn.action_data() == ActionData::RestoreFixedApp && torn.recovery_data().is_none()
+            && previous_matches(torn, Some(previous))
+            && torn.next_data() == expected.current_data()
+            && previous.0.current_data().release_data() == expected.current_data(),
+            TransactionDataError::Binding)?;
+        Ok(Self { torn_invocation: torn.invocation_data().into(), torn_request: torn.request_id_data().into(),
+            torn_sha256: torn.digest_data().into(), previous_invocation: previous.0.invocation_data().into(),
+            previous_state_sha256: previous.0.digest_data().into(),
+            previous_capsule_sha256: previous.1.digest_data().into(),
+            runtime_instance: previous.0.current_data().instance_data().into(), release: torn.next_data().clone() })
+    }
+    pub fn torn_data(&self) -> (&str, &str, &str) {
+        (&self.torn_invocation, &self.torn_request, &self.torn_sha256)
+    }
+    pub fn previous_data(&self) -> (&str, &str, &str) {
+        (&self.previous_invocation, &self.previous_state_sha256, &self.previous_capsule_sha256)
+    }
+    pub fn runtime_instance_data(&self) -> &str { &self.runtime_instance }
+    /// Canonical bytes must still be the exact previous State. Even an empty
+    /// pending State or an equal-byte published App is outside this slice.
+    /// None means the native observer proved absence; it is not proof itself.
+    pub fn unchanged_state_data(&self, canonical: &[u8], pending_state: Option<&[u8]>,
+        fixed_app: Option<crate::macos_applications_launcher::OriginalIdentityData>) -> Result<()> {
+        require(!canonical.is_empty() && canonical.len() <= STATE_LIMIT
+            && digest(canonical) == self.previous_state_sha256
+            && pending_state.is_none() && fixed_app.is_none(), TransactionDataError::Transition)
+    }
+    /// A newly admitted invocation must retain exactly the same old history,
+    /// runtime and selected release, without replaying either request identity.
+    pub fn retry_data(&self, next: &IntentData, previous: (&StateData, &CapsuleData),
+        expected: &ReleaseSetData) -> Result<()> {
+        require(next.action_data()==ActionData::RestoreFixedApp && next.recovery_data().is_none()
+            && previous_matches(next,Some(previous)) && next.next_data()==expected.current_data()
+            && next.next_data()==&self.release
+            && next.restore_recovery_data().is_none_or(|r|r.torn_invocation==self.torn_invocation),
+            TransactionDataError::Binding)?;
+        require(next.invocation_data()!=self.torn_invocation && next.request_id_data()!=self.torn_request,
+            TransactionDataError::ReusedIdentity)?;
+        require((previous.0.invocation_data(),previous.0.digest_data(),previous.1.digest_data())==self.previous_data()
+            && previous.0.current_data().instance_data()==self.runtime_instance,TransactionDataError::Binding)
+    }
+    /// Compare one stage/intent original against its immutable receipt binding.
+    /// Called separately for BOTH objects, after real no-follow metadata/flags/
+    /// byte audits. A source-equal replacement cannot replace dev/inode/birth.
+    pub fn original_placement_data(&self, expected: crate::macos_applications_launcher::OriginalIdentityData,
+        original: Option<crate::macos_applications_launcher::OriginalIdentityData>,
+        preserved: Option<crate::macos_applications_launcher::OriginalIdentityData>)
+        -> Result<RestoreOriginalPlacementData> {
+        RestoreOriginalPlacementData::compare_data(expected,original,preserved)
     }
 }
 
@@ -637,7 +804,7 @@ pub fn correspondence_data(intent: &IntentData, previous: Option<(&StateData, &C
         if c.state_sha256.as_deref() != Some(state.body_sha256.as_str()) || state.wire.invocation != i.invocation
             || state.wire.request_id != i.request_id || state.wire.target != i.target || state.wire.intended_action != i.action
             || c.actual_current.as_ref() != Some(&state.wire.current.release)
-            || state.wire.recovery != i.recovery { return CorrespondenceData::Mismatch; }
+            || state.wire.recovery != i.recovery || state.wire.restore_recovery != i.restore_recovery { return CorrespondenceData::Mismatch; }
     } else if c.state_sha256.is_some() { return CorrespondenceData::Pending; }
     if matches!(c.outcome, WorkerOutcome::Refused | WorkerOutcome::Partial) {
         return if c.writer.exit_code.is_some_and(|code| code != 0) { CorrespondenceData::FailureRecorded }
@@ -1112,6 +1279,167 @@ mod tests {
         assert!(IntentData::parse_data(&bytes(&update),&e).is_err());
         let duplicate=String::from_utf8(retry_raw).unwrap().replacen("\"recovery\":", "\"recovery\":null,\"recovery\":",1);
         assert!(IntentData::parse_data(duplicate.as_bytes(),&e).is_err());
+    }
+    #[test]
+    fn restore_reference_is_action_closed_and_binds_new_intent_state_and_capsule() {
+        let e=expected(); let old=state(3,3);
+        let old_state=StateData::parse_data(&bytes(&old),&e).unwrap();
+        let old_capsule=CapsuleData::parse_data(&bytes(&prior_capsule(&old)),&e).unwrap();
+        let prior=(&old_state,&old_capsule);
+        let torn=IntentData::parse_data(&IntentData::encode_data(&id(9),&id(109),ActionData::RestoreFixedApp,
+            Some(prior),&e).unwrap(),&e).unwrap();
+        let admission=RestorePrepublicationData::from_recorded_data(&torn,prior,&e).unwrap();
+        let reference=RestoreReferenceData::new_data(&id(9),&id(10),&"a".repeat(64)).unwrap();
+        assert_eq!(reference.receipt_name_data(),format!(".restore-recovery-{}.json",id(10)));
+        assert_eq!(reference.preserved_stage_name_data(),format!(".restore-recovery-{}.stage",id(9)));
+        assert_eq!(reference.preserved_intent_name_data(&id(9)).unwrap(),format!(".restore-recovery-{}-{}.intent.json",id(9),id(9)));
+        assert!(reference.preserved_intent_name_data("../other").is_err());
+        assert!(RestoreReferenceData::new_data(&id(9),&id(9),&"a".repeat(64)).is_err());
+        let raw=IntentData::encode_with_restore_recovery_data(&id(10),&id(110),prior,&reference,&e).unwrap();
+        let retry=IntentData::parse_data(&raw,&e).unwrap();
+        assert_eq!(retry.restore_recovery_data(),Some(&reference));
+        assert!(admission.retry_data(&retry,prior,&e).is_ok());
+        assert!(RestorePrepublicationData::from_recorded_data(&retry,prior,&e).is_err());
+        let next_admission=RestorePrepublicationData::from_preserved_retry_data(&retry,&torn,prior,&e).unwrap();
+        assert_eq!(next_admission.torn_data(),(retry.invocation_data(),retry.request_id_data(),retry.digest_data()));
+        assert!(RestorePrepublicationData::from_preserved_retry_data(&retry,&retry,prior,&e).is_err());
+        let next_ref=RestoreReferenceData::new_data(&id(10),&id(12),&"b".repeat(64)).unwrap();
+        let next_raw=IntentData::restore_retry_body_recorded_data(&retry,&id(12),&id(112),prior,&next_ref,&e).unwrap();
+        let next_intent=IntentData::parse_data(&next_raw,&e).unwrap();
+        assert!(next_admission.retry_data(&next_intent,prior,&e).is_ok());
+        let cycle_ref=RestoreReferenceData::new_data(&id(10),&id(9),&"c".repeat(64)).unwrap();
+        assert!(IntentData::restore_retry_body_recorded_data(&retry,&id(9),&id(113),prior,&cycle_ref,&e).is_err());
+        assert!(IntentData::encode_with_restore_recovery_data(&id(11),&id(110),prior,&reference,&e).is_err());
+        let other_base=RestoreReferenceData::new_data(&id(8),&id(10),&"a".repeat(64)).unwrap();
+        let other=IntentData::parse_data(&IntentData::encode_with_restore_recovery_data(&id(10),&id(110),prior,&other_base,&e).unwrap(),&e).unwrap();
+        assert!(admission.retry_data(&other,prior,&e).is_err());
+        let state_raw=StateData::encode_applied_data(&retry,Some(prior),&old_state.current_data(),&e).unwrap();
+        let state=StateData::parse_data(&state_raw,&e).unwrap();
+        assert_eq!(state.restore_recovery_data(),Some(&reference));
+        let writer=||WriterObservationData{returned:true,exit_code:Some(0),original_joined:true,result_eof:true,
+            original_closes_known:true,within_original_deadline:true,payload_write_count:1,payload_write_bytes:1};
+        let cap=CapsuleData::parse_data(&CapsuleData::encode_data(&retry,Some(prior),Some(&state),Some(e.current_data()),
+            RecordedOutcomeData::RestoredApp,writer(),&e).unwrap(),&e).unwrap();
+        assert_eq!(correspondence_data(&retry,Some(prior),Some(&state),Some(&cap)),CorrespondenceData::MatchingRecordedData);
+        let mut stripped:Value=serde_json::from_slice(&state_raw).unwrap();stripped.as_object_mut().unwrap().remove("restoreRecovery");
+        let stripped_state=StateData::parse_data(&bytes(&stripped),&e).unwrap();
+        let retry_value:Value=serde_json::from_slice(&raw).unwrap();
+        let mut stripped_cap=capsule(&retry_value,&stripped,"restored-app");
+        stripped_cap["intentSha256"]=json!(retry.digest_data());
+        let stripped_cap=CapsuleData::parse_data(&bytes(&stripped_cap),&e).unwrap();
+        assert_eq!(correspondence_data(&retry,Some(prior),Some(&stripped_state),Some(&stripped_cap)),CorrespondenceData::Mismatch);
+        for (name,body) in [("intent",raw.as_slice()),("state",state_raw.as_slice())] {
+            let value:Value=serde_json::from_slice(body).unwrap();
+            for bad in [Value::Null,json!([]),json!({"tornInvocation":id(9),"receiptInvocation":id(10),
+                "receiptSha256":"a".repeat(64),"extra":true}),json!({"tornInvocation":id(10),"receiptInvocation":id(10),
+                "receiptSha256":"a".repeat(64)}),json!({"tornInvocation":id(9),"receiptInvocation":id(11),"receiptSha256":"a".repeat(64)})] {
+                let mut bad_value=value.clone();bad_value["restoreRecovery"]=bad;
+                if name=="intent"{assert!(IntentData::parse_data(&bytes(&bad_value),&e).is_err());}
+                else{assert!(StateData::parse_data(&bytes(&bad_value),&e).is_err());}
+            }
+            let mut both=value.clone();both["recovery"]=json!({"stageInvocation":id(3),"tornInvocation":id(9),"receiptSha256":"a".repeat(64)});
+            if name=="intent"{assert!(IntentData::parse_data(&bytes(&both),&e).is_err());}
+            else{assert!(StateData::parse_data(&bytes(&both),&e).is_err());}
+            let mut wrong=value;wrong[if name=="intent"{"action"}else{"intendedAction"}]=json!("same-package-noop");
+            if name=="intent"{assert!(IntentData::parse_data(&bytes(&wrong),&e).is_err());}
+            else{assert!(StateData::parse_data(&bytes(&wrong),&e).is_err());}
+        }
+        // A later genuine producer set keeps old namespace comparisons valid
+        // without changing its current release or enabling an old Restore.
+        let newer=ReleaseSetData::parse_for_target_data(&bytes(&json!({"schemaVersion":2,
+            "current":release(4),"acceptedPredecessors":[release(3)]})),MaintenanceTargetData::Arm64).unwrap();
+        let recorded=IntentData::restore_retry_body_recorded_data(&torn,&id(10),&id(110),prior,&reference,&newer).unwrap();
+        assert_eq!(recorded,raw);
+        assert!(IntentData::parse_recorded_data(&recorded,&newer).is_ok());
+        assert!(IntentData::parse_data(&recorded,&newer).is_err());
+        assert!(RestorePrepublicationData::from_recorded_data(&torn,prior,&newer).is_err());
+        assert!(RestorePrepublicationData::from_preserved_retry_data(&retry,&torn,prior,&newer).is_err());
+        assert!(admission.retry_data(&retry,prior,&newer).is_err());
+        assert!(IntentData::restore_retry_body_recorded_data(&retry,&id(10),&id(110),prior,&reference,&newer).is_err());
+        assert!(IntentData::restore_retry_body_recorded_data(&torn,&id(10),&id(109),prior,&reference,&newer).is_err());
+        assert!(IntentData::restore_retry_body_recorded_data(&torn,&id(11),&id(110),prior,&reference,&newer).is_err());
+        assert!(IntentData::restore_retry_body_recorded_data(&torn,&id(10),&id(110),prior,&other_base,&newer).is_err());
+        let unknown=ReleaseSetData::parse_for_target_data(&bytes(&json!({"schemaVersion":2,
+            "current":release(4),"acceptedPredecessors":[]})),MaintenanceTargetData::Arm64).unwrap();
+        assert!(IntentData::restore_retry_body_recorded_data(&torn,&id(10),&id(110),prior,&reference,&unknown).is_err());
+        let mut bad_prior=prior_capsule(&old);bad_prior["writer"]["originalClosesKnown"]=json!(false);
+        let bad_prior=CapsuleData::parse_recorded_data(&bytes(&bad_prior),&newer).unwrap();
+        assert!(IntentData::restore_retry_body_recorded_data(&torn,&id(10),&id(110),(&old_state,&bad_prior),&reference,&newer).is_err());
+        let duplicate=String::from_utf8(raw).unwrap().replacen("\"restoreRecovery\":", "\"restoreRecovery\":null,\"restoreRecovery\":",1);
+        assert!(IntentData::parse_data(duplicate.as_bytes(),&e).is_err());
+        let legacy=IntentData::encode_data(&id(11),&id(111),ActionData::RestoreFixedApp,Some(prior),&e).unwrap();
+        assert!(serde_json::from_slice::<Value>(&legacy).unwrap().get("restoreRecovery").is_none());
+    }
+    #[test]
+    fn restore_prepublication_requires_exact_completed_history_and_fresh_retry() {
+        let e = expected(); let old = state(3,3); let old_raw = bytes(&old);
+        let old_state = StateData::parse_data(&old_raw, &e).unwrap();
+        let old_capsule = CapsuleData::parse_data(&bytes(&prior_capsule(&old)), &e).unwrap();
+        let prior = (&old_state, &old_capsule);
+        let make = |inv, request, action| IntentData::parse_data(
+            &IntentData::encode_data(&id(inv), &id(request), action, Some(prior), &e).unwrap(), &e).unwrap();
+        let torn = make(9,109,ActionData::RestoreFixedApp);
+        let data = RestorePrepublicationData::from_recorded_data(&torn, prior, &e).unwrap();
+        assert_eq!(data.torn_data(), (torn.invocation_data(), torn.request_id_data(), torn.digest_data()));
+        assert_eq!(data.previous_data(), (old_state.invocation_data(), old_state.digest_data(), old_capsule.digest_data()));
+        assert_eq!(data.runtime_instance_data(), old_state.current_data().instance_data());
+        assert!(data.retry_data(&make(10,110,ActionData::RestoreFixedApp), prior, &e).is_ok());
+        assert_eq!(data.retry_data(&torn, prior, &e), Err(TransactionDataError::ReusedIdentity));
+        assert_eq!(data.retry_data(&make(10,109,ActionData::RestoreFixedApp), prior, &e), Err(TransactionDataError::ReusedIdentity));
+        let noop = make(10,110,ActionData::SamePackageNoop);
+        assert!(RestorePrepublicationData::from_recorded_data(&noop, prior, &e).is_err());
+        assert!(data.retry_data(&noop, prior, &e).is_err());
+        let newer = ReleaseSetData::parse_for_target_data(&bytes(&json!({"schemaVersion":2,
+            "current":release(4),"acceptedPredecessors":[release(3)]})), MaintenanceTargetData::Arm64).unwrap();
+        assert!(RestorePrepublicationData::from_recorded_data(&torn, prior, &newer).is_err());
+        let different_old = state(3,4);
+        let different_state = StateData::parse_data(&bytes(&different_old), &e).unwrap();
+        let different_cap = CapsuleData::parse_data(&bytes(&prior_capsule(&different_old)), &e).unwrap();
+        let different_prior = (&different_state, &different_cap);
+        let next = IntentData::parse_data(&IntentData::encode_data(&id(10), &id(110),
+            ActionData::RestoreFixedApp, Some(different_prior), &e).unwrap(), &e).unwrap();
+        assert!(data.retry_data(&next, different_prior, &e).is_err());
+        assert!(RestorePrepublicationData::from_recorded_data(&torn, different_prior, &e).is_err());
+        for fact in ["originalJoined", "resultEof", "originalClosesKnown", "withinOriginalDeadline"] {
+            let mut bad = prior_capsule(&old); bad["writer"][fact] = json!(false);
+            let bad = CapsuleData::parse_data(&bytes(&bad), &e).unwrap();
+            assert!(RestorePrepublicationData::from_recorded_data(&torn, (&old_state, &bad), &e).is_err(), "{fact}");
+        }
+        let mut failed = prior_capsule(&old); failed["writer"]["exitCode"] = json!(20);
+        let failed = CapsuleData::parse_data(&bytes(&failed), &e).unwrap();
+        assert!(RestorePrepublicationData::from_recorded_data(&torn, (&old_state, &failed), &e).is_err());
+    }
+    #[test]
+    fn restore_prepublication_rejects_state_publication_and_foreign_original_placements() {
+        use crate::macos_applications_launcher::OriginalIdentityData as I;
+        use RestoreOriginalPlacementData as P;
+        let e = expected(); let old = state(3,3); let raw = bytes(&old);
+        let old_state = StateData::parse_data(&raw, &e).unwrap();
+        let old_capsule = CapsuleData::parse_data(&bytes(&prior_capsule(&old)), &e).unwrap();
+        let torn = IntentData::parse_data(&IntentData::encode_data(&id(9), &id(109), ActionData::RestoreFixedApp,
+            Some((&old_state, &old_capsule)), &e).unwrap(), &e).unwrap();
+        let data = RestorePrepublicationData::from_recorded_data(&torn, (&old_state, &old_capsule), &e).unwrap();
+        let original = I {device:1,inode:42,birth_seconds:10,birth_nanoseconds:20};
+        assert!(data.unchanged_state_data(&raw,None,None).is_ok());
+        for pending in [b"".as_slice(),raw.as_slice(),b"unfinished".as_slice()] {
+            assert!(data.unchanged_state_data(&raw,Some(pending),None).is_err());
+        }
+        assert!(data.unchanged_state_data(&raw,None,Some(original)).is_err());
+        for changed in [b"".as_slice(),&raw[..raw.len()-1],b"foreign".as_slice()] {
+            assert!(data.unchanged_state_data(changed,None,None).is_err());
+        }
+        assert_eq!(data.original_placement_data(original,Some(original),None),Ok(P::Original));
+        assert_eq!(data.original_placement_data(original,None,Some(original)),Ok(P::Preserved));
+        assert!(data.original_placement_data(original,Some(original),Some(original)).is_err());
+        assert!(data.original_placement_data(original,None,None).is_err());
+        for changed in [I {device:2,..original},I {inode:43,..original},I {birth_seconds:11,..original},
+            I {birth_nanoseconds:21,..original}] {
+            assert!(data.original_placement_data(original,Some(changed),None).is_err());
+            assert!(data.original_placement_data(original,None,Some(changed)).is_err());
+            assert!(data.original_placement_data(original,Some(original),Some(changed)).is_err());
+        }
+        let invalid = I {inode:0,..original};
+        assert!(data.original_placement_data(invalid,Some(invalid),None).is_err());
     }
     #[test]
     fn retained_generations_and_inverse_never_adopt_partial_or_unrelated_state() {

@@ -629,12 +629,13 @@ impl Observation {
 // that allowance. Stage callers receive only names from actual closed audits.
 pub(super) struct Namespace {
     pub(super) stages:BTreeMap<String,BTreeSet<String>>,pub(super) bytes:u64,pub(super) attempts:usize,
+    pub(super) facts:InstallInvocationSetData,
 }
 pub(super) fn namespace(book:&mut Install,root:usize,history:&History,selected:&ReleaseSetData,
     pending:Option<&Observation>,current:Option<&IntentData>,completed:bool)->Result<Namespace> {
     if pending.is_none()&&!history.originals.values().chain(std::iter::once(&history.current))
         .any(|record|record.intent.recovery_data().is_some()) {
-        return Ok(Namespace{stages:BTreeMap::new(),bytes:0,attempts:0});
+        return Ok(Namespace{stages:BTreeMap::new(),bytes:0,attempts:0,facts:InstallInvocationSetData::empty()});
     }
     // Bound the shared small maps/identity facts before allocating them. Each
     // referenced group separately reserves its actual original/read backing.
@@ -656,7 +657,7 @@ pub(super) fn namespace(book:&mut Install,root:usize,history:&History,selected:&
         check(facts.insert(InstallInvocationFactData::intent(&record.intent)?)?,"noop-recovery-invocation-reused")?;
     }
     if let Some(current)=current{check(facts.insert(InstallInvocationFactData::intent(current)?)?,"noop-recovery-invocation-reused")?;}
-    let mut out=Namespace{stages:BTreeMap::new(),bytes:0,attempts:0};
+    let mut out=Namespace{stages:BTreeMap::new(),bytes:0,attempts:0,facts:InstallInvocationSetData::empty()};
     let mut add=|reference:&RecoveryReferenceData,census:Census|->Result<()> {
         for id in census.invocations {check(ids.insert(id),"noop-recovery-cross-group-invocation")?;}
         for fact in census.facts {check(facts.insert(fact)?,"noop-recovery-cross-group-invocation")?;}
@@ -675,6 +676,7 @@ pub(super) fn namespace(book:&mut Install,root:usize,history:&History,selected:&
     }
     if let Some(pending)=pending {add(&pending.reference,pending.pending_census(book,history,selected,current,completed)?)?;}
     out.attempts=ids.len().checked_sub(complete_count).ok_or("noop-recovery-invocation-count")?;
+    out.facts=facts;
     Ok(out)
 }
 

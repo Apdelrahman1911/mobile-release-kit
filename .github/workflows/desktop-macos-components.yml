@@ -11,6 +11,7 @@ on:
       - desktop/src-tauri/src/bin/macos_install.rs
       - desktop/src-tauri/src/macos_install*.rs
       - desktop/src-tauri/src/macos_noop_recovery_native.rs
+      - desktop/src-tauri/src/macos_restore_recovery_native.rs
       - desktop/src-tauri/Cargo.toml
       - desktop/src-tauri/Cargo.lock
       - desktop/src-tauri/build.rs
@@ -25,6 +26,7 @@ on:
       - desktop/src-tauri/src/bin/macos_install.rs
       - desktop/src-tauri/src/macos_install*.rs
       - desktop/src-tauri/src/macos_noop_recovery_native.rs
+      - desktop/src-tauri/src/macos_restore_recovery_native.rs
       - desktop/src-tauri/Cargo.toml
       - desktop/src-tauri/Cargo.lock
       - desktop/src-tauri/build.rs
@@ -153,8 +155,9 @@ jobs:
           expected_tests=3
           if [[ "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
             tests+=(installer::applications::tests::
-                    installer::maintenance::store_path_tests::contextual_store_paths_keep_copy_recovery_and_removal_scoped)
-            expected_tests=9
+                    installer::maintenance::store_path_tests::contextual_store_paths_keep_copy_recovery_and_removal_scoped
+                    installer::maintenance::restore_recovery::)
+            expected_tests=16
           fi
           if [[ "$INSTALLER_CHECKS" == installer-frames ]]; then
             tests=(installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality)
@@ -164,6 +167,14 @@ jobs:
             --features macos-installed-installer --bin mrk-macos-install -- \
             "${tests[@]}" --test-threads=1 | tee "$WORK_ROOT/installer-contract-tests.log"
           grep -Eq "^test result: ok\. $expected_tests passed; 0 failed; 0 ignored;" "$WORK_ROOT/installer-contract-tests.log"
+          if [[ "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
+            # Same dependency/target owner, separate pure transaction DATA target.
+            # Neither this test filter nor the bin tests execute Installer main.
+            rustup run 1.98.1 cargo test --locked --no-default-features --lib \
+              macos_install_transaction::tests::restore_ -- --test-threads=1 \
+              | tee "$WORK_ROOT/installer-restore-transaction-tests.log"
+            grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/installer-restore-transaction-tests.log"
+          fi
       - name: Remove only this job's disposable compiler and dependencies
         if: always() && steps.work.outputs.root != ''
         shell: bash
