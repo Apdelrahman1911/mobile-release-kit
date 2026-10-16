@@ -100,6 +100,32 @@ class LauncherStaging(unittest.TestCase):
                         package_version='99.0.0')) if field == 'version' else contextlib.nullcontext():
                     with self.assertRaises(TOOL.Refused): TOOL.applications_launcher_files(args)
 
+    def test_ticket_copy_role_preserves_private_input_not_assembly_mode(self):
+        for mode in (0o400, 0o600, 0o444, 0o644):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / 'launcher.app'
+                args = self.fixture(root, ticket=True)
+                (root / 'Contents/CodeResources').chmod(mode)
+                before = TOOL.tree(root)
+                assembly = TOOL.applications_launcher_files(args)
+                copied_input = TOOL.applications_launcher_files(args, input_copy=True)
+                self.assertEqual(assembly[TOOL.LAUNCHER_TICKET], (before['Contents/CodeResources'][0], 0o644))
+                self.assertEqual(copied_input[TOOL.LAUNCHER_TICKET], before['Contents/CodeResources'])
+                self.assertEqual(TOOL.tree(root), before)
+        for change in ('executable', 'shared-write', 'world-write', 'special', 'ordinary-private', 'unrequested', 'wrong-digest'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / 'launcher.app'
+                args = self.fixture(root, ticket=True)
+                ticket = root / 'Contents/CodeResources'
+                ticket.chmod(0o600)
+                if change in ('executable', 'shared-write', 'world-write', 'special'):
+                    ticket.chmod({'executable':0o700, 'shared-write':0o620, 'world-write':0o602, 'special':0o4600}[change])
+                elif change == 'ordinary-private': (root / 'Contents/Info.plist').chmod(0o600)
+                elif change == 'unrequested': args.expected_applications_launcher_ticket = None
+                else: args.expected_applications_launcher_ticket = 'f' * 64
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.applications_launcher_files(args, input_copy=True)
+
     def test_existing_system_loader_policy_is_not_relaxed_for_swift(self):
         for dependency in (b'@rpath/libswiftCore.dylib', b'/tmp/lib.dylib', b'/usr/lib/../tmp/lib.dylib'):
             with self.subTest(dependency=dependency), tempfile.TemporaryDirectory() as tmp:

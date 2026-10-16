@@ -26,6 +26,20 @@ PRIVATE = b"PRIVATE_SENTINEL_/secret/key.p8-password-no-export"
 
 
 class NotarySubmitDiagnosticTests(unittest.TestCase):
+    def test_final_input_refusals_are_distinct_without_exporting_private_values(self):
+        stager = load("notary_final_stager_data", "stage_macos_installed.py")
+        for reason in ("applications-launcher-file", "applications-launcher-installed-correspondence",
+                       "ticket-input-correspondence", "signed-app-roster", PRIVATE.decode()):
+            with self.subTest(public=reason != PRIVATE.decode()):
+                error = stager.Refused(reason)
+                captured = HELPER.failure_exception(error, stager)
+                self.assertEqual(captured["type"], "stager-refused")
+                self.assertEqual(captured["reason"], "unclassified" if reason == PRIVATE.decode() else reason)
+                self.assertNotIn(PRIVATE.decode(), json.dumps(captured))
+        # The same text in an unrelated exception never borrows the stager label.
+        self.assertEqual(HELPER.failure_exception(ValueError("applications-launcher-file"), stager)["reason"],
+                         "unclassified")
+
     def test_bounded_lexical_facts_keep_unknown_conflict_and_private_text(self):
         cases = ((b"", "empty", "none", "unclassified"),
             (b"HTTP status code: 401", "bounded-utf8", "single-known", "http-authentication"),

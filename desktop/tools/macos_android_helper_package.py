@@ -1458,6 +1458,14 @@ FINAL_IMAGE_INPUT_STAGER_REASONS = frozenset((
 # Existing notary guards only. A zero log command can still carry an Invalid
 # submission or fail its strict DATA parser; neither is native success evidence.
 _FAILURE_NOTARY_REASONS = (
+    # Final input staging is after successful Apple checks. Preserve its exact
+    # finite refusal instead of misdiagnosing another Apple rejection.
+    'applications-launcher-copy-role', 'applications-launcher-input-pair',
+    'applications-launcher-roster', 'applications-launcher-file', 'applications-launcher-info',
+    'applications-launcher-version', 'applications-launcher-icon', 'applications-launcher-signed-digest',
+    'applications-launcher-ticket-digest', 'applications-launcher-installed-correspondence',
+    'ticket-launcher-role', 'ticket-input-expectations', 'ticket-input-correspondence',
+    'signed-app-roster', 'input-executable-scope', 'installer-inventory-bound', 'installer-complete-byte-bound',
     'notary-submission-invalid', 'notary-fixed-archive-name', 'notary-uuid',
     'notary-json-bound', 'notary-json-keys', 'notary-json-constant', 'notary-json-format', 'notary-json-object',
     'notary-submit-terminal', 'notary-submit-metadata', 'notary-submit-archive',

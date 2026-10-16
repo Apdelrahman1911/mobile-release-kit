@@ -3218,13 +3218,14 @@ def github_seal_files(args, *, installed=False):
         yield {GITHUB_SEAL: (body, 0o555), GITHUB_SEAL_NOTICE: (notice, 0o644)}
 
 
-def applications_launcher_files(args):
+def applications_launcher_files(args, *, input_copy=False):
     """Read a separately signed nested convenience launcher, never execute it.
 
     The signing caller must verify Developer ID before this DATA copy. Neither
     CodeResources nor a matching digest is itself signature/notary acceptance.
     An optional ticket is explicitly pinned; an unrequested ticket is an extra.
     """
+    need(type(input_copy) is bool, "applications-launcher-copy-role")
     path = getattr(args, "applications_launcher", None)
     expected = getattr(args, "expected_applications_launcher", None)
     ticket = getattr(args, "expected_applications_launcher_ticket", None)
@@ -3241,9 +3242,18 @@ def applications_launcher_files(args):
     result = {}
     for name, (body, mode) in files.items():
         executable = name == "Contents/MacOS/mrk-macos-launcher"
-        need(0 < len(body) <= limits[name] and mode in ((0o555, 0o755) if executable else (0o444, 0o644)),
-             "applications-launcher-file")
-        result[LAUNCHER_BUNDLE + "/" + name] = (body, 0o555 if executable else 0o644)
+        is_ticket = name == "Contents/CodeResources"
+        # Stapler may create an owner-only ticket under the signing job's
+        # private umask. Apply the same non-executable/no-shared-write policy
+        # as ticket_input_names, without widening ordinary launcher files.
+        permitted = (bool(mode & 0o400) and mode & 0o7133 == 0 if is_ticket else
+                     mode in ((0o555, 0o755) if executable else (0o444, 0o644)))
+        need(0 < len(body) <= limits[name] and permitted, "applications-launcher-file")
+        # Input readback must compare the actual original permission, not a
+        # future copy's normalized mode. Assembly keeps its existing 644 form;
+        # input_with_github_seal seals only its fresh ticket copy to 444.
+        result[LAUNCHER_BUNDLE + "/" + name] = (body, mode if is_ticket and input_copy else
+                                                0o555 if executable else 0o644)
     info = files["Contents/Info.plist"][0]
     need(info == read(DESKTOP / "native/macos-applications-launcher/Info.plist", 16 * 1024),
          "applications-launcher-info")
@@ -3423,7 +3433,7 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
     if role == "ordinary-image":
         expected_names.add(DESKTOP_IMAGE)
     expected_names.update(seal)
-    launcher = applications_launcher_files(args)
+    launcher = applications_launcher_files(args, input_copy=True)
     expected_names.update(launcher)
     need(all(app.get(path) == (body, mode) or mode == 0o644 and app.get(path) == (body, 0o444)
              for path, (body, mode) in launcher.items()), "applications-launcher-installed-correspondence")
