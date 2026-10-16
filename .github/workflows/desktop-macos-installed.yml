@@ -5381,11 +5381,12 @@ jobs:
       MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
     steps:
       - name: Admit only the disposable hosted prepared-input route
         timeout-minutes: 1
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
@@ -5422,12 +5423,13 @@ jobs:
           [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || exit 1
           root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
-          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nMRK_CONSUMER_TREE=%s\n' "$root" "$MRK_PYTHON" "$tree" >> "$GITHUB_ENV"
+          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nMRK_CONSUMER_TREE=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$tree" "$root" >> "$GITHUB_ENV"
       - name: Select the one closed upstream target checkpoint without matrix output ambiguity
         id: prepared
         timeout-minutes: 4
         shell: bash
         env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
           PRODUCER_SOURCE: ${{ github.event_name == 'workflow_dispatch' && inputs.prepared_source || github.sha }}
           PRODUCER_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.prepared_run || github.run_id }}
           GH_TOKEN: ${{ github.token }}
@@ -5487,6 +5489,8 @@ jobs:
       - name: Reconstruct fresh script originals and repeat full finalized product audit
         timeout-minutes: 5
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           ulimit -c 0
@@ -5584,6 +5588,8 @@ jobs:
         if: github.event_name == 'push' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success'
         timeout-minutes: 3
         shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           set -o noclobber
