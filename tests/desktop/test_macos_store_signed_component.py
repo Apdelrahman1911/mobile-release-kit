@@ -52,7 +52,10 @@ class SignedStoreComponent(unittest.TestCase):
             'signedArchiveSha256': hashlib.sha256(archive).hexdigest(), 'signedArchiveBytes': len(archive),
             'signedInventorySha256': FIXTURE.M.sha(FIXTURE.M.canonical(rows)),
             'inputNativeCount': FIXTURE.M.INPUT_NATIVE_COUNT, 'outputNativeCount': FIXTURE.M.NATIVE_COUNT,
-            'inputMemberCount': len(rows) + 54, 'outputMemberCount': len(rows),
+            'inputMemberCount': len(rows) + 55, 'outputMemberCount': len(rows),
+            'nonNativeUnchangedScope': 'retained-after-declared-projection',
+            'omittedInstallCaches': [{'path': FIXTURE.M.NOTIFIER_CACHE_PATH,
+                'sha256': FIXTURE.M.NOTIFIER_CACHE_SHA256, 'bytes': FIXTURE.M.NOTIFIER_CACHE_BYTES}],
             'omittedBuildObjects': [{'path': name, 'bytes': len(body), 'sha256': FIXTURE.M.sha(body)}
                 for name, body, _ in FIXTURE.build_objects(cpu=cpu, subtype=subtype)],
             'nativeMembers': [{'path': row['path'], 'signedBytes': row['bytes'], 'signedSha256': row['sha256'],
@@ -105,10 +108,13 @@ class SignedStoreComponent(unittest.TestCase):
 
     def test_wrong_origin_incomplete_closure_signer_or_full_inventory_refuse(self):
         fixture = self.fixture('arm64')
-        changes = ('job', 'branch', 'source', 'calls', 'closure', 'identity', 'inventory', 'native', 'native-duplicate', 'object-roster', 'projection-count')
+        changes = ('job', 'branch', 'source', 'calls', 'closure', 'identity', 'inventory', 'native', 'native-duplicate', 'object-roster', 'projection-count', 'cache-omission', 'cache-count', 'cache-scope')
         for changed in changes:
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
                 data = copy.deepcopy(fixture)
+                if changed == 'cache-omission': data[1]['omittedInstallCaches'] = []
+                if changed == 'cache-count': data[1]['inputMemberCount'] -= 1
+                if changed == 'cache-scope': del data[1]['nonNativeUnchangedScope']
                 if changed == 'object-roster': data[1]['omittedBuildObjects'][0]['path'] = 'runtime/other.o'
                 if changed == 'projection-count': data[1]['outputNativeCount'] = 187
                 if changed == 'job': data[5]['jobs'][0]['conclusion'] = 'failure'

@@ -118,23 +118,69 @@ class StoreSigning(unittest.TestCase):
         intel = native(cpu=0x1000007, subtype=3)
         M.native_policy(intel, 'runtime/bin/ruby', profile(API.INTEL_TARGET), MATCHER)
 
-    def test_projection_checks_all187_headers_and_omits_only_exact54_build_objects(self):
+    def test_projection_checks_all_headers_and_omits_only_declared_build_inputs(self):
         for target, cpu, subtype in ((API.ARM_TARGET, 0x100000c, 0), (API.INTEL_TARGET, 0x1000007, 3)):
             loadable = [(name, native(cpu=cpu, subtype=subtype, kind=2 if name == 'runtime/bin/ruby' else 8)
                          if data[:4] in M.MAGICS else data, kind) for name, data, kind in fixture()]
             objects = build_objects(cpu=cpu, subtype=subtype)
-            before, after, omitted = M.project_runtime_inventory(tar(loadable + objects), profile(target), MATCHER)
-            self.assertEqual(sum(r['native'] for r in before), 187)
-            self.assertEqual(sum(r['native'] for r in after), 133)
-            self.assertEqual(len(omitted), 54)
-            self.assertEqual(after, [r for r in before if r['path'] not in M.BUILD_OBJECT_PATHS])
-            for bad in (objects[:-1], [(objects[0][0], native(cpu=cpu, subtype=subtype), tarfile.REGTYPE)] + objects[1:],
-                        [(objects[0][0], b'not Mach-O', tarfile.REGTYPE)] + objects[1:],
-                        [('runtime/unselected.o', objects[0][1], tarfile.REGTYPE)] + objects[1:]):
+            cache_body = b'synthetic-gem-archive-not-executable'
+            cache = (M.NOTIFIER_CACHE_PATH, cache_body, tarfile.REGTYPE)
+            retained = [
+                ('runtime/bundle/ruby/3.3.0/cache/another.gem', b'keep archive', tarfile.REGTYPE),
+                ('runtime/bundle/ruby/3.3.0/gems/terminal-notifier-2.0.0/lib/terminal-notifier.rb', b'keep wrapper', tarfile.REGTYPE),
+                ('runtime/bundle/ruby/3.3.0/gems/terminal-notifier-2.0.0/vendor/terminal-notifier/LICENSE.md', b'keep license', tarfile.REGTYPE),
+                ('runtime/bundle/ruby/3.3.0/specifications/terminal-notifier-2.0.0.gemspec', b'keep specification', tarfile.REGTYPE),
+            ]
+            with mock.patch.object(M, 'NOTIFIER_CACHE_SHA256', M.sha(cache_body)), \
+                    mock.patch.object(M, 'NOTIFIER_CACHE_BYTES', len(cache_body)):
+                before, after, omitted = M.project_runtime_inventory(tar(loadable + objects + [cache] + retained), profile(target), MATCHER)
+                self.assertEqual(sum(r['native'] for r in before), 187)
+                self.assertEqual(sum(r['native'] for r in after), 133)
+                self.assertEqual(len(omitted), 55)
+                self.assertEqual(after, [r for r in before if r['path'] not in M.OMISSION_PATHS])
+                self.assertEqual(after[-len(retained):], before[-len(retained):])
+                for bad in (objects[:-1], [(objects[0][0], native(cpu=cpu, subtype=subtype), tarfile.REGTYPE)] + objects[1:],
+                            [(objects[0][0], b'not Mach-O', tarfile.REGTYPE)] + objects[1:],
+                            [('runtime/unselected.o', objects[0][1], tarfile.REGTYPE)] + objects[1:]):
+                    with self.assertRaises((M.Refused, STAGER.Refused)):
+                        M.project_runtime_inventory(tar(loadable + bad + [cache]), profile(target), MATCHER)
+                for bad_cache in ([], [(cache[0], b'x' * len(cache_body), cache[2])],
+                                  [(cache[0], cache_body + b'x', cache[2])],
+                                  [(cache[0], b'', tarfile.DIRTYPE)],
+                                  [(cache[0], b'', tarfile.SYMTYPE)],
+                                  [(cache[0].replace('/cache/', '/gems/'), cache_body, cache[2])]):
+                    with self.subTest(cache=bad_cache[:1]), self.assertRaises(M.Refused):
+                        M.project_runtime_inventory(tar(loadable + objects + bad_cache), profile(target), MATCHER)
                 with self.assertRaises((M.Refused, STAGER.Refused)):
-                    M.project_runtime_inventory(tar(loadable + bad), profile(target), MATCHER)
-            with self.assertRaises((M.Refused, STAGER.Refused)):
-                M.archive_scan(tar(loadable + objects), lambda data, name: M.native_policy(data, name, profile(target), MATCHER))
+                    M.archive_scan(tar(loadable + objects + [cache]), lambda data, name: M.native_policy(data, name, profile(target), MATCHER))
+
+    def test_projection_receipt_distinguishes_legacy_from_declared_cache_omission(self):
+        rows = M.archive_scan(tar(fixture()), lambda *_: None)
+        cache = {'path': M.NOTIFIER_CACHE_PATH, 'sha256': M.NOTIFIER_CACHE_SHA256, 'bytes': M.NOTIFIER_CACHE_BYTES}
+        receipt = {'inputNativeCount': 187, 'outputNativeCount': 133,
+                   'inputMemberCount': len(rows) + 55, 'outputMemberCount': len(rows),
+                   'omittedInstallCaches': [cache], 'nonNativeUnchangedScope': 'retained-after-declared-projection',
+                   'omittedBuildObjects': [{'path': name, 'bytes': len(body), 'sha256': M.sha(body)}
+                       for name, body, _ in build_objects()]}
+        M.validate_projection_receipt(receipt, rows)
+        legacy_rows = rows + [dict(cache, directory=False, native=False, mode=0o644)]
+        legacy = dict(receipt, outputMemberCount=len(legacy_rows), inputMemberCount=len(legacy_rows) + 54)
+        del legacy['omittedInstallCaches']; del legacy['nonNativeUnchangedScope']
+        M.validate_projection_receipt(legacy, legacy_rows)
+        for changes in ({'omittedInstallCaches': None}, {'omittedInstallCaches': []},
+                        {'omittedInstallCaches': [cache, cache]}, {'omittedInstallCaches': [dict(cache, sha256='0' * 64)]},
+                        {'omittedInstallCaches': [dict(cache, bytes=cache['bytes'] - 1)]},
+                        {'omittedInstallCaches': [dict(cache, path='runtime/other')]},
+                        {'nonNativeUnchangedScope': 'all-original-data'}, {'inputMemberCount': True},
+                        {'inputMemberCount': len(rows) + 54}, {'outputNativeCount': 187},
+                        {'omittedBuildObjects': receipt['omittedBuildObjects'][:-1]}):
+            with self.subTest(changes=changes), self.assertRaises(M.Refused):
+                M.validate_projection_receipt(dict(receipt, **changes), rows)
+        with self.assertRaises(M.Refused): M.validate_projection_receipt(receipt, legacy_rows)
+        with self.assertRaises(M.Refused): M.validate_projection_receipt(legacy, rows)
+        for mutation in ({'sha256': '0' * 64}, {'bytes': 1}, {'directory': True}, {'native': True}):
+            with self.assertRaises(M.Refused):
+                M.validate_projection_receipt(legacy, rows + [dict(legacy_rows[-1], **mutation)])
 
     def test_archive_implicit_aliases_links_duplicates_and_native_disguises_refuse(self):
         for extra in (
@@ -331,10 +377,13 @@ class StoreSigning(unittest.TestCase):
                 for role in API.CREDENTIAL_ROLES[:17] + ('search-final', 'default-after'))
             op.credential_contexts.append({'purpose': purpose, 'retired': True, 'closed': True,
                                           'searchRestored': True, 'defaultUnchanged': True})
-        with tempfile.TemporaryDirectory() as temporary:
+        cache_body = b'synthetic-gem-archive-not-executable'
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.object(M, 'NOTIFIER_CACHE_SHA256', M.sha(cache_body)), \
+                mock.patch.object(M, 'NOTIFIER_CACHE_BYTES', len(cache_body)):
             work = Path(temporary)
             incoming = work / 'store-original'; incoming.mkdir(mode=0o700)
-            body = tar(fixture() + build_objects())
+            body = tar(fixture() + build_objects() + [(M.NOTIFIER_CACHE_PATH, cache_body, tarfile.REGTYPE)])
             archive = incoming / 'store-runtime.tar.gz'; archive.write_bytes(body); archive.chmod(0o400)
             origin = {'signed': False, 'arch': 'arm64', 'archiveSha256': M.sha(body),
                 'source': '0039f79baa54318d58d87606335492f7ef2a90dd', 'runId': 38844616192,
@@ -391,7 +440,9 @@ class StoreSigning(unittest.TestCase):
                 signed = (work / 'store-signed.tar.gz').read_bytes()
                 final = M.archive_scan(signed, lambda value, name: M.native_policy(value, name, profile(), MATCHER))
                 initial = M.archive_scan(body, lambda *_: None, native_count=M.INPUT_NATIVE_COUNT)
-                self.assertEqual([r for r in initial if not r['native']], [r for r in final if not r['native']])
+                self.assertEqual([r for r in initial if not r['native'] and r['path'] != M.NOTIFIER_CACHE_PATH],
+                                 [r for r in final if not r['native']])
+                M.validate_projection_receipt(op.store_signing['receipt'], final)
                 self.assertEqual(archive.read_bytes(), body)
                 self.assertEqual(len(op.store_signing['native']), M.NATIVE_COUNT)
                 self.assertEqual(len(op.store_signing['receipt']['omittedBuildObjects']), 54)

@@ -356,18 +356,7 @@ def restore_signed(output, run_id, source, arch, artifact_id, *, expected_attemp
             or type(native_rows) is not list or len(native_rows) != signing.NATIVE_COUNT
             or len({row.get('path') for row in native_rows if type(row) is dict}) != signing.NATIVE_COUNT):
         raise ValueError('Signed Store complete inventory differs')
-    omitted = receipt.get('omittedBuildObjects')
-    if (receipt.get('inputNativeCount') != signing.INPUT_NATIVE_COUNT
-            or receipt.get('outputNativeCount') != signing.NATIVE_COUNT
-            or receipt.get('outputMemberCount') != len(rows) or receipt.get('inputMemberCount') != len(rows) + 54
-            or type(omitted) is not list or len(omitted) != 54
-            or any(type(row) is not dict or set(row) != {'path', 'sha256', 'bytes'}
-                or type(row.get('path')) is not str or row['path'] not in signing.BUILD_OBJECT_PATHS
-                or type(row.get('sha256')) is not str or not re.fullmatch(r'[0-9a-f]{64}', row['sha256'])
-                or type(row.get('bytes')) is not int or not 0 < row['bytes'] <= signing.FILE_LIMIT for row in omitted)
-            or {row['path'] for row in omitted} != signing.BUILD_OBJECT_PATHS
-            or any(row['path'] in signing.BUILD_OBJECT_PATHS for row in rows)):
-        raise ValueError('Signed Store build-only projection differs')
+    signing.validate_projection_receipt(receipt, rows)
     by_name = {row['path']: row for row in native_rows}
     with tarfile.open(fileobj=io.BytesIO(archive_body), mode='r:gz') as contents:
         for entry, row in zip(contents, rows, strict=True):

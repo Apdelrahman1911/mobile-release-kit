@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import struct
@@ -31,6 +32,13 @@ CRC_BUILD_MODULES = (
 BUILD_OBJECT_PATHS = frozenset(
     f"runtime/bundle/ruby/3.3.0/gems/digest-crc-0.7.0/ext/digest/{name}/{name}{suffix}.o"
     for name in CRC_BUILD_MODULES for suffix in ("", "_ext"))
+# RubyGems' install cache contains another copy of the optional notifier app.
+# It is not used by the frozen runtime. Keep all installed sources and notices;
+# exclude only this lock-checksummed archive, not arbitrary cache contents.
+NOTIFIER_CACHE_PATH = 'runtime/bundle/ruby/3.3.0/cache/terminal-notifier-2.0.0.gem'
+NOTIFIER_CACHE_SHA256 = '7a0d2b2212ab9835c07f4b2e22a94cff64149dba1eed203c04835f7991078cea'
+NOTIFIER_CACHE_BYTES = 1030656
+OMISSION_PATHS = BUILD_OBJECT_PATHS | {NOTIFIER_CACHE_PATH}
 WORK_SECONDS, HARD_SECONDS = 1500, 1620
 ROLES = tuple(f'store-{index:03d}-{action}' for index in range(NATIVE_COUNT) for action in ('sign', 'verify'))
 # 266*(3 capture + 1 native + 2*8 private census) + 40*8 auxiliary
@@ -127,11 +135,11 @@ def native_policy(body, name, op, matcher):
 
 
 def project_runtime_inventory(body, op, matcher):
-    """Check all187 original headers; omit only54 exact build-only objects.
+    """Omit54 exact build objects and one authenticated optional-app cache.
 
     Ruby requires crc*_ext.bundle through its installed library/load path; these
     ext/digest/*.o are compiler intermediates, never signed runtime images.
-    Every other member, including extension bundles and source/notices, stays.
+    All other members, including installed sources/notices/extensions, stay.
     """
     objects = []
     def inspect(data, name):
@@ -147,11 +155,43 @@ def project_runtime_inventory(body, op, matcher):
         objects.append(name)
     original = archive_scan(body, inspect, native_count=INPUT_NATIVE_COUNT)
     need(len(objects) == 54 and set(objects) == BUILD_OBJECT_PATHS, 'build-object-exact-roster')
+    cache = [row for row in original if row['path'] == NOTIFIER_CACHE_PATH]
+    need(len(cache) == 1 and not cache[0]['directory'] and not cache[0]['native']
+         and cache[0]['bytes'] == NOTIFIER_CACHE_BYTES and cache[0]['sha256'] == NOTIFIER_CACHE_SHA256,
+         'notifier-cache-original')
     omitted = [{'path': row['path'], 'bytes': row['bytes'], 'sha256': row['sha256']}
-               for row in original if row['path'] in BUILD_OBJECT_PATHS]
-    projected = [row for row in original if row['path'] not in BUILD_OBJECT_PATHS]
+               for row in original if row['path'] in OMISSION_PATHS]
+    projected = [row for row in original if row['path'] not in OMISSION_PATHS]
     need(sum(row['native'] for row in projected) == NATIVE_COUNT, 'projected-native-roster')
     return original, projected, omitted
+
+
+def validate_projection_receipt(receipt, rows):
+    """Validate declared omissions; legacy readback is not notarization readiness."""
+    caches = [row for row in rows if row['path'] == NOTIFIER_CACHE_PATH]
+    expected_cache = {'path': NOTIFIER_CACHE_PATH, 'sha256': NOTIFIER_CACHE_SHA256, 'bytes': NOTIFIER_CACHE_BYTES}
+    modern = 'omittedInstallCaches' in receipt
+    if modern:
+        declared = receipt['omittedInstallCaches']
+        need(type(declared) is list and len(declared) == 1 and type(declared[0]) is dict
+             and type(declared[0].get('bytes')) is int and declared[0] == expected_cache and not caches
+             and receipt.get('nonNativeUnchangedScope') == 'retained-after-declared-projection',
+             'notifier-cache-projection')
+    else:
+        need('nonNativeUnchangedScope' not in receipt and len(caches) == 1
+             and not caches[0]['directory'] and not caches[0]['native']
+             and {key: caches[0][key] for key in expected_cache} == expected_cache, 'legacy-notifier-cache')
+    omitted = receipt.get('omittedBuildObjects')
+    expected_counts = {'inputNativeCount': INPUT_NATIVE_COUNT, 'outputNativeCount': NATIVE_COUNT,
+                       'outputMemberCount': len(rows), 'inputMemberCount': len(rows) + 54 + int(modern)}
+    need(all(type(receipt.get(key)) is int and receipt[key] == number for key, number in expected_counts.items())
+         and type(omitted) is list and len(omitted) == 54
+         and all(type(row) is dict and set(row) == {'path', 'sha256', 'bytes'}
+             and type(row['path']) is str and row['path'] in BUILD_OBJECT_PATHS
+             and type(row['sha256']) is str and re.fullmatch(r'[0-9a-f]{64}', row['sha256'])
+             and type(row['bytes']) is int and 0 < row['bytes'] <= FILE_LIMIT for row in omitted)
+         and {row['path'] for row in omitted} == BUILD_OBJECT_PATHS
+         and not any(row['path'] in BUILD_OBJECT_PATHS for row in rows), 'build-only-projection')
 
 
 def clock(op, *, work=True):
@@ -278,8 +318,8 @@ def prepare(op):
                     with source.extractfile(entry) as stream:
                         data = stream.read(FILE_LIMIT + 1)
                 need(len(data) == row['bytes'] and sha(data) == row['sha256'], 'preimage-row')
-                if row['path'] in BUILD_OBJECT_PATHS:
-                    continue  # Exact inspected compiler object only; original archive is unchanged.
+                if row['path'] in OMISSION_PATHS:
+                    continue  # Exact validated build-only leaf; original archive is unchanged.
                 if row['native']:
                     index = native_index
                     native_index += 1
@@ -341,7 +381,10 @@ def prepare(op):
         'runAttempt': op.environment['GITHUB_RUN_ATTEMPT'], 'workflow': op.environment['GITHUB_WORKFLOW_REF'],
         'upstream': upstream, 'originalInventorySha256': sha(canonical(input_rows)),
         'inputMemberCount': len(input_rows), 'outputMemberCount': len(observed),
-        'inputNativeCount': INPUT_NATIVE_COUNT, 'outputNativeCount': NATIVE_COUNT, 'omittedBuildObjects': omitted,
+        'inputNativeCount': INPUT_NATIVE_COUNT, 'outputNativeCount': NATIVE_COUNT,
+        'omittedBuildObjects': [row for row in omitted if row['path'] in BUILD_OBJECT_PATHS],
+        'omittedInstallCaches': [row for row in omitted if row['path'] == NOTIFIER_CACHE_PATH],
+        'nonNativeUnchangedScope': 'retained-after-declared-projection',
         'signedInventorySha256': sha(canonical(observed)), 'signedArchiveSha256': sha(body), 'signedArchiveBytes': len(body),
         'nativeMembers': state['native'], 'nonNativeUnchanged': True,
         'signer': {'teamIdentifier': op.signing[0], 'certificateSha1': op.signing[1],

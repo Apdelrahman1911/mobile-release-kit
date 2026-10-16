@@ -121,6 +121,16 @@ establish local Store execution or authentication.
 
 ### Small Mac component builds
 
+The Store signing projection excludes the exact lock-checksummed
+`terminal-notifier-2.0.0.gem` installation-cache archive. Apple's notarization
+service also inspects the optional unsigned app inside that cache; removing its
+installed copy alone was insufficient. Installed gem sources, licenses,
+specifications and native extensions remain unchanged. The receipt declares
+this one omission separately from compiler objects. Older signed-component
+receipts remain readable only with their original cache present; that does not
+make them notarization-qualified. Reuse the original unsigned Ruby assembly for
+the corrected signing batch instead of compiling Ruby again.
+
 `desktop-macos-components.yml` supports targeted manual selections:
 
 - `launcher`: Swift compilation, plist, architecture and linkage checks on both Macs.
