@@ -45,6 +45,25 @@ class StoreInputs(unittest.TestCase):
             with self.assertRaises(ValueError): TOOL.copy_tooling(source, root / 'linked')
             self.assertFalse((root / 'linked').exists())
 
+    def test_phase_selection_never_fetches_native_sources_for_assembly(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); calls = []
+            spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda module: None))
+            module = SimpleNamespace(load_assets=lambda *_: (None, None, [
+                {'filename': 'synthetic.gem', 'url': 'https://example.invalid/gem', 'sha256': 'a' * 64}], None, None))
+            with mock.patch.object(TOOL, 'ROOT', root), \
+                    mock.patch.object(TOOL.sys, 'argv', ['prepare', '--gems-only', str(root / 'inputs')]), \
+                    mock.patch.object(TOOL.shutil, 'disk_usage', return_value=SimpleNamespace(free=8 * 1024**3)), \
+                    mock.patch.object(TOOL.importlib.util, 'spec_from_file_location', return_value=spec), \
+                    mock.patch.object(TOOL.importlib.util, 'module_from_spec', return_value=module), \
+                    mock.patch.object(TOOL, 'fetch', side_effect=lambda asset, path: calls.append((asset, path))), \
+                    mock.patch.object(TOOL, 'unpack', side_effect=AssertionError('assembly must not extract native sources')):
+                TOOL.main()
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][1], root / 'inputs/gems/synthetic.gem')
+            self.assertEqual([p.name for p in (root / 'inputs').iterdir()], ['gems'])
+
     def test_download_authentication_and_no_overwrite(self):
         data = b'public synthetic dependency'
         asset = {'url': 'https://example.invalid/dependency', 'bytes': len(data),

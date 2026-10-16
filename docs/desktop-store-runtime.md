@@ -10,7 +10,8 @@ Run `desktop/tools/build_macos_store_runtime.sh` as an ordinary user on a native
 macOS 26 runner with the Xcode command-line tools already installed:
 
 ```text
-build_macos_store_runtime.sh RUBY_SOURCE OPENSSL_SOURCE LIBYAML_SOURCE GEM_CACHE CA_FILE ABSENT_OUTPUT arm64|x86_64
+build_macos_store_runtime.sh base RUBY_SOURCE OPENSSL_SOURCE LIBYAML_SOURCE CA_FILE ABSENT_BASE arm64|x86_64
+build_macos_store_runtime.sh assemble VERIFIED_BASE GEM_CACHE ABSENT_OUTPUT arm64|x86_64
 ```
 
 The caller supplies reviewed, authenticated, pristine **release source** trees
@@ -119,9 +120,43 @@ with SHA-256 `c642ae9b75fee120b2d96c712538bd2cf283228d2337df2cf2988e3c02678ef4`.
 OpenSSL reuses the existing dependency lock. These are dependency integrity
 checks, not duplicated hashes of this repository's build scripts.
 
-Each job retains an unsigned compressed component for three days for upcoming
-integration, then deletes only its own workspace. A successful job proves the
-listed component checks, not installed-app execution or distribution readiness.
+The native-base jobs retain an unsigned Ruby/OpenSSL/LibYAML component, CA,
+notices and complete tooling for **seven days before Bundler installation**.
+Base publication requires default-runtime, native linkage and real relocation
+checks. Separate assembly jobs restore that exact base into fresh scratch,
+refresh current first-party tooling, install locked gems, and run the complete
+bundle/native/relocation checks. Final components remain for three days. Each
+job deletes only its own workspace. These are component checks, not installed
+application or distribution qualification.
+
+For an assembly failure, use GitHub's **Re-run failed jobs**. The succeeded base
+job is not rebuilt. Restore checks the immutable artifact ID, original source,
+architecture, versions, native recipe/input DATA and original per-architecture
+base-job success; a failed
+overall run is intentionally allowed. It accepts only this repository's fixed
+workflow from `verify/desktop-macos-store-runtime`, on `push` or
+`workflow_dispatch`, never PR/fork artifacts or an arbitrary latest release.
+
+For a tooling/DATA or assembly-script fix at a new commit, dispatch with all four
+reuse fields: `base_run_id`, the original full `base_source`, and the exact
+`arm64_base_artifact_id` / `x86_64_base_artifact_id`. Native compilation is then
+skipped. The current assembly source and original base source are distinct;
+`base-origin.json` accompanies the final artifact. Reuse is appropriate only
+when the compiled native recipe/dependencies remain applicable; a native input
+or compiler-option change needs a fresh base. Empty reuse fields select a new
+base build. Artifact expiration/unavailability is a failure, never a pass.
+
+Actions service metadata/digest authenticates the selected ZIP; its bounded
+ordinary tar payload is extracted using Python's supported DATA filter into a
+fresh directory. No restored binary is executed until this check completes.
+The small metadata file also retains the actual base SDK and Clang versions.
+Native configure options, deployment target and compiler flags are declared
+once and consumed by the builder; restore compares them, the native release
+archive digests and the CA digest with current requirements. A native build
+logic change outside those options must increment `recipeVersion`. Tooling and
+gem-only changes do not invalidate a compatible base. This is native dependency
+identity, not a hash of every repository script or a new release authority.
+No credentials, signing, installation or Store operations are enabled.
 
 Component tooling includes the shared core's actual `REQUIRED_TOOLING_FILES`
 roster, including schemas and workflow/configuration templates. The build-only
@@ -131,7 +166,7 @@ addition does not change compiled Ruby or native gems. Earlier native binary
 checks remain applicable to those unchanged inputs, but a final assembled
 component still needs the complete tooling/relocation smoke and its own digest.
 
-The first ARM component run (`38837216127`, source `9a4bbe69`) compiled Ruby and
+The first ARM and Intel component run (`38837216127`, source `9a4bbe69`) compiled Ruby and
 its native dependencies, then RubyGems refused to overwrite Ruby's existing
 default Bundler launcher. It did **not** reach runtime smoke or relocation.
 The corrected bootstrap uses RubyGems' documented `--bindir` to place the

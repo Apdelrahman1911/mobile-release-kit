@@ -86,7 +86,10 @@ def copy_tooling(source_root, destination):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path, help="Absent task-owned output directory")
-    parser.add_argument("--tooling-only", action="store_true", help="Copy first-party tooling only; no network")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--tooling-only", action="store_true", help="Copy first-party tooling only; no network")
+    modes.add_argument("--sources-only", action="store_true", help="Acquire native base sources/CA, no gems")
+    modes.add_argument("--gems-only", action="store_true", help="Acquire locked gems only, no native sources")
     args = parser.parse_args()
     output = args.output.absolute()
     if args.tooling_only:
@@ -95,29 +98,32 @@ def main():
     output.mkdir(mode=0o700)  # Existing/foreign output is never adopted.
     if shutil.disk_usage(output).free < 4 * 1024**3:
         raise ValueError("Need at least 4 GiB free for public sources and compilation")
-    spec = importlib.util.spec_from_file_location("mrk_ci_public_inputs", ROOT / ".github/scripts/ci_prepare.py")
-    loader = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(loader)
-    _manifest, _wheels, gems, _manifest_hash, _lock_hash = loader.load_assets(ROOT, "macos")
-    lock = json.loads((ROOT / "desktop/macos-cpython-source-inputs/source-lock.json").read_text())
-    openssl, = [row for row in lock["archiveSelections"] if row["id"] == "openssl"]
-    if openssl["version"] != "3.5.8":
-        raise ValueError("Unsupported OpenSSL source version")
-    sources = (*SOURCES, {**openssl, "directory": "openssl-3.5.8"})
-    for asset in sources:
-        archive = output / (asset["directory"] + ".tar.gz")
-        fetch(asset, archive)
-        staging = output / (asset["directory"] + "-extract")
-        tree = unpack(archive, staging, asset["directory"])
-        tree.rename(output / asset["directory"])
-        staging.rmdir()
-        archive.unlink()  # Exactly this authenticated downloaded archive.
-    cache = output / "gems"
-    cache.mkdir()
-    for asset in gems:
-        fetch(asset, cache / asset["filename"])
-    shutil.copyfile(ROOT / "desktop/cpython-source-inputs/github-ca.pem", output / "ca.pem")
-    print("Prepared 3 source trees and 100 checksum-locked gem archives; nothing executed.")
+    if not args.gems_only:
+        lock = json.loads((ROOT / "desktop/macos-cpython-source-inputs/source-lock.json").read_text())
+        openssl, = [row for row in lock["archiveSelections"] if row["id"] == "openssl"]
+        if openssl["version"] != "3.5.8":
+            raise ValueError("Unsupported OpenSSL source version")
+        sources = (*SOURCES, {**openssl, "directory": "openssl-3.5.8"})
+        for asset in sources:
+            archive = output / (asset["directory"] + ".tar.gz")
+            fetch(asset, archive)
+            staging = output / (asset["directory"] + "-extract")
+            tree = unpack(archive, staging, asset["directory"])
+            tree.rename(output / asset["directory"])
+            staging.rmdir()
+            archive.unlink()  # Exactly this authenticated downloaded archive.
+        shutil.copyfile(ROOT / "desktop/cpython-source-inputs/github-ca.pem", output / "ca.pem")
+    if not args.sources_only:
+        spec = importlib.util.spec_from_file_location("mrk_ci_public_inputs", ROOT / ".github/scripts/ci_prepare.py")
+        loader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loader)
+        _manifest, _wheels, gems, _manifest_hash, _lock_hash = loader.load_assets(ROOT, "macos")
+        cache = output / "gems"
+        cache.mkdir()
+        for asset in gems:
+            fetch(asset, cache / asset["filename"])
+    print("Prepared requested checksum-locked inputs; nothing executed.")
+
 
 
 if __name__ == "__main__":

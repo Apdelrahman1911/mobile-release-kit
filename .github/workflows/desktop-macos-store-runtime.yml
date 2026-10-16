@@ -7,27 +7,50 @@ on:
       - desktop/tools/*macos_store*.sh
       - desktop/tools/*macos_store*.py
       - desktop/tools/*macos_store*.rb
+      - tests/desktop/test_macos_store*.py
       - tests/desktop/test_macos_store_runtime.rb
       - Gemfile
       - Gemfile.lock
       - fastlane/**
+      - schemas/**
+      - templates/**
+      - src/mobile_release/tooling.py
       - .github/verification-tools.json
       - .github/scripts/ci_prepare.py
       - desktop/macos-cpython-source-inputs/source-lock.json
       - desktop/cpython-source-inputs/github-ca.pem
       - .github/workflows/desktop-macos-store-runtime.yml
   workflow_dispatch:
+    inputs:
+      base_run_id:
+        description: Optional original base run ID (skip native rebuild; all reuse fields required)
+        type: string
+        default: ''
+      base_source:
+        description: Exact original base source commit, not the new assembly source
+        type: string
+        default: ''
+      arm64_base_artifact_id:
+        description: Exact retained ARM64 base artifact ID
+        type: string
+        default: ''
+      x86_64_base_artifact_id:
+        description: Exact retained Intel base artifact ID
+        type: string
+        default: ''
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: mac-store-runtime-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  runtime:
-    name: Offline Store runtime (${{ matrix.arch }})
+  native-base:
+    if: inputs.base_run_id == ''
+    name: Native Ruby base (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -46,41 +69,126 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14'
-      - name: Allocate task-owned build directory
+      - name: Allocate task-owned base directory
         id: work
         shell: bash
         run: |
           set -euo pipefail
-          root=$(mktemp -d "$RUNNER_TEMP/mrk-store-runtime-ci.XXXXXX")
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-store-base-ci.XXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
-      - name: Acquire public checksum-locked inputs without executing them
+      - name: Acquire native source inputs only
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
-        run: python -I -B desktop/tools/prepare_macos_store_inputs.py "$WORK_ROOT/inputs"
-      - name: Build offline, inspect native images, and verify relocation
+        run: python -I -B desktop/tools/prepare_macos_store_inputs.py --sources-only "$WORK_ROOT/inputs"
+      - name: Compile and verify relocatable Ruby base before installing any locked gems
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
           TARGET_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          bash desktop/tools/build_macos_store_runtime.sh \
+          bash desktop/tools/build_macos_store_runtime.sh base \
             "$WORK_ROOT/inputs/ruby-3.3.12" "$WORK_ROOT/inputs/openssl-3.5.8" \
-            "$WORK_ROOT/inputs/yaml-0.2.5" "$WORK_ROOT/inputs/gems" \
-            "$WORK_ROOT/inputs/ca.pem" "$WORK_ROOT/runtime" "$TARGET_ARCH"
-          tar -czf "$WORK_ROOT/store-runtime.tar.gz" -C "$WORK_ROOT" runtime
-      - name: Retain unsigned component for later integration
+            "$WORK_ROOT/inputs/yaml-0.2.5" "$WORK_ROOT/inputs/ca.pem" \
+            "$WORK_ROOT/ruby-base" "$TARGET_ARCH"
+          python -I -B desktop/tools/macos_store_component.py archive \
+            "$WORK_ROOT/ruby-base" "$WORK_ROOT/artifact" --source "$GITHUB_SHA" \
+            --arch "$TARGET_ARCH" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Retain successful unsigned base independently of later assembly
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mac-store-runtime-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ steps.work.outputs.root }}/store-runtime.tar.gz
+          name: mac-store-base-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/artifact/*
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 7
           compression-level: 0
-      - name: Remove only this job's disposable inputs, build, and archive
+      - name: Remove only this job's disposable source and compiler outputs
         if: always() && steps.work.outputs.root != ''
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
         run: rm -rf -- "$WORK_ROOT"
 
-# This is an unsigned dependency component, NOT an application/signing/Store
-# workflow. It never receives credentials, installs the app, or executes a lane.
+  assemble:
+    needs: native-base
+    # A failed peer architecture must not discard a successful base. Each
+    # assembly admits only its own successful original native job/artifact.
+    if: always() && !cancelled()
+    name: Assemble Store runtime (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Allocate task-owned assembly directory
+        id: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-store-assembly-ci.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - name: Restore exact successful base artifact, never a latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          BASE_RUN: ${{ inputs.base_run_id }}
+          BASE_SOURCE: ${{ inputs.base_source }}
+          ARM_ARTIFACT: ${{ inputs.arm64_base_artifact_id }}
+          INTEL_ARTIFACT: ${{ inputs.x86_64_base_artifact_id }}
+        run: |
+          set -euo pipefail
+          artifact=''
+          if [ -n "$BASE_RUN" ]; then
+            test -n "$BASE_SOURCE" && test -n "$ARM_ARTIFACT" && test -n "$INTEL_ARTIFACT"
+            case "$TARGET_ARCH" in arm64) artifact="$ARM_ARTIFACT" ;; x86_64) artifact="$INTEL_ARTIFACT" ;; esac
+          else
+            test -z "$BASE_SOURCE$ARM_ARTIFACT$INTEL_ARTIFACT"
+            BASE_RUN="$GITHUB_RUN_ID"; BASE_SOURCE="$GITHUB_SHA"
+          fi
+          python -I -B desktop/tools/macos_store_component.py restore "$WORK_ROOT/base" \
+            --run-id "$BASE_RUN" --source "$BASE_SOURCE" --arch "$TARGET_ARCH" --artifact-id "$artifact"
+      - name: Acquire locked gems only, without native source downloads
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: python -I -B desktop/tools/prepare_macos_store_inputs.py --gems-only "$WORK_ROOT/inputs"
+      - name: Assemble offline using current tooling, then verify native images and relocation
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          bash desktop/tools/build_macos_store_runtime.sh assemble \
+            "$WORK_ROOT/base/extracted/ruby-base" "$WORK_ROOT/inputs/gems" \
+            "$WORK_ROOT/runtime" "$TARGET_ARCH"
+          cp "$WORK_ROOT/base/base.json" "$WORK_ROOT/base-origin.json"
+          tar -czf "$WORK_ROOT/store-runtime.tar.gz" -C "$WORK_ROOT" runtime
+      - name: Retain unsigned assembled component and original base identity
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mac-store-runtime-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/store-runtime.tar.gz
+            ${{ steps.work.outputs.root }}/base-origin.json
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+      - name: Remove only this job's disposable inputs, assembly and archives
+        if: always() && steps.work.outputs.root != ''
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: rm -rf -- "$WORK_ROOT"
+
+# Unsigned dependency components only: no credentials, app launch/install,
+# signing, notarization, Store lane or release workflow is executed.
