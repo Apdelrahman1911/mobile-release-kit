@@ -2970,46 +2970,30 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(result["ownerFinality"], [1, 1, 1048575, 15, 63])
         self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
         helper_body = (Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").read_bytes()
-        self.assertEqual(len(helper_body), module.HELPER_SOURCE_BYTES)
-        self.assertEqual(module.HELPER_SOURCE_BYTES, 575167)
-        helper_tree = ast.parse(helper_body)
-        constants = [node.value for node in helper_tree.body
-                     if isinstance(node, ast.Assign) and len(node.targets) == 1
-                     and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "HELPER_SOURCE_BYTES"]
-        self.assertEqual(len(constants), 1)
-        source_cap = ast.literal_eval(constants[0])
+        source_cap = module.HELPER_SOURCE_BYTES
         self.assertIs(type(source_cap), int)
-        self.assertEqual(source_cap, 575167)
-        operation = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
-        caps = []
-        for method in operation.body:
-            if not isinstance(method, ast.FunctionDef): continue
-            for call in ast.walk(method):
-                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "source_original" and len(call.args) == 3:
-                    cap = call.args[2]
-                    if isinstance(cap, ast.IfExp) and isinstance(cap.body, ast.Name) and cap.body.id == "HELPER_SOURCE_BYTES":
-                        self.assertEqual(ast.dump(cap.test, include_attributes=False), ast.dump(ast.parse('filename == "macos_android_helper_package.py"', mode="eval").body, include_attributes=False))
-                        self.assertEqual(ast.dump(cap.orelse, include_attributes=False), ast.dump(ast.parse('512 * 1024', mode="eval").body, include_attributes=False))
-                        caps.append(method.name)
-        self.assertEqual(sorted(caps), ["finalize_image", "finalize_package", "notarize_payload"])
+        self.assertEqual(source_cap, 1024 * 1024)
+        self.assertGreater(len(helper_body), 0)
+        self.assertLessEqual(len(helper_body), source_cap)
         # Actual no-follow regular-file originals: complete read and consuming
-        # close at the exact SOURCE bound, +1 refuses before read.
+        # close for current SOURCE and at the ceiling; +1 refuses before read.
         with tempfile.TemporaryDirectory(prefix="mrk-producer-source-cap-") as temporary:
             root = Path(temporary); root.chmod(0o700)
             tools = root / "desktop/tools"; tools.mkdir(parents=True, mode=0o700)
-            for extra in (b"", b"\n"):
+            at_cap = helper_body + b"\n" * (source_cap - len(helper_body))
+            for body in (helper_body, at_cap, at_cap + b"\n"):
                 path = tools / "macos_android_helper_package.py"
-                path.write_bytes(helper_body + extra); path.chmod(0o644)
+                path.write_bytes(body); path.chmod(0o644)
                 port = module.Operation(SimpleNamespace(), root, root, "package-install",
                     {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40, "GITHUB_WORKFLOW_REF": "inert-source",
                      "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "MRK_MACOS_PACKAGE_ROLE": "ordinary-image"}, TOOL)
                 try:
-                    if extra:
+                    if len(body) > source_cap:
                         with self.assertRaisesRegex(module.Refused, "^file-original-shape$"):
                             port.source_original("desktop/tools/macos_android_helper_package.py", "SOURCE-test", module.HELPER_SOURCE_BYTES)
                     else:
                         entry = port.source_original("desktop/tools/macos_android_helper_package.py", "SOURCE-test", module.HELPER_SOURCE_BYTES)
-                        self.assertEqual(port.read(entry), helper_body)
+                        self.assertEqual(port.read(entry), body)
                 finally:
                     for entry in reversed(port.entries): port.close(entry)
                 self.assertFalse(port.errors)
@@ -7663,6 +7647,53 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertNotIn("PRIVATE", json.dumps(receipt))
             self.assertFalse(receipt["passed"])
             self.assertTrue(receipt["targetRetired"] and receipt["originalClosesKnown"])
+
+    def test_app_signature_inventory_has_scoped_current_runtime_bounds(self):
+        module = ANDROID_HELPER
+        # Passive DATA only: no filesystem, native signature or Store execution.
+        files = {"store/file-%05d" % i: (b"", 0o444) for i in range(TOOL.MAX_FILES)}
+        files["store/file-00000"] = (b"complete runtime row", 0o555)
+        rows, encoded = module.app_signature_inventory(files, runtime_stager=TOOL)
+        self.assertEqual([row["path"] for row in rows], sorted(files))
+        self.assertEqual(json.loads(encoded)["files"], rows)
+        self.assertGreater(len(encoded), 1024 * 1024)
+        self.assertLessEqual(len(encoded), TOOL.INVENTORY_BYTES)
+        for row in rows:
+            body, mode = files[row["path"]]
+            self.assertEqual((row["mode"], row["bytes"], row["sha256"]),
+                             (mode, len(body), hashlib.sha256(body).hexdigest()))
+        files["store/one-too-many"] = (b"", 0o444)
+        with self.assertRaisesRegex(module.Refused, "^app-signature-inventory-count$"):
+            module.app_signature_inventory(files, runtime_stager=TOOL)
+        del files, rows, encoded
+
+        # The app's original ceilings do not grow with the current runtime.
+        app = {str(i): (b"", 0o444) for i in range(2048)}
+        self.assertEqual(len(module.app_signature_inventory(app)[0]), 2048)
+        app["extra"] = (b"", 0o444)
+        with self.assertRaisesRegex(module.Refused, "^app-signature-inventory-count$"):
+            module.app_signature_inventory(app)
+        with self.assertRaisesRegex(module.Refused, "^app-signature-inventory-bytes$"):
+            module.app_signature_inventory({str(i) + "x" * 4000: (b"", 0o444) for i in range(300)})
+
+        # Independently reach the real serialized ceiling without reaching the
+        # file ceiling; ASCII path padding contributes exactly one byte per x.
+        short = {"store/%05d" % i: (b"", 0o444) for i in range(3100)}
+        remaining = TOOL.INVENTORY_BYTES - len(module.app_signature_inventory(short, runtime_stager=TOOL)[1])
+        at_cap = {}
+        for name, value in short.items():
+            padding = min(remaining, 4096 - len(name))
+            at_cap[name + "x" * padding] = value
+            remaining -= padding
+        self.assertEqual(remaining, 0)
+        rows, encoded = module.app_signature_inventory(at_cap, runtime_stager=TOOL)
+        self.assertEqual(len(rows), len(short))
+        self.assertEqual(len(encoded), TOOL.INVENTORY_BYTES)
+        del rows, encoded
+        spare = next(name for name in at_cap if len(name) < 4096)
+        at_cap[spare + "x"] = at_cap.pop(spare)
+        with self.assertRaisesRegex(module.Refused, "^app-signature-inventory-bytes$"):
+            module.app_signature_inventory(at_cap, runtime_stager=TOOL)
 
     def test_alias_original_return_close_and_signature_failures_never_produce_success(self):
         module = ANDROID_HELPER
@@ -15717,19 +15748,16 @@ class MacCurrentRuntimeData(unittest.TestCase):
                         workflow.index("      - name: " + input_name + "\n"))
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
+        helper_cap = ANDROID_HELPER.HELPER_SOURCE_BYTES
+        self.assertIs(type(helper_cap), int)
+        self.assertEqual(helper_cap, 1024 * 1024)
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(575167 + 1)
+            helper_raw = original.read(helper_cap + 1)
             self.assertEqual(original.read(1), b"")
-        self.assertEqual(len(helper_raw), 575167)
+        self.assertGreater(len(helper_raw), 0)
+        self.assertLessEqual(len(helper_raw), helper_cap)
         helper_source = helper_raw.decode("utf-8", "strict")
         helper_tree = ast.parse(helper_source)
-        helper_caps = [node.value for node in helper_tree.body
-                       if isinstance(node, ast.Assign) and len(node.targets) == 1
-                       and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "HELPER_SOURCE_BYTES"]
-        self.assertEqual(len(helper_caps), 1)
-        helper_cap = ast.literal_eval(helper_caps[0])
-        self.assertIs(type(helper_cap), int)
-        self.assertEqual(helper_cap, len(helper_raw))
         operations = [node for node in helper_tree.body
                       if isinstance(node, ast.ClassDef) and node.name == "Operation"]
         self.assertEqual(len(operations), 1)

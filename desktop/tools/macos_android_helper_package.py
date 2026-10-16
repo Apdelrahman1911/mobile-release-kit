@@ -69,7 +69,9 @@ PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.op
 # Intel alone uses this fixed shared-package release optimization.
 # Runtime dependencies retain release3; generic code instantiated here inherits release1.
 RESIDENT_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=1"
-HELPER_SOURCE_BYTES = 575167
+# Bounded SOURCE input, not an exact historical implementation length. Keep
+# normal maintenance from invalidating every packaging consumer of this file.
+HELPER_SOURCE_BYTES = 1024 * 1024
 # Closed first-failed metadata attribution; no dynamic role/path rendering.
 FINAL_IMAGE_VERIFY_FIELDS = ("device", "inode", "mode", "links", "uid", "gid", "size", "mtime", "ctime")
 FINAL_IMAGE_VERIFY_OBJECTS = ("output", *("input-%02d" % index for index in range(14)))
@@ -3344,7 +3346,8 @@ class Operation:
             self.recheck_directory(parent)
             names = sorted(os.listdir(parent["fd"]))
             nodes[0] += len(names)
-            need(nodes[0] <= 4096, "notary-original-node-bound")
+            need(nodes[0] <= (self.stager.MAX_ENTRIES if getattr(self, "composed_runtime", False) else 4096),
+                 "notary-original-node-bound")
             result["directories"][prefix] = (parent["identity"], tuple(names))
             for name in names:
                 relative = name if not prefix else prefix + "/" + name
@@ -3714,6 +3717,23 @@ class Operation:
         nomination_body = self.read(nomination)
         selected = self.stager.signed_runtime_binding_data(nomination_body, self.producer_profile, self.service_profile, target=self.target)
         self.package_sources.append((nomination, nomination_body))
+        if self.environment.get("MRK_MACOS_STORE_RUNTIME") is not None:
+            need(self.environment["MRK_MACOS_STORE_RUNTIME"] == "signed-component", "notary-store-mode")
+            store_source = self.source_original("desktop/" + self.stager.SIGNED_STORE_SELECTION,
+                "source-notary-store-selection", self.stager.SIGNED_STORE_SELECTION_LIMIT)
+            store_source_body = self.read(store_source)
+            store = self.stager.signed_store_selection_data(store_source_body, target=self.target)
+            binding_entry = self.original(self.work_entry, "runtime-binding.json", "notary-composed-runtime-binding", 16384, (0o444,))
+            binding_body = self.read(binding_entry)
+            need(digest(binding_body) == self.environment.get("MRK_MACOS_RUNTIME_BINDING_SHA256"), "notary-composed-binding-original")
+            selected, composed = self.stager.composed_runtime_binding_data(binding_body, selected, store, target=self.target)
+            source_entry = self.original(self.work_entry, "source-binding.json", "notary-composed-source-binding", 65536, (0o444,))
+            source_body = self.read(source_entry)
+            work_info = os.fstat(self.work_entry["fd"])
+            self.stager.composed_source_binding_data(source_body, binding_body, composed, self.environment,
+                (work_info.st_dev, work_info.st_ino, work_info.st_uid))
+            self.package_sources.extend(((store_source, store_source_body), (binding_entry, binding_body), (source_entry, source_body)))
+            self.composed_runtime = True
         for variable, key in (("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", "runtimeManifestSha256"),
                               ("MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "sourceInputsSha256"),
                               ("MRK_MACOS_SIGNED_PYTHON_SHA256", "signedPythonSha256"),
@@ -8243,17 +8263,21 @@ def app_signature_outcomes(value):
     return value
 
 
-def app_signature_inventory(files):
+def app_signature_inventory(files, *, runtime_stager=None):
     # tree() really retains <=512MiB of file bodies. No streaming/RSS claim.
     # This projection contains no second copy of those bodies.
-    need(type(files) is dict and 0 < len(files) <= 2048, "app-signature-inventory-count")
+    # Only the authenticated current-runtime caller supplies the SOURCE stager;
+    # app observations keep their original count and byte ceilings.
+    file_limit = 2048 if runtime_stager is None else runtime_stager.MAX_FILES
+    byte_limit = 1024 * 1024 if runtime_stager is None else runtime_stager.INVENTORY_BYTES
+    need(type(files) is dict and 0 < len(files) <= file_limit, "app-signature-inventory-count")
     rows = []
     for name, (body, mode) in sorted(files.items()):
         need(type(name) is str and len(name.encode("utf-8")) <= 4096 and type(body) is bytes
              and type(mode) is int, "app-signature-inventory-row")
         rows.append({"path": name, "mode": mode, "bytes": len(body), "sha256": digest(body)})
     result = tool_canonical({"schemaVersion": 1, "files": rows}) + b"\n"
-    need(len(result) <= 1024 * 1024, "app-signature-inventory-bytes")
+    need(len(result) <= byte_limit, "app-signature-inventory-bytes")
     return rows, result
 
 
@@ -8322,7 +8346,7 @@ def app_signature_summary(target, environment, stager, work):
          and binding.get("runtimeSourceInputsSha256") == environment.get("MRK_BUNDLED_RUNTIME_SOURCE_SHA256"),
          "app-signature-runtime-binding")
     runtime = stager.runtime_tree(work / "runtime", manifest, current=True, target=target)
-    runtime_rows, runtime_inventory = app_signature_inventory(runtime)
+    runtime_rows, runtime_inventory = app_signature_inventory(runtime, runtime_stager=stager)
     del runtime
     need(tool_selected(stager, target) == (selected, selected_source), "app-signature-tool-source-post")
     # Recheck every actual tracked source leaf against the pre-compilation inventory;

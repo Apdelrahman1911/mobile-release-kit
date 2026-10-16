@@ -10,6 +10,25 @@ module StoreRuntimeComponent
   OPTIONAL_APP = "vendor/terminal-notifier/terminal-notifier.app"
   MACH_MAGICS = %w[feedface cefaedfe feedfacf cffaedfe cafebabe bebafeca cafebabf bfbafeca].freeze
 
+  # Consumer smoke after the authenticated build-object projection and signing.
+  # Read-only, no Store lane, no gem installation, no notice regeneration.
+  def self.projected_smoke(root, architecture)
+    abort "Unsupported runtime" unless RUBY_VERSION == "3.3.12" && %w[arm64 x86_64].include?(architecture)
+    abort "Runtime architecture differs" unless RbConfig::CONFIG.fetch("host_cpu") == architecture
+    root = File.realpath(root)
+    require "bundler"
+    require "fastlane"
+    require "digest/crc32"
+    abort "Bundler mismatch" unless Bundler::VERSION == "4.0.16"
+    abort "Fastlane mismatch" unless Fastlane::VERSION == "2.235.0"
+    abort "CRC32 native extension missing" unless Digest::CRC32.instance_method(:update).source_location.nil?
+    loaded = $LOADED_FEATURES.select { |name| name.end_with?("/digest/crc32/crc32_ext.bundle") }
+    abort "CRC32 extension escaped runtime" unless loaded.length == 1 && File.realpath(loaded.first).start_with?(root + "/")
+    abort "CRC32 result differs" unless Digest::CRC32.hexdigest("123456789") == "cbf43926"
+    Fastlane::FastFile.new(File.join(root, "tooling/fastlane/Fastfile"))
+    puts "Projected signed runtime: native CRC32 and Fastlane require/parse passed; no lane or Store request."
+  end
+
   def self.native_image?(path)
     # File.binread(path, length) returns nil at EOF for an empty ordinary file.
     # Empty gem resources are valid DATA, not native images or a read failure.
@@ -173,7 +192,9 @@ end
 if $PROGRAM_NAME == __FILE__
   abort "Expected root, architecture and component mode" unless ARGV.length == (ARGV[2] == "headers" ? 4 : 3)
   root, architecture, mode = ARGV
-  if mode == "headers"
+  if mode == "projected-smoke"
+    StoreRuntimeComponent.projected_smoke(root, architecture)
+  elsif mode == "headers"
     abort "Unsupported runtime" unless RUBY_VERSION == "3.3.12" && %w[arm64 x86_64].include?(architecture)
     StoreRuntimeComponent.install_headers(root, ARGV[3])
   elsif mode == "trim-notifier"

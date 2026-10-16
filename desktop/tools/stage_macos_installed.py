@@ -1268,14 +1268,208 @@ def project_signed_python_command(args):
             "qualification": "configured-capsule-DATA-projection-not-signature-or-installed-authority"}
 
 
+SIGNED_STORE_SELECTION = "macos-installed-inputs/store-signed-component.json"
+SIGNED_STORE_SELECTION_LIMIT = 4096
+
+
+def signed_store_selection_data(body, *, target=ARM_TARGET):
+    """A SOURCE-selected producer, never a latest-success or Python fallback."""
+    target = mac_target(target)
+    need(type(body) is bytes and 0 < len(body) <= SIGNED_STORE_SELECTION_LIMIT, "store-selection-size")
+    value = decode(body.decode("utf-8", "strict"))
+    need(type(value) is dict and type(value.get("schemaVersion")) is int
+         and value["schemaVersion"] == 1, "store-selection-shape")
+    need(value != {"schemaVersion": 1, "state": "unconfigured"}, "store-selection-unconfigured")
+    need(set(value) == {"schemaVersion", "state", "source", "runId", "runAttempt", "artifacts"}
+         and value["state"] == "configured" and maintenance_hex(value["source"], 40)
+         and type(value["artifacts"]) is dict and set(value["artifacts"]) == set(MAC_TARGETS),
+         "store-selection-shape")
+    need(all(type(item) is str and re.fullmatch(r"[1-9][0-9]{0,15}", item)
+             and int(item) <= 9007199254740991
+             for item in (value["runId"], value["runAttempt"], *value["artifacts"].values())),
+         "store-selection-identifiers")
+    need(len(set(value["artifacts"].values())) == 2, "store-selection-distinct-artifacts")
+    return {"source": value["source"], "runId": value["runId"], "runAttempt": value["runAttempt"],
+            "artifactId": value["artifacts"][target], "target": target, "selectionSha256": digest(body)}
+
+
+def signed_store_selection(target=ARM_TARGET):
+    with parent(DESKTOP / SIGNED_STORE_SELECTION) as (fd, leaf):
+        body, info = read_at(fd, leaf, SIGNED_STORE_SELECTION_LIMIT)
+        return signed_store_selection_data(body, target=target), (body, signature(info))
+
+
+def store_signing_selection_command(args):
+    return signed_store_selection(command_target(args))[0]
+
+
+def store_component_inputs(root, target):
+    """Bind the already service-authenticated archive to every extracted byte.
+
+    These are DATA checks; native signature admission still owns the installed
+    package. Retain exact metadata/identities for POST, not the large archive.
+    """
+    selection, source = signed_store_selection(target)
+    snapshots = []
+    for name, maximum in (("signed-origin.json", 4096), ("store-signed-receipt.json", 256 * 1024),
+                          ("store-signed.tar.gz", 512 * 1024 * 1024)):
+        with parent(root / name) as (fd, leaf):
+            body, info = read_at(fd, leaf, maximum)
+            snapshots.append((name, digest(body), signature(info)))
+        if name == "signed-origin.json": origin = decode(body)
+        elif name == "store-signed-receipt.json": receipt = decode(body)
+        else: archive = body
+    need(type(origin) is dict and type(receipt) is dict, "store-component-metadata")
+    need(origin.get("schema") == 1 and origin.get("source") == selection["source"]
+         and origin.get("target") == target
+         and all(type(origin.get(key)) is int and origin[key] == int(selection[key])
+                 for key in ("runId", "runAttempt", "artifactId"))
+         and origin.get("receiptSha256") == snapshots[1][1]
+         and origin.get("archiveSha256") == snapshots[2][1]
+         and type(origin.get("artifactDigest")) is str
+         and re.fullmatch(r"sha256:[0-9a-f]{64}", origin["artifactDigest"]), "store-component-origin")
+    need(receipt.get("kind") == "macos-store-signed-v1" and receipt.get("target") == target
+         and all(receipt.get(key) == selection[key] for key in ("source", "runId", "runAttempt"))
+         and receipt.get("signedArchiveSha256") == snapshots[2][1]
+         and receipt.get("signedArchiveBytes") == len(archive)
+         and all(receipt.get(key) is True for key in ("originalsClosed", "sourcePost", "inputPost", "nonNativeUnchanged")),
+         "store-component-receipt")
+    # Exact archive inventory comes from the successful SOURCE-selected signer.
+    # No extract API, payload import, native command or second producer is used.
+    members = []
+    names = set()
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as contents:
+        total = 0
+        for entry in contents:
+            need(len(names) < 32768 and entry.name not in names
+                 and (entry.name == "runtime" and entry.isdir() or entry.name.startswith("runtime/"))
+                 and len(entry.name) <= 512 and len(entry.name.split("/")) <= 32
+                 and all(part not in ("", ".", "..") for part in entry.name.split("/"))
+                 and (entry.isfile() or entry.isdir()), "store-component-archive-member")
+            names.add(entry.name)
+            if entry.isdir(): continue
+            need(0 <= entry.size <= 64 * 1024 * 1024 and total + entry.size <= 512 * 1024 * 1024,
+                 "store-component-archive-bound")
+            total += entry.size
+            with contents.extractfile(entry) as stream: payload = stream.read(entry.size + 1)
+            need(len(payload) == entry.size, "store-component-archive-size")
+            members.append((entry.name.removeprefix("runtime/"), digest(payload), len(payload)))
+    need(signed_store_selection(target) == (selection, source), "store-selection-post-changed")
+    binding = {**selection, "receiptSha256": snapshots[1][1], "archiveSha256": snapshots[2][1],
+               "artifactDigest": origin["artifactDigest"]}
+    return binding, tuple(sorted(members)), (source, tuple(snapshots))
+
+
+def composed_runtime_binding_data(body, python, store, *, target=ARM_TARGET):
+    """Validate the single-invocation computed S/M; never use legacy S/M."""
+    need(type(body) is bytes and 0 < len(body) <= 16384, "composed-runtime-binding-size")
+    value = decode(body)
+    python_keys = ("signedPythonSha256", "signingReceiptSha256", "signingSourceCommit", "signingRunId",
+                   "signingRunAttempt", "signingArtifactId", "producerProfileSha256", "serviceProfileSha256")
+    need(type(value) is dict and set(value) == {"schemaVersion", "kind", "target", "sourceInputsSha256",
+         "runtimeManifestSha256", "python", "store"} and value["schemaVersion"] == 1
+         and value["kind"] == "current-signed-store-runtime" and value["target"] == target
+         and maintenance_hex(value["sourceInputsSha256"], 64) and maintenance_hex(value["runtimeManifestSha256"], 64)
+         and value["python"] == {key: python[key] for key in python_keys}
+         and type(value["store"]) is dict and set(value["store"]) == set(store) | {"receiptSha256", "archiveSha256", "artifactDigest"}
+         and all(value["store"][key] == item for key, item in store.items())
+         and all(maintenance_hex(value["store"][key], 64) for key in ("receiptSha256", "archiveSha256"))
+         and type(value["store"]["artifactDigest"]) is str
+         and re.fullmatch(r"sha256:[0-9a-f]{64}", value["store"]["artifactDigest"]), "composed-runtime-binding")
+    return {**python, "sourceInputsSha256": value["sourceInputsSha256"],
+            "runtimeManifestSha256": value["runtimeManifestSha256"]}, value
+
+
+def composed_source_binding_data(body, binding_body, composed, environment, work_identity):
+    need(type(body) is bytes and 0 < len(body) <= 65536, "composed-source-binding-size")
+    value = decode(body)
+    need(type(value) is dict and value.get("runtimeBindingSha256") == digest(binding_body)
+         and value.get("runtimeManifestSha256") == composed["runtimeManifestSha256"]
+         and value.get("runtimeSourceInputsSha256") == composed["sourceInputsSha256"]
+         and value.get("signedStoreDerivation") == composed["store"] and value.get("target") == composed["target"]
+         and value.get("workDirectory") == list(work_identity)
+         and value.get("source") == environment.get("GITHUB_SHA")
+         and value.get("workflowSource") == environment.get("GITHUB_WORKFLOW_SHA")
+         and value.get("runId") == environment.get("GITHUB_RUN_ID")
+         and value.get("runAttempt") == environment.get("GITHUB_RUN_ATTEMPT")
+         and digest(binding_body) == environment.get("MRK_MACOS_RUNTIME_BINDING_SHA256")
+         and composed["runtimeManifestSha256"] == environment.get("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
+         and composed["sourceInputsSha256"] == environment.get("MRK_BUNDLED_RUNTIME_SOURCE_SHA256"),
+         "composed-source-invocation")
+    return value
+
+
+def write_runtime_binding(path, body, expected_parent):
+    need(type(body) is bytes and 0 < len(body) <= 65536, "binding-size")
+    current_output_absent(path, expected_parent)
+    with parent(path) as (fd, name):
+        need(current_directory_identity(os.fstat(fd)) == expected_parent, "binding-parent-changed")
+        opened = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
+        try:
+            view = memoryview(body)
+            while view:
+                count = os.write(opened, view)
+                need(count > 0, "binding-write-zero")
+                view = view[count:]
+            os.fchmod(opened, 0o444)
+            os.fsync(opened)
+            before = signature(os.fstat(opened))
+            actual, info = read_at(fd, name, 65536)
+            need(actual == body and signature(info) == before == signature(os.fstat(opened)), "binding-original-readback")
+            os.fsync(fd)
+        finally:
+            close_once(opened)
+
+
+def finalize_runtime_binding_command(args):
+    target = command_target(args)
+    python, python_original = signed_runtime_inputs(target)
+    store, store_original = signed_store_selection(target)
+    work = args.work_root
+    body = read(work / "runtime-binding.json", 16384)
+    _selected, binding = composed_runtime_binding_data(body, python, store, target=target)
+    admission_body = read(work / "source-admission.json", 65536)
+    admission = decode(admission_body)
+    need(type(admission) is dict and admission.get("target") == target
+         and not ({"runtimeManifestSha256", "runtimeSourceInputsSha256", "runtimeBindingSha256", "signedStoreDerivation"} & set(admission))
+         and admission.get("runtimeCompositionPending") is True
+         and type(admission.get("signedPythonDerivation")) is dict, "composed-source-admission")
+    previous = admission["signedPythonDerivation"]
+    pairs = (("signedPythonSha256", "signedPythonSha256"), ("signingReceiptSha256", "signingReceiptSha256"),
+             ("signingSourceCommit", "signingSourceCommit"), ("runId", "signingRunId"),
+             ("runAttempt", "signingRunAttempt"), ("artifactId", "signingArtifactId"),
+             ("producerProfileSha256", "producerProfileSha256"), ("serviceProfileSha256", "serviceProfileSha256"))
+    need(all(previous.get(key) == python[source] for key, source in pairs)
+         and previous.get("nominationSha256") == digest(python_original[0][0]), "composed-source-python")
+    need(digest(read(work / "runtime/manifest.json", MANIFEST_BYTES)) == binding["runtimeManifestSha256"],
+         "composed-published-manifest")
+    info = os.stat(work, follow_symlinks=False)
+    need(admission.get("workDirectory") == [info.st_dev, info.st_ino, info.st_uid], "composed-source-work")
+    result = dict(admission)
+    del result["runtimeCompositionPending"]
+    result.update(runtimeManifestSha256=binding["runtimeManifestSha256"],
+                  runtimeSourceInputsSha256=binding["sourceInputsSha256"], runtimeBindingSha256=digest(body),
+                  signedStoreDerivation=binding["store"])
+    need(signed_runtime_inputs(target) == (python, python_original)
+         and signed_store_selection(target) == (store, store_original)
+         and read(work / "runtime-binding.json", 16384) == body
+         and read(work / "source-admission.json", 65536) == admission_body, "composed-binding-post")
+    path = work / "source-binding.json"
+    write_runtime_binding(path, canonical(result) + b"\n", current_output_absent(path))
+    return {"sourceInputsSha256": binding["sourceInputsSha256"], "runtimeManifestSha256": binding["runtimeManifestSha256"],
+            "runtimeBindingSha256": digest(body)}
+
+
 def configured_current_binding(args, target):
-    need(args.command == "current-runtime" and signed_python_options(args), "configured-signing-required")
+    need(args.command in ("current-runtime", "compose-store-runtime") and signed_python_options(args), "configured-signing-required")
     binding = signed_runtime_inputs(target)
     chosen = binding[0]
     pairs = (("expected_signed_python", "signedPythonSha256"), ("expected_signing_receipt", "signingReceiptSha256"),
              ("expected_signing_source", "signingSourceCommit"), ("expected_signing_run", "signingRunId"),
              ("expected_signing_attempt", "signingRunAttempt"), ("expected_source", "sourceInputsSha256"),
              ("expected_manifest", "runtimeManifestSha256"))
+    if args.command == "compose-store-runtime":
+        pairs = pairs[:-2]  # Legacy nomination still authenticates Python, never the new S/M.
     need(all(getattr(args, option, None) == chosen[key] for option, key in pairs)
          and args.expected_supplier == SIGNED_ORIGINAL_SUPPLIERS[target]["receiptSha256"],
          "configured-signing-source-arguments")
@@ -1520,7 +1714,9 @@ def current_output_absent(path, expected_parent=None):
 
 
 def current_paths(args):
-    outputs = [args.work] + ([args.output] if args.command == "current-runtime" else [])
+    outputs = [args.work] + ([args.output] if args.command in ("current-runtime", "compose-store-runtime") else [])
+    if args.command == "compose-store-runtime":
+        outputs.append(args.binding_output)
     origin = current_supplier_origin(args)
     inputs = [DESKTOP.parent] + ([args.archive] if origin == "historical"
                                 else [args.python_root, args.supplier_receipt])
@@ -1530,6 +1726,8 @@ def current_paths(args):
         inputs.append(args.history_provider)
     if getattr(args, "store_component", None) is not None:
         inputs.append(args.store_component)
+    if getattr(args, "signed_store_root", None) is not None:
+        inputs.append(args.signed_store_root)
     # Components are later admitted without following links. Case folding also
     # refuses an alias on default case-insensitive Mac filesystems.
     folded = lambda path: tuple(part.casefold() for part in path.parts)
@@ -1642,11 +1840,17 @@ def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, h
 
 def current_runtime_command(args):
     target = command_target(args)
-    configured = getattr(args, "configured_signing", False)
+    composing = args.command == "compose-store-runtime"
+    configured = composing or getattr(args, "configured_signing", False)
+    if composing:
+        need(getattr(args, "store_component", None) is None and args.signed_store_root is not None
+             and getattr(args, "expected_source", None) is None and getattr(args, "expected_manifest", None) is None,
+             "composed-runtime-no-overrides")
     need(type(configured) is bool, "configured-signing-option")
     configured_inputs = configured_current_binding(args, target) if configured else None
     origin = current_supplier_origin(args)
-    store_component = getattr(args, "store_component", None)
+    store_component = args.signed_store_root / "extracted/runtime" if composing else getattr(args, "store_component", None)
+    store_original = store_component_inputs(args.signed_store_root, target) if composing else None
     store_enabled = store_component is not None
     need(not store_enabled or origin == "fresh-public-source", "current-store-fresh-supplier-only")
     provider_nomination, provider_source = history_provider_selection(args, origin, target=target)
@@ -1654,15 +1858,15 @@ def current_runtime_command(args):
     need(origin == "fresh-public-source" or target == ARM_TARGET, "unqualified-intel-route")
     selection = source_build_selection(target)
     packager_ids()
-    need(args.command in ("describe-current-runtime", "current-runtime"), "current-runtime-command")
-    final = args.command == "current-runtime"
-    if final:
+    need(args.command in ("describe-current-runtime", "current-runtime", "compose-store-runtime"), "current-runtime-command")
+    final = args.command in ("current-runtime", "compose-store-runtime")
+    if final and not composing:
         need(sha(args.expected_source) and sha(args.expected_manifest), "current-reviewed-digests")
     parents = current_paths(args)
     captured, projection, source_digest = current_source(history_provider=provider_enabled, store_runtime=store_enabled)
     if provider_enabled:
         need(captured[HISTORY_PROVIDER_PROFILE][0] == provider_source[0], "history-provider-source-projection")
-    if final:
+    if final and not composing:
         need(source_digest == args.expected_source, "current-reviewed-source-mismatch")
     fresh_inputs = None
     if origin == "fresh-public-source":
@@ -1705,6 +1909,9 @@ def current_runtime_command(args):
             write_tree(runtime, runtime_inputs, root_mode=0o700, current_owned=True)
             store = preparer._store_inputs(store_component, source, runtime) if store_enabled else None
             store_rows = preparer._store_output_rows(store) if store_enabled else ()
+            if composing:
+                need(tuple(sorted((name, sha, size) for name, _, sha, size in store[1])) == store_original[1],
+                     "composed-store-archive-correspondence")
             old_mask = os.umask(0o077)
             try:
                 options = {"history_provider": True} if provider_enabled else {}
@@ -1752,7 +1959,8 @@ def current_runtime_command(args):
                 result["historyProvider"] = {**provider_nomination, "bytes": len(provider_body),
                     "profileSha256": digest(provider_source[0]), "nativeAuthority": False}
             if final:
-                need(manifest_digest == args.expected_manifest, "current-reviewed-manifest-mismatch")
+                if not composing:
+                    need(manifest_digest == args.expected_manifest, "current-reviewed-manifest-mismatch")
                 current_output_absent(args.output, parents[args.output])
                 normalized = {name: (body, current_runtime_mode(name, body, provider_nomination, target=target))
                               for name, (body, _) in files.items()}
@@ -1769,6 +1977,19 @@ def current_runtime_command(args):
                      "history-provider-profile-publication-post-changed")
             if store_enabled:
                 preparer._store_recheck(store)
+            if composing:
+                need(store_component_inputs(args.signed_store_root, target) == store_original, "composed-store-post-changed")
+                keys = ("signedPythonSha256", "signingReceiptSha256", "signingSourceCommit", "signingRunId",
+                        "signingRunAttempt", "signingArtifactId", "producerProfileSha256", "serviceProfileSha256")
+                binding = {"schemaVersion": 1, "kind": "current-signed-store-runtime", "target": target,
+                    "sourceInputsSha256": source_digest, "runtimeManifestSha256": manifest_digest,
+                    "python": {key: configured_inputs[0][key] for key in keys}, "store": store_original[0]}
+                body = canonical(binding) + b"\n"
+                composed_runtime_binding_data(body, configured_inputs[0], signed_store_selection(target)[0], target=target)
+                current_output_absent(args.binding_output, parents[args.binding_output])
+                write_runtime_binding(args.binding_output, body, parents[args.binding_output])
+                result["runtimeBindingSha256"] = digest(body)
+                result["storeComponent"] = store_original[0]
             return result
 
 
@@ -5971,7 +6192,7 @@ def main(argv=None):
         if name == "runtime":
             command.add_argument("--expected-manifest", required=True)
             command.add_argument("--output", required=True, type=Path)
-    for name in ("describe-current-runtime", "current-runtime"):
+    for name in ("describe-current-runtime", "current-runtime", "compose-store-runtime"):
         command = commands.add_parser(name)
         supplier = command.add_mutually_exclusive_group(required=True)
         supplier.add_argument("--archive", type=Path, help="Historical SOURCE-compatible route, never a fresh supplier fallback")
@@ -5986,6 +6207,10 @@ def main(argv=None):
         for option in ("signed-python", "signing-receipt", "signing-source", "signing-run", "signing-attempt"):
             command.add_argument("--expected-" + option)
         command.add_argument("--work", required=True, type=Path)
+        if name == "compose-store-runtime":
+            command.add_argument("--signed-store-root", required=True, type=Path)
+            command.add_argument("--binding-output", required=True, type=Path)
+            command.add_argument("--output", required=True, type=Path)
         if name == "current-runtime":
             command.add_argument("--configured-signing", action="store_true",
                                  help="Require the fixed SOURCE capsule/S/M nomination, never a CLI replacement")
@@ -5993,6 +6218,9 @@ def main(argv=None):
             command.add_argument("--expected-manifest", required=True)
             command.add_argument("--output", required=True, type=Path)
     commands.add_parser("packaging-selection", help="Fixed SOURCE signing/release DATA; refuses unconfigured ordinary distribution")
+    composed = commands.add_parser("finalize-runtime-binding", help="Latch computed Store S/M before the first app compilation")
+    composed.add_argument("--work-root", required=True, type=Path)
+    commands.add_parser("store-signing-selection", help="Fixed SOURCE Store producer; no fallback")
     commands.add_parser("runtime-signing-selection", help="Fixed SOURCE signed-runtime nomination; refuses unconfigured target")
     capsule = commands.add_parser("project-signed-python", help="Project only the two SOURCE-pinned capsule files as DATA")
     capsule.add_argument("--transport-root", required=True, type=Path)
@@ -6151,7 +6379,8 @@ def main(argv=None):
         result, status = installer_log_diagnostic(args)
         print(canonical(result).decode("utf-8"))
         return status
-    action = {"packaging-selection": packaging_selection_command, "runtime-signing-selection": runtime_signing_selection_command,
+    action = {"finalize-runtime-binding": finalize_runtime_binding_command, "store-signing-selection": store_signing_selection_command, "compose-store-runtime": current_runtime_command,
+              "packaging-selection": packaging_selection_command, "runtime-signing-selection": runtime_signing_selection_command,
               "project-signed-python": project_signed_python_command, "describe-runtime": runtime_command, "runtime": runtime_command,
               "describe-current-runtime": current_runtime_command, "current-runtime": current_runtime_command, "app": app_command, "preview": preview_command, "remove-preview": remove_preview_command,
               "input": input_command, "android-support": android_support_command, "scripts": scripts_command, "package-format-input": package_format_input_command,

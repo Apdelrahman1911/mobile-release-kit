@@ -66,7 +66,9 @@ jobs:
       # A separate reviewed SOURCE change selects the targeted recovery run.
       # Default seven cases and each closed singleton are distinct native obligations.
       MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}
-      # Final signed M comes only from the fixed configured SOURCE nomination.
+      # Signed Store selection is mandatory; no unconfigured/Python-only fallback.
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      # Legacy Python SOURCE pins authenticate that capsule, not the combined M.
       MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
       # Independently accepted paired supplier six pins; each signed target requires a new final M.
       MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
@@ -269,6 +271,9 @@ jobs:
           finally:
               os.close(fd)
           PY_SIGNING_SELECTION
+          # Resolve the separate fixed Store SOURCE selection before any payload download.
+          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py store-signing-selection --target "$MRK_MACOS_TARGET"
       - name: Select fixed frontend compiler
         timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 2 || 350 }}
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -289,7 +294,7 @@ jobs:
           root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
           printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$root" >> "$GITHUB_ENV"
-          "$MRK_PYTHON" -I -S -B - "$root/source-binding.json" <<'PY'
+          "$MRK_PYTHON" -I -S -B - "$root/source-admission.json" <<'PY'
           import json, os, subprocess, sys
           build_target = os.environ["MRK_MACOS_TARGET"]
           supplier_routes = {
@@ -373,6 +378,10 @@ jobs:
                   fullUIQualified=False, removalQualified=False, powerLossQualified=False, distributionQualified=False)
               with open(os.environ["GITHUB_ENV"], "a", encoding="ascii") as environment:
                   environment.write("MRK_MACOS_REMOVAL_CORRELATION=" + correlation + "\n")
+          # The final source binding does not exist until the one actual Store
+          # composition has supplied its immutable S/M. Never overwrite it.
+          del value["runtimeManifestSha256"], value["runtimeSourceInputsSha256"]
+          value["runtimeCompositionPending"] = True
           data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
           if len(data) > 65536: raise ValueError("source/tool binding size refused")
           fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -745,6 +754,17 @@ jobs:
             true) "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py project-github-seal --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/github-seal-result.json" ;;
             false) ;; *) exit 1 ;;
           esac
+      - name: Restore exactly the SOURCE-selected signed Store component without executing it
+        timeout-minutes: 5
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$MRK_MACOS_STORE_RUNTIME" == signed-component ]] || exit 1
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_store_component.py restore-selected \
+            "$MRK_MACOS_WORK/signed-store-component" --target "$MRK_MACOS_TARGET"
       - name: Prepare the current payload from the independently accepted fresh Python supplier
         id: app_runtime
         timeout-minutes: 3
@@ -758,12 +778,13 @@ jobs:
             history_provider_arguments=(--history-provider "$MRK_MACOS_WORK/history-provider-capsule/gh")
           fi
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
-            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py current-runtime \
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py compose-store-runtime \
             --target "$MRK_MACOS_TARGET" ${history_provider_arguments[@]+"${history_provider_arguments[@]}"} \
             --python-root "$MRK_MACOS_WORK/fresh-python-supplier" \
             --supplier-receipt "$MRK_MACOS_WORK/fresh-python-receipt/supplier-receipt.json" \
             --expected-supplier "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" \
-            --configured-signing \
+            --signed-store-root "$MRK_MACOS_WORK/signed-store-component" \
+            --binding-output "$MRK_MACOS_WORK/runtime-binding.json" \
             --signed-python "$MRK_MACOS_WORK/signed-python-capsule/python3" \
             --signing-receipt "$MRK_MACOS_WORK/signed-python-capsule/python-signed-receipt.json" \
             --expected-signed-python "$MRK_MACOS_SIGNED_PYTHON_SHA256" \
@@ -772,9 +793,63 @@ jobs:
             --expected-signing-run "$MRK_MACOS_SIGNING_RUN_ID" \
             --expected-signing-attempt "$MRK_MACOS_SIGNING_RUN_ATTEMPT" \
             --work "$MRK_MACOS_WORK/current-runtime-preparation" \
-            --expected-source "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" \
-            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" \
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
+      - name: Latch the same computed runtime binding before any application compilation
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py finalize-runtime-binding \
+            --target "$MRK_MACOS_TARGET" --work-root "$MRK_MACOS_WORK" > "$MRK_MACOS_WORK/runtime-binding-result.json"
+          "$MRK_PYTHON" -I -S -B - <<'PY_COMPOSED_BINDING'
+          import json, os, re, stat
+          root = os.environ["MRK_MACOS_WORK"]
+          fd = os.open(root + "/runtime-binding-result.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              info = os.fstat(fd)
+              if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
+                  raise ValueError("computed runtime result original")
+              value = json.loads(os.read(fd, 4097))
+          finally: os.close(fd)
+          keys = {"sourceInputsSha256": "MRK_BUNDLED_RUNTIME_SOURCE_SHA256",
+                  "runtimeManifestSha256": "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256",
+                  "runtimeBindingSha256": "MRK_MACOS_RUNTIME_BINDING_SHA256"}
+          if type(value) is not dict or set(value) != set(keys): raise ValueError("computed runtime binding shape")
+          if any(type(v) is not str or not re.fullmatch(r"[0-9a-f]{64}", v) or v == "0" * 64 for v in value.values()):
+              raise ValueError("computed runtime binding digest")
+          fd = os.open(os.environ["GITHUB_ENV"], os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              info = os.fstat(fd)
+              if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+                  raise ValueError("workflow environment original")
+              body = "".join(keys[k] + "=" + value[k] + "\n" for k in keys).encode("ascii")
+              while body:
+                  written = os.write(fd, body)
+                  if written <= 0: raise OSError("workflow binding write")
+                  body = body[written:]
+              os.fsync(fd)
+          finally: os.close(fd)
+          PY_COMPOSED_BINDING
+      - name: Exercise projected signed Store native CRC32 and Fastlane without a Store lane
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/store-smoke"
+          # No tokens, signing material, Store credentials or ambient Ruby/Gem configuration.
+          /usr/bin/env -i PATH="$MRK_MACOS_WORK/runtime/store/bin:/usr/bin:/bin" \
+            HOME="$MRK_MACOS_WORK/store-smoke" TMPDIR="$MRK_MACOS_WORK/store-smoke" \
+            LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC CI=true FASTLANE_SKIP_UPDATE_CHECK=1 \
+            FASTLANE_OPT_OUT_USAGE=1 FASTLANE_HIDE_CHANGELOG=1 \
+            "$MRK_MACOS_WORK/runtime/store/bin/bundle" exec ruby \
+            "$GITHUB_WORKSPACE/desktop/tools/verify_macos_store_runtime.rb" \
+            "$MRK_MACOS_WORK/runtime/store" "$MRK_MACOS_MACHINE" projected-smoke \
+            > "$MRK_MACOS_WORK/store-smoke/result.txt"
       - name: Build only the external normal-app XCTest runner, not an instrumented app
         id: normal_ui_build
         if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && (env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' || env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery') && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))

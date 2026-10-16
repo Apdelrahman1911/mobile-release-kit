@@ -151,10 +151,32 @@ required artifacts/evidence.
   existing guided settings editor. It defaults off, preserves actual branch
   policy, and does not grant mutation authority. The focused draft/config/help
   gate passed 31 tests, including unchanged CI-only mutation refusal.
-- GitHub local workflow Apply and remote settings exist, but creating a scoped
-  setup branch/draft PR is a genuine missing feature. Its implementation is
-  underway, reusing existing connection and process ownership; local Apply
-  must not be labeled repository publication.
+- GitHub workflow Apply and scoped setup branch/draft-PR publication are now
+  implemented. Installed authenticated setup/publication and reconciliation
+  remain verification obligations; local Apply alone is not publication.
+- The signed Ruby/Bundler/Fastlane component now passes on both architectures:
+  `desktop-macos-python-runtime-signing.yml`, `38888466802/1`, source
+  `7d58cc4d4787957b43d067166a729fcf697697f2`; ARM job `116931896706`, Intel
+  `116931896493`. Each completed 133 native sign/verify pairs and closed the
+  temporary credential scope, restoring the original keychain selection.
+  Exact compiler-only gem objects were excluded, and a missing fixed Store
+  signing identifier was corrected without weakening the certificate rules.
+  This is component signing, not installed runtime execution or app readiness.
+- Packaging now selects those exact signed Store components and composes them
+  once with the signed Python capsule and current core. The actual composed
+  runtime binding is retained before app compilation and reused by notarization;
+  stale Python-only manifest pins no longer describe the combined runtime.
+  Six focused consumer methods passed with inert native/credential boundaries,
+  as did the current helper-input and scoped runtime-inventory boundary tests.
+  Native combined-runtime loading and current app packaging remain pending.
+- Installer and Remover native compilation plus five pure Applications adapter
+  cases passed on both architectures in `38887513050/1` at `1dfb974e`; its
+  separate recovery case failed obsolete fixture bounds. The focused recovery
+  case subsequently passed on both architectures in `38889752254/1`, source
+  `3dd50b32fe6cbd18637ef4e73660a3734eb0d161` (ARM job `116936098732`, Intel
+  `116936098294`). This rerun deliberately did not repeat the successful
+  compilation/launcher cases. No installation or crash-recovery runtime pass
+  is inferred from pure tests. Interrupted Noop/update integration is ongoing.
 - The previously authorized Mac SSH route timed out again on 2026-10-16.
   No build or worker was started there. Native verification continues through
   GitHub macOS runners rather than blocking independent work.
