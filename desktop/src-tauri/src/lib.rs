@@ -122,6 +122,8 @@ mod macos_build_profile;
 // Pure fixed-layout DATA is also used by portable contract tests.
 pub mod macos_install_paths;
 pub mod macos_install_record;
+pub mod macos_store_runtime;
+pub(crate) mod macos_history_inventory;
 pub mod macos_applications_launcher;
 pub mod macos_install_maintenance;
 pub mod macos_install_transaction;

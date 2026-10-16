@@ -1875,8 +1875,13 @@ mod lookup_memory {
         census.add(std::mem::size_of::<Census<'_>>())?;
         // Includes native source reservation, raw saved config and the fixed
         // simultaneous framing/receipt/Status-copy term. Not a process RSS claim.
-        census.add(future)?;
-        if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes)
+        // Only this Mac History path replaces its old48MiB code partition with
+        // the full128MiB installed-runtime reservation. The original16MiB for
+        // Document, source and every other retained/future copy stays unchanged.
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { crate::macos_history_inventory::admission_bytes(census.bytes,future).ok_or(Problem::Capacity) }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { census.add(future)?;if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes) }
     }
 
     pub(super) fn variable_admission_bytes(document:&Arc<Inner>,state:&DocumentState,loan:&Arc<GitHubVariableMaterial>,

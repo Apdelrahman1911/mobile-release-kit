@@ -3936,7 +3936,7 @@ class Operation:
         need(set(os.listdir(input_root["fd"])) == names, "final-removal-input-roster")
         self.final_image_roots.append((input_root, names))
         for name in sorted(names):
-            maximum = self.stager.REMOVER_BYTES if name == self.stager.REMOVER_NAME else (1024 * 1024 if name == "install-inventory.json" else self.stager.PRODUCER_DESCRIPTOR_BYTES)
+            maximum = self.stager.REMOVER_BYTES if name == self.stager.REMOVER_NAME else (self.stager.INVENTORY_BYTES if name == "install-inventory.json" else self.stager.PRODUCER_DESCRIPTOR_BYTES)
             input_values[name] = retained(input_root, name, maximum, (0o555,) if name == self.stager.REMOVER_NAME else (0o444,))[1]
         source = self.stager.packaging_signing_data(self.producer_profile, self.service_profile)
         expected = self.stager.packaging_removal_descriptor_data(input_values["producer.json"], input_values["install-inventory.json"],
@@ -5748,7 +5748,7 @@ class Operation:
         installed = self.original(installed_root, "producer.json", "observer-installed-producer", 65536, (0o444,))
         signature = self.original(installed_root, "producer.sig", "observer-installed-signature", 512, (0o444,))
         input_root = self.directory(self.work_entry, "input", "observer-installed-input")
-        inventory = self.original(input_root, self.stager.INSTALLATION_INVENTORY_NAME, "observer-installed-inventory", 1048576, (0o444,))
+        inventory = self.original(input_root, self.stager.INSTALLATION_INVENTORY_NAME, "observer-installed-inventory", self.stager.INVENTORY_BYTES, (0o444,))
         parts = ("app/" + self.stager.REMOVER).split("/")
         installed_program = self.original(self.descend(input_root, tuple(parts[:-1])), parts[-1],
             "observer-genuine-installed-remover", self.stager.REMOVER_BYTES, (0o555,))
@@ -7337,7 +7337,7 @@ class Operation:
         os.mkdir("input", 0o700, dir_fd=self.same_package_case["fd"])
         projected = self.directory(self.same_package_case, "input", "same-package-inventory-input")
         source_input = self.directory(self.work_entry, "input", "same-package-original-input")
-        inventory = self.original(source_input, self.stager.INSTALLATION_INVENTORY_NAME, "same-package-inventory", 1024 * 1024, (0o444,))
+        inventory = self.original(source_input, self.stager.INSTALLATION_INVENTORY_NAME, "same-package-inventory", self.stager.INVENTORY_BYTES, (0o444,))
         inventory_body = self.read(inventory)
         need(digest(inventory_body) == args.expected_inventory, "same-package-inventory-binding")
         self.package_sources.append((inventory, inventory_body))
@@ -7417,7 +7417,7 @@ class Operation:
             entry = self.source_original("desktop/packaging/macos-install-producer-certificates/" + name, "source-producer-" + name, 16384)
             self.package_sources.append((entry, self.read(entry)))
         source_inventory = self.original(self.directory(self.work_entry, "input", "package-input"), self.stager.INSTALLATION_INVENTORY_NAME,
-            "package-source-inventory", 1024 * 1024, (0o444,))
+            "package-source-inventory", self.stager.INVENTORY_BYTES, (0o444,))
         inventory = self.read(source_inventory)
         self.stager.observation_inventory_bytes(inventory, inventory_hash, manifest_hash, selection=selection)
         self.package_outputs.append((source_inventory, digest(inventory)))
@@ -7573,7 +7573,7 @@ class Operation:
         installed, signature = self.read(installed_entry), self.read(signature_entry)
         self.package_outputs.extend(((installed_entry, digest(installed)), (signature_entry, digest(signature))))
         input_root = self.directory(self.work_entry, "input", "remove-installed-input")
-        inventory_entry = self.original(input_root, self.stager.INSTALLATION_INVENTORY_NAME, "remove-installed-inventory", 1024 * 1024, (0o444,))
+        inventory_entry = self.original(input_root, self.stager.INSTALLATION_INVENTORY_NAME, "remove-installed-inventory", self.stager.INVENTORY_BYTES, (0o444,))
         inventory = self.read(inventory_entry)
         remover_path = self.work / "input/app" / self.stager.REMOVER
         parts = ("app/" + self.stager.REMOVER).split("/")
@@ -7601,7 +7601,7 @@ class Operation:
         need(set(os.listdir(input_copy["fd"])) == set(input_values), "remove-emitter-five-inputs")
         self.package_roots.append((input_copy, set(input_values)))
         for name, value in input_values.items():
-            limit = self.stager.REMOVER_BYTES if name == self.stager.REMOVER_NAME else (1024 * 1024 if name == "install-inventory.json" else self.stager.PRODUCER_DESCRIPTOR_BYTES)
+            limit = self.stager.REMOVER_BYTES if name == self.stager.REMOVER_NAME else (self.stager.INVENTORY_BYTES if name == "install-inventory.json" else self.stager.PRODUCER_DESCRIPTOR_BYTES)
             entry = self.original(input_copy, name, "remove-emitter-input-" + name, limit,
                                   (0o555,) if name == self.stager.REMOVER_NAME else (0o444,))
             need(self.read(entry) == value, "remove-input-exact-original-copy")

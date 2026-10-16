@@ -9,7 +9,7 @@ pub const CORE_VERSION: &str = "0.3.0";
 pub const COMPILED_TARGET: &str = env!("MRK_COMPILED_TARGET");
 const MANIFEST_ANCHOR: Option<&str> = option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
 const PROTOCOL_ANCHOR: Option<&str> = option_env!("MRK_BUNDLED_PROTOCOL_SHA256");
-const MANIFEST_LIMIT: u64 = 1024 * 1024;
+const MANIFEST_LIMIT: u64 = if cfg!(target_os = "macos") { crate::macos_install_record::MANIFEST_LIMIT as u64 } else { 1024 * 1024 };
 pub(crate) const GITHUB_CA_LIMIT: u64 = 512 * 1024;
 // Separate from the session gate and the passive development feature. A CA
 // inventory hash is not native socket/TLS, runtime-custody or host qualification.
@@ -22,10 +22,13 @@ pub(crate) const GITHUB_PREFLIGHT_NATIVE_QUALIFIED: bool = false;
 pub(crate) const GITHUB_RELEASE_NATIVE_QUALIFIED: bool = false;
 const FILE_LIMIT: u64 = 512 * 1024 * 1024;
 const TOTAL_LIMIT: u64 = 1024 * 1024 * 1024;
-// Seven JSON nodes per payload entry; leave room under strict_json's 20k
-// budget. Publisher preparation uses this same portable inventory ceiling.
-const FILE_COUNT: usize = 2048;
-const ENTRY_COUNT: usize = 8192;
+// Larger bounded Mac dependency inventory; other targets keep their profile.
+const FILE_COUNT: usize = if cfg!(target_os = "macos") { crate::macos_install_record::FILE_LIMIT } else { 2048 };
+const ENTRY_COUNT: usize = if cfg!(target_os = "macos") { crate::macos_install_record::ENTRY_LIMIT } else { 8192 };
+fn manifest_json(bytes: &[u8]) -> Result<serde_json::Value, BridgeError> {
+    if cfg!(target_os = "macos") { crate::protocol::strict_macos_runtime_manifest_json(bytes) }
+    else { strict_json(bytes) }
+}
 const TREE_DEPTH: usize = 16;
 #[cfg(windows)]
 const PYTHON_RESOURCE: &str = "python/python.exe";
@@ -2234,7 +2237,7 @@ impl RuntimeConfig {
         let protocol_anchor = PROTOCOL_ANCHOR.filter(|value| sha(value)).ok_or_else(unavailable)?;
         let bytes = read_checked(&self.bundle_root.join("manifest.json"), MANIFEST_LIMIT, end)?;
         if digest(&bytes) != manifest_anchor { return Err(unavailable()); }
-        let manifest: Manifest = serde_json::from_value(strict_json(&bytes).map_err(|_| unavailable())?).map_err(|_| unavailable())?;
+        let manifest: Manifest = serde_json::from_value(manifest_json(&bytes).map_err(|_| unavailable())?).map_err(|_| unavailable())?;
         if manifest.schema_version != 1 || manifest.protocol != PROTOCOL || manifest.core_version != CORE_VERSION
             || manifest.target != COMPILED_TARGET || manifest.protocol_sha256 != protocol_anchor
             || !sha(&manifest.core_sha256) || !sha(&manifest.inventory_sha256)
@@ -3478,7 +3481,7 @@ pub(crate) mod windows_version {
             // No JSON is interpreted until its exact compile-bound bytes match.
             if bytes.is_empty() || bytes.len() as u64 > MANIFEST_LIMIT
                 || digest(bytes) != self.manifest_sha256 { return Err(unavailable()); }
-            let manifest: Manifest = serde_json::from_value(strict_json(bytes).map_err(|_| unavailable())?)
+            let manifest: Manifest = serde_json::from_value(manifest_json(bytes).map_err(|_| unavailable())?)
                 .map_err(|_| unavailable())?;
             if manifest.schema_version != 1 || manifest.protocol != PROTOCOL || manifest.core_version != CORE_VERSION
                 || manifest.target != TARGET || manifest.protocol_sha256 != self.protocol_sha256

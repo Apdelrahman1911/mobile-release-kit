@@ -327,7 +327,7 @@ mod selected{
             match enter.try_recv(){Ok(())=>break,Err(oneshot::error::TryRecvError::Empty)=>std::thread::park_timeout(original.pause()),
                 Err(oneshot::error::TryRecvError::Closed)=>{original.control.stop_at(wire::Reason::ServiceUnavailable,Instant::now());break;}}
         }
-        if original.reservation.get().is_none_or(|bytes|*bytes>OWNED_LIMIT){original.control.poisoned();}
+        if original.reservation.get().is_none_or(|bytes|!crate::macos_install_record::installed_control_fits(*bytes,if original.removal.is_some(){3}else{2})){original.control.poisoned();}
         if let Some(clock)=&original.removal{
             // Removal prepared this SAME strict clock before GO. It cannot be
             // recaptured/rearmed after authentication or user confirmation.
@@ -446,7 +446,9 @@ mod selected{
             // actual admission below still recomputes actual capacities and
             // the full live-peer census before its own GO. No fake Control.
             let control=arc_bytes::<Control>()?.checked_add(128)?.checked_add(SIGNAL_STORAGE)?;
-            owner_reservation(base,control,true).filter(|bytes|*bytes<=OWNED_LIMIT)
+            // The removal peer is not allocated yet: two preparations here.
+            // Its own reservation is added by Document before any peer GO.
+            owner_reservation(base,control,true).filter(|bytes|crate::macos_install_record::installed_control_fits(*bytes,2))
         }
         pub(crate) fn removal_dispatcher(&self,document:&Arc<()>)->Option<Arc<service_setup::Dispatcher>>{
             if !self.inner.android_original_document_matches(Some(document)){return None;}
@@ -492,7 +494,7 @@ mod selected{
                 cohort:cohort.identity.clone(),epoch:cohort.epoch,first:Mutex::new(None),unknown:AtomicBool::new(false),
                 dirty:AtomicBool::new(false),latches:AtomicUsize::new(0),stop,audit});
             let whole=owner_reservation(prior,control.retained_bytes().ok_or_else(unavailable)?,snapshot.request.removal.is_some())
-                .filter(|bytes|*bytes<=OWNED_LIMIT).ok_or_else(unavailable)?;
+                .filter(|bytes|crate::macos_install_record::installed_control_fits(*bytes,if snapshot.request.removal.is_some(){3}else{2})).ok_or_else(unavailable)?;
             let signal=Arc::new(native::Signal::reserved());let original_clock=OnceLock::new();
             let removal_cut=if let Some(removal)=&snapshot.request.removal{
                 let clock=OriginalClock::capture(&control,&signal,Some(removal)).ok_or_else(unavailable)?;

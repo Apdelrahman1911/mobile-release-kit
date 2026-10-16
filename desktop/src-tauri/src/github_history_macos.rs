@@ -5,6 +5,7 @@ use super::*;
 use crate::{github_history_protocol as wire,github_history_session::Nomination};
 use std::sync::Arc;
 use crate::asset_source::HistorySources;
+use crate::macos_history_inventory as inventory_storage;
 
 const PROVIDER_PROFILE:&str=include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../packaging/macos-history-provider.profile"));
 const SOURCE_FUTURE_ORIGINALS:usize=8; // existing child/stdin/stdout/stderr + startup/settlement reserve
@@ -72,35 +73,19 @@ pub(super) fn provider_observed(book:&mut Book,path:&str,index:usize,file:Option
     Ok(())
 }
 
-// The History-only containing debit is first-party owned/control storage,
-// not allocator/Go/OS RSS. It keeps the existing64MiB Document cap unchanged.
-// Preparse:1MiB raw+bounded20k Value nodes/keys and their byte copies; native
-// original8256 records+names and SnapshotBook frame; checked prospective tree
-// strings/containers24MiB;17 walk blocks+read/hash+framing. Actual allocations
-// are measured again. Deep/unusually duplicated prefixes refuse before sets.
-const TREE_CONTROL_LIMIT:usize=24*1024*1024;
-const CODE_CONTROL_RESERVE:usize=48*1024*1024;
-pub(super) fn history_manifest_reserve(files:&[PayloadFile])->Result<usize>{
-    let mut names=0usize;let mut bytes=0usize;
-    for file in files{
-        if !runtime::safe_payload_path(&file.path)||file.path.len()>512{return Err(AdmissionFailure::Bounds);}
-        let mut path=file.path.as_str();
-        loop{
-            names=names.checked_add(1).ok_or(AdmissionFailure::Bounds)?;
-            bytes=bytes.checked_add(path.len()).ok_or(AdmissionFailure::Bounds)?;
-            if names>8192{return Err(AdmissionFailure::Bounds);}
-            match path.rsplit_once('/') {Some((parent,_))=>path=parent,None=>break}
-        }
-    }
-    // Files/dirs/folded/observed/local and original names. Charge duplicate
-    // prefixes too: no credit is inferred from later BTree de-duplication.
-    let total=bytes.checked_mul(6).and_then(|v|v.checked_add(names.checked_mul(6*256)?))
-        .and_then(|v|v.checked_add(files.len().checked_mul(std::mem::size_of::<PayloadFile>()+64)?))
-        .ok_or(AdmissionFailure::Bounds)?;
-    if total>TREE_CONTROL_LIMIT{return Err(AdmissionFailure::Bounds);}Ok(total)
+// Separate nonsecret code storage, never extra Document/credential capacity.
+// The shared Book parses the bounded12MiB Mac manifest; the pure planner prices
+// complete unique names and all owned copies before its indexed allocation.
+pub(super) fn history_manifest_reserve(files:&Vec<PayloadFile>)->Result<usize>{
+    inventory_storage::tree_quote(files,files.capacity(),|file|
+        (file.path.as_str(),file.path.capacity(),file.sha256.capacity()))
+        .map(|quote|quote.bytes).ok_or(AdmissionFailure::Bounds)
 }
 pub(super) fn history_prefix_insert_allowed(book:&Book,names:usize,already_present:bool)->Result<()>{
-    if book.history_nomination.is_some()&&!already_present&&names>=8192{return Err(AdmissionFailure::Bounds);}Ok(())
+    // The full file+directory bound was already checked by the pure planner.
+    if book.history_nomination.is_some()&&!already_present&&names>=crate::macos_install_record::ENTRY_LIMIT{
+        return Err(AdmissionFailure::Bounds);
+    }Ok(())
 }
 
 // One allocation, shared by actual slot and owner. Its constructor stays here
@@ -131,15 +116,17 @@ fn source_error(reason:crate::asset_commands::Reason)->BridgeError{
 }
 impl GitHubHistoryRuntimeSlots {
     pub(crate) fn working_reservation_bytes()->Option<usize>{
-        CODE_CONTROL_RESERVE.checked_add(std::mem::size_of::<Self>())?
+        inventory_storage::code_storage_bytes(std::mem::size_of::<Record>(),native::vault_filesystem::SNAPSHOT_FRAME_BYTES)?;
+        inventory_storage::CODE_CONTROL_RESERVE.checked_add(std::mem::size_of::<Self>())?
             .checked_add(HistorySources::working_reservation_bytes()?)?
             .checked_add(wire::CONFIG_LIMIT as usize)?.checked_add(wire::WIRE_COPY_RESERVE)
     }
     pub(crate) fn reserve_once(&mut self)->Result<usize>{
         if !self.never_started(){return Err(AdmissionFailure::AlreadyUsed);}
         let original=self.original_mut()?;
-        original.code.records.try_reserve_exact(8256).map_err(native_error)?;
-        if original.code.records.capacity()>8256{return Err(AdmissionFailure::Bounds);}
+        let records=crate::macos_install_record::RUNTIME_RECORD_LIMIT;
+        original.code.records.try_reserve_exact(records).map_err(native_error)?;
+        if original.code.records.capacity()>records{return Err(AdmissionFailure::Bounds);}
         Self::working_reservation_bytes().ok_or(AdmissionFailure::Bounds)
     }
     pub(crate) fn new()->Self{Self{inspection:Some(Original::new()),acquisition:None,settlement:false}}
@@ -254,13 +241,17 @@ pub(crate) fn history_installed_slot_data_checks(){
     assert!(ProviderNomination::parse(&serde_json::to_vec(&partial).unwrap(),wire::NativeProfile::Arm64).is_err());
     let stale=PayloadFile{path:"tools/gh".into(),sha256:"d".repeat(64),size:1};assert!(!nomination.matches_manifest(&stale));
     let too_large=PayloadFile{path:"tools/gh".into(),sha256:"b".repeat(64),size:wire::PROVIDER_LIMIT+1};assert!(!nomination.matches_manifest(&too_large));
-    let simple=PayloadFile{path:"core.zip".into(),sha256:"e".repeat(64),size:1};assert!(history_manifest_reserve(&[simple]).is_ok());
+    let simple=PayloadFile{path:"core.zip".into(),sha256:"e".repeat(64),size:1};assert!(history_manifest_reserve(&vec![simple]).is_ok());
     let deep=PayloadFile{path:(0..40).map(|_|"component").collect::<Vec<_>>().join("/"),sha256:"e".repeat(64),size:1};
     let repeated=(0..2048).map(|_|PayloadFile{path:deep.path.clone(),sha256:deep.sha256.clone(),size:deep.size}).collect::<Vec<_>>();
     assert!(history_manifest_reserve(&repeated).is_err());
-    let mut ordinary=Book::new();assert!(history_prefix_insert_allowed(&ordinary,8192,false).is_ok());
-    ordinary.history_nomination=Some(nomination.clone());assert!(history_prefix_insert_allowed(&ordinary,8192,false).is_err());
-    assert!(history_prefix_insert_allowed(&ordinary,8192,true).is_ok());
+    let limit=crate::macos_install_record::ENTRY_LIMIT;
+    let mut ordinary=Book::new();assert!(history_prefix_insert_allowed(&ordinary,limit,false).is_ok());
+    ordinary.history_nomination=Some(nomination.clone());assert!(history_prefix_insert_allowed(&ordinary,limit,false).is_err());
+    assert!(history_prefix_insert_allowed(&ordinary,limit-1,false).is_ok());
+    assert!(history_prefix_insert_allowed(&ordinary,limit,true).is_ok());
+    assert!(GitHubHistoryRuntimeSlots::working_reservation_bytes().is_some_and(|bytes|
+        inventory_storage::admission_bytes(0,bytes).is_some()));
     let mut sequence=raw;sequence["targets"]=serde_json::json!(["b".repeat(64),"c".repeat(64)]);
     assert!(ProviderNomination::parse(&serde_json::to_vec(&sequence).unwrap(),wire::NativeProfile::Arm64).is_err());
 }

@@ -105,7 +105,7 @@ def nomination_data(document, target, stager):
              and row["package"]["name"] == "Install.pkg" and row["descriptor"]["name"] == "producer.json"
              and row["signature"]["name"] == "producer.sig" and row["inventory"]["name"] == stager.INSTALLATION_INVENTORY_NAME
              and row["descriptor"]["bytes"] <= 16384 and row["signature"]["bytes"] <= 512
-             and row["inventory"]["bytes"] <= 1024 * 1024, "update-nomination-fixed-members")
+             and row["inventory"]["bytes"] <= stager.INVENTORY_BYTES, "update-nomination-fixed-members")
         release = stager.maintenance_release_data(row["release"], selected)
         need(release["sourceCommit"] == row["source"] and release["packageSha256"] == row["package"]["sha256"]
              and release["inventorySha256"] == row["inventory"]["sha256"], "update-nomination-release")
@@ -252,7 +252,7 @@ def reserve(op, size):
 def source_expectation(op):
     api, stager = op.update_api, op.stager
     inventory_entry, inventory = retain(op, op.directory(op.work_entry, "input", "update-current-input"),
-                                        stager.INSTALLATION_INVENTORY_NAME, 1024 * 1024)
+                                        stager.INSTALLATION_INVENTORY_NAME, stager.INVENTORY_BYTES)
     package_entry, package = retain(op, op.directory(op.work_entry, "package-final", "update-current-final"),
                                     "MobileReleaseKit.pkg", LIMIT)
     op.package_finalization_input(package_entry, package)

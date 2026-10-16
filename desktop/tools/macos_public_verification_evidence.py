@@ -1237,7 +1237,7 @@ def project_same_package(value, context):
          and all(type(row[name]) is int and row[name] == number for name, number in counts.items()))
     for name in hashes:
         hex_value(row[name])
-    integer(row["verifiedCurrentFiles"], 2048, 1)
+    integer(row["verifiedCurrentFiles"], 16384, 1)
     need(row["baselineResultSha256"] != row["resultSha256"])
     calls = value.get("originalCalls")
     need(type(calls) is list and len(calls) == 3
@@ -1417,7 +1417,7 @@ def project_app_absence_receipt(value, context, phase, raw_sha):
         app_absence_phase(row[phase], context, phase, binding, baseline)
     result.update(binding=binding, **{k: hex_value(row[k]) for k in ("preparationReceiptSha256", "baselineOwnerReceiptSha256", "imageSha256",
         "baselineSha256", "initialResultSha256", "restoreResultSha256")})
-    result.update(verifiedCurrentFiles=integer(row["verifiedCurrentFiles"], 4096, 1), retainedPrivateEvidence=True)
+    result.update(verifiedCurrentFiles=integer(row["verifiedCurrentFiles"], 16384, 1), retainedPrivateEvidence=True)
     return result
 
 

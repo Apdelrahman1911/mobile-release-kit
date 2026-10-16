@@ -2448,7 +2448,7 @@ def _installation_report(value):
         need(type(actual) is dict and set(actual) == set(target), label)
         first = actual["firstRead"]
         need(type(first) is dict and set(first) == {"verifiedFiles", "verifiedBytes"}, label)
-        need(type(first["verifiedFiles"]) is int and 1 <= first["verifiedFiles"] <= 2048
+        need(type(first["verifiedFiles"]) is int and 1 <= first["verifiedFiles"] <= 16384
              and type(first["verifiedBytes"]) is int and 1 <= first["verifiedBytes"] <= 512 * 1024 * 1024, label)
         target["firstRead"] = first
         for kind in ("start", "status"):
@@ -2461,7 +2461,7 @@ def _installation_report(value):
         if name == "matching":
             assessment = actual["status"]["assessment"]
             need(type(assessment) is dict and set(assessment) == {"files", "bytes", "assurance", "maintenance"}, label)
-            need(type(assessment["files"]) is int and 1 <= assessment["files"] <= 2048
+            need(type(assessment["files"]) is int and 1 <= assessment["files"] <= 16384
                  and type(assessment["bytes"]) is int and 1 <= assessment["bytes"] <= 512 * 1024 * 1024
                  and first["verifiedFiles"] <= assessment["files"] and first["verifiedBytes"] <= assessment["bytes"], label)
             target["status"]["assessment"].update(files=assessment["files"], bytes=assessment["bytes"])
@@ -4969,7 +4969,7 @@ class Fixtures:
             _, source_lock_sha, _ = self._recovery_read(None,
                 str(source / "desktop/macos-cpython-source-inputs" / target["sourceLock"]), self.uid, 16*1024)
             need(result["supplierSourceLockSha256"] == source_lock_sha, "recovery-fresh-source-lock")
-        _, manifest_sha, manifest_body = self._recovery_read(None, str(work / "runtime/manifest.json"), self.uid, 1024*1024)
+        _, manifest_sha, manifest_body = self._recovery_read(None, str(work / "runtime/manifest.json"), self.uid, 12*1024*1024)
         need(type(result) is dict and type(result.get("schemaVersion")) is int and result["schemaVersion"] == 1
              and result.get("release") == release["release"] and result.get("target") == self.binding.target
              and result.get("qualification") == "current-source-staged-no-native-execution"
@@ -4983,7 +4983,7 @@ class Fixtures:
              and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
              and type(manifest["protocol"]) is int and manifest["protocol"] == 1 and manifest["target"] == self.binding.target
              and manifest["protocolSha256"] == result.get("protocolSha256") and manifest["coreSha256"] == result.get("coreSha256")
-             and type(manifest["files"]) is list and 1 <= len(manifest["files"]) <= 2048
+             and type(manifest["files"]) is list and 1 <= len(manifest["files"]) <= 16384
              and manifest["inventorySha256"] == result.get("inventorySha256")
              and digest(json.dumps(manifest["files"], sort_keys=True, separators=(",", ":")).encode("ascii")) == manifest["inventorySha256"],
              "recovery-current-manifest")
@@ -5012,7 +5012,7 @@ class Fixtures:
                  and original[3] == 0 and original[2] & 0o022 == 0, "recovery-runtime-ancestor")
             self.recovery_runtime_originals.append((parent, part, current, original)); parents[str(path)] = current
         runtime = parents[str(installed)]
-        _, actual, _ = self._recovery_read(runtime, "manifest.json", 0, 1024*1024, 0o444, retain=True)
+        _, actual, _ = self._recovery_read(runtime, "manifest.json", 0, 12*1024*1024, 0o444, retain=True)
         need(actual == manifest_sha, "recovery-installed-current-manifest")
         for relative in ("core.zip", "python/bin/python3"):
             parent, _, name = relative.rpartition("/")
@@ -5208,7 +5208,7 @@ class Fixtures:
         _, _, raw = self._recovery_read(None, str(work / "runtime-result.json"), self.uid, 16384, retain=True, collect=True)
         result = json.loads(raw, object_pairs_hook=_pairs)
         _, manifest_sha, manifest_body = self._recovery_read(None, str(work / "runtime/manifest.json"), self.uid,
-                                                           1024*1024, retain=True, collect=True)
+                                                           stager.MANIFEST_BYTES, retain=True, collect=True)
         need(type(result) is dict and type(result.get("schemaVersion")) is int and result["schemaVersion"] == 1
              and result.get("release") == release.release and result.get("target") == self.binding.target
              and result.get("qualification") == "current-source-staged-no-native-execution"
@@ -5968,7 +5968,7 @@ def _gate_installation(body, status, binding, environment, stage, selection, anc
              and stage.maintenance_hex(instance, 32) and instance not in instances and row["historicalOuterExit"] == "unverified",
              "gate-installation-generation-binding")
         releases.add(release); instances.add(instance)
-        for key, limit in (("inventoryBytes", 1024 * 1024), ("descriptorBytes", stage.INSTALLATION_RECORD_LIMIT),
+        for key, limit in (("inventoryBytes", stage.INVENTORY_BYTES), ("descriptorBytes", stage.INSTALLATION_RECORD_LIMIT),
                 ("producerDescriptorBytes", stage.PRODUCER_DESCRIPTOR_BYTES), ("producerSignatureBytes", stage.PRODUCER_SIGNATURE_BYTES)):
             need(type(row[key]) is int and 0 < row[key] <= limit, "gate-installation-metadata-bound")
         declared, verified, extent = row["declaredPayloadFiles"], row["verifiedCurrentFiles"], row["declaredBytes"]

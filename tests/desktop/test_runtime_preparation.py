@@ -233,7 +233,7 @@ class RuntimePreparationTests(unittest.TestCase):
                     gh.chmod(0o755)
                     gh.write_bytes(b"")
                     gh.chmod(0o555)
-                bound, limit = (("MAX_FILES", len(preparation.CURRENT_BOOTSTRAPS) + 4) if case == "file-capacity"
+                bound, limit = (("MAC_MAX_FILES", len(preparation.CURRENT_BOOTSTRAPS) + 4) if case == "file-capacity"
                                 else ("MAX_TOTAL_BYTES", 1) if case == "byte-capacity" else
                                 ("MAX_TOTAL_BYTES", preparation.MAX_TOTAL_BYTES))
                 with self.subTest(history_provider=case), patch.object(preparation, bound, limit):
@@ -365,8 +365,24 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
         for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
                 source, runtime, component = self.fixture(Path(temporary), history=True)
+                if target == "aarch64-apple-darwin":
+                    # Actual retained/copy/POST tree above the former 2048 cap;
+                    # larger maximum row counts are checked by bounded parsers.
+                    extras=component / "lib/inert-large-roster"
+                    extras.mkdir()
+                    for index in range(2050):
+                        (extras / f"f{index:05}").write_bytes(b"inert")
+                # Reuse unchanged dependency bytes, but never the component's
+                # old first-party tooling; selected source owns the full subtree.
+                (component / "tooling/fastlane/run_lane.rb").write_bytes(b"stale dependency-component tooling")
+                (component / "tooling/obsolete.rb").write_bytes(b"not selected")
+                names=preparation._store_tooling_files(source)[0]+("fastlane/new_required.rb",)
+                (source / "src/mobile_release/tooling.py").write_text("REQUIRED_TOOLING_FILES = "+repr(names)+"\n")
+                (source / "fastlane/new_required.rb").write_bytes(b"current extra tooling")
+                selected={"tooling/"+name:(source / name).read_bytes() for name in names}
                 originals = {path.relative_to(component).as_posix(): (path.read_bytes(), preparation._state(path.stat()))
-                             for path in preparation.files(component)}
+                             for path in preparation.files(component, max_files=preparation.MAC_MAX_FILES,
+                                                          max_entries=preparation.MAC_MAX_ENTRIES)}
                 result = preparation.prepare_current(source, runtime, target, history_provider=True,
                                                       store_component=component)
                 encoded = (runtime / "manifest.json").read_bytes()
@@ -374,28 +390,35 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
                 self.assertEqual(result["qualification"], "prepared-not-native-verified")
                 rows = json.loads(encoded)["files"]
                 copied = {row["path"][6:]: row for row in rows if row["path"].startswith("store/")}
-                self.assertEqual(set(copied), set(originals))
-                for name, (body, state) in originals.items():
+                expected={name:body for name,(body,_) in originals.items() if not name.startswith("tooling/")} | selected
+                self.assertEqual(set(copied), set(expected))
+                for name, body in expected.items():
                     self.assertEqual((runtime / "store" / name).read_bytes(), body)
                     self.assertEqual(copied[name]["size"], len(body))
                     self.assertEqual(copied[name]["sha256"], hashlib.sha256(body).hexdigest())
                     self.assertEqual(stat.S_IMODE((runtime / "store" / name).stat().st_mode),
                                      0o555 if name in preparation.STORE_EXECUTABLES else 0o444)
+                for name, (body,state) in originals.items():
+                    self.assertEqual((component / name).read_bytes(),body)
                     self.assertEqual(preparation._state((component / name).stat()), state)
+                self.assertFalse((runtime / "store/tooling/obsolete.rb").exists())
                 self.assertIn("tools/gh", {row["path"] for row in rows})
                 self.assertIn("core.zip", {row["path"] for row in rows})
 
     def test_refusals_precede_output_and_keep_unknown_inputs(self):
-        for case in ("platform", "missing", "tooling", "new-core-requirement", "invalid-core-roster", "wrapper", "entry-mode", "link", "case",
+        for case in ("platform", "missing", "tooling", "changed-gemfile", "changed-lock", "missing-component-lock", "new-core-requirement", "invalid-core-roster", "wrapper", "entry-mode", "link", "case",
                      "empty-directory", "depth", "file-limit", "byte-limit", "existing-store", "overlap"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 source, runtime, component = self.fixture(Path(temporary))
                 target = "x86_64-unknown-linux-gnu" if case == "platform" else "aarch64-apple-darwin"
                 if case == "missing": (component / "ca.pem").unlink()
-                if case == "tooling": (component / "tooling/Gemfile").write_bytes(b"not current tooling")
+                if case == "tooling": (source / "Gemfile").unlink()
+                if case == "changed-gemfile": (source / "Gemfile").write_bytes(b"new dependency")
+                if case == "changed-lock": (source / "Gemfile.lock").write_bytes(b"new locked version")
+                if case == "missing-component-lock": (component / "tooling/Gemfile.lock").unlink()
                 if case == "new-core-requirement":
-                    (source / "src/mobile_release/tooling.py").write_bytes(b'REQUIRED_TOOLING_FILES = ("required-new.rb",)\n')
-                    (source / "required-new.rb").write_bytes(b"new core dependency")
+                    names=preparation._store_tooling_files(source)[0]+("required-new.rb",)
+                    (source / "src/mobile_release/tooling.py").write_text("REQUIRED_TOOLING_FILES = "+repr(names)+"\n")
                 if case == "invalid-core-roster":
                     (source / "src/mobile_release/tooling.py").write_bytes(b'REQUIRED_TOOLING_FILES = ("../outside.rb",)\n')
                 if case == "wrapper": (component / "bin/bundle").write_bytes(b"#!/usr/bin/env sh\n")
@@ -412,8 +435,8 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
                     (runtime / "store/keep").write_bytes(b"existing user data")
                 if case == "overlap": component = runtime
                 limit = (len(preparation.files(component)) + len(preparation.CURRENT_BOOTSTRAPS) + 1
-                         if case == "file-limit" else preparation.MAX_FILES)
-                with patch.object(preparation, "MAX_FILES", limit), \
+                         if case == "file-limit" else preparation.MAC_MAX_FILES)
+                with patch.object(preparation, "MAC_MAX_FILES", limit), \
                         patch.object(preparation, "MAX_TOTAL_BYTES", 1 if case == "byte-limit" else preparation.MAX_TOTAL_BYTES):
                     with self.assertRaises(preparation.PreparationError):
                         preparation.prepare_current(source, runtime, target, store_component=component)
@@ -425,7 +448,7 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
                     self.assertEqual((runtime / "store/keep").read_bytes(), b"existing user data")
 
     def test_changed_original_and_copied_bytes_cannot_receive_manifest(self):
-        for case in ("input-during-copy", "output-during-inventory", "core-roster-after-observation"):
+        for case in ("input-during-copy", "tooling-input-during-copy", "output-during-inventory", "core-roster-after-observation"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 source, runtime, component = self.fixture(Path(temporary))
                 original = preparation.read_checked
@@ -434,6 +457,9 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
                     body = original(path, limit=limit)
                     if not changed and case == "input-during-copy" and (runtime / "store").exists() and path == component / "ca.pem":
                         path.write_bytes(body + b"changed")
+                        changed.append(path)
+                    if not changed and case == "tooling-input-during-copy" and (runtime / "store").exists() and path == source / "Gemfile":
+                        path.write_bytes(body+b"changed current tooling")
                         changed.append(path)
                     if not changed and case == "output-during-inventory" and path == runtime / "store/ca.pem":
                         changed.append(path)

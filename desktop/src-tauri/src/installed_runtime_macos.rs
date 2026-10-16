@@ -19,6 +19,9 @@ use crate::{error::BridgeError, protocol::{strict_json, PROTOCOL}, runtime::{sel
 mod history_runtime;
 pub(crate) use history_runtime::{GitHubHistoryRuntimeSlots,GitHubHistoryInstalledRuntime,
     ProviderNomination as HistoryProviderNomination,SealedHistoryRequest};
+#[path = "store_runtime_macos.rs"]
+mod store_runtime;
+pub(crate) use store_runtime::{StoreRuntimeSlots, StoreRuntimeLoan};
 #[cfg(test)]
 pub(crate) use history_runtime::history_installed_slot_data_checks;
 
@@ -68,7 +71,7 @@ impl AndroidServiceIdentitySlots {
             signing:native::android_service_management::IdentityBook::new(),gate,entered:false,checked:false,closed:false }
     }
     pub(crate) fn working_reservation_bytes()->Option<usize> {
-        // InstallationSlots' unchanged16MiB complete inspector bound is the
+        // InstallationSlots' bounded128MiB complete inspector reservation is the
         // larger phase. Its actual storage is consumed before the separate
         // fixed identity book allocates its ledger/record parser. Charge the
         // simultaneous inline/control/CF cells and bounded record DATA too.
@@ -545,6 +548,7 @@ impl Drop for RemovalRequestOriginal {fn drop(&mut self){
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
 struct Book { records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
     history_nomination: Option<HistoryProviderNomination>, history_provider: Option<usize>,
+    store: Option<store_runtime::Originals>,
     #[cfg(not(feature = "macos-android-registration-helper"))]
     registration_gate: Option<crate::saved_command_owner::AndroidRegistrationWorkGate>,
     #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -586,6 +590,7 @@ fn metadata(s: &FileStat, directory: bool) -> Result<Identity> {
 impl Book {
     fn new() -> Self { Self { records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
         history_nomination: None, history_provider: None,
+        store: None,
         #[cfg(not(feature = "macos-android-registration-helper"))]
         registration_gate: None,
         #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -757,7 +762,7 @@ impl Book {
     }
     fn fd(&self, index: usize) -> Result<&OwnedFd> { self.records.get(index).and_then(|r| r.fd.as_ref()).ok_or(AdmissionFailure::Unknown) }
     fn reserve(&mut self, parent: Option<usize>, name: &str) -> Result<usize> {
-        if self.records.len() >= 8256 || self.records.iter().filter(|r| r.fd.is_some()).count() >= 48 { return Err(AdmissionFailure::Bounds); }
+        if self.records.len() >= crate::macos_install_record::RUNTIME_RECORD_LIMIT || self.records.iter().filter(|r| r.fd.is_some()).count() >= 48 { return Err(AdmissionFailure::Bounds); }
         let i = self.records.len(); self.records.push(Record { state: State::Reserved, fd: None, parent, name: name.into(), identity: None, android_flags: None }); Ok(i)
     }
     fn filesystem(&self, index: usize, identity: Identity, stopped: &mut dyn FnMut() -> bool) -> Result<()> {
@@ -866,7 +871,7 @@ impl Book {
         Ok(parent)
     }
     fn read(&self, index: usize, size: u64, collect: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<(String, Vec<u8>)> {
-        if size > 512 * 1024 * 1024 || (collect && size > 1024 * 1024) { return Err(AdmissionFailure::Bounds); }
+        if size > 512 * 1024 * 1024 || (collect && size > crate::macos_install_record::MANIFEST_LIMIT as u64) { return Err(AdmissionFailure::Bounds); }
         let fd = self.fd(index)?; native::no_xattrs(fd.as_fd()).map_err(native_error)?;
         if self.records[index].identity.is_none_or(|id| id.size < 0 || id.size as u64 != size) { return Err(AdmissionFailure::Inventory); }
         let mut hash = Sha256::new(); let mut bytes = Vec::new(); let mut count = 0u64; let mut block = [0u8; 65536];
@@ -920,13 +925,14 @@ impl Book {
                 if !runtime::safe_payload_path(&name) || name.contains('/') || inode == 0 || !local.insert(name.clone()) { return Err(AdmissionFailure::Inventory); }
                 let path = if relative.is_empty() { name.clone() } else { format!("{relative}/{name}") };
                 if path == "manifest.json" { continue; }
-                if observed.len() >= 8192 || !observed.insert(path.clone()) { return Err(AdmissionFailure::Bounds); }
+                if observed.len() >= crate::macos_install_record::ENTRY_LIMIT || !observed.insert(path.clone()) { return Err(AdmissionFailure::Bounds); }
                 let directory = directories.contains(&path);
                 if !directory && !files.contains_key(&path) { return Err(AdmissionFailure::Inventory); }
                 let index = self.open(Some(parent), &name, directory, end, stop)?;
                 let id = self.records[index].identity.ok_or(AdmissionFailure::Identity)?;
                 let history_executable=history_runtime::provider_inventory_mode(&path,files.get(&path))?;
-                if id.ino != inode || id.gid != 0 || id.mode & 0o7777 != if directory || path == "python/bin/python3" || history_executable { 0o555 } else { 0o444 } {
+                if id.ino != inode || id.gid != 0 || id.mode & 0o7777 != if directory || path == "python/bin/python3"
+                    || history_executable || crate::macos_store_runtime::executable(&path) { 0o555 } else { 0o444 } {
                     return Err(AdmissionFailure::Ownership);
                 }
                 native::no_xattrs(self.fd(index)?.as_fd()).map_err(native_error)?;
@@ -936,12 +942,14 @@ impl Book {
                     if self.read(index, expected.size, false, end, stop)?.0 != expected.sha256 { return Err(AdmissionFailure::Inventory); }
                     history_runtime::provider_observed(self,&path,index,Some(expected))?;
                 }
+                if let Some(store) = &mut self.store { store.observed(&path, index)?; }
                 // Original records survive every close. Keep the launch roots
                 // and their ancestors; other inspected payloads need no live fd
                 // because verified root ownership/ACL ancestry forbids mutation.
                 let absolute = selection.cwd.join(&path);
                 let retain = [&selection.python, &selection.core, &selection.bootstrap].iter().any(|p| p.starts_with(&absolute))
-                    || history_runtime::provider_retained(self,&path);
+                    || history_runtime::provider_retained(self,&path)
+                    || self.store.is_some() && store_runtime::retained(&path);
                 if !retain {
                     self.point(end, stop)?;
                     if !self.close(index) { self.note_acl(AdmissionFailure::Unknown, Instant::now()); return Err(AdmissionFailure::Unknown); }
@@ -1019,6 +1027,8 @@ impl Book {
     fn protected_app_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<ProtectedApp> {
         if !self.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
         let layout=installed_code_layout()?;
+        // Fixed support/seal callers retain their existing small quote. Full
+        // runtime inspection reserves its larger ledger before entering here.
         self.records.try_reserve_exact(8256).map_err(native_error)?; self.started = true;
         self.point(end, stop)?; native::real_user().map_err(native_error)?; self.point(end, stop)?;
         // A user-writable drag-copy or checkout app cannot select this runtime.
@@ -1040,6 +1050,8 @@ impl Book {
         Ok(ProtectedApp { install, entry, payload, contents })
     }
     fn inspect(&mut self, selection: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        if !self.inspection_ready(){return Err(AdmissionFailure::AlreadyUsed);}
+        self.records.try_reserve_exact(crate::macos_install_record::RUNTIME_RECORD_LIMIT).map_err(native_error)?;
         self.protected_app_once(end, stop)?;
         if selection.cwd != runtime_root() { return Err(AdmissionFailure::Inventory); }
         let root = self.chain(&selection.cwd, end, stop)?;
@@ -1052,20 +1064,24 @@ impl Book {
         let size = u64::try_from(self.records[manifest].identity.ok_or(AdmissionFailure::Identity)?.size).map_err(native_error)?;
         let (hash, bytes) = self.read(manifest, size, true, end, stop)?;
         if Some(hash.as_str()) != option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256") { return Err(AdmissionFailure::Inventory); }
-        let manifest: Manifest = serde_json::from_value(strict_json(&bytes).map_err(native_error)?).map_err(native_error)?;
+        let manifest: Manifest = serde_json::from_value(crate::protocol::strict_macos_runtime_manifest_json(&bytes).map_err(native_error)?).map_err(native_error)?;
         if manifest.schema_version != 1 || manifest.protocol != PROTOCOL || manifest.core_version != runtime::CORE_VERSION
             || !crate::macos_build_profile::MacBuildTarget::matches_compiled(&manifest.target) || manifest.protocol_sha256 != PROTOCOL_SHA
             || option_env!("MRK_BUNDLED_PROTOCOL_SHA256") != Some(PROTOCOL_SHA)
-            || manifest.files.is_empty() || manifest.files.len() > 2048
+            || manifest.files.is_empty() || manifest.files.len() > crate::macos_install_record::FILE_LIMIT
             || digest(&serde_json::to_vec(&manifest.files).map_err(native_error)?) != manifest.inventory_sha256 { return Err(AdmissionFailure::Inventory); }
         if self.history_nomination.is_some(){history_runtime::history_manifest_reserve(&manifest.files)?;}
+        let store_present = crate::macos_store_runtime::validate(manifest.files.iter()
+            .map(|file| (file.path.as_str(), file.size))).map_err(|_| AdmissionFailure::Inventory)?;
+        if self.store.is_some() && !store_present { return Err(AdmissionFailure::Inventory); }
         let mut files = BTreeMap::new(); let mut directories = BTreeSet::new(); let mut folded = BTreeSet::new(); let mut total = 0u64;
         let mut previous = String::new();
         for file in manifest.files {
             if !runtime::safe_payload_path(&file.path) || !file.path.is_ascii() || file.path == "manifest.json" || !sha(&file.sha256)
                 || file.path <= previous || file.size > 512*1024*1024 { return Err(AdmissionFailure::Inventory); }
             total = total.checked_add(file.size).ok_or(AdmissionFailure::Bounds)?;
-            if total > 1024*1024*1024 || (file.path == "core.zip" && file.sha256 != manifest.core_sha256) { return Err(AdmissionFailure::Inventory); }
+            if total > if store_present { 512*1024*1024 } else { 1024*1024*1024 }
+                || (file.path == "core.zip" && file.sha256 != manifest.core_sha256) { return Err(AdmissionFailure::Inventory); }
             previous = file.path.clone(); let mut name = file.path.as_str();
             while let Some((parent, _)) = name.rsplit_once('/') {
                 history_runtime::history_prefix_insert_allowed(self,directories.len(),directories.contains(parent))?;
@@ -1082,6 +1098,7 @@ impl Book {
         }
         let mut observed = BTreeSet::new(); self.walk(root, "", &files, &directories, &mut observed, selection, 0, end, stop)?;
         if observed.len() != files.len() + directories.len() { return Err(AdmissionFailure::Inventory); }
+        if self.store.as_ref().is_some_and(|store| !store.complete()) { return Err(AdmissionFailure::Inventory); }
         self.point(end, stop)?; self.inspected = true; Ok(())
     }
     fn prepare(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {

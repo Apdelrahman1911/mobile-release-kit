@@ -149,6 +149,17 @@ pub fn strict_json(bytes: &[u8]) -> Result<Value, BridgeError> {
     strict_json_with_limits(bytes, NODE_LIMIT, DEPTH_LIMIT)
 }
 
+// Signed Mac inventory DATA only. Seven nodes/runtime row and nine/install
+// row, including keys: 16,384 rows fit these fixed bounds. No renderer caller.
+pub(crate) fn strict_macos_runtime_manifest_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+    if bytes.len() > crate::macos_install_record::MANIFEST_LIMIT { return Err(BridgeError::protocol()); }
+    strict_json_with_limits(bytes, 120_000, 16)
+}
+pub(crate) fn strict_macos_inventory_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+    if bytes.len() > crate::macos_install_record::INVENTORY_LIMIT { return Err(BridgeError::protocol()); }
+    strict_json_with_limits(bytes, 150_000, 16)
+}
+
 // Fixed protected Android-file admission only; never an IPC/renderer policy.
 // The ordinary parser, runtime inventory and OS contract keep their old limits.
 pub(crate) fn strict_android_tool_manifest_json(bytes: &[u8]) -> Result<Value, BridgeError> {
@@ -289,6 +300,31 @@ mod tests {
         }
         assert!(strict_android_tool_manifest_json(&vec![b' '; crate::android_toolchain::MANIFEST_LIMIT + 1]).is_err());
         assert_eq!((NODE_LIMIT, DEPTH_LIMIT), (20_000, 32));
+    }
+    #[test]
+    fn macos_manifest_node_bounds_are_separate_from_ipc() {
+        for count in [8_622usize,16_384] {
+            let files: Vec<_>=(0..count).map(|i|json!({"path":format!("store/files/{i:05}"),
+                "sha256":"a".repeat(64),"size":1})).collect();
+            let runtime=serde_json::to_vec(&json!({"files":files})).unwrap();
+            assert!(strict_macos_runtime_manifest_json(&runtime).is_ok());
+            assert!(strict_json(&runtime).is_err());
+            let files: Vec<_>=(0..count).map(|i|json!({"path":format!("runtime/store/files/{i:05}"),
+                "sha256":"a".repeat(64),"size":1,"executable":false})).collect();
+            let installed=serde_json::to_vec(&json!({"files":files})).unwrap();
+            assert!(strict_macos_inventory_json(&installed).is_ok());
+            assert!(strict_json(&installed).is_err());
+        }
+        let nodes=serde_json::to_vec(&vec![Value::Null;120_000]).unwrap();
+        assert!(strict_macos_runtime_manifest_json(&nodes).is_err());
+        let nodes=serde_json::to_vec(&vec![Value::Null;150_000]).unwrap();
+        assert!(strict_macos_inventory_json(&nodes).is_err());
+        for raw in [br#"{"files":[],"files":[]}"#.as_slice(),b"NaN",b"{} {}",&[0xff]] {
+            assert!(strict_macos_runtime_manifest_json(raw).is_err());
+            assert!(strict_macos_inventory_json(raw).is_err());
+        }
+        assert!(strict_macos_inventory_json(&vec![b' ';crate::macos_install_record::INVENTORY_LIMIT+1]).is_err());
+        assert_eq!((NODE_LIMIT,DEPTH_LIMIT),(20_000,32));
     }
     #[test]
     fn thirty_third_empty_container_is_not_a_depth_thirty_two_scalar() {

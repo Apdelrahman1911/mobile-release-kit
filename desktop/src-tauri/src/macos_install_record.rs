@@ -4,14 +4,34 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use crate::{macos_install_maintenance::ReleaseData, macos_install_paths as paths,
-    protocol::strict_json, runtime::safe_payload_path};
+    protocol::{strict_json, strict_macos_inventory_json}, runtime::safe_payload_path};
 
 pub const INVENTORY_NAME: &str = "install-inventory.json";
 pub const RECORD_NAME: &str = "installation-v1.json";
-pub const INVENTORY_LIMIT: usize = 1024 * 1024;
+// Measured bundled Store runtime has 6,587 files before CPython/app resources.
+// These are Mac payload/metadata budgets, never IPC or non-Mac limits.
+pub const INVENTORY_LIMIT: usize = 12 * 1024 * 1024;
+pub const MANIFEST_LIMIT: usize = 12 * 1024 * 1024;
+pub const ENTRY_LIMIT: usize = 32_768;
+pub const RUNTIME_RECORD_LIMIT: usize = ENTRY_LIMIT + 64;
+pub const ORIGINAL_LIMIT: usize = 196_608;
+pub const CONTROL_LIMIT: usize = 128 * 1024 * 1024;
+/// Nonsecret installed-control peaks. Counts are fixed by trusted callers:
+/// one setup/inspection, two maintenance preparations, three including removal.
+/// Preserve the original 64MiB total minus its 16MiB per-inspector partitions.
+/// This does not enlarge Document/credential quotas or omit retained originals.
+pub(crate) fn installed_control_peak(inspectors: usize) -> Option<usize> {
+    if !(1..=3).contains(&inspectors) { return None; }
+    let backing=(64usize*1024*1024).checked_sub(inspectors.checked_mul(16*1024*1024)?)?;
+    backing.checked_add(inspectors.checked_mul(CONTROL_LIMIT)?)
+}
+pub(crate) fn installed_control_fits(total: usize, inspectors: usize) -> bool {
+    installed_control_peak(inspectors).is_some_and(|peak| total<=peak
+        && inspectors.checked_mul(CONTROL_LIMIT).is_some_and(|control|total>=control))
+}
 pub const RECORD_LIMIT: usize = 8192;
 pub const PAYLOAD_LIMIT: u64 = 512 * 1024 * 1024;
-pub const FILE_LIMIT: usize = 2048;
+pub const FILE_LIMIT: usize = 16_384;
 pub const ENTRY_BINARY: &str = paths::ENTRY_INVENTORY_PATH;
 pub const APP_BINARY: &str = paths::PAYLOAD_INVENTORY_PATH;
 pub const VAULT_HELPER: &str = paths::VAULT_HELPER_INVENTORY_PATH;
@@ -83,7 +103,7 @@ impl Inventory {
         check(!bytes.is_empty() && bytes.len() <= INVENTORY_LIMIT, "inventory-size")?;
         check(!release.is_empty() && release.len() <= 128 && release != "." && release != ".."
             && release.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b)), "inventory-expected-release")?;
-        let value = strict_json(bytes).map_err(|_| "inventory-json")?;
+        let value = strict_macos_inventory_json(bytes).map_err(|_| "inventory-json")?;
         check(value.is_object() && value.get("files").and_then(serde_json::Value::as_array)
             .is_some_and(|items| items.iter().all(serde_json::Value::is_object)), "inventory-shape")?;
         let inventory: Self = serde_json::from_value(value)
@@ -102,10 +122,11 @@ impl Inventory {
                 && item.path.split('/').count() <= 17
                 && (item.path.starts_with("app/Contents/") || item.path.starts_with("runtime/"))
                 && item.path.as_str() > previous && hex(&item.sha256, 64), "inventory-path")?;
-            check(item.executable == matches!(item.path.as_str(),
+            check(item.executable == (matches!(item.path.as_str(),
                 ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | REMOVER | DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"
                 | paths::HISTORY_PROVIDER_INVENTORY_PATH | paths::GITHUB_SEAL_INVENTORY_PATH
-                | crate::macos_applications_launcher::EXECUTABLE),
+                | crate::macos_applications_launcher::EXECUTABLE)
+                || item.path.strip_prefix("runtime/").is_some_and(crate::macos_store_runtime::executable)),
                 "inventory-executable-scope")?;
             total = total.checked_add(item.size).ok_or("inventory-bound")?;
             check(total <= PAYLOAD_LIMIT, "inventory-bound")?;
@@ -113,7 +134,7 @@ impl Inventory {
             let mut path = item.path.as_str();
             while let Some((parent, _)) = path.rsplit_once('/') { directories.insert(parent.to_owned()); path = parent; }
         }
-        check(directories.len() <= FILE_LIMIT && files.contains_key(ENTRY_BINARY) && files.contains_key(APP_BINARY)
+        check(files.len().checked_add(directories.len()).is_some_and(|n|n<=ENTRY_LIMIT) && files.contains_key(ENTRY_BINARY) && files.contains_key(APP_BINARY)
             && files.contains_key("app/Contents/Info.plist") && files.contains_key(paths::PAYLOAD_INFO_INVENTORY_PATH)
             && files.contains_key(VAULT_HELPER)
             && files.contains_key("runtime/python/bin/python3")
@@ -131,6 +152,8 @@ impl Inventory {
         }
         let index = InventoryIndex { files, directories, payload_bytes: total };
         crate::macos_applications_launcher::LauncherInventory::from_index(&index)?;
+        crate::macos_store_runtime::validate(index.files.values().filter_map(|file|
+            file.path.strip_prefix("runtime/").map(|path| (path, file.size))))?;
         Ok(index)
     }
 }
@@ -296,6 +319,39 @@ impl Progress {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn installed_control_reservations_keep_original_document_backing() {
+        for (count,mib) in [(1,176),(2,288),(3,400)] {
+            let peak=installed_control_peak(count).unwrap();
+            assert_eq!(peak,mib*1024*1024);
+            assert!(installed_control_fits(peak-1,count));
+            assert!(installed_control_fits(peak,count));
+            assert!(!installed_control_fits(peak+1,count));
+            assert!(!installed_control_fits(CONTROL_LIMIT*count-1,count));
+            assert!(!installed_control_fits(usize::MAX,count));
+            assert_eq!(peak-CONTROL_LIMIT*count,(64-16*count)*1024*1024);
+        }
+        assert!(installed_control_peak(0).is_none());
+        assert!(installed_control_peak(4).is_none());
+        assert!(installed_control_peak(usize::MAX).is_none());
+    }
+    #[test]
+    fn measured_store_inventory_and_total_file_boundary() {
+        let manifest="c".repeat(64);
+        for count in [8_622usize,FILE_LIMIT-3,FILE_LIMIT-2] {
+            let rows:Vec<_>=(0..count).map(|i|json!({"path":format!("runtime/files/{i:05}"),
+                "sha256":"a".repeat(64),"size":1,"executable":false})).collect();
+            let bytes=serde_json::to_vec(&json!({"schemaVersion":1,"release":paths::RELEASE,
+                "runtimeManifestSha256":manifest,"files":rows})).unwrap();
+            assert_eq!(Inventory::parse(&bytes,&manifest).is_ok(),count<=FILE_LIMIT-3);
+        }
+        // Filename/case/required-role checks still belong to index(), not the
+        // larger bounded JSON parser. No malformed inventory gains authority.
+        let mut value:serde_json::Value=serde_json::from_slice(&inventory()).unwrap();
+        value["files"][0]["path"]=json!("runtime/../outside");
+        let bytes=serde_json::to_vec(&value).unwrap();
+        assert!(Inventory::parse(&bytes,&manifest).unwrap().index().is_err());
+    }
     fn inventory() -> Vec<u8> {
         let mut paths = [ENTRY_BINARY, APP_BINARY, VAULT_HELPER, "app/Contents/Info.plist",
             paths::PAYLOAD_INFO_INVENTORY_PATH, "runtime/manifest.json", "runtime/python/bin/python3"];

@@ -1874,8 +1874,8 @@ class SavedVersionFixture:
         names = {"runtime", module.INSTALLATION_INVENTORY_NAME, module.INSTALLATION_RECORD_NAME}
         _, _, release_fd = self.runtime_stack.enter_context(module.installation_metadata_directory(module.INSTALL_ROOT, names, selection=selection))
         runtime_fd, _ = self.runtime_stack.enter_context(module.maintenance_directory(release_fd, "runtime", 0o555))
-        inventory = self._installed_runtime_leaf(release_fd, module.INSTALLATION_INVENTORY_NAME, 1024 * 1024)
-        manifest = self._installed_runtime_leaf(runtime_fd, "manifest.json", 1024 * 1024)
+        inventory = self._installed_runtime_leaf(release_fd, module.INSTALLATION_INVENTORY_NAME, module.INVENTORY_BYTES)
+        manifest = self._installed_runtime_leaf(runtime_fd, "manifest.json", module.MANIFEST_BYTES)
         core = self._installed_runtime_leaf(runtime_fd, "core.zip", module.CURRENT_CORE_BYTES + module.MAX_FILES * 2048)
         bootstraps = {name:self._installed_runtime_leaf(runtime_fd, name, 1024 * 1024)
                       for name in sorted(set(SAVED_VERSION_BOOTSTRAPS) | {"github-ca.pem"})}
@@ -2824,7 +2824,7 @@ class CredentialUpdateInputs:
         self.expected_current = self.read(self.case / "expected-current-producer.json", 16384, modes=(0o444,))
         need(sha(self.expected_current) == baseline["expectedCurrentDescriptorSha256"], "update-credential-expected-current-descriptor")
         for key, name, limit in (("descriptor", "producer.json", 16384), ("signature", "producer.sig", 512),
-                                  ("inventory", "input/" + self.stager.INSTALLATION_INVENTORY_NAME, 1024 * 1024)):
+                                  ("inventory", "input/" + self.stager.INSTALLATION_INVENTORY_NAME, self.stager.INVENTORY_BYTES)):
             body = self.read(self.case / name, limit, modes=(0o444,))
             need((len(body), sha(body)) == (self.selected[key]["bytes"], self.selected[key]["sha256"]),
                  "update-credential-original-predecessor-member")
@@ -2887,7 +2887,7 @@ class CredentialUpdateInputs:
             request_id = distribution["requestId"]
             self.status(self.work / "installer-output.status")
             options = {"expected_update_previous": self.baseline["readback"]}
-        inventory_body = self.read(input_path / self.stager.INSTALLATION_INVENTORY_NAME, 1024 * 1024, modes=(0o444,))
+        inventory_body = self.read(input_path / self.stager.INSTALLATION_INVENTORY_NAME, self.stager.INVENTORY_BYTES, modes=(0o444,))
         selection = self.stager.BuildSelection(target, release["packageVersion"], release["release"])
         inventory = self.stager.observation_inventory_bytes(inventory_body, release["inventorySha256"], release["runtimeManifestSha256"], selection=selection)
         helper = inventory["app/" + self.stager.VAULT_HELPER]
@@ -4800,8 +4800,8 @@ class EngineeringInputs:
                  and result.get("pythonVersion") == "3.14.7" and result.get("gil") is True
                  and not any(key in result for key in ("signedRuntimeBindingSha256", "signedPythonSha256", "signingReceiptSha256")),
                  "engineering-fresh-current-runtime")
-            manifest_body, _, self.runtime_manifest_digest = self.read(self.work / "runtime/manifest.json", 1024 * 1024)
-            manifest = engineering_document(manifest_body, 1024 * 1024)
+            manifest_body, _, self.runtime_manifest_digest = self.read(self.work / "runtime/manifest.json", 12 * 1024 * 1024)
+            manifest = engineering_document(manifest_body, 12 * 1024 * 1024)
             need(set(manifest) == {"schemaVersion", "protocol", "coreVersion", "target", "coreSha256", "protocolSha256", "inventorySha256", "files"}
                  and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
                  and type(manifest["protocol"]) is int and manifest["protocol"] == 1 and manifest["target"] == ARM_TARGET
@@ -4809,7 +4809,7 @@ class EngineeringInputs:
                  and all(manifest[key] == result.get(key) for key in ("inventorySha256", "coreSha256", "protocolSha256")),
                  "engineering-runtime-manifest")
             rows = manifest["files"]
-            need(type(rows) is list and 0 < len(rows) <= 2048, "engineering-runtime-roster-bound")
+            need(type(rows) is list and 0 < len(rows) <= 16384, "engineering-runtime-roster-bound")
             expected_files = {}
             for row in rows:
                 need(type(row) is dict and set(row) == {"path", "sha256", "size"}
@@ -4855,13 +4855,13 @@ class EngineeringInputs:
             self.phase.clock.check()
             identity = full9(os.fstat(fd))
             need(depth <= 24 and identity[3] == os.getuid() and identity[4] == os.getgid()
-                 and stat.S_IMODE(identity[2]) == 0o555 and len(files) + len(directories) < 4096, "engineering-readonly-directory")
+                 and stat.S_IMODE(identity[2]) == 0o555 and len(files) + len(directories) < (32768 if runtime else 4096), "engineering-readonly-directory")
             directories[prefix] = decimal(identity)
             with os.scandir(fd) as entries:
                 names = []
                 for entry in entries:
                     names.append(entry.name)
-                    need(len(names) <= 2048 and len(names) + len(files) + len(directories) <= 4096, "engineering-tree-count")
+                    need(len(names) <= (16384 if runtime else 2048) and len(names) + len(files) + len(directories) <= (32768 if runtime else 4096), "engineering-tree-count")
             for name in sorted(names):
                 need(name not in ("", ".", "..") and "/" not in name, "engineering-tree-component")
                 relative = name if not prefix else prefix + "/" + name

@@ -9,8 +9,8 @@ use crate::{installation::{CheckReason as Problem, Matching},
         GenerationData, IntentData, StateData}};
 use std::mem::size_of;
 type InspectResult<T> = std::result::Result<T, Problem>;
-pub(crate) const CONTROL_RESERVE: usize = 16 * 1024 * 1024;
-const RECORDS: usize = 8256;
+pub(crate) const CONTROL_RESERVE: usize = data::CONTROL_LIMIT;
+const RECORDS: usize = data::RUNTIME_RECORD_LIMIT;
 const NATIVE_FRAME_LIMIT: usize = 16384;
 
 // Descriptive visible namespace only. No contents of root's0700 archives are
@@ -1219,13 +1219,13 @@ fn immediate_child(parent: &str, path: &str) -> bool {
 }
 
 // Conservative complete backing bound: existing strict JSON is node/depth
-// bounded while parsing, and only <=1MiB DATA is collected. The parser arena is
-// gone before the indexed walk. Reserve 4MiB for its transient nodes/control,
-// native frame <=16KiB, Book's entire8256-cell ledger, bounded recursion/blocks,
+// bounded while parsing, and only <=12MiB DATA is collected. The parser arena is
+// gone before the indexed walk. Reserve 32MiB for its <=150k transient nodes/control,
+// native frame <=16KiB, Book's entire bounded ledger, bounded recursion/blocks,
 // copied/indexed String backing, directory/observed nodes and streamed rosters.
 // Exact current capacities are checked too; opaque live SDK memory is Unknown.
 fn control_bound(descriptor: &Vec<u8>, raw: &Vec<u8>, inventory: &Inventory, index: &InventoryIndex<'_>, native_bytes: usize) -> Option<usize> {
-    let mut bytes = (4usize * 1024 * 1024).checked_add(NATIVE_FRAME_LIMIT)?
+    let mut bytes = (32usize * 1024 * 1024).checked_add(NATIVE_FRAME_LIMIT)?
         .checked_add(17usize.checked_mul(65536)?)? // Bounded retained walk frames.
         .checked_add(128 * 1024)? // Read block, fixed rosters and control/signal DATA.
         .checked_add(RECORDS.checked_mul(size_of::<Record>())?)?

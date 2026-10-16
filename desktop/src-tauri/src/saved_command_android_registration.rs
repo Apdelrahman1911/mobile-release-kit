@@ -1539,7 +1539,13 @@ impl SavedCommandOwner {
 /// census, including an old full Review AND its retained closed-source original.
 fn operation_admission_bytes(previous:usize,data:&wire::Operation,review_id:&String,instance:&String,
     control:&Control,phase_storage:usize)->Option<usize>{
-    bounded_operation_sum(previous,operation_allocation_bytes(data,review_id,instance,control,phase_storage)?)
+    let added=operation_allocation_bytes(data,review_id,instance,control,phase_storage)?;
+    if data.kind==wire::Kind::Registration {
+        // Registration's native Preparation includes one complete installation
+        // inspector. Pure source Inspection retains the original64MiB limit.
+        if phase_storage<crate::macos_install_record::CONTROL_LIMIT{return None;}
+        previous.checked_add(added).filter(|bytes|crate::macos_install_record::installed_control_fits(*bytes,1))
+    }else{bounded_operation_sum(previous,added)}
 }
 fn operation_allocation_bytes(data:&wire::Operation,review_id:&String,instance:&String,
     control:&Control,phase_storage:usize)->Option<usize>{
@@ -1792,9 +1798,10 @@ mod catalogue_budget_tests {
         eprintln!("catalogue_budget register client={} preparation={} settled={} phase={} tasks={} task_reserved={}",
             client.client,client.preparation,client.settled,client.phase,client.tasks,client.task_reserved);
         for (name,previous,control,checked,review,phase,added,tasks,total) in cases{
+            let limit=if name=="register_retained_review"{crate::macos_install_record::installed_control_peak(1).unwrap()}else{OWNED_LIMIT};
             eprintln!("catalogue_budget case={} previous={} control_slot={} checked={} retained_review={} phase={} new_owner={} final_tasks={} total={} limit={} headroom={} over={}",
-                name,previous,control,checked,review,phase,added.checked_sub(phase).unwrap(),tasks,total,OWNED_LIMIT,
-                OWNED_LIMIT.saturating_sub(total),total.saturating_sub(OWNED_LIMIT));
+                name,previous,control,checked,review,phase,added.checked_sub(phase).unwrap(),tasks,total,limit,
+                limit.saturating_sub(total),total.saturating_sub(limit));
         }
 
         assert_eq!(inspection_source,reproof_source);
@@ -1809,8 +1816,9 @@ mod catalogue_budget_tests {
             operation_admission_bytes(register_previous,&register_data,&old_review_id,&old_instance,&register_control,client.phase),
         ];
         for ((name,_,_,_,_,_,_,_,total),admitted) in cases.into_iter().zip(admitted){
-            assert_eq!(admitted,(total<=OWNED_LIMIT).then_some(total),"{name}: actual production capped expression");
-            assert!(total<=OWNED_LIMIT,"{name}: genuine catalogue exceeds unchanged whole-owner cap");
+            let fits=if name=="register_retained_review"{crate::macos_install_record::installed_control_fits(total,1)}else{total<=OWNED_LIMIT};
+            assert_eq!(admitted,fits.then_some(total),"{name}: actual production capped expression");
+            assert!(fits,"{name}: genuine catalogue exceeds its fixed native/document partitions");
         }
         // Only the missing inspection final-addition boundaries; existing
         // base-operation, A-C phase/shape/parser regressions stay unchanged.
@@ -1860,6 +1868,14 @@ mod lifecycle_book_tests {
         assert_eq!(operation_admission_bytes(OWNED_LIMIT - added, &data, &review_id, &instance, &control, 53), Some(OWNED_LIMIT));
         assert_eq!(operation_admission_bytes(OWNED_LIMIT - added + 1, &data, &review_id, &instance, &control, 53), None);
         assert_eq!(operation_admission_bytes(27, &data, &review_id, &instance, &control, usize::MAX), None);
+        let registration=wire::Operation{kind:wire::Kind::Registration,..data};
+        let phase=crate::macos_install_record::CONTROL_LIMIT;
+        let added=operation_allocation_bytes(&registration,&review_id,&instance,&control,phase).unwrap();
+        let peak=crate::macos_install_record::installed_control_peak(1).unwrap();
+        for (prior,expected) in [(peak-added-1,Some(peak-1)),(peak-added,Some(peak)),(peak-added+1,None),(usize::MAX,None)]{
+            assert_eq!(operation_admission_bytes(prior,&registration,&review_id,&instance,&control,phase),expected);
+        }
+        assert_eq!(operation_admission_bytes(0,&registration,&review_id,&instance,&control,phase-1),None);
     }
 
     pub(super) fn control_at(admitted:Instant)->(Arc<ControlSlot>,Arc<Control>,AdmissionCohort,WorkGate) {

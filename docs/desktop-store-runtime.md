@@ -1,8 +1,10 @@
 # Bundled macOS Store runtime component
 
 This component builds the repository's Ruby **3.3.12**, Bundler **4.0.16**,
-Fastlane **2.235.0** and exact `Gemfile.lock` dependencies. It is not yet consumed
-by the Desktop application, and does not enable direct Store mutations.
+Fastlane **2.235.0** and exact `Gemfile.lock` dependencies. Current macOS runtime
+composition and installed-book loans support this optional component; a shipped
+application consuming it is not yet verified. It does not authorize direct Store
+mutations.
 
 ## Publisher build inputs
 
@@ -79,22 +81,26 @@ refusal boundaries without compiling or executing any native payload.
 
 ## Remaining integration and distribution work
 
-1. Native builds/relocation on both architectures, a credential-free TLS test,
-   full dependency/license audit and any genuine native-extension failures.
-   Ruby/OpenSSL/LibYAML notices and installed gem license files are retained;
-   generated gem-license metadata alone is **not** redistribution approval.
-2. `prepare_runtime.py`, installed stager and Rust runtime custody currently
-   admit Python/core and the fixed GitHub provider, not this component. Measure
-   the combined bytes and file count first. The existing 2,048-file manifest
-   likely cannot hold an unpacked 99-gem tree. No limits are raised here; do not
-   bypass the combined 512 MiB installed-package bound.
-3. Integrate a reviewed component layout into the existing manifest and signing
-   path; nested executables/extensions must receive genuine native signature
-   verification, Developer ID signing, notarization and installed readback.
+1. Retain and reconcile native component results and complete the remaining
+   dependency/license review and credential-free live TLS verification. Component
+   assembly and all four pre/post-relocation smokes passed on ARM in run
+   `38844616192` (job `116792194190`); Intel smoke success was also reported,
+   with final artifact reconciliation still separate. These tests are not Store
+   access or packaged-app evidence. Retained license metadata is not by itself
+   redistribution approval.
+2. Verify the combined current macOS payload against the measured bounds below.
+   Preparation, stager Store image roles, and the app's same-original runtime
+   loan are implemented; full current-source staging and actual installed
+   consumption remain integration/native-verification work. Linux/Windows and
+   historical supplier limits are not widened.
+3. Finish the manifest/signing path: every nested executable and extension must
+   receive genuine native verification, Developer ID signing, notarization and
+   installed readback. The combined 512 MiB payload ceiling is unchanged.
 4. Bind `stores._runtime_environment`/`_require_fastlane_bundle` to the admitted
    immutable component with clean explicit PATH/GEM/BUNDLE/CA configuration.
-   Preserve the current CI guard and native-process ownership contracts. A
-   locally built runtime or parsed local draft cannot authorize Store access.
+   Preserve the CI guard and native-process ownership contracts. A locally
+   built runtime, credential selection, or parsed draft cannot authorize Store
+   access.
 
 ## Authoritative implementation references
 
@@ -176,14 +182,15 @@ and binds copied bytes into the existing runtime manifest. Only `bin/ruby` and
 the fixed `/bin/sh` `bin/bundle` wrapper receive executable modes; other installed
 gem binstubs are resources, not additional executable roles.
 
-The existing 2,048-file, portable-path and combined 512-MiB package limits remain.
-A component that cannot fit is refused, not silently trimmed. Actual component
-counts must be assessed before enabling a shipping profile. This DATA
+Current macOS composition uses the measured 16,384-file / 32,768-entry limits
+below, with portable paths and the unchanged combined 512-MiB payload ceiling.
+A component that cannot fit is refused, not silently trimmed. This DATA
 composition is **not** a native architecture/signature check or a Store grant:
 final signing must cover every Mach-O, update the manifest to the final signed
-bytes, and retain the full signed inventory. Stager/installed-book Store roles,
-live runtime loans, clean core runtime-context integration and local mutation
-authority are still separate unfinished work.
+bytes, and retain the full signed inventory. Stager/installed-book Store roles
+and live runtime loans are implemented but need installed native qualification;
+clean core runtime-context integration and local mutation authority remain
+separate unfinished work.
 
 The first ARM and Intel component run (`38837216127`, source `9a4bbe69`) compiled Ruby and
 its native dependencies, then RubyGems refused to overwrite Ruby's existing
@@ -192,3 +199,38 @@ The corrected bootstrap uses RubyGems' documented `--bindir` to place the
 locked gem's generated launchers in fresh build-only scratch. The builder still
 invokes the exact Bundler 4.0.16 `exe/bundle` and installs its own relocatable
 wrapper; it does not use `--force`, replace global tools or relax checksums.
+
+
+### Measured macOS composition bounds
+
+The complete relocated ARM Store component contains 6,588 files and 1,273
+directories (109,752,638 bytes, 187 native images, longest relative path 162
+characters). The prior 2,048-file package cap could not contain it plus CPython. Current macOS composition therefore admits at most 16,384 files and
+32,768 total entries, still within the unchanged 512 MiB payload bound. The
+historical CPython supplier and Linux/Windows preparation retain their previous
+caps. All paths, modes, digests, signed inventory and original-file checks remain.
+
+Mac runtime and installed-inventory JSON have scoped 12 MiB byte limits and
+120,000 / 150,000 node ceilings; ordinary IPC remains 20,000 nodes. The app's
+installed-file ledger is at most 32,832 records. The privileged installer retains
+at most 196,608 lifetime original records, with actual allocation/name/history
+costs checked against 128 MiB of installed-control memory and the same 96 live
+FD ceiling. Large mixed histories may still be refused; these are caps, not a
+claim that every maximal history fits. The read-only app installation check keeps
+the existing 48 MiB document backing and separately reserves up to 128 MiB of
+installed control (176 MiB peak); general session/credential quotas are unchanged.
+Native consumption, signed packaged output and real installation still require
+Mac verification. The Ruby bundle setup shim is ordinary non-executable DATA.
+
+
+Dependency component reuse does not reuse its first-party tooling. Composition
+omits the complete artifact `tooling/` subtree, then copies exactly the selected
+core's `REQUIRED_TOOLING_FILES` from checked source originals into the fresh
+runtime. Old extra tooling is not merged; the artifact itself is unchanged.
+Missing or changed current tooling refuses composition. The resulting full
+manifest and final Mac signatures cover both dependency bytes and current tools.
+
+The selected `Gemfile` and `Gemfile.lock` must still match the component's actual
+dependency inputs (size and SHA-256), because those inputs determined the
+installed gemset. Changing either requires gem reassembly from the retained
+native base; changing only the first-party Ruby/helper tooling does not.

@@ -28,6 +28,9 @@ TARGETS = frozenset({
 # independent 20,000-node limit without weakening that parser.
 MAX_FILES = 2048
 MAX_ENTRIES = 8192
+MAC_MAX_FILES = 16384
+MAC_MAX_ENTRIES = 32768
+MAC_MANIFEST_BYTES = 12 * 1024 * 1024
 MAX_PATH_PARTS = 16
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
@@ -47,7 +50,7 @@ GITHUB_CA_NAME = "github-ca.pem"
 MAX_GITHUB_CA_BYTES = 512 * 1024
 STORE_EXECUTABLES = frozenset({"bin/ruby", "bin/bundle"})
 STORE_REQUIRED_FILES = frozenset({
-    *STORE_EXECUTABLES, "ca.pem", "lib/ruby/gems/3.3.0/gems/bundler-4.0.16/exe/bundle",
+    *STORE_EXECUTABLES, "bin/mrk_bundle_setup.rb", "ca.pem", "lib/ruby/gems/3.3.0/gems/bundler-4.0.16/exe/bundle",
     "bundle/ruby/3.3.0/gems/fastlane-2.235.0/lib/fastlane.rb",
     "licenses/Ruby-COPYING", "licenses/Ruby-BSDL", "licenses/Ruby-LEGAL",
     "licenses/OpenSSL-LICENSE.txt", "licenses/LibYAML-License", "licenses/locked-gem-licenses.txt",
@@ -98,7 +101,9 @@ def _root(path: Path) -> Path:
     return path
 
 
-def files(root: Path, *, reserve_entries: int = 0) -> list[Path]:
+def files(root: Path, *, reserve_entries: int = 0, max_files: int | None = None, max_entries: int | None = None) -> list[Path]:
+    max_files = MAX_FILES if max_files is None else max_files
+    max_entries = MAX_ENTRIES if max_entries is None else max_entries
     result: list[Path] = []
     seen: set[str] = set()
     directories: set[Path] = set()
@@ -111,7 +116,7 @@ def files(root: Path, *, reserve_entries: int = 0) -> list[Path]:
         with os.scandir(parent) as children:
             for child in children:
                 entries += 1
-                if entries + reserve_entries > MAX_ENTRIES or not _safe_name(child.name):
+                if entries + reserve_entries > max_entries or not _safe_name(child.name):
                     raise PreparationError("Payload inventory limit or unsafe name")
                 path = parent / child.name
                 relative = path.relative_to(root).as_posix()
@@ -127,7 +132,7 @@ def files(root: Path, *, reserve_entries: int = 0) -> list[Path]:
                 else:
                     _ordinary(path)
                     result.append(path)
-                    if len(result) > MAX_FILES:
+                    if len(result) > max_files:
                         raise PreparationError("Payload file count exceeded")
     # The runtime inventory authorizes only file ancestors, never extra empty
     # directories. Reject rather than silently removing publisher inputs.
@@ -195,10 +200,10 @@ def prepare_current(source: Path, runtime: Path, target: str, *, history_provide
                     store_component=store_component)
 
 
-def _store_tooling_files(source: Path) -> tuple[tuple[str, ...], bytes]:
-    # The selected core, not a cached module from the preparer's checkout,
-    # defines this literal DATA roster. Do not execute supplier/project Python.
-    body = read_checked(source / "src/mobile_release/tooling.py", limit=MAX_CORE_BYTES)
+def _store_tooling_names(body: bytes) -> tuple[str, ...]:
+    """Pure roster for captured selected-core DATA; no imported core or IO."""
+    if type(body) is not bytes or not body or len(body)>MAX_CORE_BYTES:
+        raise PreparationError("Selected core tooling source is unbounded")
     try:
         assignments = [node.value for node in ast.parse(body).body if isinstance(node, ast.Assign)
                        and any(isinstance(target, ast.Name) and target.id == "REQUIRED_TOOLING_FILES"
@@ -213,7 +218,12 @@ def _store_tooling_files(source: Path) -> tuple[tuple[str, ...], bytes]:
                    or not all(_safe_name(part) for part in name.split("/")) for name in names)
             or len({name.lower() for name in names}) != len(names)):
         raise PreparationError("Selected core tooling roster has invalid or duplicate paths")
-    return names, body
+    return names
+
+
+def _store_tooling_files(source: Path) -> tuple[tuple[str, ...], bytes]:
+    body=read_checked(source / "src/mobile_release/tooling.py",limit=MAX_CORE_BYTES)
+    return _store_tooling_names(body),body
 
 
 def _store_inputs(component: Path, source: Path, runtime: Path):
@@ -226,12 +236,15 @@ def _store_inputs(component: Path, source: Path, runtime: Path):
     component = _root(component)
     if component == runtime or component in runtime.parents or runtime in component.parents:
         raise PreparationError("Store component and runtime output must not overlap")
-    paths = files(component)
+    paths = files(component, max_files=MAC_MAX_FILES, max_entries=MAC_MAX_ENTRIES)
     tooling_files, tooling_source = _store_tooling_files(source)
-    required = STORE_REQUIRED_FILES | {"tooling/" + name for name in tooling_files}
+    required = STORE_REQUIRED_FILES
     relative = {path.relative_to(component).as_posix() for path in paths}
-    if not required <= relative:
-        raise PreparationError("Store component lacks required runtime, tooling or notices")
+    if not required <= relative or "tooling" in relative:
+        raise PreparationError("Store component lacks runtime/notices or conflicts with tooling")
+    if not {"Gemfile","Gemfile.lock","fastlane/Fastfile","fastlane/run_lane.rb",
+            "fastlane/native_process_spawn.rb"} <= set(tooling_files):
+        raise PreparationError("Selected core lacks required Store entry tooling")
     directories = {component, *(parent for path in paths for parent in path.parents
                                 if parent == component or component in parent.parents)}
     original_directories = {path: _state(_ordinary(path, directory=True)) for path in directories}
@@ -251,43 +264,120 @@ def _store_inputs(component: Path, source: Path, runtime: Path):
             raise PreparationError("Store entry must be an executable component input")
         if name == "bin/bundle" and not body.startswith(b"#!/bin/sh\n"):
             raise PreparationError("Store wrapper requires the fixed system shell, not ambient lookup")
-        tooling_name = name.removeprefix("tooling/")
-        if name.startswith("tooling/") and tooling_name in tooling_files:
-            if body != read_checked(source / tooling_name, limit=MAX_FILE_BYTES):
-                raise PreparationError("Store tooling does not match the selected first-party source")
         rows.append((name, state, digest(body), len(body)))
     _store_post(component, rows, original_directories)
-    return component, rows, original_directories, total, tooling_source
+    # Dependency artifacts may carry older tooling. Never merge that subtree:
+    # the current selected core supplies the entire new tooling namespace.
+    tooling_rows=[];tooling_directories={}
+    component_digests={name:(sha,size) for name,_,sha,size in rows}
+    output_total=sum(size for name,_,_,size in rows if not name.startswith("tooling/"))
+    for name in sorted(tooling_files):
+        path=source / name
+        try:
+            _root(path.parent)
+            for parent in path.parents:
+                if parent==source or source in parent.parents:
+                    tooling_directories.setdefault(parent,_state(_ordinary(parent,directory=True)))
+            state=_state(_ordinary(path))
+            body=read_checked(path,limit=min(MAX_FILE_BYTES,512*1024*1024-output_total))
+        except FileNotFoundError as error:
+            raise PreparationError("A required selected Store tooling input is missing") from error
+        if not body:raise PreparationError("Selected Store tooling is empty")
+        sha=digest(body)
+        # Installed gems came from these actual dependency inputs, not merely
+        # the same Ruby version. Source-only tooling edits can reuse the gemset;
+        # changed dependency inputs require reassembly from the native base.
+        if (name in {"Gemfile","Gemfile.lock"}
+                and component_digests.get("tooling/"+name)!=(sha,len(body))):
+            raise PreparationError("Store dependency inputs changed; reassemble the locked gems")
+        output_total+=len(body)
+        tooling_rows.append(("tooling/"+name,state,sha,len(body)))
+    # [0:5] preserve dependency observations; [5:8] are current source originals.
+    observed=(component,tuple(rows),original_directories,output_total,tooling_source,
+              source,tuple(tooling_rows),tooling_directories)
+    _store_tooling_post(observed)
+    return observed
 
 
 def _store_post(component, rows, directories):
-    if ([path.relative_to(component).as_posix() for path in files(component)] != [row[0] for row in rows]
+    if ([path.relative_to(component).as_posix() for path in files(component, max_files=MAC_MAX_FILES, max_entries=MAC_MAX_ENTRIES)] != [row[0] for row in rows]
             or any(_state(_ordinary(path, directory=True)) != state for path, state in directories.items())
             or any(_state(_ordinary(component / name)) != state for name, state, _, _ in rows)):
         raise PreparationError("Store component original or roster changed")
 
 
+def _store_copy_rows(observed):
+    return tuple(sorted([row for row in observed[1] if not row[0].startswith("tooling/")]
+                        +list(observed[6]),key=lambda row:row[0]))
+
+
+def _store_output_rows(observed):
+    """Immutable final (relative name, sha256, size) rows, before any copy."""
+    return tuple((name,sha,size) for name,_,sha,size in _store_copy_rows(observed))
+
+
+def _store_recheck(observed):
+    _store_post(observed[0],observed[1],observed[2])
+    _store_tooling_post(observed)
+
+
+def _store_tooling_post(observed):
+    source,rows,directories=observed[5:8]
+    if any(_state(_ordinary(path,directory=True))!=state for path,state in directories.items()):
+        raise PreparationError("Selected Store tooling ancestor changed")
+    for name,state,expected,size in rows:
+        path=source / name.removeprefix("tooling/")
+        if _state(_ordinary(path))!=state or digest(read_checked(path,limit=size))!=expected:
+            raise PreparationError("Selected Store tooling original changed")
+
+
 def _copy_store(observed, runtime):
-    component, rows, directories, _, _ = observed
+    component, rows, directories = observed[:3]
     _store_post(component, rows, directories)
+    _store_tooling_post(observed)
     output = runtime / "store"
-    output.mkdir(mode=0o700)  # Never adopt a previous or caller-owned output.
-    for name, state, expected, size in rows:
-        path = component / name
+    copies = _store_copy_rows(observed)
+    parents = {output}
+    for name, _, _, _ in copies:
+        parents.update(output / parent for parent in Path(name).parents if parent != Path("."))
+    created = []
+    for directory in sorted(parents, key=lambda path: (len(path.parts), str(path))):
+        # Every directory is exclusive task output. Never normalize an input or
+        # adopt an existing directory through mkdir(exist_ok=True).
+        directory.mkdir(mode=0o700)
+        original = _ordinary(directory, directory=True)
+        created.append((directory, (original.st_dev, original.st_ino, original.st_uid, original.st_gid)))
+    for name, state, expected, size in copies:
+        path = (observed[5] / name.removeprefix("tooling/") if name.startswith("tooling/") else component / name)
         body = read_checked(path, limit=size)
         if _state(_ordinary(path)) != state or digest(body) != expected:
             raise PreparationError("Store component original changed during copying")
         target = output / name
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with target.open("xb") as stream:
             stream.write(body)
             os.fchmod(stream.fileno(), 0o555 if name in STORE_EXECUTABLES else 0o444)
     _store_post(component, rows, directories)
+    _store_tooling_post(observed)
+    # The containing runtime's root remains private/writable for core.zip and
+    # its manifest; all prepared descendants have the stager's read-only mode.
+    for directory, identity in reversed(created):
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            for actual in (os.fstat(fd), _ordinary(directory, directory=True)):
+                if (actual.st_dev, actual.st_ino, actual.st_uid, actual.st_gid) != identity or stat.S_IMODE(actual.st_mode) != 0o700:
+                    raise PreparationError("Copied Store directory changed before sealing")
+            os.fchmod(fd, 0o555)
+        finally:
+            os.close(fd)
 
 
 def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
              history_provider: bool = False, store_component: Path | None = None) -> dict[str, str]:
     bootstrap_names = CURRENT_BOOTSTRAPS if current else BOOTSTRAPS
+    current_mac = current and target in {"aarch64-apple-darwin", "x86_64-apple-darwin"}
+    file_limit = MAC_MAX_FILES if current_mac else MAX_FILES
+    entry_limit = MAC_MAX_ENTRIES if current_mac else MAX_ENTRIES
+    manifest_limit = MAC_MANIFEST_BYTES if current_mac else 1024 * 1024
     if target not in TARGETS:
         raise PreparationError("Unsupported desktop package target")
     if type(history_provider) is not bool or (history_provider and
@@ -307,7 +397,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
     if history_provider:
         # The existing incremental inventory bounds every entry before the
         # closed root/one-provider roster is inspected; no new eager listdir.
-        provider_paths = files(runtime, reserve_entries=len(bootstrap_names) + 3)
+        provider_paths = files(runtime, reserve_entries=len(bootstrap_names) + 3, max_files=file_limit, max_entries=entry_limit)
         relative = [path.relative_to(runtime).as_posix() for path in provider_paths]
         if ({name.split("/", 1)[0] for name in relative} != {"python", "tools"}
                 or [name for name in relative if not name.startswith("python/")] != ["tools/gh"]):
@@ -331,21 +421,22 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
     generated_payloads = len(bootstrap_names) + 2
     # Reserve every generated payload and the final manifest before any write.
     # This is only publisher preparation, not runtime-custody admission.
-    preadmitted = provider_paths if provider_paths is not None else files(runtime, reserve_entries=generated_payloads + 1)
+    preadmitted = provider_paths if provider_paths is not None else files(runtime, reserve_entries=generated_payloads + 1, max_files=file_limit, max_entries=entry_limit)
     store = _store_inputs(store_component, source, runtime) if store_component is not None else None
-    store_files = len(store[1]) if store else 0
-    if len(preadmitted) + store_files > MAX_FILES - generated_payloads - (1 if history_provider else 0):
+    store_rows = _store_output_rows(store) if store else ()
+    store_files = len(store_rows)
+    if len(preadmitted) + store_files > file_limit - generated_payloads - (1 if history_provider else 0):
         raise PreparationError("Python payload leaves no room for core resources")
     if store:
         total_limit = min(total_limit, 512 * 1024 * 1024)
         # Count the combined file ancestors, not merely each tree separately.
         names = {path.relative_to(runtime).as_posix() for path in preadmitted}
-        names.update("store/" + row[0] for row in store[1])
+        names.update("store/" + row[0] for row in store_rows)
         names.update((*bootstrap_names, "core.zip", GITHUB_CA_NAME, "manifest.json"))
         entries = set(names)
         for name in names:
             entries.update(parent.as_posix() for parent in Path(name).parents if parent != Path("."))
-        if len(entries) > MAX_ENTRIES:
+        if len(entries) > entry_limit:
             raise PreparationError("Combined Store runtime entry limit exceeded")
     package = _root(source / "src/mobile_release")
     candidates = files(package)
@@ -378,7 +469,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
         # reading the large provider or creating any generated payload. The
         # containing stager independently keeps the same512MiB total ceiling.
         quote = (sum(_ordinary(path).st_size for path in preadmitted) + size + MAX_FILES * 2048
-                 + sum(len(content) for _, content in bootstraps) + len(github_ca) + 1024 * 1024
+                 + sum(len(content) for _, content in bootstraps) + len(github_ca) + manifest_limit
                  + (store[3] if store else 0))
         if quote > total_limit:
             raise PreparationError("Current provider leaves no room for complete runtime resources")
@@ -390,7 +481,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
         provider_expected = {path.relative_to(runtime).as_posix() for path in preadmitted}
         provider_expected.update((*bootstrap_names, "core.zip", GITHUB_CA_NAME))
         if store:
-            provider_expected.update("store/" + row[0] for row in store[1])
+            provider_expected.update("store/" + row[0] for row in store_rows)
     if store:
         _copy_store(store, runtime)
     for name, content in bootstraps:
@@ -407,7 +498,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
             archive.writestr(info, content)
     inventory = []
     total = 0
-    for path in files(runtime, reserve_entries=1):
+    for path in files(runtime, reserve_entries=1, max_files=file_limit, max_entries=entry_limit):
         relative = path.relative_to(runtime).as_posix()
         if provider_expected is not None and relative not in provider_expected:
             raise PreparationError("Current provider runtime acquired an unexpected payload")
@@ -427,7 +518,8 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
             raise PreparationError("Current provider runtime original or roster changed")
     if store:
         _store_post(store[0], store[1], store[2])
-        expected_store = {"store/" + name: (sha, size) for name, _, sha, size in store[1]}
+        _store_tooling_post(store)
+        expected_store = {"store/" + name: (sha, size) for name, sha, size in store_rows}
         actual_store = {row["path"]: (row["sha256"], row["size"]) for row in inventory
                         if row["path"].startswith("store/")}
         if actual_store != expected_store:
@@ -439,7 +531,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
         "inventorySha256": digest(canonical(inventory)), "files": inventory,
     }
     encoded = canonical(manifest) + b"\n"
-    if len(encoded) > 1024 * 1024:
+    if len(encoded) > manifest_limit:
         raise PreparationError("Manifest byte limit exceeded")
     if (history_provider or store) and total + len(encoded) > total_limit:
         raise PreparationError("Complete current provider runtime exceeds its byte limit")

@@ -12,9 +12,9 @@ use super::*;
 pub(crate) use known::catalogue_census_data;
 
 pub(super) fn admitted(document:&DocumentBinding,state: &DocumentState, control: usize) -> Result<(), Reason> {
-    // The one native/JSON/index/control partition is fixed, inside the unchanged
-    // 64MiB session quota. A smaller caller value cannot create payload credit.
-    if control != 16 * 1024 * 1024 { return Err(Reason::Capacity); }
+    // The installed-control partition is separate from document backing. Neither
+    // a smaller caller value nor a larger native reservation creates secret credit.
+    if control != installation::CONTROL_RESERVE { return Err(Reason::Capacity); }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { known::admitted(state, control,Some(&document.inner.bridge.artifact_inspection)) }
@@ -132,6 +132,17 @@ mod known {
     fn capacity<T>(value: Option<T>) -> Count<T> { value.ok_or(Reason::Capacity) }
     fn fits(live: usize, control: usize) -> Count<()> {
         if capacity(live.checked_add(control))? > SESSION_BYTES { return Err(Reason::Capacity); }
+        Ok(())
+    }
+    fn installed_fits(live: usize, control: usize) -> Count<()> {
+        if control != installation::CONTROL_RESERVE { return Err(Reason::Capacity); }
+        // Keep the original 48MiB document partition; Mac adds a separately
+        // reserved 128MiB installed-control peak, not general SESSION_BYTES.
+        let backing = capacity(SESSION_BYTES.checked_sub(16 * 1024 * 1024))?;
+        let peak = capacity(backing.checked_add(installation::CONTROL_RESERVE))?;
+        if live > backing || capacity(live.checked_add(control))? > peak {
+            return Err(Reason::Capacity);
+        }
         Ok(())
     }
     fn arc_bytes<T>() -> Count<usize> {
@@ -583,15 +594,18 @@ mod known {
         if !state.maintenance.removal_matches(peer)
             ||!peer.sources_match(pickers,peer.source_generation()){return Err(Reason::Capacity);}
         let mut census=Census::new(); if let Some(artifact)=artifact{census.artifact_inputs(artifact)?;}census.document_state_gate(state)?;
-        census.document_rows(state)?;census.add(capacity(peer.reservation())?)?;
+        census.document_rows(state)?;
         for picker in pickers.iter().flatten(){census.owner(picker)?;}
-        Ok(census.bytes)
+        // The original document/picker census remains within SESSION_BYTES.
+        // Add this exact peer's full native reservation separately; Saved then
+        // adds its two preparations and checks the combined three-control peak.
+        capacity(census.bytes.checked_add(capacity(peer.reservation())?))
     }
     pub(super) fn admitted(state: &DocumentState, control: usize,artifact:Option<&crate::saved_command_owner::SavedCommandOwner>) -> Count<()> {
-        if control!=16*1024*1024{return Err(Reason::Capacity);}
+        if control!=installation::CONTROL_RESERVE{return Err(Reason::Capacity);}
         let mut census = Census::new(); if let Some(artifact)=artifact{census.artifact_inputs(artifact)?;}
         census.document(state)?;
-        fits(census.bytes, control)
+        installed_fits(census.bytes, control)
     }
 
     #[cfg(all(test, debug_assertions))]
@@ -628,8 +642,16 @@ mod known {
             assert!(fits(SESSION_BYTES - 16 * 1024 * 1024, 16 * 1024 * 1024).is_ok());
             assert!(fits(SESSION_BYTES - 16 * 1024 * 1024 + 1, 16 * 1024 * 1024).is_err());
             assert!(fits(usize::MAX, 1).is_err());
+            let backing=SESSION_BYTES-16*1024*1024;
+            let control=installation::CONTROL_RESERVE;
+            assert!(installed_fits(backing-1,control).is_ok());
+            assert!(installed_fits(backing,control).is_ok());
+            assert!(installed_fits(backing+1,control).is_err());
+            assert!(installed_fits(0,control-1).is_err());
+            assert!(installed_fits(0,control+1).is_err());
+            assert!(installed_fits(usize::MAX,control).is_err());
             let state = state();
-            assert!(super::admitted(&state, 16 * 1024 * 1024,None).is_ok());
+            assert!(super::admitted(&state, control,None).is_ok());
             assert!(super::admitted(&state, 0,None).is_err());
             assert!(super::admitted(&state, usize::MAX,None).is_err());
             assert_eq!((state.next_operation, state.next_context), (7, 3));
@@ -639,12 +661,12 @@ mod known {
                 let notice=macos_removal::NoticeRuntime::reserved();
                 let passive=notice.retained_bytes().unwrap();let peer=macos_removal::working_reservation().unwrap();
                 assert!(passive>0&&peer>16*1024*1024);
-                let total=passive.checked_add(peer).unwrap();
-                assert!(fits(SESSION_BYTES-total,total).is_ok());assert!(fits(SESSION_BYTES-total+1,total).is_err());
-                assert!(fits(usize::MAX,peer).is_err());
-                let mut exact=Census::new();assert!(exact.add(SESSION_BYTES-total).is_ok());
-                assert!(exact.add(passive).is_ok());assert!(exact.add(peer).is_ok());assert_eq!(exact.bytes,SESSION_BYTES);
+                // Native peer reservation is no longer mislabeled Document DATA.
+                let mut exact=Census::new();assert!(exact.add(SESSION_BYTES-passive).is_ok());
+                assert!(exact.add(passive).is_ok());assert_eq!(exact.bytes,SESSION_BYTES);
                 assert!(exact.add(1).is_err());assert_eq!(notice.retained_bytes(),Some(passive));
+                assert!(exact.bytes.checked_add(peer).unwrap()>SESSION_BYTES);
+                assert!(usize::MAX.checked_add(peer).is_none());
             }
         }
         #[test]

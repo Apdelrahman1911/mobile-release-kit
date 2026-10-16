@@ -4,7 +4,7 @@ use super::*;
 use crate::installation::{self as wire, CheckPhase, CheckReason, CheckSettlement, CheckStatus, Matching};
 
 pub(super) const WORK_TIME: Duration = Duration::from_secs(30);
-pub(super) const CONTROL_RESERVE: usize = 16 * 1024 * 1024;
+pub(super) const CONTROL_RESERVE: usize = if cfg!(target_os="macos") { crate::macos_install_record::CONTROL_LIMIT } else { 16 * 1024 * 1024 };
 // Conservative channel/notification/task-control heap charge, not payload credit
 // or an RSS promise. The native/JSON/index capacities have their own checked row.
 const SIGNAL_BYTES: usize = 4 * 1024;

@@ -7707,7 +7707,7 @@ def engineering_cleanup(context: dict) -> list[Path]:
     digests = {"compilerReceiptSha256": compiler_digest}
     for key, path, limit in (
         ("runtimeResultSha256", work / "runtime-result.json", 65536),
-        ("runtimeManifestSha256", work / "runtime/manifest.json", 1024 * 1024),
+        ("runtimeManifestSha256", work / "runtime/manifest.json", 12 * 1024 * 1024),
         ("testAdmissionSha256", normal / "engineering-test.runner-admission.json", 32768),
         ("summaryAdmissionSha256", normal / "engineering-summary.command-admission.json", 32768),
         ("nativeSummarySha256", normal / "engineering-summary.stdout", 262144),

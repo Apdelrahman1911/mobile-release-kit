@@ -1644,7 +1644,7 @@ impl SavedCommandOwner {
                 .and_then(|bytes|bytes.checked_add(Preparation::reservation_bytes()?))
                 .and_then(|bytes|bytes.checked_add(TASK_STORAGE))
                 .and_then(|bytes|bytes.checked_add(3*wire::REQUEST_LIMIT+3*wire::STATUS_LIMIT))
-                .filter(|bytes|*bytes<=OWNED_LIMIT).ok_or_else(wire::service_unavailable)?;
+                .filter(|bytes|crate::macos_install_record::installed_control_fits(*bytes,1)).ok_or_else(wire::service_unavailable)?;
             let action=match data.action{wire::ServiceAction::Check=>management::Action::Observe,
                 wire::ServiceAction::RequestRegistration=>management::Action::RequestRegistration,
                 wire::ServiceAction::OpenApprovalSettings=>management::Action::OpenApprovalSettings};

@@ -143,13 +143,17 @@ CURRENT_BOOTSTRAPS = BOOTSTRAPS | {
 CURRENT_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
 CURRENT_HELPER_SOURCE = "desktop/tools/prepare_runtime.py"
 CURRENT_CORE_BYTES = 32 * 1024 * 1024
-MAX_FILES = 2048
+LEGACY_MAX_FILES = 2048
+MAX_FILES = 16384
+MAX_ENTRIES = 32768
+MANIFEST_BYTES = 12 * 1024 * 1024
+INVENTORY_BYTES = 12 * 1024 * 1024
 MAX_BYTES = 512 * 1024 * 1024
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 INSTALLER_RESULT_BYTES = 65536
 INSTALLER_RESULT_STATE = "pending-original-export-finalization"
 MAINTENANCE_STATE_NAME = "installation-v2.json"
-MAINTENANCE_METADATA_BYTES = 16 * 1024 * 1024
+MAINTENANCE_METADATA_BYTES = 128 * 1024 * 1024
 MAINTENANCE_ACTIONS = ("fresh-install", "same-package-noop", "restore-fixed-app", "update")
 PRODUCER_DESCRIPTOR_BYTES = 64 * 1024
 PRODUCER_SIGNATURE_BYTES = 16 * 1024
@@ -486,15 +490,15 @@ def pairs(items):
     return result
 
 
-def decode(body):
-    need(len(body) <= 1024 * 1024, "json-byte-bound")
+def decode(body, *, byte_limit=1024 * 1024, node_limit=20000):
+    need(len(body) <= byte_limit, "json-byte-bound")
     value = json.loads(body, object_pairs_hook=pairs, parse_constant=lambda _: (_ for _ in ()).throw(Refused("json-constant")))
     todo = [(value, 0)]
     count = 0
     while todo:
         item, depth = todo.pop()
         count += 1
-        need(count <= 20000 and depth <= 32, "json-shape-bound")
+        need(count <= node_limit and depth <= 32, "json-shape-bound")
         if type(item) is dict:
             todo.extend((v, depth + 1) for v in item.values())
         elif type(item) is list:
@@ -695,7 +699,7 @@ def directories(files):
     for path in files:
         bits = path.split("/")
         result.update("/".join(bits[:i]) for i in range(1, len(bits)))
-    need(len(result) <= 2048, "directory-count")
+    need(len(result) + len(files) <= MAX_ENTRIES, "directory-count")
     folded = set()
     for name in set(files) | result:
         need(safe_path(name) and name.lower() not in folded, "path-alias-or-type-collision")
@@ -740,7 +744,7 @@ def tree(path, *, installed=False, packager=False, max_bytes=MAX_BYTES, current_
         for name in names:
             relative = prefix + name
             count += 1
-            need(count <= 4096 and safe_path(relative), "tree-path-bound")
+            need(count <= MAX_ENTRIES and safe_path(relative), "tree-path-bound")
             info = os.stat(name, dir_fd=fd, follow_symlinks=False)
             if stat.S_ISDIR(info.st_mode):
                 observed_directories.add(relative)
@@ -837,14 +841,15 @@ def manifest_files(body, expected, *, current=False, target=ARM_TARGET):
     protocol = CURRENT_PROTOCOL if current else PROTOCOL
     bootstraps = CURRENT_BOOTSTRAPS if current else BOOTSTRAPS
     need(sha(expected) and digest(body) == expected, "runtime-manifest-anchor")
-    manifest = decode(body)
+    manifest = decode(body, byte_limit=MANIFEST_BYTES if current else 1024 * 1024,
+                      node_limit=120000 if current else 20000)
     need(type(manifest) is dict and set(manifest) == {"schemaVersion", "protocol", "coreVersion", "target", "coreSha256", "protocolSha256", "inventorySha256", "files"}
          and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
          and type(manifest["protocol"]) is int and manifest["protocol"] == 1
          and manifest["target"] == target and manifest["protocolSha256"] == protocol,
          "runtime-manifest-shape")
     rows = manifest["files"]
-    need(type(rows) is list and 0 < len(rows) <= MAX_FILES and digest(canonical(rows)) == manifest["inventorySha256"], "runtime-inventory-anchor")
+    need(type(rows) is list and 0 < len(rows) <= (MAX_FILES if current else LEGACY_MAX_FILES) and digest(canonical(rows)) == manifest["inventorySha256"], "runtime-inventory-anchor")
     files = {}
     total = 0
     for row in rows:
@@ -925,7 +930,7 @@ FRESH_SOURCE_LOCK = "desktop/macos-cpython-source-inputs/source-lock.json"
 FRESH_SOURCE_LOCK_LIMIT = 16 * 1024
 FRESH_SUPPLIER_BYTES = 464 * 1024 * 1024
 # tree()/write_tree() count the final manifest too, unlike its own file roster.
-FRESH_SUPPLIER_FILES = MAX_FILES - len(CURRENT_BOOTSTRAPS) - 3
+FRESH_SUPPLIER_FILES = LEGACY_MAX_FILES - len(CURRENT_BOOTSTRAPS) - 3
 FRESH_EVIDENCE = {"build", "relocation", "modules", "loader", "tls", "cancellation", "notices"}
 
 
@@ -1345,8 +1350,8 @@ def history_provider_capacity(*, supplier_bytes, supplier_files, fixed_bytes):
     # supplier+provider combination if it cannot fit the existing total cap.
     need(all(type(value) is int and value >= 0 for value in (supplier_bytes, supplier_files, fixed_bytes)),
          "history-provider-capacity-shape")
-    need(supplier_files + len(CURRENT_BOOTSTRAPS) + 4 <= MAX_FILES, "history-provider-file-capacity")
-    generated = CURRENT_CORE_BYTES + MAX_FILES * 2048 + 1024 * 1024 + fixed_bytes
+    need(supplier_files + len(CURRENT_BOOTSTRAPS) + 4 <= LEGACY_MAX_FILES, "history-provider-file-capacity")
+    generated = CURRENT_CORE_BYTES + LEGACY_MAX_FILES * 2048 + 1024 * 1024 + fixed_bytes
     available = MAX_BYTES - supplier_bytes - generated
     need(available > 0, "history-provider-byte-capacity")
     return min(HISTORY_PROVIDER_LIMIT, available)
@@ -1409,12 +1414,51 @@ def current_runtime_mode(name, body, nomination, *, target=ARM_TARGET):
     if name == HISTORY_PROVIDER_PATH:
         history_provider_payload(body, nomination, target=target)
         return 0o555
-    return 0o555 if name == SIGNED_PYTHON_PATH else 0o444
+    return 0o555 if name in {SIGNED_PYTHON_PATH, "store/bin/ruby", "store/bin/bundle"} else 0o444
 
 
-def current_source(*, history_provider=False):
+STORE_RUNTIME_REQUIRED = frozenset({
+        "bin/ruby", "bin/bundle", "bin/mrk_bundle_setup.rb", "ca.pem",
+        "lib/ruby/gems/3.3.0/gems/bundler-4.0.16/exe/bundle",
+        "bundle/ruby/3.3.0/gems/fastlane-2.235.0/lib/fastlane.rb",
+        "tooling/Gemfile", "tooling/Gemfile.lock", "tooling/fastlane/Fastfile",
+        "tooling/fastlane/run_lane.rb", "tooling/fastlane/native_process_spawn.rb",
+        "licenses/Ruby-COPYING", "licenses/Ruby-BSDL", "licenses/Ruby-LEGAL",
+        "licenses/OpenSSL-LICENSE.txt", "licenses/LibYAML-License", "licenses/locked-gem-licenses.txt",
+})
+
+
+def store_runtime_rows(rows):
+    present = any(name.startswith("store/") for name in rows)
+    if present:
+        need(all("store/" + name in rows and rows["store/" + name]["size"] > 0
+                 for name in STORE_RUNTIME_REQUIRED), "store-complete-runtime")
+    return present
+
+
+def store_runtime_payload(files, *, current, target):
+    """Final full-roster DATA validation; native signature verification is separate."""
+    store = {name[6:]: item for name, item in files.items() if name.startswith("store/")}
+    if not store:
+        return
+    need(current, "store-current-runtime-only")
+    store_runtime_rows({name: {"size": len(body)} for name, (body, _mode) in files.items()})
+    need(store["bin/bundle"][0].startswith(b"#!/bin/sh\n"), "store-wrapper-interpreter")
+    magic = {bytes.fromhex(value) for value in ("feedface", "cefaedfe", "feedfacf", "cffaedfe",
+                                              "cafebabe", "bebafeca", "cafebabf", "bfbafeca")}
+    need(store["bin/ruby"][0][:4] in magic, "store-ruby-native-image")
+    for name, (body, _mode) in store.items():
+        if body[:4] in magic:
+            # Every native extension is inspected, not only the Ruby entry.
+            complete, minimum, _ = _macho_commands(body, system_only=True, target=target,
+                                                  allowed_kinds=(2,) if name == "bin/ruby" else (2, 8))
+            need(complete and minimum == [(1, 26 << 16)], "macho-minimum-macos26")
+
+
+def current_source(*, history_provider=False, store_runtime=False):
     """Capture DATA, including the committed CA's one explicit projection map."""
     need(type(history_provider) is bool, "current-history-provider-profile")
+    need(type(store_runtime) is bool, "current-store-runtime-profile")
     source = DESKTOP.parent
     core = tree(source / "src/mobile_release", max_bytes=CURRENT_CORE_BYTES)
     need(core and all(Path(name).suffix in {".py", ".json", ".pem"} for name in core), "current-core-inputs")
@@ -1430,6 +1474,16 @@ def current_source(*, history_provider=False):
         with parent(source / name) as (fd, leaf):
             body, info = read_at(fd, leaf, limit)
         captured[name] = (body, stat.S_IMODE(info.st_mode))
+    if store_runtime:
+        # The same captured core defines its first-party Store files. The fixed
+        # publisher parses this literal roster; no selected core is executed.
+        preparer = current_preparer(captured)
+        names = preparer._store_tooling_names(core["tooling.py"][0])
+        for name in names:
+            need(name not in captured, "current-store-source-collision")
+            with parent(source / name) as (fd, leaf):
+                body, info = read_at(fd, leaf, CURRENT_CORE_BYTES)
+            captured[name] = (body, stat.S_IMODE(info.st_mode))
     need(captured[CURRENT_CA_SOURCE][0], "current-ca-empty")
     rows = [{"path": name, "size": len(body), "sha256": digest(body)}
             for name, (body, _) in sorted(captured.items())]
@@ -1474,6 +1528,8 @@ def current_paths(args):
         inputs.extend((args.signed_python, args.signing_receipt))
     if getattr(args, "history_provider", None) is not None:
         inputs.append(args.history_provider)
+    if getattr(args, "store_component", None) is not None:
+        inputs.append(args.store_component)
     # Components are later admitted without following links. Case folding also
     # refuses an alias on default case-insensitive Mac filesystems.
     folded = lambda path: tuple(part.casefold() for part in path.parts)
@@ -1533,7 +1589,7 @@ def current_preparer(captured):
 def current_core_matches(body, projection):
     expected = {name[len("src/"):]: content for name, (content, _) in projection.items()
                 if name.startswith("src/mobile_release/")}
-    need(len(body) <= CURRENT_CORE_BYTES + MAX_FILES * 2048, "current-core-archive-bound")
+    need(len(body) <= CURRENT_CORE_BYTES + LEGACY_MAX_FILES * 2048, "current-core-archive-bound")
     with zipfile.ZipFile(io.BytesIO(body)) as archive:
         rows = archive.infolist()
         need([row.filename for row in rows] == sorted(expected), "current-core-complete-roster")
@@ -1548,7 +1604,8 @@ def current_core_matches(body, projection):
                 need(stream.read(len(content) + 1) == content, "current-core-byte-correspondence")
 
 
-def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, history_provider=None):
+def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, history_provider=None,
+                          store_rows=()):
     target = mac_target(target)
     files = tree(runtime, current_root_mode=0o700)
     preadmitted = supplier
@@ -1556,11 +1613,19 @@ def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, h
         need(type(history_provider) is bytes and 0 < len(history_provider) <= HISTORY_PROVIDER_LIMIT
              and HISTORY_PROVIDER_PATH not in supplier, "current-history-provider-overlay")
         preadmitted = {**supplier, HISTORY_PROVIDER_PATH: (history_provider, 0o555)}
-    required = set(preadmitted) | CURRENT_BOOTSTRAPS | {"core.zip", "github-ca.pem", "manifest.json"}
+    expected_store = {"store/" + name: (sha, size) for name, sha, size in store_rows}
+    need(len(expected_store) == len(store_rows) and not set(expected_store) & set(preadmitted),
+         "current-store-input-collision")
+    required = set(preadmitted) | set(expected_store) | CURRENT_BOOTSTRAPS | {"core.zip", "github-ca.pem", "manifest.json"}
     need(set(files) == required, "current-runtime-complete-roster")
     for name, value in preadmitted.items():
         need(files[name] == value, "current-supplier-changed")
-    for name in required - set(preadmitted):
+    for name, (expected_hash, size) in expected_store.items():
+        body, mode = files[name]
+        need(len(body) == size and digest(body) == expected_hash
+             and mode == (0o555 if name in {"store/bin/ruby", "store/bin/bundle"} else 0o444),
+             "current-store-original-correspondence")
+    for name in required - set(preadmitted) - set(expected_store):
         need(files[name][1] == 0o600, "current-generated-mode")
     manifest_body = files["manifest.json"][0]
     manifest, rows = manifest_files(manifest_body, digest(manifest_body), current=True, target=target)
@@ -1571,6 +1636,7 @@ def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, h
     for name in CURRENT_BOOTSTRAPS | {"github-ca.pem"}:
         need(files[name][0] == projection["desktop/" + name][0], "current-entrypoint-byte-correspondence")
     current_core_matches(files["core.zip"][0], projection)
+    store_runtime_payload(files, current=True, target=target)
     return files, manifest
 
 
@@ -1580,6 +1646,9 @@ def current_runtime_command(args):
     need(type(configured) is bool, "configured-signing-option")
     configured_inputs = configured_current_binding(args, target) if configured else None
     origin = current_supplier_origin(args)
+    store_component = getattr(args, "store_component", None)
+    store_enabled = store_component is not None
+    need(not store_enabled or origin == "fresh-public-source", "current-store-fresh-supplier-only")
     provider_nomination, provider_source = history_provider_selection(args, origin, target=target)
     provider_enabled = provider_nomination is not None
     need(origin == "fresh-public-source" or target == ARM_TARGET, "unqualified-intel-route")
@@ -1590,7 +1659,7 @@ def current_runtime_command(args):
     if final:
         need(sha(args.expected_source) and sha(args.expected_manifest), "current-reviewed-digests")
     parents = current_paths(args)
-    captured, projection, source_digest = (current_source(history_provider=True) if provider_enabled else current_source())
+    captured, projection, source_digest = current_source(history_provider=provider_enabled, store_runtime=store_enabled)
     if provider_enabled:
         need(captured[HISTORY_PROVIDER_PROFILE][0] == provider_source[0], "history-provider-source-projection")
     if final:
@@ -1634,18 +1703,25 @@ def current_runtime_command(args):
             source, runtime = args.work / "source", args.work / "runtime"
             write_tree(source, projection, current_owned=True)
             write_tree(runtime, runtime_inputs, root_mode=0o700, current_owned=True)
+            store = preparer._store_inputs(store_component, source, runtime) if store_enabled else None
+            store_rows = preparer._store_output_rows(store) if store_enabled else ()
             old_mask = os.umask(0o077)
             try:
-                prepared = (preparer.prepare_current(source, runtime, target, history_provider=True) if provider_enabled
-                            else preparer.prepare_current(source, runtime, target))
+                options = {"history_provider": True} if provider_enabled else {}
+                if store_enabled:
+                    options["store_component"] = store_component
+                prepared = preparer.prepare_current(source, runtime, target, **options)
             finally:
                 os.umask(old_mask)
-            files, manifest = current_runtime_files(runtime, projection, supplier, target=target, history_provider=provider_body)
+            files, manifest = current_runtime_files(runtime, projection, supplier, target=target,
+                history_provider=provider_body, store_rows=store_rows)
+            if store_enabled:
+                preparer._store_recheck(store)
             manifest_digest = digest(files["manifest.json"][0])
             need(prepared == {"manifestSha256": manifest_digest, "protocolSha256": CURRENT_PROTOCOL,
                               "qualification": "prepared-not-native-verified"}, "current-preparer-result")
             need(tree(source, current_root_mode=0o555) == projection
-                 and (current_source(history_provider=True) if provider_enabled else current_source()) == (captured, projection, source_digest),
+                 and current_source(history_provider=provider_enabled, store_runtime=store_enabled) == (captured, projection, source_digest),
                  "current-source-post-changed")
             if fresh_inputs is not None:
                 need(fresh_supplier(args) == fresh_inputs, "fresh-supplier-post-changed")
@@ -1691,14 +1767,16 @@ def current_runtime_command(args):
             if provider_source is not None:
                 need(history_provider_source(target=target) == (provider_nomination, provider_source),
                      "history-provider-profile-publication-post-changed")
+            if store_enabled:
+                preparer._store_recheck(store)
             return result
 
 
-def _macho_commands(body, *, system_only=False, target=ARM_TARGET):
+def _macho_commands(body, *, system_only=False, target=ARM_TARGET, allowed_kinds=(2,)):
     expected_cpu, expected_subtype = target_machine(target)
     need(len(body) >= 32, "macho-header")
     magic, cpu, subtype, kind, count, size, flags, reserved = struct.unpack_from("<8I", body)
-    need(magic == 0xFEEDFACF and cpu == expected_cpu and subtype == expected_subtype and kind == 2 and count <= 128
+    need(magic == 0xFEEDFACF and cpu == expected_cpu and subtype == expected_subtype and kind in allowed_kinds and count <= 128
          and size <= 65536 and 32 + size <= len(body), "macho-target")
     offset = 32
     minimum, records = [], []
@@ -2441,7 +2519,7 @@ def remove_preview_command(args):
     signed = read(work / "remove-producer-root/remove-producer.sig", PRODUCER_SIGNATURE_BYTES)
     input_root = work / "remove-emitter-input"
     installed = read(input_root / "producer.json", PRODUCER_DESCRIPTOR_BYTES)
-    inventory = read(input_root / "install-inventory.json", 1024 * 1024)
+    inventory = read(input_root / "install-inventory.json", INVENTORY_BYTES)
     with parent(input_root / REMOVER_NAME) as (fd, name):
         program, info = read_at(fd, name, REMOVER_BYTES)
         need(stat.S_IMODE(info.st_mode) == 0o555, "remove-preview-program-mode")
@@ -2985,6 +3063,7 @@ def runtime_tree(root, expected, *, current=False, target=ARM_TARGET):
     need("manifest.json" in files, "runtime-manifest-missing")
     _, rows = manifest_files(files["manifest.json"][0], expected, current=current, target=target)
     need(set(files) == set(rows) | {"manifest.json"}, "runtime-complete-roster")
+    store_runtime_payload(files, current=current, target=target)
     if current:
         need((HISTORY_PROVIDER_PATH in files) == (provider_nomination is not None), "runtime-provider-roster")
     for name, (body, mode) in files.items():
@@ -3081,7 +3160,7 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
         for name, (body, mode) in source.items():
             need(prefix != "app/" or name.startswith("Contents/"), "app-contents-scope")
             code = ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
-                    "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "app/" + LAUNCHER_EXECUTABLE, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3")
+                    "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "app/" + LAUNCHER_EXECUTABLE, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3", "runtime/store/bin/ruby", "runtime/store/bin/bundle")
             expected_mode = 0o555 if prefix + name in code else 0o444
             # Normalize only the fresh copy, never the signed original.
             need(mode & 0o7022 == 0 and bool(mode & 0o111) == (expected_mode == 0o555), "input-executable-scope")
@@ -3089,7 +3168,7 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
     rows = [{"path": path, "sha256": digest(body), "size": len(body), "executable": mode == 0o555} for path, (body, mode) in sorted(files.items())]
     need(len(rows) <= MAX_FILES - 4, "installer-inventory-bound")
     inventory = canonical({"schemaVersion": 1, "release": selection.release, "runtimeManifestSha256": args.expected_manifest, "files": rows}) + b"\n"
-    decode(inventory)
+    decode(inventory, byte_limit=INVENTORY_BYTES, node_limit=150000)
     need(sum(len(data) for data, _mode in files.values()) + len(inventory) + INSTALLATION_RECORD_LIMIT
          + len(MAINTENANCE_GATE_BYTES) + len(REGISTRATION_GATE_BYTES) <= MAX_BYTES, "installer-complete-byte-bound")
     files["install-inventory.json"] = (inventory, 0o444)
@@ -4124,15 +4203,15 @@ def removal_fixture_original_data(case, role, returncode, *, entered, returned, 
 
 def observation_inventory(args, *, selection=None):
     selection = selected_build(selection) if selection is not None else source_build_selection(command_target(args))
-    body = read(Path(args.input) / INSTALLATION_INVENTORY_NAME, 1024 * 1024)
+    body = read(Path(args.input) / INSTALLATION_INVENTORY_NAME, INVENTORY_BYTES)
     return observation_inventory_bytes(body, args.expected_inventory, args.expected_manifest, selection=selection)
 
 
 def observation_inventory_bytes(body, expected_inventory, expected_manifest, *, selection=None):
     selection = selected_build(selection)
-    need(type(body) is bytes and 0 < len(body) <= 1024 * 1024, "observation-inventory-bytes")
+    need(type(body) is bytes and 0 < len(body) <= INVENTORY_BYTES, "observation-inventory-bytes")
     need(sha(expected_inventory) and sha(expected_manifest) and digest(body) == expected_inventory, "observation-inventory-anchor")
-    inventory = decode(body)
+    inventory = decode(body, byte_limit=INVENTORY_BYTES, node_limit=150000)
     need(type(inventory) is dict and set(inventory) == {"schemaVersion", "release", "runtimeManifestSha256", "files"}
          and type(inventory["schemaVersion"]) is int and inventory["schemaVersion"] == 1
          and inventory["release"] == selection.release and inventory["runtimeManifestSha256"] == expected_manifest
@@ -4144,8 +4223,10 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest, *, 
              and sha(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= MAX_BYTES
              and type(row["executable"]) is bool
              and row["executable"] == (row["path"] in ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
-                                                     "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "app/" + LAUNCHER_EXECUTABLE, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3")), "observation-inventory-row")
+                                                     "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "app/" + LAUNCHER_EXECUTABLE, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3", "runtime/store/bin/ruby", "runtime/store/bin/bundle")), "observation-inventory-row")
         rows[row["path"]] = row
+    store_runtime_rows({name.removeprefix("runtime/"): row for name, row in rows.items()
+                        if name.startswith("runtime/")})
     need(("app/" + ANDROID_HELPER in rows) == ("app/" + ANDROID_SERVICE_PLIST in rows)
          == ("app/" + RESIDENT_IMAGE in rows)
          and ("app/" + DESKTOP_IMAGE not in rows or "app/" + RESIDENT_IMAGE in rows), "android-service-input-pair")
@@ -4639,7 +4720,7 @@ def removal_observer_copy_quote_data(sizes):
     or an authority inferred from caller-supplied lengths.
     """
     names = ("package", "observer", "installedProgram", "inventory", "installed", "signature")
-    limits = (MAX_BYTES, REMOVER_BYTES, REMOVER_BYTES, 1024 * 1024,
+    limits = (MAX_BYTES, REMOVER_BYTES, REMOVER_BYTES, INVENTORY_BYTES,
               PRODUCER_DESCRIPTOR_BYTES, PRODUCER_SIGNATURE_BYTES)
     need(type(sizes) is dict and set(sizes) == set(names)
          and all(type(sizes[n]) is int and 0 < sizes[n] <= cap for n, cap in zip(names, limits)),
@@ -4670,7 +4751,7 @@ def remove_input_command(args):
     installed = read(args.installed_producer, PRODUCER_DESCRIPTOR_BYTES)
     signature = read(args.installed_signature, PRODUCER_SIGNATURE_BYTES)
     need(len(signature) == source.rsa_bits // 8, "remove-installed-signature-size")
-    inventory = read(args.inventory, 1024 * 1024)
+    inventory = read(args.inventory, INVENTORY_BYTES)
     with parent(args.remover) as (fd, name):
         program, info = read_at(fd, name, REMOVER_BYTES)
         need(stat.S_IMODE(info.st_mode) == 0o555, "remove-program-signed-mode")
@@ -5216,7 +5297,7 @@ def installation_record_data(body, inventory_body, source, manifest, root, relea
     """Closed DATA comparison, never permission or native/old finality evidence."""
     selection = selected_build(selection)
     need(type(body) is bytes and 0 < len(body) <= INSTALLATION_RECORD_LIMIT
-         and type(inventory_body) is bytes and 0 < len(inventory_body) <= 1024 * 1024
+         and type(inventory_body) is bytes and 0 < len(inventory_body) <= INVENTORY_BYTES
          and type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
          and sha(manifest) and sha(expected_protocol) and type(fixture) is bool
          and (not fixture or expected_protocol == CURRENT_PROTOCOL)
@@ -5263,7 +5344,7 @@ def installation_metadata_result(value, expected):
          and value["state"] in ("not-attempted", "incomplete", "recorded") and value["writersSettled"] is True
          and all(type(value[key]) is int for key in ("attemptedFiles", "openedFiles", "plannedBytes", "writtenBytes"))
          and 0 <= value["openedFiles"] <= value["attemptedFiles"] <= 2
-         and 0 <= value["writtenBytes"] <= value["plannedBytes"] <= 1024 * 1024 + INSTALLATION_RECORD_LIMIT,
+         and 0 <= value["writtenBytes"] <= value["plannedBytes"] <= INVENTORY_BYTES + INSTALLATION_RECORD_LIMIT,
          "installation-metadata-result")
     expected_state = ("recorded" if state == "installed" or (runtime == "confirmed" and app == "occupied-refused") else
                       "incomplete" if reason == "open-refused" and runtime == "confirmed" else "not-attempted")
@@ -5394,13 +5475,13 @@ def installation_metadata_leaf(fd, name, limit):
 
 def installation_metadata_readback(args, root, original, *, fixture=False, occupant=None, selection=None):
     selection = selected_build(selection) if selection is not None else source_build_selection(command_target(args))
-    source_inventory = read(Path(args.input) / INSTALLATION_INVENTORY_NAME, 1024 * 1024)
+    source_inventory = read(Path(args.input) / INSTALLATION_INVENTORY_NAME, INVENTORY_BYTES)
     need(digest(source_inventory) == args.expected_inventory, "installation-inventory-source")
     metadata = original["installationMetadata"]
     need(metadata["state"] == ("incomplete" if occupant is not None else "recorded"), "installation-readback-phase")
     names = {"runtime", INSTALLATION_INVENTORY_NAME, INSTALLATION_RECORD_NAME}
     with installation_metadata_directory(root, names, selection=selection) as (root_data, release_data, fd):
-        inventory, _info = installation_metadata_leaf(fd, INSTALLATION_INVENTORY_NAME, 1024 * 1024)
+        inventory, _info = installation_metadata_leaf(fd, INSTALLATION_INVENTORY_NAME, INVENTORY_BYTES)
         need(inventory == source_inventory, "installation-inventory-exact-bytes")
         descriptor, info = installation_metadata_leaf(fd, INSTALLATION_RECORD_NAME, INSTALLATION_RECORD_LIMIT)
         if occupant is None:
@@ -5460,7 +5541,7 @@ def maintenance_directory(parent_fd, name, mode):
 
 
 def maintenance_metadata_leaf(fd, name, limit, budget):
-    # Bound before read/allocation. This is the existing 16MiB metadata envelope,
+    # Bound before read/allocation. This is the bounded 128MiB installed metadata envelope,
     # including held raw bytes, parse capacity and per-original record overhead.
     remaining = (MAINTENANCE_METADATA_BYTES - budget[0] - 4096) // 8
     need(remaining >= 0, "maintenance-metadata-budget")
@@ -5510,7 +5591,7 @@ def maintenance_generation_readback(root_fd, versions_fd, root_identity, generat
             need(release_identity == generation["releaseDirectory"], "maintenance-runtime-object")
             names = {"runtime", INSTALLATION_INVENTORY_NAME, INSTALLATION_RECORD_NAME}
             need(set(os.listdir(release_fd)) == names, "installation-release-roster")
-            inventory = maintenance_metadata_leaf(release_fd, INSTALLATION_INVENTORY_NAME, 1024 * 1024, budget)
+            inventory = maintenance_metadata_leaf(release_fd, INSTALLATION_INVENTORY_NAME, INVENTORY_BYTES, budget)
             record = maintenance_metadata_leaf(release_fd, INSTALLATION_RECORD_NAME, INSTALLATION_RECORD_LIMIT, budget)
             need(digest(inventory) == release["inventorySha256"] and (not current or inventory == source_inventory),
                  "installation-inventory-exact-bytes")
@@ -5606,7 +5687,7 @@ def original_release_readback_selection(args, record):
     need((args.expected_source, args.expected_inventory, args.expected_manifest, args.expected_package)
          == tuple(release[key] for key in ("sourceCommit", "inventorySha256", "runtimeManifestSha256", "packageSha256")),
          "original-release-readback-binding")
-    for key, limit in (("descriptor", PRODUCER_DESCRIPTOR_BYTES), ("signature", PRODUCER_SIGNATURE_BYTES), ("inventory", 1024 * 1024)):
+    for key, limit in (("descriptor", PRODUCER_DESCRIPTOR_BYTES), ("signature", PRODUCER_SIGNATURE_BYTES), ("inventory", INVENTORY_BYTES)):
         member = maintenance_map(record[key], ("bytes", "sha256"), "original-release-readback-member-shape")
         need(type(member["bytes"]) is int and 0 < member["bytes"] <= limit
              and maintenance_hex(member["sha256"], 64), "original-release-readback-member-bound")
@@ -5648,7 +5729,7 @@ def observation_command(args, *, expected_previous=None, expected_restore_previo
     # own future close, kernel-retained gate lifetime or original outer return.
     result, exported = installer_result_readback(args)
     producer, descriptor, signed = maintenance_producer_inputs(args, selection)
-    source_inventory = read(Path(args.input) / INSTALLATION_INVENTORY_NAME, 1024 * 1024)
+    source_inventory = read(Path(args.input) / INSTALLATION_INVENTORY_NAME, INVENTORY_BYTES)
     observation_inventory_bytes(source_inventory, args.expected_inventory, args.expected_manifest, selection=selection)
     if original_release:
         original_release_readback_members(original_release_readback, producer, descriptor, signed, source_inventory)
@@ -5899,6 +5980,8 @@ def main(argv=None):
         command.add_argument("--expected-supplier", help="Independently reviewed SHA256 of the fresh supplier receipt")
         command.add_argument("--signed-python", type=Path, help="Explicit configured-signing capsule executable; never fallback")
         command.add_argument("--history-provider", type=Path, help="Current fixed SOURCE-nominated signed tools/gh; no unconfigured fallback")
+        command.add_argument("--store-component", type=Path,
+                             help="Explicit authenticated Ruby/gem component; current first-party Store tooling is composed from source")
         command.add_argument("--signing-receipt", type=Path)
         for option in ("signed-python", "signing-receipt", "signing-source", "signing-run", "signing-attempt"):
             command.add_argument("--expected-" + option)

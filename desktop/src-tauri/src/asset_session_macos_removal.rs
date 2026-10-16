@@ -20,7 +20,7 @@ const TAIL:Duration=Duration::from_secs(10);
 const HEARTBEAT:Duration=Duration::from_millis(5);
 const TASK_STORAGE:usize=64*1024;
 const SIGNAL_STORAGE:usize=4096;
-const INSPECTOR_RESERVE:usize=16*1024*1024;
+const INSPECTOR_RESERVE:usize=crate::macos_install_record::CONTROL_LIMIT;
 const ENTRY:&str="app/Contents/MacOS/mrk-macos-entry";
 const PAYLOAD:&str="app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop";
 const REMOVER:&str="app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove";
@@ -31,7 +31,9 @@ fn arc_bytes<T>()->Option<usize>{
     let(layout,_)=std::alloc::Layout::new::<[usize;2]>().extend(std::alloc::Layout::new::<T>()).ok()?;
     Some(layout.pad_to_align().size())
 }
-fn fits(prior:usize,reserved:usize)->bool{prior.checked_add(reserved).is_some_and(|n|n<=SESSION_BYTES)}
+// Two Saved maintenance preparations plus this peer inspector coexist.
+fn fits(prior:usize,reserved:usize)->bool{prior.checked_add(reserved)
+    .is_some_and(|n|crate::macos_install_record::installed_control_fits(n,3))}
 fn first(a:Option<(AdmissionFailure,Instant)>,b:Option<(AdmissionFailure,Instant)>)->Option<(AdmissionFailure,Instant)>{
     match(a,b){(Some(a),Some(b))=>Some(if a.1<=b.1{a}else{b}),(a,None)|(None,a)=>a}
 }
@@ -194,7 +196,7 @@ impl Handle{
     pub(super) fn generation(&self)->u32{self.original.generation}
     pub(super) fn source_generation(&self)->u32{self.original.source_generation}
     pub(super) fn reservation(&self)->Option<usize>{
-        (!self.original.unknown.load(Ordering::SeqCst)&&self.original.whole<=SESSION_BYTES).then_some(self.original.reservation)
+        (!self.original.unknown.load(Ordering::SeqCst)&&crate::macos_install_record::installed_control_fits(self.original.whole,3)).then_some(self.original.reservation)
     }
     pub(super) fn picker_originals(&self)->&[Option<Arc<OriginalWork>>;3]{&self.original.pickers}
     pub(super) fn sources_match(&self,pickers:&[Option<Arc<OriginalWork>>;3],generation:u32)->bool{
@@ -760,8 +762,10 @@ mod tests{
             assert_eq!(resources_data(v(0),v(1),v(2),v(3),v(4)),mask==15);
             assert_eq!(joined_data_only(v(4),v(0),v(1),v(2),v(3)),mask==15);
         }
-        let reserved=working_reservation().unwrap();assert!(reserved>INSPECTOR_RESERVE&&reserved<SESSION_BYTES);
-        assert!(fits(SESSION_BYTES-reserved,reserved));assert!(!fits(SESSION_BYTES-reserved+1,reserved));assert!(!fits(usize::MAX,1));
+        let reserved=working_reservation().unwrap();let peak=crate::macos_install_record::installed_control_peak(3).unwrap();
+        assert!(reserved>INSPECTOR_RESERVE&&reserved<peak);
+        assert!(fits(peak-reserved-1,reserved));assert!(fits(peak-reserved,reserved));
+        assert!(!fits(peak-reserved+1,reserved));assert!(!fits(usize::MAX,1));
         for target in [wire::TargetData::Arm64,wire::TargetData::Intel]{
             let release=format!("{}fixture",target.release_prefix());
             let binding=wire::BindingData::new_data(wire::BindingInputData{
