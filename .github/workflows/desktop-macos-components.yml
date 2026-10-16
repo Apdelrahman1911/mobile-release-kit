@@ -312,13 +312,14 @@ jobs:
           original = stager.store_component_inputs(capsule, target)
           expected = original[1]
           def snapshot():
-              rows = []
-              for path in prep.files(runtime, max_files=prep.MAC_MAX_FILES, max_entries=prep.MAC_MAX_ENTRIES):
+              rows, directories = [], {}
+              for path in prep.store_component_files(runtime, directories=directories):
                   with stager.parent(path) as (parent, leaf):
                       body, info = stager.read_at(parent, leaf, signing.FILE_LIMIT)
                   rows.append((path.relative_to(runtime).as_posix(), stager.digest(body), len(body)))
               stager.need(tuple(rows) == expected, "store-smoke-complete-extracted-bytes")
-          snapshot()
+              return directories
+          original_directories = snapshot()
           producer_path = checkout / helper.PRODUCER_PROFILE
           service_path = checkout / helper.PROFILE
           producer, service = stager.read(producer_path, 1024), stager.read(service_path, 1024)
@@ -358,7 +359,7 @@ jobs:
                       str(runtime), arch, "projected-smoke"], stdin=subprocess.DEVNULL, stdout=capture,
                       stderr=subprocess.STDOUT, env=clean, cwd=home, check=True, timeout=90)
               phase = "post"
-              snapshot()
+              stager.need(snapshot() == original_directories, "store-smoke-directory-original-post")
               stager.need(stager.store_component_inputs(capsule, target) == original
                   and stager.read(producer_path, 1024) == producer and stager.read(service_path, 1024) == service,
                   "store-smoke-source-input-post")

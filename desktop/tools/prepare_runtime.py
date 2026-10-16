@@ -62,10 +62,22 @@ class PreparationError(ValueError):
     pass
 
 
-def _safe_name(name: str) -> bool:
-    return (re.fullmatch(r"[A-Za-z0-9._+\-]+", name, flags=re.ASCII) is not None
-            and name not in {".", ".."} and not name.endswith(".")
+def _safe_name(name: str, *, mac_store: bool = False) -> bool:
+    pattern = r"[A-Za-z0-9._+% \-]+" if mac_store else r"[A-Za-z0-9._+\-]+"
+    return (re.fullmatch(pattern, name, flags=re.ASCII) is not None
+            and name not in {".", ".."} and not name.startswith(" ") and not name.endswith((".", " "))
             and name.split(".", 1)[0].lower() not in _RESERVED)
+
+
+def _safe_runtime_path(name: str, *, store_prefix: str | None = None) -> bool:
+    if type(name) is not str or not name or len(name) > 512 or store_prefix not in (None, "", "store"):
+        return False
+    parts = name.split("/")
+    scoped = store_prefix == "" or store_prefix == "store" and name.startswith("store/")
+    prefix_parts = 1 if store_prefix == "store" else 0
+    return (len(parts) <= MAX_PATH_PARTS + (prefix_parts if scoped else 0)
+            and all(_safe_name(part, mac_store=scoped and index >= prefix_parts)
+                    for index, part in enumerate(parts)))
 
 
 def _windows_identity(value: os.stat_result, mode: int) -> tuple[int, ...]:
@@ -101,7 +113,9 @@ def _root(path: Path) -> Path:
     return path
 
 
-def files(root: Path, *, reserve_entries: int = 0, max_files: int | None = None, max_entries: int | None = None) -> list[Path]:
+def _files(root: Path, *, reserve_entries: int = 0, max_files: int | None = None,
+           max_entries: int | None = None, store_prefix: str | None = None,
+           supplier_directories: dict | None = None) -> list[Path]:
     max_files = MAX_FILES if max_files is None else max_files
     max_entries = MAX_ENTRIES if max_entries is None else max_entries
     result: list[Path] = []
@@ -111,17 +125,19 @@ def files(root: Path, *, reserve_entries: int = 0, max_files: int | None = None,
     entries = 0
     while pending:
         parent, depth = pending.pop()
-        if depth >= MAX_PATH_PARTS:
+        depth_limit = MAX_PATH_PARTS + (1 if store_prefix == "store" else 0)
+        if depth > depth_limit or depth == depth_limit and supplier_directories is None:
             raise PreparationError("Payload directory depth exceeded")
+        if supplier_directories is not None:
+            supplier_directories[parent] = _state(_ordinary(parent, directory=True))
         with os.scandir(parent) as children:
             for child in children:
                 entries += 1
-                if entries + reserve_entries > max_entries or not _safe_name(child.name):
-                    raise PreparationError("Payload inventory limit or unsafe name")
                 path = parent / child.name
                 relative = path.relative_to(root).as_posix()
-                if (len(relative) > 512 or len(path.relative_to(root).parts) > MAX_PATH_PARTS
-                        or relative.lower() in seen):
+                if entries + reserve_entries > max_entries or not _safe_runtime_path(relative, store_prefix=store_prefix):
+                    raise PreparationError("Payload inventory limit or unsafe name")
+                if relative.lower() in seen:
                     raise PreparationError("Payload path limit or case collision")
                 seen.add(relative.lower())
                 value = path.lstat()
@@ -142,9 +158,29 @@ def files(root: Path, *, reserve_entries: int = 0, max_files: int | None = None,
         while parent != root:
             required_directories.add(parent)
             parent = parent.parent
-    if directories != required_directories:
+    if supplier_directories is None and directories != required_directories:
         raise PreparationError("Payload contains an empty or uninventoried directory")
     return sorted(result, key=lambda item: item.relative_to(root).as_posix())
+
+
+def files(root: Path, *, reserve_entries: int = 0, max_files: int | None = None,
+          max_entries: int | None = None, mac_store: bool = False) -> list[Path]:
+    if type(mac_store) is not bool:
+        raise PreparationError("Invalid runtime path profile")
+    return _files(root, reserve_entries=reserve_entries, max_files=max_files, max_entries=max_entries,
+                  store_prefix="store" if mac_store else None)
+
+
+def store_component_files(root: Path, *, directories: dict) -> list[Path]:
+    """Explicit signed Store supplier input, not a generic output-tree profile.
+
+    Empty supplier directories are observed for POST, never manufactured in the
+    final file inventory. Every filename and byte remains in the Store copy.
+    """
+    if type(directories) is not dict or directories:
+        raise PreparationError("Store directory observation must start empty")
+    return _files(_root(root), max_files=MAC_MAX_FILES, max_entries=MAC_MAX_ENTRIES,
+                  store_prefix="", supplier_directories=directories)
 
 
 def read_checked(path: Path, *, limit: int) -> bytes:
@@ -236,7 +272,8 @@ def _store_inputs(component: Path, source: Path, runtime: Path):
     component = _root(component)
     if component == runtime or component in runtime.parents or runtime in component.parents:
         raise PreparationError("Store component and runtime output must not overlap")
-    paths = files(component, max_files=MAC_MAX_FILES, max_entries=MAC_MAX_ENTRIES)
+    original_directories = {}
+    paths = store_component_files(component, directories=original_directories)
     tooling_files, tooling_source = _store_tooling_files(source)
     required = STORE_REQUIRED_FILES
     relative = {path.relative_to(component).as_posix() for path in paths}
@@ -245,15 +282,12 @@ def _store_inputs(component: Path, source: Path, runtime: Path):
     if not {"Gemfile","Gemfile.lock","fastlane/Fastfile","fastlane/run_lane.rb",
             "fastlane/native_process_spawn.rb"} <= set(tooling_files):
         raise PreparationError("Selected core lacks required Store entry tooling")
-    directories = {component, *(parent for path in paths for parent in path.parents
-                                if parent == component or component in parent.parents)}
-    original_directories = {path: _state(_ordinary(path, directory=True)) for path in directories}
     rows = []
     total = 0
     for path in paths:
         name = path.relative_to(component).as_posix()
         # The outer manifest adds store/; apply its path/depth bounds here too.
-        if len("store/" + name) > 512 or len(path.relative_to(component).parts) + 1 > MAX_PATH_PARTS:
+        if not _safe_runtime_path("store/" + name, store_prefix="store"):
             raise PreparationError("Store component cannot fit the runtime path bounds")
         state = _state(_ordinary(path))
         body = read_checked(path, limit=min(MAX_FILE_BYTES, 512 * 1024 * 1024 - total))
@@ -300,8 +334,9 @@ def _store_inputs(component: Path, source: Path, runtime: Path):
 
 
 def _store_post(component, rows, directories):
-    if ([path.relative_to(component).as_posix() for path in files(component, max_files=MAC_MAX_FILES, max_entries=MAC_MAX_ENTRIES)] != [row[0] for row in rows]
-            or any(_state(_ordinary(path, directory=True)) != state for path, state in directories.items())
+    current_directories = {}
+    if ([path.relative_to(component).as_posix() for path in store_component_files(component, directories=current_directories)] != [row[0] for row in rows]
+            or current_directories != directories
             or any(_state(_ordinary(component / name)) != state for name, state, _, _ in rows)):
         raise PreparationError("Store component original or roster changed")
 
@@ -498,7 +533,8 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
             archive.writestr(info, content)
     inventory = []
     total = 0
-    for path in files(runtime, reserve_entries=1, max_files=file_limit, max_entries=entry_limit):
+    for path in files(runtime, reserve_entries=1, max_files=file_limit, max_entries=entry_limit,
+                      mac_store=current_mac and store is not None):
         relative = path.relative_to(runtime).as_posix()
         if provider_expected is not None and relative not in provider_expected:
             raise PreparationError("Current provider runtime acquired an unexpected payload")
