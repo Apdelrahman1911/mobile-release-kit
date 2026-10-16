@@ -234,7 +234,15 @@ def _observation(value: object, kind: str, file_requirement: str | None) -> None
 
 def _applicability(config: ReleaseConfig, kind_platform: str, platform: str, stage: str,
                    purpose: str, names: set[str]) -> dict[str, str]:
-    if platform != kind_platform:
+    # The signed iOS owner borrows every assigned build input from its one
+    # original iOS/candidate/signing context. A project dependency token keeps
+    # its project requirement identity; this exception does not retarget context
+    # or grant requiredness, which still comes from the shared core selector.
+    ios_signing_dependency = (
+        kind_platform == "project" and names == {"MOBILE_RELEASE_PROJECT_READ_TOKEN"}
+        and (platform, stage, purpose) == ("ios", "candidate", "signing")
+    )
+    if platform != kind_platform and not ios_signing_dependency:
         reason = "wrong-platform"
     elif platform != "project" and not config.platform_enabled(platform):
         reason = "platform-disabled"

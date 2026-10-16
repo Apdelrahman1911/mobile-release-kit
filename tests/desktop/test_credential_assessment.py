@@ -209,6 +209,42 @@ class CredentialAssessmentTests(unittest.TestCase):
         body = request("android-firebase", platform="project")
         self.assertEqual(execute("credentials.assess", body)["identity"], "not-assessed")
 
+    def test_ios_signing_dependency_token_uses_same_context_and_shared_requiredness(self):
+        body = request("project-read-token", platform="ios", stage="candidate", purpose="signing")
+        with patch.object(assessment, "requirements", wraps=requirements) as selector:
+            result = execute("credentials.assess", body)
+        selector.assert_called_once()
+        self.assertEqual(selector.call_args.kwargs, {"purpose": "signing", "platforms": ("ios",)})
+        self.assertEqual(result["context"], {"platform": "ios", "stage": "candidate", "purpose": "signing"})
+        self.assertEqual(result["applicability"], {"state": "required", "reason": "selected"})
+        self.assertEqual(result["state"], "configured")
+        self.assertEqual(result["fields"][0]["requirement"], "MOBILE_RELEASE_PROJECT_READ_TOKEN")
+        self.assertNotIn(SCALARS["project-read-token"]["token"], encoded(result).decode())
+        self.assertEqual(result["assurance"]["serviceValidation"], "not-run")
+        self.assertFalse(result["assurance"]["projectCodeExecuted"])
+        for value, state, issue in ((None, "missing", "required-missing"), ("", "missing", "required-missing"),
+                                    ("fictional\0token", "invalid", "value-nul")):
+            changed = copy.deepcopy(body); changed["input"]["fields"]["token"] = value
+            actual = execute("credentials.assess", changed)
+            self.assertEqual(actual["state"], state)
+            self.assertEqual(actual["fields"][0]["issues"], [issue])
+        for required in (False, True):
+            for enabled in (False, True):
+                changed = copy.deepcopy(body)
+                changed["context"]["draft"]["source"]["projectReadTokenRequired"] = required
+                if not enabled:
+                    changed["context"]["draft"]["ios"] = {"enabled": False}
+                actual = execute("credentials.assess", changed)
+                reason = "platform-disabled" if not enabled else "selected" if required else "not-required"
+                self.assertEqual(actual["applicability"]["reason"], reason)
+                self.assertEqual(actual["state"], "configured" if required and enabled else "not-applicable")
+        for platform, stage, purpose in (("android", "candidate", "signing"), ("ios", "candidate", "full"),
+                                        ("ios", "candidate", "store"), ("ios", "external-testing", "signing"),
+                                        ("ios", "production", "signing")):
+            actual = execute("credentials.assess", request("project-read-token", platform=platform, stage=stage, purpose=purpose))
+            self.assertEqual(actual["applicability"], {"state": "not-applicable", "reason": "wrong-platform"})
+        self.assertEqual(execute("credentials.assess", request("project-read-token"))["state"], "configured")
+
     def test_partial_requirement_association_is_unavailable(self):
         partial = [Requirement("MOBILE_RELEASE_ANDROID_KEY_ALIAS", "variable", "candidate", "android")]
         with patch.object(assessment, "requirements", return_value=partial):

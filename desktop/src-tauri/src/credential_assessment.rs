@@ -966,7 +966,13 @@ fn result_valid(result: &AssessmentResult, expected: &Expected) -> bool {
         || assurance.selected_files_read || assurance.keyring_accessed || assurance.storage_writes_performed || assurance.project_code_executed { return false; }
     let applicable = result.applicability.state == ApplicabilityState::Required;
     if applicable != (result.applicability.reason == ApplicabilityReason::Selected) { return false; }
-    if expected.kind.platform() != expected.context.platform {
+    // A signed iOS build borrows its dependency token from the same original
+    // context as P12/profile. This admits only the core's finite response; it
+    // neither changes the context echo nor decides whether the token is needed.
+    let ios_signing_dependency = expected.kind == Kind::ProjectReadToken
+        && expected.context.platform == Platform::Ios && expected.context.stage == Stage::Candidate
+        && expected.context.purpose == Purpose::Signing;
+    if expected.kind.platform() != expected.context.platform && !ios_signing_dependency {
         if applicable || result.applicability.reason != ApplicabilityReason::WrongPlatform { return false; }
     } else if result.applicability.reason == ApplicabilityReason::WrongPlatform { return false; }
     if expected.context.platform == Platform::Project && result.applicability.reason == ApplicabilityReason::PlatformDisabled { return false; }
@@ -1063,6 +1069,45 @@ mod tests {
     const KINDS: [Kind; 11] = [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::AppleP12, Kind::AppleProfile,
         Kind::AscP8, Kind::IosFirebase, Kind::GoogleWif, Kind::ProjectReadToken,
         Kind::AppleReviewContact, Kind::AppleReviewDemo, Kind::OperationCommitment];
+
+    #[test]
+    fn ios_signing_dependency_assessment_preserves_context_and_preview_requiredness() {
+        let mut body = request(Kind::ProjectReadToken);
+        body["context"]["platform"] = json!("ios"); body["context"]["purpose"] = json!("signing");
+        let mut raw = response(Kind::ProjectReadToken);
+        raw["context"]["platform"] = json!("ios"); raw["context"]["purpose"] = json!("signing");
+        let expected = admitted(&body).expected();
+        let result = sanitized_result(raw.clone(), &expected).ok().expect("same-context dependency assessment");
+        assert!(result.permits_session_preview());
+        assert!(result.context.platform == Platform::Ios && result.context.purpose == Purpose::Signing);
+        let mut retargeted = raw.clone(); retargeted["context"]["platform"] = json!("project");
+        refuses(&body, retargeted);
+        for reason in ["not-required", "platform-disabled"] {
+            let mut unavailable = raw.clone();
+            unavailable["applicability"] = json!({"state":"not-applicable", "reason":reason});
+            unavailable["state"] = json!("not-applicable");
+            unavailable["fields"][0]["state"] = json!("not-applicable");
+            unavailable["fields"][0]["checks"] = json!([]);
+            let result = sanitized_result(unavailable, &expected).ok().expect("core applicability remains authoritative");
+            assert!(!result.permits_session_preview());
+        }
+        let mut missing = body.clone(); missing["input"]["fields"]["token"] = Value::Null;
+        let mut absent = raw.clone(); absent["state"] = json!("missing");
+        absent["fields"][0]["state"] = json!("missing"); absent["fields"][0]["presence"] = json!("missing");
+        absent["fields"][0]["issues"] = json!(["required-missing"]); absent["fields"][0]["checks"] = json!([]);
+        absent["assurance"]["scalarValuesProcessed"] = json!(false);
+        let result = sanitized_result(absent, &admitted(&missing).expected()).ok().expect("missing token is not permission");
+        assert!(!result.permits_session_preview());
+        for (platform, stage, purpose) in [("android", "candidate", "signing"), ("ios", "candidate", "full"),
+            ("ios", "candidate", "store"), ("ios", "external-testing", "signing"), ("ios", "production", "signing")] {
+            let mut other = body.clone(); let mut forged = raw.clone();
+            for (key, value) in [("platform", platform), ("stage", stage), ("purpose", purpose)] {
+                other["context"][key] = json!(value); forged["context"][key] = json!(value);
+            }
+            refuses(&other, forged); // No cross-platform exception for these contexts.
+        }
+        accepts(&request(Kind::ProjectReadToken), response(Kind::ProjectReadToken));
+    }
 
     #[test]
     fn secret_format_results_are_finite_redacted_and_not_public_identifier_checks() {
