@@ -37,6 +37,47 @@ def binding():
 
 
 class StoreConsumerData(unittest.TestCase):
+    def test_preparation_diagnostic_preserves_failure_without_private_details(self):
+        secret = 'private-input-must-not-be-logged'
+        try:
+            TOOL.need(False, secret)
+        except TOOL.Refused as error:
+            original = error
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            TOOL.runtime_refusal_annotation('compose-store-runtime', original)
+        self.assertRegex(stderr.getvalue(), r'^MRK_RUNTIME_PREPARATION_REFUSED=refused;sites=stager:[0-9]+\n$')
+        self.assertNotIn(secret, stderr.getvalue())
+        self.assertNotIn(str(TOOL.DESKTOP), stderr.getvalue())
+        # Foreign stack filenames, exception chains and arbitrary class names
+        # are not diagnostics. Only literal known kinds and own code sites are.
+        class PrivateNamedError(Exception):
+            pass
+        try:
+            exec(compile('raise failure', '/private/' + secret, 'exec'),
+                 {'failure': PrivateNamedError(secret)})
+        except PrivateNamedError as foreign:
+            foreign.__cause__ = original
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                TOOL.runtime_refusal_annotation('compose-store-runtime', foreign)
+            self.assertEqual(stderr.getvalue(), 'MRK_RUNTIME_PREPARATION_REFUSED=unknown;sites=unavailable\n')
+        # Real parser/handler retains the exact refusal even if stderr fails.
+        for fail_sink in (False, True):
+            sink = mock.Mock()
+            if fail_sink:
+                sink.write.side_effect = OSError(secret)
+            with (mock.patch.object(TOOL, 'finalize_runtime_binding_command', side_effect=original),
+                  mock.patch.object(TOOL.os, 'getuid', return_value=501),
+                  mock.patch.object(TOOL.os, 'geteuid', return_value=501),
+                  mock.patch.object(TOOL.sys, 'stderr', sink), self.assertRaises(TOOL.Refused) as caught):
+                TOOL.main(['finalize-runtime-binding', '--target', TOOL.ARM_TARGET, '--work-root', '/inert'])
+            self.assertIs(caught.exception, original)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            TOOL.runtime_refusal_annotation('preview', original)
+        self.assertEqual(stderr.getvalue(), '')
+
     def test_source_selection_is_closed_per_arch_and_never_falls_back(self):
         original = selection()
         self.assertEqual(TOOL.signed_store_selection_data(TOOL.canonical(original))['artifactId'], '31')

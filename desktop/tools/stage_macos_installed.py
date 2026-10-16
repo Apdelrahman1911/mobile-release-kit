@@ -466,6 +466,32 @@ def package_refusal_message(error):
     return GENERIC_REFUSAL
 
 
+def runtime_refusal_annotation(command, error):
+    """Bounded code locations only: never private values or exception messages."""
+    if command not in ("compose-store-runtime", "finalize-runtime-binding"):
+        return
+    try:
+        kinds = {Refused: "refused", OSError: "os-error", ValueError: "value-error",
+                 KeyError: "key-error", TypeError: "type-error", RecursionError: "recursion",
+                 OverflowError: "overflow", zipfile.BadZipFile: "zip-error",
+                 tarfile.TarError: "tar-error", ET.ParseError: "xml-error"}
+        names = {__file__: "stager", str(DESKTOP / "tools/prepare_runtime.py"): "preparer"}
+        frame = BaseException.__traceback__.__get__(error, BaseException)
+        locations = []
+        for _ in range(32):
+            if frame is None:
+                break
+            label = names.get(frame.tb_frame.f_code.co_filename)
+            if label is not None and 0 < frame.tb_lineno < 100000:
+                locations.append(label + ":" + str(frame.tb_lineno))
+            frame = frame.tb_next
+        print("MRK_RUNTIME_PREPARATION_REFUSED=" + kinds.get(type(error), "unknown")
+              + ";sites=" + (",".join(locations[-8:]) or "unavailable"), file=sys.stderr)
+    except Exception:
+        # The diagnostic sink cannot replace the original failure or its custody.
+        pass
+
+
 def need(ok, reason):
     if not ok:
         raise Refused(reason)
@@ -6462,12 +6488,14 @@ def main(argv=None):
     try:
         result = action(args)
     except Refused as error:
+        runtime_refusal_annotation(args.command, error)
         carrier_refusal_annotation(args, error)
         if args.command in ("app", "android-support", "input", "package-format-input", "prepare-package", "audit-package"):
             print(package_refusal_message(error), file=sys.stderr)
             raise SystemExit(1)
         raise
     except (OSError, ValueError, KeyError, TypeError, RecursionError, OverflowError, zipfile.BadZipFile, tarfile.TarError, ET.ParseError) as error:
+        runtime_refusal_annotation(args.command, error)
         carrier_refusal_annotation(args, error)
         raise
     print(canonical(result).decode("utf-8"))
