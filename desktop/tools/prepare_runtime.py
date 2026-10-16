@@ -10,6 +10,7 @@ not a signed installer or native verification receipt.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -44,6 +45,13 @@ CURRENT_BOOTSTRAPS = (
 )
 GITHUB_CA_NAME = "github-ca.pem"
 MAX_GITHUB_CA_BYTES = 512 * 1024
+STORE_EXECUTABLES = frozenset({"bin/ruby", "bin/bundle"})
+STORE_REQUIRED_FILES = frozenset({
+    *STORE_EXECUTABLES, "ca.pem", "lib/ruby/gems/3.3.0/gems/bundler-4.0.16/exe/bundle",
+    "bundle/ruby/3.3.0/gems/fastlane-2.235.0/lib/fastlane.rb",
+    "licenses/Ruby-COPYING", "licenses/Ruby-BSDL", "licenses/Ruby-LEGAL",
+    "licenses/OpenSSL-LICENSE.txt", "licenses/LibYAML-License", "licenses/locked-gem-licenses.txt",
+})
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 
 
@@ -180,19 +188,114 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     return _prepare(source, runtime, target, current=False)
 
 
-def prepare_current(source: Path, runtime: Path, target: str, *, history_provider: bool = False) -> dict[str, str]:
+def prepare_current(source: Path, runtime: Path, target: str, *, history_provider: bool = False,
+                    store_component: Path | None = None) -> dict[str, str]:
     """Current complete fixed roster, still DATA only and never qualification."""
-    return _prepare(source, runtime, target, current=True, history_provider=history_provider)
+    return _prepare(source, runtime, target, current=True, history_provider=history_provider,
+                    store_component=store_component)
+
+
+def _store_tooling_files(source: Path) -> tuple[tuple[str, ...], bytes]:
+    # The selected core, not a cached module from the preparer's checkout,
+    # defines this literal DATA roster. Do not execute supplier/project Python.
+    body = read_checked(source / "src/mobile_release/tooling.py", limit=MAX_CORE_BYTES)
+    try:
+        assignments = [node.value for node in ast.parse(body).body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "REQUIRED_TOOLING_FILES"
+                               for target in node.targets)]
+        if len(assignments) != 1:
+            raise ValueError("Missing or ambiguous tooling roster")
+        names = ast.literal_eval(assignments[0])
+    except (SyntaxError, ValueError, TypeError) as error:
+        raise PreparationError("Selected core tooling roster must be literal DATA") from error
+    if (type(names) is not tuple or not 0 < len(names) <= MAX_FILES
+            or any(type(name) is not str or not name or len(name) > 512
+                   or not all(_safe_name(part) for part in name.split("/")) for name in names)
+            or len({name.lower() for name in names}) != len(names)):
+        raise PreparationError("Selected core tooling roster has invalid or duplicate paths")
+    return names, body
+
+
+def _store_inputs(component: Path, source: Path, runtime: Path):
+    """Observe an already authenticated component; never acquire/execute it.
+
+    Native architecture, linkage and signing belong to the component producer
+    and final Mac stager. These original-byte checks prevent mixing inputs while
+    composing the complete runtime manifest; they are not supplier authority.
+    """
+    component = _root(component)
+    if component == runtime or component in runtime.parents or runtime in component.parents:
+        raise PreparationError("Store component and runtime output must not overlap")
+    paths = files(component)
+    tooling_files, tooling_source = _store_tooling_files(source)
+    required = STORE_REQUIRED_FILES | {"tooling/" + name for name in tooling_files}
+    relative = {path.relative_to(component).as_posix() for path in paths}
+    if not required <= relative:
+        raise PreparationError("Store component lacks required runtime, tooling or notices")
+    directories = {component, *(parent for path in paths for parent in path.parents
+                                if parent == component or component in parent.parents)}
+    original_directories = {path: _state(_ordinary(path, directory=True)) for path in directories}
+    rows = []
+    total = 0
+    for path in paths:
+        name = path.relative_to(component).as_posix()
+        # The outer manifest adds store/; apply its path/depth bounds here too.
+        if len("store/" + name) > 512 or len(path.relative_to(component).parts) + 1 > MAX_PATH_PARTS:
+            raise PreparationError("Store component cannot fit the runtime path bounds")
+        state = _state(_ordinary(path))
+        body = read_checked(path, limit=min(MAX_FILE_BYTES, 512 * 1024 * 1024 - total))
+        total += len(body)
+        if name in required and not body:
+            raise PreparationError("A required Store component file is empty")
+        if name in STORE_EXECUTABLES and not stat.S_IMODE(state[2]) & 0o111:
+            raise PreparationError("Store entry must be an executable component input")
+        if name == "bin/bundle" and not body.startswith(b"#!/bin/sh\n"):
+            raise PreparationError("Store wrapper requires the fixed system shell, not ambient lookup")
+        tooling_name = name.removeprefix("tooling/")
+        if name.startswith("tooling/") and tooling_name in tooling_files:
+            if body != read_checked(source / tooling_name, limit=MAX_FILE_BYTES):
+                raise PreparationError("Store tooling does not match the selected first-party source")
+        rows.append((name, state, digest(body), len(body)))
+    _store_post(component, rows, original_directories)
+    return component, rows, original_directories, total, tooling_source
+
+
+def _store_post(component, rows, directories):
+    if ([path.relative_to(component).as_posix() for path in files(component)] != [row[0] for row in rows]
+            or any(_state(_ordinary(path, directory=True)) != state for path, state in directories.items())
+            or any(_state(_ordinary(component / name)) != state for name, state, _, _ in rows)):
+        raise PreparationError("Store component original or roster changed")
+
+
+def _copy_store(observed, runtime):
+    component, rows, directories, _, _ = observed
+    _store_post(component, rows, directories)
+    output = runtime / "store"
+    output.mkdir(mode=0o700)  # Never adopt a previous or caller-owned output.
+    for name, state, expected, size in rows:
+        path = component / name
+        body = read_checked(path, limit=size)
+        if _state(_ordinary(path)) != state or digest(body) != expected:
+            raise PreparationError("Store component original changed during copying")
+        target = output / name
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with target.open("xb") as stream:
+            stream.write(body)
+            os.fchmod(stream.fileno(), 0o555 if name in STORE_EXECUTABLES else 0o444)
+    _store_post(component, rows, directories)
 
 
 def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
-             history_provider: bool = False) -> dict[str, str]:
+             history_provider: bool = False, store_component: Path | None = None) -> dict[str, str]:
     bootstrap_names = CURRENT_BOOTSTRAPS if current else BOOTSTRAPS
     if target not in TARGETS:
         raise PreparationError("Unsupported desktop package target")
     if type(history_provider) is not bool or (history_provider and
             (not current or target not in {"aarch64-apple-darwin", "x86_64-apple-darwin"})):
         raise PreparationError("History provider is a fixed current Mac input only")
+    if store_component is not None and (not current or target not in
+            {"aarch64-apple-darwin", "x86_64-apple-darwin"} or not isinstance(store_component, Path)):
+        raise PreparationError("Store component is an explicit current Mac input only")
     source, runtime = _root(source), _root(runtime)
     provider = None
     provider_paths = None
@@ -229,8 +332,21 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
     # Reserve every generated payload and the final manifest before any write.
     # This is only publisher preparation, not runtime-custody admission.
     preadmitted = provider_paths if provider_paths is not None else files(runtime, reserve_entries=generated_payloads + 1)
-    if len(preadmitted) > MAX_FILES - generated_payloads - (1 if history_provider else 0):
+    store = _store_inputs(store_component, source, runtime) if store_component is not None else None
+    store_files = len(store[1]) if store else 0
+    if len(preadmitted) + store_files > MAX_FILES - generated_payloads - (1 if history_provider else 0):
         raise PreparationError("Python payload leaves no room for core resources")
+    if store:
+        total_limit = min(total_limit, 512 * 1024 * 1024)
+        # Count the combined file ancestors, not merely each tree separately.
+        names = {path.relative_to(runtime).as_posix() for path in preadmitted}
+        names.update("store/" + row[0] for row in store[1])
+        names.update((*bootstrap_names, "core.zip", GITHUB_CA_NAME, "manifest.json"))
+        entries = set(names)
+        for name in names:
+            entries.update(parent.as_posix() for parent in Path(name).parents if parent != Path("."))
+        if len(entries) > MAX_ENTRIES:
+            raise PreparationError("Combined Store runtime entry limit exceeded")
     package = _root(source / "src/mobile_release")
     candidates = files(package)
     if not candidates or any(path.suffix not in {".py", ".json", ".pem"} for path in candidates):
@@ -242,6 +358,8 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
         size += len(content)
         core.append(("mobile_release/" + path.relative_to(package).as_posix(), content))
     source_map = dict(core)
+    if store and source_map.get("mobile_release/tooling.py") != store[4]:
+        raise PreparationError("Selected core tooling roster changed before composition")
     version = re.search(rb'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$', source_map["mobile_release/__init__.py"], re.M)
     if version is None:
         raise PreparationError("Core version must be an explicit package version")
@@ -255,20 +373,26 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
     if not github_ca:
         raise PreparationError("The fixed GitHub CA payload is empty")
     provider_expected = None
-    if provider is not None:
+    if provider is not None or store is not None:
         # Quote actual input lengths and bounded generated resources before
         # reading the large provider or creating any generated payload. The
         # containing stager independently keeps the same512MiB total ceiling.
         quote = (sum(_ordinary(path).st_size for path in preadmitted) + size + MAX_FILES * 2048
-                 + sum(len(content) for _, content in bootstraps) + len(github_ca) + 1024 * 1024)
+                 + sum(len(content) for _, content in bootstraps) + len(github_ca) + 1024 * 1024
+                 + (store[3] if store else 0))
         if quote > total_limit:
             raise PreparationError("Current provider leaves no room for complete runtime resources")
+    if provider is not None:
         if (_state(_ordinary(provider)) != provider_state
                 or _state(_ordinary(provider.parent, directory=True)) != provider_directory_state):
             raise PreparationError("Current provider original changed before preparation")
         provider_digest = digest(read_checked(provider, limit=128 * 1024 * 1024))
         provider_expected = {path.relative_to(runtime).as_posix() for path in preadmitted}
         provider_expected.update((*bootstrap_names, "core.zip", GITHUB_CA_NAME))
+        if store:
+            provider_expected.update("store/" + row[0] for row in store[1])
+    if store:
+        _copy_store(store, runtime)
     for name, content in bootstraps:
         with (runtime / name).open("xb") as stream:
             stream.write(content)
@@ -301,6 +425,13 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
                 or _state(_ordinary(provider)) != provider_state
                 or _state(_ordinary(provider.parent, directory=True)) != provider_directory_state):
             raise PreparationError("Current provider runtime original or roster changed")
+    if store:
+        _store_post(store[0], store[1], store[2])
+        expected_store = {"store/" + name: (sha, size) for name, _, sha, size in store[1]}
+        actual_store = {row["path"]: (row["sha256"], row["size"]) for row in inventory
+                        if row["path"].startswith("store/")}
+        if actual_store != expected_store:
+            raise PreparationError("Copied Store runtime differs from the observed component")
     manifest = {
         "schemaVersion": 1, "protocol": 1, "coreVersion": version[1].decode("ascii"), "target": target,
         "coreSha256": next(item["sha256"] for item in inventory if item["path"] == "core.zip"),
@@ -310,7 +441,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
     encoded = canonical(manifest) + b"\n"
     if len(encoded) > 1024 * 1024:
         raise PreparationError("Manifest byte limit exceeded")
-    if history_provider and total + len(encoded) > total_limit:
+    if (history_provider or store) and total + len(encoded) > total_limit:
         raise PreparationError("Complete current provider runtime exceeds its byte limit")
     with (runtime / "manifest.json").open("xb") as stream:
         stream.write(encoded)
@@ -325,10 +456,15 @@ def main(argv=None) -> None:
     parser.add_argument("--target", required=True, choices=sorted(TARGETS))
     parser.add_argument("--profile", choices=("historical", "current"), default="historical",
                         help="Explicit current ten-bootstrap product roster, or backward-compatible historical roster")
+    parser.add_argument("--store-component", type=Path,
+                        help="Already authenticated Mac Store component; current profile only, no native qualification")
     args = parser.parse_args(argv)
     try:
-        action = prepare_current if args.profile == "current" else prepare
-        print(json.dumps(action(args.source, args.runtime_root, args.target), sort_keys=True))
+        if args.store_component is not None and args.profile != "current":
+            raise PreparationError("Store component requires the current profile")
+        result = (prepare_current(args.source, args.runtime_root, args.target, store_component=args.store_component)
+                  if args.profile == "current" else prepare(args.source, args.runtime_root, args.target))
+        print(json.dumps(result, sort_keys=True))
     except (OSError, ValueError, KeyError, UnicodeError):
         parser.exit(1, "Runtime preparation failed. Existing inputs/partial output were preserved; no native qualification was performed.\n")
 

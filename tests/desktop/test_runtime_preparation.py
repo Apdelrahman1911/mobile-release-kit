@@ -328,3 +328,123 @@ class RuntimePreparationTests(unittest.TestCase):
                         preparation.prepare(source, runtime, "x86_64-unknown-linux-gnu")
                 self.assertEqual({entry.name for entry in runtime.iterdir()}, {"python"})
                 self.assertEqual(executable.read_bytes(), b"inert, not executable")
+
+
+class StoreRuntimeCompositionTests(unittest.TestCase):
+    """Only inert file composition; no Ruby, signature or Store execution."""
+
+    def fixture(self, base, *, history=False):
+        source, runtime, component = base / "source", base / "runtime", base / "component"
+        package = source / "src/mobile_release"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_bytes(b'__version__ = "0.3.0"\n')
+        (package / "_desktop_engine.py").write_bytes(b"# inert protocol\n")
+        (package / "tooling.py").write_bytes((_SOURCE / "src/mobile_release/tooling.py").read_bytes())
+        (source / "desktop").mkdir()
+        for name in (*preparation.CURRENT_BOOTSTRAPS, preparation.GITHUB_CA_NAME):
+            (source / "desktop" / name).write_bytes(b"inert first-party payload\n")
+        (runtime / "python/bin").mkdir(parents=True)
+        (runtime / "python/bin/python3").write_bytes(b"inert Python\n")
+        if history:
+            (runtime / "tools").mkdir()
+            (runtime / "tools/gh").write_bytes(b"inert gh\n")
+            (runtime / "tools/gh").chmod(0o555)
+        for name in preparation.STORE_REQUIRED_FILES | {"bin/gem", "lib/native/example.bundle"}:
+            path = component / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"#!/bin/sh\n# inert, never executed\n" if name == "bin/bundle" else b"inert component\n")
+            path.chmod(0o755)
+        for name in preparation._store_tooling_files(source)[0]:
+            for root in (source, component / "tooling"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"inert current tooling\n")
+        return source, runtime, component
+
+    def test_complete_composition_preserves_bytes_and_only_fixed_executable_roles(self):
+        for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                source, runtime, component = self.fixture(Path(temporary), history=True)
+                originals = {path.relative_to(component).as_posix(): (path.read_bytes(), preparation._state(path.stat()))
+                             for path in preparation.files(component)}
+                result = preparation.prepare_current(source, runtime, target, history_provider=True,
+                                                      store_component=component)
+                encoded = (runtime / "manifest.json").read_bytes()
+                self.assertEqual(result["manifestSha256"], hashlib.sha256(encoded).hexdigest())
+                self.assertEqual(result["qualification"], "prepared-not-native-verified")
+                rows = json.loads(encoded)["files"]
+                copied = {row["path"][6:]: row for row in rows if row["path"].startswith("store/")}
+                self.assertEqual(set(copied), set(originals))
+                for name, (body, state) in originals.items():
+                    self.assertEqual((runtime / "store" / name).read_bytes(), body)
+                    self.assertEqual(copied[name]["size"], len(body))
+                    self.assertEqual(copied[name]["sha256"], hashlib.sha256(body).hexdigest())
+                    self.assertEqual(stat.S_IMODE((runtime / "store" / name).stat().st_mode),
+                                     0o555 if name in preparation.STORE_EXECUTABLES else 0o444)
+                    self.assertEqual(preparation._state((component / name).stat()), state)
+                self.assertIn("tools/gh", {row["path"] for row in rows})
+                self.assertIn("core.zip", {row["path"] for row in rows})
+
+    def test_refusals_precede_output_and_keep_unknown_inputs(self):
+        for case in ("platform", "missing", "tooling", "new-core-requirement", "invalid-core-roster", "wrapper", "entry-mode", "link", "case",
+                     "empty-directory", "depth", "file-limit", "byte-limit", "existing-store", "overlap"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                source, runtime, component = self.fixture(Path(temporary))
+                target = "x86_64-unknown-linux-gnu" if case == "platform" else "aarch64-apple-darwin"
+                if case == "missing": (component / "ca.pem").unlink()
+                if case == "tooling": (component / "tooling/Gemfile").write_bytes(b"not current tooling")
+                if case == "new-core-requirement":
+                    (source / "src/mobile_release/tooling.py").write_bytes(b'REQUIRED_TOOLING_FILES = ("required-new.rb",)\n')
+                    (source / "required-new.rb").write_bytes(b"new core dependency")
+                if case == "invalid-core-roster":
+                    (source / "src/mobile_release/tooling.py").write_bytes(b'REQUIRED_TOOLING_FILES = ("../outside.rb",)\n')
+                if case == "wrapper": (component / "bin/bundle").write_bytes(b"#!/usr/bin/env sh\n")
+                if case == "entry-mode": (component / "bin/ruby").chmod(0o644)
+                if case == "link": (component / "linked").symlink_to(component / "ca.pem")
+                if case == "case": (component / "CA.pem").write_bytes(b"collision")
+                if case == "empty-directory": (component / "unused").mkdir()
+                if case == "depth":
+                    nested = component.joinpath(*(["deep"] * 15), "file")
+                    nested.parent.mkdir(parents=True)
+                    nested.write_bytes(b"too deep under store/")
+                if case == "existing-store":
+                    (runtime / "store").mkdir()
+                    (runtime / "store/keep").write_bytes(b"existing user data")
+                if case == "overlap": component = runtime
+                limit = (len(preparation.files(component)) + len(preparation.CURRENT_BOOTSTRAPS) + 1
+                         if case == "file-limit" else preparation.MAX_FILES)
+                with patch.object(preparation, "MAX_FILES", limit), \
+                        patch.object(preparation, "MAX_TOTAL_BYTES", 1 if case == "byte-limit" else preparation.MAX_TOTAL_BYTES):
+                    with self.assertRaises(preparation.PreparationError):
+                        preparation.prepare_current(source, runtime, target, store_component=component)
+                self.assertFalse((runtime / "manifest.json").exists())
+                self.assertFalse((runtime / "core.zip").exists())
+                self.assertEqual({entry.name for entry in runtime.iterdir()},
+                                 {"python", "store"} if case == "existing-store" else {"python"})
+                if case == "existing-store":
+                    self.assertEqual((runtime / "store/keep").read_bytes(), b"existing user data")
+
+    def test_changed_original_and_copied_bytes_cannot_receive_manifest(self):
+        for case in ("input-during-copy", "output-during-inventory", "core-roster-after-observation"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                source, runtime, component = self.fixture(Path(temporary))
+                original = preparation.read_checked
+                changed = []
+                def read(path, *, limit):
+                    body = original(path, limit=limit)
+                    if not changed and case == "input-during-copy" and (runtime / "store").exists() and path == component / "ca.pem":
+                        path.write_bytes(body + b"changed")
+                        changed.append(path)
+                    if not changed and case == "output-during-inventory" and path == runtime / "store/ca.pem":
+                        changed.append(path)
+                        return body + b"changed"
+                    if not changed and case == "core-roster-after-observation" and path == source / "src/mobile_release/tooling.py":
+                        path.write_bytes(body + b"\n# changed selected source\n")
+                        changed.append(path)
+                    return body
+                with patch.object(preparation, "read_checked", side_effect=read):
+                    with self.assertRaises(preparation.PreparationError):
+                        preparation.prepare_current(source, runtime, "aarch64-apple-darwin", store_component=component)
+                self.assertEqual(len(changed), 1)
+                self.assertFalse((runtime / "manifest.json").exists())
+                self.assertTrue(component.is_dir())  # Uncertain originals/partial output preserved.

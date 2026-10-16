@@ -166,6 +166,25 @@ addition does not change compiled Ruby or native gems. Earlier native binary
 checks remain applicable to those unchanged inputs, but a final assembled
 component still needs the complete tooling/relocation smoke and its own digest.
 
+### Current runtime composition (not yet installed execution)
+
+`prepare_runtime.py --profile current --store-component /absolute/component`
+can compose an **already authenticated** Store component into `runtime/store/`.
+It does not download or run Ruby. It preserves the complete component inventory,
+checks required notices/runtime/current core tooling, copies only into absence,
+and binds copied bytes into the existing runtime manifest. Only `bin/ruby` and
+the fixed `/bin/sh` `bin/bundle` wrapper receive executable modes; other installed
+gem binstubs are resources, not additional executable roles.
+
+The existing 2,048-file, portable-path and combined 512-MiB package limits remain.
+A component that cannot fit is refused, not silently trimmed. Actual component
+counts must be assessed before enabling a shipping profile. This DATA
+composition is **not** a native architecture/signature check or a Store grant:
+final signing must cover every Mach-O, update the manifest to the final signed
+bytes, and retain the full signed inventory. Stager/installed-book Store roles,
+live runtime loans, clean core runtime-context integration and local mutation
+authority are still separate unfinished work.
+
 The first ARM and Intel component run (`38837216127`, source `9a4bbe69`) compiled Ruby and
 its native dependencies, then RubyGems refused to overwrite Ruby's existing
 default Bundler launcher. It did **not** reach runtime smoke or relocation.
