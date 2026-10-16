@@ -60,6 +60,11 @@ jobs:
           plutil -lint "$WORK_ROOT/Mobile Release Kit.app/Contents/Info.plist"
           lipo "$WORK_ROOT/Mobile Release Kit.app/Contents/MacOS/mrk-macos-launcher" \
             -verify_arch "$TARGET_ARCH"
+          # Public component linkage only: integration must use the actual
+          # Swift SDK's library/rpath behavior, not guessed Mach-O policy.
+          otool -L "$WORK_ROOT/Mobile Release Kit.app/Contents/MacOS/mrk-macos-launcher"
+          otool -l "$WORK_ROOT/Mobile Release Kit.app/Contents/MacOS/mrk-macos-launcher" |
+            sed -n '/cmd LC_RPATH/,+3p'
       - name: Remove only this job's disposable component
         if: always() && steps.work.outputs.root != ''
         shell: bash
