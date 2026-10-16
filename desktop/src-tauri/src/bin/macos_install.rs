@@ -7456,11 +7456,17 @@ mod installer {
                 REMOVAL_SNAPSHOT_WORK as usize-work-65536-8192,work,0,plan.bytes_data()).unwrap(),installation_record::ORIGINAL_LIMIT);
             assert!(rehome_audit_quote_data(plan.directories_data(),plan.files_data(),2,(installation_record::ORIGINAL_LIMIT + 1)-2*count,91,0,work,0,plan.bytes_data()).is_err());
             assert!(rehome_audit_quote_data(plan.directories_data(),plan.files_data(),1,0,92,0,work,0,plan.bytes_data()).is_err());
-            assert!(rehome_audit_quote_data(75,484,usize::MAX,0,0,0,0,0,0).is_err());
-            assert!(rehome_audit_quote_data(76,484,1,0,0,0,0,0,0).is_err());
-            assert!(rehome_audit_quote_data(75,485,1,0,0,0,0,0,0).is_err());
-            assert!(rehome_audit_quote_data(75,484,1,0,0,0,REHOME_WORK+1,0,0).is_err());
-            assert!(rehome_audit_quote_data(75,484,1,0,0,0,0,installation_record::PAYLOAD_LIMIT,1).is_err());
+            // Snapshot controls now also include each enrolled launcher phase.
+            // Exercise the actual closed count boundary, not the old 484-file
+            // snapshot cap. Original/live/memory/storage limits remain separate.
+            let directories=SNAPSHOT_DIRECTORIES;let files=SNAPSHOT_CONTROLS-4;
+            assert_eq!(rehome_audit_quote_data(directories,files,1,0,0,0,0,0,0).unwrap(),2*directories+files);
+            assert_eq!(rehome_audit_quote_data(directories,files-1,1,0,0,0,0,0,0).unwrap(),2*directories+files-1);
+            assert!(rehome_audit_quote_data(directories,files,usize::MAX,0,0,0,0,0,0).is_err());
+            assert!(rehome_audit_quote_data(directories+1,files,1,0,0,0,0,0,0).is_err());
+            assert!(rehome_audit_quote_data(directories,files+1,1,0,0,0,0,0,0).is_err());
+            assert!(rehome_audit_quote_data(directories,files,1,0,0,0,REHOME_WORK+1,0,0).is_err());
+            assert!(rehome_audit_quote_data(directories,files,1,0,0,0,0,installation_record::PAYLOAD_LIMIT,1).is_err());
             drop(plan);
             // Same real decoded State/Intent and sole parsed snapshot; every
             // foreign/missing/hash mutation is rejected by the production set.

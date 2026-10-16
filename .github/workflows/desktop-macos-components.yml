@@ -34,7 +34,7 @@ on:
         description: Compile only the changed native component
         type: choice
         default: all
-        options: [all, launcher, installer, app]
+        options: [all, launcher, installer, installer-recovery, app]
 
 permissions:
   contents: read
@@ -95,7 +95,7 @@ jobs:
 
   installer-check:
     name: Check installer and remover (${{ matrix.arch }})
-    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'installer'
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'installer' || inputs.component == 'installer-recovery'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -124,6 +124,7 @@ jobs:
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
           MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+          INSTALLER_CHECKS: ${{ inputs.component }}
         run: |
           set -euo pipefail
           export CARGO_HOME="$WORK_ROOT/cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
@@ -134,17 +135,23 @@ jobs:
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
           # Separate invocations keep the two mutually exclusive roles distinct;
           # dependencies are compiled once in this job's shared target directory.
-          rustup run 1.98.1 cargo check --locked --no-default-features \
-            --features macos-installed-installer --bin mrk-macos-install
-          rustup run 1.98.1 cargo check --locked --no-default-features \
-            --features macos-installed-remover --bin mrk-macos-remove
+          if [[ "$INSTALLER_CHECKS" != installer-recovery ]]; then
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features macos-installed-installer --bin mrk-macos-install
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features macos-installed-remover --bin mrk-macos-remove
+          fi
           # Only launcher and existing recovery-contract byte/data tests run. The Installer main, live
           # filesystem adapter and removal entry point are not invoked.
+          tests=(installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality)
+          # Use only for a recovery-test-only correction after both native roles
+          # and launcher tests already passed; normal runs keep their full scope.
+          if [[ "$INSTALLER_CHECKS" != installer-recovery ]]; then
+            tests+=(installer::applications::tests::)
+          fi
           rustup run 1.98.1 cargo test --locked --no-default-features \
             --features macos-installed-installer --bin mrk-macos-install -- \
-            installer::applications::tests:: \
-            installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality \
-            --test-threads=1
+            "${tests[@]}" --test-threads=1
       - name: Remove only this job's disposable compiler and dependencies
         if: always() && steps.work.outputs.root != ''
         shell: bash
