@@ -372,8 +372,17 @@ class LocalSourceObservation:
         return self.observed
 
     def _close(self):
-        self.active, self.closed = False, True
         first = None
+        metadata = getattr(self, "_metadata_owner", None)
+        if metadata is not None:
+            from .local_release_metadata import LocalMetadataSource
+            try:
+                _need(type(metadata) is LocalMetadataSource and metadata.source is self, "input")
+                if metadata.composition is not None:
+                    metadata._close()  # Independent consuming closes BEFORE borrowed source parents.
+            except BaseException as error:
+                first = error
+        self.active, self.closed = False, True
         for reader in reversed(self.readers):
             try:
                 reader.close()
@@ -400,6 +409,11 @@ def _retain_source(owner):
                 owner.acquire()
                 yield owner
                 owner.check()
+                metadata = getattr(owner, "_metadata_owner", None)
+                if metadata is not None:
+                    from .local_release_metadata import LocalMetadataSource
+                    _need(type(metadata) is LocalMetadataSource and metadata.source is owner, "input")
+                    metadata._source_post(owner)
         finally:
             scope.__exit__(*sys.exc_info())
         for reader in owner.readers:

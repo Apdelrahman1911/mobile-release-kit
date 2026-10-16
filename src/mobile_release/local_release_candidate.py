@@ -3,8 +3,8 @@
 This optional internal seam starts before the existing signed build runs. It
 retains the SAME exclusive artifact snapshot, not a renderer path/report or a
 second AAB copy. Core producer finality is distinct from external native parent
-and transport finality. Source/freshness, metadata, intent and consent still
-need their original owners; none are inferred from a successful build.
+and transport finality. Source/freshness and metadata retain their original
+owners; intent and consent still require a separate original join; none are inferred from a successful build.
 """
 from __future__ import annotations
 
@@ -286,6 +286,21 @@ def composition_fd_quote(*, project, source, bound_files, module_depth, root_dep
             "handoff": handoff}
 
 
+def metadata_fd_quote(quote, *, directories, scratch_depth):
+    """Retained metadata + AAB + last source query; no future-close credit."""
+    _need(type(quote) is dict and type(directories) is int and 0 <= directories <= 96
+          and type(scratch_depth) is int and 1 <= scratch_depth <= 96)
+    base = sum(quote[key] for key in ("project", "source", "normalFiles", "normalIterators",
+                                    "namespace", "tools", "baseline"))
+    # Scratch's independent complete ancestry, slot/writer/readback; metadata
+    # directories + leaf/iterator; retained AAB alongside eighth native query.
+    phase = base + scratch_depth + 3 + directories + 2 + quote["handoff"] + 20
+    total = max(quote["total"], phase)
+    _need(total <= COMPOSITION_FDS)
+    return {**quote, "metadataPhase": phase, "metadataDirectories": directories,
+            "metadataScratch": scratch_depth + 3, "total": total}
+
+
 OUTPUT_REFUSALS = {
     "preexisting-output": "Previous Android output is preserved. Use reviewed output preparation before starting a local candidate.",
     "module-missing": "The configured Android module directory is missing; no build or output cleanup was started.",
@@ -309,6 +324,7 @@ class LocalAndroidCandidateComposition:
         self.run = run
         self.handoff = LocalAndroidBuildHandoff(run)
         self.source = None
+        self.metadata = self.metadata_scratch = self.metadata_snapshot = None
         self.quote = self.source_binding = None
         self.failed = self.closed = self.source_closed = self.joined = False
         self._source_pending = None
@@ -471,6 +487,11 @@ class LocalAndroidCandidateComposition:
                                         self.run.source.work_end, None)
         self.source = source  # Root before original source opens.
         source._composition = self
+        from .local_release_metadata import LocalMetadataSource
+        from .build_inputs import FiniteScratch
+        self.metadata = LocalMetadataSource(source)  # Before original sixth-call row selection.
+        self.metadata_scratch = FiniteScratch("store-metadata", self.run.guard,
+            op.root / ".mobile-release" / "desktop-android-build" / op.operation_id)
         project = op.invocation.project_owner
         module_depth = len(bound.saved.configuration.module.lstrip(":").split(":")) if bound.saved.configuration.module != ":" else 0
         self.quote = composition_fd_quote(project=len(project.directory.slots) + 1,
@@ -484,6 +505,7 @@ class LocalAndroidCandidateComposition:
                 observed = source.observed
                 self.source_binding = {"commit": observed.commit, "tree": observed.tree,
                                        "ref": observed.ref, "branch": observed.branch}
+                self.metadata._reserve_composed(self, self.metadata_scratch)
                 self._output = op.files.prepare_candidate_output(self)
                 try:
                     yield
@@ -501,11 +523,54 @@ class LocalAndroidCandidateComposition:
         self._owner()
         _need(self.source is not None and self.quote is not None and not self.failed
               and self.run.operation.work_finish_attempted)
-        self.source.check()
+        op = self.run.operation
+        _need(type(artifact) is OriginalAndroidArtifact and artifact is op._artifact
+              and artifact is op.files.artifact and self.metadata_snapshot is None)
+        path = op.root / ".mobile-release" / "desktop-android-build" / op.operation_id / "artifacts" / "app-release.aab"
+        _need(artifact.path == path and len(path.parts) + 2 <= self.quote["handoff"])
+        self._metadata_cut()
+        self.metadata_scratch.acquire()
+        self.metadata_snapshot = self.metadata_scratch.metadata_archive(
+            self.metadata.root, platform="android", _source=self.metadata)
         _need(self._output is not None and self._output_data is None)
         self._output_data = self._output.data(artifact)
-        path = self.run.operation.root / ".mobile-release" / "desktop-android-build" / self.run.operation.operation_id / "artifacts" / "app-release.aab"
-        _need(artifact.path == path and len(path.parts) + 2 <= self.quote["handoff"])
+
+    def _metadata_cut(self):
+        self._owner()
+        op = self.run.operation
+        work = op.files._work
+        facts = self.run.guard.lifetime_ledger.verdict()
+        _need(not self.failed and not self.closed and self.metadata is not None
+              and self.metadata.composition is self and self.metadata.source is self.source
+              and op.work_finish_attempted and op.files._work_claimed
+              and work is not None and work.deleted and work.slot.number is None
+              and work.slot.close_state == "CLOSED"
+              and op.signing is not None and op.signing.inputs_closed()
+              and op.commands_settled() and not op.close_claimed and self.run.primary is None
+              and self.source.calls == 6 and self._source_pending is None and op._signature_passed
+              and all(op._roles.get(role) == "returned" and op._returned.get(role)
+                      in ((0, 4) if role == "jarsigner" else (0,)) for role in BUILD_ROLES)
+              and facts.complete and facts.cleanup_complete and facts.contained and not facts.fatal
+              and facts.commands == 12 and facts.profile_calls == 0)
+
+    def _metadata_data(self):
+        try:
+            from .build_inputs import InputSnapshot
+            metadata, scratch, snapshot = self.metadata, self.metadata_scratch, self.metadata_snapshot
+            _need(metadata is not None and metadata.composition is self and metadata.scratch is scratch
+                  and metadata.closed and not metadata.failed and metadata.final_post
+                  and all(it.close_state == "closed" for it in metadata.iterators)
+                  and metadata.reader is not None and metadata.reader.assert_closed() is None
+                  and type(snapshot) is InputSnapshot and snapshot._owner is scratch
+                  and snapshot._role == "metadata" and scratch.snapshots.get("metadata") is snapshot
+                  and scratch.tokens.get("metadata") is snapshot._token and scratch.active and not scratch.claimed)
+            scratch._check()  # Same original independently retained ancestry/slot.
+            return {"bytes": snapshot.size, "sha256": snapshot.sha256,
+                    "sourceOriginalsClosed": True, "snapshotRetention": "live-original-scratch",
+                    "assemblyBytesQuote": metadata.reservation["assemblyBytes"]}
+        except BaseException as error:
+            self._fail(error)
+            raise
 
     def _terminal(self, terminal):
         try:
@@ -517,6 +582,7 @@ class LocalAndroidCandidateComposition:
     def _terminal_data(self, terminal):
         from ._desktop_android_build_protocol import _validate_composed_terminal
         _validate_composed_terminal(terminal, self.run.request, self)
+        metadata_data = self._metadata_data() if terminal["outcome"] == "complete" else None
         if terminal["outcome"] == "complete":
             _need(not self.failed and self.source_closed and self.source_binding is not None
                   and self._output_data is not None
@@ -532,6 +598,7 @@ class LocalAndroidCandidateComposition:
                 "sourceOriginalsClosed": self.source_closed, "sourceFailure": self.source_failure,
                 "outputFailure": self.output_failure, "outputGuidance": OUTPUT_REFUSALS.get(self.output_failure),
                 "outputFreshness": json.loads(json.dumps(self._output_data)) if self.joined else None,
+                "metadataSnapshot": metadata_data if self.joined else None,
                 "ownedPythonDescriptorQuote": self.quote,
                 # Serialized payload/row bounds, not a Python heap or OS-wide
                 # memory proof. No AAB body is retained in memory.
@@ -547,7 +614,18 @@ class LocalAndroidCandidateComposition:
         self._owner()
         _need(self.joined and not self.closed and not self.failed)
         return {**self.handoff.observation(), "sourceCorrespondence": dict(self.source_binding),
-                "outputFreshness": json.loads(json.dumps(self._output_data))}
+                "outputFreshness": json.loads(json.dumps(self._output_data)),
+                "metadataSnapshot": self._metadata_data()}
+
+    def metadata_input(self):
+        """Exact original snapshot only after join; no path, Store or intent authority."""
+        self.observation()
+        try:
+            self.metadata_scratch.require(self.metadata_snapshot)
+            return self.metadata_snapshot
+        except BaseException as error:
+            self._fail(error)
+            raise
 
     def artifact_blocks(self):
         self.observation()
@@ -555,8 +633,32 @@ class LocalAndroidCandidateComposition:
 
     def _close(self):
         self._owner()
+        if self.closed:
+            return
         self.closed = True
-        self.handoff._close()
+        from .build_inputs import _attempt_all
+        actions = ([self.metadata._close] if self.metadata is not None else [])
+        if self.metadata_scratch is not None:
+            actions.append(self.metadata_scratch.cleanup)
+        actions.append(self.handoff._close)
+        try:
+            _attempt_all(self.run.guard, actions)
+        except BaseException as error:
+            self._fail(error)
+            raise
+
+    def _fork_close(self):
+        from .cancellation import _mark_fork_unsafe
+        actions = ([self.metadata._fork_close] if self.metadata is not None else [])
+        if self.metadata_scratch is not None:
+            actions.append(self.metadata_scratch.fork_close)
+        if self.handoff.reader is not None:
+            actions.append(self.handoff.reader.after_fork_child)
+        for action in actions:
+            try:
+                action()
+            except BaseException:
+                _mark_fork_unsafe()
 
 
 @contextmanager
@@ -564,7 +666,7 @@ def retain_local_android_candidate(run):
     """No engine/wire caller yet; original internal composition only."""
     owner = LocalAndroidCandidateComposition(run)
     scope = CleanupScope(run.guard, owner._close, owns_cancellation=False,
-        fork_cleanup=lambda: owner.handoff.reader.after_fork_child() if owner.handoff.reader else None,
+        fork_cleanup=owner._fork_close,
         first_primary=True)
     try:
         try:

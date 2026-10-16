@@ -720,6 +720,7 @@ class FiniteScratch:
         self.journal = _journal
         self._lane_binding = None
         self._desktop_binding = None
+        self._local_metadata_owner = None
         self._cleanup_complete = False
         source = getattr(guard, "_ios_archive_source", None)
         if source is not None and layout in {"signing-validation", "build"}:
@@ -773,6 +774,10 @@ class FiniteScratch:
 
     def acquire(self) -> None:
         self.parent.acquire()
+        if self._local_metadata_owner is not None:
+            from .local_release_metadata import LocalMetadataSource
+            _need(type(self._local_metadata_owner) is LocalMetadataSource, "metadata requires its original source")
+            self._local_metadata_owner._scratch_parent(self)
         _name_absent(self.parent.fd, self.name,
                      cancellation=self.cancellation if self._desktop_binding is not None else None)
         with self.cancellation.deferred(check_on_exit=False):

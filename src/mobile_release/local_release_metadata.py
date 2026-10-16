@@ -2,7 +2,7 @@
 
 Opt in before source acquisition. The unchanged original scratch owns the ZIP;
 this reader only binds its bytes to the held source's selected committed rows.
-Current composed-build profiles deliberately remain unwired and refuse here.
+Candidate composition retains these originals through its last source POST.
 """
 from __future__ import annotations
 
@@ -59,7 +59,8 @@ class LocalMetadataSource:
         self.absent = []
         self.reader = self.leaf = None
         self.iterators = []
-        self.scratch = self.reservation = None
+        self.scratch = self.reservation = self.composition = None
+        self.final_post = False
         self.failed = self.closed = self.active = self.used = False
         self.counters = {}
         source._metadata_owner = self  # Before original capture; no files opened.
@@ -114,41 +115,114 @@ class LocalMetadataSource:
                 parent = parent.parent
         self.rows, self.planned = rows, tuple(sorted(planned, key=lambda p: (len(p.parts), p)))
 
-    def reserve(self, scratch):
-        """Before original scratch acquire; derive owned FD/memory quotes.
-
-        Not an ambient OS/native-parent headroom proof. The existing composed
-        build's different retained phase has no metadata admission yet.
-        """
+    def _scratch_new(self, scratch):
         self.check()
         _need(self.source.active and self.rows is not None and self.reservation is None
               and type(scratch) is FiniteScratch and scratch.cancellation is self.guard
               and scratch.layout == "store-metadata" and not scratch.created
               and not scratch.active and not scratch.claimed and not scratch.parent.slots
-              and getattr(self.source, "_composition", None) is None
-              and getattr(self.guard, "_android_build_source", None) is None)
-        # Only the already-held project-private root is admitted in this
-        # standalone internal slice. Candidate operation-namespace wiring must
-        # reserve its own exact retained roster before enabling this branch.
-        project = self.source.project
-        _need(scratch.parent.path == self.source.root / ".mobile-release"
-              and project.meta.number is not None)
-        source_fds = sum(len(reader.descriptors) for reader in self.source.readers)
-        directories = sum(path not in self.source.directories for path in self.planned)
-        scratch_fds = len(scratch.parent.path.parts) + 3  # slot, writer, readback
-        total = len(project.directory.slots) + 1 + source_fds + directories + scratch_fds + 2 + 20 + 8
+              and scratch._local_metadata_owner is None)
+
+    def _reserve(self, scratch, total, directories):
         soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
         _need(total <= MAX_FDS and (soft == resource.RLIM_INFINITY or soft >= MAX_FDS))
         row_bytes = self.counters.get("row-bytes", 0)
         zip_bound = MAX_ARCHIVE_SIZE + 2 * row_bytes + 512 * len(self.rows) + 65536
         _need(zip_bound <= scratch._spec("metadata").limit)
+        # Four composed censuses (initial, publication, seventh and eighth Git
+        # POST), including excluded .gitkeep rows. Quote before build, not ZIP.
+        passes = 4 if self.composition is not None else 3
+        # Selected root entry + root iterator exhaustion; each selected
+        # directory adds its own exhaustion attempt as well as child entries.
+        count, census = 2, 2048
+        count += sum(any(path == root or root in path.parents for root in self.selected)
+                     for path in self.planned)
+        for path in (*self.planned, *self.rows):
+            if any(path.parent == root or root in path.parent.parents for root in self.selected):
+                count += 1
+                census += 8 * len(path.name.encode("utf-8")) + 128
+        _need(passes * count <= 50_000 and passes * census <= 8 * MAX_ROWS_BYTES)
         self.reservation = {"ownedDescriptors": total, "directories": directories,
             "zipBytes": zip_bound,
-            # BytesIO growth/copy reserve, read bytearray+immutable bytes,
-            # retained rows/ZipInfo and the original publication chunk.
             "assemblyBytes": 2 * zip_bound + 2 * MAX_FILE_SIZE + 4 * row_bytes + (1 << 20)}
         self.scratch = scratch
+        scratch._local_metadata_owner = self
         return dict(self.reservation)
+
+    def reserve(self, scratch):
+        """Standalone original source phase; ordinary scratch APIs unchanged."""
+        self._scratch_new(scratch)
+        _need(getattr(self.source, "_composition", None) is None
+              and getattr(self.guard, "_android_build_source", None) is None)
+        project = self.source.project
+        _need(scratch.parent.path == self.source.root / ".mobile-release"
+              and project.meta.number is not None)
+        source_fds = sum(len(reader.descriptors) for reader in self.source.readers)
+        directories = sum(path not in self.source.directories for path in self.planned)
+        scratch_fds = len(scratch.parent.path.parts) + 3
+        total = len(project.directory.slots) + 1 + source_fds + directories + scratch_fds + 2 + 20 + 8
+        return self._reserve(scratch, total, directories)
+
+    def _reserve_composed(self, composition, scratch):
+        from .local_release_candidate import LocalAndroidCandidateComposition, metadata_fd_quote
+        self._scratch_new(scratch)
+        _need(type(composition) is LocalAndroidCandidateComposition
+              and self.source._composition is composition and composition.source is self.source
+              and composition.metadata is self and composition.metadata_scratch is scratch)
+        composition._owner()
+        op = composition.run.operation
+        _need(op.guard is self.guard and op.root == self.source.root
+              and op.inputs is not None and all(state == "new" for state in op._roles.values())
+              and scratch.parent.path == op.root / ".mobile-release" / "desktop-android-build" / op.operation_id)
+        directories = sum(path not in self.source.directories for path in self.planned)
+        quote = metadata_fd_quote(composition.quote, directories=directories,
+                                  scratch_depth=len(scratch.parent.path.parts))
+        self.composition = composition
+        reservation = self._reserve(scratch, quote["total"], directories)
+        composition.quote = quote
+        return reservation
+
+    def _scratch_parent(self, scratch):
+        """After original parent acquire, BEFORE any scratch mkdir/publication."""
+        self.check()
+        _need(scratch is self.scratch and scratch._local_metadata_owner is self
+              and self.source.active and self.reservation is not None)
+        if self.composition is None:
+            number = self.source.project.meta.number
+        else:
+            composition = self.composition
+            composition._metadata_cut()
+            files = composition.run.operation.files
+            files._namespace_metadata()
+            namespace = files.namespace
+            from .build_inputs import _StoreNamespace
+            _need(type(namespace) is _StoreNamespace and namespace is files._namespace_owner
+                  and namespace.android_operation is composition.run.operation
+                  and namespace.path == scratch.parent.path and not namespace.claimed)
+            number = namespace.slots[-1].number
+        _need(number is not None)
+        scratch.parent.check()
+        _need(_directory_identity(os.fstat(scratch.parent.fd)) == _directory_identity(os.fstat(number)))
+
+    def _source_post(self, source):
+        if self.composition is None:
+            return
+        self.check()
+        _need(source is self.source and self.used and not self.final_post
+              and source.calls == 8 and self.composition.metadata_snapshot is not None)
+        try:
+            self._post()  # Actual eighth original Git returned; no later native seam.
+            self.scratch.require(self.composition.metadata_snapshot)
+            self.final_post = True
+        except BaseException:
+            self.failed = True
+            raise
+
+    def _archive_close(self):
+        # Composed readers belong to the original source scope and close after
+        # its eighth-query POST, not at the provisional ZIP return.
+        if self.composition is None:
+            self._close()
 
     def _directory(self, path):
         parent = self.directories[path.parent]
@@ -238,8 +312,9 @@ class LocalMetadataSource:
         self._post()
         # Initial, pre-native and final post-native census use the same known
         # roster. Reserve those passes before ZIP publication, not a cap rise.
-        _need(3 * self.counters.get("advances", 0) <= 50_000
-              and 3 * self.counters.get("census-bytes", 0) <= 8 * MAX_ROWS_BYTES)
+        passes = 4 if self.composition is not None else 3
+        _need(passes * self.counters.get("advances", 0) <= 50_000
+              and passes * self.counters.get("census-bytes", 0) <= 8 * MAX_ROWS_BYTES)
         # Admission totals include excluded .gitkeep payload, not just ZIP rows.
         total = 0
         for path in self.rows:
@@ -282,6 +357,8 @@ class LocalMetadataSource:
 
     def _close(self):
         self.owner()
+        if self.closed:
+            return
         self.closed = True
         first = None
         for action in ([self.leaf.close] if self.leaf is not None else []) + [
@@ -332,12 +409,10 @@ class LocalMetadataSource:
               and type(scratch) is FiniteScratch and scratch.layout == "store-metadata"
               and scratch.cancellation is self.guard and root == self.root and platform == "android"
               and self.source.active and scratch.active and not scratch.claimed)
-        scratch.parent.check()
-        _need(_directory_identity(os.fstat(scratch.parent.fd))
-              == _directory_identity(os.fstat(self.source.project.meta.number)))
+        self._scratch_parent(scratch)
         self.used = True
         self.read_paths = set()
-        scope = CleanupScope(self.guard, self._close, owns_cancellation=False,
+        scope = CleanupScope(self.guard, self._archive_close, owns_cancellation=False,
             fork_cleanup=self._fork_close,
             first_primary=True)
         try:

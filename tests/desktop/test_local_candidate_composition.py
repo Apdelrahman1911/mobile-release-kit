@@ -9,6 +9,8 @@ Separate existing local-Git tests exercise genuine Git output/custody.
 from dataclasses import replace
 import hashlib
 import json
+import io
+import zipfile
 import os
 from pathlib import Path
 import time
@@ -22,6 +24,7 @@ from mobile_release._desktop_android_build_files import AndroidBuildFiles
 from mobile_release.android_build_signing import SignedAndroidOperation
 import test_android_build_protocol as protocol
 from mobile_release import local_release_candidate as C, local_release_source as S
+from mobile_release import local_release_metadata as M, build_inputs as B
 from mobile_release import _command_process as process
 from mobile_release import _desktop_android_build_protocol as wire
 from mobile_release.checked_files import _Reader
@@ -90,11 +93,24 @@ class LocalCandidateCompositionTests(unittest.TestCase):
         for name in ('work', 'artifacts'):
             (f.namespace.path / name).mkdir(parents=True, mode=0o700, exist_ok=True)
         parent, record = root_fd, None
+        namespace_records = []
         for name in f.namespace.components:
             record = f.files._directory_at(parent, name, record)
             parent = record.slot.number
+            namespace_records.append(record)
+        f.namespace.slots = [r.slot for r in namespace_records]
+        f.namespace.identities = [r.identity for r in namespace_records]
+        f.namespace.android_operation = op
+        f.namespace.claimed = False
+        f.files._namespace_owner = f.namespace
+        self.patched(f.namespace, "cleanup", return_value=None)  # Existing project/namespace admission boundary.
         f.files._work = f.files._directory_at(parent, 'work', record)
         f.files._artifacts = f.files._directory_at(parent, 'artifacts', record)
+        f.files._work.creation = {"state": "CREATED"}
+        def finish_work():
+            AndroidBuildFiles.finish_work(f.files)  # Real deletion and original consuming closes.
+            f.finish_work()
+        f.files.finish_work.side_effect = finish_work
         self.patched(op, 'gradle_command', new=type(op).gradle_command.__get__(op, type(op)))
         self.patched(f.tools, 'gradle_command', side_effect=lambda task, work: ('/inert/gradle', '--no-daemon', task))
         def close():
@@ -111,8 +127,14 @@ class LocalCandidateCompositionTests(unittest.TestCase):
             p.chmod(0o600)
         for relative in ('.git/objects/info', '.git/info'):
             (root / relative).mkdir(parents=True, mode=0o700)
+        f.metadata_leaf = root / "release/store/android/en-US/title.txt"
+        f.metadata_body = b"Original committed metadata\n"
+        f.metadata_leaf.parent.mkdir(parents=True, mode=0o700)
+        f.metadata_leaf.write_bytes(f.metadata_body)
+        f.metadata_leaf.chmod(0o600)
         rows = [(name.encode(), hashlib.sha1(b'blob ' + str(len(value)).encode() + b'\0' + value).hexdigest().encode())
-                for name, value in ((S.CONFIG_PATH, raw), (saved.configuration.source, saved.version_raw))]
+                for name, value in ((S.CONFIG_PATH, raw), (saved.configuration.source, saved.version_raw),
+                    (f.metadata_leaf.relative_to(root).as_posix(), f.metadata_body))]
         f.native_calls = []
         def command(argv, **kwargs):
             self.assertIs(kwargs['cancellation'], f.guard)
@@ -429,6 +451,187 @@ class LocalCandidateCompositionTests(unittest.TestCase):
             with self.assertRaises(C.LocalCandidateError): candidate._charge('file-slots', 1)
             f.files.slots[0].close_state = 'CLOSED'
             candidate._charge('file-slots', 1)
+
+    def test_metadata_same_original_survives_producer_only_after_eighth_post(self):
+        f, artifact, body = self.subject()
+        command = f.command.side_effect
+        moments = []
+        def native(argv, **kwargs):
+            result = command(argv, **kwargs)
+            owner = f.run._local_composition
+            if len(f.native_calls) in (7, 8):
+                moments.append(len(f.native_calls))
+                self.assertFalse(owner.metadata.closed or owner.metadata.final_post)
+                owner.metadata.reader.terminal()
+                self.assertTrue(f.files._work.deleted and f.operation.signing.inputs_closed())
+                self.assertTrue(owner.metadata_scratch.active)
+                scratch = owner.metadata_scratch
+                owned_metadata = len(owner.metadata.reader.descriptors)
+                self.assertEqual(owned_metadata, owner.quote['metadataDirectories'])
+                scratch_live = sum(slot.close_state != 'CLOSED' for slot in
+                                   (*scratch.parent.slots, scratch.slot, *scratch.writer_slots))
+                self.assertLessEqual(scratch_live + 1, owner.quote['metadataScratch'])
+                # Actual live slots plus the unchanged reserved native/tools/
+                # project envelopes. Borrowed metadata nodes own no extra FD.
+                peak = (sum(slot.close_state != 'CLOSED' for slot in f.files.slots)
+                    + owner.source.held + owned_metadata + scratch_live
+                    + (len(owner.handoff.reader.descriptors) if owner.handoff.reader is not None else 0)
+                    + owner.quote['project'] + owner.quote['namespace'] + owner.quote['tools']
+                    + owner.quote['baseline'] + 20 + 2)
+                self.assertLessEqual(peak, owner.quote['total'])
+                if len(f.native_calls) == 8:
+                    self.assertTrue(owner.handoff.captured)
+                    with self.assertRaises(C.LocalCandidateError): owner.metadata_input()
+            return result
+        f.command.side_effect = native
+        with C.retain_local_android_candidate(f.run) as owner:
+            f.run.run()
+            self.assertEqual(moments, [7, 8])
+            self.assertTrue(owner.metadata.final_post and owner.metadata.closed and owner.source.closed)
+            f.settle_outer()
+            terminal = f.run.terminal()
+            snapshot = owner.metadata_input()
+            self.assertIs(snapshot, owner.metadata_snapshot)
+            self.assertIs(snapshot._owner, owner.metadata_scratch)
+            self.assertIsNone(owner.metadata_scratch._lane_binding)
+            self.assertNotIn('pending', owner.metadata_scratch.parent.path.parts)
+            self.assertEqual(owner.metadata_scratch.parent.path, f.namespace.path)
+            retained = owner.metadata_scratch.require(snapshot)
+            with zipfile.ZipFile(io.BytesIO(retained.read_bytes())) as archive:
+                self.assertEqual(archive.namelist(), ['android/en-US/title.txt'])
+                self.assertEqual(archive.read('android/en-US/title.txt'), f.metadata_body)
+            self.assertEqual(terminal['metadataSnapshot']['sha256'], snapshot.sha256)
+            self.assertEqual(terminal['metadataSnapshot']['snapshotRetention'], 'live-original-scratch')
+            self.assertEqual(terminal['build']['lifetime']['commands'], 14)
+            self.assertLessEqual(terminal['ownedPythonDescriptorQuote']['metadataPhase'], 256)
+            with owner.artifact_blocks() as blocks: self.assertEqual(b''.join(blocks), body)
+            scratch_path = owner.metadata_scratch._path
+            self.assertTrue(scratch_path.exists())
+        self.assertFalse(scratch_path.exists())
+        self.assertTrue(artifact.exists())
+        self.assertTrue(owner.metadata_scratch._cleanup_complete)
+        with self.assertRaises(C.LocalCandidateError): owner.metadata_input()
+
+    def test_metadata_late_seventh_and_eighth_git_mutations_veto_both_handoffs(self):
+        for moment in (7, 8):
+            for change in ('leaf', 'parent', 'roster', 'borrowed-parent'):
+                with self.subTest(moment=moment, change=change):
+                    f, artifact, _ = self.subject()
+                    command = f.command.side_effect
+                    def native(argv, **kwargs):
+                        result = command(argv, **kwargs)
+                        if len(f.native_calls) == moment:
+                            if change == 'leaf': f.metadata_leaf.write_bytes(b'late changed bytes')
+                            elif change == 'parent':
+                                f.metadata_leaf.parent.rename(f.metadata_leaf.parent.with_name('held-old-locale'))
+                                f.metadata_leaf.parent.mkdir()
+                                f.metadata_leaf.write_bytes(f.metadata_body)
+                            elif change == 'roster':
+                                f.metadata_leaf.with_name('extra.txt').write_bytes(b'extra')
+                            else:
+                                release = f.operation.root / 'release'
+                                release.rename(release.with_name('held-old-release'))
+                                release.mkdir()
+                        return result
+                    f.command.side_effect = native
+                    with C.retain_local_android_candidate(f.run) as owner:
+                        with self.assertRaises(Exception): f.run.run()
+                        self.assertEqual(len(f.native_calls), moment)
+                        self.assertTrue(owner.failed and owner.metadata.closed and owner.source.closed)
+                        self.assertFalse(owner.joined or owner.metadata.final_post)
+                        with self.assertRaises(C.LocalCandidateError): owner.metadata_input()
+                        with self.assertRaises(C.LocalCandidateError): owner.artifact_blocks()
+                        scratch = owner.metadata_scratch
+                    self.assertFalse(scratch._path.exists())
+                    self.assertTrue(artifact.exists())
+
+    def test_metadata_requires_positive_work_signing_and_original_parent_before_effect(self):
+        for fault in ('work', 'signing', 'parent'):
+            with self.subTest(fault=fault):
+                f, _, _ = self.subject()
+                if fault == 'work':
+                    f.files.finish_work.side_effect = f.finish_work  # No claimed/deleted/closed originals.
+                elif fault == 'signing':
+                    self.patched(f.operation.signing, 'inputs_closed', return_value=False)
+                with C.retain_local_android_candidate(f.run) as owner:
+                    if fault == 'parent':
+                        original = B.FiniteScratch.acquire
+                        def acquire(scratch):
+                            if scratch is owner.metadata_scratch:
+                                foreign = f.operation.root / 'wrong-scratch-parent'
+                                foreign.mkdir(mode=0o700)
+                                scratch.parent.path = scratch.parent.lexical_path = foreign
+                            return original(scratch)
+                        self.patched(B.FiniteScratch, 'acquire', new=acquire)
+                    with self.assertRaises(Exception): f.run.run()
+                    self.assertEqual(len(f.native_calls), 6)
+                    self.assertFalse(owner.metadata_scratch.created or owner.metadata_scratch.snapshots)
+                    self.assertTrue(owner.failed)
+                    with self.assertRaises(C.LocalCandidateError): owner.metadata_input()
+
+    def test_metadata_unknown_final_reader_close_is_absorbing_and_source_closes(self):
+        f, artifact, _ = self.subject()
+        original = os.close
+        attempts = []
+        with C.retain_local_android_candidate(f.run) as owner:
+            def close(number):
+                reader = owner.metadata.reader if owner.metadata is not None else None
+                losing = reader is not None and any(slot.state == 'CLOSING' for slot in reader.descriptors)
+                original(number)
+                if losing and not attempts:
+                    attempts.append(number)
+                    raise OSError('PRIVATE_METADATA_CLOSE')
+            with patch.object(os, 'close', side_effect=close):
+                with self.assertRaises(ProcessCleanupError): f.run.run()
+            self.assertEqual(len(f.native_calls), 8)
+            self.assertEqual(len(attempts), 1)
+            self.assertTrue(owner.metadata.failed and owner.source.closed and owner.failed)
+            for reader in owner.source.readers: reader.assert_closed()
+            self.assertTrue(owner.handoff.captured)
+            self.assertFalse(owner.joined)
+            with self.assertRaises(C.LocalCandidateError): owner.metadata_input()
+        self.assertEqual(len(attempts), 1)
+        self.assertTrue(artifact.exists())
+
+    def test_metadata_cleanup_failure_still_closes_aab_and_preserves_original_foreign_roster(self):
+        f, artifact, _ = self.subject()
+        owner = None
+        with self.assertRaises(Exception):
+            with C.retain_local_android_candidate(f.run) as owner:
+                f.run.run(); f.settle_outer(); f.run.terminal()
+                self.assertIs(owner.metadata_input(), owner.metadata_snapshot)
+                foreign = owner.metadata_scratch._path / 'foreign'
+                foreign.write_bytes(b'Preserve unknown foreign entry')
+        self.assertTrue(owner.failed and owner.handoff.closed)
+        owner.handoff.reader.assert_closed()
+        self.assertTrue(foreign.exists() and artifact.exists())
+        self.assertTrue(owner.metadata_scratch.claimed)
+        self.assertFalse(owner.metadata_scratch._cleanup_complete)
+        self.assertTrue(all(slot.close_state == 'CLOSED' for slot in
+            (*owner.metadata_scratch.writer_slots, owner.metadata_scratch.slot, *owner.metadata_scratch.parent.slots)))
+
+    def test_metadata_phase_ceiling_and_oversized_selection_refuse_before_build(self):
+        quote = C.composition_fd_quote(project=5, source=25, bound_files=4,
+                                       module_depth=1, root_depth=4, firebase=False)
+        first = C.metadata_fd_quote(quote, directories=0, scratch_depth=7)
+        fitting = 256 - first['metadataPhase']
+        self.assertEqual(C.metadata_fd_quote(quote, directories=fitting, scratch_depth=7)['total'], 256)
+        with self.assertRaises(C.LocalCandidateError):
+            C.metadata_fd_quote(quote, directories=fitting + 1, scratch_depth=7)
+        self.assertEqual(first['total'], quote['total'])  # MAX phases, not their sum.
+        f, _, _ = self.subject()
+        reserve = M.LocalMetadataSource._reserve_composed
+        def too_many(owner, composition, scratch):
+            # Actual owned-directory quote reducer, not an artificial native FD pass.
+            composition.quote = {**composition.quote, 'source': composition.quote['source'] + 96}
+            return reserve(owner, composition, scratch)
+        with patch.object(M.LocalMetadataSource, '_reserve_composed', new=too_many):
+            with C.retain_local_android_candidate(f.run) as owner:
+                with self.assertRaises(Exception): f.run.run()
+                self.assertEqual(len(f.native_calls), 6)
+                f.run._signed_body.assert_not_called()
+                self.assertFalse(owner.metadata_scratch.created or owner.metadata_scratch.parent.slots)
+                self.assertFalse((f.operation.root / 'app/build').exists())
 
 
 if __name__ == '__main__':
