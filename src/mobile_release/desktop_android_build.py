@@ -46,6 +46,7 @@ class AndroidBuildRun:
         self.primary_signing_phase: str | None = None
         self.report: Report | None = None
         self._candidate: dict | None = None
+        self._local_handoff = None  # Internal opt-in; no request/wire authority.
         self._run_claimed = self._close_claimed = False
         # This constructor roots itself in source before any child owner can
         # fail construction. The engine has a fixed original-operation fallback
@@ -53,6 +54,8 @@ class AndroidBuildRun:
         self.operation = AndroidBuildOperation(request, guard, source)
 
     def remember(self, error: BaseException) -> None:
+        if getattr(self, "_local_handoff", None) is not None:
+            self._local_handoff._fail()
         if self.primary is None:
             self.primary = error
             self.primary_signing_phase = (None if self.operation.signing is None else self.operation.signing.phase)
@@ -138,6 +141,10 @@ class AndroidBuildRun:
                                 raise
                             raise AndroidBuildError("result-limit") from None
                         operation.checkpoint()
+                        if getattr(self, "_local_handoff", None) is not None:
+                            from .local_release_candidate import LocalAndroidBuildHandoff
+                            require(type(self._local_handoff) is LocalAndroidBuildHandoff)
+                            self._local_handoff._capture(self, artifact)
                     except BaseException as error:
                         # F and the original primary precede potentially blocking
                         # independent work/artifact/tool/namespace closes.
@@ -291,4 +298,6 @@ class AndroidBuildRun:
                     "outcome": outcome, "reason": reason, "activity": activity,
                     "disposition": disposition, "result": result, "lifetime": lifetime}
         validate_terminal(terminal, self.request)
+        if getattr(self, "_local_handoff", None) is not None:
+            self._local_handoff._terminal(self, terminal)
         return terminal

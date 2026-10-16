@@ -54,8 +54,12 @@ Owned Android-candidate preparation now observes the actual clean local Git
 source and holds the selected config/version and Git controls through its scope.
 It uses eight bounded Git calls, refuses executable filters and unsupported
 repository layouts, supports packed nested branches, and preserves the existing
-CI mutation guard. This is preparation DATA only: artifact handoff, durable
-intent, local authorization, Store execution and UI integration remain required.
+CI mutation guard. A separately reviewed optional Android service hook now
+retains the same signed artifact and saved inputs through original producer
+closure, with bounded read-only consumption and focused failure tests. It adds
+no second artifact copy or Store call. The combined source/metadata/fresh-output
+binding, outer native finality, durable intent, local authorization, Store
+execution and UI integration remain required; preparation is not authorization.
 
 ## API and compatibility boundaries
 
