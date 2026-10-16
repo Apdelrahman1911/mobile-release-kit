@@ -104,7 +104,8 @@ impl Inventory {
                 && item.path.as_str() > previous && hex(&item.sha256, 64), "inventory-path")?;
             check(item.executable == matches!(item.path.as_str(),
                 ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | REMOVER | DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"
-                | paths::HISTORY_PROVIDER_INVENTORY_PATH | paths::GITHUB_SEAL_INVENTORY_PATH),
+                | paths::HISTORY_PROVIDER_INVENTORY_PATH | paths::GITHUB_SEAL_INVENTORY_PATH
+                | crate::macos_applications_launcher::EXECUTABLE),
                 "inventory-executable-scope")?;
             total = total.checked_add(item.size).ok_or("inventory-bound")?;
             check(total <= PAYLOAD_LIMIT, "inventory-bound")?;
@@ -128,7 +129,9 @@ impl Inventory {
         for name in files.keys().chain(directories.iter()) {
             check(folded.insert(name.to_ascii_lowercase()), "inventory-collision")?;
         }
-        Ok(InventoryIndex { files, directories, payload_bytes: total })
+        let index = InventoryIndex { files, directories, payload_bytes: total };
+        crate::macos_applications_launcher::LauncherInventory::from_index(&index)?;
+        Ok(index)
     }
 }
 
