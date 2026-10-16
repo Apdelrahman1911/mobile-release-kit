@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import zipimport
 from dataclasses import dataclass
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
@@ -197,6 +198,34 @@ def guard_ci_mutation(
         raise MutationGuardError("Store identity must be explicitly approved in reviewed configuration")
 
 
+def _validation_module_root(tooling_root: Path) -> Path:
+    """Select this executing core's origin, not an application-supplied module.
+
+    Directory installs keep their source/wheel behavior. The optional Desktop
+    ZIP layout must be the same runtime as the selected Python and Store tools.
+    These path checks do not authenticate a runtime: the installed owner's
+    original complete signed inventory/custody remains required.
+    """
+    module = Path(__file__).absolute()
+    if not isinstance(__loader__, zipimport.zipimporter):
+        return module.resolve().parent.parent
+    try:
+        archive = Path(__loader__.archive).absolute()
+        runtime = archive.parent
+        python = Path(sys.executable).absolute()
+        tooling = tooling_root.absolute()
+        if (archive.name != "core.zip" or module != archive / "mobile_release/stores.py"
+                or not archive.is_file() or archive.is_symlink() or archive.resolve(strict=True) != archive
+                or tooling != runtime / "store/tooling" or tooling.resolve(strict=True) != tooling
+                or not tooling.is_dir()
+                or python != runtime / "python/bin/python3" or python.resolve(strict=True) != python
+                or not python.is_file() or not os.access(python, os.X_OK)):
+            raise StoreOperationError("Current-upload validation requires the original paired Desktop runtime")
+        return archive
+    except (OSError, ValueError):
+        raise StoreOperationError("Current-upload validation requires the original paired Desktop runtime") from None
+
+
 def _store_environment(
     config: ReleaseConfig,
     release: ReleaseVersion,
@@ -236,7 +265,7 @@ def _store_environment(
             # environment command. Fastlane invokes only the toolkit's isolated
             # current-upload validator through this interpreter.
             "MOBILE_RELEASE_VALIDATION_PYTHON": str(Path(sys.executable).absolute()),
-            "MOBILE_RELEASE_VALIDATION_MODULE_ROOT": str(Path(__file__).resolve().parent.parent),
+            "MOBILE_RELEASE_VALIDATION_MODULE_ROOT": str(_validation_module_root(tooling_root)),
         }
     )
     if request.operation_intent:

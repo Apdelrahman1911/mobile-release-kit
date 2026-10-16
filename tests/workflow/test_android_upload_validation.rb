@@ -269,3 +269,22 @@ class AndroidUploadValidationTest < Minitest::Test
     assert_equal @value, validate(module_root: installed_modules, tooling_directory: installed_tooling)
   end
 end
+
+class AndroidUploadOriginTest < Minitest::Test
+  # Stop at the shared origin decision: no native capture or process fixture.
+  def test_origin_android_current_adapter_supplies_actual_directory_before_capture
+    calls = []
+    refusal = ->(**arguments) { calls << arguments; raise MobileReleaseKit::ContractError, "inert origin refusal" }
+    MobileReleaseKit::NativeUploadValidation.stub(:module_origin!, refusal) do
+      assert_raises(MobileReleaseKit::ContractError) do
+        MobileReleaseKit::AndroidUploadValidation.current!(python: RbConfig.ruby, module_root: "/inert/core.zip", app_root: "/inert/app",
+          config_path: "release/mobile-release.json", intent_path: "intent.json", aab_path: "candidate.aab", intent_sha256: "a" * 64,
+          environment: {}, tooling_directory: "/inert/runtime/store/tooling/fastlane")
+      end
+    end
+    assert_equal 1, calls.length
+    assert_equal "android", calls[0].fetch(:platform)
+    assert_equal File.realpath(File.expand_path("../../fastlane", __dir__)), calls[0].fetch(:adapter_directory)
+    assert_equal "/inert/core.zip", calls[0].fetch(:module_root)
+  end
+end

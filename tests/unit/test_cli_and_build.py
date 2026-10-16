@@ -2122,5 +2122,88 @@ class CliBuildTests(unittest.TestCase):
                 self.assertEqual(gate.status, Status.SKIP)
 
 
+
+
+class CurrentUploadOriginTests(unittest.TestCase):
+    """Finite origin DATA and tiny isolated Python only; no Store/native adapter."""
+
+    def test_directory_origin_preserves_checkout_and_wheel_layout(self):
+        expected = Path(stores.__file__).resolve().parent.parent
+        self.assertEqual(stores._validation_module_root(Path('/inert/tooling')), expected)
+        with patch.object(stores, '__file__', '/inert/wheel/site-packages/mobile_release/stores.py'):
+            self.assertEqual(stores._validation_module_root(Path('/inert/wheel/share/mobile-release-kit')),
+                             Path('/inert/wheel/site-packages'))
+
+    def test_packaged_origin_requires_exact_archive_interpreter_and_tooling_pair(self):
+        import zipimport
+        with tempfile.TemporaryDirectory(prefix='mrk-validation-origin-') as directory:
+            runtime = Path(directory).resolve() / 'runtime with spaces'
+            tooling, python = runtime / 'store/tooling', runtime / 'python/bin/python3'
+            tooling.mkdir(parents=True); python.parent.mkdir(parents=True)
+            python.write_text('inert executable DATA'); python.chmod(0o700)
+            archive = runtime / 'core.zip'
+            with zipfile.ZipFile(archive, 'x') as output:
+                output.writestr('mobile_release/stores.py', '# inert origin DATA\n')
+            with patch.object(stores, '__loader__', zipimport.zipimporter(str(archive))), \
+                    patch.object(stores, '__file__', str(archive / 'mobile_release/stores.py')), \
+                    patch.object(stores.sys, 'executable', str(python)):
+                self.assertEqual(stores._validation_module_root(tooling), archive)
+                for wrong in [runtime / 'other/tooling', tooling / '..', Path(directory) / 'foreign/store/tooling']:
+                    with self.subTest(wrong=wrong), self.assertRaises(StoreOperationError):
+                        stores._validation_module_root(wrong)
+                with patch.object(stores.sys, 'executable', '/usr/bin/python3'), self.assertRaises(StoreOperationError):
+                    stores._validation_module_root(tooling)
+                with patch.object(stores, '__file__', str(archive / 'foreign/stores.py')), self.assertRaises(StoreOperationError):
+                    stores._validation_module_root(tooling)
+                python.chmod(0o600)
+                with self.assertRaises(StoreOperationError): stores._validation_module_root(tooling)
+
+    def test_packaged_origin_rejects_archive_or_interpreter_alias(self):
+        import zipimport
+        with tempfile.TemporaryDirectory(prefix='mrk-validation-origin-') as directory:
+            runtime = Path(directory).resolve()
+            tooling, python = runtime / 'store/tooling', runtime / 'python/bin/python3'
+            tooling.mkdir(parents=True); python.parent.mkdir(parents=True)
+            original = runtime / 'original-python'; original.write_text('inert executable DATA'); original.chmod(0o700)
+            python.symlink_to(original)
+            archive = runtime / 'core.zip'
+            with zipfile.ZipFile(archive, 'x') as output: output.writestr('mobile_release/stores.py', '# inert\n')
+            with patch.object(stores, '__loader__', zipimport.zipimporter(str(archive))), \
+                    patch.object(stores, '__file__', str(archive / 'mobile_release/stores.py')), \
+                    patch.object(stores.sys, 'executable', str(python)):
+                with self.assertRaises(StoreOperationError): stores._validation_module_root(tooling)
+                python.unlink(); python.write_text('inert executable DATA'); python.chmod(0o700)
+                other = runtime / 'other.zip'; archive.rename(other); archive.symlink_to(other)
+                with self.assertRaises(StoreOperationError): stores._validation_module_root(tooling)
+
+    def test_actual_fixed_bootstraps_load_tiny_zip_not_application_or_site_code(self):
+        import ast
+        import re
+        with tempfile.TemporaryDirectory(prefix='mrk-validation-bootstrap-') as directory:
+            root = Path(directory).resolve(); app = root / 'app'; app.mkdir()
+            marker = root / 'unexpected-app-code'
+            poison = f"open({str(marker)!r}, 'w').write('unexpected')\nraise RuntimeError('wrong origin')\n"
+            (app / 'mobile_release').mkdir(); (app / 'mobile_release/__init__.py').write_text(poison)
+            (app / 'sitecustomize.py').write_text(poison); (app / 'usercustomize.py').write_text(poison)
+            archive = root / 'core.zip'
+            with zipfile.ZipFile(archive, 'x') as output:
+                output.writestr('mobile_release/__init__.py', '')
+                for platform in ('ios', 'android'):
+                    output.writestr(f'mobile_release/{platform}_upload_validation.py', f'print("fixed-{platform}-validator")\n')
+            for platform in ('ios', 'android'):
+                # Execute the actual adapter's fixed literal, not a reconstructed
+                # bootstrap. The fixture ZIP contains no real Store/tool code.
+                source = (Path(__file__).resolve().parents[2] / f'fastlane/{platform}_upload_validation.rb').read_text()
+                lines = re.findall(r'^    BOOTSTRAP = (\'.*\')\.freeze$', source, re.MULTILINE)
+                self.assertEqual(len(lines), 1)
+                bootstrap = ast.literal_eval(lines[0])
+                result = subprocess.run([sys.executable, '-I', '-S', '-c', bootstrap, str(archive)],
+                    cwd=app, env={'PATH': '/usr/bin:/bin', 'HOME': str(app), 'PYTHONPATH': str(app), 'PYTHONUSERBASE': str(app)},
+                    text=True, capture_output=True, timeout=5, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, f'fixed-{platform}-validator\n'); self.assertEqual(result.stderr, '')
+                self.assertFalse(marker.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

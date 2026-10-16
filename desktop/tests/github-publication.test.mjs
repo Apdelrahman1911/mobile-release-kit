@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
+import mainCapability from '../src-tauri/capabilities/main.json' with { type: 'json' };
 import { GitHubPublicationController, githubPublicationOwnerReason } from '../src/githubPublicationController.ts';
 import { PUBLICATION_CONFIRMATION, PUBLICATION_PATHS, PUBLICATION_PROTOCOL, parsePublicationStatus, publicationError, publicationRequestFits } from '../src/githubPublicationProtocol.ts';
 const clone = structuredClone, marker = 'd'.repeat(32), consentId = 'e'.repeat(32);
@@ -96,4 +97,26 @@ test('cleanup unknown and wrong-repository positive reply never grant another se
 test('service handoff retains original observer until settlement, never adopts a late review into new service', async () => {
   const h = await attached(); h.controller.prepare(); await h.controller.connect(null); assert.equal(h.detached, 0); h.emit(review()); await flush(); assert.equal(h.controller.currentConsent(), null); assert.equal(h.count('discard'), 1);
   h.respond('discard', operation('prepare', 'settled', 4)); h.respond('prepare', review()); await flush(); assert.equal(h.detached, 1); assert.equal(h.count('publish'), 0);
+});
+
+
+test('actual main-local capability grants exactly the seven emitted publication commands without remote or event-write authority', async () => {
+  const emitted = [];
+  const api = createNativeApi('native', async (command, args) => { emitted.push([command, args]); return idle(); }, async () => () => {});
+  await api.githubPublicationStatus();
+  await api.githubPublicationPrepare({ sessionId: 'session-a', expectedRevision: 1, expectedConnectionRevision: 12, base: 'release/setup' });
+  await api.githubPublicationPublish({ sessionId: 'session-a', expectedRevision: 1, consentId, confirm: true });
+  await api.githubPublicationPending({ sessionId: 'session-a', expectedRevision: 1, expectedConnectionRevision: 12 });
+  await api.githubPublicationReconcile({ sessionId: 'session-a', expectedRevision: 1, marker });
+  await api.githubPublicationDiscard({ sessionId: 'session-a', expectedRevision: 1, consentId });
+  await api.githubPublicationCancel('original-1');
+  const permitted = mainCapability.permissions.filter((p) => typeof p === 'string' && p.startsWith('allow-github-setup-publication-'));
+  assert.equal(emitted.length, 7); assert.equal(new Set(emitted.map(([command]) => command)).size, 7);
+  assert.deepEqual(new Set(permitted), new Set(emitted.map(([command]) => 'allow-' + command.replaceAll('_', '-'))));
+  assert.equal(permitted.length, 7); assert.deepEqual(mainCapability.windows, ['main']); assert.equal(mainCapability.local, true);
+  assert.equal(Object.hasOwn(mainCapability, 'remote'), false);
+  assert.equal(mainCapability.permissions.some((p) => typeof p !== 'string' || p.includes('*') || /event:allow-emit|http:|shell:|opener:/.test(p)), false);
+  // tauri-build generates the actual allow declarations from build.rs COMMANDS;
+  // the subsequent desktop-shell build checks those declarations. This test
+  // exercises actual bridge requests + ACL DATA, not native command execution.
 });

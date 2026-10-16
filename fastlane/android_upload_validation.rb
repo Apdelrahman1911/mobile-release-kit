@@ -23,17 +23,8 @@ module MobileReleaseKit
       unless intent_sha256.is_a?(String) && intent_sha256.match?(/\A[0-9a-f]{64}\z/)
         raise ContractError, "Current AAB validation requires the authenticated intent digest"
       end
-      unless module_root.is_a?(String) && module_root.start_with?(File::SEPARATOR) &&
-             !module_root.match?(/[\x00-\x1f\x7f]/) && !File.symlink?(module_root) && File.directory?(module_root)
-        raise ContractError, "Current AAB validation requires the pinned toolkit module root"
-      end
-      trusted_module_root = File.realpath(module_root)
-      source_root = File.expand_path("../src", tooling_directory)
-      if File.directory?(File.join(source_root, "mobile_release")) && trusted_module_root != File.realpath(source_root)
-        raise ContractError, "Current AAB validation module differs from the pinned source checkout"
-      end
-      module_file = MobileReleaseKit.safe_path(trusted_module_root, "mobile_release/android_upload_validation.py")
-      raise ContractError, "Pinned current-upload validator module is missing" unless File.file?(module_file)
+      trusted_module_root = NativeUploadValidation.module_origin!(python: python, module_root: module_root,
+        tooling_directory: tooling_directory, adapter_directory: __dir__, platform: "android")
       config = MobileReleaseKit.safe_path(app_root, config_path)
       intent = MobileReleaseKit.safe_path(app_root, intent_path)
       aab = MobileReleaseKit.safe_path(app_root, aab_path)
