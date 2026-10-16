@@ -491,6 +491,27 @@ impl Facts {
     pub fn native_exception(&self) -> bool { self.raw.flags & NATIVE_EXCEPTION != 0 }
     /// This concerns only the adapter's native frame, not provider/global state.
     pub fn adapter_frame_retired(&self) -> bool { self.frame_retired }
+    // An expected local ProbeAbsent is the ONLY path which observes Missing
+    // without stamping failure_phase. Old vault Missing remains a refusal.
+    fn local_absent(&self) -> bool {
+        self.verified && self.native_run_returned() && self.verified_native_run_receipt()
+            && self.operation == Operation::Lookup && self.outcome() == Outcome::Missing
+            && self.custody() == Custody::Settled && !self.stopped() && !self.callback_panicked()
+            && !self.native_exception() && self.process_interaction_restored() && self.raw.policy.role == 3
+            && self.ordinary_user_admitted() && self.namespace_verified()
+            && self.namespace_checkpoints_passed() == Some(NAMESPACE_CHECKPOINTS)
+            && self.raw.failure_phase == 0 && !self.original_item_verified()
+            && self.raw.effect == 0 && self.raw.key_bytes == 0
+            && self.raw.flags & KEY_READY == 0 && self.raw.flags & KEY_WIPED != 0
+            && self.references().and_then(|rows|rows.last()).is_some_and(|r|
+                r.reserved == 1 && r.call_entered == 1 && r.call_returned == 1
+                && r.nonnull_returned == 0 && r.release_entered == 0 && r.release_returned == 0)
+            && self.security_calls().is_some_and(|rows| {
+                let mut item = rows.iter().filter(|r| matches!(r.phase, 10 | 11));
+                item.next().is_some_and(|r| r.phase == 11 && r.entered == 1 && r.returned == 1
+                    && r.status == -25300) && item.next().is_none()
+            })
+    }
     fn accepted(&self, outcome: Outcome) -> bool {
         self.verified && !self.callback_panicked && self.native_run_returned() && self.verified_native_run_receipt()
             && self.custody() == Custody::Settled && !self.stopped() && self.process_interaction_restored()
@@ -957,4 +978,40 @@ pub(crate) fn helper_lookup<F:FnMut(Checkpoint,&Facts)->Admission>(context:&Cont
                 admission,bridge,cleanup,cleanup_bridge,out);}true
         });
     finish_lookup(returned)
+}
+
+#[cfg(feature="vault-helper")]
+unsafe extern "C" {
+    fn mrk_local_keychain_run(frame:*mut c_void,operation:u32,purpose:u32,locator:*const u8,
+        sequence:u32,probe_absent:u32,key:*const u8,admission:NativeAdmission,context:*mut c_void,
+        cleanup:NativeCleanupAdmission,cleanup_context:*mut c_void,out:*mut RawResult);
+}
+#[cfg(feature="vault-helper")]
+fn helper_local_run<F:FnMut(Checkpoint,&Facts)->Admission>(context:&crate::local_keychain_wire::Context,
+    operation:Operation,probe:bool,key:Option<&[u8;KEY_BYTES]>,admission:&mut F)->Returned {
+    run_using(operation,admission,CleanupAdmission::from_helper_control(),
+        |frame,admission,bridge,cleanup,cleanup_bridge,out| {
+            // All pointers belong to this synchronous registered frame/bridge;
+            // the only callee is the fixed helper-only native entry above.
+            unsafe { mrk_local_keychain_run(frame,operation.raw(),context.purpose().code(),context.locator().as_ptr(),
+                context.sequence(),u32::from(probe),key.map_or(std::ptr::null(),|k|k.as_ptr()),
+                admission,bridge,cleanup,cleanup_bridge,out); } true
+        })
+}
+#[cfg(feature="vault-helper")]
+pub(crate) fn helper_local_add<F:FnMut(Checkpoint,&Facts)->Admission>(context:&crate::local_keychain_wire::Context,
+    key:&[u8;KEY_BYTES],admission:&mut F)->NativeResult<()> {
+    let returned=helper_local_run(context,Operation::AddOnly,false,Some(key),admission);
+    let value=returned.facts.accepted(Outcome::Added).then_some(());finish_without_key(returned,value)
+}
+#[cfg(feature="vault-helper")]
+pub(crate) fn helper_local_lookup<F:FnMut(Checkpoint,&Facts)->Admission>(context:&crate::local_keychain_wire::Context,
+    admission:&mut F)->NativeResult<WrappingKeyCandidate> {
+    finish_lookup(helper_local_run(context,Operation::Lookup,false,None,admission))
+}
+#[cfg(feature="vault-helper")]
+pub(crate) fn helper_local_probe<F:FnMut(Checkpoint,&Facts)->Admission>(context:&crate::local_keychain_wire::Context,
+    admission:&mut F)->NativeResult<()> {
+    let returned=helper_local_run(context,Operation::Lookup,true,None,admission);
+    let value=returned.facts.local_absent().then_some(());finish_without_key(returned,value)
 }

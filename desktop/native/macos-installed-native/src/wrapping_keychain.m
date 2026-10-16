@@ -41,6 +41,8 @@ extern int mrk_user(uint32_t *uid); // Existing ordinary-user/platform admission
 #define MRK_W_PATH 4096u
 #define MRK_W_ACCOUNT 68u
 #define MRK_W_METADATA 52u
+#define MRK_L_ACCOUNT 76u
+#define MRK_L_METADATA 56u
 #define MRK_W_KEY 32u
 #define MRK_W_FDS 72u
 #define MRK_W_COMPONENTS 64u
@@ -345,8 +347,11 @@ typedef struct {
     MRKWrappingAdmission admission;
     void *context;
     uint32_t uid, ran, consuming, key_backing_borrowed;
-    uint8_t vault[16], generation[16], metadata[MRK_W_METADATA], key[MRK_W_KEY];
-    char account[MRK_W_ACCOUNT + 1], path[MRK_W_PATH], observed_path[MRK_W_PATH];
+    uint8_t vault[16], generation[16], metadata[MRK_L_METADATA], key[MRK_W_KEY];
+    uint8_t locator[32];
+    uint32_t local_purpose, local_sequence, probe_absent;
+    size_t account_bytes, metadata_bytes;
+    char account[MRK_L_ACCOUNT + 1], path[MRK_W_PATH], observed_path[MRK_W_PATH];
     char account_scratch[16384];
     MRKWrappingFd fds[MRK_W_FDS];
     MRKWrappingAclCell acl_cell;
@@ -911,18 +916,36 @@ static int mrk_w_account(MRKWrappingFrame *s) {
 #endif
     static const char hex[] = "0123456789abcdef";
     memcpy(s->account, "v1:", 3);
-    for (unsigned i = 0; i < 16; ++i) {
-        s->account[3 + i * 2] = hex[s->vault[i] >> 4];
-        s->account[4 + i * 2] = hex[s->vault[i] & 15];
-        s->account[36 + i * 2] = hex[s->generation[i] >> 4];
-        s->account[37 + i * 2] = hex[s->generation[i] & 15];
+    if (s->local_purpose) {
+        for (unsigned i = 0; i < 32; ++i) {
+            s->account[3 + i * 2] = hex[s->locator[i] >> 4];
+            s->account[4 + i * 2] = hex[s->locator[i] & 15];
+        }
+        s->account[67] = ':';
+        for (unsigned i = 0; i < 8; ++i) s->account[68 + i] = hex[(s->local_sequence >> (28 - 4 * i)) & 15];
+        s->account[MRK_L_ACCOUNT] = 0;
+        static const uint8_t key_domain[16] = "MRK-LOCAL-KEY-v1";
+        static const uint8_t checkpoint_domain[16] = "MRK-LOCAL-CHK-v1";
+        memcpy(s->metadata, s->local_purpose == 1 ? key_domain : checkpoint_domain, 16);
+        for (unsigned i = 0; i < 4; ++i) s->metadata[16 + i] = (uint8_t)(uid >> (24 - i * 8));
+        memcpy(s->metadata + 20, s->locator, 32);
+        for (unsigned i = 0; i < 4; ++i) s->metadata[52 + i] = (uint8_t)(s->local_sequence >> (24 - i * 8));
+        s->account_bytes = MRK_L_ACCOUNT; s->metadata_bytes = MRK_L_METADATA;
+    } else {
+        for (unsigned i = 0; i < 16; ++i) {
+            s->account[3 + i * 2] = hex[s->vault[i] >> 4];
+            s->account[4 + i * 2] = hex[s->vault[i] & 15];
+            s->account[36 + i * 2] = hex[s->generation[i] >> 4];
+            s->account[37 + i * 2] = hex[s->generation[i] & 15];
+        }
+        s->account[35] = ':'; s->account[MRK_W_ACCOUNT] = 0;
+        static const uint8_t domain[16] = "MRK-WRAP-MAC-v1"; // 15 ASCII bytes plus NUL, exactly16.
+        memcpy(s->metadata, domain, sizeof(domain));
+        for (unsigned i = 0; i < 4; ++i) s->metadata[16 + i] = (uint8_t)(uid >> (24 - i * 8));
+        memcpy(s->metadata + 20, s->vault, 16);
+        memcpy(s->metadata + 36, s->generation, 16);
+        s->account_bytes = MRK_W_ACCOUNT; s->metadata_bytes = MRK_W_METADATA;
     }
-    s->account[35] = ':'; s->account[MRK_W_ACCOUNT] = 0;
-    static const uint8_t domain[16] = "MRK-WRAP-MAC-v1"; // 15 ASCII bytes plus NUL, exactly16.
-    memcpy(s->metadata, domain, sizeof(domain));
-    for (unsigned i = 0; i < 4; ++i) s->metadata[16 + i] = (uint8_t)(uid >> (24 - i * 8));
-    memcpy(s->metadata + 20, s->vault, 16);
-    memcpy(s->metadata + 36, s->generation, 16);
     // No password/home pointer escapes this call; no account strings are logged.
     mrk_w_wipe(s->account_scratch, sizeof(s->account_scratch));
     return 1;
@@ -1069,10 +1092,10 @@ static int mrk_w_exact_string(MRKWrappingFrame *s, CFTypeRef object, const char 
     return 1;
 }
 static int mrk_w_context_data(MRKWrappingFrame *s, CFTypeRef object) {
-    if (!mrk_w_type(s, object, CFDataGetTypeID()) || CFDataGetLength((CFDataRef)object) != MRK_W_METADATA)
+    if (!mrk_w_type(s, object, CFDataGetTypeID()) || CFDataGetLength((CFDataRef)object) != (CFIndex)s->metadata_bytes)
         return mrk_w_fail(s, MRK_W_SHAPE);
     const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)object);
-    if (!bytes || memcmp(bytes, s->metadata, MRK_W_METADATA)) return mrk_w_fail(s, MRK_W_SHAPE);
+    if (!bytes || memcmp(bytes, s->metadata, s->metadata_bytes)) return mrk_w_fail(s, MRK_W_SHAPE);
     return 1;
 }
 static int mrk_w_key_data(MRKWrappingFrame *s, CFTypeRef object) {
@@ -1140,14 +1163,17 @@ static void mrk_w_operation(MRKWrappingFrame *s) {
     if (s->qualification.observation.mode == MRK_W_Q_HELPERS) { mrk_w_qualification_helpers(s); return; }
 #endif
     MRKWrappingOwned *original = mrk_w_open(s); if (!original) return;
-    static const char service_text[] = "dev.mobile-release-kit.desktop/vault/wrapping-key/v1";
-    MRKWrappingOwned *service = mrk_w_string(s, service_text, sizeof(service_text) - 1);
+    const char *service_text = s->local_purpose == 1 ? "dev.mobile-release-kit.desktop/local-release/key/v1"
+        : s->local_purpose == 2 ? "dev.mobile-release-kit.desktop/local-release/checkpoint/v1"
+        : "dev.mobile-release-kit.desktop/vault/wrapping-key/v1";
+    size_t service_bytes = strlen(service_text);
+    MRKWrappingOwned *service = mrk_w_string(s, service_text, service_bytes);
     if (!service) return;
-    MRKWrappingOwned *account = mrk_w_string(s, s->account, MRK_W_ACCOUNT);
+    MRKWrappingOwned *account = mrk_w_string(s, s->account, s->account_bytes);
     if (!account) return;
     MRKWrappingOwned *generic = NULL, *access = NULL, *value = NULL, *search = NULL;
     if (s->result.operation == MRK_W_ADD) {
-        generic = mrk_w_data(s, s->metadata, MRK_W_METADATA, 0); if (!generic) return;
+        generic = mrk_w_data(s, s->metadata, s->metadata_bytes, 0); if (!generic) return;
         access = mrk_w_access(s); if (!access) return;
         // Immutable CFData view of stable adapter-owned key backing. It is never
         // wiped or freed until every original CF release actually returned.
@@ -1169,7 +1195,9 @@ static void mrk_w_operation(MRKWrappingFrame *s) {
     if (s->result.operation == MRK_W_ADD) {
         MRK_W_PAIR(kSecUseKeychain, original->value);
         MRK_W_PAIR(kSecAttrGeneric, generic->value);
-        MRK_W_PAIR(kSecAttrLabel, CFSTR("MobileReleaseKit vault wrapping key v1"));
+        MRK_W_PAIR(kSecAttrLabel, s->local_purpose == 1 ? CFSTR("MobileReleaseKit local journal key v1")
+            : s->local_purpose == 2 ? CFSTR("MobileReleaseKit local checkpoint v1")
+            : CFSTR("MobileReleaseKit vault wrapping key v1"));
         MRK_W_PAIR(kSecAttrAccess, access->value);
         MRK_W_PAIR(kSecValueData, value->value);
     } else {
@@ -1203,6 +1231,8 @@ static void mrk_w_operation(MRKWrappingFrame *s) {
     if (status != errSecSuccess) {
         // A nonnull result on a failed call is not an empty/missing item.
         if (result->value) mrk_w_fail(s, MRK_W_SHAPE);
+        else if (s->local_purpose && s->probe_absent && phase == MRK_W_LOOKUP_CALL && status == errSecItemNotFound)
+            s->result.outcome = MRK_W_MISSING; // Positive local probe fact; no earlier failure is erased.
         else mrk_w_status(s, status, phase);
     }
     // Actual result/+1 and add effect above precede STOP and the postcheck. A
@@ -1213,6 +1243,7 @@ static void mrk_w_operation(MRKWrappingFrame *s) {
         if (mrk_w_original_item(s, result->value, (SecKeychainRef)original->value)) s->result.outcome = MRK_W_ADDED;
         return;
     }
+    if (s->probe_absent) { mrk_w_fail(s, MRK_W_SHAPE); return; }
     s->result.phase = MRK_W_VALIDATE;
     if (!mrk_w_type(s, result->value, CFDictionaryGetTypeID())) return;
     CFDictionaryRef dictionary = (CFDictionaryRef)result->value;
@@ -1225,8 +1256,8 @@ static void mrk_w_operation(MRKWrappingFrame *s) {
     CFTypeRef synchronized = CFDictionaryGetValue(dictionary, kSecAttrSynchronizable);
     CFTypeRef item = CFDictionaryGetValue(dictionary, kSecValueRef);
     CFTypeRef secret = CFDictionaryGetValue(dictionary, kSecValueData);
-    if (!mrk_w_exact_string(s, found_service, service_text, sizeof(service_text) - 1, 96)
-        || !mrk_w_exact_string(s, found_account, s->account, MRK_W_ACCOUNT, MRK_W_ACCOUNT)
+    if (!mrk_w_exact_string(s, found_service, service_text, service_bytes, 96)
+        || !mrk_w_exact_string(s, found_account, s->account, s->account_bytes, s->account_bytes)
         || !mrk_w_context_data(s, found_generic)) return;
     if (found_class && (!mrk_w_type(s, found_class, CFStringGetTypeID()) || !CFEqual(found_class, kSecClassGenericPassword))) {
         mrk_w_fail(s, MRK_W_SHAPE); return;
@@ -1353,7 +1384,8 @@ void *mrk_wrapping_frame_new(void) {
     }
     return s;
 }
-void mrk_wrapping_run(void *frame, uint32_t operation, const uint8_t *vault, const uint8_t *generation,
+static void mrk_w_run(void *frame, uint32_t operation, const uint8_t *vault, const uint8_t *generation,
+    uint32_t local_purpose, const uint8_t *locator, uint32_t sequence, uint32_t probe_absent,
     const uint8_t *key, MRKWrappingAdmission admission, void *context,
     MRKWrappingCleanupAdmission cleanup, void *cleanup_context, MRKWrappingResult *out) {
     if (!frame || !out) return;
@@ -1367,9 +1399,17 @@ void mrk_wrapping_run(void *frame, uint32_t operation, const uint8_t *vault, con
     s->interaction.fixture = s->qualification.observation.mode == MRK_W_Q_FIXTURE
         && s->qualification.observation.configured ? &s->qualification.fixture : NULL;
 #endif
+    int local_valid = 0;
+    if ((local_purpose == 1 || local_purpose == 2) && locator && !vault && !generation
+        && ((local_purpose == 1 && sequence == 0) || (local_purpose == 2 && sequence >= 1 && sequence <= 513))
+        && (probe_absent == 0 || (probe_absent == 1 && operation == MRK_W_LOOKUP))) {
+        uint8_t any = 0; for (unsigned i = 0; i < 32; ++i) any |= locator[i];
+        local_valid = any != 0;
+    }
+    int context_valid = local_purpose ? local_valid : !locator && !sequence && !probe_absent && mrk_w_ids(vault, generation);
     int scope = mrk_w_policy_acquire(&s->interaction, &s->result.policy, MRK_P_OPERATION, operation);
     @try {
-        if ((operation != MRK_W_ADD && operation != MRK_W_LOOKUP) || !mrk_w_ids(vault, generation)
+        if ((operation != MRK_W_ADD && operation != MRK_W_LOOKUP) || !context_valid
             || (operation == MRK_W_ADD ? !key : key != NULL) || !admission || !context
             || !cleanup || !cleanup_context || !scope
 #if defined(MRK_WRAPPING_KEYCHAIN_QUALIFICATION)
@@ -1379,7 +1419,10 @@ void mrk_wrapping_run(void *frame, uint32_t operation, const uint8_t *vault, con
             mrk_w_fail(s, MRK_W_INPUT);
             mrk_p_fail(&s->result.policy, MRK_P_SCOPE_FAILURE);
         } else if (mrk_w_policy_install(&s->interaction)) {
-            memcpy(s->vault, vault, 16); memcpy(s->generation, generation, 16);
+            if (local_purpose) {
+                s->local_purpose = local_purpose; s->local_sequence = sequence; s->probe_absent = probe_absent;
+                memcpy(s->locator, locator, 32);
+            } else { memcpy(s->vault, vault, 16); memcpy(s->generation, generation, 16); }
             if (operation == MRK_W_ADD) { memcpy(s->key, key, MRK_W_KEY); s->result.key_bytes = MRK_W_KEY; }
             mrk_w_operation(s);
         } else { mrk_w_unknown(s, MRK_W_CUSTODY); }
@@ -1417,6 +1460,21 @@ void mrk_wrapping_run(void *frame, uint32_t operation, const uint8_t *vault, con
     s->result.phase = MRK_W_RETURN; s->result.run_returned = 1;
     *out = s->result;
 }
+void mrk_wrapping_run(void *frame, uint32_t operation, const uint8_t *vault, const uint8_t *generation,
+    const uint8_t *key, MRKWrappingAdmission admission, void *context,
+    MRKWrappingCleanupAdmission cleanup, void *cleanup_context, MRKWrappingResult *out) {
+    mrk_w_run(frame, operation, vault, generation, 0, NULL, 0, 0, key, admission, context, cleanup, cleanup_context, out);
+}
+#if defined(MRK_WRAPPING_VAULT_HELPER)
+void mrk_local_keychain_run(void *frame, uint32_t operation, uint32_t purpose, const uint8_t *locator,
+    uint32_t sequence, uint32_t probe_absent, const uint8_t *key, MRKWrappingAdmission admission, void *context,
+    MRKWrappingCleanupAdmission cleanup, void *cleanup_context, MRKWrappingResult *out) {
+    // Closed helper-only domains. Ordinary app selectors remain unavailable.
+    mrk_w_run(frame, operation, NULL, NULL, purpose, locator, sequence, probe_absent,
+        key, admission, context, cleanup, cleanup_context, out);
+}
+#endif
+
 #if defined(MRK_WRAPPING_KEYCHAIN_QUALIFICATION)
 uint32_t mrk_wrapping_qualification_abi(void) { return 0x514b0201u; }
 void mrk_wrapping_qualification_run(void *frame, uint32_t mode,

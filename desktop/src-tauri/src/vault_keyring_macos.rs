@@ -5,7 +5,7 @@ use std::{mem::ManuallyDrop,os::fd::OwnedFd,process::{Child,ExitStatus},time::{D
 use nix::{fcntl::{fcntl,FcntlArg,OFlag},unistd};
 use zeroize::{Zeroize,Zeroizing};
 use mrk_macos_installed_native::{vault_helper_wire::{self as wire,ClockBridge,Request,Terminal},
-    wrapping_keychain::{Outcome}};
+    wrapping_keychain::{Outcome}, local_keychain_wire::{self as local,RequestEnvelope,TerminalEnvelope}};
 use crate::{asset_session::KeyringMemoryAdmission,installed_runtime::VaultHelperSlots,vault_format as format};
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -22,6 +22,23 @@ impl LookupInput{
         Ok(Self{identity,proposal:Some(proposal)})
     }
 }
+/// Deliberately no constructor yet: native current-root/nonce/project-lease
+/// enrollment/append ownership must be implemented before any local helper GO.
+/// A renderer locator, disk journal, bool or vault initialization cannot mint it.
+pub(crate) struct LocalInput { context:local::Context, operation:local::Operation, value:Zeroizing<[u8;32]> }
+enum AttemptInput { Vault(LookupInput), Local(LocalInput) }
+/// These cells are constructed only after the SAME native/process/original
+/// finality as a vault key. No serde/Clone/Debug or public field constructors.
+pub(crate) struct LocalKeyLoan { context:local::Context, bytes:Zeroizing<[u8;32]> }
+pub(crate) struct LocalCheckpointValue { context:local::Context, bytes:Zeroizing<[u8;32]> }
+pub(crate) struct LocalAbsence { context:local::Context }
+pub(crate) enum LocalResult { Key(LocalKeyLoan), Checkpoint(LocalCheckpointValue), Absent(LocalAbsence) }
+impl LocalKeyLoan { pub(crate) fn consume<R>(self,use_key:impl FnOnce(local::Context,&[u8;32])->R)->R {use_key(self.context,&self.bytes)} }
+impl LocalCheckpointValue { pub(crate) fn matches(&self,context:local::Context,digest:&[u8;32])->bool {
+    self.context==context && self.bytes.iter().zip(digest).fold(0u8,|n,(a,b)|n|(a^b))==0
+} }
+impl LocalAbsence { pub(crate) fn matches(&self,context:local::Context)->bool {self.context==context} }
+enum SettledCandidate { Vault(WrappingKeyCandidate), Local(LocalResult) }
 /// Constructed here only after native+pipe+process+blocking-child finality.
 // No Clone/Debug/serde, key getter, async callback or deserialization constructor.
 pub(crate) struct WrappingKeyCandidate{bytes:Zeroizing<[u8;32]>}
@@ -59,19 +76,19 @@ impl Pipe{
 }
 pub(crate) struct LookupBook{
     entered:bool,driver_entered:bool,driver_returned:bool,joined:bool,driver_result:Option<Result<(),Problem>>,
-    charge:Option<KeyringMemoryAdmission>,input:Option<LookupInput>,slots:Option<VaultHelperSlots>,
+    charge:Option<KeyringMemoryAdmission>,input:Option<AttemptInput>,slots:Option<VaultHelperSlots>,
     launch:Launch,child:Option<ManuallyDrop<Child>>,exit:Option<ExitStatus>,
     wait_entered:bool,wait_failed:bool,kill_attempted:bool,kill_failed:bool,pipes:[Pipe;3],
-    clock:Option<ClockBridge>,request:Option<Request>,request_bytes:Zeroizing<[u8;wire::REQUEST_BYTES]>,
+    clock:Option<ClockBridge>,request:Option<RequestEnvelope>,request_bytes:Zeroizing<[u8;wire::REQUEST_BYTES]>,
     go:bool,write_attempted:bool,request_sent:bool,stop_attempted:bool,stop_sent:bool,
     output:Zeroizing<[u8;wire::RESPONSE_LIMIT+1]>,used:usize,notice_seen:bool,terminal_start:usize,
-    terminal:Option<Terminal>,terminal_seen:bool,output_failed:bool,stderr_seen:bool,
+    terminal:Option<TerminalEnvelope>,terminal_seen:bool,output_failed:bool,stderr_seen:bool,
     work:Option<Instant>,cleanup:Option<Instant>,first:Option<(Problem,Instant)>,uncertain:bool,effect:u32,
-    candidate:Option<WrappingKeyCandidate>,disposed:bool,postchecked:bool,
+    candidate:Option<SettledCandidate>,disposed:bool,postchecked:bool,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     qualification: QualificationBook,
 }
-pub(crate) const LOOKUP_CONTROL_BYTES:usize=std::mem::size_of::<LookupBook>()+std::mem::size_of::<LookupInput>()
+pub(crate) const LOOKUP_CONTROL_BYTES:usize=std::mem::size_of::<LookupBook>()+std::mem::size_of::<AttemptInput>()
     + std::mem::size_of::<VaultHelperSlots>() + 8192;
 // Census reserves both fixed native operation frames, both bounded ACL
 //adapter allocations, the authentication book, helper control storage and the
@@ -102,8 +119,8 @@ impl LookupBook{
     pub(crate) fn fail_at(&mut self,p:Problem,at:Instant){
         Self::latch_failure(&mut self.first,&mut self.cleanup,&mut self.uncertain,p,at);
         self.candidate=None;
-        if let Some(request)=self.request.as_mut(){request.initial_key.zeroize();}
-        if let Some(input)=self.input.as_mut(){input.proposal=None;}
+        if let Some(request)=self.request.as_mut(){request.wipe_value();}
+        if let Some(input)=self.input.as_mut(){match input {AttemptInput::Vault(v)=>v.proposal=None,AttemptInput::Local(v)=>v.value.zeroize()}}
         if !self.request_sent{self.request_bytes.zeroize();}
     }
     pub(crate) fn fail(&mut self,p:Problem){self.fail_at(p,Instant::now());}
@@ -115,6 +132,12 @@ impl LookupBook{
     }
     pub(crate) fn can_begin(&self)->bool{!self.entered && self.allocations_released() && self.first.is_none()}
     pub(crate) fn begin(&mut self,input:LookupInput,end:Instant,charge:KeyringMemoryAdmission)->Result<(),Problem>{
+        self.begin_input(AttemptInput::Vault(input),end,charge)
+    }
+    pub(crate) fn begin_local(&mut self,input:LocalInput,end:Instant,charge:KeyringMemoryAdmission)->Result<(),Problem>{
+        self.begin_input(AttemptInput::Local(input),end,charge)
+    }
+    fn begin_input(&mut self,input:AttemptInput,end:Instant,charge:KeyringMemoryAdmission)->Result<(),Problem>{
         if !self.can_begin(){return Err(Problem::CleanupUnknown);}self.entered=true;self.charge=Some(charge);
         self.input=Some(input);self.work=Some(end);self.cleanup=end.checked_add(Duration::from_secs(2));
         // Inert fixed slots are retained before the registered blocking child.
@@ -139,11 +162,17 @@ impl LookupBook{
             let input=self.input.take().ok_or(Problem::CleanupUnknown)?;
             let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|Problem::Crypto)?;
             if nonce==[0;16]{return Err(Problem::Crypto);}
-            let operation=if input.proposal.is_some(){wire::Operation::Initialize}else{wire::Operation::Lookup};
-            let mut initial_key=Zeroizing::new([0;32]);
-            if let Some(proposal)=input.proposal{proposal.consume_for_transport(|key|initial_key.copy_from_slice(key));}
-            let request=Request{operation,nonce,vault:*input.identity.vault.bytes(),generation:*input.identity.generation.bytes(),
-                work,maximum_cleanup,initial_key};
+            let request=match input {
+                AttemptInput::Vault(input)=>{
+                    let operation=if input.proposal.is_some(){wire::Operation::Initialize}else{wire::Operation::Lookup};
+                    let mut initial_key=Zeroizing::new([0;32]);
+                    if let Some(proposal)=input.proposal{proposal.consume_for_transport(|key|initial_key.copy_from_slice(key));}
+                    RequestEnvelope::Vault(Request{operation,nonce,vault:*input.identity.vault.bytes(),generation:*input.identity.generation.bytes(),
+                        work,maximum_cleanup,initial_key})
+                },
+                AttemptInput::Local(input)=>RequestEnvelope::Local(local::Request{context:input.context,operation:input.operation,
+                    nonce,work,maximum_cleanup,value:input.value}),
+            };
             self.clock=Some(clock);self.request=Some(request);
             if !self.request.as_ref().unwrap().encode(&mut self.request_bytes){return Err(Problem::InvalidInput);}
             self.slots.as_mut().ok_or(Problem::CleanupUnknown)?.prepare_command().map_err(|_|Problem::CleanupUnknown)?;
@@ -187,33 +216,34 @@ impl LookupBook{
         self.go=true;Ok(())
     }
     fn apply_effect(&mut self,new:u32)->bool{
-        if new>3 || self.request.as_ref().is_some_and(|r|r.operation==wire::Operation::Lookup) && new!=0{return false;}
+        if new>3 || self.request.as_ref().is_some_and(|r|!r.is_add()) && new!=0{return false;}
         match(self.effect,new){
             (0,_)|(3,1|2|3)|(1,1)|(2,2)=>{self.effect=new;true},_=>false,
         }
     }
     fn consume_frames(&mut self){
         let Some(request)=self.request.as_ref()else{self.fail(Problem::Protocol);return;};
+        let terminal_bytes=request.terminal_bytes();
         if !self.notice_seen && self.used>=8 && &self.output[..8]==b"MRKVKN01"{
             if self.used<wire::NOTICE_BYTES{return;}
-            let Some(notice)=wire::Notice::decode(&self.output[..wire::NOTICE_BYTES],request)else{self.fail(Problem::Protocol);self.output_failed=true;return;};
+            let Some(notice)=request.notice(&self.output[..wire::NOTICE_BYTES])else{self.fail(Problem::Protocol);self.output_failed=true;return;};
             self.notice_seen=true;self.terminal_start=wire::NOTICE_BYTES;
             let bound=self.clock.as_mut().and_then(|clock|clock.failure_bound(notice.first));
             if !self.apply_effect(notice.effect){self.fail(Problem::Protocol);self.output_failed=true;return;}
             match bound{Some(at)=>self.fail_at(if notice.valid{Problem::Unavailable}else{Problem::CleanupUnknown},at),None=>self.fail(Problem::CleanupUnknown)}
         }
         if self.terminal_seen{
-            if self.used!=self.terminal_start+wire::TERMINAL_BYTES{
+            if self.used!=self.terminal_start+terminal_bytes{
                 self.output_failed=true;self.fail(Problem::Protocol);
             }
             return;
         }
         let start=self.terminal_start;
         if self.used<start+8{return;}
-        if &self.output[start..start+8]!=b"MRKVKT01"{self.fail(Problem::Protocol);self.output_failed=true;return;}
-        if self.used<start+wire::TERMINAL_BYTES{return;}
+        if &self.output[start..start+8]!=self.request.as_ref().unwrap().terminal_magic(){self.fail(Problem::Protocol);self.output_failed=true;return;}
+        if self.used<start+terminal_bytes{return;}
         let request=self.request.as_ref().unwrap();
-        let Some(terminal)=Terminal::decode(&self.output[start..start+wire::TERMINAL_BYTES],request)else{self.fail(Problem::Protocol);self.output_failed=true;return;};
+        let Some(terminal)=TerminalEnvelope::decode(&self.output[start..start+terminal_bytes],request)else{self.fail(Problem::Protocol);self.output_failed=true;return;};
         if !self.apply_effect(terminal.effect){self.fail(Problem::Protocol);self.output_failed=true;return;}
         if terminal.first!=0{
             let bound=self.clock.as_mut().and_then(|clock|clock.failure_bound(terminal.first));
@@ -224,11 +254,11 @@ impl LookupBook{
             }).unwrap_or(Problem::Unavailable);
             match bound{Some(at)=>self.fail_at(reason,at),None=>self.fail(Problem::CleanupUnknown)}
         }
-        let terminal_success=terminal.success(self.request.as_ref().unwrap().operation);
+        let terminal_success=terminal.success_for(self.request.as_ref().unwrap());
         if !terminal.valid{self.fail(Problem::CleanupUnknown);}
         else if !terminal_success && self.first.is_none(){self.fail(Problem::Unavailable);}
         self.terminal=Some(terminal);self.terminal_seen=true;
-        if self.used!=start+wire::TERMINAL_BYTES{self.output_failed=true;self.fail(Problem::Protocol);}
+        if self.used!=start+terminal_bytes{self.output_failed=true;self.fail(Problem::Protocol);}
     }
     fn needs_stop_control(&self)->bool{
         // Only a real request-bound decoded terminal can retire this route.
@@ -246,7 +276,7 @@ impl LookupBook{
                 // No retry or GO reconstruction after ambiguous/partial write.
                 _=>{self.fail(Problem::CleanupUnknown);}
             }
-            self.request_bytes.zeroize();if let Some(request)=self.request.as_mut(){request.initial_key.zeroize();}
+            self.request_bytes.zeroize();if let Some(request)=self.request.as_mut(){request.wipe_value();}
         }
         // A stopped child that never received a complete GO must not wait for
         //the cleanup deadline merely because its blocking request read lacks
@@ -260,7 +290,7 @@ impl LookupBook{
             let encoded=(||{
                 let clock=self.clock.as_ref()?;let first=clock.earlier_endpoint(self.first?.1)?;
                 let cleanup=clock.earlier_endpoint(self.cleanup?)?;
-                wire::Stop{first,cleanup}.encode(&self.request.as_ref()?.nonce)
+                wire::Stop{first,cleanup}.encode(self.request.as_ref()?.nonce())
             })();
             if let Some(frame)=encoded{
                 self.stop_sent=self.pipes[0].original().is_some_and(|fd|unistd::write(fd,&frame).is_ok_and(|n|n==wire::STOP_BYTES));
@@ -278,7 +308,7 @@ impl LookupBook{
                 match result{
                     Ok(0)=>{
                         self.pipes[1].eof=true;
-                        if self.request_sent && (!self.terminal_seen || self.used!=self.terminal_start+wire::TERMINAL_BYTES){
+                        if self.request_sent && (!self.terminal_seen || !self.request.as_ref().is_some_and(|r|self.used==self.terminal_start+r.terminal_bytes())){
                             self.output_failed=true;self.fail(Problem::Protocol);
                         }
                     },
@@ -450,8 +480,8 @@ impl LookupBook{
             && self.exit.is_some_and(|s|s.success()) && !self.wait_failed && !self.kill_attempted
             && self.pipes.iter().all(Pipe::settled) && self.pipes[1].eof && self.pipes[2].eof
             && self.slots.as_ref().is_some_and(VaultHelperSlots::settled)
-            && self.request.as_ref().is_some_and(|r|self.terminal.as_ref().is_some_and(|t|t.success(r.operation)))
-            && self.used==self.terminal_start+wire::TERMINAL_BYTES
+            && self.request.as_ref().is_some_and(|r|self.terminal.as_ref().is_some_and(|t|t.success_for(r)))
+            && self.request.as_ref().is_some_and(|r|self.used==self.terminal_start+r.terminal_bytes())
     }
     pub(crate) fn child_joined(&mut self,actual:Result<(),Problem>){
         if self.joined || !self.driver_returned || self.driver_result!=Some(actual){self.fail(Problem::CleanupUnknown);return;}
@@ -460,11 +490,20 @@ impl LookupBook{
             self.fail_at(Problem::Interrupted,self.work.unwrap());
         }
         if actual.is_ok() && self.transport_success(){
+            let request=self.request.as_ref().unwrap();
             let mut bytes=Zeroizing::new([0;32]);
-            let start=self.terminal_start+wire::TERMINAL_BYTES-32;bytes.copy_from_slice(&self.output[start..start+32]);
-            self.candidate=Some(WrappingKeyCandidate{bytes});
+            let start=self.terminal_start+request.terminal_bytes()-32;bytes.copy_from_slice(&self.output[start..start+32]);
+            self.candidate=Some(match request {
+                RequestEnvelope::Vault(_)=>SettledCandidate::Vault(WrappingKeyCandidate{bytes}),
+                RequestEnvelope::Local(r)=>SettledCandidate::Local(if self.terminal.as_ref().unwrap().absent() {
+                    LocalResult::Absent(LocalAbsence{context:r.context})
+                } else {match r.context.purpose() {
+                    local::Purpose::LocalJournalKey=>LocalResult::Key(LocalKeyLoan{context:r.context,bytes}),
+                    local::Purpose::LocalCheckpoint=>LocalResult::Checkpoint(LocalCheckpointValue{context:r.context,bytes}),
+                }}),
+            });
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-            { self.qualification.application_constructed = true; }
+            { self.qualification.application_constructed = matches!(request,RequestEnvelope::Vault(_)); }
         }
         self.output.zeroize();self.request_bytes.zeroize();
     }
@@ -476,7 +515,7 @@ impl LookupBook{
         //Retain the prearmed frame and charge as Unknown for the same owner.
         self.fail(Problem::CleanupUnknown);
     }
-    pub(crate) fn creation_possible(&self)->bool{self.effect!=0 || self.request.as_ref().is_some_and(|r|r.operation==wire::Operation::Initialize) && self.write_attempted}
+    pub(crate) fn creation_possible(&self)->bool{self.effect!=0 || self.request.as_ref().is_some_and(|r|r.is_add()) && self.write_attempted}
     pub(crate) fn resources_settled(&self)->bool{
         if !self.entered{return true;}
         self.driver_returned && self.joined && !self.uncertain && !self.wait_failed && !self.kill_failed
@@ -495,13 +534,21 @@ impl LookupBook{
     pub(crate) fn consume_settled_key<R>(&mut self,authenticate:impl FnOnce(WrappingKeyCandidate)->R)->Result<R,Problem>{
         if !self.resources_settled() || !self.memory_held() || self.first.is_some() || !self.joined
             || self.work.is_none_or(|end|Instant::now()>=end){return Err(self.problem().unwrap_or(Problem::CleanupUnknown));}
-        let candidate=self.candidate.take().ok_or(Problem::CleanupUnknown)?;
+        if !matches!(self.candidate,Some(SettledCandidate::Vault(_))) {return Err(Problem::InvalidInput);}
+        let Some(SettledCandidate::Vault(candidate))=self.candidate.take() else {return Err(Problem::CleanupUnknown);};
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         { self.qualification.application_taken = true; }
         let result = authenticate(candidate);
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         { self.qualification.application_returned = true; }
         Ok(result)
+    }
+    pub(crate) fn consume_settled_local<R>(&mut self,consume:impl FnOnce(LocalResult)->R)->Result<R,Problem>{
+        if !self.resources_settled() || !self.memory_held() || self.first.is_some() || !self.joined
+            || self.work.is_none_or(|end|Instant::now()>=end) {return Err(self.problem().unwrap_or(Problem::CleanupUnknown));}
+        if !matches!(self.candidate,Some(SettledCandidate::Local(_))) {return Err(Problem::InvalidInput);}
+        let Some(SettledCandidate::Local(candidate))=self.candidate.take() else {return Err(Problem::CleanupUnknown);};
+        Ok(consume(candidate))
     }
     pub(crate) fn dispose_settled_storage(&mut self)->bool{
         if self.disposed || !self.memory_held() || !self.resources_settled(){return false;}
@@ -529,6 +576,39 @@ impl LookupBook{
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn local_request()->RequestEnvelope {RequestEnvelope::Local(local::Request{
+        context:local::Context::new([7;32],local::Purpose::LocalCheckpoint,513).unwrap(),
+        operation:local::Operation::ProbeAbsent,nonce:[1;16],work:11,maximum_cleanup:12,value:Zeroizing::new([0;32])})}
+    #[test]
+    fn local_failure_and_wrong_domain_never_mint_absence_or_vault_key() {
+        let mut book=LookupBook::new();book.request=Some(local_request());book.request_sent=true;
+        book.entered=true;book.cleanup=Some(Instant::now()+Duration::from_secs(2));
+        let b=&mut book.output[..local::TERMINAL_BYTES];
+        b[..8].copy_from_slice(b"MRKLJT01");
+        for (at,value) in [(8,1u32),(12,3),(100,1),(128,2),(132,1),(136,513)] {b[at..at+4].copy_from_slice(&value.to_le_bytes());}
+        b[16..32].copy_from_slice(&[1;16]);b[32..64].copy_from_slice(&[7;32]);
+        for (at,value) in [(64,11u64),(72,12),(88,12)] {b[at..at+8].copy_from_slice(&value.to_le_bytes());}
+        book.used=local::TERMINAL_BYTES;book.consume_frames();
+        assert!(book.terminal_seen);assert_eq!(book.problem(),Some(Problem::Unavailable));
+        assert!(book.candidate.is_none());assert!(!book.resources_settled());
+        assert!(book.consume_settled_local(|_|panic!("unsettled local output")).is_err());
+        assert!(book.consume_settled_key(|_|panic!("local output is not a vault key")).is_err());
+        let mut wrong=LookupBook::new();wrong.request=Some(local_request());wrong.output[..8].copy_from_slice(b"MRKVKT01");
+        wrong.used=8;wrong.consume_frames();assert_eq!(wrong.problem(),Some(Problem::Protocol));assert!(!wrong.terminal_seen);
+    }
+    #[test]
+    fn local_unknown_close_and_late_join_cannot_publish_or_refund() {
+        let mut book=LookupBook::new();book.request=Some(local_request());book.entered=true;
+        let context=local::Context::new([7;32],local::Purpose::LocalCheckpoint,513).unwrap();
+        book.candidate=Some(SettledCandidate::Local(LocalResult::Absent(LocalAbsence{context})));
+        book.work=Some(Instant::now()+Duration::from_secs(1));book.fail(Problem::CleanupUnknown);
+        assert!(book.candidate.is_none());assert!(!book.dispose_settled_storage());
+        assert!(book.consume_settled_local(|_|panic!("unknown close")).is_err());
+        book.driver_returned=true;book.driver_result=Some(Ok(()));book.child_joined(Ok(()));
+        assert!(book.candidate.is_none());assert_eq!(book.problem(),Some(Problem::CleanupUnknown));
+        assert!(!book.transport_success());assert!(!book.resources_settled());
+    }
+
     // Closed DATA only: no helper, FD, Keychain, admission frame or credentials.
     fn request(operation:wire::Operation)->Request{
         Request{operation,nonce:[1;16],vault:[2;16],generation:[3;16],work:11,maximum_cleanup:12,
@@ -548,13 +628,14 @@ mod tests {
     }
     #[test]
     fn only_valid_decoded_terminal_input_retirement_suppresses_stop_control(){
-        let mut book=LookupBook::new();book.request=Some(request(wire::Operation::Initialize));
+        let mut book=LookupBook::new();book.request=Some(RequestEnvelope::Vault(request(wire::Operation::Initialize)));
+        book.entered=true; // A request-bound in-flight attempt, not an unentered/empty owner.
         book.request_sent=true;book.first=Some((Problem::Interrupted,Instant::now()));
         assert!(book.needs_stop_control()); // No terminal, regardless of notice/effect.
         book.notice_seen=true;book.effect=1;assert!(book.needs_stop_control());
         for (valid,closed) in [(false,false),(false,true),(true,false),(true,true)]{
-            book.terminal=Some(Terminal{first:0,cleanup:12,effect:0,valid,add:None,lookup:None,
-                auth_settled:false,filesystem_settled:false,input_closed:closed,candidate:false});
+            book.terminal=Some(TerminalEnvelope::Vault(Terminal{first:0,cleanup:12,effect:0,valid,add:None,lookup:None,
+                auth_settled:false,filesystem_settled:false,input_closed:closed,candidate:false}));
             book.terminal_seen=false;assert!(book.needs_stop_control());
             book.terminal_seen=true;assert_eq!(book.needs_stop_control(),!(valid && closed));
             assert!(!book.resources_settled());assert!(book.candidate.is_none());
@@ -566,7 +647,7 @@ mod tests {
     fn first_failure_contracts_once_and_never_erases_an_actual_add(){
         let start=Instant::now();let mut book=LookupBook::new();
         book.work=Some(start+Duration::from_secs(10));book.cleanup=Some(start+Duration::from_secs(12));
-        book.request=Some(request(wire::Operation::Initialize));
+        book.request=Some(RequestEnvelope::Vault(request(wire::Operation::Initialize)));
         assert!(book.apply_effect(3));assert!(book.apply_effect(1));
         book.fail_at(Problem::Unavailable,start+Duration::from_secs(4));
         book.fail_at(Problem::Interrupted,start+Duration::from_secs(8));
@@ -593,7 +674,7 @@ mod tests {
         let mut book=LookupBook::new();book.entered=true;
         book.cleanup=Some(Instant::now()+Duration::from_secs(2));
         let request=request(wire::Operation::Lookup);let terminal=failed_terminal(&request);
-        book.request=Some(request);
+        book.request=Some(RequestEnvelope::Vault(request));
         book.output[..terminal.len()].copy_from_slice(&terminal);
         book.used=terminal.len()-1;book.consume_frames();assert!(!book.terminal_seen);
         book.used=terminal.len();book.consume_frames();
@@ -676,10 +757,10 @@ mod tests {
     }
     #[test]
     fn initialization_attempt_ambiguity_is_not_a_fabricated_added_effect(){
-        let mut book=LookupBook::new();book.request=Some(request(wire::Operation::Initialize));
+        let mut book=LookupBook::new();book.request=Some(RequestEnvelope::Vault(request(wire::Operation::Initialize)));
         assert!(!book.creation_possible());book.write_attempted=true;
         assert!(book.creation_possible());assert_eq!(book.effect,0);
-        book.request=Some(request(wire::Operation::Lookup));
+        book.request=Some(RequestEnvelope::Vault(request(wire::Operation::Lookup)));
         assert!(!book.creation_possible());assert!(!book.apply_effect(1));
     }
 }
@@ -850,15 +931,15 @@ mod qualification {
         pub(crate) fn qualification_before_go(&self) -> bool {
             self.driver_entered && self.launch == Launch::Returned && !self.go && !self.write_attempted && !self.request_sent
                 && self.first.is_none() && !self.uncertain && !self.joined
-                && self.request.as_ref().is_some_and(|r|r.operation == wire::Operation::Initialize)
+                && self.request.as_ref().is_some_and(|r|matches!(r,RequestEnvelope::Vault(v) if v.operation==wire::Operation::Initialize))
         }
         pub(crate) fn qualification_added_checkpoint(&self) -> bool {
             // Notice always denotes F; only the actual successful decoded
             // Initialize terminal can satisfy this checkpoint, including EOF.
             self.driver_entered && self.go && self.request_sent && self.first.is_none() && !self.uncertain && !self.joined
                 && self.candidate.is_none() && !self.qualification.application_constructed
-                && self.request.as_ref().is_some_and(|r| r.operation == wire::Operation::Initialize
-                    && self.terminal.as_ref().is_some_and(|t|t.success(r.operation) && t.add.as_ref().is_some_and(|a|a.added())))
+                && self.request.as_ref().is_some_and(|r| matches!(r,RequestEnvelope::Vault(v) if v.operation==wire::Operation::Initialize)
+                    && self.terminal.as_ref().is_some_and(|t|t.success_for(r) && t.add.as_ref().is_some_and(|a|a.added())))
         }
         pub(crate) fn qualification_snapshot(&self) -> Option<Snapshot> {
             if !self.entered { return None; }
@@ -882,8 +963,8 @@ mod qualification {
             Some(Snapshot { go:self.go,request_sent:self.request_sent,write_attempted:self.write_attempted,
                 stop_attempted:self.stop_attempted,stop_sent:self.stop_sent,notice:self.notice_seen,terminal:self.terminal_seen,
                 output_failed:self.output_failed,stderr_seen:self.stderr_seen,
-                successful_add_terminal:terminal.is_some_and(|t|t.success(wire::Operation::Initialize) && t.add.as_ref().is_some_and(|a|a.added())),
-                terminal_success:self.request.as_ref().is_some_and(|r|terminal.is_some_and(|t|t.success(r.operation))),
+                successful_add_terminal:terminal.is_some_and(|t|matches!(t,TerminalEnvelope::Vault(v) if v.success(wire::Operation::Initialize) && v.add.as_ref().is_some_and(|a|a.added()))),
+                terminal_success:self.request.as_ref().is_some_and(|r|terminal.is_some_and(|t|t.success_for(r))),
                 auth_settled:terminal.map(|t|t.auth_settled),filesystem_settled:terminal.map(|t|t.filesystem_settled),
                 native_input_closed:terminal.map(|t|t.input_closed),
                 add_outcome:terminal.and_then(|t|t.add.as_ref()).map(|r|outcome(r.facts().outcome())),

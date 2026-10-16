@@ -69,6 +69,7 @@ pub mod e2_native_fixture;
 pub mod wrapping_keychain;
 pub mod vault_filesystem;
 pub mod vault_helper_wire;
+pub mod local_keychain_wire;
 pub mod vault_helper_filesystem;
 #[cfg(not(any(feature = "vault-helper", feature = "android-registration-helper")))]
 pub mod vault_helper_launch;

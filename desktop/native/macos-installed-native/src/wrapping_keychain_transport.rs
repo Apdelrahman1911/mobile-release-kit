@@ -41,6 +41,9 @@ impl Receipt {
             && self.facts.outcome()==Outcome::Candidate && self.facts.add_effect()==AddEffect::NotEntered
             && self.facts.raw.flags&KEY_READY!=0 && self.exact_item_call(11,0)
     }
+    pub fn local_absent(&self)->bool {
+        self.settled() && !self.consumed && self.facts.adapter_frame_retired() && self.facts.local_absent()
+    }
     fn valid(&self)->bool {
         let f=&self.facts;
         f.raw.operation==f.operation.raw() && f.raw.valid(false)
@@ -160,5 +163,52 @@ mod tests {
         for at in [0,4,4056,4064,4068]{let mut bad=b;bad[at]^=128;assert!(decode(&bad,Operation::Lookup).is_none());}
         let mut forged=b;forged[4068..4072].copy_from_slice(&1u32.to_le_bytes());
         assert!(decode(&forged,Operation::Lookup).is_none());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn local_absence_fixture()->Receipt {
+    // DATA only: no frame, native operation, key, FD or helper is constructed.
+    let mut raw=RawResult::empty(Operation::Lookup,3);
+    raw.failure_phase=0;raw.run_returned=1;raw.phase=16;
+    raw.flags=KNOWN|KEY_WIPED|USER_ADMITTED|NAMESPACE_VERIFIED;
+    raw.directory_count=1;raw.descriptor_count=6;
+    raw.namespace_entered=5;raw.namespace_returned=5;raw.namespace_passed=5;
+    for d in &mut raw.descriptors[..6] {*d=DescriptorObservation{reserved:1,open_entered:1,open_returned:1,
+        acquired:1,close_entered:1,close_returned:1,closed:1,..DescriptorObservation::default()};}
+    raw.acl=AclObservation{snapshots_entered:11,snapshots_returned:11,snapshots_admitted:11,
+        filesec_init_entered:11,filesec_init_returned:11,filesec_acquired:11,filesec_free_entered:11,
+        filesec_free_returned:11,..AclObservation::default()};
+    raw.slot_count=1;raw.references[0]=ReferenceObservation{reserved:1,call_entered:1,call_returned:1,
+        ..ReferenceObservation::default()};
+    raw.call_count=1;raw.calls[0]=CallObservation{phase:11,entered:1,returned:1,status:-25300};
+    let call=|value|InteractionCallObservation{entered:1,returned:1,value,value_valid:1,..InteractionCallObservation::default()};
+    raw.policy=ProcessInteractionObservation{version:1,kind:1,role:3,entered:1,scope_admitted:1,original_valid:1,
+        original_value:1,installed:1,restore_due:1,restored:1,finished:1,calls:[call(1),call(0),call(0),call(1),call(1)],
+        ..ProcessInteractionObservation::default()};
+    assert!(raw.valid(true));
+    Receipt{facts:Facts{raw,operation:Operation::Lookup,verified:true,ffi_returned:true,callback_panicked:false,frame_retired:true},consumed:false}
+}
+#[cfg(test)]
+mod local_tests {
+    use super::*;
+    #[test]
+    fn local_absence_requires_positive_original_missing_and_every_close() {
+        let good=local_absence_fixture();assert!(good.local_absent());assert!(!good.candidate_consumed());
+        let mut bytes=[0;BYTES];assert!(encode(&good,&mut bytes));assert!(decode(&bytes,Operation::Lookup).unwrap().local_absent());
+        for fault in 0..16 {
+            let mut bad=local_absence_fixture();
+            match fault {
+                0=>bad.facts.raw.failure_phase=11, // Existing vault Missing stamps F.
+                1=>bad.facts.raw.calls[0].status=-1,2=>bad.facts.raw.calls[0].returned=0,
+                3=>bad.facts.raw.references[0].nonnull_returned=1,4=>bad.facts.raw.flags|=ITEM_VERIFIED,
+                5=>bad.facts.raw.flags|=KEY_READY,6=>bad.facts.raw.flags|=STOP,
+                7=>bad.facts.raw.namespace_passed=4,8=>bad.facts.raw.policy.restored=0,
+                9=>bad.facts.frame_retired=false,10=>bad.facts.callback_panicked=true,
+                11=>bad.facts.raw.flags=UNKNOWN|KEY_WIPED,12=>bad.facts.raw.key_bytes=32,
+                13=>bad.facts.raw.effect=1,14=>bad.consumed=true,_=>bad.facts.raw.policy.role=1,
+            }
+            assert!(!bad.local_absent(),"fault {fault}");
+        }
     }
 }

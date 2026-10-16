@@ -61,10 +61,13 @@ impl Stop {
 pub struct Notice { pub first:u64, pub cleanup:u64, pub effect:u32, pub valid:bool }
 impl Notice {
     pub fn decode(b:&[u8],request:&Request) -> Option<Self> {
+        Self::decode_bounds(b,request.maximum_cleanup,request.operation==Operation::Initialize)
+    }
+    pub(crate) fn decode_bounds(b:&[u8],maximum_cleanup:u64,can_add:bool)->Option<Self> {
         if b.len()!=NOTICE_BYTES || &b[..8]!=b"MRKVKN01" || u32_at(b,24)>3 || u32_at(b,28)>1 { return None; }
         let first=u64_at(b,8);let cleanup=u64_at(b,16);let effect=u32_at(b,24);
-        if first==0 || cleanup<first || cleanup-first>CLEANUP_NS || cleanup>request.maximum_cleanup
-            || request.operation==Operation::Lookup && effect!=0 { return None; }
+        if first==0 || cleanup<first || cleanup-first>CLEANUP_NS || cleanup>maximum_cleanup
+            || !can_add && effect!=0 { return None; }
         Some(Self{first,cleanup,effect,valid:u32_at(b,28)==1})
     }
 }

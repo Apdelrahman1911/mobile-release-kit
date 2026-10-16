@@ -6,7 +6,8 @@ use std::{ffi::c_void,mem::ManuallyDrop,os::fd::{FromRawFd,OwnedFd},
     panic::{catch_unwind,AssertUnwindSafe},ptr::NonNull};
 use nix::{fcntl::{fcntl,FcntlArg,OFlag},unistd};
 use zeroize::{Zeroize,Zeroizing};
-use crate::{vault_helper_filesystem::CodeOriginals,vault_helper_wire::{self as wire,Request,Operation,Terminal},
+use crate::{vault_helper_filesystem::CodeOriginals,vault_helper_wire::{self as wire,Operation,Terminal},
+    local_keychain_wire::{self as local,RequestEnvelope},
     wrapping_keychain::{self as wrapping,transport,Admission,Checkpoint}};
 
 unsafe extern "C" {
@@ -160,18 +161,19 @@ impl Pipes{
     }
 }
 struct Work{pipes:Pipes,filesystem:Option<CodeOriginals>,auth:Option<AuthBook>,clock:Option<wire::ClockBridge>,
-    request:Option<Request>,add:Option<wrapping::NativeResult<()>>,lookup:Option<wrapping::NativeResult<wrapping::WrappingKeyCandidate>>,
+    request:Option<RequestEnvelope>,add:Option<wrapping::NativeResult<()>>,lookup:Option<wrapping::NativeResult<wrapping::WrappingKeyCandidate>>,
+    probe:Option<wrapping::NativeResult<()>>,absent:bool,
     key:Zeroizing<[u8;32]>,consumed:bool,panic:[Option<Box<dyn std::any::Any+Send>>;2]}
-const _:()=assert!(std::mem::size_of::<Work>()+wire::REQUEST_BYTES+wire::TERMINAL_BYTES<=wire::HELPER_CONTROL_ALLOWANCE);
+const _:()=assert!(std::mem::size_of::<Work>()+wire::REQUEST_BYTES+local::TERMINAL_BYTES<=wire::HELPER_CONTROL_ALLOWANCE);
 impl Work{
     fn new()->Self{Self{pipes:Pipes::inherited(),filesystem:None,auth:None,clock:None,request:None,add:None,lookup:None,
-        key:Zeroizing::new([0;32]),consumed:false,panic:[None,None]}}
+        probe:None,absent:false,key:Zeroizing::new([0;32]),consumed:false,panic:[None,None]}}
     fn run(&mut self)->bool{
         let mut input=Zeroizing::new([0;wire::REQUEST_BYTES]);
         if !self.pipes.read_request(&mut input){return false;}
-        self.request=Request::decode(&*input);input.zeroize();
+        self.request=RequestEnvelope::decode(&*input);input.zeroize();
         let Some(request)=self.request.as_ref() else{return false;};
-        if !self.pipes.nonblocking() || unsafe{mrk_vault_control_begin(request.nonce.as_ptr(),request.work,request.maximum_cleanup)}!=1{return false;}
+        if !self.pipes.nonblocking() || unsafe{mrk_vault_control_begin(request.nonce().as_ptr(),request.work(),request.maximum_cleanup())}!=1{return false;}
         // One retained bridge for subsequent Rust filesystem F; no clock or
         //deadline is restarted when a later cleanup callback reports that F.
         self.clock=wire::ClockBridge::capture();if self.clock.is_none(){fail();return false;}
@@ -181,7 +183,6 @@ impl Work{
             local_failure(&mut self.clock,filesystem.first_failure().map(|(_,at)|at));fail();return false;
         }
         let auth=self.auth.as_mut().unwrap();if !auth.begin(){fail();return false;}
-        let context=wrapping::Context::new(request.vault,request.generation).unwrap();
         let mut forward=|checkpoint:Checkpoint,_facts:&wrapping::Facts|->Admission{
             // Native original-only closes use cleanup admission; an earlier
             //forward callback failure cannot re-enter/poison restore slots3/4.
@@ -189,18 +190,42 @@ impl Work{
             let gate=admission(cleanup);if gate!=Admission::Continue{return gate;}
             if !cleanup && !auth.current(){fail();return Admission::Unknown;}Admission::Continue
         };
-        if request.operation==Operation::Initialize{
-            let mut result=wrapping::helper_add(&context,&request.initial_key,&mut forward);
-            let added=result.take_value().is_some();
-            self.add=Some(result);
-            if !added{fail();return false;}
+        match request {
+            RequestEnvelope::Vault(request)=>{
+                let context=wrapping::Context::new(request.vault,request.generation).unwrap();
+                if request.operation==Operation::Initialize {
+                    let mut result=wrapping::helper_add(&context,&request.initial_key,&mut forward);
+                    let added=result.take_value().is_some();self.add=Some(result);
+                    if !added {fail();return false;}
+                }
+                self.lookup=Some(wrapping::helper_lookup(&context,&mut forward));
+            },
+            RequestEnvelope::Local(request)=>{
+                if request.operation==local::Operation::AddRead {
+                    let mut result=wrapping::helper_local_add(&request.context,&request.value,&mut forward);
+                    let added=result.take_value().is_some();self.add=Some(result);
+                    if !added {fail();return false;}
+                }
+                if request.operation==local::Operation::ProbeAbsent {
+                    let mut result=wrapping::helper_local_probe(&request.context,&mut forward);
+                    self.absent=result.take_value().is_some();self.probe=Some(result);
+                    if !self.absent {fail();return false;}
+                } else {self.lookup=Some(wrapping::helper_local_lookup(&request.context,&mut forward));}
+            },
         }
-        self.lookup=Some(wrapping::helper_lookup(&context,&mut forward));
-        // Keychain and its five-call interaction guard have ACTUALLY returned
-        //before native consumption/retirement. This private cell is not output.
-        if admission(false)!=Admission::Continue{return false;}
-        let Some(candidate)=self.lookup.as_mut().and_then(|result|result.take_value()) else{fail();return false;};
-        candidate.consume(|key|self.key.copy_from_slice(key));self.consumed=true;
+        // Native cleanup and frame consumption precede output. Absence has no
+        // candidate cell and cannot be turned into a key by an empty receipt.
+        if admission(false)!=Admission::Continue {return false;}
+        if !request.is_probe() {
+            let Some(candidate)=self.lookup.as_mut().and_then(|result|result.take_value()) else {fail();return false;};
+            candidate.consume(|key|self.key.copy_from_slice(key));self.consumed=true;
+            if let RequestEnvelope::Local(request)=request {
+                if request.operation==local::Operation::AddRead {
+                    let difference=self.key.iter().zip(request.value.iter()).fold(0u8,|n,(a,b)|n|(a^b));
+                    if difference!=0 {self.key.zeroize();fail();return false;}
+                }
+            }
+        }
         if !auth.recheck(){fail();return false;}
         if filesystem.recheck(&mut ||admission(false)!=Admission::Continue).is_err(){
             local_failure(&mut self.clock,filesystem.first_failure().map(|(_,at)|at));fail();return false;
@@ -223,20 +248,22 @@ impl Work{
         let stderr_ok=cleanup_admission()==Admission::Continue && self.pipes.close(2);
         if !auth_ok || !fs_ok || !input_ok || !stderr_ok{fail();}
         let Some(request)=self.request.as_ref()else{return false;};
-        let mut terminal=Terminal{first:0,cleanup:request.maximum_cleanup,effect:0,valid:false,
+        let mut terminal=Terminal{first:0,cleanup:request.maximum_cleanup(),effect:0,valid:false,
             add:self.add.as_ref().map(|r|transport::Receipt::observe(r.facts(),false)),
-            lookup:self.lookup.as_ref().map(|r|transport::Receipt::observe(r.facts(),self.consumed)),
+            lookup:self.lookup.as_ref().map(|r|transport::Receipt::observe(r.facts(),self.consumed))
+                .or_else(||self.probe.as_ref().map(|r|transport::Receipt::observe(r.facts(),false))),
             auth_settled:auth_ok,filesystem_settled:fs_ok,input_closed:input_ok,candidate:false};
         // Resolve every pre-output decision before reading the terminal clock
         //cell. A newly stamped failure must not leave a stale success-shaped
         //first/cleanup/valid envelope when its optional early notice was lost.
-        let ready=success && self.panic.iter().all(Option::is_none) && self.consumed && stderr_ok
-            && auth_ok && fs_ok && input_ok && admission(false)==Admission::Continue
+        let native_ready=if request.is_probe() {
+            self.absent && !self.consumed && terminal.add.is_none()
+                && terminal.lookup.as_ref().is_some_and(transport::Receipt::local_absent)
+        } else {self.consumed && !self.absent
             && terminal.lookup.as_ref().is_some_and(transport::Receipt::candidate_consumed)
-            && match request.operation {
-                Operation::Initialize=>terminal.add.as_ref().is_some_and(transport::Receipt::added),
-                Operation::Lookup=>terminal.add.is_none(),
-            };
+            && if request.is_add() {terminal.add.as_ref().is_some_and(transport::Receipt::added)} else {terminal.add.is_none()}};
+        let ready=success && self.panic.iter().all(Option::is_none) && native_ready && stderr_ok
+            && auth_ok && fs_ok && input_ok && admission(false)==Admission::Continue;
         if !ready{fail();}
         // Closing notice publication cannot renew or disable admission. It
         //merely prevents a later diagnostic frame from splicing the terminal.
@@ -244,23 +271,36 @@ impl Work{
         let mut valid=0;
         let snapshot=unsafe{mrk_vault_control_snapshot(&mut terminal.first,&mut terminal.cleanup,&mut terminal.effect,&mut valid)}==1;
         terminal.valid=snapshot && valid==1 && terminal.effect<=3;
-        terminal.candidate=ready && terminal.first==0 && terminal.valid;
-        if terminal.candidate && !terminal.success(request.operation){
-            terminal.candidate=false;fail();
+        let mut published=ready && terminal.first==0 && terminal.valid;
+        terminal.candidate=published && !request.is_probe();
+        let result=if !published {local::ResultKind::None} else if request.is_probe() {local::ResultKind::Absent} else {local::ResultKind::Value};
+        let mut envelope=match request {
+            RequestEnvelope::Vault(_)=>local::TerminalEnvelope::Vault(terminal),
+            RequestEnvelope::Local(_)=>local::TerminalEnvelope::Local(local::Terminal{common:terminal,result}),
+        };
+        if published && !envelope.success_for(request) {
+            published=false;fail();
+            let terminal=match &mut envelope {local::TerminalEnvelope::Vault(t)=>t,
+                local::TerminalEnvelope::Local(t)=>{t.result=local::ResultKind::None;&mut t.common}};
+            terminal.candidate=false;
             let refreshed=unsafe{mrk_vault_control_snapshot(&mut terminal.first,&mut terminal.cleanup,&mut terminal.effect,&mut valid)}==1;
             terminal.valid=refreshed && valid==1 && terminal.effect<=3;
         }
-        if !terminal.candidate{self.key.zeroize();}
-        let mut output=Zeroizing::new([0;wire::TERMINAL_BYTES]);
-        if !wire::terminal_encode(request,&terminal,terminal.candidate.then_some(&*self.key),&mut output){
-            self.key.zeroize();return false;
-        }
-        let written=self.pipes.write_terminal(&*output,terminal.candidate);
+        if !envelope.candidate {self.key.zeroize();}
+        let mut output=Zeroizing::new([0;local::TERMINAL_BYTES]);
+        let value=envelope.candidate.then_some(&*self.key);
+        let encoded=match (request,&envelope) {
+            (RequestEnvelope::Vault(r),local::TerminalEnvelope::Vault(t))=>wire::terminal_encode(r,t,value,
+                (&mut output[..wire::TERMINAL_BYTES]).try_into().unwrap()),
+            (RequestEnvelope::Local(r),local::TerminalEnvelope::Local(t))=>local::terminal_encode(r,t,value,&mut output),
+            _=>false,
+        };
+        if !encoded {self.key.zeroize();return false;}
+        let written=self.pipes.write_terminal(&output[..request.terminal_bytes()],published);
         self.key.zeroize();output.zeroize();
-        // No envelope claims its own subsequent stdout close. The parent needs
-        //actual EOF, actual successful original Child exit and actual worker join.
+        // stdout close is deliberately NOT claimed by the preceding envelope.
         let closed=cleanup_admission()==Admission::Continue && self.pipes.close(1);
-        written && closed && terminal.candidate && admission(false)==Admission::Continue
+        written && closed && published && admission(false)==Admission::Continue
     }
 }
 /// Caller is only helpers/macos-vault-helper/src/main.rs. Ordinary application
@@ -271,7 +311,7 @@ unsafe extern "C"{fn mrk_vault_helper_gate_admit(descriptor:i32,parent_pid:i32)-
 // This is not a bound on opaque allocator/native/process-RSS storage.
 const GATE_STARTUP_CONTROL_BYTES:usize=8192;
 const _:()=assert!(GATE_STARTUP_CONTROL_BYTES+std::mem::size_of::<Work>()
-    +wire::REQUEST_BYTES+wire::TERMINAL_BYTES<=wire::HELPER_CONTROL_ALLOWANCE);
+    +wire::REQUEST_BYTES+local::TERMINAL_BYTES<=wire::HELPER_CONTROL_ALLOWANCE);
 pub fn main_entry()->i32{
     std::panic::set_hook(Box::new(|_|{})); // Before any credentials; no panic output.
     // Keep empty parent-supplied env; only the bounded same-real-UID CF
@@ -299,5 +339,6 @@ pub fn main_entry()->i32{
     // Unknown native originals/panic payloads are deliberately retained, not
     //dropped into another cleanup attempt at process exit. Exit is never a
     //receipt of CF/policy restoration, a wipe of OS copies or add rollback.
-    work.key.zeroize();let result=if finished{0}else{1};std::mem::forget(work);result
+    work.key.zeroize();if let Some(request)=work.request.as_mut(){request.wipe_value();}
+    let result=if finished{0}else{1};std::mem::forget(work);result
 }
