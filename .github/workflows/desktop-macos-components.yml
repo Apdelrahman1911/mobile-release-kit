@@ -1,0 +1,72 @@
+name: Mac launcher component
+
+on:
+  push:
+    branches: [verify/desktop-macos-components]
+    paths:
+      - desktop/native/macos-applications-launcher/**
+      - desktop/src-tauri/tauri.conf.json
+      - desktop/src-tauri/icons/icon.png
+      - .github/workflows/desktop-macos-components.yml
+  pull_request:
+    paths:
+      - desktop/native/macos-applications-launcher/**
+      - desktop/src-tauri/tauri.conf.json
+      - desktop/src-tauri/icons/icon.png
+      - .github/workflows/desktop-macos-components.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-launcher-component-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  launcher:
+    name: Compile launcher (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Allocate one task-owned component directory
+        id: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-launcher-ci.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+      - name: Build only the unsigned launcher component with the native SDK
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          bash desktop/native/macos-applications-launcher/build.sh \
+            "$WORK_ROOT/Mobile Release Kit.app" "$TARGET_ARCH"
+          plutil -lint "$WORK_ROOT/Mobile Release Kit.app/Contents/Info.plist"
+          lipo "$WORK_ROOT/Mobile Release Kit.app/Contents/MacOS/mrk-macos-launcher" \
+            -verify_arch "$TARGET_ARCH"
+      - name: Remove only this job's disposable component
+        if: always() && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: rm -rf -- "$WORK_ROOT"
+
+# No application launch, private runtime, signing identity, notarization or
+# installed-image qualification is involved. Native launch and integrated
+# Applications publication remain separate acceptance requirements.
