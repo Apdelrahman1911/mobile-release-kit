@@ -132,18 +132,8 @@ bundle="$prefix/lib/ruby/gems/3.3.0/gems/bundler-4.0.16/exe/bundle"
 run "$prefix/bin/ruby" "$bundle" install --local --jobs 2 --retry 0
 # Executable gem shebangs contain the build prefix. The Store entry uses only
 # ruby and this relocatable bundle wrapper, never an arbitrary cached binstub.
-cat > "$prefix/bin/bundle" <<'WRAPPER'
-#!/bin/sh
-set -eu
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-unset RUBYOPT RUBYLIB GEMRC
-export GEM_HOME="$root/lib/ruby/gems/3.3.0" GEM_PATH="$root/lib/ruby/gems/3.3.0"
-export BUNDLE_IGNORE_CONFIG=1 BUNDLE_FROZEN=true BUNDLE_AUTO_INSTALL=false
-export BUNDLE_GEMFILE="$root/tooling/Gemfile" BUNDLE_PATH="$root/bundle"
-export BUNDLE_FORCE_RUBY_PLATFORM=true SSL_CERT_FILE="$root/ca.pem"
-exec "$root/bin/ruby" "$GEM_HOME/gems/bundler-4.0.16/exe/bundle" "$@"
-WRAPPER
-/bin/chmod 0755 "$prefix/bin/bundle"
+/usr/bin/install -m 0755 "$here/macos_store_bundle.sh" "$prefix/bin/bundle"
+/usr/bin/install -m 0644 "$here/macos_store_bundle_setup.rb" "$prefix/bin/mrk_bundle_setup.rb"
 # Archive caches are build-only; installed gem sources/licenses are retained.
 /bin/rm -rf -- "$prefix/tooling/vendor/cache"
 /bin/rmdir "$prefix/tooling/vendor"

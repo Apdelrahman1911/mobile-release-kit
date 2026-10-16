@@ -139,12 +139,18 @@ module StoreRuntimeComponent
 
     total = 0
     files = 0
+    directories = 0
+    max_relative_bytes = 0
     native_files = 0
     Find.find(root) do |path|
       info = File.lstat(path)
       abort "Nonordinary component entry: #{path.delete_prefix(root + '/')}" unless info.directory? || info.file?
-      next if info.directory?
+      if info.directory?
+        directories += 1 unless path == root
+        next
+      end
       files += 1
+      max_relative_bytes = [max_relative_bytes, path.delete_prefix(root + "/").bytesize].max
       total += info.size
       abort "Store component exceeds 512 MiB" if total > 512 * 1024 * 1024
       next unless native_image?(path)
@@ -160,7 +166,7 @@ module StoreRuntimeComponent
       end
     end
     abort "Missing native Ruby" if native_files.zero?
-    puts "Offline #{mode} smoke: #{files} files, #{total} bytes, #{native_files} native images; TLS handshake/signing/app integration not verified."
+    puts "Offline #{mode} smoke: #{files} files, #{directories} directories, #{total} bytes, #{native_files} native images, max relative path #{max_relative_bytes} bytes; TLS handshake/signing/app integration not verified."
   end
 end
 
