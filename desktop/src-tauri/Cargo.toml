@@ -6,7 +6,7 @@ rust-version = "1.88"
 license = "MIT"
 publish = false
 build = "build.rs"
-description = "Read-only desktop foundation for the Mobile Release Kit core"
+description = "Desktop application for Mobile Release Kit"
 
 [lib]
 name = "mobile_release_desktop"

@@ -1,9 +1,9 @@
 {
   "name": "mobile-release-kit-desktop",
-  "version": "0.3.0",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
-  "description": "Read-only desktop foundation for Mobile Release Kit",
+  "description": "Desktop application for Mobile Release Kit",
   "engines": {
     "node": ">=22.12.0"
   },
