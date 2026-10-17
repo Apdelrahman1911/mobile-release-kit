@@ -463,5 +463,179 @@ class XcodeSetupPackageNative(unittest.TestCase):
         print("Synthetic component callback twice/receipt/BOM/encoded3800 observed; no long-runtime or native setup claim.")
 
 
+@unittest.skipUnless(sys.platform == "darwin" and os.environ.get("MRK_XCODE_PRODUCT_METADATA_PROBE") == "1",
+                     "explicit hosted unsigned product metadata probe only")
+class XcodeSetupProductMetadataNative(unittest.TestCase):
+    def test_unsigned_product_original_metadata_matches_production_parsers(self):
+        self.assertNotEqual(os.geteuid(), 0)
+        for key, value in {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
+                           "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
+                           "RUNNER_TEMP": "/Users/runner/work/_temp"}.items():
+            self.assertEqual(os.environ.get(key), value)
+        repo = Path(__file__).absolute().parents[2]
+        source = os.environ["GITHUB_SHA"]
+        self.assertRegex(source, r"^[0-9a-f]{40}$")
+        self.assertEqual(source, os.environ.get("GITHUB_WORKFLOW_SHA"))
+        target = {"arm64": "aarch64-apple-darwin", "x86_64": "x86_64-apple-darwin"}[platform.machine()]
+        spec = importlib.util.spec_from_file_location("unsigned_product_probe_stager", repo / "desktop/tools/stage_macos_installed.py")
+        stager = importlib.util.module_from_spec(spec); spec.loader.exec_module(stager)
+        selected = stager.source_build_selection(target)
+        sources = stager.xcode_setup_sources(selected)
+        work = Path(os.environ["RUNNER_TEMP"]) / "mrk-xcode-product-metadata"
+        work.mkdir(mode=0o700)  # Only a new nonroot task tree; never reuse.
+        deadline, counter = time.monotonic() + 300, 0
+        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner", "LANG": "C", "LC_ALL": "C"}
+        previous_limit = resource.getrlimit(resource.RLIMIT_FSIZE)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (min(1024 * 1024, previous_limit[0]) if previous_limit[0] >= 0 else 1024 * 1024,
+                                                previous_limit[1]))
+        def bounded(path, limit):
+            self.assertLess(time.monotonic(), deadline)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+            try:
+                before = os.fstat(fd)
+                self.assertTrue(stat.S_ISREG(before.st_mode))
+                self.assertEqual((before.st_uid, before.st_nlink), (os.getuid(), 1))
+                self.assertTrue(0 < before.st_size <= limit)
+                value = bytearray()
+                while len(value) < before.st_size:
+                    part = os.read(fd, min(4096, before.st_size-len(value))); self.assertTrue(part); value.extend(part)
+                self.assertEqual(os.read(fd, 1), b"")
+                fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+                identity = lambda info: tuple(getattr(info, name) for name in fields)
+                self.assertEqual(identity(before), identity(os.fstat(fd)))
+                self.assertEqual(identity(before), identity(path.lstat()))
+                self.assertLess(time.monotonic(), deadline)
+                return bytes(value)
+            finally:
+                os.close(fd)
+        def run(argv, seconds, *, cwd=work, archive=False):
+            nonlocal counter
+            remaining = deadline-time.monotonic(); self.assertGreater(remaining, 0); counter += 1
+            stdout, stderr = (work / (str(counter)+suffix) for suffix in (".stdout", ".stderr"))
+            environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "TZ": "UTC", "COPYFILE_DISABLE": "1"} if archive else env
+            try:
+                with stdout.open("xb") as out, stderr.open("xb") as err:
+                    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err, cwd=cwd,
+                                            env=environment, timeout=min(seconds, remaining), check=False)
+                self.assertLess(time.monotonic(), deadline, "original metadata probe deadline after command")
+            except subprocess.TimeoutExpired:
+                _command_failure(work, repo, argv, counter, timed_out=True)
+                raise TimeoutError("unsigned metadata command timed out; preserve task") from None
+            if result.returncode != 0:
+                _command_failure(work, repo, argv, counter, returncode=result.returncode)
+            self.assertEqual(result.returncode, 0, "unsigned metadata command failed; see Failure.json")
+            self.assertLessEqual(stdout.stat().st_size, 256*1024); self.assertLessEqual(stderr.stat().st_size, 256*1024)
+            return b"" if stdout.stat().st_size == 0 else bounded(stdout, 256*1024)
+        def metadata(package, member):
+            # Observation-only extraction of TWO fixed public XML members. Save
+            # the actual TOC before any member/production-parser assertion. This
+            # neither relaxes the shipping parser nor grants package authority.
+            self.assertIn(member, ("PackageInfo", "Distribution"))
+            body = bounded(package, 1024*1024)
+            self.assertGreaterEqual(len(body), 28)
+            magic, header, version, packed, unpacked, checksum = stager.struct.unpack_from(">IHHQQI", body)
+            self.assertEqual((magic, header, version), (0x78617221, 28, 1))
+            self.assertIn(checksum, (1, 3, 4))
+            self.assertTrue(0 < packed <= 65536 and 0 < unpacked <= 65536 and header+packed <= len(body))
+            toc = stager.inflate(body[header:header+packed], unpacked); self.assertEqual(len(toc), unpacked)
+            (work / ("ComponentTOC.xml" if member == "PackageInfo" else "ProductTOC.xml")).write_bytes(toc)
+            tree = stager.ET.fromstring(toc)
+            rows = [row for row in tree.findall("./toc/file") if row.findtext("name") == member]
+            self.assertEqual(len(rows), 1); row = rows[0]
+            self.assertEqual(row.findtext("type"), "file"); self.assertFalse(row.findall("file"))
+            self.assertEqual(len(row.findall("data")), 1); data = row.find("data")
+            numbers = []
+            for key in ("length", "offset", "size"):
+                self.assertEqual(len(data.findall(key)), 1)
+                text = data.findtext(key); self.assertRegex(text, r"^(0|[1-9][0-9]{0,9})$"); numbers.append(int(text))
+            length, offset, size = numbers
+            limit = 16384 if member == "PackageInfo" else 32768
+            self.assertTrue(0 < length <= 65536 and 0 < size <= limit and offset >= {1:20, 3:32, 4:64}[checksum])
+            start = header+packed+offset; self.assertLessEqual(start+length, len(body))
+            self.assertEqual(len(data.findall("encoding")), 1); encoding = data.find("encoding").get("style")
+            self.assertIn(encoding, ("application/octet-stream", "application/x-gzip"))
+            value = body[start:start+length]
+            value = value if encoding == "application/octet-stream" else stager.inflate(value, size, gzip=value[:2] == b"\x1f\x8b")
+            self.assertEqual(len(value), size)
+            (work / (member+".xml")).write_bytes(value)
+            return body, value
+        try:
+            self.assertEqual(run(["/usr/bin/git", "-C", str(repo), "rev-parse", "HEAD"], 10).decode().strip(), source)
+            run(["/usr/bin/git", "-C", str(repo), "diff", "--exit-code", "HEAD", "--",
+                 "desktop/macos-xcode-setup-inputs", "desktop/tools/stage_macos_installed.py",
+                 str(Path(__file__).relative_to(repo))], 10)
+            payload, scripts, parts = work/"carrier", work/"scripts-original", work/"parts"
+            stager.write_tree(payload, {stager.XCODE_SETUP_CARRIER+"/Contents/Info.plist": (sources["CarrierInfo.plist"], 0o444)}, root_mode=0o755)
+            # Deliberately NOT Mach-O or a signing/admission stand-in. Packaging
+            # tools only read these bytes; no script/helper/Installer is executed.
+            files = {"preinstall": (sources["preinstall"], 0o555), "setup/postinstall": (sources["setup/postinstall"], 0o555),
+                     stager.XCODE_SETUP_PROGRAM: (b"INERT UNSIGNED PACKAGE METADATA PROBE; NEVER EXECUTE\n", 0o555)}
+            stager.write_tree(scripts, files, root_mode=0o755)
+            component_plist = work/"Component.plist"; component_plist.write_bytes(sources["Component.plist"])
+            original = work/"original.pkg"
+            run(["/usr/bin/pkgbuild", "--root", str(payload), "--scripts", str(scripts), "--component-plist", str(component_plist),
+                 "--identifier", stager.XCODE_SETUP_ID, "--version", selected.package_version, "--install-location", "/Library",
+                 "--ownership", "recommended", "--compression", "legacy", "--min-os-version", "26.0", str(original)], 60)
+            original_body, package_info = metadata(original, "PackageInfo")
+            members = stager.xar_members(original_body, xcode_setup=True)
+            self.assertEqual(members["PackageInfo"], package_info)
+            stager.xcode_setup_package_info(package_info, selected)
+            stager._xcode_setup_payload(members["Payload"], sources["CarrierInfo.plist"])
+            self.assertTrue(0 < len(members["Bom"]) <= 65536)
+            stager.write_tree(parts, {name: (members[name], 0o444) for name in ("PackageInfo", "Payload", "Bom")}, root_mode=0o700)
+            bom = run(["/usr/bin/lsbom", "-p", "fmugs", str(parts/"Bom")], 10)
+            self.assertLessEqual(len(bom), 8192); (work/"BOM.txt").write_bytes(bom)
+            stager.xcode_setup_bom_data(bom, sources["CarrierInfo.plist"])
+            scripts_final = work/"scripts-final"
+            stager.write_tree(scripts_final, dict(files, **{"setup/carrier.bom": (members["Bom"], 0o444)}), root_mode=0o755)
+            run(["/usr/bin/bsdtar", "-c", "-z", "-f", str(parts/"Scripts"), "--format=odc", "--uid=0", "--gid=0",
+                 "--no-acls", "--no-xattrs", "--no-fflags", "--no-mac-metadata", "."], 30, cwd=scripts_final, archive=True)
+            script_body = bounded(parts/"Scripts", 1024*1024)
+            self.assertEqual(stager.cpio_members(stager.inflate(script_body, 1024*1024, gzip=True)),
+                             dict(files, **{"setup": (None, 0o555), "setup/carrier.bom": (members["Bom"], 0o444)}))
+            component_dir = work/"component"; component_dir.mkdir(mode=0o700)
+            component = component_dir/stager.XCODE_SETUP_COMPONENT
+            run(["/usr/bin/xar", "-c", "-f", str(component), "--compression=none", "PackageInfo", "Scripts", "Bom", "Payload"],
+                30, cwd=parts, archive=True)
+            component_body = bounded(component, 1024*1024)
+            component_members = stager.xar_members(component_body, xcode_setup=True)
+            self.assertEqual(component_members, dict(members, Scripts=script_body))
+            presentation = work/"presentation"
+            stager.write_tree(presentation, {"Distribution": (sources["Distribution.xml"], 0o444),
+                "resources/InstallerReadMe.html": (sources["InstallerReadMe.html"], 0o444)}, root_mode=0o700)
+            product = work/"Product.pkg"
+            run(["/usr/bin/productbuild", "--distribution", str(presentation/"Distribution"), "--package-path", str(component_dir),
+                 "--resources", str(presentation/"resources"), str(product)], 30)
+            outer, distribution = metadata(product, "Distribution")
+            self.assertEqual(bounded(component, 1024*1024), component_body)
+            actual = stager.install_product_members(outer, xcode_setup=True)
+            self.assertEqual(actual["Distribution"], distribution)
+            stager.install_product_distribution(distribution, sources["Distribution.xml"], xcode_setup=True)
+            self.assertEqual(actual["Resources/InstallerReadMe.html"], sources["InstallerReadMe.html"])
+            observed_component = (stager.xar_members(actual[stager.XCODE_SETUP_COMPONENT], xcode_setup=True)
+                if stager.XCODE_SETUP_COMPONENT in actual else
+                {name: actual[stager.XCODE_SETUP_COMPONENT+"/"+name] for name in stager.XCODE_SETUP_COMPONENT_MEMBERS})
+            self.assertEqual(observed_component, component_members)
+            self.assertEqual(counter, 7)  # Two fixed Git checks + five packaging commands.
+            self.assertLess(time.monotonic(), deadline)
+            (work/"RESULT.json").write_text(json.dumps({"sourceCommit":source, "target":target, "packagingCommands":5,
+                "productionMetadataParsersPassed":True, "unsignedOnly":True, "installerExecuted":False,
+                "nativeSetupQualified":False, "signingQualified":False}, sort_keys=True)+"\n")
+            # No service/root state exists. Retire only own successfully joined
+            # nonroot inputs; on failure preserve bounded metadata for diagnosis.
+            for path in (payload, scripts, scripts_final, parts, component_dir, presentation):
+                for directory, child_dirs, names in os.walk(path, followlinks=False):
+                    node = Path(directory); self.assertTrue(stat.S_ISDIR(node.lstat().st_mode))
+                    self.assertEqual(node.lstat().st_uid, os.getuid())
+                    for name in child_dirs+names:
+                        info = (node/name).lstat(); self.assertEqual(info.st_uid, os.getuid()); self.assertFalse(stat.S_ISLNK(info.st_mode))
+                    node.chmod(0o700)
+                shutil.rmtree(path)
+            original.unlink(); product.unlink(); component_plist.unlink()
+        finally:
+            resource.setrlimit(resource.RLIMIT_FSIZE, previous_limit)
+        print("Unsigned five-command product metadata passed; no Installer, signing or native setup qualification.")
+
+
 if __name__ == "__main__":
     unittest.main()

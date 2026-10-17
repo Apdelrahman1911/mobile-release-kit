@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe]
+        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
       architecture:
         description: Architecture for Store, iOS tools and package probe; other components use both
         type: choice
@@ -1312,9 +1312,9 @@ jobs:
           PY
 
   xcode-package-probe:
-    # Explicit synthetic PackageKit routing only; no A helper, Xcode or signing.
-    if: github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-package-probe'
-    name: Probe fixed Xcode package component (${{ matrix.arch }})
+    # Explicit synthetic PackageKit or unsigned metadata only; no A/Xcode/signing.
+    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'xcode-package-probe' || inputs.component == 'xcode-product-metadata')
+    name: Probe fixed Xcode package metadata (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 8
     strategy:
@@ -1326,11 +1326,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Run only the fixed synthetic component callback probe
+      - name: Run only the selected fixed package probe
         timeout-minutes: 6
         shell: bash
         env:
           COMPONENT_ARCH: ${{ matrix.arch }}
+          PACKAGE_PROBE: ${{ inputs.component }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
@@ -1341,15 +1342,26 @@ jobs:
           [[ "$RUNNER_OS" == macOS && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
           [[ "$(/usr/bin/uname -m)" == "$COMPONENT_ARCH" && "$(/usr/bin/id -u)" != 0 ]] || exit 1
           [[ "$RUNNER_TEMP" == /Users/runner/work/_temp ]] || exit 1
+          case "$PACKAGE_PROBE" in
+            xcode-package-probe)
+              marker=MRK_XCODE_SETUP_PACKAGE_PROBE=1
+              method=XcodeSetupPackageNative.test_component_callback_once_reinstall_and_documented_timeout
+              ;;
+            xcode-product-metadata)
+              marker=MRK_XCODE_PRODUCT_METADATA_PROBE=1
+              method=XcodeSetupProductMetadataNative.test_unsigned_product_original_metadata_matches_production_parsers
+              ;;
+            *) exit 1 ;;
+          esac
           log="$RUNNER_TEMP/mrk-xcode-package-probe-tests.log"
           set +e
           /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C \
             GITHUB_ACTIONS="$GITHUB_ACTIONS" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
             GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" \
             RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_TEMP="$RUNNER_TEMP" \
-            MRK_XCODE_SETUP_PACKAGE_PROBE=1 \
+            "$marker" \
             /usr/bin/python3 -I -B tests/desktop/test_macos_xcode_setup_package.py -v \
-              XcodeSetupPackageNative.test_component_callback_once_reinstall_and_documented_timeout \
+              "$method" \
               > "$log" 2>&1
           status=$?
           set -e
@@ -1374,6 +1386,13 @@ jobs:
             ${{ runner.temp }}/mrk-xcode-package-probe/Receipt-*.bom
             ${{ runner.temp }}/mrk-xcode-package-probe/RESULT.json
             ${{ runner.temp }}/mrk-xcode-package-probe/Failure.json
+            ${{ runner.temp }}/mrk-xcode-product-metadata/PackageInfo.xml
+            ${{ runner.temp }}/mrk-xcode-product-metadata/Distribution.xml
+            ${{ runner.temp }}/mrk-xcode-product-metadata/ComponentTOC.xml
+            ${{ runner.temp }}/mrk-xcode-product-metadata/ProductTOC.xml
+            ${{ runner.temp }}/mrk-xcode-product-metadata/BOM.txt
+            ${{ runner.temp }}/mrk-xcode-product-metadata/RESULT.json
+            ${{ runner.temp }}/mrk-xcode-product-metadata/Failure.json
           if-no-files-found: error
           retention-days: 7
     # Only the test's positively observed same-attempt fixture is cleaned. On

@@ -4238,7 +4238,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertNotIn(reason, json.dumps(projected))
         # Genuine boundary/IO functions, with no process, file or credential work.
         operation = object.__new__(module.Operation)
-        operation.stager = TOOL; operation.install_product = True
+        operation.stager = TOOL; operation.install_product = True; operation.setup_package = False
+        operation.environment = {}
         operation.work = Path("/synthetic-fixed-product")
         operation.target = "aarch64-apple-darwin"
         operation.scripts_name = "scripts"; operation.packager_filename = "original.pkg"
@@ -4260,8 +4261,24 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertIs(caught.exception.__cause__, original)
                 self.assertEqual(BaseException.args.__get__(caught.exception), (reason,))
                 self.assertEqual(operation.stager_io_pending, "final-package-original-audit")
+                passive = object.__new__(module.Operation)
+                passive.receipt = {"failure": {"stage": operation.stage}, "directStagerIOPending": operation.stager_io_pending}
+                passive.diagnostic_failure = module.failure_exception(caught.exception, TOOL)
+                projected = module.failure_diagnostic(caught.exception, operation=passive, stager=TOOL)
+                self.assertEqual(projected["originalFailure"]["stage"], "final-package-original-audit")
+                self.assertEqual(projected["originalFailure"]["reason"], reason)
+                self.assertTrue(projected["cleanup"]["directStagerIOPending"])
+                self.assertFalse(projected["productReady"])
                 self.assertEqual(public.project_failure({"stage": operation.stage, "type": "Refused", "reason": reason}),
                     {"stage": "final-package-original-audit", "type": "Refused", "reason": reason, "errno": None})
+        for reason in ("install-product-adoption-order", "install-product-output-roster"):
+            passive = object.__new__(module.Operation)
+            passive.receipt = {"failure": {"stage": "install-product-original-adoption"}}
+            passive.diagnostic_failure = module.failure_exception(module.Refused(reason), TOOL)
+            projected = module.failure_diagnostic(module.Refused(reason), operation=passive, stager=TOOL)
+            self.assertEqual(projected["originalFailure"]["stage"], "install-product-original-adoption")
+            self.assertEqual(projected["originalFailure"]["reason"], reason)
+        self.assertEqual(module.failure_exception(module.Refused("install-product-private-path"), TOOL)["reason"], "unclassified")
         class Unrenderable(TOOL.Refused):
             def __str__(self): raise AssertionError("exception rendering forbidden")
         class Lookalike(Exception):
