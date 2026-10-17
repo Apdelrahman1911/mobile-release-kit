@@ -3539,7 +3539,10 @@ def inflate(body, limit, *, gzip=False):
     return output
 
 
-def xar_members(body, *, allocation_budget=None):
+def xar_members(body, *, allocation_budget=None, xcode_setup=False):
+    need(type(xcode_setup) is bool, "fixed-xar-package-purpose")
+    if xcode_setup:
+        need(type(body) is bytes and len(body) <= XCODE_SETUP_PACKAGE_LIMIT, "xcode-setup-package-bound")
     need(len(body) >= 28, "xar-header")
     magic, header, version, compressed, expanded, checksum = struct.unpack_from(">IHHQQI", body)
     need(magic == 0x78617221 and header == 28 and version == 1 and compressed <= 1024 * 1024
@@ -3554,11 +3557,14 @@ def xar_members(body, *, allocation_budget=None):
     packed = unpacked = b''
     for member in toc.findall("toc/file"):
         name = member.findtext("name")
-        need(name in ("Bom", "PackageInfo", "Scripts") and name not in result and member.findtext("type") == "file"
+        need(name in (XCODE_SETUP_COMPONENT_MEMBERS if xcode_setup else ("Bom", "PackageInfo", "Scripts")) and name not in result and member.findtext("type") == "file"
              and not member.findall("file"), "scripts-only-package-no-payload")
         length, offset, size = (member.findtext("data/" + key) for key in ("length", "offset", "size"))
         need(all(v is not None and re.fullmatch(r"[0-9]{1,10}", v) for v in (length, offset, size)), "xar-member-bound")
         length, offset, size = int(length), int(offset), int(size)
+        if xcode_setup:
+            limit = XCODE_SETUP_PACKAGE_LIMIT if name == "Scripts" else (16384 if name == "PackageInfo" else 65536)
+            need(0 < length <= limit and 0 < size <= limit, "xcode-setup-member-bound")
         start = header + compressed + offset
         need(length <= MAX_BYTES and size <= MAX_BYTES and start + length <= len(body), "xar-member-bound")
         if allocation_budget is not None:
@@ -3570,7 +3576,7 @@ def xar_members(body, *, allocation_budget=None):
         unpacked = packed if encoding.get("style") == "application/octet-stream" else inflate(packed, size, gzip=packed[:2] == b"\x1f\x8b")
         need(len(unpacked) == size, "xar-member-size")
         result[name] = unpacked
-    need({"PackageInfo", "Scripts"} <= set(result), "scripts-package-required")
+    need(set(result) == set(XCODE_SETUP_COMPONENT_MEMBERS) if xcode_setup else {"PackageInfo", "Scripts"} <= set(result), "scripts-package-required")
     return result
 
 
@@ -3989,7 +3995,10 @@ def install_product_xml(body):
     return value
 
 
-def install_product_distribution(body, expected):
+def install_product_distribution(body, expected, *, xcode_setup=False):
+    need(type(xcode_setup) is bool, "fixed-product-purpose")
+    package_id = XCODE_SETUP_ID if xcode_setup else PACKAGE_ID
+    component_name = XCODE_SETUP_COMPONENT if xcode_setup else INSTALL_COMPONENT
     def tree(element):
         return (element.tag, tuple(sorted(element.attrib.items())), (element.text or "").strip(),
                 tuple((tree(child), (child.tail or "").strip()) for child in element))
@@ -4000,7 +4009,7 @@ def install_product_distribution(body, expected):
     # has no payload/bundle and is the final child of the original definition.
     if len(references) == 2:
         metadata = references[1]
-        need(list(actual)[-1] is metadata and metadata.attrib == {"id": PACKAGE_ID}
+        need(list(actual)[-1] is metadata and metadata.attrib == {"id": package_id}
              and not (metadata.text or "").strip() and not (metadata.tail or "").strip()
              and len(metadata) == 1, "install-product-distribution")
         bundle = metadata[0]
@@ -4009,11 +4018,11 @@ def install_product_distribution(body, expected):
              "install-product-distribution")
         actual.remove(metadata)
     for reference in actual.findall("pkg-ref"):
-        for name, value in (("installKBytes", "0"), ("updateKBytes", "0"), ("onConclusion", "None")):
+        for name, value in (("installKBytes", "2" if xcode_setup else "0"), ("updateKBytes", "0"), ("onConclusion", "None")):
             if name in reference.attrib:
                 need(reference.attrib.pop(name) == value, "install-product-distribution")
-        if (reference.text or "").strip() == "#" + INSTALL_COMPONENT:
-            reference.text = INSTALL_COMPONENT
+        if (reference.text or "").strip() == "#" + component_name:
+            reference.text = component_name
     need(tree(actual) == tree(install_product_xml(expected)), "install-product-distribution")
 
 
@@ -4057,14 +4066,17 @@ INSTALL_PRODUCT_AUDIT_REASONS = frozenset((
 ))
 
 
-def install_product_members(body, *, allocation_budget=None):
+def install_product_members(body, *, allocation_budget=None, xcode_setup=False):
     """Closed outer Install XAR using the existing context's member syntax.
 
     Native signature/timestamp/staple verification and final whole-P binding
     remain mandatory in the existing owner. Signature/ticket bytes are not
     filesystem members and are not treated as authority by this DATA audit.
     """
-    need(type(body) is bytes and 28 <= len(body) <= MAX_BYTES, "install-product-xar-bound")
+    need(type(xcode_setup) is bool, "fixed-product-purpose")
+    component_name = XCODE_SETUP_COMPONENT if xcode_setup else INSTALL_COMPONENT
+    component_rows = XCODE_SETUP_COMPONENT_MEMBERS if xcode_setup else ("PackageInfo", "Scripts")
+    need(type(body) is bytes and 28 <= len(body) <= (XCODE_SETUP_PACKAGE_LIMIT if xcode_setup else MAX_BYTES), "install-product-xar-bound")
     magic, header, version, compressed, expanded, checksum = struct.unpack_from(">IHHQQI", body)
     algorithms = {1: ("sha1", 20), 3: ("sha256", 32), 4: ("sha512", 64)}
     need((magic, header, version) == (0x78617221, 28, 1) and 0 < compressed <= 1024 * 1024
@@ -4104,13 +4116,13 @@ def install_product_members(body, *, allocation_budget=None):
     heap = header + compressed
     need(body[heap:heap + checksum_size] == hashlib.new(algorithm, packed_toc).digest(),
          "install-product-xar-checksum")
-    allowed = {"Distribution", "Resources", "Resources/InstallerReadMe.html", INSTALL_COMPONENT,
-               INSTALL_COMPONENT + "/PackageInfo", INSTALL_COMPONENT + "/Scripts"}
+    allowed = {"Distribution", "Resources", "Resources/InstallerReadMe.html", component_name,
+               *(component_name + "/" + name for name in component_rows)}
     queue = [(element, "") for element in toc.findall("file")]
     members, directories, identifiers, intervals, expanded_bytes = {}, set(), set(), [], 0
     packed = decoded = b''
     while queue:
-        need(len(queue) + len(identifiers) <= 6, "install-product-xar-count")
+        need(len(queue) + len(identifiers) <= len(allowed), "install-product-xar-count")
         element, parent = queue.pop(0)
         file_id = element.get("id")
         need(set(element.attrib) == {"id"} and type(file_id) is str
@@ -4160,8 +4172,8 @@ def install_product_members(body, *, allocation_budget=None):
         name = parent + name
         need(name in allowed and name not in members and name not in directories, "install-product-xar-roster")
         if kind == "directory":
-            need(not parent and name in ("Resources", INSTALL_COMPONENT) and element.find("data") is None
-                 and len(element.findall("file")) == (1 if name == "Resources" else 2), "install-product-xar-directory")
+            need(not parent and name in ("Resources", component_name) and element.find("data") is None
+                 and len(element.findall("file")) == (1 if name == "Resources" else len(component_rows)), "install-product-xar-directory")
             directories.add(name)
             queue.extend((child, name + "/") for child in element.findall("file"))
             continue
@@ -4199,10 +4211,10 @@ def install_product_members(body, *, allocation_budget=None):
         expanded_bytes += size
         intervals.append((offset, offset + length))
     presentation = {"Distribution", "Resources/InstallerReadMe.html"}
-    need(set(members) == presentation | {INSTALL_COMPONENT}
-         or set(members) == presentation | {INSTALL_COMPONENT + "/PackageInfo", INSTALL_COMPONENT + "/Scripts"},
+    need(set(members) == presentation | {component_name}
+         or set(members) == presentation | {component_name + "/" + name for name in component_rows},
          "install-product-xar-roster")
-    need(directories == ({"Resources"} if INSTALL_COMPONENT in members else {"Resources", INSTALL_COMPONENT}),
+    need(directories == ({"Resources"} if component_name in members else {"Resources", component_name}),
          "install-product-xar-directory")
     return members
 
@@ -4260,8 +4272,20 @@ XCODE_SETUP_BOM_LIMIT = 64 * 1024
 XCODE_SETUP_PROGRAM_LIMIT = 64 * 1024 * 1024
 
 
+def xcode_setup_cargo_version(body, selection):
+    # Fixed checked SOURCE projection, not a general TOML parser. Cargo/build.rs
+    # independently parse the complete manifest at compilation. Keep Python3.9
+    # recipe/probe support: no new third-party or newer stdlib dependency.
+    prefix = ('[package]\nname = "mobile-release-kit-desktop"\nversion = "'
+              + selection.package_version + '"\n').encode("ascii")
+    need(type(body) is bytes and 0 < len(body) <= 128 * 1024 and body.startswith(prefix),
+         "xcode-setup-cargo-version")
+
+
 def xcode_setup_sources(selection):
     selection = selected_build(selection)
+    need(selection == source_build_selection(selection.target), "xcode-setup-fixed-source-version")
+    xcode_setup_cargo_version(read(DESKTOP / "src-tauri/Cargo.toml", 128 * 1024), selection)
     source = DESKTOP / "macos-xcode-setup-inputs"
     names = ("preinstall", "setup/postinstall", "Distribution.xml", "InstallerReadMe.html",
              "Component.plist", "CarrierInfo.plist")
@@ -4342,6 +4366,181 @@ def prepare_xcode_setup_product_command(args):
     return {"schemaVersion": 1, "packageIdentifier": XCODE_SETUP_ID, "packageVersion": selection.package_version,
             "componentSha256": digest(source["Component.plist"]), "scriptTimeoutSeconds": 3800,
             "qualification": "setup-presentation-prepared-not-built-or-Installer-qualified"}
+
+
+# This fixed companion uses the original component members, not an ordinary
+# scripts-only package exemption. Actual macOS26 probe 39048636096 observed
+# four payload rows and a nested four-member product component.
+XCODE_SETUP_PACKAGE_LIMIT = 68 * 1024 * 1024
+XCODE_SETUP_COMPONENT_MEMBERS = ("Bom", "PackageInfo", "Payload", "Scripts")
+XCODE_SETUP_QUALIFICATION = "fixed-xcode-setup-product-audited-not-installed-or-setup-qualified"
+
+
+def _xcode_setup_allocation(retained=0):
+    def check(_label, live, packed, expanded):
+        need(type(retained) is int and retained >= 0 and all(type(n) is int and n >= 0 for n in (live, packed, expanded))
+             and retained + live + packed + expanded <= MAX_BYTES, "xcode-setup-control-bound")
+    return check
+
+
+def xcode_setup_package_info(body, selection):
+    selection = selected_build(selection)
+    info = install_product_xml(body)
+    required = {"overwrite-permissions": "true", "relocatable": "false", "identifier": XCODE_SETUP_ID,
+                "postinstall-action": "none", "version": selection.package_version, "format-version": "2",
+                "install-location": XCODE_SETUP_INSTALL_LOCATION, "auth": "root", "minimumSystemVersion": "26.0"}
+    need(info.tag == "pkg-info" and set(required) <= set(info.attrib) <= set(required) | {"generator-version"}
+         and all(info.get(key) == value for key, value in required.items()), "xcode-setup-package-identity")
+    if "generator-version" in info.attrib:
+        need(re.fullmatch(r"InstallCmds-[0-9.]{1,32} \([A-Za-z0-9.]{1,32}\)", info.get("generator-version")) is not None,
+             "xcode-setup-generator-annotation")
+    need([node.tag for node in info] == ["payload", "bundle", "bundle-version", "upgrade-bundle", "update-bundle",
+        "atomic-update-bundle", "strict-identifier", "relocate", "scripts"], "xcode-setup-package-roster")
+    need(all(not (node.text or "").strip() and not (node.tail or "").strip() for node in info.iter()),
+         "xcode-setup-package-text")
+    need(info[0].attrib == {"numberOfFiles": "4", "installKBytes": "2"} and not list(info[0]),
+         "xcode-setup-payload-count")
+    need(info[1].attrib == {"id": XCODE_SETUP_CARRIER_ID, "CFBundleVersion": selection.package_version,
+                            "path": "./" + XCODE_SETUP_CARRIER} and not list(info[1]), "xcode-setup-bundle")
+    for node in (info[2], info[4], info[5], info[7]):
+        need(not node.attrib and not list(node), "xcode-setup-bundle-policy")
+    for node in (info[3], info[6]):
+        need(not node.attrib and len(node) == 1 and node[0].tag == "bundle"
+             and node[0].attrib == {"id": XCODE_SETUP_CARRIER_ID} and not list(node[0]), "xcode-setup-bundle-policy")
+    hooks = info[8]
+    need(not hooks.attrib and [node.tag for node in hooks] == ["preinstall", "postinstall"], "xcode-setup-hooks")
+    pre, post = hooks
+    # Standard top-level preinstall remains at its default600; it is NOT the
+    # long copy role. Only the documented component postinstall receives3800.
+    need(pre.attrib in ({"file": "./preinstall"}, {"file": "preinstall"},
+                        {"file": "./preinstall", "timeout": "600"}, {"file": "preinstall", "timeout": "600"})
+         and not list(pre), "xcode-setup-preinstall")
+    need(post.attrib in ({"file": path, "component-id": XCODE_SETUP_CARRIER_ID, "timeout": "3800"}
+                         for path in ("./setup/postinstall", "setup/postinstall")) and not list(post),
+         "xcode-setup-component-timeout")
+    return {"packageIdentifier": XCODE_SETUP_ID, "payloadFileCount": 4, "installKBytes": 2}
+
+
+def xcode_setup_bom_data(body, info):
+    # Native `lsbom -p fmugs` observation: name/mode/uid/gid/size, including
+    # an empty final field for directories. Exact signed-source payload only.
+    need(type(body) is bytes and len(body) <= 8192 and type(info) is bytes and 0 < len(info) <= 1024,
+         "xcode-setup-bom-list-bound")
+    expected = (".\t40755\t0\t0\t\n./" + XCODE_SETUP_CARRIER + "\t40555\t0\t0\t\n./"
+                + XCODE_SETUP_CARRIER + "/Contents\t40555\t0\t0\t\n./" + XCODE_SETUP_CARRIER
+                + "/Contents/Info.plist\t100444\t0\t0\t" + str(len(info)) + "\n").encode("ascii")
+    need(body == expected, "xcode-setup-bom-payload-roster")
+    return {"payloadFileCount": 4, "carrierInfoSha256": digest(info)}
+
+
+def _xcode_setup_payload(body, info):
+    need(type(body) is bytes and 0 < len(body) <= 65536, "xcode-setup-payload-bound")
+    archive = inflate(body, 65536, gzip=True) if body[:2] == b"\x1f\x8b" else body
+    expected = {XCODE_SETUP_CARRIER: (None, 0o555), XCODE_SETUP_CARRIER + "/Contents": (None, 0o555),
+                XCODE_SETUP_CARRIER + "/Contents/Info.plist": (info, 0o444)}
+    need(cpio_members(archive) == expected, "xcode-setup-payload-source")
+
+
+def _xcode_setup_rows(files):
+    return {name: (None if body is None else digest(body), None if body is None else len(body), mode)
+            for name, (body, mode) in files.items()}
+
+
+def xcode_setup_original_package(scripts_path, package_path, expected_program, *, selection=None):
+    """Return small original facts; raw helper/package/decoded graphs do not escape.
+
+    The original package and complete input tree are reread by the retained
+    outer Operation on every PRE/POST. This DATA result is never native authority.
+    """
+    selection = selected_build(selection)
+    source = xcode_setup_sources(selection)
+    scripts = tree(scripts_path, packager=True, max_bytes=XCODE_SETUP_PROGRAM_LIMIT + 32768)
+    need(XCODE_SETUP_PROGRAM in scripts, "xcode-setup-program-required")
+    need(scripts == xcode_setup_script_files(scripts[XCODE_SETUP_PROGRAM][0], expected_program, selection),
+         "xcode-setup-exact-source-scripts")
+    owner = packager_ids()
+    with parent(package_path) as (fd, name):
+        package, info = read_at(fd, name, XCODE_SETUP_PACKAGE_LIMIT)
+        need((info.st_uid, info.st_gid) == owner, "xcode-setup-original-owner")
+    retained = sum(len(value[0]) for value in scripts.values())
+    members = xar_members(package, xcode_setup=True, allocation_budget=_xcode_setup_allocation(retained))
+    xcode_setup_package_info(members["PackageInfo"], selection)
+    _xcode_setup_payload(members["Payload"], source["CarrierInfo.plist"])
+    need(0 < len(members["Bom"]) <= XCODE_SETUP_BOM_LIMIT, "xcode-setup-bom-bound")
+    archive = members["Scripts"]
+    if archive[:2] == b"\x1f\x8b":
+        _xcode_setup_allocation(retained)("scripts-inflate", len(package) + sum(map(len, members.values())), 0, XCODE_SETUP_PACKAGE_LIMIT)
+        archive = inflate(archive, XCODE_SETUP_PACKAGE_LIMIT, gzip=True)
+    actual = _cpio_members(archive, owner, allocation_budget=_xcode_setup_allocation(
+        retained + len(package) + sum(map(len, members.values()))))
+    expected = {**scripts, "setup": (None, 0o555)}
+    need(actual == expected, "xcode-setup-original-scripts")
+    return {"originalPackageSha256": digest(package), "originalPackageSize": len(package),
+            "packageInfo": members["PackageInfo"], "payload": members["Payload"], "bom": members["Bom"],
+            "scriptRows": _xcode_setup_rows(expected), "helperSha256": expected_program,
+            "packagerUid": owner[0], "packagerGid": owner[1]}
+
+
+def prepare_xcode_setup_package_command(args):
+    selection = source_build_selection(command_target(args))
+    original = xcode_setup_original_package(args.scripts, args.package, args.expected_helper, selection=selection)
+    # Same original bytes, no generic extraction and no PackageInfo rewrite.
+    write_tree(args.output, {"PackageInfo": (original["packageInfo"], 0o444),
+        "Payload": (original["payload"], 0o444), "Bom": (original["bom"], 0o444)}, root_mode=0o700)
+    return {"schemaVersion": 1, "originalPackageSha256": original["originalPackageSha256"],
+            "originalPackageSize": original["originalPackageSize"], "bomSha256": digest(original["bom"]),
+            "helperSha256": original["helperSha256"], "payloadFileCount": 4,
+            "qualification": "fixed-setup-component-prepared-not-final-or-installed"}
+
+
+def _xcode_setup_component_audit(members, original, selection):
+    need(set(members) == set(XCODE_SETUP_COMPONENT_MEMBERS)
+         and all(members[key] == original[stored] for key, stored in
+                 (("PackageInfo", "packageInfo"), ("Payload", "payload"), ("Bom", "bom"))),
+         "xcode-setup-original-component-bytes")
+    xcode_setup_package_info(members["PackageInfo"], selection)
+    archive = members["Scripts"]
+    if archive[:2] == b"\x1f\x8b":
+        _xcode_setup_allocation()("final-scripts-inflate", 2 * XCODE_SETUP_PACKAGE_LIMIT, 0, XCODE_SETUP_PACKAGE_LIMIT)
+        archive = inflate(archive, XCODE_SETUP_PACKAGE_LIMIT, gzip=True)
+    actual = cpio_members(archive, allocation_budget=_xcode_setup_allocation(2 * XCODE_SETUP_PACKAGE_LIMIT))
+    expected = dict(original["scriptRows"], **{"setup/carrier.bom": (digest(original["bom"]), len(original["bom"]), 0o444)})
+    need(_xcode_setup_rows(actual) == expected, "xcode-setup-final-root-scripts")
+
+
+def _xcode_setup_audit_result(package, original, members):
+    return {"schemaVersion": 1, "packageIdentifier": XCODE_SETUP_ID, "packageSize": len(package), "packageSha256": digest(package),
+            "originalPackageSha256": original["originalPackageSha256"], "packageInfoSha256": digest(members["PackageInfo"]),
+            "payloadSha256": digest(members["Payload"]), "bomSha256": digest(members["Bom"]),
+            "helperSha256": original["helperSha256"], "scriptFileCount": 4, "finalDestinationPayloadEntries": 4,
+            "qualification": XCODE_SETUP_QUALIFICATION}
+
+
+def audit_xcode_setup_package_command(args):
+    selection = source_build_selection(command_target(args))
+    original = xcode_setup_original_package(args.scripts, args.original_package, args.expected_helper, selection=selection)
+    package = read(args.package, XCODE_SETUP_PACKAGE_LIMIT)
+    members = xar_members(package, xcode_setup=True, allocation_budget=_xcode_setup_allocation())
+    _xcode_setup_component_audit(members, original, selection)
+    return _xcode_setup_audit_result(package, original, members)
+
+
+def audit_xcode_setup_product_command(args):
+    selection = source_build_selection(command_target(args))
+    original = xcode_setup_original_package(args.scripts, args.original_package, args.expected_helper, selection=selection)
+    package = read(args.package, XCODE_SETUP_PACKAGE_LIMIT)
+    members = install_product_members(package, xcode_setup=True, allocation_budget=_xcode_setup_allocation())
+    component = (xar_members(members[XCODE_SETUP_COMPONENT], xcode_setup=True,
+                            allocation_budget=_xcode_setup_allocation(len(package))) if XCODE_SETUP_COMPONENT in members else
+                 {name: members[XCODE_SETUP_COMPONENT + "/" + name] for name in XCODE_SETUP_COMPONENT_MEMBERS})
+    _xcode_setup_component_audit(component, original, selection)
+    source = xcode_setup_sources(selection)
+    install_product_distribution(members["Distribution"], source["Distribution.xml"], xcode_setup=True)
+    need(members["Resources/InstallerReadMe.html"] == source["InstallerReadMe.html"], "xcode-setup-readme")
+    result = _xcode_setup_audit_result(package, original, component)
+    result.update(productDistributionSha256=digest(members["Distribution"]),
+                  productReadMeSha256=digest(source["InstallerReadMe.html"]))
+    return result
 
 
 def remove_scripts_command(args):

@@ -4453,7 +4453,77 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     with self.assertRaises(module.Refused):
                         module.final_package_receipt(TOOL.canonical(dict(record, packageStapleObservation=None)), *arguments)
 
-    def final_package_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None, returned_output=False):
+    def test_xcode_setup_same_owner_four_prefix_and_ten_final_calls(self):
+        module = ANDROID_HELPER
+        for target in (module.ARM_TARGET, module.INTEL_TARGET):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                state = self.final_package_fixture(Path(directory), target=target, setup=True)
+                operation = state.operation
+                before = len(os.listdir("/proc/self/fd")) if sys.platform == "linux" else None
+                with self.final_package_fixture_call(state):
+                    try:
+                        value = operation.execute()
+                    except module.Refused:
+                        self.fail(str((operation.receipt.get("failure"), operation.errors)))
+                self.assertEqual(value, module.digest(state.signed + state.ticket))
+                self.assertEqual(tuple(row["role"] for row in operation.calls), module.XCODE_SETUP_COMPONENT_ROLES
+                    + ("final-package-productbuild",) + module.FINAL_PACKAGE_ROLES)
+                self.assertEqual(tuple(row["role"] for row in operation.credential_calls), module.INSTALLER_CREDENTIAL_ROSTER)
+                self.assertTrue(operation.receipt["passed"] and operation.receipt["originalClosesKnown"] and operation.receipt["targetRetired"])
+                self.assertTrue(operation.setup_bom_verified and operation.setup_quoted)
+                final = operation.receipt["finalPackage"]
+                self.assertEqual((final["kind"], final["scriptFileCount"], final["finalDestinationPayloadEntries"]),
+                    ("mrk-final-xcode-setup-package", 4, 4))
+                self.assertEqual(final["helperSha256"], state.environment["MRK_MACOS_XCODE_SETUP_SHA256"])
+                published = state.work / "xcode-setup-final/Prepare Xcode.pkg"
+                self.assertEqual(published.read_bytes(), state.signed + state.ticket)
+                self.assertEqual(stat.S_IMODE(published.stat().st_mode), 0o444)
+                self.assertFalse((state.work / "package-final").exists())
+                self.assertFalse((state.work / operation.target_name).exists())
+                self.assertEqual(operation.receipt["notaryAuthentication"], {"created": True, "closed": True, "retired": True})
+                if before is not None: self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
+    def test_xcode_setup_prefix_refusals_keep_originals_and_never_enter_credentials(self):
+        module = ANDROID_HELPER
+        for fault, count in (("final-package-setup-pkgbuild-nonzero", 1), ("setup-bom-owner", 2),
+                             ("setup-scripts-owner", 4), ("setup-tool-close", 1), ("setup-source-change", 1)):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                state = self.final_package_fixture(Path(directory), setup=True, failure=fault)
+                operation = state.operation
+                real_close, real_run = module.os.close, operation.owner.run_owned
+                closed, original_tool_fd = [], []
+                actual_tool = state.tool
+                def tool(name):
+                    value = actual_tool(name)
+                    if name == "pkgbuild": original_tool_fd.append(value["entry"]["fd"])
+                    return value
+                state.tool = tool
+                def close(fd):
+                    selected = original_tool_fd == [fd] and not closed and bool(operation.calls)
+                    result = real_close(fd)
+                    if fault == "setup-tool-close" and selected:
+                        closed.append(fd)
+                        raise OSError(5, "inert consumed close lost acknowledgement")
+                    return result
+                def run(argv, **options):
+                    result = real_run(argv, **options)
+                    if fault == "setup-source-change" and argv[0] == "/usr/bin/pkgbuild":
+                        (state.checkout / "desktop/macos-xcode-setup-inputs/preinstall").write_bytes(b"changed original SOURCE")
+                    return result
+                with self.final_package_fixture_call(state), mock.patch.object(module.os, "close", side_effect=close), \
+                        mock.patch.object(operation.owner, "run_owned", side_effect=run):
+                    with self.assertRaisesRegex(module.Refused, "helper-package-incomplete"):
+                        operation.execute()
+                self.assertFalse(operation.receipt["passed"])
+                self.assertEqual(len(operation.calls), count, operation.receipt.get("failure"))
+                self.assertEqual(operation.credential_calls, [])
+                self.assertFalse((state.work / "xcode-setup-final").exists())
+                self.assertTrue((state.work / "xcode-setup-inputs/scripts-original").is_dir())
+                if fault == "setup-tool-close":
+                    self.assertEqual(len(closed), 1)
+                    self.assertFalse(operation.receipt["originalClosesKnown"])
+
+    def final_package_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None, returned_output=False, setup=False):
         """Real original files/audits/auth custody; only native returns are DATA."""
         module = ANDROID_HELPER
         checkout, work, environment, _owner, _observations = self.fixture(root, build_target=target)
@@ -4462,30 +4532,49 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             b"-----BEGIN PRIVATE KEY-----\nSU5FUlQgUDggREFUQQ==\n-----END PRIVATE KEY-----\n").decode("ascii")
         observations, clock = [], [10_000_000_000]
         selected = TOOL.source_build_selection(target)
-        files, packager_members = package_data(uid=os.getuid(), gid=os.getgid(), selection=selected)
-        unsigned_members = package_data(selection=selected)[1]
-        TOOL.write_tree(work / "scripts", files, root_mode=0o755)
+        filename = "Prepare Xcode.pkg" if setup else "MobileReleaseKit.pkg"
+        component_name = "PrepareXcode.pkg" if setup else "MobileReleaseKit.pkg"
+        unsigned_name = "xcode-setup-unsigned" if setup else "package-unsigned"
+        component_name_root = "xcode-setup-inputs/component" if setup else "package-component"
         product = role == "ordinary-image"
-        component = self.final_package_xar(unsigned_members)
-        if product:
-            source = Path(__file__).absolute().parents[2]
-            for name in TOOL.INSTALL_PRESENTATION:
-                path = checkout / "desktop/macos-installed-inputs" / name
-                path.write_bytes((source / "desktop/macos-installed-inputs" / name).read_bytes()); path.chmod(0o644)
-            definition, readme = TOOL.install_product_sources(selected)
-            outer_members = {"Distribution": definition, "Resources/InstallerReadMe.html": readme,
-                             TOOL.INSTALL_COMPONENT: component}
+        source = Path(__file__).absolute().parents[2]
+        if setup:
+            cargo = checkout / "desktop/src-tauri/Cargo.toml"
+            cargo.parent.mkdir(parents=True, exist_ok=True)
+            cargo.write_bytes((source / "desktop/src-tauri/Cargo.toml").read_bytes()); cargo.chmod(0o644)
+            shape = root / "setup-shape"; shape.mkdir()
+            args, packager_members, unsigned_members, setup_source, _maker = MacInstalledData.xcode_setup_package_fixture(self, shape, target)
+            files = TOOL.tree(args.scripts, packager=True)
+            for name in ("CarrierInfo.plist", "Component.plist", "Distribution.xml", "InstallerReadMe.html", "preinstall", "setup/postinstall"):
+                path = checkout / "desktop/macos-xcode-setup-inputs" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((source / "desktop/macos-xcode-setup-inputs" / name).read_bytes()); path.chmod(0o644)
+            helper = work / "xcode-setup-target" / target / "release/mrk-macos-xcode-setup"
+            helper.parent.mkdir(parents=True); helper.write_bytes(files[TOOL.XCODE_SETUP_PROGRAM][0]); helper.chmod(0o555)
+            environment["MRK_MACOS_XCODE_SETUP_SHA256"] = args.expected_helper
+            definition, readme = setup_source["Distribution.xml"], setup_source["InstallerReadMe.html"]
         else:
-            outer_members = unsigned_members
-        initial_parent = "package-component" if product else "package-unsigned"
-        (work / initial_parent).mkdir(mode=0o700)
+            files, packager_members = package_data(uid=os.getuid(), gid=os.getgid(), selection=selected)
+            unsigned_members = package_data(selection=selected)[1]
+            TOOL.write_tree(work / "scripts", files, root_mode=0o755)
+            if product:
+                for name in TOOL.INSTALL_PRESENTATION:
+                    path = checkout / "desktop/macos-installed-inputs" / name
+                    path.write_bytes((source / "desktop/macos-installed-inputs" / name).read_bytes()); path.chmod(0o644)
+                definition, readme = TOOL.install_product_sources(selected)
+        component = self.final_package_xar(unsigned_members)
+        outer_members = ({"Distribution": definition, "Resources/InstallerReadMe.html": readme,
+                          component_name: component} if product else unsigned_members)
         original = self.final_package_xar(packager_members)
         unsigned = self.final_package_xar(outer_members, product=product) if product else component
         signed = self.final_package_xar(outer_members, signed=True, product=product)
         ticket = b"INERT APPENDED PACKAGE TICKET DATA ONLY\0t8lr"
-        for path, body in ((work / "MobileReleaseKit-original.pkg", original),
-                           (work / initial_parent / "MobileReleaseKit.pkg", component)):
-            path.write_bytes(body); path.chmod(0o600)
+        if not setup:
+            initial_parent = "package-component" if product else "package-unsigned"
+            (work / initial_parent).mkdir(mode=0o700)
+            for path, body in ((work / "MobileReleaseKit-original.pkg", original),
+                               (work / initial_parent / filename, component)):
+                path.write_bytes(body); path.chmod(0o600)
         for name in ("stage_macos_installed.py", "macos_android_helper_package.py"):
             path = checkout / "desktop/tools" / name
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -4496,7 +4585,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         profile.write_bytes(TOOL.canonical(notary_profile) + b"\n"); profile.chmod(0o644)
         state = SimpleNamespace(checkout=checkout, work=work, environment=environment, target=target, role=role,
             original=original, component=component, unsigned=unsigned, signed=signed, ticket=ticket, clock=clock, observations=observations,
-            failure=failure, primary=RuntimeError("INERT final-package original failure"), tools={}, signature_text=None)
+            failure=failure, setup=setup, primary=RuntimeError("INERT final-package original failure"), tools={}, signature_text=None)
 
         def command(argv, **options):
             operation = state.operation
@@ -4504,9 +4593,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             observations.append((called, tuple(argv), dict(options)))
             self.assertFalse(set(module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES
                                  + (module.NOTARY_KEY_VARIABLE,)) & set(options["environ"]))
-            self.assertEqual(options["cwd"], work)
+            self.assertEqual(options["cwd"], work / "xcode-setup-inputs" / ("scripts-final" if called.endswith("-tar") else "parts")
+                             if called in ("final-package-setup-tar", "final-package-setup-xar") else work)
             self.assertEqual((options["capture"], options["text"]), (True, False))
-            self.assertLessEqual(options["timeout"], 1200 if called == "final-package-submit" else 60 if called == "final-package-sign" else 30)
+            self.assertLessEqual(options["timeout"], 1200 if called == "final-package-submit" else 60 if called in ("final-package-sign", "final-package-setup-pkgbuild") else 30)
             if failure == called + "-owner":
                 raise state.primary
             if failure == called + "-nonzero":
@@ -4516,24 +4606,56 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             if failure == called + "-late":
                 clock[0] += 1800_000_000_000
             output = b""
-            path = work / operation.target_name / "signed-package/MobileReleaseKit.pkg"
-            if called == "final-package-productbuild":
+            path = work / operation.target_name / "signed-package" / filename
+            if called in module.XCODE_SETUP_COMPONENT_ROLES:
+                self.assertTrue(setup and operation.setup_quoted)
+                self.assertIsNone(operation.credential_active)
+                self.assertEqual(operation.credential_calls, [])
+                base = work / "xcode-setup-inputs"
+                if called.endswith("-pkgbuild"):
+                    self.assertEqual(argv, ["/usr/bin/pkgbuild", "--root", str(base / "carrier"), "--scripts", str(base / "scripts-original"),
+                        "--component-plist", str(work / operation.target_name / "product-input/Component.plist"),
+                        "--identifier", TOOL.XCODE_SETUP_ID, "--version", selected.package_version, "--install-location", "/Library",
+                        "--ownership", "recommended", str(base / "packager/PrepareXcode-original.pkg")])
+                    self.assertEqual(TOOL.tree(base / "scripts-original", packager=True), files)
+                    self.assertEqual(TOOL.tree(base / "carrier"), {TOOL.XCODE_SETUP_CARRIER+"/Contents/Info.plist": (setup_source["CarrierInfo.plist"], 0o444)})
+                    (base / "packager/PrepareXcode-original.pkg").write_bytes(original)
+                elif called.endswith("-lsbom"):
+                    self.assertEqual(argv, ["/usr/bin/lsbom", "-p", "fmugs", str(base / "parts/Bom")])
+                    self.assertEqual((base / "parts/Bom").read_bytes(), packager_members["Bom"])
+                    output = (".\t40755\t0\t0\t\n./" + TOOL.XCODE_SETUP_CARRIER + "\t40555\t0\t0\t\n./" + TOOL.XCODE_SETUP_CARRIER
+                        + "/Contents\t40555\t0\t0\t\n./" + TOOL.XCODE_SETUP_CARRIER + "/Contents/Info.plist\t100444\t0\t0\t"
+                        + str(len(setup_source["CarrierInfo.plist"])) + "\n").encode()
+                    if failure == "setup-bom-owner": output = output.replace(b"\t0\t0\t", b"\t1\t0\t", 1)
+                elif called.endswith("-tar"):
+                    self.assertEqual(argv, ["/usr/bin/tar", "-c", "-z", "-f", str(base / "parts/Scripts"), "--format=odc", "--uid=0", "--gid=0",
+                        "--no-acls", "--no-xattrs", "--no-fflags", "--no-mac-metadata", "."])
+                    self.assertEqual(options["environ"], {"PATH":"/usr/bin:/bin", "LC_ALL":"C", "TZ":"UTC", "COPYFILE_DISABLE":"1"})
+                    self.assertEqual(TOOL.tree(base / "scripts-final", packager=True), TOOL.xcode_setup_scripts_with_bom(
+                        files, packager_members["Bom"], args.expected_helper, selected))
+                    (base / "parts/Scripts").write_bytes(unsigned_members["Scripts"] if failure != "setup-scripts-owner" else packager_members["Scripts"])
+                else:
+                    self.assertEqual(argv, ["/usr/bin/xar", "-c", "-f", str(base / "component" / component_name),
+                        "--compression=none", "PackageInfo", "Scripts", "Bom", "Payload"])
+                    values = {name: (base / "parts" / name).read_bytes() for name in TOOL.XCODE_SETUP_COMPONENT_MEMBERS}
+                    (base / "component" / component_name).write_bytes(self.final_package_xar(values))
+            elif called == "final-package-productbuild":
                 presentation = work / operation.target_name / "product-input"
-                output_path = work / "package-unsigned/MobileReleaseKit.pkg"
+                output_path = work / unsigned_name / filename
                 self.assertEqual(argv, ["/usr/bin/productbuild", "--distribution", str(presentation / "Distribution"),
-                    "--package-path", str(work / "package-component"), "--resources", str(presentation / "resources"), str(output_path)])
+                    "--package-path", str(work / component_name_root), "--resources", str(presentation / "resources"), str(output_path)])
                 self.assertEqual((presentation / "Distribution").read_bytes(), definition)
                 self.assertEqual((presentation / "resources/InstallerReadMe.html").read_bytes(), readme)
                 self.assertEqual(stat.S_IMODE((presentation / "resources").stat().st_mode), 0o555)
                 self.assertEqual(stat.S_IMODE((presentation / "Distribution").stat().st_mode), 0o444)
                 self.assertEqual(stat.S_IMODE((presentation / "resources/InstallerReadMe.html").stat().st_mode), 0o444)
-                self.assertEqual((work / "package-component/MobileReleaseKit.pkg").read_bytes(), component)
+                self.assertEqual((work / component_name_root / component_name).read_bytes(), component)
                 self.assertFalse(output_path.exists())
                 changed = dict(outer_members)
                 if failure == "product-readme": changed["Resources/InstallerReadMe.html"] += b"not SOURCE"
                 elif failure == "product-distribution": changed["Distribution"] = definition.replace(b'allow-external-scripts="false"', b'allow-external-scripts="true"')
                 elif failure == "product-resource": changed["Resources/other.html"] = b"extra"
-                elif failure == "product-component": changed[TOOL.INSTALL_COMPONENT] = original
+                elif failure == "product-component": changed[component_name] = original
                 output_path.write_bytes(self.final_package_xar(changed, product=True)); output_path.chmod(0o600)
             elif called.startswith("final-package-resolve-"):
                 name = called.removeprefix("final-package-resolve-")
@@ -4544,12 +4666,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(context["purpose"], "installer")
                 self.assertEqual(argv, ["/usr/bin/productsign", "--sign", state.credentials.installer["identityCommonName"],
                     "--keychain", str(context["path"] / "identity.keychain-db"), "--timestamp",
-                    str(work / "package-unsigned/MobileReleaseKit.pkg"), str(path)])
+                    str(work / unsigned_name / filename), str(path)])
                 self.assertFalse(path.exists())
-                self.assertEqual((work / "package-unsigned/MobileReleaseKit.pkg").read_bytes(), unsigned)
+                self.assertEqual((work / unsigned_name / filename).read_bytes(), unsigned)
                 path.write_bytes(signed); path.chmod(0o600)
                 if failure == "signed-input-changed":
-                    (work / "package-unsigned/MobileReleaseKit.pkg").write_bytes(unsigned + b"changed")
+                    (work / unsigned_name / filename).write_bytes(unsigned + b"changed")
                 elif failure == "signed-roster":
                     (path.parent / "unlisted").write_bytes(b"INERT other native output")
                 elif failure == "signed-scripts":
@@ -4578,7 +4700,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 submission = {"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "status": "Invalid" if failure in ("invalid", "invalid-log-failure") else "Accepted"}
                 if called == "final-package-submit":
                     self.assertEqual(argv, [str(state.tools["notarytool"]["path"]), "submit", str(path), "--wait", "--output-format", "json", *tail])
-                    output = TOOL.canonical(dict(submission, name="MobileReleaseKit.pkg")) + b"\n"
+                    output = TOOL.canonical(dict(submission, name=filename)) + b"\n"
                     if failure == "submit-json": output = b"{inert malformed JSON\n"
                     if failure == "submit-status": output = TOOL.canonical(dict(submission, status="In Progress"))
                 else:
@@ -4586,8 +4708,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     if failure == "invalid-log-failure":
                         return CompletedProcess(argv, 1, b"", b"INERT log failure")
                     value = {"logFormatVersion": 1, "jobId": submission["id"], "status": submission["status"],
-                        "archiveFilename": "MobileReleaseKit.pkg", "sha256": module.digest(signed), "issues": None,
-                        "ticketContents": [{"path": "MobileReleaseKit.pkg", "digestAlgorithm": "SHA-1", "cdhash": "c" * 40, "arch": None}]}
+                        "archiveFilename": filename, "sha256": module.digest(signed), "issues": None,
+                        "ticketContents": [{"path": filename, "digestAlgorithm": "SHA-1", "cdhash": "c" * 40, "arch": None}]}
                     if failure == "log-sha": value["sha256"] = "f" * 64
                     if failure == "log-id": value["jobId"] = "00000000-1111-2222-3333-444444444444"
                     output = TOOL.canonical(value) + b"\n"
@@ -4620,14 +4742,14 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     os.fchmod(operation.final_package_preimage[0]["fd"], 0o644)
             return CompletedProcess(argv, 0, output, b"")
 
-        state.operation = module.Operation(SimpleNamespace(run_owned=command), checkout, work, "finalize-package", environment, TOOL, target=target)
+        state.operation = module.Operation(SimpleNamespace(run_owned=command), checkout, work, "finalize-xcode-setup-package" if setup else "finalize-package", environment, TOOL, target=target)
         state.credentials = self.credential_fixture(state.operation, clock=clock)
         certificate_rows = []
         for index, body in enumerate(state.credentials.certificates, 1):
             name = state.credentials.installer["identityCommonName"] if index == 1 else "INERT " + ("ISSUER" if index == 2 else "ROOT")
             fingerprint = ' '.join(module.digest(body)[offset:offset + 2].upper() for offset in range(0, 64, 2))
             certificate_rows.append(str(index) + ". " + name + "\n    SHA256 Fingerprint:\n        " + fingerprint + "\n")
-        state.signature_text = ('Package "MobileReleaseKit.pkg":\n   Status: signed by a certificate trusted by macOS\n'
+        state.signature_text = ('Package "' + filename + '":\n   Status: signed by a certificate trusted by macOS\n'
             '   Signed with a trusted timestamp on: INERT DATA\n   Certificate Chain:\n' + ''.join(certificate_rows)).encode('utf-8')
         # Hold real tiny executable-mode source originals, but never execute
         # them. Only the selected-system-tool resolver is doubled locally.
@@ -6534,6 +6656,19 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertFalse((work / module.RESIDENT_IMAGE).exists())
                 self.assertFalse((work / "android-helper-target" / module.INTEL_TARGET).exists())
 
+    def test_xcode_setup_finalization_roles_are_exact_four_prefix_then_existing_ten(self):
+        module = ANDROID_HELPER
+        ordinary = module.final_package_roles(False, "ordinary-image")
+        self.assertEqual(len(ordinary), 10)
+        self.assertEqual(module.final_package_roles(False, "ordinary-image", setup=True),
+                         module.XCODE_SETUP_COMPONENT_ROLES + ordinary)
+        self.assertEqual(len(set(module.final_package_roles(False, "ordinary-image", setup=True))), 14)
+        for remove, role, setup in ((True, "ordinary-image", True), (False, "installed-shell-observation", True),
+                                    (False, "ordinary-image", 1)):
+            with self.assertRaises(module.Refused): module.final_package_roles(remove, role, setup=setup)
+        self.assertEqual(module.final_package_roles(True, "ordinary-image"), module.FINAL_PACKAGE_ROLES)
+        self.assertEqual(module.final_package_roles(False, "installed-shell-observation"), module.FINAL_PACKAGE_ROLES)
+
     def test_fixed_workflow_signing_roles_use_original_inputs_and_identity(self):
         module = ANDROID_HELPER
         # Every new workflow phase traverses the actual fixed selector, held
@@ -6541,10 +6676,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         # These tiny Mach-O/Keychain return values remain inert DATA only.
         _transport, matcher, _parser = self.python_data_functions()
         for target in (module.ARM_TARGET, module.INTEL_TARGET):
-            for phase, failed_verify in ([(value, False) for value in module.SIGNING_PHASES] + [("sign-remover", True), ("sign-applications-launcher", True)]):
+            for phase, failed_verify in ([(value, False) for value in module.SIGNING_PHASES] + [("sign-remover", True), ("sign-applications-launcher", True), ("sign-xcode-setup", True)]):
                 with self.subTest(fixedSigning=phase, target=target, failedVerify=failed_verify), tempfile.TemporaryDirectory() as directory:
                     checkout, work, environment, _owner, _observations = self.fixture(Path(directory), build_target=target)
-                    environment["CARGO_TARGET_DIR"] = str(work / "cargo-target")
+                    environment["CARGO_TARGET_DIR"] = str(work / ("xcode-setup-target" if phase == "sign-xcode-setup" else "cargo-target"))
                     for relative, body in (("desktop/packaging/macos-empty-entitlements.plist",
                             (Path(__file__).absolute().parents[2] / "desktop/packaging/macos-empty-entitlements.plist").read_bytes()),
                             ("desktop/tools/macos_cpython_orchestrator.py", b"# INERT held parser SOURCE; DATA functions injected below\n")):
@@ -6558,7 +6693,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         "sign-desktop-payload": payload, "sign-root-app": app,
                         "sign-root-installer": work / ("cargo-target/" + target + "/release/mrk-macos-install"),
                         "sign-remover": work / ("remover-target/" + target + "/release/mrk-macos-remove"),
-                        "sign-applications-launcher": work / "applications-launcher/MobileReleaseKitLauncher.app"}[phase]
+                        "sign-applications-launcher": work / "applications-launcher/MobileReleaseKitLauncher.app",
+                        "sign-xcode-setup": work / ("xcode-setup-target/"+target+"/release/mrk-macos-xcode-setup")}[phase]
                     launcher = phase == "sign-applications-launcher"
                     binary = (selected / "Contents/MacOS" / ("mrk-macos-launcher" if launcher else "mobile-release-kit-desktop" if phase == "sign-desktop-payload" else module.ENTRY)
                               if phase in ("sign-desktop-payload", "sign-root-app", "sign-applications-launcher") else selected)
@@ -6583,8 +6719,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                             expected_sign = ["/usr/bin/codesign", "--force", "--sign", credentials.leaf,
                                 "--options", "runtime", "--entitlements",
                                 str(checkout / "desktop/packaging/macos-empty-entitlements.plist")]
-                            if phase == "sign-remover" or launcher:
-                                expected_sign += ["--identifier", module.LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove"]
+                            if phase in ("sign-remover", "sign-xcode-setup") or launcher:
+                                expected_sign += ["--identifier", module.XCODE_SETUP_IDENTIFIER if phase == "sign-xcode-setup" else module.LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove"]
                             self.assertEqual(argv, expected_sign + ["--timestamp", str(selected)])
                             self.assertIn("--timestamp", argv)
                             replacement = binary.with_name(binary.name + ".replacement")
@@ -6594,9 +6730,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                                 seal.parent.mkdir(); seal.write_bytes(b"INERT launcher signature"); seal.chmod(0o644)
                         else:
                             expected_verify = ["/usr/bin/codesign", "--verify", "--strict"]
-                            if phase == "sign-remover" or launcher:
+                            if phase in ("sign-remover", "sign-xcode-setup") or launcher:
                                 expected_verify += ["-R", "=" + module.signing_requirement(("TEST000001", credentials.leaf),
-                                                                                   module.LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove")]
+                                                                                   module.XCODE_SETUP_IDENTIFIER if phase == "sign-xcode-setup" else module.LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove")]
                             self.assertEqual(argv, expected_verify + [str(selected)])
                             self.assertEqual(binary.read_bytes(), signed)
                             if failed_verify:
@@ -6612,7 +6748,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         if failed_verify:
                             with self.assertRaises(module.Refused): operation.execute()
                         else:
-                            self.assertEqual(operation.execute(), module.digest(signed))
+                            try:
+                                value = operation.execute()
+                            except module.Refused:
+                                self.fail(str(operation.receipt.get("failure")))
+                            self.assertEqual(value, module.digest(signed))
                     self.assertEqual(operation.receipt["passed"], not failed_verify)
                     self.assertIs(module.load_data, original_loader)
                     self.assertEqual(len(calls), 2)
@@ -7836,7 +7976,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             with self.assertRaises(module.Refused): module.tool_signed_receipt(raw, row, purpose, target, producer, service, entitlements)
         self.assertEqual(module.MAX_HELPER, 32 * 1024 * 1024)
         self.assertEqual(module.SIGNING_PHASES, ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload",
-            "sign-root-app", "sign-root-installer", "sign-remover", "sign-applications-launcher"))
+            "sign-root-app", "sign-root-installer", "sign-remover", "sign-applications-launcher", "sign-xcode-setup"))
         with self.assertRaises(module.Refused): module.tool_quote("arbitrary-tool")
         # The original epoch is not restarted by a callback or cleanup switch.
         clock = SimpleNamespace(phase="sign-github-seal", tool_started=100, tool_observed=100)
@@ -8802,7 +8942,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             for label, history in histories:
                 with self.subTest(notaryKeyPrefix=label, remove=remove, packageRole=package_role):
                     state = SimpleNamespace(phase="finalize-remove-package" if remove else "finalize-package",
-                        removal=remove, environment={"MRK_MACOS_PACKAGE_ROLE": package_role},
+                        removal=remove, setup_package=False, environment={"MRK_MACOS_PACKAGE_ROLE": package_role},
                         calls=[{"role": role} for role in history], notary_key=object() if label == "key-held" else None,
                         notary_known=lambda: label != "unknown")
                     # Use the real final-package predicate and original-role projection.
@@ -9376,6 +9516,32 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "credentialUnknown": True, "directStagerIOPending": True})
         self.assertNotIn(private, json.dumps(value))
         self.assertNotIn("passed", value)
+        # Exact setup SOURCE codes survive the public failure projection, but
+        # the same prefix cannot expose a path, credential or unknown message.
+        for error, stage, role in (
+                (module.Refused("setup-tool-close-unknown"), "final-package-setup-pkgbuild", "final-package-setup-pkgbuild"),
+                (TOOL.Refused("xcode-setup-package-roster"), "setup-original-component-audit", "final-package-setup-pkgbuild"),
+                (TOOL.Refused("xcode-setup-bom-payload-roster"), "final-package-setup-lsbom", "final-package-setup-lsbom"),
+                *((module.Refused("original-nonzero-" + r), r, r) for r in module.XCODE_SETUP_COMPONENT_ROLES)):
+            passive.receipt["failure"]["stage"] = stage
+            passive.diagnostic_failure = module.failure_exception(error, TOOL)
+            passive.calls = [{"role": role, "entered": True, "returned": True,
+                              "capturesSettled": True, "returncode": 1}]
+            value = module.failure_diagnostic(module.Refused("helper-package-incomplete"),
+                phase="finalize-xcode-setup-package", target=module.ARM_TARGET, operation=passive, stager=TOOL)
+            self.assertEqual(value["originalFailure"]["reason"], error.args[0])
+            self.assertEqual(value["originalFailure"]["stage"], stage)
+            self.assertEqual(value["lastRecordedNative"]["role"], role)
+            self.assertFalse(value["productReady"])
+            self.assertEqual(value["outcome"], "failure")
+        for label in ("setup-" + private, "xcode-setup-" + private, "final-package-setup-" + private):
+            self.assertEqual(module.failure_exception(module.Refused(label), TOOL)["reason"], "unclassified")
+            self.assertEqual(module.failure_exception(TOOL.Refused(label), TOOL)["reason"], "unclassified")
+            passive.receipt["failure"]["stage"] = label
+            passive.diagnostic_failure = module.failure_exception(module.Refused(label), TOOL)
+            passive.calls = [{"role": label}]
+            encoded = json.dumps(module.failure_diagnostic(module.Refused(label), operation=passive, stager=TOOL))
+            self.assertNotIn(private, encoded)
         # Malformed scalars and oversized lists cannot be coerced into zero/true.
         passive.calls = [{}] * 4097
         passive.credential_calls = [{}] * 65
@@ -10899,6 +11065,112 @@ def channel_data(path, body=None, *, private=False):
 
 @unittest.skipUnless(TOOL is not None, "Darwin/POSIX DATA tool only")
 class MacInstalledData(unittest.TestCase):
+
+    def xcode_setup_package_fixture(self, root, target):
+        selection = TOOL.source_build_selection(target)
+        program = entry_macho_fixture(target=target)
+        source = TOOL.xcode_setup_sources(selection)
+        files = TOOL.xcode_setup_script_files(program, TOOL.digest(program), selection)
+        TOOL.write_tree(root / "Scripts", files, root_mode=0o755)
+        # Public native probe's exact PackageInfo shape plus the real C top
+        # preinstall and distinct carrier ID. No synthetic binary is native proof.
+        package_info = ('<pkg-info overwrite-permissions="true" relocatable="false" identifier="'+TOOL.XCODE_SETUP_ID
+            +'" postinstall-action="none" version="'+selection.package_version+'" format-version="2" install-location="/Library"'
+            +' auth="root" minimumSystemVersion="26.0" generator-version="InstallCmds-864.12 (25G83)">'
+            +'<payload numberOfFiles="4" installKBytes="2"/><bundle id="'+TOOL.XCODE_SETUP_CARRIER_ID
+            +'" CFBundleVersion="'+selection.package_version+'" path="./'+TOOL.XCODE_SETUP_CARRIER+'"/><bundle-version/>'
+            +'<upgrade-bundle><bundle id="'+TOOL.XCODE_SETUP_CARRIER_ID+'"/></upgrade-bundle><update-bundle/>'
+            +'<atomic-update-bundle/><strict-identifier><bundle id="'+TOOL.XCODE_SETUP_CARRIER_ID
+            +'"/></strict-identifier><relocate/><scripts><preinstall file="./preinstall"/>'
+            +'<postinstall file="./setup/postinstall" component-id="'+TOOL.XCODE_SETUP_CARRIER_ID+'" timeout="3800"/>'
+            +'</scripts></pkg-info>').encode()
+        def archive(values, uid, gid):
+            rows = {**values, **{name: (None, 0o555) for name in TOOL.directories(values)}}
+            return odc(".", stat.S_IFDIR | 0o755, uid=uid, gid=gid) + b"".join(
+                odc("./"+name, (stat.S_IFDIR if body is None else stat.S_IFREG) | mode,
+                    b"" if body is None else body, uid=uid, gid=gid) for name, (body, mode) in sorted(rows.items())) + odc("TRAILER!!!", 0)
+        payload = archive({TOOL.XCODE_SETUP_CARRIER+"/Contents/Info.plist": (source["CarrierInfo.plist"], 0o444)}, 0, 0)
+        original = {"Bom": b"INERT-BOM-not-PackageKit-authority", "PackageInfo": package_info, "Payload": payload,
+                    "Scripts": archive(files, os.getuid(), os.getgid())}
+        final = dict(original, Scripts=archive(TOOL.xcode_setup_scripts_with_bom(files, original["Bom"], TOOL.digest(program), selection), 0, 0))
+        maker = lambda members, **kw: MacAndroidHelperPackagingData.final_package_xar(self, members, **kw)
+        (root / "original.pkg").write_bytes(maker(original))
+        (root / "final.pkg").write_bytes(maker(final))
+        return (SimpleNamespace(target=target, scripts=root / "Scripts", original_package=root / "original.pkg",
+                    package=root / "final.pkg", expected_helper=TOOL.digest(program)), original, final, source, maker)
+
+    def test_xcode_setup_component_exact_original_and_root_scripts_shared_decoders(self):
+        for target in TOOL.MAC_TARGETS:
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                args, original, final, source, maker = self.xcode_setup_package_fixture(root, target)
+                before = len(os.listdir("/proc/self/fd")) if sys.platform == "linux" else None
+                value = TOOL.audit_xcode_setup_package_command(args)
+                self.assertEqual(value["scriptFileCount"], 4)
+                self.assertEqual(value["finalDestinationPayloadEntries"], 4)
+                self.assertEqual(value["bomSha256"], TOOL.digest(original["Bom"]))
+                self.assertEqual(value["helperSha256"], args.expected_helper)
+                compact = TOOL.xcode_setup_original_package(args.scripts, args.original_package, args.expected_helper,
+                                                           selection=TOOL.source_build_selection(target))
+                self.assertEqual({name for name, body in compact.items() if isinstance(body, bytes)}, {"packageInfo", "payload", "bom"})
+                prepare = SimpleNamespace(target=target, scripts=args.scripts, package=args.original_package,
+                    expected_helper=args.expected_helper, output=root / "parts")
+                TOOL.prepare_xcode_setup_package_command(prepare)
+                self.assertEqual(TOOL.tree(root / "parts", current_root_mode=0o700),
+                    {name: (original[name], 0o444) for name in ("PackageInfo", "Payload", "Bom")})
+                for changed in (dict(final, Bom=b"different-original"), dict(final, Scripts=original["Scripts"]),
+                                dict(final, Payload=final["Payload"].replace(b"Info.plist", b"Oops.plist")),
+                                dict(final, Extra=b"x")):
+                    args.package.write_bytes(maker(changed))
+                    with self.assertRaises(TOOL.Refused): TOOL.audit_xcode_setup_package_command(args)
+                args.package.write_bytes(maker(final))
+                with self.assertRaises(TOOL.Refused): TOOL.xar_members(maker(final))  # Ordinary stays scripts-only.
+                if before is not None: self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
+    def test_xcode_setup_product_exact_eight_nodes_and_wrong_scope_refuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, original, final, source, maker = self.xcode_setup_package_fixture(root, TOOL.ARM_TARGET)
+            component = TOOL.XCODE_SETUP_COMPONENT
+            product = {"Distribution": source["Distribution.xml"], "Resources/InstallerReadMe.html": source["InstallerReadMe.html"],
+                       **{component+"/"+name: body for name, body in final.items()}}
+            for flat in (False, True):
+                members = ({"Distribution": source["Distribution.xml"], "Resources/InstallerReadMe.html": source["InstallerReadMe.html"],
+                            component: maker(final)} if flat else product)
+                args.package.write_bytes(maker(members, product=True))
+                result = TOOL.audit_xcode_setup_product_command(args)
+                self.assertEqual(result["qualification"], TOOL.XCODE_SETUP_QUALIFICATION)
+                self.assertEqual(result["productReadMeSha256"], TOOL.digest(source["InstallerReadMe.html"]))
+                with self.assertRaises(TOOL.Refused): TOOL.install_product_members(args.package.read_bytes())
+            for changed in (dict(product, **{component+"/unexpected": b"x"}),
+                            dict(product, **{component+"/Bom": b"replaced"}),
+                            dict(product, **{"Resources/InstallerReadMe.html": b"changed"})):
+                args.package.write_bytes(maker(changed, product=True))
+                with self.assertRaises(TOOL.Refused): TOOL.audit_xcode_setup_product_command(args)
+
+    def test_xcode_setup_package_policy_bom_and_allocation_bounds_are_exact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args, original, _final, source, _maker = self.xcode_setup_package_fixture(Path(tmp), TOOL.ARM_TARGET)
+            selection = TOOL.source_build_selection(TOOL.ARM_TARGET)
+            for old, new in ((b'/Library', b'/'), (b'timeout="3800"', b'timeout="600"'),
+                             (b'numberOfFiles="4"', b'numberOfFiles="5"'),
+                             (b'./preinstall', b'./foreign'), (b'relocatable="false"', b'relocatable="true"')):
+                with self.subTest(value=new), self.assertRaises(TOOL.Refused):
+                    TOOL.xcode_setup_package_info(original["PackageInfo"].replace(old, new), selection)
+            info = source["CarrierInfo.plist"]
+            bom = (".\t40755\t0\t0\t\n./"+TOOL.XCODE_SETUP_CARRIER+"\t40555\t0\t0\t\n./"
+                +TOOL.XCODE_SETUP_CARRIER+"/Contents\t40555\t0\t0\t\n./"+TOOL.XCODE_SETUP_CARRIER
+                +"/Contents/Info.plist\t100444\t0\t0\t"+str(len(info))+"\n").encode()
+            self.assertEqual(TOOL.xcode_setup_bom_data(bom, info)["payloadFileCount"], 4)
+            for changed in (bom.replace(b'40755', b'40555'), bom.replace(b'\t0\t0\t', b'\t0\t20\t'), bom+b'extra\n'):
+                with self.assertRaises(TOOL.Refused): TOOL.xcode_setup_bom_data(changed, info)
+            cargo = (Path(__file__).absolute().parents[2] / "desktop/src-tauri/Cargo.toml").read_bytes()
+            TOOL.xcode_setup_cargo_version(cargo, selection)
+            with self.assertRaises(TOOL.Refused):
+                TOOL.xcode_setup_cargo_version(cargo.replace(('version = "'+selection.package_version+'"').encode(), b'version = "9.9.9"', 1), selection)
+            TOOL._xcode_setup_allocation()("boundary", TOOL.MAX_BYTES, 0, 0)
+            with self.assertRaises(TOOL.Refused): TOOL._xcode_setup_allocation(1)("overflow", TOOL.MAX_BYTES, 0, 0)
+
 
     def test_xcode_setup_recipe_has_one_inert_carrier_and_separate_fixed_hooks(self):
         # Actual original reads/fresh writes and shared Mach-O checks, never A,

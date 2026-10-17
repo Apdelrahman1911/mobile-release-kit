@@ -98,7 +98,8 @@ PYTHON_SUPPLIERS = {
 }
 
 
-SIGNING_PHASES = ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover", "sign-applications-launcher")
+SIGNING_PHASES = ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover", "sign-applications-launcher", "sign-xcode-setup")
+XCODE_SETUP_IDENTIFIER = "dev.mobile-release-kit.desktop.xcode-setup"
 CREDENTIAL_VARIABLES = ("MRK_MACOS_DEVELOPER_ID_P12_BASE64", "MRK_MACOS_DEVELOPER_ID_P12_PASSWORD")
 CREDENTIAL_ROLES = ("search-before", "default-before", "create", "search-created", "settings", "unlock", "import",
                     "partitions", "identity", "certificates", "search-admit", "restrict", "search-restricted",
@@ -469,7 +470,7 @@ def notary_text(value, bound):
 
 
 def notary_submit_data(body, *, archive_name=NOTARY_ZIP_NAME):
-    need(archive_name in (NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg"), "notary-fixed-archive-name")
+    need(archive_name in (NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg", "Prepare Xcode.pkg"), "notary-fixed-archive-name")
     value = notary_json(body, 65536)
     need({"id", "status"} <= set(value) <= {"id", "status", "message", "name", "createdDate"}
          and value["status"] in ("Accepted", "Invalid"), "notary-submit-terminal")
@@ -537,7 +538,7 @@ def notary_failure_summary_data(value):
 
 
 def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP_NAME):
-    need(archive_name in (NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg"), "notary-fixed-archive-name")
+    need(archive_name in (NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg", "Prepare Xcode.pkg"), "notary-fixed-archive-name")
     value = notary_json(body, 1024 * 1024)
     required = {"logFormatVersion", "jobId", "status", "archiveFilename", "issues", "ticketContents"}
     need(required <= set(value) <= required | {"statusSummary", "statusCode", "uploadDate", "sha256"}
@@ -579,7 +580,7 @@ def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP
              <= {"path", "digestAlgorithm", "cdhash", "arch"}
              and notary_text(row["path"], 4096) and row["digestAlgorithm"] in ("SHA-1", "SHA-256")
              and type(row["cdhash"]) is str and re.fullmatch(r"[0-9a-fA-F]{40}", row["cdhash"])
-             and (row.get("arch") in ("arm64", "x86_64", "i386") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg")
+             and (row.get("arch") in ("arm64", "x86_64", "i386") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg", "Prepare Xcode.pkg")
                   and (row["path"] == archive_name
                        or archive_name == "MobileReleaseKit.dmg" and row["path"] == "MobileReleaseKit.dmg/Install.pkg")
                   and row.get("arch") is None), "notary-log-ticket-shape")
@@ -594,17 +595,21 @@ FINAL_IMAGE_ROLES = ("final-image-resolve-notarytool", "final-image-resolve-stap
                      "final-image-signature-after", "final-image-verify", "final-image-attach", "final-image-detach",
                      "final-image-policy-status", "final-image-policy-assess")
 
-FINAL_PACKAGE_PHASES = ("finalize-package", "finalize-remove-package")
+FINAL_PACKAGE_PHASES = ("finalize-package", "finalize-remove-package", "finalize-xcode-setup-package")
+XCODE_SETUP_COMPONENT_ROLES = ("final-package-setup-pkgbuild", "final-package-setup-lsbom",
+                               "final-package-setup-tar", "final-package-setup-xar")
+XCODE_SETUP_MUTATION_ROLES = ("final-package-setup-pkgbuild", "final-package-setup-tar", "final-package-setup-xar")
 INSTALLER_PROFILE = "desktop/packaging/macos-installer-signing.json"
 INSTALLER_CREDENTIAL_VARIABLES = ("MRK_MACOS_INSTALLER_P12_BASE64", "MRK_MACOS_INSTALLER_P12_PASSWORD")
 FINAL_PACKAGE_ROLES = ("final-package-resolve-notarytool", "final-package-resolve-stapler",
                        "final-package-sign", "final-package-signature-before", "final-package-submit",
                        "final-package-log", "final-package-staple", "final-package-validate",
                        "final-package-signature-after")
-def final_package_roles(remove, package_role):
-    need(type(remove) is bool and package_role in ("ordinary-image", "installed-shell-observation"),
+def final_package_roles(remove, package_role, *, setup=False):
+    need(type(remove) is bool and type(setup) is bool and (not setup or not remove and package_role == "ordinary-image")
+         and package_role in ("ordinary-image", "installed-shell-observation"),
          "final-package-fixed-purpose")
-    return (("final-package-productbuild",) + FINAL_PACKAGE_ROLES
+    return ((XCODE_SETUP_COMPONENT_ROLES if setup else ()) + ("final-package-productbuild",) + FINAL_PACKAGE_ROLES
             if not remove and package_role == "ordinary-image" else FINAL_PACKAGE_ROLES)
 
 
@@ -705,7 +710,7 @@ def package_signature_data(body, selection, certificates, path, *, after_staple=
     """Closed pkgutil trust/timestamp/complete-chain projection; no raw output."""
     need(type(body) is bytes and 0 < len(body) <= 65536 and body.endswith(b"\n")
          and type(selection) is dict and type(certificates) is tuple and len(certificates) == 3
-         and isinstance(path, Path) and path.name in ("MobileReleaseKit.pkg", "Remove.pkg")
+         and isinstance(path, Path) and path.name in ("MobileReleaseKit.pkg", "Remove.pkg", "Prepare Xcode.pkg")
          and type(after_staple) is bool, "package-signature-bound")
     try:
         text = body.decode("utf-8")
@@ -1653,7 +1658,78 @@ def installer_log_diagnostic_data(value):
     return dict(value)
 
 
-_FAILURE_REASONS = frozenset((*_FAILURE_NOTARY_REASONS, *FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
+# Static SOURCE literals only: no prefix rule or private exception rendering.
+_FAILURE_SETUP_REASONS = (
+    'fixed-product-purpose',
+    'fixed-setup-target',
+    'fixed-xar-package-purpose',
+    'setup-bom-stderr',
+    'setup-component-originals-required',
+    'setup-component-purpose',
+    'setup-component-required',
+    'setup-final-originals-required',
+    'setup-fixed-tree',
+    'setup-held-release-selection',
+    'setup-held-source-correspondence',
+    'setup-original-ledger-bound',
+    'setup-package-fixed-purpose',
+    'setup-package-no-store-runtime',
+    'setup-package-prequote',
+    'setup-pkgbuild-output-roster',
+    'setup-prefix-mutation-role',
+    'setup-prefix-original-adoption',
+    'setup-prefix-purpose',
+    'setup-signed-helper-anchor',
+    'setup-signed-mode-original',
+    'setup-signed-mode-post',
+    'setup-snapshot-fixed-root',
+    'setup-tar-output-roster',
+    'setup-tool-close-unknown',
+    'setup-xar-output-roster',
+    'xcode-setup-bom-bound',
+    'xcode-setup-bom-list-bound',
+    'xcode-setup-bom-payload-roster',
+    'xcode-setup-bundle',
+    'xcode-setup-bundle-policy',
+    'xcode-setup-cargo-version',
+    'xcode-setup-carrier-source',
+    'xcode-setup-component-source',
+    'xcode-setup-component-timeout',
+    'xcode-setup-control-bound',
+    'xcode-setup-exact-source-scripts',
+    'xcode-setup-final-root-scripts',
+    'xcode-setup-fixed-source-version',
+    'xcode-setup-generator-annotation',
+    'xcode-setup-hooks',
+    'xcode-setup-member-bound',
+    'xcode-setup-original-component-bytes',
+    'xcode-setup-original-owner',
+    'xcode-setup-original-scripts',
+    'xcode-setup-package-bound',
+    'xcode-setup-package-identity',
+    'xcode-setup-package-roster',
+    'xcode-setup-package-text',
+    'xcode-setup-payload-bound',
+    'xcode-setup-payload-count',
+    'xcode-setup-payload-source',
+    'xcode-setup-preinstall',
+    'xcode-setup-program-anchor',
+    'xcode-setup-program-mode',
+    'xcode-setup-program-required',
+    'xcode-setup-readme',
+    'xcode-setup-scripts-shape',
+    'xcode-setup-source-binding',
+    'xcode-setup-source-version',
+)
+_FAILURE_SETUP_ROLES = XCODE_SETUP_COMPONENT_ROLES + ("final-package-productbuild",) + FINAL_PACKAGE_ROLES
+_FAILURE_SETUP_STAGES = _FAILURE_SETUP_ROLES + tuple(role + "-adoption" for role in XCODE_SETUP_MUTATION_ROLES) + (
+    "sign-xcode-setup", "sign-xcode-setup-verify", "setup-carrier", "setup-scripts-original", "setup-scripts-final",
+    "setup-input-root", "setup-presentation", "setup-packager-directory", "setup-original-component-audit",
+    "setup-original-parts", "setup-component-directory",
+)
+
+_FAILURE_REASONS = frozenset((*_FAILURE_SETUP_REASONS, *("original-nonzero-" + role for role in _FAILURE_SETUP_ROLES),
+    *_FAILURE_NOTARY_REASONS, *FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
     *( 'original-nonzero-' + role for role in _PACKAGE_DIAGNOSTIC_ROLES),
     'package-group-clock', 'package-io-finality-unknown', 'package-compiled-bindings',
     'package-source-signing-selection', 'package-final-audit-original', 'package-output-readback',
@@ -1725,6 +1801,7 @@ _FAILURE_REASONS = frozenset((*_FAILURE_NOTARY_REASONS, *FINAL_IMAGE_STAPLE_REAS
     'strict-original-verification', 'work-original',
 ))
 _FAILURE_STAGES = (
+    *_FAILURE_SETUP_STAGES,
     *FINAL_IMAGE_STAPLE_STAGES, *FINAL_IMAGE_INPUT_STAGES,
     *notary_roles(True), 'notary-preflight-input', 'notary-final-input', 'notary-known-private-retirement',
     "package-producer-tests", "package-final-audit", "package-explicit-producer-compiler",
@@ -2067,7 +2144,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
             "errno": integer(captured.get("errno", original.get("errno")), 1, 65535),
         },
         "lastRecordedNative": {
-            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES + notary_roles(True) + _PACKAGE_DIAGNOSTIC_ROLES),
+            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES + notary_roles(True) + _PACKAGE_DIAGNOSTIC_ROLES + _FAILURE_SETUP_ROLES),
             **{key: flag(native.get(key)) for key in ("entered", "returned", "capturesSettled", "dispatched", "contained", "cleanup_complete")},
             "returncode": integer(native.get("returncode"), -65536, 65535),
             "originalFailure": {"available": flag(owned.get("available")),
@@ -2158,7 +2235,7 @@ def signing_requirement(identity, identifier):
          and (store_identifier or identifier in (IDENTIFIER, IDENTIFIER + ".image", "dev.mobile-release-kit.desktop.distribution",
                             "dev.mobile-release-kit.desktop.observation", "dev.mobile-release-kit.desktop.remove-distribution", PYTHON_IDENTIFIER,
                              "dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry",
-                             "dev.mobile-release-kit.desktop.remove", LAUNCHER_IDENTIFIER, *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()])), "fixed-signing-requirement")
+                             "dev.mobile-release-kit.desktop.remove", LAUNCHER_IDENTIFIER, XCODE_SETUP_IDENTIFIER, *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()])), "fixed-signing-requirement")
     return ('identifier "' + identifier + '" and anchor apple generic'
             ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
             ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
@@ -2432,6 +2509,9 @@ class Operation:
         self.phase, self.environment, self.stager = phase, environment, stager
         # Exhaustive SOURCE-selected purpose. No filenames/roles come from DATA.
         self.removal = phase in REMOVE_PHASES + REMOVAL_OWNER_PHASES
+        self.setup_package = phase == "finalize-xcode-setup-package"
+        need(not self.setup_package or environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image"
+             and environment.get("MRK_MACOS_STORE_RUNTIME") is None, "setup-package-fixed-purpose")
         # The existing SOURCE-selected ordinary workflow alone ships this UI.
         # Aqua observation and the separate Remove package keep their flat form.
         self.install_product = not self.removal and environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image"
@@ -2442,6 +2522,19 @@ class Operation:
         self.final_package_name = "remove-package-final" if self.removal else "package-final"
         self.package_status_name = "remove-package-finalization.status" if self.removal else "package-finalization.status"
         self.package_receipt_name = "android-helper-finalize-remove-package.json" if self.removal else "android-helper-finalize-package.json"
+        self.component_filename = self.package_filename
+        if self.setup_package:
+            self.component_filename, self.package_filename = "PrepareXcode.pkg", "Prepare Xcode.pkg"
+            self.scripts_name, self.packager_filename = "xcode-setup-inputs/scripts-original", "xcode-setup-inputs/packager/PrepareXcode-original.pkg"
+            self.unsigned_package_name, self.final_package_name = "xcode-setup-unsigned", "xcode-setup-final"
+            self.package_status_name, self.package_receipt_name = "xcode-setup-finalization.status", "android-helper-finalize-xcode-setup-package.json"
+        self.setup_component_inputs = None
+        self.setup_bom_verified = False
+        self.setup_helper_sha = None
+        self.setup_quoted = False
+        self.setup_input_root = self.setup_parts_root = self.setup_component_root = self.setup_packager_root = None
+        self.setup_root_names, self.setup_component_names, self.setup_packager_names = set(), set(), set()
+        self.setup_parts_names = {"Bom", "PackageInfo", "Payload"}
         self.image_filename = "MobileReleaseKit-Remove.dmg" if self.removal else "MobileReleaseKit.dmg"
         self.image_directory = "remove-distribution" if self.removal else "distribution"
         self.final_image_directory = "remove-distribution-final" if self.removal else "distribution-final"
@@ -2603,6 +2696,10 @@ class Operation:
     def register(self, fd, role, kind, parent=None, name=None):
         entry = {"fd": fd, "role": role, "kind": kind, "parent": parent, "name": name, "closed": False}
         self.entries.append(entry)  # Before any fallible identity/content observation.
+        if self.setup_package:
+            need(len(self.entries) <= 24576
+                 and sum(e["fd"] is not None or not e["closed"] for e in self.entries) + 24 <= 96,
+                 "setup-original-ledger-bound")
         if self.prepared_binding is not None or self.prepared_staging:
             # One current book plus forty reserved codec/native/capture slots;
             # consumed-unknown rows never get future-close credit.
@@ -2772,11 +2869,11 @@ class Operation:
             self.notary_clock()
         if self.removal_final_active():
             current = self.removal_final_calls()
-            roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
+            roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"], setup=self.setup_package)
             need(not self.notary_retiring and not self.notary_unknown and not self.errors
                  and self.stager_io_pending is None and len(current) < len(roles)
                  and role == roles[len(current)]
-                 and self.notary_mutation_pending == (role in ("final-package-productbuild", "final-package-staple"))
+                 and self.notary_mutation_pending == (role in (("final-package-productbuild", "final-package-staple") + (XCODE_SETUP_MUTATION_ROLES if self.setup_package else ())))
                  and self.signing_mutation_pending == (role == "final-package-sign")
                  and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls),
                  "final-package-original-dispatch-boundary")
@@ -3588,11 +3685,15 @@ class Operation:
             "sign-root-installer": "cargo-target/" + self.target + "/release/mrk-macos-install",
             "sign-remover": "remover-target/" + self.target + "/release/mrk-macos-remove",
             "sign-applications-launcher": "applications-launcher/MobileReleaseKitLauncher.app",
+            "sign-xcode-setup": "xcode-setup-target/" + self.target + "/release/mrk-macos-xcode-setup",
         }[self.phase]
         if self.phase == "sign-desktop-image":
             need(self.environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image", "fixed-desktop-image-role")
         if self.phase == "sign-root-installer":
             need(self.environment.get("CARGO_TARGET_DIR") == str(self.work / "cargo-target"), "fixed-installer-target")
+        if self.phase == "sign-xcode-setup":
+            need(self.environment.get("CARGO_TARGET_DIR") == str(self.work / "xcode-setup-target")
+                 and self.environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image", "fixed-setup-target")
         path = self.work / selected
         launcher = self.phase == "sign-applications-launcher"
         if launcher:
@@ -3625,7 +3726,7 @@ class Operation:
         self.package_sources.append((entitlements, empty))
         arguments = ["--options", "runtime", "--entitlements",
             str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist")]
-        identifier = (LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove"
+        identifier = (XCODE_SETUP_IDENTIFIER if self.phase == "sign-xcode-setup" else LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove"
                       if self.phase == "sign-remover" else None)
         if identifier is not None:
             arguments += ["--identifier", identifier]
@@ -3650,6 +3751,15 @@ class Operation:
             need(not verified.stdout and not verified.stderr and self.read(signed) == body, "fixed-sign-original-verification")
             if root is not None:
                 self.recheck_directory(root)
+        if self.phase == "sign-xcode-setup":
+            before = signed["identity"]
+            os.fchmod(signed["fd"], 0o555)
+            os.fsync(signed["fd"])
+            after = signature(os.fstat(signed["fd"]))
+            need(after[:2] == before[:2] and after[2] == stat.S_IFREG | 0o555 and after[3:8] == before[3:8],
+                 "setup-signed-mode-original")
+            signed["identity"] = after
+            need(self.read(signed) == body, "setup-signed-mode-post")
         self.sha256 = digest(body)
         if launcher:
             # The same signed source bundle is copied into the outer app. No
@@ -3761,7 +3871,13 @@ class Operation:
         if (getattr(self, "package_store_runtime", False) and not self.removal
                 and path == self.work / "scripts"):
             store_prefix = "input/runtime/store"
-        files = self.stager.tree(path, mac_store_prefix=store_prefix)
+        tree_bounds = {}
+        if self.setup_package:
+            scripts = path in (self.setup_package_paths() / "scripts-original", self.setup_package_paths() / "scripts-final")
+            need(scripts or path in (self.setup_package_paths() / "carrier", self.work / self.target_name / "product-input"),
+                 "setup-snapshot-fixed-root")
+            tree_bounds["max_bytes"] = self.stager.XCODE_SETUP_PROGRAM_LIMIT + 32768 if scripts else 65536
+        files = self.stager.tree(path, mac_store_prefix=store_prefix, **tree_bounds)
         self.stager_io_pending = None
         self.notary_clock(work=work)
         result = {"directories": {}, "files": {}}
@@ -3872,13 +3988,15 @@ class Operation:
         return digestor.hexdigest()
 
     def notary_tool(self, name):
-        need(name in ("notarytool", "stapler", "productbuild"), "notary-fixed-tool")
-        need(name != "productbuild" or self.phase == "finalize-package" and self.install_product,
+        prefix_tool = self.setup_package and name in ("pkgbuild", "lsbom", "tar", "xar")
+        system_tool = name == "productbuild" or prefix_tool
+        need(name in ("notarytool", "stapler", "productbuild") or prefix_tool, "notary-fixed-tool")
+        need(name != "productbuild" or self.phase in ("finalize-package", "finalize-xcode-setup-package") and self.install_product,
              "install-product-fixed-tool")
-        fixed = Path("/usr/bin/productbuild") if name == "productbuild" else NOTARY_XCODE / "usr/bin" / name
+        fixed = Path("/usr/bin") / name if system_tool else NOTARY_XCODE / "usr/bin" / name
         canonical = fixed.resolve(strict=True)
         applications = NOTARY_XCODE.parents[2]
-        need(canonical == fixed if name == "productbuild" else
+        need(canonical == fixed if system_tool else
              canonical.is_absolute() and len(canonical.parts) <= 16
              and applications.resolve(strict=True) in canonical.parents, "notary-selected-tool-path")
         # Both the fixed Xcode.app alias and its independently resolved chain
@@ -3893,7 +4011,7 @@ class Operation:
             trusted_applications_group = (path == applications and stat.S_ISDIR(info.st_mode)
                 and info.st_uid == 0 and info.st_gid in (0, 80) and not info.st_mode & 0o002)
             need((info.st_uid == 0 and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
-                  and not info.st_mode & 0o022) if name == "productbuild" else
+                  and not info.st_mode & 0o022) if system_tool else
                  info.st_uid in (0, os.getuid())
                  and (selected_alias or (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
                       and (above_applications or not info.st_mode & 0o022 or trusted_applications_group)),
@@ -4059,7 +4177,7 @@ class Operation:
     def notary_key_scope(self):
         package_prefix = None
         if self.removal_final_active():
-            roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
+            roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"], setup=self.setup_package)
             package_prefix = roles[:roles.index("final-package-submit")]
         payload_roles = notary_roles(getattr(self, "notary_launcher", False))
         payload_prefix = payload_roles[:payload_roles.index("payload-submit")]
@@ -4307,14 +4425,15 @@ class Operation:
                 # returned call and the full snapshot POST immediately above.
                 root = self.install_product_root
                 items = [item for item in self.notary_roots if item["entry"] is root]
-                need(self.install_product and self.phase == "finalize-package"
+                need(self.install_product and self.phase in ("finalize-package", "finalize-xcode-setup-package")
                      and root.get("parent_entry") is self.target_entry and root["name"] == "product-input"
                      and len(items) == 1 and items[0]["path"] == self.work / self.target_name / "product-input",
                      "install-product-retirement-root")
                 expected = items[0]["snapshot"]["directories"]
                 need(set(expected) == {"", "resources"}
-                     and set(items[0]["snapshot"]["files"]) == {"Distribution", "resources/InstallerReadMe.html"}
-                     and expected[""][1] == ("Distribution", "resources")
+                     and set(items[0]["snapshot"]["files"]) == ({"Component.plist", "Distribution", "resources/InstallerReadMe.html"}
+                         if self.setup_package else {"Distribution", "resources/InstallerReadMe.html"})
+                     and expected[""][1] == (("Component.plist", "Distribution", "resources") if self.setup_package else ("Distribution", "resources"))
                      and expected["resources"][1] == ("InstallerReadMe.html",), "install-product-retirement-roster")
                 self.recheck_directory(root)
                 need(root["identity"] == expected[""][0] and stat.S_IMODE(root["identity"][2]) == 0o700,
@@ -4982,6 +5101,164 @@ class Operation:
         self.final_image_complete = True
         self.notary_clock()
 
+    def setup_package_quote(self):
+        # Existing 96-live / 24576-original / 512MiB bounds, not a new budget.
+        # Fifty future held entries cover the fixed six SOURCE leaves, helper
+        # ancestry, six input roots/files, tool and product/signing inputs.
+        # Twenty-four slots remain for tree/read/capture/credential transients.
+        need(self.setup_package and not self.calls and self.credential_active is None
+             and final_package_roles(False, "ordinary-image", setup=True) == XCODE_SETUP_COMPONENT_ROLES
+                 + ("final-package-productbuild",) + FINAL_PACKAGE_ROLES
+             and sum(e["fd"] is not None or not e["closed"] for e in self.entries) + 50 + 24 <= 96
+             and len(self.entries) + 8192 <= 24576, "setup-package-prequote")
+        self.stager._xcode_setup_allocation(4 * 1024 * 1024)(
+            "setup-owned-control", 3 * self.stager.XCODE_SETUP_PROGRAM_LIMIT,
+            2 * self.stager.XCODE_SETUP_PACKAGE_LIMIT, self.stager.XCODE_SETUP_PACKAGE_LIMIT)
+        self.setup_quoted = True
+
+    def setup_package_paths(self):
+        return self.work / "xcode-setup-inputs"
+
+    def setup_package_tree(self, name, files, *, root_mode=0o700):
+        need(self.setup_package and self.setup_quoted and name in ("carrier", "scripts-original", "scripts-final"),
+             "setup-fixed-tree")
+        path = self.setup_package_paths() / name
+        self.final_package_io("setup-" + name, self.stager.write_tree, path, files, root_mode=root_mode)
+        root = self.directory(self.setup_input_root, name, "setup-" + name)
+        self.setup_root_names.add(name)
+        self.notary_roots.append({"entry": root, "path": path, "snapshot": self.notary_snapshot(root, path)})
+        return root
+
+    def prepare_setup_component(self):
+        """Four original native calls, on fresh fixed inputs, before credentials."""
+        need(self.setup_package and self.setup_quoted and not self.calls, "setup-component-purpose")
+        selected = self.stager.source_build_selection(self.target)
+        held_release = self.stager.build_release_data(self.read(self.release_entry), target=self.target)
+        need((selected.package_version, selected.release) == (held_release["packageVersion"], held_release["release"]),
+             "setup-held-release-selection")
+        cargo = self.source_original("desktop/src-tauri/Cargo.toml", "setup-source-cargo-package", 128 * 1024)
+        cargo_body = self.read(cargo)
+        self.stager.xcode_setup_cargo_version(cargo_body, selected)
+        self.package_sources.append((cargo, cargo_body))
+        sources = {}
+        for name in ("CarrierInfo.plist", "Component.plist", "Distribution.xml", "InstallerReadMe.html", "preinstall", "setup/postinstall"):
+            entry = self.source_original("desktop/macos-xcode-setup-inputs/" + name, "setup-source-" + name, 8192)
+            body = self.read(entry)
+            self.package_sources.append((entry, body))
+            sources[name] = body
+            if name in ("Distribution.xml", "InstallerReadMe.html"):
+                self.install_presentation_sources.append((entry, body))
+        validated = self.stager.xcode_setup_sources(selected)
+        for name, body in sources.items():
+            expected = body.replace(b"__MRK_PACKAGE_VERSION__", selected.package_version.encode("ascii"))
+            need(expected == validated[name], "setup-held-source-correspondence")
+        parent = self.descend(self.work_entry, ("xcode-setup-target", self.target, "release"))
+        helper = self.original(parent, "mrk-macos-xcode-setup", "setup-signed-helper", self.stager.XCODE_SETUP_PROGRAM_LIMIT, (0o555,))
+        program = self.read(helper)
+        self.setup_helper_sha = self.environment.get("MRK_MACOS_XCODE_SETUP_SHA256")
+        need(tool_hex(self.setup_helper_sha) and digest(program) == self.setup_helper_sha, "setup-signed-helper-anchor")
+        self.final_package_inputs.append((helper, self.setup_helper_sha))
+        scripts = self.stager.xcode_setup_script_files(program, self.setup_helper_sha, selected)
+        def root_directory():
+            self.recheck_directory(self.work_entry)
+            os.mkdir("xcode-setup-inputs", 0o700, dir_fd=self.work_entry["fd"])
+            self.setup_input_root = self.directory(self.work_entry, "xcode-setup-inputs", "setup-input-root")
+            self.final_package_roots.append((self.setup_input_root, self.setup_root_names))
+        self.final_package_io("setup-input-root", root_directory)
+        self.setup_package_tree("carrier", {self.stager.XCODE_SETUP_CARRIER + "/Contents/Info.plist": (validated["CarrierInfo.plist"], 0o444)}, root_mode=0o755)
+        self.setup_package_tree("scripts-original", scripts, root_mode=0o755)
+        self.scripts_name = "xcode-setup-inputs/scripts-original"
+        product_path = self.work / self.target_name / "product-input"
+        self.final_package_io("setup-presentation", self.stager.prepare_xcode_setup_product_command,
+                              argparse.Namespace(target=self.target, output=product_path))
+        self.install_product_root = self.directory(self.target_entry, "product-input", "setup-presentation")
+        self.notary_roots.append({"entry": self.install_product_root, "path": product_path,
+                                  "snapshot": self.notary_snapshot(self.install_product_root, product_path)})
+        def packager_directory():
+            self.recheck_directory(self.setup_input_root)
+            os.mkdir("packager", 0o700, dir_fd=self.setup_input_root["fd"])
+            self.setup_packager_root = self.directory(self.setup_input_root, "packager", "setup-packager")
+            self.setup_root_names.add("packager")
+            self.final_package_roots.append((self.setup_packager_root, self.setup_packager_names))
+        self.final_package_io("setup-packager-directory", packager_directory)
+        self.notary_tool("pkgbuild")
+        self.final_package_call("final-package-setup-pkgbuild", ["/usr/bin/pkgbuild", "--root", str(self.setup_package_paths() / "carrier"),
+            "--scripts", str(self.work / self.scripts_name), "--component-plist", str(product_path / "Component.plist"),
+            "--identifier", self.stager.XCODE_SETUP_ID, "--version", selected.package_version,
+            "--install-location", "/Library", "--ownership", "recommended", str(self.work / self.packager_filename)], maximum=60)
+        self.setup_close_tool("pkgbuild")
+        original = self.final_package_io("setup-original-component-audit", self.stager.xcode_setup_original_package,
+            self.work / self.scripts_name, self.work / self.packager_filename, self.setup_helper_sha, selection=selected)
+        self.setup_component_inputs = original
+        def parts():
+            path = self.setup_package_paths() / "parts"
+            self.stager.write_tree(path, {"PackageInfo": (original["packageInfo"], 0o444), "Payload": (original["payload"], 0o444),
+                                         "Bom": (original["bom"], 0o444)}, root_mode=0o700)
+            self.setup_parts_root = self.directory(self.setup_input_root, "parts", "setup-parts")
+            self.setup_root_names.add("parts")
+            self.final_package_roots.append((self.setup_parts_root, self.setup_parts_names))
+            for name in sorted(self.setup_parts_names):
+                entry = self.original(self.setup_parts_root, name, "setup-original-" + name, 65536, (0o444,))
+                self.final_package_inputs.append((entry, digest(self.read(entry))))
+        self.final_package_io("setup-original-parts", parts)
+        self.notary_tool("lsbom")
+        result = self.final_package_call("final-package-setup-lsbom", ["/usr/bin/lsbom", "-p", "fmugs", str(self.setup_package_paths() / "parts/Bom")], maximum=10, limit=8192)
+        need(not result.stderr, "setup-bom-stderr")
+        self.stager.xcode_setup_bom_data(result.stdout, validated["CarrierInfo.plist"])
+        self.setup_bom_verified = True
+        self.setup_close_tool("lsbom")
+        self.setup_package_tree("scripts-final", self.stager.xcode_setup_scripts_with_bom(scripts, original["bom"], self.setup_helper_sha, selected), root_mode=0o755)
+        # Do not carry the signed helper's byte copies across native work.
+        del program, scripts
+        self.notary_tool("tar")
+        self.final_package_call("final-package-setup-tar", ["/usr/bin/tar", "-c", "-z", "-f", str(self.setup_package_paths() / "parts/Scripts"),
+            "--format=odc", "--uid=0", "--gid=0", "--no-acls", "--no-xattrs", "--no-fflags", "--no-mac-metadata", "."])
+        self.setup_close_tool("tar")
+        def component_directory():
+            os.mkdir("component", 0o700, dir_fd=self.setup_input_root["fd"])
+            self.setup_component_root = self.directory(self.setup_input_root, "component", "setup-component")
+            self.setup_root_names.add("component")
+            self.final_package_roots.append((self.setup_component_root, self.setup_component_names))
+        self.final_package_io("setup-component-directory", component_directory)
+        self.notary_tool("xar")
+        self.final_package_call("final-package-setup-xar", ["/usr/bin/xar", "-c", "-f", str(self.setup_package_paths() / "component" / self.component_filename),
+            "--compression=none", "PackageInfo", "Scripts", "Bom", "Payload"])
+        self.setup_close_tool("xar")
+        need(self.setup_bom_verified and tuple(row["role"] for row in self.calls) == XCODE_SETUP_COMPONENT_ROLES,
+             "setup-component-originals-required")
+
+    def setup_close_tool(self, name):
+        self.notary_post()
+        value = self.notary_tools[name]
+        self.close(value["entry"])
+        need(value["entry"]["closed"] and not self.errors, "setup-tool-close-unknown")
+        del self.notary_tools[name]
+
+    def setup_adopt_prefix(self, role):
+        need(self.setup_package and self.notary_mutation_pending and role in XCODE_SETUP_COMPONENT_ROLES,
+             "setup-prefix-original-adoption")
+        self.stage = self.stager_io_pending = role + "-adoption"
+        if role == "final-package-setup-pkgbuild":
+            parent, name, limit = self.setup_packager_root, "PrepareXcode-original.pkg", self.stager.XCODE_SETUP_PACKAGE_LIMIT
+            need(os.listdir(parent["fd"]) == [name], "setup-pkgbuild-output-roster")
+            self.setup_packager_names.add(name)
+        elif role == "final-package-setup-tar":
+            parent, name, limit = self.setup_parts_root, "Scripts", self.stager.XCODE_SETUP_PACKAGE_LIMIT
+            need(set(os.listdir(parent["fd"])) == self.setup_parts_names | {name}, "setup-tar-output-roster")
+            self.setup_parts_names.add(name)
+        else:
+            need(role == "final-package-setup-xar", "setup-prefix-mutation-role")
+            parent, name, limit = self.setup_component_root, self.component_filename, self.stager.XCODE_SETUP_PACKAGE_LIMIT
+            need(os.listdir(parent["fd"]) == [name], "setup-xar-output-roster")
+            self.setup_component_names.add(name)
+        entry = self.original(parent, name, role + "-original", limit, (0o400, 0o444, 0o600, 0o644))
+        self.final_package_inputs.append((entry, self.notary_stream(entry)))
+        if role == "final-package-setup-xar":
+            self.install_component_inputs = (parent, entry)
+        self.notary_clock()
+        self.stager_io_pending = None
+        self.notary_mutation_pending = False
+
     def installer_sources(self):
         """One SOURCE-selected Installer chain, distinct from Application use."""
         entry = self.source_original(INSTALLER_PROFILE, "source-installer-profile", 1024)
@@ -4999,7 +5276,7 @@ class Operation:
             self.package_sources.append((certificate, value))
             certificates.append(value)
         need(hashlib.sha1(certificates[0]).hexdigest() == selected["leafSha1"], "installer-source-leaf")
-        if self.install_product:
+        if self.install_product and not self.setup_package:
             for name in self.stager.INSTALL_PRESENTATION:
                 source = self.source_original("desktop/macos-installed-inputs/" + name,
                                               "source-install-presentation-" + name, 8192)
@@ -5059,12 +5336,13 @@ class Operation:
     def final_package_audit(self, entry, path):
         self.notary_post()
         size, sha = entry["identity"][6], self.notary_stream(entry)
-        audit = self.stager.audit_install_product_command if self.install_product else self.stager.audit_command
+        audit = (self.stager.audit_xcode_setup_product_command if self.setup_package else
+                 self.stager.audit_install_product_command if self.install_product else self.stager.audit_command)
         try:
             result = self.final_package_io("final-package-original-audit", audit,
                 argparse.Namespace(target=self.target, fixture=False, store_runtime=self.selected_package_store(), scripts=self.work / self.scripts_name, package=path,
                                    original_package=self.work / self.packager_filename,
-                                   **self.removal_package_audit_arguments()))
+                                   **({"expected_helper": self.setup_helper_sha} if self.setup_package else self.removal_package_audit_arguments())))
         except self.stager.Refused as error:
             values = BaseException.args.__get__(error)
             if (self.install_product is True and type(error) is self.stager.Refused
@@ -5098,7 +5376,7 @@ class Operation:
         self.stager.package_staple_appended(self, before, before_sha, need)
 
     def final_package_call(self, role, argv, *, maximum=30, limit=65536, developer=False):
-        roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
+        roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"], setup=self.setup_package)
         current = self.removal_final_calls()
         need(self.removal_final_active() and self.final_package_known() and not self.notary_retiring
              and len(current) < len(roles) and role == roles[len(current)],
@@ -5108,7 +5386,8 @@ class Operation:
                   and self.credential_active.get("purpose") == "installer"), "final-package-private-role")
         bounds = {"final-package-resolve-notarytool": (30, 4096), "final-package-resolve-stapler": (30, 4096),
                   "final-package-sign": (60, 65536), "final-package-submit": (1200, 65536),
-                  "final-package-log": (30, 1024 * 1024)}
+                  "final-package-log": (30, 1024 * 1024),
+                  "final-package-setup-pkgbuild": (60, 65536), "final-package-setup-lsbom": (10, 8192)}
         need((maximum, limit) == bounds.get(role, (30, 65536)), "final-package-original-bound")
         self.notary_post()
         now, endpoint = self.notary_clock()
@@ -5123,12 +5402,20 @@ class Operation:
         before_sha = self.final_package_sha if changing else None
         if changing:
             self.receipt["packageStapleObservation"] = self.stager.package_staple_observation()
-        self.notary_mutation_pending = changing or role == "final-package-productbuild"
+        prefix_mutation = self.setup_package and role in XCODE_SETUP_MUTATION_ROLES
+        self.notary_mutation_pending = changing or role == "final-package-productbuild" or prefix_mutation
         self.signing_mutation_pending = role == "final-package-sign"
+        cwd = self.work
+        if role in ("final-package-setup-tar", "final-package-setup-xar"):
+            need(self.setup_package, "setup-prefix-purpose")
+            cwd = self.setup_package_paths() / ("scripts-final" if role.endswith("-tar") else "parts")
+            environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "TZ": "UTC", "COPYFILE_DISABLE": "1"}
         try:
-            result = self.call(role, argv, environment, cwd=self.work, timeout=timeout, limit=limit)
+            result = self.call(role, argv, environment, cwd=cwd, timeout=timeout, limit=limit)
             self.notary_clock()
-            if role == "final-package-productbuild":
+            if prefix_mutation:
+                self.setup_adopt_prefix(role)
+            elif role == "final-package-productbuild":
                 self.final_package_adopt_product()
             elif role == "final-package-sign":
                 self.final_package_adopt_signed()
@@ -5189,29 +5476,36 @@ class Operation:
         outer file is adopted only after that same original returns zero and
         its captures/close receipts are complete. Unknown effects stay pending.
         """
-        need(self.install_product and self.phase == "finalize-package" and not self.calls
+        need(self.install_product and self.phase in ("finalize-package", "finalize-xcode-setup-package")
+             and tuple(row["role"] for row in self.calls) == (XCODE_SETUP_COMPONENT_ROLES if self.setup_package else ())
              and len(self.install_presentation_sources) == 2, "fixed-install-product-purpose")
-        component_parent = self.directory(self.work_entry, "package-component", "install-product-component-directory")
-        need(os.listdir(component_parent["fd"]) == [self.package_filename], "install-product-component-roster")
-        self.final_package_roots.append((component_parent, {self.package_filename}))
-        component = self.original(component_parent, self.package_filename, "install-product-component", self.stager.MAX_BYTES,
-                                  (0o444, 0o600, 0o644))
-        self.install_component_inputs = (component_parent, component)
+        component_path = self.setup_package_paths() / "component" if self.setup_package else self.work / "package-component"
+        if self.setup_package:
+            need(self.setup_bom_verified and self.install_component_inputs is not None, "setup-component-required")
+            component_parent, component = self.install_component_inputs
+        else:
+            component_parent = self.directory(self.work_entry, "package-component", "install-product-component-directory")
+            need(os.listdir(component_parent["fd"]) == [self.component_filename], "install-product-component-roster")
+            self.final_package_roots.append((component_parent, {self.component_filename}))
+            component = self.original(component_parent, self.component_filename, "install-product-component", self.stager.MAX_BYTES,
+                                      (0o444, 0o600, 0o644))
+            self.install_component_inputs = (component_parent, component)
+            self.final_package_inputs.append((component, self.notary_stream(component)))
         component_sha = self.notary_stream(component)
-        self.final_package_inputs.append((component, component_sha))
-        component_audit = self.final_package_io("install-product-component-audit", self.stager.audit_command,
+        component_audit = self.final_package_io("install-product-component-audit",
+            self.stager.audit_xcode_setup_package_command if self.setup_package else self.stager.audit_command,
             argparse.Namespace(target=self.target, fixture=False, store_runtime=self.selected_package_store(), scripts=self.work / self.scripts_name,
-                package=self.work / "package-component" / self.package_filename,
-                original_package=self.work / self.packager_filename))
+                package=component_path / self.component_filename, original_package=self.work / self.packager_filename,
+                **({"expected_helper": self.setup_helper_sha} if self.setup_package else {})))
         need(type(component_audit) is dict and component_audit.get("packageSha256") == component_sha
              and component_audit.get("packageSize") == component["identity"][6], "install-product-component-audit")
         product_input = self.work / self.target_name / "product-input"
-        prepared = self.final_package_io("install-product-presentation-prepare", self.stager.prepare_install_product_command,
-            argparse.Namespace(target=self.target, output=product_input))
+        prepared = (None if self.setup_package else self.final_package_io("install-product-presentation-prepare",
+            self.stager.prepare_install_product_command, argparse.Namespace(target=self.target, output=product_input)))
         root = self.directory(self.target_entry, "product-input", "install-product-presentation-directory")
         self.install_product_root = root
         resources = self.directory(root, "resources", "install-product-resource-directory")
-        need(set(os.listdir(root["fd"])) == {"Distribution", "resources"}
+        need(set(os.listdir(root["fd"])) == ({"Distribution", "resources", "Component.plist"} if self.setup_package else {"Distribution", "resources"})
              and os.listdir(resources["fd"]) == ["InstallerReadMe.html"], "install-product-presentation-roster")
         definition = self.original(root, "Distribution", "install-product-distribution", 8192, (0o444,))
         readme = self.original(resources, "InstallerReadMe.html", "install-product-readme", 8192, (0o444,))
@@ -5220,10 +5514,11 @@ class Operation:
         need(source_definition.count(b"__MRK_PACKAGE_VERSION__") == 1, "install-product-source-version")
         expected = source_definition.replace(b"__MRK_PACKAGE_VERSION__", selection["packageVersion"].encode("ascii"))
         need(self.read(definition) == expected and self.read(readme) == source_readme
-             and type(prepared) is dict and prepared.get("distributionSha256") == digest(expected)
-             and prepared.get("readMeSha256") == digest(source_readme), "install-product-presentation-source")
-        self.notary_roots.append({"entry": root, "path": product_input,
-                                  "snapshot": self.notary_snapshot(root, product_input)})
+             and (self.setup_package or type(prepared) is dict and prepared.get("distributionSha256") == digest(expected)
+                  and prepared.get("readMeSha256") == digest(source_readme)), "install-product-presentation-source")
+        if not self.setup_package:
+            self.notary_roots.append({"entry": root, "path": product_input,
+                                      "snapshot": self.notary_snapshot(root, product_input)})
         # The retained root/snapshot binds these same named originals on every
         # later POST. Consume these initial validation FDs before the native
         # child, rather than growing the existing simultaneous-FD allowance.
@@ -5242,7 +5537,7 @@ class Operation:
         self.notary_tool("productbuild")
         result = self.final_package_call("final-package-productbuild", ["/usr/bin/productbuild",
             "--distribution", str(product_input / "Distribution"),
-            "--package-path", str(self.work / "package-component"),
+            "--package-path", str(component_path),
             "--resources", str(product_input / "resources"),
             str(self.work / self.unsigned_package_name / self.package_filename)])
         need(type(result.returncode) is int and result.returncode == 0 and self.install_product_original is not None,
@@ -5289,6 +5584,9 @@ class Operation:
 
     def selected_package_store(self):
         """Hold the same fixed SOURCE selector for ordinary package consumers."""
+        if self.setup_package:
+            need(self.environment.get("MRK_MACOS_STORE_RUNTIME") is None, "setup-package-no-store-runtime")
+            return False
         if hasattr(self, "package_store_runtime"):
             return self.package_store_runtime
         mode = self.environment.get("MRK_MACOS_STORE_RUNTIME")
@@ -5307,6 +5605,8 @@ class Operation:
         need(self.removal_final_active() and self.signing is not None
              and (self.phase == "prepare-removal-observers" or not any(name in self.environment for name in CREDENTIAL_VARIABLES)), "final-package-configured-purpose")
         self.notary_space(reserve=True)  # Existing3GiB floor plus2GiB additional reservation.
+        if self.setup_package:
+            self.setup_package_quote()
         self.installer_sources()
         profile = self.source_original(NOTARY_PROFILE, "source-final-package-notary-profile", 1024)
         profile_body = self.read(profile)
@@ -5317,12 +5617,15 @@ class Operation:
                 HELPER_SOURCE_BYTES if filename == "macos_android_helper_package.py" else 512 * 1024)
             self.package_sources.append((source, self.read(source)))
         self.selected_package_store()
-        scripts = self.directory(self.work_entry, self.scripts_name, "final-package-scripts")
-        self.notary_roots.append({"entry": scripts, "path": self.work / self.scripts_name,
-                                  "snapshot": self.notary_snapshot(scripts, self.work / self.scripts_name)})
-        packager = self.original(self.work_entry, self.packager_filename, "final-package-packager-original", self.stager.MAX_BYTES,
-                                (0o444, 0o600, 0o644))
-        self.final_package_inputs.append((packager, self.notary_stream(packager)))
+        if self.setup_package:
+            self.prepare_setup_component()
+        else:
+            scripts = self.directory(self.work_entry, self.scripts_name, "final-package-scripts")
+            self.notary_roots.append({"entry": scripts, "path": self.work / self.scripts_name,
+                                      "snapshot": self.notary_snapshot(scripts, self.work / self.scripts_name)})
+            packager = self.original(self.work_entry, self.packager_filename, "final-package-packager-original", self.stager.MAX_BYTES,
+                                    (0o444, 0o600, 0o644))
+            self.final_package_inputs.append((packager, self.notary_stream(packager)))
         if not self.install_product:
             parent = self.directory(self.work_entry, self.unsigned_package_name, "final-package-unsigned")
             need(os.listdir(parent["fd"]) == [self.package_filename], "final-package-unsigned-roster")
@@ -5399,7 +5702,7 @@ class Operation:
              "final-package-stapled-audit-changed")
         self.final_package_publish()
         self.sha256 = self.final_package_sha
-        self.receipt["finalPackage"] = {"schemaVersion": 1, "kind": "mrk-final-remover-package" if self.removal else "mrk-final-installer-package",
+        self.receipt["finalPackage"] = {"schemaVersion": 1, "kind": "mrk-final-xcode-setup-package" if self.setup_package else "mrk-final-remover-package" if self.removal else "mrk-final-installer-package",
             "unsignedBytes": unsigned["identity"][6], "unsignedSha256": unsigned_audit["packageSha256"],
             "signedBytes": signed_size, "signedSha256": signed_sha, "packageBytes": self.final_package_output["identity"][6],
             "packageSha256": self.sha256, "packageMode": 0o444, "originalPackageSha256": unsigned_audit["originalPackageSha256"],
@@ -5410,6 +5713,12 @@ class Operation:
             "trustedSignatureBeforeAndAfter": True, "trustedTimestampBeforeAndAfter": True,
             "actualStaplerValidation": True, "signedPrefixUnchanged": True, "completeScriptsAudited": True,
             "assurance": "final-package-observation-not-installed-or-final-carrier-authority"}
+        if self.setup_package:
+            need(self.setup_bom_verified and final_audit["helperSha256"] == self.setup_helper_sha,
+                 "setup-final-originals-required")
+            self.receipt["finalPackage"].update(payloadSha256=final_audit["payloadSha256"], bomSha256=final_audit["bomSha256"],
+                helperSha256=self.setup_helper_sha, finalDestinationPayloadEntries=4,
+                assurance="final-setup-package-observation-not-installed-or-xcode-setup-authority")
         self.final_package_complete = True
         self.notary_clock()
 
@@ -8548,7 +8857,7 @@ class Operation:
                  (removal_preparation_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "prepare-removal-observers" else
                  (removal_runtime_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "package-removal-fixture" else
                  FINAL_IMAGE_ROLES if self.phase in FINAL_IMAGE_PHASES else
-                 final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"]) if self.phase in FINAL_PACKAGE_PHASES else
+                 final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"], setup=self.setup_package) if self.phase in FINAL_PACKAGE_PHASES else
                  notary_roles(getattr(self, "notary_launcher", False)) if self.phase in NOTARY_PHASES else
                  PYTHON_ROLES if self.phase in PYTHON_PHASES else
                  self.stager.PACKAGING_CALL_ROLES if self.phase == "package-install" else
@@ -9543,7 +9852,7 @@ def main():
             print("resident-image-sha256=" + operation.resident_image_sha256, flush=True)
             print("desktop-facade-sha256=" + operation.desktop_facade_sha256, flush=True)
             print("image-release-id=" + operation.image_release, flush=True)
-        if phase in ("sign-remover", "sign-applications-launcher"):
+        if phase in ("sign-remover", "sign-applications-launcher", "sign-xcode-setup"):
             # Only the same completed fixed-sign owner may publish this digest;
             # no caller reopens/rehashes a replacement to infer success.
             need(type(result) is str and re.fullmatch(r"[0-9a-f]{64}", result), "fixed-remover-result")
