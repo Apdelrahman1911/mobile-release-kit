@@ -273,7 +273,15 @@ jobs:
             ${{ env.MRK_MACOS_WORK }}/${{ matrix.name }}
             ${{ env.MRK_MACOS_WORK }}/tool-signed-receipt.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
+      - name: Retain only the finalized public receipt for exact SOURCE enrollment
+        if: success() && steps.sign.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tool-signed-facts-${{ matrix.purpose }}-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MRK_MACOS_WORK }}/tool-signed-receipt.json
+          if-no-files-found: error
+          retention-days: 30
 
   signed-store:
     name: Store signing (${{ matrix.machine }})
