@@ -633,11 +633,29 @@ mod native {
             })
         }
         fn directory(self, mode: Option<u16>) -> bool {
+            // Apple sys/stat.h: SF_RESTRICTED, SF_NOUNLINK, SF_FIRMLINK.
+            // These protection flags occur on real / and /Library originals;
+            // they are not permission to alter those ancestors. Managed nodes
+            // retain the existing zero-flags policy, including every POST.
+            const ANCESTOR_PROTECTION: u32 = 0x00080000 | 0x00100000 | 0x00800000;
             self.mode & libc::S_IFMT == libc::S_IFDIR
                 && self.uid == 0
-                && self.flags == 0
                 && self.mode & 0o7022 == 0
-                && mode.is_none_or(|mode| self.mode & 0o7777 == mode && self.gid == 0)
+                && match mode {
+                    None => self.flags & !ANCESTOR_PROTECTION == 0,
+                    Some(mode) => self.flags == 0 && self.mode & 0o7777 == mode && self.gid == 0,
+                }
+        }
+        fn created_private(self) -> bool {
+            self.mode & libc::S_IFMT == libc::S_IFDIR
+                && self.mode & 0o7777 & !0o700 == 0
+                && self.uid == 0 && self.gid == 0 && self.flags == 0
+        }
+        fn sealed_creation(self, actual: Self, named: Self, mode: u16) -> bool {
+            self.created_private() && actual == named && actual.directory(Some(mode))
+                && self.node == actual.node && self.links == actual.links
+                && self.size == actual.size && self.mt == actual.mt && self.mn == actual.mn
+                && self.uid == actual.uid && self.gid == actual.gid && self.flags == actual.flags
         }
         fn control(self) -> bool {
             self.mode == (libc::S_IFREG | 0o600)
@@ -1551,11 +1569,11 @@ mod native {
                 }
                 if ((self.purpose != Purpose::Carrier && index < 3)
                     || (self.purpose == Purpose::Carrier && index == 0))
-                    && !held.directory(if self.purpose != Purpose::Carrier && index == 2 {
+                    && (!held.directory(if self.purpose != Purpose::Carrier && index == 2 {
                         Some(0o755)
                     } else {
                         None
-                    })
+                    }) || self.purpose == Purpose::Carrier && held.flags != 0)
                 {
                     return Err(Failure::Access);
                 }
@@ -3012,17 +3030,42 @@ mod native {
         }
         fn mkdir(&mut self, parent: usize, name: &str, index: usize, mode: u16) -> Result<()> {
             self.point(false)?;
+            if !matches!(mode, 0o700 | 0o755) {
+                return Err(Failure::Access);
+            }
             self.absent(parent, name)?;
-            if unsafe { libc::mkdirat(self.fd(parent)?.as_raw_fd(), c(name)?.as_ptr(), mode) } != 0
+            // Hooks intentionally inherit umask077. Always create privately;
+            // mkdir's requested bits alone cannot establish the final mode.
+            if unsafe { libc::mkdirat(self.fd(parent)?.as_raw_fd(), c(name)?.as_ptr(), 0o700) } != 0
             {
                 return Err(Failure::Write);
             }
             // Effect happened: a later failure never permits an eager unlink
             // using only this name. Original acquisition is required first.
             self.open(index, parent, name, libc::O_RDONLY | libc::O_DIRECTORY)?;
-            if !self.original[index].is_some_and(|s| s.directory(Some(mode))) {
+            let before = self.original[index].ok_or(Failure::Binding)?;
+            if !before.created_private() {
                 return Err(Failure::Access);
             }
+            self.join(index, parent, name, false)?;
+            self.point(false)?;
+            let changed = unsafe { libc::fchmod(self.fd(index)?.as_raw_fd(), mode) };
+            self.point(false)?;
+            if changed != 0 {
+                return Err(Failure::Write);
+            }
+            let actual = fstat(self.fd(index)?)?;
+            self.point(false)?;
+            let byname = named(self.fd(parent)?, &c(name)?)?.ok_or(Failure::Binding)?;
+            self.point(false)?;
+            if !before.sealed_creation(actual, byname, mode) {
+                return Err(Failure::Binding);
+            }
+            // Only the positively observed chmod of this newly created same
+            // original may revise its metadata. Existing names never reach it.
+            self.original[index] = Some(actual);
+            self.protect(index)?;
+            self.join(index, parent, name, false)?;
             self.sync(parent, false)
         }
         fn create_control(&mut self, index: usize, name: &str) -> Result<()> {
@@ -4067,6 +4110,97 @@ mod native {
         }
         pub(crate) fn first_failure(&self) -> Option<Instant> {
             self.clock.first
+        }
+    }
+
+    #[cfg(test)]
+    mod namespace_tests {
+        use super::*;
+        use std::{fs, os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink},
+            panic::{catch_unwind, AssertUnwindSafe}, time::{SystemTime, UNIX_EPOCH}};
+
+        #[test]
+        #[ignore = "requires explicit disposable macOS root/APFS fixture"]
+        fn namespace_creation_seals_umask077_and_preserves_existing_objects() {
+            assert_eq!(unsafe { libc::getuid() }, 0);
+            assert_eq!(unsafe { libc::geteuid() }, 0);
+            // This exact ignored method runs alone with --test-threads=1.
+            // Restore the process mask even if a fixture assertion panics.
+            struct Mask(libc::mode_t);
+            impl Drop for Mask { fn drop(&mut self) { unsafe { libc::umask(self.0); } } }
+            let mask = Mask(unsafe { libc::umask(0o077) });
+            let path = std::env::temp_dir().join(format!("mrk-xcode-namespace-{}-{}",
+                std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+            let now = Instant::now();
+            let mut owner = Namespace::new(now + Duration::from_secs(30), now + Duration::from_secs(40),
+                now + Duration::from_secs(50), 0).unwrap();
+            let raw = unsafe { libc::open(c(path.to_str().unwrap()).unwrap().as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            assert!(raw >= 0, "exclusive fixture parent open");
+            // Actual tempfile may inherit the runner parent's group. Normalize
+            // only this new fixture, before supplying it to the production call.
+            owner.slots[ROOT] = Slot::Owned(raw);
+            let original = fs::symlink_metadata(&path).unwrap();
+            let observed = catch_unwind(AssertUnwindSafe(|| {
+                assert_eq!(unsafe { libc::fchown(raw, 0, 0) }, 0);
+                owner.original[ROOT] = Some(fstat(owner.fd(ROOT).unwrap()).unwrap());
+                owner.protect(ROOT).unwrap();
+                let base = owner.original[ROOT].unwrap();
+                let observed_root = Stat { mode: libc::S_IFDIR | 0o755, flags: 1048576, ..base };
+                assert!(observed_root.directory(None)); // Actual macos26 root: SF_NOUNLINK.
+                for flags in [0, 0x00080000, 0x00100000, 0x00800000, 0x00980000] {
+                    let ancestor = Stat { flags, ..observed_root };
+                    assert!(ancestor.directory(None));
+                    assert_eq!(ancestor.directory(Some(0o755)), flags == 0);
+                }
+                assert!(!Stat { flags: 1, ..observed_root }.directory(None));
+                assert!(!Stat { mode: libc::S_IFDIR | 0o777, ..observed_root }.directory(None));
+                assert!(!Stat { uid: 1, ..observed_root }.directory(None));
+                assert!(!Stat { flags: 0, ..observed_root }.created_private());
+                for wrong in [Stat { uid: 1, ..base }, Stat { gid: 1, ..base },
+                    Stat { flags: 1, ..base }, Stat { mode: libc::S_IFREG | 0o700, ..base }] {
+                    assert!(!wrong.created_private());
+                }
+                owner.mkdir(ROOT, "managed", NAMESPACE, 0o755).unwrap();
+                let created = owner.original[NAMESPACE].unwrap();
+                assert!(created.directory(Some(0o755)));
+                assert!(fstat(owner.fd(NAMESPACE).unwrap()).unwrap() == created);
+                assert!(named(owner.fd(ROOT).unwrap(), c"managed").unwrap() == Some(created));
+                owner.mkdir(NAMESPACE, "pending", PENDING, 0o700).unwrap();
+                assert!(owner.original[PENDING].unwrap().directory(Some(0o700)));
+                let private = Stat { mode: libc::S_IFDIR | 0o700, ..created };
+                assert!(private.sealed_creation(created, created, 0o755));
+                assert!(!private.sealed_creation(Stat { node: Node { inode: created.node.inode + 1, ..created.node }, ..created }, created, 0o755));
+                assert!(!private.sealed_creation(Stat { flags: 1, ..created }, Stat { flags: 1, ..created }, 0o755));
+                // No permission repair of preexisting objects or link targets.
+                fs::DirBuilder::new().mode(0o500).create(path.join("existing")).unwrap();
+                let existing = fs::symlink_metadata(path.join("existing")).unwrap();
+                assert_eq!(owner.mkdir(ROOT, "existing", STAGED, 0o755), Err(Failure::Present));
+                let after = fs::symlink_metadata(path.join("existing")).unwrap();
+                assert_eq!((after.dev(), after.ino(), after.mode()), (existing.dev(), existing.ino(), existing.mode()));
+                symlink("existing", path.join("alias")).unwrap();
+                assert_eq!(owner.mkdir(ROOT, "alias", STAGED, 0o755), Err(Failure::Present));
+                assert_eq!(fs::read_link(path.join("alias")).unwrap(), std::path::Path::new("existing"));
+                assert_eq!(fs::symlink_metadata(path.join("existing")).unwrap().mode(), existing.mode());
+                assert_eq!(owner.mkdir(ROOT, "bad-mode", STAGED, 0o777), Err(Failure::Access));
+                assert!(!path.join("bad-mode").exists());
+                owner.clock.work = Instant::now();
+                assert_eq!(owner.mkdir(ROOT, "late", STAGED, 0o755), Err(Failure::Clock));
+                assert!(!path.join("late").exists());
+            }));
+            // Known original closes precede task-only cleanup even on assertion
+            // failure. A failed/unknown close preserves this exclusive fixture.
+            let settled = owner.settle(None).is_ok() && !owner.unknown()
+                && owner.slots.iter().all(|s| matches!(s, Slot::Vacant | Slot::Closed));
+            drop(mask);
+            let current = fs::symlink_metadata(&path).unwrap();
+            assert!(settled && current.is_dir() && current.dev() == original.dev()
+                && current.ino() == original.ino() && current.uid() == 0,
+                "namespace fixture retained: original settlement/root changed");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::remove_dir_all(&path).unwrap();
+            if let Err(error) = observed { std::panic::resume_unwind(error); }
         }
     }
 }

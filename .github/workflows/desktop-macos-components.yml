@@ -301,8 +301,9 @@ jobs:
               "$native_test" \
               macos_xcode_tree_tests::copier_copies_real_bytes_links_attributes_and_retires_only_its_stage \
               macos_xcode_tree_tests::retirement_checks_recorded_identity_and_never_follows_partial_or_sealed_aliases \
+              macos_xcode_parent::native::namespace_tests::namespace_creation_seals_umask077_and_preserves_existing_objects \
               --exact --ignored --test-threads=1 | tee "$WORK_ROOT/xcode-files-tests.log"
-            grep -Eq '^test result: ok\. 2 passed; 0 failed; 0 ignored;' "$WORK_ROOT/xcode-files-tests.log"
+            grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/xcode-files-tests.log"
             # Both tests consume originals and remove only their own fixture;
             # this succeeds only when that parent is actually empty afterward.
             /bin/rmdir "$WORK_ROOT/xcode-files-fixtures"

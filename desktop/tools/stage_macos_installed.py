@@ -5785,11 +5785,272 @@ def maintenance_noop_recovery_data(value, action):
     return reference
 
 
+def maintenance_restore_recovery_data(value, action):
+    if "restoreRecovery" not in value:
+        return None
+    reference = maintenance_map(value["restoreRecovery"], ("tornInvocation", "receiptInvocation", "receiptSha256"),
+                                "maintenance-restore-reference-shape")
+    need("recovery" not in value and action == "restore-fixed-app"
+         and all(maintenance_hex(reference[key], width) for key, width in
+                 (("tornInvocation", 32), ("receiptInvocation", 32), ("receiptSha256", 64)))
+         and reference["tornInvocation"] != reference["receiptInvocation"] == value["invocation"],
+         "maintenance-restore-reference-binding")
+    return reference
+
+
+def maintenance_restore_identity_data(value):
+    maintenance_map(value, ("device", "inode", "birthSeconds", "birthNanoseconds"), "maintenance-restore-identity")
+    need(all(type(v) is int for v in value.values()) and 0 < value["device"] < 1 << 63
+         and 0 < value["inode"] < 1 << 64 and 0 < value["birthSeconds"] < 1 << 63
+         and 0 <= value["birthNanoseconds"] < 1_000_000_000, "maintenance-restore-identity")
+    return value
+
+
+def maintenance_restore_receipt_data(body, reference, base, base_body, previous, producer):
+    """Native receipt comparison DATA; no permission to read its private stage."""
+    value = maintenance_json(body, 64 * 1024)
+    keys = ("schemaVersion", "kind", "target", "tornInvocation", "previousStateSha256", "previousCapsuleSha256",
+            "root", "stage", "oldState", "stageSha256", "ownAttempt", "attempts")
+    maintenance_map(value, keys, "maintenance-restore-receipt-shape")
+    own = maintenance_map(value["ownAttempt"], ("invocation", "requestId", "identity"), "maintenance-restore-own-shape")
+    need(digest(body) == reference["receiptSha256"] and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["kind"] == "mrk-restore-app-prepublication-preservation-v1" and value["target"] == producer["target"]
+         and base["action"] == "restore-fixed-app" and "recovery" not in base
+         and value["tornInvocation"] == reference["tornInvocation"] == base["invocation"]
+         and value["previousStateSha256"] == digest(previous[1]) and value["previousCapsuleSha256"] == digest(previous[2])
+         and sha(value["stageSha256"]) and own["invocation"] == reference["receiptInvocation"]
+         and maintenance_hex(own["invocation"], 32) and maintenance_hex(own["requestId"], 32)
+         and type(value["attempts"]) is list and 1 <= len(value["attempts"]) < 64, "maintenance-restore-receipt-binding")
+    identities, invocations, requests = set(), {own["invocation"]}, {own["requestId"]}
+    def identity(raw):
+        raw = maintenance_restore_identity_data(raw)
+        pair = (raw["device"], raw["inode"])
+        need(raw["device"] == value["root"]["device"] and pair not in identities, "maintenance-restore-original-alias")
+        identities.add(pair)
+        return {key: raw[key] for key in ("device", "inode", "birthSeconds", "birthNanoseconds")}
+    ordered = {key: value[key] for key in keys}
+    for key in ("root", "stage", "oldState"):
+        ordered[key] = identity(value[key])
+    ordered["ownAttempt"] = {"invocation": own["invocation"], "requestId": own["requestId"], "identity": identity(own["identity"])}
+    rows, prior = [], ""
+    for row in value["attempts"]:
+        maintenance_map(row, ("invocation", "requestId", "intentSha256", "identity"), "maintenance-restore-attempt-shape")
+        need(maintenance_hex(row["invocation"], 32) and maintenance_hex(row["requestId"], 32) and sha(row["intentSha256"])
+             and row["invocation"] > prior and row["invocation"] not in invocations and row["requestId"] not in requests,
+             "maintenance-restore-attempt-binding")
+        prior = row["invocation"]; invocations.add(prior); requests.add(row["requestId"])
+        rows.append({"invocation": prior, "requestId": row["requestId"], "intentSha256": row["intentSha256"], "identity": identity(row["identity"])})
+    ordered["attempts"] = rows
+    need(any(row["invocation"] == base["invocation"] and row["requestId"] == base["requestId"]
+             and row["intentSha256"] == digest(base_body) for row in rows), "maintenance-restore-base-required")
+    need(json.dumps(ordered, separators=(",", ":"), ensure_ascii=False).encode() + b"\n" == body,
+         "maintenance-restore-receipt-canonical")
+    return value
+
+
+def maintenance_restore_retry_body(base, receipt, receipt_body, producer):
+    # Exact native IntentWire/ReleaseData/StateLink order, not sorted-key canonical().
+    release_keys = ("profile", "packageIdentifier", "bundleIdentifier", "packageVersion", "release", "sourceCommit",
+                    "protocolSha256", "runtimeManifestSha256", "inventorySha256", "signingPolicySha256", "packageSha256")
+    own = receipt["ownAttempt"]
+    need(own["invocation"] != base["invocation"] and own["requestId"] != base["requestId"]
+         and ("restoreRecovery" not in base or base["restoreRecovery"]["tornInvocation"] != own["invocation"]),
+         "maintenance-restore-retry-binding")
+    value = {key: base[key] for key in ("schemaVersion", "kind", "target", "invocation", "requestId", "action", "previous", "next", "previousState")}
+    value.update(invocation=own["invocation"], requestId=own["requestId"])
+    for key in ("previous", "next"):
+        value[key] = {name: base[key][name] for name in release_keys}
+    value["previousState"] = {key: base["previousState"][key] for key in ("invocation", "sha256")}
+    value["restoreRecovery"] = {"tornInvocation": base["invocation"], "receiptInvocation": own["invocation"], "receiptSha256": digest(receipt_body)}
+    body = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode() + b"\n"
+    return maintenance_intent_data(body, producer, current=False), body
+
+
+def maintenance_restore_namespace(root_fd, root_identity, current, parsed, records, producer, budget):
+    """Observe only public receipt bytes and original metadata; private600/700 are stat-only."""
+    queue = [(row[0], records[invocation][0]) for invocation, row in parsed.items() if "restoreRecovery" in row[0]]
+    if not queue:
+        return set(), {}
+    # Reserve all <=64 expected16KiB bodies/parsed facts and <=512 names before growth.
+    budget[0] += 64 * (16 * 1024 * 8 + 4096) + 512 * 4096
+    need(budget[0] <= MAINTENANCE_METADATA_BYTES, "maintenance-metadata-budget")
+    groups, originals = {}, {}
+    fact_ids, generated_ids = set(parsed), set()
+    def retain_id(invocation):
+        need(invocation in fact_ids or len(fact_ids) < 64, "maintenance-restore-facts-bound")
+        fact_ids.add(invocation)
+    def stat_name(name, identity=None, modes=(0o444,), limit=16*1024, absent=False):
+        need(name in originals or len(originals) < 512, "maintenance-restore-original-bound")
+        try:
+            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            need(absent, "maintenance-restore-original-missing")
+            observed = None
+        else:
+            need(not absent, "maintenance-restore-original-unexpected")
+            directory = modes == (0o700,)
+            need(info.st_mode in tuple((stat.S_IFDIR if directory else stat.S_IFREG) | mode for mode in modes)
+                 and info.st_uid == info.st_gid == 0 and getattr(info, "st_flags", None) == 0
+                 and info.st_dev == root_identity["device"]
+                 and (directory or info.st_nlink == 1 and 0 <= info.st_size <= limit), "maintenance-restore-original-policy")
+            # Exact birth identity and private content commitments remain native checks.
+            if identity is not None:
+                need((info.st_dev, info.st_ino) == (identity["device"], identity["inode"]), "maintenance-restore-original-identity")
+            observed = signature(info) + (getattr(info, "st_flags", None),)
+        need(name not in originals or originals[name] == observed, "maintenance-restore-original-changed")
+        originals[name] = observed
+        return None if observed is None else info
+    def read_public(name, limit, identity=None):
+        stat_name(name, identity, limit=limit)
+        body = maintenance_metadata_leaf(root_fd, name, limit, budget)
+        stat_name(name, identity, limit=limit)
+        return body
+    while queue:
+        holder, holder_body = queue.pop()
+        holder_id = holder["invocation"]
+        if holder_id in groups:
+            need(groups[holder_id]["holderBody"] == holder_body, "maintenance-restore-holder-conflict")
+            continue
+        need(len(groups) < 63, "maintenance-restore-group-bound")
+        reference = holder["restoreRecovery"]; torn = reference["tornInvocation"]
+        latest_name = ".restore-recovery-" + holder_id + ".json"
+        latest_body = read_public(latest_name, 64*1024)
+        base_name = ".restore-recovery-" + torn + "-" + torn + ".intent.json"
+        base_body = read_public(base_name, 16*1024)
+        base = maintenance_intent_data(base_body, producer, current=False)
+        link = base["previousState"]
+        need(base["invocation"] == torn and link is not None and link == holder["previousState"]
+             and link["invocation"] in parsed and link["sha256"] == digest(records[link["invocation"]][1])
+             and base["previous"] == parsed[link["invocation"]][1]["current"]["release"], "maintenance-restore-base-history")
+        previous = records[link["invocation"]]
+        latest = maintenance_restore_receipt_data(latest_body, reference, base, base_body, previous, producer)
+        retain_id(holder_id)
+        for row in latest["attempts"]: retain_id(row["invocation"])
+        receipts = [(latest, latest_body)]
+        names = {latest_name}
+        for row in latest["attempts"]:
+            if row["invocation"] == torn: continue
+            name = ".restore-recovery-" + row["invocation"] + ".json"
+            raw = read_public(name, 64*1024)
+            ref = {"tornInvocation": torn, "receiptInvocation": row["invocation"], "receiptSha256": digest(raw)}
+            receipts.append((maintenance_restore_receipt_data(raw, ref, base, base_body, previous, producer), raw))
+            names.add(name)
+        receipts.sort(key=lambda pair: len(pair[0]["attempts"]))
+        first = receipts[0][0]
+        base_row = first["attempts"][0]
+        need(base_row["invocation"] == torn and base_row["requestId"] == base["requestId"]
+             and base_row["intentSha256"] == digest(base_body), "maintenance-restore-chain-base")
+        expected = {torn: {"intent": base, "body": base_body, "identity": base_row["identity"]}}
+        for receipt, raw in receipts:
+            need(all(receipt[key] == first[key] for key in ("root", "stage", "oldState", "stageSha256", "tornInvocation"))
+                 and len(receipt["attempts"]) == len(expected), "maintenance-restore-chain-prefix")
+            for row in receipt["attempts"]:
+                old = expected.get(row["invocation"])
+                need(old is not None and row["identity"] == old["identity"] and row["requestId"] == old["intent"]["requestId"]
+                     and row["intentSha256"] == digest(old["body"]), "maintenance-restore-chain-attempt")
+            own_id = receipt["ownAttempt"]["invocation"]
+            need(own_id not in generated_ids and len(generated_ids) < 64, "maintenance-restore-generated-bound")
+            generated_ids.add(own_id)
+            retain_id(own_id)
+            intent, body = maintenance_restore_retry_body(base, receipt, raw, producer)
+            need(intent["invocation"] not in expected and len(expected) < 64
+                 and all(intent["requestId"] != old["intent"]["requestId"] and receipt["ownAttempt"]["identity"] != old["identity"]
+                         for old in expected.values()), "maintenance-restore-chain-own")
+            expected[intent["invocation"]] = {"intent": intent, "body": body, "identity": receipt["ownAttempt"]["identity"]}
+        need(next(reversed(expected)) == holder_id and expected[holder_id]["body"] == holder_body,
+             "maintenance-restore-holder-body")
+        need((latest["root"]["device"], latest["root"]["inode"]) == (root_identity["device"], root_identity["inode"]),
+             "maintenance-restore-root-identity")
+        prior_name = (MAINTENANCE_STATE_NAME if link["invocation"] == current["invocation"] else
+                      ".maintenance-" + link["invocation"] + ".state.json")
+        need(read_public(prior_name, 16*1024, latest["oldState"]) == previous[1], "maintenance-restore-previous-original")
+        stage_name = ".restore-recovery-" + torn + ".stage"
+        stat_name(stage_name, latest["stage"], modes=(0o700,))
+        stat_name(".install-" + torn, absent=True)
+        names.add(stage_name)
+        for invocation, row in expected.items():
+            original_name = ".maintenance-" + invocation + ".intent.json"
+            preserved_name = ".restore-recovery-" + torn + "-" + invocation + ".intent.json"
+            if invocation == holder_id:
+                own_preserved = ".restore-recovery-" + invocation + "-" + invocation + ".intent.json"
+                # Completed holders stay public; a nested holder is exactly the next preserved base.
+                name, other = (original_name, own_preserved) if invocation in parsed else (own_preserved, original_name)
+                need(read_public(name, 16*1024, row["identity"]) == row["body"], "maintenance-restore-own-original")
+                stat_name(other, absent=True)
+            else:
+                stat_name(original_name, absent=True)
+                modes = (0o444,) if invocation == torn else (0o444, 0o600)
+                info = stat_name(preserved_name, row["identity"], modes=modes, limit=len(row["body"]))
+                if stat.S_IMODE(info.st_mode) == 0o444:
+                    need(read_public(preserved_name, 16*1024, row["identity"]) == row["body"], "maintenance-restore-attempt-bytes")
+                names.add(preserved_name)
+        groups[holder_id] = dict(base=base, baseBody=base_body, holder=holder, holderBody=holder_body,
+                                attempts=expected, stage=latest["stage"], names=names)
+        if "restoreRecovery" in base:
+            need(len(queue) < 64, "maintenance-restore-group-bound")
+            queue.append((base, base_body))
+    facts = {inv: (row[0]["requestId"], digest(records[inv][0])) for inv, row in parsed.items()}
+    requests = {value[0]: inv for inv, value in facts.items()}
+    linked, owners, seen, names = set(), {}, {}, set()
+    for holder_id, group in groups.items():
+        base = group["base"]
+        if "restoreRecovery" in base:
+            reference = base["restoreRecovery"]; parent_id = reference["receiptInvocation"]
+            prior = groups.get(parent_id)
+            need(prior is not None and parent_id not in linked and prior["holder"]["restoreRecovery"] == reference
+                 and prior["holderBody"] == group["baseBody"]
+                 and prior["attempts"][parent_id]["identity"] == group["attempts"][base["invocation"]]["identity"]
+                 and prior["base"]["previousState"] == base["previousState"] and prior["base"]["next"] == base["next"],
+                 "maintenance-restore-group-link")
+            linked.add(parent_id)
+        cursor, visited = group, set()
+        while "restoreRecovery" in cursor["base"]:
+            key = cursor["holder"]["invocation"]
+            need(key not in visited, "maintenance-restore-group-cycle")
+            visited.add(key)
+            cursor = groups[cursor["base"]["restoreRecovery"]["receiptInvocation"]]
+        pair = (group["stage"]["device"], group["stage"]["inode"])
+        need(pair not in owners, "maintenance-restore-cross-original")
+        owners[pair] = "stage:" + base["invocation"]
+        for invocation, row in group["attempts"].items():
+            pair = (row["identity"]["device"], row["identity"]["inode"])
+            edge = invocation == base["invocation"] and "restoreRecovery" in base
+            if invocation in seen:
+                old = seen[invocation]
+                need(old[0] == row["identity"] and ((edge and invocation in groups) or invocation == holder_id and old[1]),
+                     "maintenance-restore-cross-attempt")
+            else:
+                need(pair not in owners, "maintenance-restore-cross-original")
+                owners[pair] = invocation; seen[invocation] = (row["identity"], edge)
+            fact = (row["intent"]["requestId"], digest(row["body"]))
+            need(invocation not in facts or invocation in groups and facts[invocation] == fact,
+                 "maintenance-restore-history-reuse")
+            need(fact[0] not in requests or requests[fact[0]] == invocation, "maintenance-restore-request-reuse")
+            need(invocation in facts or len(facts) < 64, "maintenance-restore-facts-bound")
+            facts[invocation] = fact; requests[fact[0]] = invocation
+        need(not names.intersection(group["names"]) and len(names) + len(group["names"]) <= 512,
+             "maintenance-restore-name-overlap")
+        names.update(group["names"])
+    return names, originals
+
+
+def maintenance_restore_post(root_fd, originals):
+    for name, before in originals.items():
+        try:
+            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            need(before is None, "maintenance-restore-original-changed")
+        else:
+            need(before is not None and signature(info) + (getattr(info, "st_flags", None),) == before,
+                 "maintenance-restore-original-changed")
+
+
 def maintenance_state_data(body, producer):
     value = maintenance_json(body, 16 * 1024)
     maintenance_map(value, ("schemaVersion", "kind", "target", "invocation", "requestId", "capsuleInvocation", "intendedAction",
                            "phase", "current", "retained", "previousEvidence", "residue")
-                    + (("recovery",) if "recovery" in value else ()), "maintenance-state-shape")
+                    + (("recovery",) if "recovery" in value else ())
+                    + (("restoreRecovery",) if "restoreRecovery" in value else ()), "maintenance-state-shape")
     maintenance_record_header(value, "mrk-macos-maintenance-state-v2", producer)
     need(value["capsuleInvocation"] == value["invocation"] and type(value["intendedAction"]) is str
          and value["intendedAction"] in MAINTENANCE_ACTIONS and value["phase"] == "mutation-recorded" and value["residue"] is None
@@ -5822,13 +6083,16 @@ def maintenance_state_data(body, producer):
     recovery = maintenance_noop_recovery_data(value, value["intendedAction"])
     need(recovery is None or recovery["stageInvocation"] == value["current"]["instance"]
          and recovery["tornInvocation"] not in links, "maintenance-noop-recovery-state")
+    restore = maintenance_restore_recovery_data(value, value["intendedAction"])
+    need(restore is None or restore["tornInvocation"] not in links, "maintenance-restore-state-binding")
     return value
 
 
 def maintenance_intent_data(body, producer, *, current):
     value = maintenance_json(body, 16 * 1024)
     maintenance_map(value, ("schemaVersion", "kind", "target", "invocation", "requestId", "action", "previous", "next", "previousState")
-                    + (("recovery",) if "recovery" in value else ()), "maintenance-intent-shape")
+                    + (("recovery",) if "recovery" in value else ())
+                    + (("restoreRecovery",) if "restoreRecovery" in value else ()), "maintenance-intent-shape")
     maintenance_record_header(value, "mrk-macos-maintenance-intent-v2", producer)
     maintenance_pair_data(value["action"], value["previous"], value["next"], producer, current=current)
     maintenance_noop_recovery_data(value, value["action"])
@@ -5840,6 +6104,9 @@ def maintenance_intent_data(body, producer, *, current):
         need(maintenance_hex(previous["invocation"], 32) and maintenance_hex(previous["sha256"], 64)
              and previous["invocation"] != value["invocation"] and value["previous"] is not None,
              "maintenance-intent-previous-state")
+    restore = maintenance_restore_recovery_data(value, value["action"])
+    need(restore is None or previous is not None and previous["invocation"] != restore["tornInvocation"],
+         "maintenance-restore-intent-binding")
     return value
 
 
@@ -5910,6 +6177,7 @@ def maintenance_history_data(result, records, producer):
              and intent["requestId"] == state["requestId"] == capsule["requestId"] and intent["requestId"] not in requests
              and intent["action"] == state["intendedAction"] == capsule["intendedAction"]
              and intent.get("recovery") == state.get("recovery")
+             and intent.get("restoreRecovery") == state.get("restoreRecovery")
              and intent["previous"] == capsule["previous"] and intent["next"] == capsule["next"] == state["current"]["release"]
              and capsule["intentSha256"] == digest(bodies[0]) and capsule["stateSha256"] == digest(bodies[1]),
              "maintenance-linked-records")
@@ -6629,6 +6897,9 @@ def observation_command(args, *, expected_previous=None, expected_restore_previo
                      and not current["retained"] and not current["previousEvidence"] and len(parsed) == 1,
                      "original-release-readback-not-fresh")
             names, stages = maintenance_roster_data(current, parsed, selection.target)
+            restore_names, restore_originals = maintenance_restore_namespace(root_fd, root_identity, current, parsed, records, producer, budget)
+            need(not names.intersection(restore_names) and len(names) + len(restore_names) <= 512, "maintenance-restore-root-roster")
+            names.update(restore_names)
             need(set(os.listdir(root_fd)) == names, "maintenance-root-roster")
             stage_originals = []
             for stage in sorted(stages):
@@ -6659,6 +6930,7 @@ def observation_command(args, *, expected_previous=None, expected_restore_previo
                 final = os.stat(stage, dir_fd=root_fd, follow_symlinks=False)
                 maintenance_directory_identity(final, 0o700)
                 need(signature(final) == original, "maintenance-root-roster-changed")
+            maintenance_restore_post(root_fd, restore_originals)
             need(set(os.listdir(root_fd)) == names, "maintenance-root-roster-changed")
     # No result is returned until every acquired original above has closed.
     if update:

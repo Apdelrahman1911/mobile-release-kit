@@ -11377,6 +11377,87 @@ def maintenance_documents(actions=("fresh-install",), *, target="aarch64-apple-d
     return producer, records, result
 
 
+def maintenance_restore_fixture(producer, records, result, root_identity, *, nested=False, repeated=False, cross_alias=False):
+    """Native-shaped synthetic receipt forest; no Rust execution or private-body evidence."""
+    records = dict(records)
+    invocation = sorted(records)[1]
+    intent, state, capsule = [TOOL.decode(body) for body in records[invocation]]
+    previous = intent["previousState"]["invocation"]
+    files, facts, names, groups = {}, {}, set(), []
+    def identity(inode):
+        return dict(device=root_identity["device"], inode=inode, birthSeconds=1, birthNanoseconds=0)
+    root = identity(root_identity["inode"]); old_state = identity(8000)
+    def body(value): return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode() + b"\n"
+    def native_intent(value):
+        keys = ("schemaVersion", "kind", "target", "invocation", "requestId", "action", "previous", "next", "previousState")
+        release = ("profile", "packageIdentifier", "bundleIdentifier", "packageVersion", "release", "sourceCommit",
+                   "protocolSha256", "runtimeManifestSha256", "inventorySha256", "signingPolicySha256", "packageSha256")
+        ordered = {key: value[key] for key in keys}
+        for key in ('previous', 'next'): ordered[key] = {k: value[key][k] for k in release}
+        ordered['previousState'] = {k: value['previousState'][k] for k in ('invocation', 'sha256')}
+        if 'restoreRecovery' in value: ordered['restoreRecovery'] = {k: value['restoreRecovery'][k] for k in ('tornInvocation','receiptInvocation','receiptSha256')}
+        return body(ordered)
+    def file(name, raw, original=None, mode=0o444):
+        inode = original['inode'] if original else 20000 + len(facts)
+        files[name] = raw
+        facts[name] = log_info(len(raw), st_dev=root['device'], st_ino=inode, st_mode=stat.S_IFREG|mode,
+                               st_uid=0, st_gid=0, st_nlink=1, st_flags=0)
+    base = copy.deepcopy(intent); base.update(invocation=f'{100:032x}',requestId=f'{1100:032x}')
+    base_raw = native_intent(base); base_identity = identity(10000)
+    final_raw = None
+    for group_index in range(2 if nested else 1):
+        torn = base['invocation']; stage = identity(9000+(0 if cross_alias else group_index))
+        stage_name = '.restore-recovery-'+torn+'.stage'
+        facts[stage_name] = log_info(st_dev=root['device'],st_ino=stage['inode'],st_mode=stat.S_IFDIR|0o700,
+                                     st_uid=0,st_gid=0,st_nlink=3,st_flags=0)
+        names.add(stage_name)
+        base_name = '.restore-recovery-'+torn+'-'+torn+'.intent.json'
+        file(base_name,base_raw,base_identity);names.add(base_name)
+        expected = [(base,base_raw,base_identity)]
+        holder_id = f'{200:032x}' if nested and group_index == 0 else invocation
+        own_ids = ([f'{110+group_index*100:032x}'] if repeated else []) + [holder_id]
+        for own_index, own_id in enumerate(own_ids):
+            request = intent['requestId'] if own_id == invocation else f'{int(own_id,16)+1000:032x}'
+            own_identity = identity(10000+int(own_id,16))
+            receipt = dict(schemaVersion=1,kind='mrk-restore-app-prepublication-preservation-v1',target=producer['target'],
+                tornInvocation=torn,previousStateSha256=TOOL.digest(records[previous][1]),previousCapsuleSha256=TOOL.digest(records[previous][2]),
+                root=root,stage=stage,oldState=old_state,stageSha256='0'*64,
+                ownAttempt=dict(invocation=own_id,requestId=request,identity=own_identity),
+                attempts=sorted([dict(invocation=i['invocation'],requestId=i['requestId'],intentSha256=TOOL.digest(raw),identity=ident)
+                                 for i,raw,ident in expected],key=lambda row:row['invocation']))
+            receipt_raw = body(receipt); receipt_name='.restore-recovery-'+own_id+'.json'
+            file(receipt_name,receipt_raw);names.add(receipt_name)
+            retry=copy.deepcopy(base);retry.update(invocation=own_id,requestId=request,
+                restoreRecovery=dict(tornInvocation=torn,receiptInvocation=own_id,receiptSha256=TOOL.digest(receipt_raw)))
+            retry_raw=native_intent(retry);expected.append((retry,retry_raw,own_identity))
+            if own_id != holder_id:
+                name='.restore-recovery-'+torn+'-'+own_id+'.intent.json'
+                file(name,retry_raw[:11],own_identity,mode=0o600);names.add(name)
+        groups.append((receipt,receipt_raw,base,base_raw))
+        base,base_raw,base_identity=expected[-1]
+        final_raw=base_raw
+    state['restoreRecovery']=copy.deepcopy(base['restoreRecovery'])
+    state_raw=TOOL.canonical(state)+b'\n';capsule.update(intentSha256=TOOL.digest(final_raw),stateSha256=TOOL.digest(state_raw))
+    records[invocation]=(final_raw,state_raw,TOOL.canonical(capsule)+b'\n')
+    # Rebind later ordinary successful history without creating new recovery references.
+    evidence=[]
+    for key in sorted(records):
+        old_intent,old_state_doc,old_capsule=[TOOL.decode(raw) for raw in records[key]]
+        if key > invocation:
+            old_intent['previousState']['sha256']=TOOL.digest(records[old_intent['previousState']['invocation']][1])
+            old_state_doc['previousEvidence']=copy.deepcopy(evidence)
+            ir,sr=TOOL.canonical(old_intent)+b'\n',TOOL.canonical(old_state_doc)+b'\n'
+            old_capsule.update(intentSha256=TOOL.digest(ir),stateSha256=TOOL.digest(sr))
+            records[key]=(ir,sr,TOOL.canonical(old_capsule)+b'\n')
+        hashes=dict(zip(('intentSha256','stateSha256','capsuleSha256'),map(TOOL.digest,records[key])))
+        evidence.append(dict(invocation=key,**hashes))
+    result={**result,**hashes}
+    file('.maintenance-'+previous+'.state.json',records[previous][1],old_state)
+    file('.maintenance-'+invocation+'.intent.json',final_raw,base_identity)
+    return SimpleNamespace(records=records,result=result,files=files,facts=facts,names=names,groups=groups,
+                           private={name for name,info in facts.items() if stat.S_IMODE(info.st_mode) in (0o600,0o700)})
+
+
 def export_document(*, fixture=False, result=None):
     if not fixture:
         return maintenance_documents()[2] if result is None else result
@@ -13663,6 +13744,113 @@ class MacInstalledData(unittest.TestCase):
                 fresh["recovery"] = copy.deepcopy(current["recovery"])
                 with self.assertRaises(TOOL.Refused): reader(TOOL.canonical(fresh))
 
+    @contextlib.contextmanager
+    def restore_namespace_model(self, fixture):
+        reads=[]
+        def named(name, *, dir_fd, follow_symlinks):
+            self.assertEqual(dir_fd,100);self.assertIs(follow_symlinks,False)
+            if name not in fixture.facts: raise FileNotFoundError(2,'inert fixed-name absence')
+            return fixture.facts[name]
+        def read(fd,name,limit):
+            self.assertEqual(fd,100);self.assertNotIn(name,fixture.private)
+            raw=fixture.files[name];self.assertLessEqual(len(raw),limit);reads.append(name)
+            return raw,fixture.facts[name]
+        api=mock.Mock(wraps=TOOL.os);api.stat.side_effect=named
+        api.open.side_effect=AssertionError('no private original opens in this observer model')
+        with mock.patch.object(TOOL,'os',api),mock.patch.object(TOOL,'installation_metadata_leaf',side_effect=read):
+            yield reads
+
+    def test_restore_recovery_references_and_receipts_keep_native_shapes(self):
+        for target in TOOL.MAC_TARGETS:
+            producer,records,result=maintenance_documents(('fresh-install','restore-fixed-app'),target=target,launcher=True,recovery=True)
+            selected=TOOL.maintenance_producer_data(TOOL.canonical(producer),target=target)
+            root=dict(device=1,inode=100)
+            fixture=maintenance_restore_fixture(producer,records,result,root,repeated=True)
+            current,parsed=TOOL.maintenance_history_data(fixture.result,fixture.records,selected)
+            receipt,raw,base,base_raw=fixture.groups[-1]
+            prior=fixture.records[base['previousState']['invocation']]
+            reference=current['restoreRecovery']
+            self.assertEqual(TOOL.maintenance_restore_receipt_data(raw,reference,base,base_raw,prior,selected),receipt)
+            self.assertEqual(receipt['stageSha256'],'0'*64)  # Native sha(), unlike reference digest, permits zero DATA.
+            for field,value in (('restoreRecovery',None),('recovery',dict(stageInvocation='a'*32,tornInvocation='b'*32,receiptSha256='c'*64))):
+                wrong=copy.deepcopy(parsed[current['invocation']][0]);wrong[field]=value
+                with self.subTest(field=field),self.assertRaises(TOOL.Refused):
+                    TOOL.maintenance_intent_data(TOOL.canonical(wrong),selected,current=True)
+            for field,value in (('receiptInvocation','e'*32),('receiptSha256','0'*64),('tornInvocation',current['invocation'])):
+                wrong=copy.deepcopy(current);wrong['restoreRecovery'][field]=value
+                with self.subTest(field=field),self.assertRaises(TOOL.Refused):TOOL.maintenance_state_data(TOOL.canonical(wrong),selected)
+            mutations=(lambda v:v.update(extra=True),lambda v:v.update(stageSha256='x'*64),
+                       lambda v:v['root'].update(device=0),lambda v:v['root'].update(inode=1<<64),
+                       lambda v:v['stage'].update(inode=v['root']['inode']),
+                       lambda v:v['ownAttempt'].update(requestId=v['attempts'][0]['requestId']),
+                       lambda v:v['attempts'].reverse(),lambda v:v.update(previousStateSha256='f'*64),
+                       lambda v:v['attempts'][0].update(intentSha256='0'*64))
+            for change in mutations:
+                wrong=copy.deepcopy(receipt);change(wrong)
+                data=json.dumps(wrong,separators=(',',':')).encode()+b'\n'
+                ref=dict(reference,receiptSha256=TOOL.digest(data))
+                with self.assertRaises(TOOL.Refused):TOOL.maintenance_restore_receipt_data(data,ref,base,base_raw,prior,selected)
+            for data in (TOOL.canonical(receipt)+b'\n',raw[:-1],b' '+raw):
+                ref=dict(reference,receiptSha256=TOOL.digest(data))
+                with self.assertRaises(TOOL.Refused):TOOL.maintenance_restore_receipt_data(data,ref,base,base_raw,prior,selected)
+
+    def test_restore_recovery_public_namespace_closes_repeated_nested_and_historical_groups(self):
+        for target in TOOL.MAC_TARGETS:
+            for repeated,nested,later in ((False,False,False),(True,False,False),(True,True,False),(True,True,True)):
+                with self.subTest(target=target,repeated=repeated,nested=nested,later=later):
+                    actions=('fresh-install','restore-fixed-app')+(('same-package-noop',) if later else ())
+                    producer,records,result=maintenance_documents(actions,target=target,launcher=True,recovery=True)
+                    selected=TOOL.maintenance_producer_data(TOOL.canonical(producer),target=target)
+                    root=dict(device=1,inode=100)
+                    fixture=maintenance_restore_fixture(producer,records,result,root,repeated=repeated,nested=nested)
+                    current,parsed=TOOL.maintenance_history_data(fixture.result,fixture.records,selected)
+                    with self.restore_namespace_model(fixture) as reads:
+                        budget=[0]
+                        names,originals=TOOL.maintenance_restore_namespace(100,root,current,parsed,fixture.records,selected,budget)
+                        self.assertEqual(names,fixture.names);self.assertLessEqual(budget[0],TOOL.MAINTENANCE_METADATA_BYTES)
+                        self.assertTrue(fixture.private.isdisjoint(reads))
+                        TOOL.maintenance_restore_post(100,originals)
+                        stage=next(name for name in fixture.private if name.endswith('.stage'))
+                        fixture.facts[stage]=log_info(st_dev=1,st_ino=99999,st_mode=stat.S_IFDIR|0o700,st_uid=0,st_gid=0,st_flags=0)
+                        with self.assertRaisesRegex(TOOL.Refused,'maintenance-restore-original-changed'):
+                            TOOL.maintenance_restore_post(100,originals)
+
+    def test_restore_recovery_missing_or_foreign_originals_and_bounds_refuse(self):
+        for fault in ('missing-receipt','changed-receipt','private-base','sealed-prefix','wrong-stage','own-alias','old-state','budget','extra-root','cross-group-alias'):
+            with self.subTest(fault=fault):
+                producer,records,result=maintenance_documents(('fresh-install','restore-fixed-app'),launcher=True,recovery=True)
+                selected=TOOL.maintenance_producer_data(TOOL.canonical(producer),target=TOOL.ARM_TARGET)
+                root=dict(device=1,inode=100)
+                # Alias case is fully rebuilt: both native-shaped receipts, own intent hashes and live stat tuples agree locally.
+                fixture=maintenance_restore_fixture(producer,records,result,root,repeated=True,nested=True,cross_alias=fault=='cross-group-alias')
+                current,parsed=TOOL.maintenance_history_data(fixture.result,fixture.records,selected)
+                if fault=='missing-receipt': fixture.facts.pop('.restore-recovery-'+f'{110:032x}'+'.json')
+                elif fault=='changed-receipt': fixture.files['.restore-recovery-'+current['invocation']+'.json']+=b' '
+                elif fault=='private-base':
+                    name='.restore-recovery-'+f'{100:032x}'+'-'+f'{100:032x}'+'.intent.json'
+                    fixture.facts[name]=log_info(len(fixture.files[name]),st_dev=1,st_ino=10000,st_mode=stat.S_IFREG|0o600,st_uid=0,st_gid=0,st_flags=0)
+                elif fault=='sealed-prefix':
+                    name='.restore-recovery-'+f'{100:032x}'+'-'+f'{110:032x}'+'.intent.json'
+                    fixture.private.remove(name)
+                    fixture.facts[name]=log_info(len(fixture.files[name]),st_dev=1,st_ino=10110,st_mode=stat.S_IFREG|0o444,st_uid=0,st_gid=0,st_flags=0)
+                elif fault=='wrong-stage':
+                    name='.restore-recovery-'+f'{200:032x}'+'.stage'
+                    fixture.facts[name]=log_info(st_dev=1,st_ino=999,st_mode=stat.S_IFDIR|0o700,st_uid=0,st_gid=0,st_flags=0)
+                elif fault=='own-alias':
+                    name='.maintenance-'+current['invocation']+'.intent.json';info=fixture.facts[name]
+                    fixture.facts[name]=log_info(info.st_size,st_dev=1,st_ino=info.st_ino,st_nlink=2,st_mode=info.st_mode,st_uid=0,st_gid=0,st_flags=0)
+                elif fault=='old-state': fixture.files['.maintenance-'+f'{1:032x}'+'.state.json']+=b' '
+                with self.restore_namespace_model(fixture):
+                    if fault=='extra-root':
+                        names,_=TOOL.maintenance_restore_namespace(100,root,current,parsed,fixture.records,selected,[0])
+                        ordinary,_=TOOL.maintenance_roster_data(current,parsed,TOOL.ARM_TARGET)
+                        self.assertNotIn('.restore-recovery-unbound.stage',names|ordinary)
+                    else:
+                        reason = "^maintenance-restore-cross-original$" if fault=="cross-group-alias" else "maintenance-"
+                        with self.assertRaisesRegex(TOOL.Refused, reason):
+                            TOOL.maintenance_restore_namespace(100,root,current,parsed,fixture.records,selected,
+                                                             [TOOL.MAINTENANCE_METADATA_BYTES] if fault=='budget' else [0])
+
     def test_same_package_readback_requires_actual_immediate_previous_state(self):
         for target in TOOL.MAC_TARGETS:
             for actions in (("fresh-install", "same-package-noop"), ("fresh-install", "same-package-noop", "same-package-noop")):
@@ -13688,10 +13876,11 @@ class MacInstalledData(unittest.TestCase):
         # reducers execute. No fake FD below reaches the host and no installed
         # ownership, signature, native Installer or Store qualification is made.
         for target in TOOL.MAC_TARGETS:
-            for fault in (None, "recovery", "default", "previous", "status", "current-bytes"):
+            for fault in (None, "recovery", "restore-recovery", "restore-extra", "restore-post", "default", "previous", "status", "current-bytes"):
                 with self.subTest(target=target, ordinary_readback=fault):
-                    producer, old_records, result = maintenance_documents(("fresh-install", "same-package-noop"), target=target,
-                                                                         launcher=True, recovery=fault == "recovery")
+                    restoring = fault in ("restore-recovery", "restore-extra", "restore-post")
+                    producer, old_records, result = maintenance_documents(("fresh-install", "restore-fixed-app" if restoring else "same-package-noop"), target=target,
+                                                                         launcher=True, recovery=restoring or fault == "recovery")
                     release = producer["releaseSet"]["current"]
                     selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
                     record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
@@ -13725,6 +13914,8 @@ class MacInstalledData(unittest.TestCase):
                                   "capsuleSha256": TOOL.digest(capsule_body)}
                         evidence.append({"invocation": invocation, **hashes})
                     result = {**result, **hashes}
+                    restore = maintenance_restore_fixture(producer, records, result, root_identity, repeated=True, nested=True) if restoring else None
+                    if restore is not None: records, result = restore.records, restore.result
                     descriptor, signed = TOOL.canonical(producer), b"inert-public-signature"
                     current, parsed = TOOL.maintenance_history_data(result, records,
                         TOOL.maintenance_producer_data(descriptor, target=target))
@@ -13738,6 +13929,8 @@ class MacInstalledData(unittest.TestCase):
                     args.expected_inventory, args.expected_manifest = inventory_hash, manifest_hash
                     export = TOOL.canonical(result) + b"\n"
                     names, stages = TOOL.maintenance_roster_data(current, parsed, target)
+                    if restore is not None: names.update(restore.names)
+                    if fault == "restore-extra": names.add(".restore-recovery-unbound.stage")
                     descriptor_name, signature_name = TOOL.maintenance_control_names(target, selection.release)
                     metadata = {(100, TOOL.MAINTENANCE_STATE_NAME): records[current["invocation"]][1],
                                 (100, TOOL.MAINTENANCE_GATE_NAME): TOOL.MAINTENANCE_GATE_BYTES,
@@ -13750,6 +13943,8 @@ class MacInstalledData(unittest.TestCase):
                         metadata[(100, ".maintenance-" + invocation + ".capsule.json")] = capsule_body
                         if invocation != current["invocation"]:
                             metadata[(100, ".maintenance-" + invocation + ".state.json")] = state_body
+                    if restore is not None:
+                        metadata.update({(100, name): body for name, body in restore.files.items() if name not in restore.private})
                     payload = {row["path"]: (b"x", 0o555 if row["executable"] else 0o444) for row in inventory_data["files"]}
                     if fault == "current-bytes":
                         payload["app/Contents/Info.plist"] = (b"y", 0o444)
@@ -13779,6 +13974,7 @@ class MacInstalledData(unittest.TestCase):
                         finally:
                             closed.append(child)
                     def metadata_read(fd, name, limit):
+                        if restore is not None: self.assertNotIn(name, restore.private)
                         body = metadata[(fd, name)]
                         self.assertLessEqual(len(body), limit)
                         return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
@@ -13793,6 +13989,9 @@ class MacInstalledData(unittest.TestCase):
                         self.assertEqual(mac_store_prefix, "store" if path.name == "runtime" else None)
                         prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
                                   TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
+                        if fault == "restore-post":
+                            stage = next(name for name in restore.private if name.endswith(".stage"))
+                            restore.facts[stage] = log_info(st_dev=root_identity["device"], st_ino=99999, st_mode=stat.S_IFDIR|0o700, st_uid=0, st_gid=0, st_flags=0)
                         return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
                     api = mock.Mock(wraps=TOOL.os)
                     api.O_DIRECTORY = TOOL.os.O_DIRECTORY
@@ -13802,7 +14001,9 @@ class MacInstalledData(unittest.TestCase):
                         103: {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME}}.__getitem__
                     api.fstat.side_effect = lambda fd: log_info(st_ino=fd, st_mode=stat.S_IFDIR | 0o755)
                     def stage_stat(name, *, dir_fd, follow_symlinks):
-                        self.assertEqual(dir_fd, 100); self.assertIn(name, stages); self.assertIs(follow_symlinks, False)
+                        self.assertEqual(dir_fd, 100); self.assertIs(follow_symlinks, False)
+                        if restore is not None and name in restore.facts: return restore.facts[name]
+                        if name not in stages: raise FileNotFoundError(2, "inert exact-name absence")
                         return log_info(st_dev=root_identity["device"], st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0, st_flags=0)
                     api.stat.side_effect = stage_stat
                     # ExitStack avoids Python's static nested-block limit and
@@ -13821,19 +14022,22 @@ class MacInstalledData(unittest.TestCase):
                         generation_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_generation_readback", wraps=TOOL.maintenance_generation_readback))
                         if fault == "previous": expected["sha256"] = "f" * 64
                         reason = {"previous": "same-package-immediate-predecessor", "status": "installer-status-not-original-zero",
-                                  "current-bytes": "installed-byte-mode-correspondence"}.get(fault)
+                                  "current-bytes": "installed-byte-mode-correspondence", "restore-extra": "maintenance-root-roster",
+                                  "restore-post": "maintenance-restore-original-changed"}.get(fault)
                         if reason is not None:
                             with self.assertRaisesRegex(TOOL.Refused, reason):
-                                TOOL.observation_command(args, expected_previous=expected)
+                                TOOL.observation_command(args, expected_previous=None if restoring else expected)
                         else:
-                            observed = TOOL.observation_command(args) if fault == "default" else TOOL.observation_command(args, expected_previous=expected)
+                            observed = TOOL.observation_command(args) if fault == "default" or restoring else TOOL.observation_command(args, expected_previous=expected)
                             self.assertEqual(observed["originalInstallerResult"], result)
                             self.assertEqual(observed["nonrootReadbackFileCount"], 7)
                             self.assertIs(observed["originalInstallerReturnedZero"], True)
-                            self.assertEqual("samePackagePredecessorMatched" in observed, fault != "default")
+                            self.assertEqual("samePackagePredecessorMatched" in observed, fault != "default" and not restoring)
                             if fault is None:
                                 self.assertIs(observed["samePackagePredecessorMatched"], True)
                                 ordinary_shape = {key: value for key, value in observed.items() if key != "samePackagePredecessorMatched"}
+                            elif restoring:
+                                self.assertEqual(observed["historicalOuterExit"], "unverified")
                             elif fault == "recovery":
                                 self.assertIs(observed["samePackagePredecessorMatched"], True)
                                 self.assertEqual(observed["historicalOuterExit"], "unverified")
@@ -13841,7 +14045,7 @@ class MacInstalledData(unittest.TestCase):
                                 self.assertEqual(observed, ordinary_shape)
                         self.assertEqual(producer_read.call_count, 0 if fault == "status" else 1)
                         self.assertEqual(history.call_count, 0 if fault == "status" else 1)
-                        self.assertEqual(generation_read.call_count, 0 if fault in ("status", "previous") else 1)
+                        self.assertEqual(generation_read.call_count, 0 if fault in ("status", "previous", "restore-extra") else 1)
                     self.assertEqual(closed, list(reversed(entered)))
                     for model in channel_models:
                         self.assertEqual(model.closed, list(reversed(model.opened)))
