@@ -55,9 +55,12 @@ APP_ABSENCE_PHASES = ("prepare-app-absence", "app-absence-restore")
 UPDATE_REF = "refs/heads/verify/desktop-macos-positive-update"
 UPDATE_PHASE = "update-baseline"
 UPDATE_ROLES = ("update-baseline-attach", "update-baseline-installer", "update-baseline-detach")
+XCODE_SETUP_VERIFY = "verify-xcode-setup-package"
+XCODE_SETUP_VERIFY_ROLES = ("setup-signature-before", "setup-installer-first", "setup-installer-repeat", "setup-signature-after")
+XCODE_SETUP_VERIFY_TIMEOUTS = (30, 3900, 900, 30)
 SAME_PACKAGE_PHASE = "same-package-noop"
 SAME_PACKAGE_ROLES = ("distribution-attach", "installer", "distribution-detach")
-PHASES = ("prepare", "verify-before", "verify-after", "package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE) + APP_ABSENCE_PHASES
+PHASES = ("prepare", "verify-before", "verify-after", "package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE, XCODE_SETUP_VERIFY) + APP_ABSENCE_PHASES
 REMOVE_PHASES = ("finalize-remove-package", "package-remove", "finalize-remove-image")
 REMOVE_PACKAGE_ROLES = ("producer-build", "producer-emitter", "distribution-create", "distribution-sign",
                         "distribution-verify-signature", "distribution-verify-image")
@@ -706,6 +709,36 @@ def installer_identity(identity_body, certificate_body, selection, certificates)
          and set(values) == set(certificates), "installer-private-source-certificates")
 
 
+_SETUP_DIAGNOSTIC_STAGES = frozenset((
+    "input", "source", "self", "carrier", "selection", "source-apple", "staged-apple", "final-apple",
+    "facts", "census", "copy", "record", "retire-tree", "current", "source-post", "files-settle", "source-settle",
+    "loans-settle", "reply", "endpoint-settle", "namespace", "reservation", "child", "publication",
+    "namespace-settle", "finality"))
+_SETUP_DIAGNOSTIC_REASONS = frozenset(("clock", "access", "bounds", "state", "binding", "present",
+    "read", "write", "sync", "close", "child", "unknown"))
+
+
+def setup_installer_diagnostics(stdout, stderr):
+    """Only A's compiled public tokens; surrounding Installer text is discarded."""
+    need(type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= 256 * 1024,
+         "setup-verification-diagnostic-bound")
+    found = []
+    pattern = rb"(?:^|[ \t])MRK_XCODE_SETUP_REFUSED=scope=([a-z]+);stage=([a-z-]+);reason=([a-z]+)(?=\r?$)"
+    for body in (stdout, stderr):
+        for line in body.splitlines():
+            if len(line) > 4096:
+                continue
+            match = re.search(pattern, line)
+            if match is None:
+                continue
+            scope, stage, reason = (value.decode("ascii") for value in match.groups())
+            if scope in ("public", "child") and stage in _SETUP_DIAGNOSTIC_STAGES and reason in _SETUP_DIAGNOSTIC_REASONS:
+                value = {"scope": scope, "stage": stage, "reason": reason}
+                if value not in found and len(found) < 4:
+                    found.append(value)
+    return {"available": bool(found), "observations": found}
+
+
 def package_signature_data(body, selection, certificates, path, *, after_staple=False):
     """Closed pkgutil trust/timestamp/complete-chain projection; no raw output."""
     need(type(body) is bytes and 0 < len(body) <= 65536 and body.endswith(b"\n")
@@ -805,14 +838,21 @@ def package_staple_observation_data(value):
 
 
 def final_package_receipt(body, environment, target, selection, profile_sha, notary_sha, package_size, package_sha,
-                          image_release, release_sha, *, remove=False, runtime_stager=None):
+                          image_release, release_sha, *, remove=False, runtime_stager=None, setup=False, setup_originals=None):
     """Closed preceding original observation AND the current immutable P.
 
     This is not a stand-alone cryptographic authority. The fixed workflow also
     requires the actual earlier helper0 and its held status original; this
     consumer repeats the complete Scripts audit before invoking the producer.
     """
-    need(type(remove) is bool and not (remove and runtime_stager is not None), "final-package-receipt-purpose")
+    need(type(remove) is bool and type(setup) is bool
+         and not (remove and runtime_stager is not None)
+         and (not setup and setup_originals is None or setup and not remove and runtime_stager is None
+              and environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image"
+              and environment.get("MRK_MACOS_STORE_RUNTIME") is None
+              and type(setup_originals) is dict
+              and set(setup_originals) == {"helperSha256", "bomSha256", "payloadSha256"}
+              and all(tool_hex(v) for v in setup_originals.values())), "final-package-receipt-purpose")
     value = final_package_json(body, 16384, "final-package-receipt-json")
     keys = {"schemaVersion", "phase", "target", "source", "packageRole", "workflowSource", "workflow", "runId", "runAttempt",
             "toolchain", "helperIdentifier", "originalCalls", "credentialOriginals", "credentialContexts", "targetRetired",
@@ -823,7 +863,7 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
         package_staple_observation_data(value["packageStapleObservation"])
         keys.add("packageStapleObservation")
     need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
-         and value["phase"] == ("finalize-remove-package" if remove else "finalize-package") and value["target"] == target and target in (ARM_TARGET, INTEL_TARGET)
+         and value["phase"] == ("finalize-xcode-setup-package" if setup else "finalize-remove-package" if remove else "finalize-package") and value["target"] == target and target in (ARM_TARGET, INTEL_TARGET)
          and value["source"] == environment["GITHUB_SHA"] == value["workflowSource"]
          and value["workflow"] == environment["GITHUB_WORKFLOW_REF"]
          and value["runId"] == environment["GITHUB_RUN_ID"] and value["runAttempt"] == environment["GITHUB_RUN_ATTEMPT"]
@@ -836,7 +876,7 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
                                                   "developerIdOrNotarizationQualified", "productReady"))
          and value["directStagerIOPending"] is None and value["cleanupErrors"] == [], "final-package-receipt-finality")
     calls, auxiliary = value["originalCalls"], value["credentialOriginals"]
-    roles = final_package_roles(remove, value["packageRole"])
+    roles = final_package_roles(remove, value["packageRole"], setup=setup)
     need(type(calls) is list and len(calls) == len(roles)
          and type(auxiliary) is list and len(auxiliary) == len(INSTALLER_CREDENTIAL_ROSTER), "final-package-receipt-original-count")
     def sha(item):
@@ -865,27 +905,36 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
               "teamId", "certificateSha256", "submissionId", "status", "sha256Compared", "errorCount", "warningCount", "ticketRowCount", "logSha256",
               "trustedSignatureBeforeAndAfter", "trustedTimestampBeforeAndAfter", "actualStaplerValidation", "signedPrefixUnchanged",
               "completeScriptsAudited", "assurance"}
+    if setup:
+        fields.update(("helperSha256", "bomSha256", "payloadSha256", "finalDestinationPayloadEntries"))
     need(type(final) is dict and set(final) == fields and type(final["schemaVersion"]) is int and final["schemaVersion"] == 1
-         and final["kind"] == ("mrk-final-remover-package" if remove else "mrk-final-installer-package") and final["teamId"] == selection["teamId"]
+         and final["kind"] == ("mrk-final-xcode-setup-package" if setup else "mrk-final-remover-package" if remove else "mrk-final-installer-package") and final["teamId"] == selection["teamId"]
          and final["certificateSha256"] == [selection[key] for key in ("leafSha256", "issuerSha256", "rootSha256")]
          and final["installerProfileSha256"] == profile_sha and final["notaryProfileSha256"] == notary_sha,
          "final-package-receipt-signing-source")
-    need(all(type(final[key]) is int and 0 < final[key] <= 512 * 1024 * 1024 for key in ("unsignedBytes", "signedBytes", "packageBytes"))
+    need(all(type(final[key]) is int and 0 < final[key] <= (68 if setup else 512) * 1024 * 1024 for key in ("unsignedBytes", "signedBytes", "packageBytes"))
          and final["signedBytes"] < final["packageBytes"] <= final["signedBytes"] + 1024 * 1024
          and final["packageBytes"] == package_size and final["packageSha256"] == package_sha
          and type(final["packageMode"]) is int and final["packageMode"] == 0o444
          and type(final["scriptFileCount"]) is int
-         and (final["scriptFileCount"] == 2 if remove else 0 < final["scriptFileCount"] <= (runtime_stager.MAX_FILES if runtime_stager is not None else 4096))
+         and (final["scriptFileCount"] == 4 if setup else final["scriptFileCount"] == 2 if remove else 0 < final["scriptFileCount"] <= (runtime_stager.MAX_FILES if runtime_stager is not None else 4096))
          and all(sha(final[key]) for key in ("unsignedSha256", "signedSha256", "packageSha256", "originalPackageSha256",
                                            "packageInfoSha256", "installerProfileSha256", "notaryProfileSha256", "logSha256")),
          "final-package-receipt-byte-correspondence")
+    if setup:
+        # These hashes come from the independently audited current component,
+        # never from this receipt itself or a renderer/ambient nomination.
+        need(all(final[key] == expected for key, expected in setup_originals.items())
+             and type(final["finalDestinationPayloadEntries"]) is int
+             and final["finalDestinationPayloadEntries"] == 4, "setup-receipt-originals")
     need(final["status"] == "Accepted" and notary_uuid(final["submissionId"]) == final["submissionId"]
          and type(final["sha256Compared"]) is bool and type(final["errorCount"]) is int and final["errorCount"] == 0
          and all(type(final[key]) is int and 0 <= final[key] <= 2048 for key in ("warningCount", "ticketRowCount"))
          and value["notarySubmission"] == {"id": final["submissionId"], "status": "Accepted"}
          and all(final[key] is True for key in ("trustedSignatureBeforeAndAfter", "trustedTimestampBeforeAndAfter", "actualStaplerValidation",
                                                "signedPrefixUnchanged", "completeScriptsAudited"))
-         and final["assurance"] == "final-package-observation-not-installed-or-final-carrier-authority",
+         and final["assurance"] == ("final-setup-package-observation-not-installed-or-xcode-setup-authority" if setup
+                                    else "final-package-observation-not-installed-or-final-carrier-authority"),
          "final-package-receipt-notarization")
     return final
 
@@ -1660,6 +1709,40 @@ def installer_log_diagnostic_data(value):
 
 # Static SOURCE literals only: no prefix rule or private exception rendering.
 _FAILURE_SETUP_REASONS = (
+    'setup-verification-audit-bytes',
+    'setup-verification-cargo',
+    'setup-verification-carrier-content',
+    'setup-verification-carrier-roster',
+    'setup-verification-cleanup',
+    'setup-verification-cleanup-deadline',
+    'setup-verification-current-file',
+    'setup-verification-current-read',
+    'setup-verification-current-roster',
+    'setup-verification-diagnostic-bound',
+    'setup-verification-final-mode',
+    'setup-verification-helper-anchor',
+    'setup-verification-input',
+    'setup-verification-input-changed',
+    'setup-verification-native-nonzero',
+    'setup-verification-original-quote',
+    'setup-verification-original-status',
+    'setup-verification-purpose',
+    'setup-verification-receipt-bom',
+    'setup-verification-returned-changed',
+    'setup-verification-returned-close',
+    'setup-verification-returned-cut',
+    'setup-verification-role-order',
+    'setup-verification-source',
+    'setup-verification-source-version',
+    'setup-verification-system-parent',
+    'xcode-setup-receipt-bound',
+    'xcode-setup-receipt-decode',
+    'xcode-setup-receipt-identity',
+    'xcode-setup-receipt-object',
+    'xcode-setup-receipt-offset',
+    'xcode-setup-receipt-root',
+    'xcode-setup-receipt-table',
+
     'fixed-product-purpose',
     'fixed-setup-target',
     'fixed-xar-package-purpose',
@@ -1679,6 +1762,7 @@ _FAILURE_SETUP_REASONS = (
     'setup-prefix-mutation-role',
     'setup-prefix-original-adoption',
     'setup-prefix-purpose',
+    'setup-receipt-originals',
     'setup-signed-helper-anchor',
     'setup-signed-mode-original',
     'setup-signed-mode-post',
@@ -1721,8 +1805,8 @@ _FAILURE_SETUP_REASONS = (
     'xcode-setup-source-binding',
     'xcode-setup-source-version',
 )
-_FAILURE_SETUP_ROLES = XCODE_SETUP_COMPONENT_ROLES + ("final-package-productbuild",) + FINAL_PACKAGE_ROLES
-_FAILURE_SETUP_STAGES = _FAILURE_SETUP_ROLES + tuple(role + "-adoption" for role in XCODE_SETUP_MUTATION_ROLES) + (
+_FAILURE_SETUP_ROLES = XCODE_SETUP_VERIFY_ROLES + XCODE_SETUP_COMPONENT_ROLES + ("final-package-productbuild",) + FINAL_PACKAGE_ROLES
+_FAILURE_SETUP_STAGES = ("setup-verification-input", "setup-verification-cleanup") + _FAILURE_SETUP_ROLES + tuple(role + "-adoption" for role in XCODE_SETUP_MUTATION_ROLES) + (
     "sign-xcode-setup", "sign-xcode-setup-verify", "setup-carrier", "setup-scripts-original", "setup-scripts-final",
     "setup-input-root", "setup-presentation", "setup-packager-directory", "setup-original-component-audit",
     "setup-original-parts", "setup-component-directory",
@@ -2213,7 +2297,9 @@ def package_timeout_data(now, endpoint, requested, *, phase=None, role=None):
     """Leave the existing owner's three-second settlement inside this group."""
     need((phase is None and role is None) or (type(phase) is str and type(role) is str),
          "package-group-clock")
-    maximum = (1440 if phase == "prepare-app-absence" and role in
+    maximum = (3900 if phase == XCODE_SETUP_VERIFY and role == "setup-installer-first" else
+               900 if phase == XCODE_SETUP_VERIFY and role == "setup-installer-repeat" else
+               1440 if phase == "prepare-app-absence" and role in
                ("app-absence-build", "app-absence-data-tests", "app-absence-cut-app-write-build",
                 "app-absence-cut-own-attempt-build", "app-absence-cut-stage-move-build") else 480)
     need(type(now) is int and type(endpoint) is int and 0 <= now < endpoint
@@ -2510,6 +2596,18 @@ class Operation:
         # Exhaustive SOURCE-selected purpose. No filenames/roles come from DATA.
         self.removal = phase in REMOVE_PHASES + REMOVAL_OWNER_PHASES
         self.setup_package = phase == "finalize-xcode-setup-package"
+        self.setup_verify = phase == XCODE_SETUP_VERIFY
+        need(not self.setup_verify or (environment.get("GITHUB_REF") == CANDIDATE_REF
+             and environment.get("GITHUB_EVENT_NAME") == "push"
+             and environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image"
+             and environment.get("MRK_MACOS_STORE_RUNTIME") is None
+             and not any(key in environment for key in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES + (NOTARY_KEY_VARIABLE,))),
+             "setup-verification-purpose")
+        self.setup_verify_complete = False
+        self.setup_verify_inputs = []
+        self.setup_verify_system = []
+        self.setup_verify_returned = []
+        self.setup_verify_hard = None
         need(not self.setup_package or environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image"
              and environment.get("MRK_MACOS_STORE_RUNTIME") is None, "setup-package-fixed-purpose")
         # The existing SOURCE-selected ordinary workflow alone ships this UI.
@@ -2523,7 +2621,7 @@ class Operation:
         self.package_status_name = "remove-package-finalization.status" if self.removal else "package-finalization.status"
         self.package_receipt_name = "android-helper-finalize-remove-package.json" if self.removal else "android-helper-finalize-package.json"
         self.component_filename = self.package_filename
-        if self.setup_package:
+        if self.setup_package or self.setup_verify:
             self.component_filename, self.package_filename = "PrepareXcode.pkg", "Prepare Xcode.pkg"
             self.scripts_name, self.packager_filename = "xcode-setup-inputs/scripts-original", "xcode-setup-inputs/packager/PrepareXcode-original.pkg"
             self.unsigned_package_name, self.final_package_name = "xcode-setup-unsigned", "xcode-setup-final"
@@ -2696,7 +2794,7 @@ class Operation:
     def register(self, fd, role, kind, parent=None, name=None):
         entry = {"fd": fd, "role": role, "kind": kind, "parent": parent, "name": name, "closed": False}
         self.entries.append(entry)  # Before any fallible identity/content observation.
-        if self.setup_package:
+        if self.setup_package or self.setup_verify:
             need(len(self.entries) <= 24576
                  and sum(e["fd"] is not None or not e["closed"] for e in self.entries) + 24 <= 96,
                  "setup-original-ledger-bound")
@@ -2933,6 +3031,14 @@ class Operation:
                  and all(c.get("returned") is True and c.get("capturesSettled") is True for c in self.calls),
                  "same-package-original-boundary")
             self.notary_clock()
+        if self.setup_verify:
+            need(len(self.calls) < len(XCODE_SETUP_VERIFY_ROLES)
+                 and role == XCODE_SETUP_VERIFY_ROLES[len(self.calls)]
+                 and all(row["returned"] and row.get("capturesSettled") is True and row.get("returncode") == 0 for row in self.calls),
+                 "setup-verification-role-order")
+            self.setup_verification_post()
+            if role == "setup-installer-first":
+                self.setup_verification_absent()  # Same original parents, immediately before first dispatch.
         prepared_capture = self.prepared_staging and role == "prepared-resource-memory"
         if prepared_capture:
             need(self.phase == "package-install" and self.target_entry is not None and len(self.calls) < 16
@@ -2983,7 +3089,7 @@ class Operation:
             self.app_absence_module.save_restore_status(self, result.returncode)
         record.update(returned=True, returncode=result.returncode,
                       stdoutSha256=digest(result.stdout), stderrSha256=digest(result.stderr))
-        prefix = "android-helper-" + ((self.phase + "-") if self.removal or self.phase == SAME_PACKAGE_PHASE else "") + recorded_role
+        prefix = "android-helper-" + ((self.phase + "-") if self.removal or self.setup_package or self.phase == SAME_PACKAGE_PHASE else "") + recorded_role
         # Prepared acquisition/hydration share a work root. Each resource
         # sample belongs to this original target, not a reusable work-root name.
         # The calls row was retained before dispatch; failed slots never replay.
@@ -2996,6 +3102,8 @@ class Operation:
         if self.phase == "package-install" and role == "installer":
             self.publish("installer-output.txt", result.stdout + result.stderr)
         record["capturesSettled"] = True  # All original output/readback/closes returned.
+        if self.setup_verify and role in XCODE_SETUP_VERIFY_ROLES[1:3]:
+            record["setupDiagnostic"] = setup_installer_diagnostics(result.stdout, result.stderr)
         if self.phase == "package-install" and role == "installer" and result.returncode != 0:
             try:
                 record["installerMarkers"] = installer_markers(result.stdout, result.stderr)
@@ -5276,7 +5384,7 @@ class Operation:
             self.package_sources.append((certificate, value))
             certificates.append(value)
         need(hashlib.sha1(certificates[0]).hexdigest() == selected["leafSha1"], "installer-source-leaf")
-        if self.install_product and not self.setup_package:
+        if self.install_product and not self.setup_package and not self.setup_verify:
             for name in self.stager.INSTALL_PRESENTATION:
                 source = self.source_original("desktop/macos-installed-inputs/" + name,
                                               "source-install-presentation-" + name, 8192)
@@ -7683,6 +7791,7 @@ class Operation:
         # refusal can mask that stager's local finally/close uncertainty; only a
         # normal return proves completion. Never infer it from an error token.
         need(operation in ("final-audit", "result-absence", "v2-readback")
+             or operation == "setup-final-audit" and self.setup_verify
              or operation == "remove-input" and self.phase == "package-remove"
              or operation in ("same-package-census", "same-package-readback") and self.phase == SAME_PACKAGE_PHASE,
              "closed-stager-io")
@@ -7690,7 +7799,9 @@ class Operation:
         self.package_clock()
         self.stager_io_pending = operation
         try:
-            if operation == "final-audit":
+            if operation == "setup-final-audit":
+                result = self.stager.audit_xcode_setup_product_command(args)
+            elif operation == "final-audit":
                 audit = self.stager.audit_install_product_command if self.install_product else self.stager.audit_command
                 result = audit(args)
             elif operation == "remove-input":
@@ -7869,7 +7980,7 @@ class Operation:
 
     def normal_mount_host(self):
         self.package_clock()
-        need(self.phase in ("package-install", SAME_PACKAGE_PHASE, UPDATE_PHASE) + FINAL_IMAGE_PHASES
+        need(self.phase in ("package-install", SAME_PACKAGE_PHASE, UPDATE_PHASE, XCODE_SETUP_VERIFY) + FINAL_IMAGE_PHASES
              and self.removal_baseline_mount is None and not self.mount_entered
              and self.mount_api is None and self.mount_host_source is None and self.package_settled(),
              "package-mount-host-admission")
@@ -7883,7 +7994,7 @@ class Operation:
         need(self.read(entry) == body, "package-mount-host-source-post")
         self.package_clock()
         self.mount_api = module.DarwinAPI(_RemovalHostClock(self), target=self.target)
-        if self.phase in ("package-install", SAME_PACKAGE_PHASE, UPDATE_PHASE):
+        if self.phase in ("package-install", SAME_PACKAGE_PHASE, UPDATE_PHASE, XCODE_SETUP_VERIFY):
             need(self.removal_host_module is None and self.removal_api is None, "package-transport-host-original")
             self.removal_host_module, self.removal_api = module, self.mount_api
         self.package_clock()
@@ -8239,6 +8350,209 @@ class Operation:
         finally:
             self.finish()
         return self.app_absence_module.candidate_baseline_result(self, nomination, helper_tree)
+
+    def setup_verification_cleanup_clock(self):
+        now = time.monotonic_ns()
+        need(type(now) is int and type(self.setup_verify_hard) is int
+             and self.package_started <= self.package_observed <= now < self.setup_verify_hard,
+             "setup-verification-cleanup-deadline")
+        self.package_observed = now
+
+    def setup_verification_quote(self, extra=0):
+        need(self.setup_verify and type(extra) is int and 0 <= extra <= 64,
+             "setup-verification-purpose")
+        # Original records never refunded; closed descriptors alone release live slots.
+        need(len(self.entries) + extra + 20 <= 24576
+             and sum(not entry["closed"] for entry in self.entries) + extra + 8 <= 96,
+             "setup-verification-original-quote")
+        self.package_clock()
+
+    def setup_verification_fixed_post(self, entry):
+        facts = self.removal_directory_facts(entry, protected=True)
+        old = entry["removal_facts"]
+        # PackageKit can change containing directory times/size. Never change
+        # the original device/inode/kind/mode/owner, flags, ACL or mount facts.
+        need(tuple(facts[0][i] for i in (0, 1, 2, 4, 5)) == tuple(old[0][i] for i in (0, 1, 2, 4, 5)) and facts[1:] == old[1:],
+             "setup-verification-system-parent")
+
+    def setup_verification_file(self, parent, name, limit, modes):
+        self.setup_verification_quote(1)
+        self.setup_verification_fixed_post(parent)
+        entry = self.register(None, "setup-current-file", "file", parent["fd"], name)
+        entry["parent_entry"] = parent
+        entry["fd"] = os.open(name, READ_FLAGS, dir_fd=parent["fd"])
+        info = os.fstat(entry["fd"])
+        need(stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0
+             and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) in modes
+             and 0 < info.st_size <= limit, "setup-verification-current-file")
+        entry["identity"] = signature(info)
+        self.removal_acl(entry, info)
+        body = os.pread(entry["fd"], info.st_size + 1, 0)
+        need(len(body) == info.st_size and signature(os.fstat(entry["fd"])) == entry["identity"]
+             == signature(os.stat(name, dir_fd=parent["fd"], follow_symlinks=False)),
+             "setup-verification-current-read")
+        self.setup_verify_returned.append((entry, digest(body)))
+        return body
+
+    def setup_verification_absent(self):
+        for parent, name in ((self.setup_library, "MobileReleaseKitDeveloper"), (self.setup_library, self.stager.XCODE_SETUP_CARRIER),
+                             (self.setup_receipts, self.stager.XCODE_SETUP_ID+".plist"), (self.setup_receipts, self.stager.XCODE_SETUP_ID+".bom")):
+            self.removal_absent(parent, name)
+
+    def setup_verification_current(self, first):
+        need(self.setup_verify and not self.setup_verify_returned
+             and len(self.calls) == (2 if first else 3)
+             and self.calls[-1].get("returncode") == 0
+             and self.calls[-1].get("capturesSettled") is True,
+             "setup-verification-returned-cut")
+        self.setup_verification_quote(10)
+        if first:
+            self.setup_namespace = self.removal_open_directory(self.setup_library, "MobileReleaseKitDeveloper", "setup-current-namespace", protected=True)
+            self.setup_final = self.removal_open_directory(self.setup_namespace, "Xcode.app", "setup-current-final", protected=True)
+            need(stat.S_IMODE(self.setup_final["removal_facts"][0][2]) == 0o555, "setup-verification-final-mode")
+        self.setup_verification_fixed_post(self.setup_namespace)
+        self.removal_directory_post(self.setup_final)
+        need(self.removal_names(self.setup_namespace, maximum=3) == ["Xcode.app", "setup.lock"],
+             "setup-verification-current-roster")
+        carrier = self.removal_open_directory(self.setup_library, self.stager.XCODE_SETUP_CARRIER, "setup-returned-carrier", protected=True)
+        contents = self.removal_open_directory(carrier, "Contents", "setup-returned-contents", protected=True)
+        self.setup_verify_returned_dirs = [carrier, contents]
+        need(all(stat.S_IMODE(e["removal_facts"][0][2]) == 0o555 for e in (carrier, contents))
+             and self.removal_names(carrier, maximum=2) == ["Contents"]
+             and self.removal_names(contents, maximum=2) == ["Info.plist"], "setup-verification-carrier-roster")
+        info = self.setup_verification_file(contents, "Info.plist", 8192, (0o444,))
+        need(info == self.setup_verify_carrier_info, "setup-verification-carrier-content")
+        receipt = self.setup_verification_file(self.setup_receipts, self.stager.XCODE_SETUP_ID + ".plist", 16384, (0o644,))
+        self.stager.xcode_setup_installed_receipt_data(receipt, self.setup_verify_selection)
+        bom = self.setup_verification_file(self.setup_receipts, self.stager.XCODE_SETUP_ID + ".bom", self.stager.XCODE_SETUP_BOM_LIMIT, (0o644,))
+        need(digest(bom) == self.setup_verify_bom, "setup-verification-receipt-bom")
+        self.setup_verification_post()
+
+    def setup_verification_consume_returned(self):
+        # These are originals of FIRST returned carrier/receipt, not immutable
+        # inputs for the next PackageKit upgrade. Do not POST stale names later.
+        self.setup_verification_post()
+        entries = [e for e, _ in self.setup_verify_returned] + list(reversed(self.setup_verify_returned_dirs))
+        for entry in entries:
+            self.package_clock()
+            self.close(entry)
+        need(all(e["closed"] for e in entries), "setup-verification-returned-close")
+        self.setup_verify_returned.clear()
+        self.setup_verify_returned_dirs.clear()
+
+    def setup_verification_post(self):
+        self.setup_verification_quote()
+        for entry, expected in self.setup_verify_inputs:
+            need(digest(self.read(entry)) == expected, "setup-verification-input-changed")
+        self.package_post()
+        for entry in self.setup_verify_system:
+            self.setup_verification_fixed_post(entry)
+        if getattr(self, "setup_namespace", None) is not None:
+            self.setup_verification_fixed_post(self.setup_namespace)
+            self.removal_directory_post(self.setup_final)
+            need(self.removal_names(self.setup_namespace, maximum=3) == ["Xcode.app", "setup.lock"],
+                 "setup-verification-current-roster")
+        for entry in getattr(self, "setup_verify_returned_dirs", ()):
+            self.removal_directory_post(entry)
+        for entry, expected in self.setup_verify_returned:
+            self.setup_verification_fixed_post(entry["parent_entry"])
+            need(signature(os.fstat(entry["fd"])) == entry["identity"]
+                 == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False))
+                 and digest(os.pread(entry["fd"], entry["identity"][6] + 1, 0)) == expected,
+                 "setup-verification-returned-changed")
+        self.package_clock()
+
+    def verify_xcode_setup_package(self):
+        self.stage = "setup-verification-input"
+        self.setup_verification_quote(40)
+        # Same finite decoding profile as C2; no Xcode tree loaded into Python.
+        self.stager._xcode_setup_allocation(4 * 1024 * 1024)("setup-verification-input",
+            3 * self.stager.XCODE_SETUP_PROGRAM_LIMIT, 2 * self.stager.XCODE_SETUP_PACKAGE_LIMIT,
+            self.stager.XCODE_SETUP_PACKAGE_LIMIT)
+        selected = self.stager.source_build_selection(self.target)
+        held = self.stager.build_release_data(self.read(self.release_entry), target=self.target)
+        need((selected.package_version, selected.release) == (held["packageVersion"], held["release"]),
+             "setup-verification-source-version")
+        self.setup_verify_selection = selected
+        for name in ("preinstall", "setup/postinstall", "Distribution.xml", "InstallerReadMe.html",
+                     "Component.plist", "CarrierInfo.plist"):
+            entry = self.source_original("desktop/macos-xcode-setup-inputs/" + name, "setup-verification-source", 8192)
+            self.package_sources.append((entry, self.read(entry)))
+        entry = self.source_original("desktop/src-tauri/Cargo.toml", "setup-verification-cargo", 128 * 1024)
+        self.package_sources.append((entry, self.read(entry)))
+        def keep(path, maximum, modes=(0o444, 0o600)):
+            parent = self.descend(self.work_entry, path.split("/")[:-1])
+            item = self.original(parent, path.split("/")[-1], "setup-immutable-input", maximum, modes)
+            body = self.read(item)
+            self.setup_verify_inputs.append((item, digest(body)))
+            return body
+        need(keep("xcode-setup-build.status", 4) == b"0\n"
+             and keep("xcode-setup-sign.status", 4) == b"0\n"
+             and keep("xcode-setup-finalization.status", 4) == b"0\n", "setup-verification-original-status")
+        helper_sha = self.environment.get("MRK_MACOS_XCODE_SETUP_SHA256")
+        need(tool_hex(helper_sha), "setup-verification-helper-anchor")
+        base = "xcode-setup-inputs/"
+        for name in ("preinstall", "setup/postinstall", "setup/mrk-macos-xcode-setup"):
+            body = keep(base + "scripts-original/" + name, self.stager.XCODE_SETUP_PROGRAM_LIMIT, (0o555,))
+            if name.endswith("mrk-macos-xcode-setup"):
+                need(digest(body) == helper_sha, "setup-verification-helper-anchor")
+            del body
+        original_body = keep(base + "packager/PrepareXcode-original.pkg", self.stager.XCODE_SETUP_PACKAGE_LIMIT)
+        del original_body
+        package = keep("xcode-setup-final/Prepare Xcode.pkg", self.stager.XCODE_SETUP_PACKAGE_LIMIT, (0o444,))
+        package_size, package_sha = len(package), digest(package)
+        del package
+        self.setup_verify_carrier_info = self.stager.xcode_setup_sources(selected)["CarrierInfo.plist"]
+        audit_args = argparse.Namespace(target=self.target,
+            scripts=self.work / (base + "scripts-original"), original_package=self.work / (base + "packager/PrepareXcode-original.pkg"),
+            package=self.work / "xcode-setup-final/Prepare Xcode.pkg", expected_helper=helper_sha)
+        audit = self.package_stager_io("setup-final-audit", audit_args)
+        need((audit["packageSize"], audit["packageSha256"]) == (package_size, package_sha), "setup-verification-audit-bytes")
+        self.setup_verify_bom = audit["bomSha256"]
+        self.installer_sources()  # Public SOURCE chain only; no private context.
+        profiles = []
+        for name in (INSTALLER_PROFILE, NOTARY_PROFILE):
+            entry = self.source_original(name, "setup-source-profile", 1024)
+            body = self.read(entry)
+            self.package_sources.append((entry, body)); profiles.append(body)
+        final_body = keep("android-helper-finalize-xcode-setup-package.json", 16384)
+        final_package_receipt(final_body, self.environment, self.target, installer_profile(profiles[0]),
+            digest(profiles[0]), digest(profiles[1]), package_size, package_sha, self.image_release,
+            digest(self.read(self.release_entry)), setup=True,
+            setup_originals={key:audit[key] for key in ("helperSha256", "bomSha256", "payloadSha256")})
+        del final_body
+        self.normal_mount_host()  # Read-only DarwinAPI/ACL source, no host preparation.
+        slash = self.removal_open_directory(None, "/", "setup-system-root", protected=True)
+        self.setup_library = self.removal_open_directory(slash, "Library", "setup-system-library", protected=True)
+        private = self.removal_open_directory(slash, "private", "setup-system-private", protected=True)
+        var = self.removal_open_directory(private, "var", "setup-system-var", protected=True)
+        db = self.removal_open_directory(var, "db", "setup-system-db", protected=True)
+        self.setup_receipts = self.removal_open_directory(db, "receipts", "setup-system-receipts", protected=True)
+        self.setup_verify_system = [slash, self.setup_library, private, var, db, self.setup_receipts]
+        self.setup_verify_returned_dirs = []
+        self.setup_verification_absent()
+        path = str(self.work / "xcode-setup-final/Prepare Xcode.pkg")
+        for index, (role, maximum) in enumerate(zip(XCODE_SETUP_VERIFY_ROLES, XCODE_SETUP_VERIFY_TIMEOUTS)):
+            self.stage = role
+            if index == 2:
+                self.setup_verification_consume_returned()
+            argv = (["/usr/sbin/pkgutil", "--check-signature", path] if index in (0,3) else
+                    ["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-pkg", path, "-target", "/", "-dumplog", "-verboseR"])
+            result = self.package_call(role, argv, timeout=maximum, limit=256*1024,
+                environment={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin", "LANG":"C", "LC_ALL":"C", "TZ":"UTC"})
+            need(result.returncode == 0, "setup-verification-native-nonzero")
+            if index in (0,3):
+                package_signature_data(result.stdout, self.installer_selection, self.installer_certificates,
+                                       Path(path), after_staple=True)
+            else:
+                self.setup_verification_current(index == 1)
+            self.setup_verification_post()
+        self.receipt["xcodeSetupVerification"] = {"packageSha256": package_sha, "firstInstallerZero":True,
+            "samePackageRepeatZero":True, "sameManagedFinalNode":True, "currentCarrierObserved":True,
+            "desktopBookQualified":False, "currentToolExecutionQualified":False,
+            "oldNativeFinalityRepaired":False, "systemServiceExitClaimed":False}
+        self.sha256 = package_sha
+        self.setup_verify_complete = True
 
     def package_install(self):
         self.stage = "package-final-audit"
@@ -8622,6 +8936,11 @@ class Operation:
         self.package_clock()
 
     def finish(self):
+        if self.setup_verify:
+            try:
+                self.setup_verification_cleanup_clock()
+            except BaseException as error:
+                self.errors.append({"stage": "setup-verification-cleanup", "type": type(error).__name__})
         if self.store_signing is not None:
             try:
                 self.store_signing_module.retire(self)
@@ -8679,7 +8998,11 @@ class Operation:
                     self.notary_clock(work=False)
                 if self.phase in TOOL_SIGNING_PHASES:
                     self.tool_clock(work=False)
+                if self.setup_verify:
+                    self.setup_verification_cleanup_clock()
                 shutil.rmtree(self.target_name, dir_fd=work_fd)
+                if self.setup_verify:
+                    self.setup_verification_cleanup_clock()
                 if self.phase in TOOL_SIGNING_PHASES:
                     self.tool_clock(work=False)
                 if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
@@ -8729,10 +9052,20 @@ class Operation:
                 self.app_absence_module.clock(self, work=False)
             except BaseException as error:
                 self.errors.append({"stage": "app-absence-post-close-clock", "type": type(error).__name__})
+        if self.setup_verify:
+            try:
+                self.setup_verification_cleanup_clock()
+            except BaseException as error:
+                self.errors.append({"stage": "setup-verification-cleanup", "type": type(error).__name__})
         self.receipt["cleanupErrors"] = self.errors
 
     def execute(self, expected=None):
         try:
+            if self.setup_verify:
+                self.package_started = self.package_observed = time.monotonic_ns()
+                self.package_endpoint = self.package_started + 4920_000_000_000
+                self.setup_verify_hard = self.package_started + 4980_000_000_000
+                self.receipt.update(toolchain=None, helperIdentifier=None)
             if self.phase in TOOL_SIGNING_PHASES:
                 self.tool_started = self.tool_observed = time.monotonic_ns()
                 self.tool_clock()
@@ -8793,6 +9126,8 @@ class Operation:
                     self.package_install()
                 elif self.phase == SAME_PACKAGE_PHASE:
                     self.same_package_noop()
+                elif self.setup_verify:
+                    self.verify_xcode_setup_package()
                 elif self.phase == "package-remove":
                     self.package_remove()
                 elif self.phase == "prepare-removal-observers":
@@ -8854,6 +9189,7 @@ class Operation:
                  UPDATE_ROLES if self.phase == UPDATE_PHASE else
                  self.app_absence_module.roles(self) if self.app_absence is not None else
                  SAME_PACKAGE_ROLES if self.phase == SAME_PACKAGE_PHASE else
+                 XCODE_SETUP_VERIFY_ROLES if self.setup_verify else
                  (removal_preparation_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "prepare-removal-observers" else
                  (removal_runtime_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "package-removal-fixture" else
                  FINAL_IMAGE_ROLES if self.phase in FINAL_IMAGE_PHASES else
@@ -8897,7 +9233,7 @@ class Operation:
                                        or (self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
                                        or (self.phase in TOOL_SIGNING_PHASES and self.tool_complete and self.tool_quote_ready)
                                        or (self.phase not in SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + TOOL_SIGNING_PHASES
-                                            and (self.phase in ("package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE) + REMOVAL_OWNER_PHASES + APP_ABSENCE_PHASES or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
+                                            and (self.phase in ("package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE, XCODE_SETUP_VERIFY) + REMOVAL_OWNER_PHASES + APP_ABSENCE_PHASES or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
                                                  or self.phase in SIGNING_PHASES and self.fixed_sign_complete)
                                            and self.image_source is not None and self.image_release is not None
                                            and (self.phase != "prepare" or self.entry_sha256 is not None
@@ -8913,6 +9249,9 @@ class Operation:
         if self.phase in TOOL_SIGNING_PHASES:
             self.receipt["toolFinal"] = self.receipt["passed"] and self.tool_complete
             self.tool_clock(work=False)
+        if self.setup_verify:
+            self.receipt["passed"] = (self.receipt["passed"] and self.setup_verify_complete
+                and not self.credential_calls and not self.credential_contexts)
         if self.phase == SAME_PACKAGE_PHASE:
             self.receipt["passed"] = (self.receipt["passed"] and self.same_package_complete and self.notary_known()
                 and self.installer_zero and self.installation_readback and self.mount_detached
@@ -8940,7 +9279,11 @@ class Operation:
                 self.python_publish_final("python-signed-receipt.json", capsule, 0o444)
         if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             self.notary_clock(work=False)
+        if self.setup_verify:
+            self.setup_verification_cleanup_clock()
         self.publish_receipt()
+        if self.setup_verify:
+            self.setup_verification_cleanup_clock()
         if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             self.notary_clock(work=False)
         if self.phase in PYTHON_PHASES and self.receipt["passed"]:
@@ -9096,7 +9439,8 @@ APP_SIGNATURE_DATA = ("select-github-tools-signed", "project-history-provider", 
 # Only produce one current carrier; no fixture, runtime re-signing or UI claim.
 CANDIDATE_REF = "refs/heads/verify/desktop-macos-candidate"
 CANDIDATE_PHASES = APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer",
-    "finalize-package", "package-install", "finalize-image")
+    "finalize-package", "package-install", "finalize-image", "sign-xcode-setup",
+    "finalize-xcode-setup-package", XCODE_SETUP_VERIFY)
 APP_SIGNATURE_SUMMARY = "summarize-app-signature"
 APP_SIGNATURE_STEPS = ("work", "source", "app_runtime", "github_tools", "app_tools", "app_selection",
                        "android_helper", "app_vault", "app_build", "app_compiler", "app_assemble")

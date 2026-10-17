@@ -2083,6 +2083,127 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+      # Companion only: integrate these steps only with the accepted callable
+      # setup entry. Never sign/publish the deliberately inert exit78 placeholder.
+      - name: Compile the fixed standalone Xcode setup before its credential admission
+        id: xcode_setup_build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.prepared_upload.outcome == 'success'
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Separate feature graph, same current SOURCE and versioned compiler.
+          # No setup/helper execution and no signing credentials in this step.
+          [[ ! -e "$MRK_MACOS_WORK/xcode-setup-target" && ! -L "$MRK_MACOS_WORK/xcode-setup-target" ]] || exit 1
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/xcode-setup-target"
+          set +e
+          (
+            ulimit -c 0
+            # Ordinary compiler diagnostics go to the credential-free runner
+            # log. A small file-size limit would also truncate build artifacts.
+            cd desktop/src-tauri || exit
+            PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" \
+            RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
+            CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
+            CARGO_TARGET_DIR="$MRK_MACOS_WORK/xcode-setup-target" \
+              /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 -u MRK_MACOS_STORE_RUNTIME \
+              "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
+                --locked --release --no-default-features --features macos-xcode-setup \
+                --target "$MRK_MACOS_TARGET" --bin mrk-macos-xcode-setup
+          )
+          build_status=$?
+          printf '%s\n' "$build_status" > "$MRK_MACOS_WORK/xcode-setup-build.status"
+          status_saved=$?
+          set -e
+          if [[ "$build_status" != 0 ]]; then
+            printf 'Fixed Xcode setup compile failed with original status %s; see the compiler diagnostics above.\n' "$build_status" >&2 || :
+            exit "$build_status"
+          fi
+          [[ "$status_saved" == 0 ]] || exit "$status_saved"
+      - name: Sign only the completed fixed Xcode setup with the Application identity
+        id: xcode_setup_sign
+        if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.xcode_setup_build.outcome == 'success'
+        timeout-minutes: 4
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          result=$(MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          CARGO_TARGET_DIR="$MRK_MACOS_WORK/xcode-setup-target" \
+            /usr/bin/env -u MRK_MACOS_STORE_RUNTIME "$MRK_PYTHON" -I -S -B \
+              desktop/tools/macos_android_helper_package.py sign-xcode-setup --target "$MRK_MACOS_TARGET")
+          sign_status=$?
+          printf '%s\n' "$sign_status" > "$MRK_MACOS_WORK/xcode-setup-sign.status"
+          status_saved=$?
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          set -e
+          if [[ "$sign_status" != 0 ]]; then exit "$sign_status"; fi
+          [[ "$status_saved" == 0 ]] || exit "$status_saved"
+          [[ "$result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
+          # This digest is the original completed signer result, not a reopened
+          # file hash that could falsely stand in for signing/close success.
+          printf '%s\n' "$result" >> "$GITHUB_OUTPUT"
+      - name: Finalize only the standalone Prepare Xcode companion package
+        id: xcode_setup_finalize
+        if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.xcode_setup_sign.outcome == 'success'
+        timeout-minutes: 32
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_XCODE_SETUP_SHA256: ${{ steps.xcode_setup_sign.outputs.sha256 }}
+          MRK_MACOS_INSTALLER_P12_BASE64: ${{ secrets.MRK_MACOS_INSTALLER_P12_BASE64 }}
+          MRK_MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MRK_MACOS_INSTALLER_P12_PASSWORD }}
+          MRK_MACOS_NOTARY_API_KEY_BASE64: ${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Same C2 original14 roles and1740/1800 endpoints. Installer context
+          # closes before notary; no Application credential or Store runtime.
+          set +e
+          MRK_MACOS_INSTALLER_P12_BASE64="$MRK_MACOS_INSTALLER_P12_BASE64" \
+          MRK_MACOS_INSTALLER_P12_PASSWORD="$MRK_MACOS_INSTALLER_P12_PASSWORD" \
+          MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+            /usr/bin/env -u MRK_MACOS_STORE_RUNTIME "$MRK_PYTHON" -I -S -B \
+              desktop/tools/macos_android_helper_package.py finalize-xcode-setup-package --target "$MRK_MACOS_TARGET" \
+              > "$MRK_MACOS_WORK/xcode-setup-finalization.stdout"
+          finalization_status=$?
+          printf '%s\n' "$finalization_status" > "$MRK_MACOS_WORK/xcode-setup-finalization.status"
+          status_saved=$?
+          unset MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -e
+          if [[ "$finalization_status" != 0 ]]; then exit "$finalization_status"; fi
+          [[ "$status_saved" == 0 ]] || exit "$status_saved"
+      - name: Retain only the finalized standalone Xcode companion and closed public facts
+        id: xcode_setup_upload
+        if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.xcode_setup_finalize.outcome == 'success'
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-kit-macos26-${{ matrix.target }}-xcode-setup-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/xcode-setup-final/Prepare Xcode.pkg
+            ${{ steps.work.outputs.root }}/android-helper-finalize-xcode-setup-package.json
+            ${{ steps.work.outputs.root }}/xcode-setup-finalization.status
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
       - name: Fixed nonshipping app-absence prepare-app-absence; no credentials or user artifact
         id: app_absence_prepare
         if: github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture'
@@ -2232,9 +2353,12 @@ jobs:
           # Neither a provisional file nor its receipt substitutes for this
           # actual original0. Preview has no fallback to the old image.
       - name: Retire only the completed candidate's disposable compiler outputs
+        id: candidate_compiler_retire
         if: always() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.prepared_upload.outcome == 'success'
         timeout-minutes: 3
         shell: bash
+        env:
+          MRK_XCODE_SETUP_COMPLETED: ${{ steps.xcode_setup_finalize.outcome == 'success' }}
         run: |
           set -euo pipefail
           "$MRK_PYTHON" -I -S -B - <<'PY_CANDIDATE_CLEAN'
@@ -2261,13 +2385,49 @@ jobs:
           # All producing commands and mandatory native owners returned before
           # candidate staging; no UI app or test process was started. Keep the
           # complete candidate and package evidence, including if upload failed.
+          setup = (root / 'xcode-setup-target',) if os.environ['MRK_XCODE_SETUP_COMPLETED'] == 'true' else ()
           for path in (root / 'cargo-target', root / 'vault-helper-target', root / 'remover-target', root / 'npm-cache',
-                       workspace / 'desktop/node_modules', workspace / 'desktop/dist'):
+                       workspace / 'desktop/node_modules', workspace / 'desktop/dist') + setup:
               try: current = path.lstat()
               except FileNotFoundError: continue
               assert stat.S_ISDIR(current.st_mode) and current.st_uid == os.getuid() and current.st_dev == info.st_dev
               shutil.rmtree(path)
           PY_CANDIDATE_CLEAN
+      - name: Qualify the same standalone setup package through first install and repeat
+        id: xcode_setup_verify
+        if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.xcode_setup_upload.outcome == 'success' && steps.candidate_compiler_retire.outcome == 'success'
+        timeout-minutes: 85
+        shell: bash
+        env:
+          MRK_MACOS_XCODE_SETUP_SHA256: ${{ steps.xcode_setup_sign.outputs.sha256 }}
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # No signing credentials. This phase uses the same retained C2 inputs,
+          # not the retired Cargo tree or a downloaded self-authorizing receipt.
+          set +e
+          /usr/bin/env -u MRK_MACOS_STORE_RUNTIME "$MRK_PYTHON" -I -S -B \
+            desktop/tools/macos_android_helper_package.py verify-xcode-setup-package --target "$MRK_MACOS_TARGET" \
+            > "$MRK_MACOS_WORK/xcode-setup-verification.stdout"
+          verification_status=$?
+          printf '%s\n' "$verification_status" > "$MRK_MACOS_WORK/xcode-setup-verification.status"
+          status_saved=$?
+          set -e
+          if [[ "$verification_status" != 0 ]]; then exit "$verification_status"; fi
+          [[ "$status_saved" == 0 ]] || exit "$status_saved"
+      - name: Retain bounded standalone setup qualification facts, never Installer transcripts
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.xcode_setup_verify.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-kit-macos26-${{ matrix.target }}-xcode-setup-check-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/android-helper-verify-xcode-setup-package.json
+            ${{ steps.work.outputs.root }}/xcode-setup-verification.status
+          if-no-files-found: error
+          retention-days: 7
       - name: Stage only the finalized ordinary image as an unqualified P0 carrier input
         id: p0_carrier_stage
         if: github.ref == 'refs/heads/verify/desktop-macos-installed' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled'

@@ -4453,12 +4453,186 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     with self.assertRaises(module.Refused):
                         module.final_package_receipt(TOOL.canonical(dict(record, packageStapleObservation=None)), *arguments)
 
+    def test_setup_qualification_same_original_four_calls_and_no_failure_repeat(self):
+        """Whole Operation; native Installer/ACL/APFS/root observations are inert.
+
+        All source/package/receipt/returned nodes are real task-owned files.
+        This is not a real Mac/root/native setup qualification.
+        """
+        import datetime, plistlib
+        module = ANDROID_HELPER
+        for fault, count in ((None, 4), ("pre-first-presence", 1), ("first75", 2), ("first-unknown", 2), ("final-drift", 2), ("after-repeat-drift", 3)):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                state = self.final_package_fixture(Path(directory), setup=True)
+                with self.final_package_fixture_call(state):
+                    state.operation.execute()
+                for name in ("xcode-setup-build.status", "xcode-setup-sign.status", "xcode-setup-finalization.status"):
+                    path = state.work/name; path.write_bytes(b"0\n"); path.chmod(0o600)
+                env = {k:v for k,v in state.environment.items() if k not in module.CREDENTIAL_VARIABLES
+                    + module.INSTALLER_CREDENTIAL_VARIABLES + (module.NOTARY_KEY_VARIABLE, "MRK_MACOS_STORE_RUNTIME")}
+                env.update(GITHUB_REF=module.CANDIDATE_REF, GITHUB_EVENT_NAME="push")
+                # Keep workflow/source fields from SAME finalizer fixture. Its
+                # final receipt has the original candidate ref (not rewritten).
+                root = Path(directory)/"system"; root.mkdir(mode=0o755)
+                (root/"Library").mkdir(mode=0o755)
+                receipts = root/"private/var/db/receipts"; receipts.mkdir(parents=True,mode=0o755)
+                for parent in (root/"private",root/"private/var",root/"private/var/db"):
+                    parent.chmod(0o755)
+                observed, first_nodes = [], []
+                def install(repeat):
+                    library = root/"Library"
+                    namespace = library/"MobileReleaseKitDeveloper"
+                    if not repeat:
+                        namespace.mkdir(mode=0o755)
+                        (namespace/"setup.lock").write_bytes(b"held by real A, inert fixture only")
+                        (namespace/"Xcode.app").mkdir(mode=0o555)
+                        (namespace/"Xcode.app").chmod(0o555)  # Exact modeled mode despite the test's restrictive umask.
+                    carrier = library/TOOL.XCODE_SETUP_CARRIER
+                    if not repeat:
+                        (carrier/"Contents").mkdir(parents=True)
+                    else:
+                        # Legitimate PackageKit republication, NOT source-node
+                        # adoption: first originals must already be closed.
+                        self.assertFalse(operation.setup_verify_returned)
+                        self.assertFalse(operation.setup_verify_returned_dirs)
+                        (carrier/"Contents").chmod(0o755)
+                    info = carrier/"Contents/Info.plist"
+                    if info.exists(): info.unlink()
+                    info.write_bytes(TOOL.xcode_setup_sources(TOOL.source_build_selection(state.target))["CarrierInfo.plist"])
+                    info.chmod(0o444); (carrier/"Contents").chmod(0o555); carrier.chmod(0o555)
+                    data = {"InstallDate": datetime.datetime(2026,10,17,0,0,int(repeat)),
+                        "InstallPrefixPath":"Library", "InstallProcessName":"installer", "PackageFileName":"PrepareXcode.pkg",
+                        "PackageIdentifier":TOOL.XCODE_SETUP_ID, "PackageVersion":TOOL.source_build_selection(state.target).package_version}
+                    for suffix, body in (("plist",plistlib.dumps(data,fmt=plistlib.FMT_BINARY)),
+                        ("bom", (state.work/"xcode-setup-inputs/parts/Bom").read_bytes())):
+                        leaf = receipts/(TOOL.XCODE_SETUP_ID+"."+suffix)
+                        if leaf.exists(): leaf.unlink()
+                        leaf.write_bytes(body); leaf.chmod(0o644)
+                    first_nodes.append((namespace/"Xcode.app").stat().st_ino)
+                def command(argv, **options):
+                    role = operation.calls[-1]["role"]; observed.append(role)
+                    self.assertEqual(options["environ"], {"PATH":"/usr/bin:/bin:/usr/sbin:/sbin", "LANG":"C","LC_ALL":"C","TZ":"UTC"})
+                    self.assertEqual(options["cwd"],state.work)
+                    self.assertEqual(options["timeout"], module.XCODE_SETUP_VERIFY_TIMEOUTS[len(observed)-1])
+                    path = str(state.work/"xcode-setup-final/Prepare Xcode.pkg")
+                    if "signature" in role:
+                        self.assertEqual(argv,["/usr/sbin/pkgutil","--check-signature",path])
+                        if fault == "pre-first-presence":
+                            (root/"Library/MobileReleaseKitDeveloper").mkdir()
+                        return CompletedProcess(argv,0,state.signature_text,b"")
+                    self.assertEqual(argv,["/usr/bin/sudo","-n","/usr/sbin/installer","-pkg",path,"-target","/","-dumplog","-verboseR"])
+                    if fault == "first-unknown": raise RuntimeError("inert owner outcome unknown")
+                    if fault == "first75":
+                        return CompletedProcess(argv,75,b"",b"installer: MRK_XCODE_SETUP_REFUSED=scope=child;stage=copy;reason=write\n")
+                    install(role.endswith("repeat"))
+                    if fault == "after-repeat-drift" and role.endswith("repeat"):
+                        (root/"Library/MobileReleaseKitDeveloper/Xcode.app").chmod(0o755)
+                    return CompletedProcess(argv,0,b"inert Installer original0\n",b"")
+                operation = module.Operation(SimpleNamespace(run_owned=command),state.checkout,state.work,module.XCODE_SETUP_VERIFY,env,TOOL,target=state.target)
+                real_open,real_lstat,real_stat,real_fstat = os.open,os.lstat,os.stat,os.fstat
+                def root_info(info):
+                    value={name:getattr(info,name) for name in ("st_dev","st_ino","st_mode","st_nlink","st_uid","st_gid","st_size","st_mtime_ns","st_ctime_ns")}
+                    value.update(st_uid=0,st_gid=0)
+                    return SimpleNamespace(**value)
+                def under(fd):
+                    return Path(os.readlink('/proc/self/fd/'+str(fd))).is_relative_to(root)
+                original_directory=operation.removal_open_directory
+                def opened_directory(parent,name,role,**kwargs):
+                    if parent is not None:return original_directory(parent,name,role,**kwargs)
+                    entry=operation.register(real_open(root,module.READ_FLAGS|os.O_DIRECTORY),role,"removal-directory",None,str(root))
+                    entry["parent_entry"]=None
+                    entry["removal_policy"]=(True,False,False)
+                    entry["removal_facts"]=operation.removal_directory_facts(entry,protected=True)
+                    return entry
+                def fst(fd):
+                    info=real_fstat(fd);return root_info(info) if under(fd) else info
+                def st(path,*args,**kwargs):
+                    info=real_stat(path,*args,**kwargs)
+                    local=kwargs.get("dir_fd") is not None and under(kwargs["dir_fd"])
+                    local=local or isinstance(path,(str,Path)) and Path(path).is_absolute() and Path(path).is_relative_to(root)
+                    return root_info(info) if local else info
+                def host():
+                    operation.removal_api=SimpleNamespace(library=None,filesystem=lambda fd:{"flags":0x1000,"typeName":"apfs"})
+                    operation.removal_host_module=SimpleNamespace(full9=module.signature,_acl_snapshot=lambda *args:{
+                        "empty":True,"phase":0,"filesecFreeReturned":True,"aclFreeResult":None,"snapshotFlags":0})
+                consume=operation.setup_verification_consume_returned
+                def before_repeat():
+                    if fault == "final-drift":
+                        (root/"Library/MobileReleaseKitDeveloper/Xcode.app").chmod(0o755)
+                    consume()
+                actual_verify=operation.verify_xcode_setup_package
+                failures=[]
+                def traced_verify():
+                    try: return actual_verify()
+                    except BaseException:
+                        import traceback
+                        failures.append(traceback.format_exc())
+                        raise
+                operation.verify_xcode_setup_package=traced_verify
+                before=len(os.listdir('/proc/self/fd'))
+                with mock.patch.object(module.time,"monotonic_ns",return_value=state.clock[0]), \
+                     mock.patch.object(operation,"normal_mount_host",side_effect=host), \
+                     mock.patch.object(operation,"setup_verification_consume_returned",side_effect=before_repeat), \
+                     mock.patch.object(operation,"removal_open_directory",side_effect=opened_directory),mock.patch.object(module.os,"fstat",side_effect=fst), \
+                     mock.patch.object(module.os,"stat",side_effect=st):
+                    if fault is None:
+                        try: operation.execute()
+                        except module.Refused: self.fail(str((operation.receipt.get("failure"),operation.errors,failures)))
+                    else:
+                        with self.assertRaises(module.Refused): operation.execute()
+                self.assertEqual(observed,list(module.XCODE_SETUP_VERIFY_ROLES[:count]), operation.receipt.get("failure"))
+                self.assertEqual(operation.receipt["passed"],fault is None)
+                self.assertTrue(operation.receipt["originalClosesKnown"])
+                self.assertEqual(operation.credential_calls,[])
+                self.assertEqual(len(os.listdir('/proc/self/fd')),before)
+                if fault is None:
+                    self.assertEqual(first_nodes,[first_nodes[0]]*2)
+                    self.assertFalse(operation.receipt["xcodeSetupVerification"]["desktopBookQualified"])
+                if fault == "first75":
+                    self.assertEqual(operation.calls[-1]["setupDiagnostic"]["observations"],[{"scope":"child","stage":"copy","reason":"write"}])
+                # Nonroot fixture cleanup owns its whole root; no production
+                # cleanup grants and no removal of a real managed installation.
+                for path in root.rglob('*'):
+                    if path.is_dir():path.chmod(0o755)
+
+    def test_setup_receipt_diagnostics_and_long_roles_are_closed_data(self):
+        import datetime, plistlib
+        module=ANDROID_HELPER; selected=TOOL.source_build_selection(module.ARM_TARGET)
+        self.assertEqual(set(module.CANDIDATE_PHASES) - set(module.APP_SIGNATURE_PHASES),
+            {"notarize-payload", "sign-root-installer", "finalize-package", "package-install", "finalize-image",
+             "sign-xcode-setup", "finalize-xcode-setup-package", module.XCODE_SETUP_VERIFY})
+        value={"InstallDate":datetime.datetime(2026,10,17),"InstallPrefixPath":"Library","InstallProcessName":"installer",
+            "PackageFileName":"PrepareXcode.pkg","PackageIdentifier":TOOL.XCODE_SETUP_ID,"PackageVersion":selected.package_version}
+        def body(v):return plistlib.dumps(v,fmt=plistlib.FMT_BINARY)
+        self.assertEqual(TOOL.xcode_setup_installed_receipt_data(body(value),selected)["prefix"],"Library")
+        for bad in (dict(value,InstallPrefixPath="/Library"),dict(value,PackageIdentifier="foreign"),dict(value,PackageVersion="0.0.0"),
+                    dict(value,InstallDate="date"),dict(value,Extra="unobserved")):
+            with self.assertRaises(TOOL.Refused):TOOL.xcode_setup_installed_receipt_data(body(bad),selected)
+        raw=bytearray(body(value));raw[-24:-16]=(2**60).to_bytes(8,'big')
+        with self.assertRaises(TOOL.Refused):TOOL.xcode_setup_installed_receipt_data(bytes(raw),selected)
+        for role,timeout in zip(module.XCODE_SETUP_VERIFY_ROLES,module.XCODE_SETUP_VERIFY_TIMEOUTS):
+            self.assertEqual(module.package_timeout_data(0,4920_000_000_000,timeout,phase=module.XCODE_SETUP_VERIFY,role=role),timeout)
+        with self.assertRaises(module.Refused):module.package_timeout_data(0,4920_000_000_000,3900,phase="package-install",role="installer")
+        good=b"installer: MRK_XCODE_SETUP_REFUSED=scope=public;stage=carrier;reason=binding\n"
+        private=b"MRK_XCODE_SETUP_REFUSED=scope=public;stage=carrier;reason=private-secret\n"
+        result=module.setup_installer_diagnostics(good,private+good.replace(b"=public",b"=foreign")+good.replace(b"binding",b"binding;/private/path"))
+        self.assertEqual(result,{"available":True,"observations":[{"scope":"public","stage":"carrier","reason":"binding"}]})
+        self.assertEqual(module.setup_installer_diagnostics(b"",private),{"available":False,"observations":[]})
+
     def test_xcode_setup_same_owner_four_prefix_and_ten_final_calls(self):
         module = ANDROID_HELPER
         for target in (module.ARM_TARGET, module.INTEL_TARGET):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
                 state = self.final_package_fixture(Path(directory), target=target, setup=True)
                 operation = state.operation
+                # Main finalization already ran in this same producer work root.
+                # Preserve those captures while the companion uses shared roles.
+                earlier = {}
+                for role in ("final-package-productbuild",) + module.FINAL_PACKAGE_ROLES:
+                    for stream in ("stdout", "stderr"):
+                        leaf = state.work / ("android-helper-" + role + "." + stream)
+                        leaf.write_bytes(b"retained main-package capture"); leaf.chmod(0o600)
+                        earlier[leaf] = (leaf.stat().st_ino, leaf.read_bytes())
                 before = len(os.listdir("/proc/self/fd")) if sys.platform == "linux" else None
                 with self.final_package_fixture_call(state):
                     try:
@@ -4466,6 +4640,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     except module.Refused:
                         self.fail(str((operation.receipt.get("failure"), operation.errors)))
                 self.assertEqual(value, module.digest(state.signed + state.ticket))
+                for leaf, original in earlier.items():
+                    self.assertEqual((leaf.stat().st_ino, leaf.read_bytes()), original)
+                    self.assertTrue((state.work / leaf.name.replace("android-helper-", "android-helper-finalize-xcode-setup-package-", 1)).is_file())
                 self.assertEqual(tuple(row["role"] for row in operation.calls), module.XCODE_SETUP_COMPONENT_ROLES
                     + ("final-package-productbuild",) + module.FINAL_PACKAGE_ROLES)
                 self.assertEqual(tuple(row["role"] for row in operation.credential_calls), module.INSTALLER_CREDENTIAL_ROSTER)
@@ -4481,6 +4658,36 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertFalse((state.work / "package-final").exists())
                 self.assertFalse((state.work / operation.target_name).exists())
                 self.assertEqual(operation.receipt["notaryAuthentication"], {"created": True, "closed": True, "retired": True})
+                raw = (state.work / "android-helper-finalize-xcode-setup-package.json").read_bytes()
+                release = (state.checkout / operation.release_input).read_bytes()
+                args = (state.environment, target, state.credentials.installer,
+                    module.digest((state.checkout / module.INSTALLER_PROFILE).read_bytes()),
+                    module.digest((state.checkout / module.NOTARY_PROFILE).read_bytes()),
+                    len(state.signed + state.ticket), module.digest(state.signed + state.ticket),
+                    TOOL.build_release_data(release, target=target)["release"], module.digest(release))
+                # Independent exact current component audit, not receipt fields.
+                audit = TOOL.audit_xcode_setup_product_command(SimpleNamespace(
+                    target=target, scripts=state.work / "xcode-setup-inputs/scripts-original",
+                    original_package=state.work / "xcode-setup-inputs/packager/PrepareXcode-original.pkg",
+                    package=published, expected_helper=state.environment["MRK_MACOS_XCODE_SETUP_SHA256"]))
+                originals = {k: audit[k] for k in ("helperSha256", "bomSha256", "payloadSha256")}
+                self.assertEqual(module.final_package_receipt(raw, *args, setup=True, setup_originals=originals), final)
+                for kwargs in ({}, {"remove": True}, {"setup": True},
+                               {"setup": True, "setup_originals": originals, "remove": True},
+                               {"setup": True, "setup_originals": originals, "runtime_stager": TOOL},
+                               {"setup_originals": originals}):
+                    with self.assertRaises(module.Refused): module.final_package_receipt(raw, *args, **kwargs)
+                mutations = (("phase", "finalize-package"), ("source", "b" * 40),
+                    ("originalClosesKnown", False), ("originalCalls", operation.receipt["originalCalls"][:-1]))
+                for key, wrong in mutations:
+                    record = json.loads(raw); record[key] = wrong
+                    with self.assertRaises(module.Refused):
+                        module.final_package_receipt(TOOL.canonical(record), *args, setup=True, setup_originals=originals)
+                for key, wrong in (("kind", "mrk-final-installer-package"), ("scriptFileCount", 3),
+                                   ("finalDestinationPayloadEntries", True), *((k, "b" * 64) for k in originals)):
+                    record = json.loads(raw); record["finalPackage"][key] = wrong
+                    with self.assertRaises(module.Refused):
+                        module.final_package_receipt(TOOL.canonical(record), *args, setup=True, setup_originals=originals)
                 if before is not None: self.assertEqual(len(os.listdir("/proc/self/fd")), before)
 
     def test_xcode_setup_prefix_refusals_keep_originals_and_never_enter_credentials(self):

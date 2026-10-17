@@ -46,7 +46,8 @@ class CandidateAdmission(unittest.TestCase):
         h = HELPER
         allowed = ('prepare', 'sign-vault-helper', 'sign-remover', 'sign-applications-launcher', 'verify-before',
             'sign-desktop-image', 'sign-desktop-payload', 'sign-root-app', 'verify-after',
-            'notarize-payload', 'sign-root-installer', 'finalize-package', 'package-install', 'finalize-image')
+            'notarize-payload', 'sign-root-installer', 'finalize-package', 'package-install', 'finalize-image',
+            'sign-xcode-setup', 'finalize-xcode-setup-package', h.XCODE_SETUP_VERIFY)
         for target in (h.ARM_TARGET, h.INTEL_TARGET):
             env = self.environment(target)
             with self.host(target):

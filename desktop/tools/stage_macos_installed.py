@@ -4282,6 +4282,49 @@ def xcode_setup_cargo_version(body, selection):
          "xcode-setup-cargo-version")
 
 
+def xcode_setup_installed_receipt_data(body, selection):
+    """Narrow CI observation of PackageKit's actual flat binary receipt.
+
+    This is not native carrier admission or authority to modify any path. Bound
+    the binary object table BEFORE plistlib allocates its offset/object arrays.
+    The first-generation qualification supports the observed six-key shape.
+    """
+    selection = selected_build(selection)
+    need(type(body) is bytes and 40 <= len(body) <= 16384 and body[:8] == b"bplist00",
+         "xcode-setup-receipt-bound")
+    trailer = body[-32:]
+    offsets, refs = trailer[6], trailer[7]
+    count = int.from_bytes(trailer[8:16], "big")
+    top = int.from_bytes(trailer[16:24], "big")
+    table = int.from_bytes(trailer[24:32], "big")
+    need(trailer[:6] == bytes(6) and offsets in (1, 2) and refs == 1
+         and 1 <= count <= 32 and top < count and 8 <= table < len(body) - 32
+         and table + offsets * count == len(body) - 32, "xcode-setup-receipt-table")
+    # Closed flat scalar objects only: no cycles, nested arrays or large data
+    # allocations are possible in this observed receipt profile.
+    kinds = []
+    for i in range(count):
+        offset = int.from_bytes(body[table+i*offsets:table+(i+1)*offsets], "big")
+        need(8 <= offset < table, "xcode-setup-receipt-offset")
+        kind, size = body[offset] >> 4, body[offset] & 15
+        need(kind in (3, 5, 6, 13) and (kind != 3 or size == 3)
+             and (kind != 13 or i == top and size == 6), "xcode-setup-receipt-object")
+        kinds.append(kind)
+    need(kinds[top] == 13, "xcode-setup-receipt-root")
+    try:
+        value = plistlib.loads(body, fmt=plistlib.FMT_BINARY)
+    except (ValueError, TypeError, OverflowError, IndexError):
+        raise Refused("xcode-setup-receipt-decode") from None
+    expected = {"InstallDate", "InstallPrefixPath", "InstallProcessName", "PackageFileName", "PackageIdentifier", "PackageVersion"}
+    need(type(value) is dict and set(value) == expected
+         and all(type(value[key]) is str and 0 < len(value[key]) <= 255 for key in expected - {"InstallDate"})
+         and type(value["InstallDate"]).__module__ == "datetime" and type(value["InstallDate"]).__name__ == "datetime"
+         and value["InstallPrefixPath"] == "Library" and value["InstallProcessName"] == "installer"
+         and value["PackageIdentifier"] == XCODE_SETUP_ID and value["PackageVersion"] == selection.package_version,
+         "xcode-setup-receipt-identity")
+    return {"identifier": value["PackageIdentifier"], "version": value["PackageVersion"], "prefix": "Library"}
+
+
 def xcode_setup_sources(selection):
     selection = selected_build(selection)
     need(selection == source_build_selection(selection.target), "xcode-setup-fixed-source-version")
