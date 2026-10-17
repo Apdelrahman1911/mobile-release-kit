@@ -879,28 +879,32 @@ jobs:
                   root = directory(b"/")
                   for name in app_path.split(b"/")[1:] + [b"Contents"]:
                       root = directory(name, root)
-                  # One fixed public Apple alias refused the actual source census.
-                  # Snapshot only: never execute or admit the target, and do not
+                  # Two fixed public Apple aliases refused the actual source census.
+                  # Snapshot only: never execute or admit a target, and do not
                   # print any regular-file contents, selected host path or xattrs.
-                  try:
-                      alias_parent = root
-                      for part in (b"Applications", b"Instruments.app", b"Contents"):
-                          alias_parent = directory(part, alias_parent)
-                      alias_name = b"XCContentsDir"
-                      row = os.stat(alias_name, dir_fd=alias_parent, follow_symlinks=False)
-                      need(stat.S_ISLNK(row.st_mode) and row.st_nlink == 1 and 1 <= row.st_size <= 1024)
-                      target = os.readlink(alias_name, dir_fd=alias_parent)
-                      need(len(target) <= 1024)
-                      after = os.stat(alias_name, dir_fd=alias_parent, follow_symlinks=False)
-                      emit("instruments-xccontentsdir", state="observed", qualification=False,
-                           target=target.decode("ascii", "backslashreplace"), targetBytes=len(target),
-                           metadataBytes=row.st_size, metadataStable=identity(row) == identity(after),
-                           uid=row.st_uid, gid=row.st_gid, mode=format(row.st_mode, "#07o"),
-                           flags=getattr(row, "st_flags", 0),
-                           relative=not target.startswith(b"/"), trailingSlash=target.endswith(b"/"),
-                           emptyComponent=any(not part for part in target.split(b"/")))
-                  except (OSError, ValueError):
-                      emit("instruments-xccontentsdir", state="unavailable-or-unsupported", qualification=False)
+                  for alias_role, parent_parts, alias_name in (
+                      ("instruments-xccontentsdir", (b"Applications", b"Instruments.app", b"Contents"), b"XCContentsDir"),
+                      ("appletvos-swift-soundanalysis", (b"Developer", b"Platforms", b"AppleTVOS.platform",
+                       b"Developer", b"SDKs", b"AppleTVOS.sdk", b"usr", b"lib", b"swift"), b"libswiftSoundAnalysis.tbd"),
+                  ):
+                      try:
+                          alias_parent = root
+                          for part in parent_parts:
+                              alias_parent = directory(part, alias_parent)
+                          row = os.stat(alias_name, dir_fd=alias_parent, follow_symlinks=False)
+                          need(stat.S_ISLNK(row.st_mode) and row.st_nlink == 1 and 1 <= row.st_size <= 1024)
+                          target = os.readlink(alias_name, dir_fd=alias_parent)
+                          need(len(target) <= 1024)
+                          after = os.stat(alias_name, dir_fd=alias_parent, follow_symlinks=False)
+                          emit(alias_role, state="observed", qualification=False,
+                               target=target.decode("ascii", "backslashreplace"), targetBytes=len(target),
+                               metadataBytes=row.st_size, metadataStable=identity(row) == identity(after),
+                               uid=row.st_uid, gid=row.st_gid, mode=format(row.st_mode, "#07o"),
+                               flags=getattr(row, "st_flags", 0),
+                               relative=not target.startswith(b"/"), trailingSlash=target.endswith(b"/"),
+                               emptyComponent=any(not part for part in target.split(b"/")))
+                      except (OSError, ValueError):
+                          emit(alias_role, state="unavailable-or-unsupported", qualification=False)
                   boundary = app_path + b"/Contents/"
                   device = os.fstat(root).st_dev
                   stack, names = [root], []
