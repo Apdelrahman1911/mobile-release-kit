@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe]
+        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe]
       architecture:
         description: Architecture for Store, iOS tools and package probe; other components use both
         type: choice
@@ -53,6 +53,77 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  resident-compile:
+    if: github.event_name == 'workflow_dispatch' && inputs.component == 'resident-compile'
+    name: Measure the Intel resident release build without signing
+    runs-on: macos-26-intel
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare a private compiler and locked dependencies
+        id: work
+        timeout-minutes: 7
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-resident-compile.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          export CARGO_HOME="$root/cargo" RUSTUP_HOME="$root/rustup"
+          export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+          rustup toolchain install 1.98.0 --profile minimal --no-self-update
+          cargo="$RUSTUP_HOME/toolchains/1.98.0-x86_64-apple-darwin/bin/cargo"
+          export RUSTC="$RUSTUP_HOME/toolchains/1.98.0-x86_64-apple-darwin/bin/rustc"
+          export RUSTUP_TOOLCHAIN=1.98.0 RUSTUP_AUTO_INSTALL=0
+          "$cargo" --version
+          "$RUSTC" -vV
+          "$cargo" fetch --locked --target x86_64-apple-darwin \
+            --manifest-path desktop/helpers/macos-android-register/Cargo.toml
+          mkdir -p "$root/target/tmp"
+      - name: Compile the shipping resident graph with live diagnostics
+        id: compile
+        timeout-minutes: 25
+        shell: bash
+        working-directory: desktop/helpers/macos-android-register
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          toolchain="$WORK_ROOT/rustup/toolchains/1.98.0-x86_64-apple-darwin/bin"
+          started=$(date +%s)
+          set +e
+          # Same release graph/profile/jobs as prepare(), not cargo check or a
+          # feature-superset test build. No credentials, signer or app execution.
+          env -i PATH="$toolchain:/usr/bin:/bin:/usr/sbin:/sbin" HOME=/Users/runner \
+            CARGO_HOME="$WORK_ROOT/cargo" RUSTUP_HOME="$WORK_ROOT/rustup" \
+            RUSTC="$toolchain/rustc" RUSTUP_TOOLCHAIN=1.98.0 RUSTUP_AUTO_INSTALL=0 \
+            LANG=C LC_ALL=C TZ=UTC CARGO_INCREMENTAL=0 \
+            DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer MACOSX_DEPLOYMENT_TARGET=26.0 \
+            CARGO_TARGET_DIR="$WORK_ROOT/target" TMPDIR="$WORK_ROOT/target/tmp" \
+            MRK_MACOS_INSTALL_SOURCE_COMMIT="$SOURCE_COMMIT" MRK_IMAGE_RELEASE_ID=macos26-x86_64-desktop-02 \
+            "$toolchain/cargo" build --manifest-path "$PWD/Cargo.toml" --locked --offline --release \
+            --config profile.release.package.mobile-release-kit-desktop.opt-level=1 \
+            --jobs 1 --target x86_64-apple-darwin --lib --message-format=json-render-diagnostics \
+            > "$WORK_ROOT/compiler.jsonl"
+          status=$?
+          set -e
+          printf 'returned=true\n' >> "$GITHUB_OUTPUT"
+          printf 'Resident Cargo exit=%s elapsedSeconds=%s\n' "$status" "$(($(date +%s) - started))"
+          exit "$status"
+      - name: Retire only this returned build's compiler and outputs
+        if: always() && steps.compile.outputs.returned == 'true'
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          [[ "$WORK_ROOT" == "$RUNNER_TEMP"/mrk-resident-compile.* && -d "$WORK_ROOT" && ! -L "$WORK_ROOT" ]]
+          # Cargo has synchronously returned. Timeout/no-return uses hosted VM
+          # disposal instead; no guessed process kill or shared cache deletion.
+          rm -rf -- "$WORK_ROOT"
+
   launcher:
     if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'launcher'
     name: Compile launcher (${{ matrix.arch }})
