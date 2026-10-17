@@ -25,6 +25,133 @@ pub(crate) enum Failure {
 }
 type Result<T> = std::result::Result<T, Failure>;
 
+// Diagnostic DATA only: no field participates in admission, clocks or finality.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stage {
+    Input,
+    Source,
+    SelfCheck,
+    Carrier,
+    Selection,
+    SourceApple,
+    StagedApple,
+    FinalApple,
+    Facts,
+    Census,
+    Copy,
+    Record,
+    RetireTree,
+    Current,
+    SourcePost,
+    FilesSettle,
+    SourceSettle,
+    LoansSettle,
+    Reply,
+    EndpointSettle,
+    Namespace,
+    Reservation,
+    Child,
+    Publication,
+    NamespaceSettle,
+    Finality,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiagnosticScope {
+    Public,
+    Child,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Diagnostic {
+    pub(crate) stage: Stage,
+    pub(crate) failure: Failure,
+}
+impl Diagnostic {
+    pub(crate) fn line(self, scope: DiagnosticScope) -> String {
+        let scope = match scope {
+            DiagnosticScope::Public => "public",
+            DiagnosticScope::Child => "child",
+        };
+        let stage = match self.stage {
+            Stage::Input => "input",
+            Stage::Source => "source",
+            Stage::SelfCheck => "self",
+            Stage::Carrier => "carrier",
+            Stage::Selection => "selection",
+            Stage::SourceApple => "source-apple",
+            Stage::StagedApple => "staged-apple",
+            Stage::FinalApple => "final-apple",
+            Stage::Facts => "facts",
+            Stage::Census => "census",
+            Stage::Copy => "copy",
+            Stage::Record => "record",
+            Stage::RetireTree => "retire-tree",
+            Stage::Current => "current",
+            Stage::SourcePost => "source-post",
+            Stage::FilesSettle => "files-settle",
+            Stage::SourceSettle => "source-settle",
+            Stage::LoansSettle => "loans-settle",
+            Stage::Reply => "reply",
+            Stage::EndpointSettle => "endpoint-settle",
+            Stage::Namespace => "namespace",
+            Stage::Reservation => "reservation",
+            Stage::Child => "child",
+            Stage::Publication => "publication",
+            Stage::NamespaceSettle => "namespace-settle",
+            Stage::Finality => "finality",
+        };
+        let failure = match self.failure {
+            Failure::Clock => "clock",
+            Failure::Access => "access",
+            Failure::Bounds => "bounds",
+            Failure::State => "state",
+            Failure::Binding => "binding",
+            Failure::Present => "present",
+            Failure::Read => "read",
+            Failure::Write => "write",
+            Failure::Sync => "sync",
+            Failure::Close => "close",
+            Failure::Child => "child",
+            Failure::Unknown => "unknown",
+        };
+        format!("MRK_XCODE_SETUP_REFUSED=scope={scope};stage={stage};reason={failure}\n")
+    }
+}
+#[derive(Clone, Copy)]
+struct Trace {
+    stage: Stage,
+    first: Option<Diagnostic>,
+}
+impl Trace {
+    fn new(stage: Stage) -> Self {
+        Self { stage, first: None }
+    }
+    fn at(&mut self, stage: Stage) {
+        self.stage = stage;
+    }
+    fn note(&mut self, failure: Failure) {
+        self.first.get_or_insert(Diagnostic {
+            stage: self.stage,
+            failure,
+        });
+    }
+    fn record<T>(&mut self, result: &Result<T>) {
+        if let Err(failure) = result {
+            self.note(*failure);
+        }
+    }
+    fn refused(&mut self, refused: bool, failure: Failure) {
+        if refused {
+            self.note(failure);
+        }
+    }
+    fn fallback(&mut self, refused: bool) {
+        if refused && self.first.is_none() {
+            self.at(Stage::Finality);
+            self.note(Failure::Unknown);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SetupOutcome {
     Prepared,
@@ -32,6 +159,7 @@ pub(crate) enum SetupOutcome {
     CarrierChecked,
 }
 pub(crate) struct CallResult {
+    pub(crate) diagnostic: Option<Diagnostic>,
     pub(crate) outcome: Option<SetupOutcome>,
     pub(crate) first_failure: Option<Instant>,
     pub(crate) unknown: bool,
@@ -1199,6 +1327,7 @@ mod native {
     /// Raw descriptor numbers are nomination DATA until all original path,
     /// parent/UID/channel and immutable-start bindings pass. No callerchosenpath.
     struct ChildAdmission {
+        trace: Trace,
         channel: Slot,
         loans: [Slot; 7],
         original: [Option<Stat>; 7],
@@ -1214,7 +1343,11 @@ mod native {
         admitted: bool,
     }
     impl ChildAdmission {
-        fn receive(channel: i32) -> Result<Self> {
+        fn receive(
+            channel: i32,
+            trace: &mut Trace,
+            diagnostic_hard: &mut Option<Instant>,
+        ) -> Result<Self> {
             if unsafe { libc::getuid() } != 0 || unsafe { libc::geteuid() } != 0 || channel < 3 {
                 return Err(Failure::Access);
             }
@@ -1308,6 +1441,7 @@ mod native {
                 endpoint(start.finish_ns)?,
                 endpoint(start.hard_ns)?,
             )?;
+            *diagnostic_hard = Some(clock.hard);
             let actual_loans = start.loans.fds().len();
             let purpose = start.loans.purpose();
             let mut slots = [Slot::Vacant; 7];
@@ -1315,6 +1449,7 @@ mod native {
                 slots[n] = Slot::Owned(*fd);
             }
             let mut owner = Self {
+                trace: *trace,
                 channel: Slot::Owned(channel),
                 loans: slots,
                 original: [None; 7],
@@ -1341,9 +1476,11 @@ mod native {
                 owner.admitted = true;
                 Ok(())
             })();
+            trace.record(&admitted);
             if admitted.is_err() {
                 owner.clock.fail();
                 let closed = owner.settle();
+                *diagnostic_hard = Some(owner.clock.hard);
                 return if closed.is_err() {
                     Err(Failure::Unknown)
                 } else {
@@ -1559,6 +1696,7 @@ mod native {
                 }
                 std::thread::sleep(Duration::from_millis(2));
             }
+            self.trace.at(Stage::EndpointSettle);
             self.clock.point(true)?;
             self.channel = Slot::Unknown;
             if unsafe { libc::close(fd) } != 0 {
@@ -1723,9 +1861,11 @@ mod native {
         source: &mut crate::macos_xcode_source::SetupSource,
         owner: &mut ChildAdmission,
     ) -> Result<()> {
+        owner.trace.at(Stage::SourcePost);
         owner.bind_source(source)?;
         // Real dynamic SELF Security invocation stays in this actual retained
         // child. No synchronous Security call runs in sole unobserved Parent.
+        owner.trace.at(Stage::SelfCheck);
         let signed = {
             let path = std::path::Path::new(source.executable().map_err(|_| Failure::Binding)?);
             let mut signer =
@@ -1735,9 +1875,12 @@ mod native {
                 source.setup().map_err(|_| Failure::Binding)?,
                 source.image().map_err(|_| Failure::Binding)?,
             );
+            owner.trace.refused(!observed, Failure::Access);
             owner.clock.absorb(signer.first_failure(), !observed);
             let closed = signer.settle(owner.clock.first);
+            owner.trace.refused(!closed, Failure::Close);
             let accepted = observed && closed && signer.accepted();
+            owner.trace.refused(!accepted, Failure::Access);
             owner.clock.absorb(signer.first_failure(), !accepted);
             if signer.unknown() {
                 owner.unknown = true;
@@ -1746,6 +1889,7 @@ mod native {
         };
         // All borrowed SELF originals above remain actual Source-owned until
         // this independent original Source POST and later consuming settlement.
+        owner.trace.at(Stage::SourcePost);
         owner.bind_source(source)?;
         if !signed {
             return Err(Failure::Access);
@@ -1756,12 +1900,14 @@ mod native {
         if owner.purpose != Purpose::Carrier {
             return Err(Failure::State);
         }
+        owner.trace.at(Stage::Source);
         let mut source =
             crate::macos_xcode_source::SetupSource::new(owner.clock.work, owner.clock.finish)
                 .map_err(|_| Failure::Binding)?;
         let result = (|| -> Result<()> {
             source.admit().map_err(|_| Failure::Binding)?;
             source_signed(&mut source, owner)?;
+            owner.trace.at(Stage::Carrier);
             const TEMPLATE: &str =
                 include_str!("../../../macos-xcode-setup-inputs/CarrierInfo.plist");
             const VERSION: &str = env!("MRK_XCODE_SETUP_PACKAGE_VERSION");
@@ -1781,14 +1927,17 @@ mod native {
                 )
                 .map_err(|_| Failure::Binding)?;
                 let admitted = carrier.check(VERSION, info.as_bytes());
+                owner.trace.refused(admitted.is_err(), Failure::Access);
                 owner
                     .clock
                     .absorb(carrier.first_failure(), admitted.is_err());
                 let closed = carrier.settle();
+                owner.trace.refused(closed.is_err(), Failure::Close);
                 owner.clock.absorb(carrier.first_failure(), closed.is_err());
                 // Work failure and positive cleanup are separate. No proof on
                 // unknown native/FD settlement, even when receipt bytes match.
                 let ok = admitted.is_ok() && closed.is_ok() && carrier.accepted();
+                owner.trace.refused(!ok, Failure::Access);
                 if closed.is_err() || !carrier.settled() {
                     owner.unknown = true;
                 }
@@ -1797,12 +1946,16 @@ mod native {
             if !checked {
                 return Err(Failure::Access);
             }
+            owner.trace.at(Stage::SourcePost);
             source.post().map_err(|_| Failure::Binding)?;
             owner.bind_source(&mut source)?;
             owner.point()
         })();
+        owner.trace.record(&result);
         owner.clock.absorb(source.first_failure(), result.is_err());
+        owner.trace.at(Stage::SourceSettle);
         let closed = source.settle(owner.clock.first).map_err(|_| Failure::Close);
+        owner.trace.refused(closed.is_err(), Failure::Close);
         owner.clock.absorb(source.first_failure(), closed.is_err());
         if !source.settled() {
             owner.unknown = true;
@@ -1818,9 +1971,11 @@ mod native {
         app: BorrowedFd<'_>,
         owner: &mut ChildAdmission,
     ) -> Result<crate::macos_xcode_facts::Observed> {
+        owner.trace.at(Stage::Facts);
         let mut facts = crate::macos_xcode_facts::Facts::new(owner.clock.work, owner.clock.finish)
             .map_err(|_| Failure::Binding)?;
         let observed = facts.inspect(app);
+        owner.trace.refused(observed.is_err(), Failure::Binding);
         owner.clock.absorb(facts.first_failure(), observed.is_err());
         let posted = if observed.is_ok() {
             facts.post()
@@ -1830,7 +1985,9 @@ mod native {
         owner
             .clock
             .absorb(facts.first_failure(), observed.is_err() || posted.is_err());
+        owner.trace.refused(posted.is_err(), Failure::Binding);
         let closed = facts.settle(owner.clock.first);
+        owner.trace.refused(closed.is_err(), Failure::Close);
         owner.clock.absorb(facts.first_failure(), closed.is_err());
         if !facts.settled() || facts.unknown() {
             owner.unknown = true;
@@ -1847,10 +2004,17 @@ mod native {
         app: BorrowedFd<'_>,
         owner: &mut ChildAdmission,
     ) -> Result<()> {
+        owner.trace.at(match role {
+            crate::macos_xcode_apple::Role::Source => Stage::SourceApple,
+            crate::macos_xcode_apple::Role::Staged => Stage::StagedApple,
+            crate::macos_xcode_apple::Role::Final => Stage::FinalApple,
+        });
         let mut apple = crate::macos_xcode_apple::Apple::new(owner.clock.work, owner.clock.finish);
         let observed = apple.verify(role, path, parent, app);
+        owner.trace.refused(!observed, Failure::Access);
         owner.clock.absorb(apple.first_failure(), !observed);
         let closed = apple.settle(owner.clock.first);
+        owner.trace.refused(!closed, Failure::Close);
         owner.clock.absorb(apple.first_failure(), !closed);
         if apple.unknown() {
             owner.unknown = true;
@@ -1864,6 +2028,7 @@ mod native {
         if owner.purpose != Purpose::Copy || owner.actual_loans != 7 {
             return Err(Failure::State);
         }
+        owner.trace.at(Stage::Source);
         let mut source =
             crate::macos_xcode_source::SetupSource::new(owner.clock.work, owner.clock.finish)
                 .map_err(|_| Failure::Binding)?;
@@ -1871,6 +2036,7 @@ mod native {
         let result = (|| -> Result<Proof> {
             source.admit().map_err(|_| Failure::Binding)?;
             source_signed(&mut source, owner)?;
+            owner.trace.at(Stage::Record);
             // Copied source/input, all inherited originals including private
             // channel+stdio, and fixed Facts8 reserve are charged BEFORE opens.
             let inherited = owner
@@ -1900,6 +2066,7 @@ mod native {
             };
             let root_raw = owner.loan(0)?.as_raw_fd();
             let root = unsafe { BorrowedFd::borrow_raw(root_raw) };
+            owner.trace.at(Stage::Selection);
             let selection = SourceSelection::selected(root, files, &work)?;
             let apps_raw = files
                 .fd(selection.applications)
@@ -1918,10 +2085,14 @@ mod native {
                 app,
                 owner,
             )?;
+            owner.trace.at(Stage::Selection);
             selection.post(root, files, &work)?;
             let source_facts = observed_facts(app, owner)?;
+            owner.trace.at(Stage::Selection);
             selection.post(root, files, &work)?;
+            owner.trace.at(Stage::SourcePost);
             owner.bind_source(&mut source)?;
+            owner.trace.at(Stage::Census);
             let mut tree = crate::macos_xcode_tree::SourceTree::original(
                 app,
                 apps,
@@ -1941,6 +2112,7 @@ mod native {
             // destination free-space quote immediately before first content.
             owner.point()?;
             owner.post()?;
+            owner.trace.at(Stage::Copy);
             let copied = tree
                 .copy_to(
                     files,
@@ -1971,11 +2143,14 @@ mod native {
             }
             copy::exact(copied_fd, stage, &c(profile::APP)?, copied.identity, &work)
                 .map_err(|_| Failure::Binding)?;
+            owner.trace.at(Stage::Census);
             let final_source = tree.census(files, unit).map_err(|_| Failure::Binding)?;
             if final_source.quote != census.quote || final_source.digest != census.digest {
                 return Err(Failure::Binding);
             }
+            owner.trace.at(Stage::Selection);
             selection.post(root, files, &work)?;
+            owner.trace.at(Stage::SourcePost);
             owner.bind_source(&mut source)?;
             owner.point()?;
             Ok(Proof::Copied {
@@ -1986,6 +2161,7 @@ mod native {
                 tree_sha256: copied.digest.iter().map(|b| format!("{b:02x}")).collect(),
             })
         })();
+        owner.trace.record(&result);
         owner.clock.absorb(source.first_failure(), result.is_err());
         let mut all_closed = true;
         if let Some(files) = files.as_mut() {
@@ -1993,7 +2169,9 @@ mod native {
             if let Some(at) = owner.clock.first {
                 files.fail_at(at);
             }
+            owner.trace.at(Stage::FilesSettle);
             let files_closed = files.close_all();
+            owner.trace.refused(!files_closed, Failure::Close);
             owner.clock.absorb(files.first_failure(), !files_closed);
             if !files_closed {
                 owner.unknown = true;
@@ -2001,7 +2179,9 @@ mod native {
             }
         }
         // SOURCE is consumed independently even when copy/Apple/Facts fails.
+        owner.trace.at(Stage::SourceSettle);
         let source_closed = source.settle(owner.clock.first).map_err(|_| Failure::Close);
+        owner.trace.record(&source_closed);
         owner
             .clock
             .absorb(source.first_failure(), source_closed.is_err());
@@ -2031,6 +2211,7 @@ mod native {
         {
             return Err(Failure::Binding);
         }
+        owner.trace.at(Stage::Source);
         let mut source =
             crate::macos_xcode_source::SetupSource::new(owner.clock.work, owner.clock.finish)
                 .map_err(|_| Failure::Binding)?;
@@ -2038,6 +2219,7 @@ mod native {
         let result = (|| -> Result<Proof> {
             source.admit().map_err(|_| Failure::Binding)?;
             source_signed(&mut source, owner)?;
+            owner.trace.at(Stage::Record);
             let hash: String = source
                 .image_sha256()
                 .map_err(|_| Failure::Binding)?
@@ -2078,16 +2260,20 @@ mod native {
             if Record::decode(&bytes)? != record {
                 return Err(Failure::Binding);
             }
+            owner.trace.at(Stage::FilesSettle);
             if !files.close_all() {
+                owner.trace.note(Failure::Close);
                 owner.unknown = true;
                 return Err(Failure::Unknown);
             }
+            owner.trace.at(Stage::SourcePost);
             owner.bind_source(&mut source)?;
             owner.post()?;
             if named(namespace, &c(profile::APP)?)?.is_some() {
                 return Err(Failure::Present);
             }
             let pending_id = copy::fstat(pending, &work).map_err(|_| Failure::Binding)?;
+            owner.trace.at(Stage::RetireTree);
             files
                 .retire_pending(
                     pending,
@@ -2099,9 +2285,11 @@ mod native {
                 .map_err(|_| Failure::Binding)?;
             // The old operation is still not established. This proves only
             // current cleanup by this fresh original signed helper invocation.
+            owner.trace.at(Stage::SourcePost);
             owner.bind_source(&mut source)?;
             Ok(Proof::PendingEmpty)
         })();
+        owner.trace.record(&result);
         owner.clock.absorb(source.first_failure(), result.is_err());
         let mut all_closed = true;
         if let Some(files) = files.as_mut() {
@@ -2109,14 +2297,18 @@ mod native {
             if let Some(at) = owner.clock.first {
                 files.fail_at(at);
             }
+            owner.trace.at(Stage::FilesSettle);
             let files_closed = files.close_all();
+            owner.trace.refused(!files_closed, Failure::Close);
             owner.clock.absorb(files.first_failure(), !files_closed);
             if !files_closed {
                 all_closed = false;
                 owner.unknown = true;
             }
         }
+        owner.trace.at(Stage::SourceSettle);
         let source_closed = source.settle(owner.clock.first).map_err(|_| Failure::Close);
+        owner.trace.record(&source_closed);
         owner
             .clock
             .absorb(source.first_failure(), source_closed.is_err());
@@ -2201,6 +2393,7 @@ mod native {
         {
             return Err(Failure::Binding);
         }
+        owner.trace.at(Stage::Source);
         let mut source =
             crate::macos_xcode_source::SetupSource::new(owner.clock.work, owner.clock.finish)
                 .map_err(|_| Failure::Binding)?;
@@ -2208,6 +2401,7 @@ mod native {
         let result = (|| -> Result<Proof> {
             source.admit().map_err(|_| Failure::Binding)?;
             source_signed(&mut source, owner)?;
+            owner.trace.at(Stage::Record);
             let inherited = owner
                 .actual_loans
                 .checked_add(1 + 3 + source.held_count())
@@ -2286,6 +2480,7 @@ mod native {
             if record.is_some() {
                 names.push(profile::ATTEMPT);
             }
+            owner.trace.at(Stage::Current);
             fixed_roster(ns, &names, &mut owner.clock, false)?;
             if final_view {
                 let final_raw = owner.loan(4)?.as_raw_fd();
@@ -2301,6 +2496,7 @@ mod native {
                         .block_size(),
                 )
                 .map_err(|_| Failure::Bounds)?;
+                owner.trace.at(Stage::Census);
                 let before = tree.census(files, unit).map_err(|_| Failure::Binding)?;
                 apple_checked(
                     crate::macos_xcode_apple::Role::Final,
@@ -2310,6 +2506,7 @@ mod native {
                     owner,
                 )?;
                 let _facts = observed_facts(app, owner)?;
+                owner.trace.at(Stage::Census);
                 let after = tree.census(files, unit).map_err(|_| Failure::Binding)?;
                 if before != after {
                     return Err(Failure::Binding);
@@ -2332,10 +2529,12 @@ mod native {
                     return Err(Failure::Binding);
                 }
             }
+            owner.trace.at(Stage::Current);
             fixed_roster(ns, &names, &mut owner.clock, false)?;
             if named(ns, c".pending")? != present_pending {
                 return Err(Failure::Binding);
             }
+            owner.trace.at(Stage::SourcePost);
             owner.bind_source(&mut source)?;
             Ok(if final_view {
                 Proof::CurrentFinal
@@ -2343,6 +2542,7 @@ mod native {
                 Proof::AttemptOnly
             })
         })();
+        owner.trace.record(&result);
         owner.clock.absorb(source.first_failure(), result.is_err());
         let mut known = true;
         if let Some(files) = files.as_mut() {
@@ -2350,14 +2550,18 @@ mod native {
             if let Some(first) = owner.clock.first {
                 files.fail_at(first);
             }
+            owner.trace.at(Stage::FilesSettle);
             let closed = files.close_all();
+            owner.trace.refused(!closed, Failure::Close);
             owner.clock.absorb(files.first_failure(), !closed);
             if !closed {
                 known = false;
                 owner.unknown = true;
             }
         }
+        owner.trace.at(Stage::SourceSettle);
         let closed = source.settle(owner.clock.first);
+        owner.trace.refused(closed.is_err(), Failure::Close);
         owner.clock.absorb(source.first_failure(), closed.is_err());
         if !source.settled() {
             known = false;
@@ -2378,6 +2582,7 @@ mod native {
         finish: Instant,
         hard: Instant,
     ) -> CallResult {
+        let mut trace = Trace::new(Stage::SourcePost);
         let mut child = None;
         let mut attempted = false;
         let mut first = source.first_failure();
@@ -2392,12 +2597,15 @@ mod native {
                 source.image().map_err(|_| Failure::Binding)?.as_raw_fd(),
             ])?;
             let executable = source.executable().map_err(|_| Failure::Binding)?;
+            trace.at(Stage::Child);
             attempted = true;
             child = Some(Copier::spawn(executable, loans, clock, nonce)?);
             let owner = child.as_mut().ok_or(Failure::State)?;
             let observed = owner.pump();
             owner.clock.absorb(None, observed.is_err());
+            trace.record(&observed);
             let closed = owner.settle();
+            trace.record(&closed);
             owner.clock.absorb(None, closed.is_err());
             observed?;
             closed?;
@@ -2413,14 +2621,18 @@ mod native {
             {
                 return Err(Failure::Unknown);
             }
+            trace.at(Stage::SourcePost);
             source.post().map_err(|_| Failure::Binding)?;
             owner.clock.point(false)
         })();
+        trace.record(&result);
         let mut settled = true;
         let mut unknown = false;
         if let Some(owner) = child.as_mut() {
             owner.clock.absorb(source.first_failure(), result.is_err());
+            trace.at(Stage::Child);
             let closed = owner.settle();
+            trace.record(&closed);
             owner.clock.absorb(None, closed.is_err());
             first = earliest(first, owner.clock.first);
             settled = closed.is_ok();
@@ -2436,7 +2648,9 @@ mod native {
         let safe = child.as_ref().map_or(!attempted, |v| {
             v.reaped && matches!(v.endpoint, Slot::Closed)
         });
+        trace.fallback(result.is_err() || !settled || unknown || !safe || first.is_some());
         CallResult {
+            diagnostic: trace.first,
             outcome: if result.is_ok() && settled && !unknown && safe && first.is_none() {
                 Some(SetupOutcome::CarrierChecked)
             } else {
@@ -2461,20 +2675,25 @@ mod native {
         finish: Instant,
         hard: Instant,
     ) -> CallResult {
+        let mut trace = Trace::new(Stage::Namespace);
         let mut namespace = match Namespace::new(work, finish, hard, source.held_count()) {
             Ok(v) => v,
-            Err(_) => {
+            Err(error) => {
+                trace.note(error);
                 return CallResult {
+                    diagnostic: trace.first,
                     outcome: None,
                     first_failure: earliest(source.first_failure(), Some(Instant::now())),
                     unknown: false,
                     settled: true,
                     safe_to_settle_source: true,
-                }
+                };
             }
         };
         let result = (|| -> Result<SetupOutcome> {
+            trace.at(Stage::SourcePost);
             source.post().map_err(|_| Failure::Binding)?;
+            trace.at(Stage::Namespace);
             namespace.admit_namespace(false)?;
             match namespace.current.ok_or(Failure::State)? {
                 Current::Fresh => {
@@ -2487,26 +2706,38 @@ mod native {
                         .iter()
                         .map(|b| format!("{b:02x}"))
                         .collect();
+                    trace.at(Stage::Reservation);
                     namespace.reserve(id, source_hash)?;
+                    trace.at(Stage::Child);
                     namespace.copy_child(source)?;
+                    trace.at(Stage::Publication);
                     namespace.publish()?;
                     Ok(SetupOutcome::Prepared)
                 }
                 Current::Pending => {
+                    trace.at(Stage::RetireTree);
                     namespace.retire_interrupted(source)?;
                     Ok(SetupOutcome::NeedsRerun)
                 }
-                _ => namespace.observe_current(source),
+                _ => {
+                    trace.at(Stage::Current);
+                    namespace.observe_current(source)
+                }
             }
         })();
+        trace.record(&result);
         namespace
             .clock
             .absorb(source.first_failure(), result.is_err());
         if result.is_err() && namespace.life.may_remove_empty_reservation() {
+            trace.at(Stage::Reservation);
             let cleanup = namespace.retire_empty_refusal();
+            trace.record(&cleanup);
             namespace.clock.absorb(None, cleanup.is_err());
         }
+        trace.at(Stage::NamespaceSettle);
         let closed = namespace.settle(namespace.clock.first);
+        trace.record(&closed);
         namespace.clock.absorb(None, closed.is_err());
         let safe = namespace.users_joined();
         let settled = closed.is_ok()
@@ -2515,7 +2746,11 @@ mod native {
                 .iter()
                 .all(|s| matches!(s, Slot::Vacant | Slot::Closed));
         let unknown = namespace.unknown();
+        trace.fallback(
+            result.is_err() || !settled || !safe || unknown || namespace.clock.first.is_some(),
+        );
         CallResult {
+            diagnostic: trace.first,
             outcome: if settled && safe && !unknown && namespace.clock.first.is_none() {
                 result.ok()
             } else {
@@ -2531,10 +2766,24 @@ mod native {
     /// Private carrier branch is callable only after actual Source/currentimage
     /// and fixed peer/fd/clock admission. Public bin remains inert until Copy and
     /// recovery are fully joined and reviewed; this is not feature activation.
+    fn emit_child(diagnostic: Option<Diagnostic>, hard: Option<Instant>) {
+        if let (Some(diagnostic), Some(hard)) = (diagnostic, hard) {
+            let line = diagnostic.line(DiagnosticScope::Child);
+            if Instant::now() < hard {
+                let _ = std::io::Write::write(&mut std::io::stderr().lock(), line.as_bytes());
+            }
+        }
+    }
     pub(crate) fn copier_entry(channel: i32) -> i32 {
-        let mut owner = match ChildAdmission::receive(channel) {
+        let mut trace = Trace::new(Stage::Input);
+        let mut diagnostic_hard = None;
+        let mut owner = match ChildAdmission::receive(channel, &mut trace, &mut diagnostic_hard) {
             Ok(v) => v,
-            Err(_) => return 74,
+            Err(error) => {
+                trace.note(error);
+                emit_child(trace.first, diagnostic_hard);
+                return 74;
+            }
         };
         let result = match owner.purpose {
             Purpose::Carrier => carrier_child(&mut owner),
@@ -2542,14 +2791,21 @@ mod native {
             Purpose::RetirePending => retire_child(&mut owner),
             Purpose::ObserveFinal | Purpose::ObserveAttempt => observe_child(&mut owner),
         };
+        owner.trace.record(&result);
         if result.is_err() {
             owner.clock.fail();
         }
+        owner.trace.at(Stage::LoansSettle);
         let closed = owner.settle();
+        owner.trace.record(&closed);
         let result = match (result, closed) {
-            (Ok(proof), Ok(())) => owner.finish(proof),
+            (Ok(proof), Ok(())) => {
+                owner.trace.at(Stage::Reply);
+                owner.finish(proof)
+            }
             _ => Err(Failure::Unknown),
         };
+        owner.trace.record(&result);
         // On refusal still consume original private endpoint once under F; no
         // success frame, no implicit Drop closure/late success after deadline.
         if result.is_err() {
@@ -2563,6 +2819,7 @@ mod native {
                     }
                 }
             }
+            emit_child(owner.trace.first, Some(owner.clock.hard));
             return 74;
         }
         0
@@ -3841,6 +4098,97 @@ mod tests {
             "a".repeat(64),
         )
         .unwrap()
+    }
+    #[test]
+    fn xcode_refusal_trace_preserves_primary_and_emits_only_closed_data() {
+        let mut trace = Trace::new(Stage::Copy);
+        trace.record(&Ok::<(), Failure>(()));
+        trace.fallback(false);
+        assert_eq!(trace.first, None);
+        trace.record(&Err::<(), _>(Failure::Write));
+        trace.at(Stage::FilesSettle);
+        trace.note(Failure::Close);
+        trace.fallback(true);
+        assert_eq!(
+            trace.first,
+            Some(Diagnostic {
+                stage: Stage::Copy,
+                failure: Failure::Write
+            })
+        );
+        let mut cleanup = Trace::new(Stage::SourceSettle);
+        cleanup.record(&Err::<(), _>(Failure::Close));
+        assert_eq!(cleanup.first.unwrap().stage, Stage::SourceSettle);
+        let mut fallback = Trace::new(Stage::Input);
+        fallback.fallback(true);
+        assert_eq!(
+            fallback.first,
+            Some(Diagnostic {
+                stage: Stage::Finality,
+                failure: Failure::Unknown
+            })
+        );
+        for stage in [
+            Stage::Input,
+            Stage::Source,
+            Stage::SelfCheck,
+            Stage::Carrier,
+            Stage::Selection,
+            Stage::SourceApple,
+            Stage::StagedApple,
+            Stage::FinalApple,
+            Stage::Facts,
+            Stage::Census,
+            Stage::Copy,
+            Stage::Record,
+            Stage::RetireTree,
+            Stage::Current,
+            Stage::SourcePost,
+            Stage::FilesSettle,
+            Stage::SourceSettle,
+            Stage::LoansSettle,
+            Stage::Reply,
+            Stage::EndpointSettle,
+            Stage::Namespace,
+            Stage::Reservation,
+            Stage::Child,
+            Stage::Publication,
+            Stage::NamespaceSettle,
+            Stage::Finality,
+        ] {
+            for failure in [
+                Failure::Clock,
+                Failure::Access,
+                Failure::Bounds,
+                Failure::State,
+                Failure::Binding,
+                Failure::Present,
+                Failure::Read,
+                Failure::Write,
+                Failure::Sync,
+                Failure::Close,
+                Failure::Child,
+                Failure::Unknown,
+            ] {
+                let diagnostic = Diagnostic { stage, failure };
+                for scope in [DiagnosticScope::Public, DiagnosticScope::Child] {
+                    let line = diagnostic.line(scope);
+                    assert!(line.len() < 192 && line.ends_with('\n'));
+                    assert!(line[..line.len() - 1]
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_=-;".contains(&b)));
+                    assert_eq!(line.matches('\n').count(), 1);
+                }
+            }
+        }
+        assert_eq!(
+            trace.first.unwrap().line(DiagnosticScope::Child),
+            "MRK_XCODE_SETUP_REFUSED=scope=child;stage=copy;reason=write\n"
+        );
+        assert_eq!(
+            trace.first.unwrap().line(DiagnosticScope::Public),
+            "MRK_XCODE_SETUP_REFUSED=scope=public;stage=copy;reason=write\n"
+        );
     }
     #[test]
     fn xcode_child_tail_is_one_use_and_lost_wait_never_reauthorizes_signals() {

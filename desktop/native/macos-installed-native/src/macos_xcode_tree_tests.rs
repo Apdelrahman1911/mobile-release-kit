@@ -10,7 +10,7 @@ use std::{
     ffi::{CStr, CString},
     fs,
     os::{
-        fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
+        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
         unix::{
             ffi::OsStrExt,
             fs::{symlink, DirBuilderExt, MetadataExt, PermissionsExt},
@@ -20,8 +20,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+#[track_caller]
 fn error(failure: Failure) -> std::io::Error {
-    std::io::Error::other(format!("{failure:?}"))
+    let site = std::panic::Location::caller();
+    std::io::Error::other(format!("{failure:?} at {}:{}", site.file(), site.line()))
 }
 fn require(value: bool, why: &str) -> TestResult {
     if value {
@@ -124,6 +126,33 @@ fn finish(
     );
     observed.expect("actual copier/retirement fixture");
 }
+// Test diagnostics for the two shared read boundaries. Only fixed operation
+// labels and errno are reported; never enumerate/log fixture file contents.
+fn probe_directory(fd: std::os::fd::BorrowedFd<'_>) -> TestResult {
+    if unsafe { libc::lseek(fd.as_raw_fd(), 0, libc::SEEK_SET) } != 0 {
+        return Err(std::io::Error::other(format!("directory rewind errno={:?}", std::io::Error::last_os_error().raw_os_error())).into());
+    }
+    let mut block = [0u8; 65536];
+    let observed = super::directory_block(fd, &mut block);
+    let reset = unsafe { libc::lseek(fd.as_raw_fd(), 0, libc::SEEK_SET) };
+    let reset_error = if reset != 0 { Some(std::io::Error::last_os_error().raw_os_error()) } else { None };
+    observed.map_err(|error| std::io::Error::other(format!("directory-block errno={:?}", error.raw_os_error())))?;
+    require(reset == 0, &format!("directory reset errno={reset_error:?}"))
+}
+fn probe_symlink(path: &Path, inputs: &mut Vec<OwnedFd>) -> TestResult {
+    let path = path_c(path)?;
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_SYMLINK | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::other(format!("symlink-open errno={:?}", std::io::Error::last_os_error().raw_os_error())).into());
+    }
+    // Adopt before any fallible check; the existing fixture finish owns close.
+    inputs.push(unsafe { OwnedFd::from_raw_fd(fd) });
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::other(format!("symlink-stat errno={:?}", std::io::Error::last_os_error().raw_os_error())).into());
+    }
+    require(unsafe { stat.assume_init() }.st_mode & libc::S_IFMT == libc::S_IFLNK, "probe opened referent instead of alias")
+}
 const ATTR: &CStr = c"dev.mobile-release-kit.setup-fixture";
 const ATTRIBUTE: &[u8] = b"bounded visible xattr\0fixture";
 fn set_attribute(path: &Path) -> TestResult {
@@ -194,11 +223,13 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
         inputs.push(fs::File::open(&root)?.into());
         inputs.push(fs::File::open(&source)?.into());
         inputs.push(fs::File::open(&pending)?.into());
-        let mut files = CopierFiles::new(cleanup, inputs.len()).map_err(error)?;
+        probe_directory(inputs[1].as_fd())?;
+        probe_symlink(&versions.join("Current"), &mut inputs)?;
+        let mut files = CopierFiles::new(cleanup, inputs.len()).map_err(|failure| error(failure))?;
         let body = (|| -> TestResult {
-            let source_id = copy::fstat(inputs[1].as_fd(), &work).map_err(error)?;
-            let stage_id = copy::fstat(inputs[2].as_fd(), &work).map_err(error)?;
-            let created = copy::named(inputs[2].as_fd(), c"Xcode.app", &work).map_err(error)?;
+            let source_id = copy::fstat(inputs[1].as_fd(), &work).map_err(|failure| error(failure))?;
+            let stage_id = copy::fstat(inputs[2].as_fd(), &work).map_err(|failure| error(failure))?;
+            let created = copy::named(inputs[2].as_fd(), c"Xcode.app", &work).map_err(|failure| error(failure))?;
             // A public source755 is legitimate copy input but not a protected
             // prepared tree. The private pending700 is refused even by the
             // original source gate; neither check changes its retained inode.
@@ -227,7 +258,7 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
                 "private unfinished root accepted as a protected payload",
             )?;
             require(
-                copy::fstat(inputs[2].as_fd(), &work).map_err(error)? == stage_id,
+                copy::fstat(inputs[2].as_fd(), &work).map_err(|failure| error(failure))? == stage_id,
                 "protected refusal changed the private pending original",
             )?;
             let mut tree = SourceTree::original(
@@ -237,9 +268,9 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
                 source_id,
                 &work,
             )
-            .map_err(error)?;
+            .map_err(|failure| error(failure))?;
             let allocation = u64::from(statfs::fstatfs(inputs[2].as_fd())?.block_size());
-            let census = tree.census(&mut files, allocation).map_err(error)?;
+            let census = tree.census(&mut files, allocation).map_err(|failure| error(failure))?;
             let sealed = tree
                 .copy_to(
                     &mut files,
@@ -249,17 +280,17 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
                     created.inode(),
                     &census,
                 )
-                .map_err(error)?;
+                .map_err(|failure| error(failure))?;
             require(
                 sealed.identity
-                    == copy::fstat(files.fd(sealed.slot).map_err(error)?, &work).map_err(error)?,
+                    == copy::fstat(files.fd(sealed.slot).map_err(|failure| error(failure))?, &work).map_err(|failure| error(failure))?,
                 "sealed original changed",
             )?;
             require(sealed.digest != [0; 32], "sealed digest absent")?;
             {
                 // Borrow this same retained slot, never dup/open another FD.
                 // Its raw borrow ends before original pool closure below.
-                let output_raw = files.fd(sealed.slot).map_err(error)?.as_raw_fd();
+                let output_raw = files.fd(sealed.slot).map_err(|failure| error(failure))?.as_raw_fd();
                 let output_fd = unsafe { BorrowedFd::borrow_raw(output_raw) };
                 let protected = SourceTree::original(
                     output_fd,
@@ -269,16 +300,16 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
                     &work,
                 )
                 .and_then(SourceTree::protected)
-                .map_err(error)?;
+                .map_err(|failure| error(failure))?;
                 let original_live = files.live();
-                let first = protected.census(&mut files, allocation).map_err(error)?;
-                let second = protected.census(&mut files, allocation).map_err(error)?;
+                let first = protected.census(&mut files, allocation).map_err(|failure| error(failure))?;
+                let second = protected.census(&mut files, allocation).map_err(|failure| error(failure))?;
                 require(
                     first == second && files.live() == original_live,
                     "protected repeated census changed the tree or retained extra originals",
                 )?;
                 require(
-                    copy::fstat(output_fd, &work).map_err(error)? == sealed.identity,
+                    copy::fstat(output_fd, &work).map_err(|failure| error(failure))? == sealed.identity,
                     "protected census changed the sealed original",
                 )?;
             }
@@ -322,11 +353,11 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
             )?;
             check_attribute(&version.join("data"))?;
             require(
-                copy::fstat(inputs[1].as_fd(), &work).map_err(error)? == source_id,
+                copy::fstat(inputs[1].as_fd(), &work).map_err(|failure| error(failure))? == source_id,
                 "source root changed",
             )?;
             require(files.close_all(), "copy originals close unconfirmed")?;
-            let pending_now = copy::fstat(inputs[2].as_fd(), &work).map_err(error)?;
+            let pending_now = copy::fstat(inputs[2].as_fd(), &work).map_err(|failure| error(failure))?;
             files
                 .retire_pending(
                     inputs[2].as_fd(),
@@ -335,7 +366,7 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
                     created.inode(),
                     work.parent,
                 )
-                .map_err(error)?;
+                .map_err(|failure| error(failure))?;
             require(
                 fs::read_dir(&pending)?.next().is_none(),
                 "pending payload remains",
@@ -390,9 +421,11 @@ fn retirement_checks_recorded_identity_and_never_follows_partial_or_sealed_alias
             "non0777 alias fixture missing",
         )?;
         inputs.push(fs::File::open(&pending)?.into());
-        let pending_id = copy::fstat(inputs[0].as_fd(), &work).map_err(error)?;
-        let app_id = copy::named(inputs[0].as_fd(), c"Xcode.app", &work).map_err(error)?;
-        let mut rejected = CopierFiles::new(cleanup, inputs.len()).map_err(error)?;
+        probe_directory(inputs[0].as_fd())?;
+        probe_symlink(&alias, &mut inputs)?;
+        let pending_id = copy::fstat(inputs[0].as_fd(), &work).map_err(|failure| error(failure))?;
+        let app_id = copy::named(inputs[0].as_fd(), c"Xcode.app", &work).map_err(|failure| error(failure))?;
+        let mut rejected = CopierFiles::new(cleanup, inputs.len()).map_err(|failure| error(failure))?;
         let refusal = rejected.retire_pending(
             inputs[0].as_fd(),
             pending_id,
@@ -410,7 +443,7 @@ fn retirement_checks_recorded_identity_and_never_follows_partial_or_sealed_alias
             "wrong recorded stage identity not refused",
         )?;
         require(
-            copy::named(inputs[0].as_fd(), c"Xcode.app", &work).map_err(error)? == app_id,
+            copy::named(inputs[0].as_fd(), c"Xcode.app", &work).map_err(|failure| error(failure))? == app_id,
             "refusal changed stage",
         )?;
         require(
@@ -421,7 +454,7 @@ fn retirement_checks_recorded_identity_and_never_follows_partial_or_sealed_alias
         )?;
         // Separate primitive call after the rejected table positively closed;
         // same original endpoint, not a Parent recovery/authorization bypass.
-        let mut accepted = CopierFiles::new(cleanup, inputs.len()).map_err(error)?;
+        let mut accepted = CopierFiles::new(cleanup, inputs.len()).map_err(|failure| error(failure))?;
         let retired = accepted.retire_pending(
             inputs[0].as_fd(),
             pending_id,
@@ -430,7 +463,7 @@ fn retirement_checks_recorded_identity_and_never_follows_partial_or_sealed_alias
             work.parent,
         );
         tables_closed &= accepted.close_all();
-        retired.map_err(error)?;
+        retired.map_err(|failure| error(failure))?;
         require(
             fs::read_dir(&pending)?.next().is_none(),
             "retired payload remains",
