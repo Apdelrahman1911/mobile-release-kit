@@ -169,8 +169,7 @@ impl UploadSelection {
     pub(crate) fn new_data(path:&Path,app:crate::ios_archive_protocol::RootIdentity,developer:crate::ios_archive_protocol::RootIdentity,
         xcrun:crate::ios_archive_protocol::ToolIdentity)->Result<Self,BridgeError>{
         let directory=native_path(path).ok_or_else(invalid)?;
-        let name=directory.strip_prefix("/Applications/").and_then(|p|p.strip_suffix("/Contents/Developer")).ok_or_else(invalid)?;
-        if name!=crate::ios_toolchain::STANDARD_APP&&crate::ios_toolchain::sibling_target(name)!=Some(name){return Err(invalid());}
+        if !crate::ios_toolchain::upload_developer(directory){return Err(invalid());}
         let root=|v:&crate::ios_archive_protocol::RootIdentity|v.valid()&&v.uid==0&&v.mode&0o022==0;
         // Existing fixed system-tool validator; no new permissive tool grammar.
         if !xcrun.valid()||xcrun.uid!=0||xcrun.mode&0o022!=0||!root(&app)||!root(&developer){return Err(invalid());}

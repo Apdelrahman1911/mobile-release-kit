@@ -1,6 +1,11 @@
 //! Fixed full-Xcode selection DATA only. Native custody lives in the original
 //! Darwin Book; no PATH discovery, download, xcode-select or renderer tool path.
 pub(crate) const APPLICATIONS: &str = "/Applications";
+pub(crate) const MANAGED_PARENT: &str = "/Library";
+pub(crate) const MANAGED_NAMESPACE: &str = "MobileReleaseKitDeveloper";
+pub(crate) const MANAGED_DEVELOPER: &str = "/Library/MobileReleaseKitDeveloper/Xcode.app/Contents/Developer";
+pub(crate) const MANAGED_PENDING: &str = ".pending";
+pub(crate) const MANAGED_ATTEMPT: &str = "attempt.json";
 pub(crate) const STANDARD_APP: &str = "Xcode.app";
 #[path = "../../native/macos-installed-native/src/ios_sdk_selection.rs"]
 mod sdk_selection;
@@ -21,12 +26,30 @@ pub(crate) fn sibling_target(value: &str) -> Option<&str> {
         .then_some(name)
 }
 
+/// Exact native upload projection only. Its managed spelling grants no IO or
+/// completion; IOSXcodeSlots requires current originals and absence of pending.
+pub(crate) fn upload_developer(value: &str) -> bool {
+    if value == MANAGED_DEVELOPER { return true; }
+    let Some(name) = value.strip_prefix("/Applications/").and_then(|p| p.strip_suffix("/Contents/Developer")) else { return false; };
+    name == STANDARD_APP || sibling_target(name) == Some(name)
+}
+
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use crate::installed_runtime::IOSXcodeSlots;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn managed_developer_is_exact_without_relaxing_legacy_selection() {
+        assert!(upload_developer(MANAGED_DEVELOPER));
+        assert_eq!(format!("{MANAGED_PARENT}/{MANAGED_NAMESPACE}/{STANDARD_APP}/Contents/Developer"),MANAGED_DEVELOPER);
+        for good in ["/Applications/Xcode.app/Contents/Developer", "/Applications/Xcode_26.6.app/Contents/Developer"] { assert!(upload_developer(good)); }
+        for bad in [MANAGED_DEVELOPER.to_lowercase(), format!("{MANAGED_DEVELOPER}/"),
+            MANAGED_DEVELOPER.replace("Xcode.app", "Other.app"), MANAGED_DEVELOPER.replace("Xcode.app", ".pending/Xcode.app"),
+            MANAGED_DEVELOPER.replace("Xcode.app", "../Xcode.app"), MANAGED_DEVELOPER.replace("MobileReleaseKitDeveloper", "MobileReleaseKitDeveloperOther"),
+            "/Applications/A/Xcode.app/Contents/Developer".into(), "/tmp/Xcode.app/Contents/Developer".into()] { assert!(!upload_developer(&bad),"{bad}"); }
+    }
     #[test]
     fn fixed_alias_is_only_one_sibling_not_a_path_traversal_or_second_lookup() {
         assert!(selection_alias_owner(0, 501));

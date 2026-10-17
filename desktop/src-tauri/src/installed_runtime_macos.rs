@@ -1723,18 +1723,39 @@ impl IOSArchiveRuntimeSlots {
     }
 }
 
+// Absence is observed only under an actually retained protected parent, and is
+// rechecked under both W and the original cleanup endpoint. Any present malformed
+// or pending namespace refuses; it never selects the writable legacy fallback.
+#[derive(Clone, Copy)]
+enum IOSManagedSelection {
+    AbsentNamespace { library: usize },
+    AbsentFinal { namespace: usize },
+    Present { namespace: usize },
+}
+// Only the already-held original directory is queried. ENOENT alone admits
+// absence; a symlink, non-directory parent, permission or I/O failure never does.
+fn ios_named_absent(parent: &OwnedFd, name: &str, point: &mut dyn FnMut()->Result<()>) -> Result<bool> {
+    point()?;
+    let observed = stat::fstatat(parent, name, AtFlags::AT_SYMLINK_NOFOLLOW);
+    point()?;
+    match observed {
+        Ok(_) => Ok(false),
+        Err(error) if error == nix::errno::Errno::ENOENT => Ok(true),
+        Err(_) => Err(AdmissionFailure::Native),
+    }
+}
 struct IOSXcodeAlias { parent: usize, identity: Identity, target: PathBuf }
 /// Distinct tool originals, reusing only Book's finite no-follow descriptor,
 /// metadata and one-attempt close primitives. No runtime/tool interchange.
 pub(crate) struct IOSXcodeSlots {
-    original: Book, alias: Option<IOSXcodeAlias>, sdk_alias: Option<IOSXcodeAlias>, developer: Option<usize>, executable: Option<usize>,
+    original: Book, managed: Option<IOSManagedSelection>, alias: Option<IOSXcodeAlias>, sdk_alias: Option<IOSXcodeAlias>, developer: Option<usize>, executable: Option<usize>,
     sdk: Option<usize>, developer_path: Option<PathBuf>, sdk_path: Option<PathBuf>,
     signing: Option<[usize; 3]>, recovery_security: Option<usize>, validation_only: bool, upload: Option<(usize,usize)>,
     audit: watch::Receiver<Instant>, prepared: bool,
 }
 impl IOSXcodeSlots {
     pub(crate) fn new(audit: watch::Receiver<Instant>) -> Self {
-        Self { original: Book::new(), alias: None, sdk_alias: None, developer: None, executable: None, sdk: None,
+        Self { original: Book::new(), managed: None, alias: None, sdk_alias: None, developer: None, executable: None, sdk: None,
             developer_path: None, sdk_path: None, signing: None, recovery_security: None,
             validation_only: false, upload: None, audit, prepared: false }
     }
@@ -1790,7 +1811,57 @@ impl IOSXcodeSlots {
         let _ = self.recovery_binding_data()?;
         self.check_current(end, stop)
     }
+    fn named_absent(&self, parent: usize, name: &str, point: &mut dyn FnMut()->Result<()>) -> Result<bool> {
+        point()?;
+        ios_named_absent(self.original.fd(parent)?, name, point)
+    }
+    fn check_managed(&self, point: &mut dyn FnMut()->Result<()>) -> Result<()> {
+        use crate::ios_toolchain::{MANAGED_NAMESPACE, MANAGED_PENDING, MANAGED_ATTEMPT, STANDARD_APP};
+        let Some(selection) = self.managed else { return Ok(()); }; // System-only validation/recovery.
+        match selection {
+            IOSManagedSelection::AbsentNamespace { library } => {
+                if !self.named_absent(library, MANAGED_NAMESPACE, point)? { return Err(AdmissionFailure::Identity); }
+            }
+            IOSManagedSelection::AbsentFinal { namespace } | IOSManagedSelection::Present { namespace } => {
+                if !self.named_absent(namespace, MANAGED_PENDING, point)?
+                    || !self.named_absent(namespace, MANAGED_ATTEMPT, point)? { return Err(AdmissionFailure::Inventory); }
+                let absent = self.named_absent(namespace, STANDARD_APP, point)?;
+                if absent != matches!(selection, IOSManagedSelection::AbsentFinal { .. }) { return Err(AdmissionFailure::Identity); }
+            }
+        }
+        point()
+    }
+    fn inspect_managed_developer(&mut self, end:Instant, stop:&watch::Receiver<bool>) -> Result<Option<usize>> {
+        use crate::ios_toolchain::{MANAGED_PARENT, MANAGED_NAMESPACE, MANAGED_PENDING, MANAGED_ATTEMPT, MANAGED_DEVELOPER, STANDARD_APP};
+        let library = self.original.chain(Path::new(MANAGED_PARENT), end, stop)?;
+        if self.named_absent(library, MANAGED_NAMESPACE, &mut || checkpoint(end, stop))? {
+            self.managed = Some(IOSManagedSelection::AbsentNamespace { library });
+            self.check_managed(&mut || checkpoint(end, stop))?;
+            return Ok(None);
+        }
+        // Present but inaccessible, symlinked, writable, wrong-owner, ACL or
+        // malformed directories refuse through the SAME original Book, no catch
+        // that changes them into absence and no second inspector/copy owner.
+        let namespace = self.original.open(Some(library), MANAGED_NAMESPACE, true, end, stop)?;
+        if !self.named_absent(namespace, MANAGED_PENDING, &mut || checkpoint(end, stop))?
+            || !self.named_absent(namespace, MANAGED_ATTEMPT, &mut || checkpoint(end, stop))? {
+            return Err(AdmissionFailure::Inventory);
+        }
+        if self.named_absent(namespace, STANDARD_APP, &mut || checkpoint(end, stop))? {
+            self.managed = Some(IOSManagedSelection::AbsentFinal { namespace });
+            self.check_managed(&mut || checkpoint(end, stop))?;
+            return Ok(None);
+        }
+        self.managed = Some(IOSManagedSelection::Present { namespace });
+        let app = self.original.open(Some(namespace), STANDARD_APP, true, end, stop)?;
+        let contents = self.original.open(Some(app), "Contents", true, end, stop)?;
+        self.developer = Some(self.original.open(Some(contents), "Developer", true, end, stop)?);
+        self.developer_path = Some(PathBuf::from(MANAGED_DEVELOPER));
+        self.check_managed(&mut || checkpoint(end, stop))?;
+        Ok(Some(app))
+    }
     fn inspect_developer(&mut self,end:Instant,stop:&watch::Receiver<bool>,account:u32)->Result<usize>{
+        if let Some(app) = self.inspect_managed_developer(end, stop)? { return Ok(app); }
         use crate::ios_toolchain::{APPLICATIONS,STANDARD_APP,selection_alias_owner,sibling_target};
         let applications = self.original.chain(Path::new(APPLICATIONS), end, stop)?;
         checkpoint(end, stop)?;
@@ -1818,7 +1889,7 @@ impl IOSXcodeSlots {
     /// Same Store Session's selected upload tools, not an archive/build grant.
     pub(crate) fn inspect_upload_once(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         if !self.original.inspection_ready(){return Err(AdmissionFailure::AlreadyUsed);}
-        self.original.records.try_reserve_exact(12).map_err(native_error)?;
+        self.original.records.try_reserve_exact(16).map_err(native_error)?;
         self.original.started=true;checkpoint(end,stop)?;
         let account=native::real_user().map_err(native_error)?;
         let bin=self.original.chain(Path::new("/usr/bin"),end,stop)?;
@@ -1907,6 +1978,7 @@ impl IOSXcodeSlots {
         Ok(())
     }
     fn check_current(&self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        self.check_managed(&mut || checkpoint(end, stop))?;
         self.check_alias(end, stop)?;
         for index in 0..self.original.records.len() { self.original.check_name(index, end, stop)?; }
         checkpoint(end, stop)
@@ -1943,7 +2015,7 @@ impl IOSXcodeSlots {
         self.system_signing_data()
     }
     pub(crate) fn validation_binding_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
-        if !self.validation_only || self.upload.is_some() || self.alias.is_some() || self.sdk_alias.is_some()
+        if !self.validation_only || self.upload.is_some() || self.managed.is_some() || self.alias.is_some() || self.sdk_alias.is_some()
             || self.developer.is_some() || self.executable.is_some() || self.sdk.is_some()
             || self.developer_path.is_some() || self.sdk_path.is_some() || self.recovery_security.is_some()
             || self.signing != Some([3, 4, 5]) || self.original.records.len() != 6
@@ -1973,13 +2045,14 @@ impl IOSXcodeSlots {
             self.tool_data(Some(codesign))?, self.tool_data(Some(openssl))?).map_err(|_| AdmissionFailure::Inventory)
     }
     pub(crate) fn recovery_binding_data(&self) -> Result<crate::ios_archive_protocol::ToolIdentity> {
-        if self.validation_only || self.upload.is_some() || !self.original.inspected || !self.original.admission_custody_ready()
+        if self.validation_only || self.upload.is_some() || self.managed.is_some() || !self.original.inspected || !self.original.admission_custody_ready()
             || self.signing.is_some() || self.developer.is_some() || self.sdk.is_some() || self.executable.is_some() {
             return Err(AdmissionFailure::Inventory);
         }
         self.tool_data(self.recovery_security)
     }
     pub(crate) fn check_after_use(&self, end: Instant) -> Result<()> {
+        self.check_managed(&mut || ios_audit_point(end, &self.audit))?;
         self.original.ios_check_after_use(end, &self.audit)?;
         for (slot, name) in [(self.alias.as_ref(), crate::ios_toolchain::STANDARD_APP),
             (self.sdk_alias.as_ref(), crate::ios_toolchain::SDK_COMPONENTS[4])] {
@@ -2010,6 +2083,73 @@ impl IOSXcodeSlots {
 mod ios_validation_tools_data_tests {
     use super::*;
 
+    // Actual private temporary originals for the absence syscall only, NOT an
+    // ACL/Apple/managed-namespace admission and never a manufactured Book grant.
+    #[test]
+    fn ios_managed_absence_is_enoent_only_and_rechecked_on_the_original_directory() {
+        use std::{fs, os::unix::fs::symlink};
+        let root = std::env::temp_dir().join(format!("mrk-managed-absence-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();
+        let mut descriptors: Vec<OwnedFd> = Vec::new();
+        let observed=(||->std::result::Result<(),Box<dyn std::error::Error>>{
+            descriptors.push(fs::File::open(&root)?.into());
+            let expect=|got:Result<bool>,expected:Result<bool>| -> std::result::Result<(),std::io::Error> {
+                if got==expected {Ok(())} else {Err(std::io::Error::other("absence verdict mismatch"))}
+            };
+            let directory=&descriptors[0];
+            expect(ios_named_absent(directory, ".pending", &mut ||Ok(())),Ok(true))?;
+            fs::write(root.join(".pending"), b"")?;
+            expect(ios_named_absent(directory, ".pending", &mut ||Ok(())),Ok(false))?;
+            fs::remove_file(root.join(".pending"))?;
+            symlink("missing",root.join(".pending"))?;
+            expect(ios_named_absent(directory, ".pending", &mut ||Ok(())),Ok(false))?;
+            fs::remove_file(root.join(".pending"))?;
+            expect(ios_named_absent(directory, ".pending", &mut ||Err(AdmissionFailure::Deadline)),Err(AdmissionFailure::Deadline))?;
+            // The old directory FD remains a directory, but presence changes
+            // are read again instead of adopting its earlier empty observation.
+            fs::create_dir(root.join("Xcode.app"))?;
+            expect(ios_named_absent(directory, "Xcode.app", &mut ||Ok(())),Ok(false))?;
+            fs::write(root.join("file"), b"")?;
+            descriptors.push(fs::File::open(root.join("file"))?.into());
+            expect(ios_named_absent(&descriptors[1], "Xcode.app", &mut ||Ok(())),Err(AdmissionFailure::Native))?;
+            Ok(())
+        })();
+        // Consume each original once, independently of earlier result. Errors
+        // are asserted only AFTER attempts; no native permission normalization.
+        let mut closed=true;
+        for descriptor in descriptors.into_iter().rev(){closed &= unistd::close(descriptor).is_ok();}
+        let cleanup=fs::remove_dir_all(&root);
+        assert!(closed,"temporary original close unconfirmed");
+        assert!(cleanup.is_ok(),"temporary namespace cleanup failed");
+        assert!(observed.is_ok(),"temporary absence checks failed: {:?}",observed.err());
+    }
+    #[test]
+    fn ios_managed_presence_never_mints_missing_original_or_renews_cleanup() {
+        let end=Instant::now()+std::time::Duration::from_secs(10);
+        let (_sender,audit)=watch::channel(end);
+        let mut tools=IOSXcodeSlots::new(audit);
+        assert!(tools.managed.is_none());
+        for selection in [IOSManagedSelection::AbsentNamespace{library:0},
+            IOSManagedSelection::AbsentFinal{namespace:0}, IOSManagedSelection::Present{namespace:0}] {
+            tools.managed=Some(selection);
+            let mut points=0;
+            // Actual absence path refuses before fstatat because no original
+            // descriptor exists. A shaped selection does not manufacture ENOENT.
+            assert!(tools.check_managed(&mut ||{points+=1;Ok(())}).is_err());
+            assert_eq!(points,1);
+            assert_eq!(tools.check_managed(&mut ||Err(AdmissionFailure::Deadline)),Err(AdmissionFailure::Deadline));
+            tools.validation_only=true;
+            assert!(matches!(tools.validation_binding_data(),Err(AdmissionFailure::Inventory)));
+            tools.validation_only=false;
+            assert!(tools.recovery_binding_data().is_err());
+            assert!(tools.original.records.is_empty());
+        }
+        // Empty originals can still be independently consumed; no IO/native
+        // inspector was entered by these DATA refusals.
+        assert_eq!(tools.settle_originals(&mut |_|false),CloseOutcome::Settled);
+        assert!(tools.settled());
+    }
     #[test]
     fn ios_validation_tools_need_original_inspector_and_never_grant_build_or_recovery() {
         let end = Instant::now();
@@ -2236,16 +2376,26 @@ mod ios_upload_tools_tests {
             tools.arm_acl_once(end,&stop)?;stage="selected-inspection";tools.inspect_upload_once(end,&stop)?;
             stage="original-projection";
             let count=tools.retained_original_count().ok_or(AdmissionFailure::Unknown)?;
-            if count<=6{return Err(AdmissionFailure::Inventory);}
+            let expected=match tools.managed {
+                Some(IOSManagedSelection::Present{..})=>13,
+                Some(IOSManagedSelection::AbsentNamespace{..})=>14,
+                Some(IOSManagedSelection::AbsentFinal{..})=>15,
+                None=>return Err(AdmissionFailure::Inventory),
+            };
+            // Compare the genuine Book count, not its Vec allocation reserve.
+            if count!=expected{return Err(AdmissionFailure::Inventory);}
             if !matches!(tools.upload_binding_data()?,crate::local_store_execute_protocol::NativeTools::Ios{..}){return Err(AdmissionFailure::Inventory);}
             if tools.binding_data().is_ok()||tools.validation_binding_data().is_ok()||tools.recovery_binding_data().is_ok(){return Err(AdmissionFailure::Inventory);}
             stage="pre";tools.check_before_spawn(end,&stop)?;stage="post";tools.check_after_use(end)?;Ok(count)
         })();
         // Closed labels from this fixed original layout, never a selected path,
         // record name, UID, identity or unbounded native diagnostic.
-        let slot=match tools.original.records.len(){
-            0=>"none",1=>"system-root",2=>"usr",3=>"bin",4=>"security",5=>"codesign",6=>"openssl",7=>"xcrun",
-            8=>"applications-root",9=>"applications",10=>"selected-app",11=>"contents",12=>"developer",_=>"unexpected-layout",
+        let slot=match tools.original.records.last().map(|record| record.name.as_str()) {
+            None=>"none", Some("/")=>"root", Some("usr")=>"usr", Some("bin")=>"bin", Some("security")=>"security",
+            Some("codesign")=>"codesign", Some("openssl")=>"openssl", Some("xcrun")=>"xcrun", Some("Library")=>"library",
+            Some("MobileReleaseKitDeveloper")=>"managed-namespace", Some("Applications")=>"applications",
+            Some("Contents")=>"contents", Some("Developer")=>"developer", Some("Xcode.app")=>"selected-app",
+            Some(name) if crate::ios_toolchain::sibling_target(name)==Some(name)=>"selected-app", _=>"unexpected-layout",
         };
         // Independent consume even when any inspection/PRE/POST above refused.
         let closed=tools.settle_originals(&mut |_|Instant::now()>=end);

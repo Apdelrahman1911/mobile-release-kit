@@ -286,7 +286,8 @@ impl ToolchainBinding {
             && self.developer_identity.valid()
             && self.xcodebuild_identity.valid() && self.sdk_identity.valid()
             && native_path(Path::new(&self.developer_dir)).is_some() && native_path(Path::new(&self.sdk)).is_some()
-            && self.developer_dir.starts_with("/Applications/") && self.developer_dir.ends_with(".app/Contents/Developer")
+            && (self.developer_dir == crate::ios_toolchain::MANAGED_DEVELOPER
+                || self.developer_dir.starts_with("/Applications/") && self.developer_dir.ends_with(".app/Contents/Developer"))
             && self.sdk.strip_prefix(&prefix).is_some_and(|s| !s.contains('/') && s.ends_with(".sdk"))
     }
     fn matches_profile(&self, profile: Profile) -> bool {
