@@ -9,9 +9,9 @@ import { Icon } from './Icon.tsx';
 const xcodePrerequisites = {
   setup: 'Open the Mac App Store and search for Xcode from Apple. Install full Xcode and complete its normal first-launch setup, including the iOS platform support your project needs. Command Line Tools alone are not full Xcode.',
   version: 'Compare both the version and build with the current core requirements. No fixed version is inferred while those requirements are unavailable or stale.',
-  selection: 'The native archive and IPA-upload profile selects /Applications/Xcode.app, either the concrete app or one link to a supported direct Xcode app sibling in /Applications. A different developer selection in Xcode does not override this profile.',
-  protection: 'The supported protected layout requires root-owned concrete tool directories, no group/world-write access, and the existing native filesystem and access-control checks. This is a separate setup requirement, not a guarantee made by the normal Apple installer.',
-  boundary: 'A matching observed version and build does not establish native tool protection, signing or upload readiness. This app does not install Xcode or repair its ownership, permissions or access controls. A setup outside the supported profile remains unavailable.',
+  selection: 'For archives and IPA uploads, the app uses its prepared Xcode copy when present. Otherwise it checks /Applications/Xcode.app, either the concrete app or a supported direct sibling link. Changing the developer selection in Xcode does not override these checks.',
+  protection: 'If your release includes Prepare Xcode.pkg, open that companion in macOS Installer after completing Xcode setup. Review the installer and approve its administrator prompt. It validates the installed Apple Xcode and creates a separate protected copy for this app; it does not change the original Xcode installation. Allow space for another Xcode copy.',
+  boundary: 'A matching version is not proof that building, signing or uploading is ready. The companion does not download Xcode or accept Apple licenses. If setup fails or is interrupted, keep its message and existing files; do not manually delete the prepared copy or change system permissions. A damaged prepared copy is refused, not silently replaced by another Xcode. Do not run this app as root.',
 };
 
 const labels: Record<EnvironmentCheckId, string> = {

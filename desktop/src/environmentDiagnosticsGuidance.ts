@@ -11,7 +11,7 @@ export function selectionDiagnosticGuidance(detail: EnvironmentSelectionDiagnost
     alias: 'Xcode selection link',
   };
   const location = locations[detail.stage];
-  const protectedSetup = 'Review Xcode prerequisites. The app needs a protected tool installation; a normal Xcode installation may not meet this requirement. Do not change system-folder permissions or run the app as administrator to bypass it.';
+  const protectedSetup = 'Review Xcode prerequisites. If your release includes Prepare Xcode.pkg, use that companion after completing Apple Xcode setup to create the separate protected tool copy. Do not change system-folder permissions or run the app as administrator to bypass a refusal.';
   switch (detail.reason) {
     case 'directory-owner': case 'alias-owner':
       return { location, problem: 'The selected tool location does not meet the required ownership rules.', nextStep: protectedSetup };
