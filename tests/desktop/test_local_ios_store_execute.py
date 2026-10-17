@@ -290,12 +290,12 @@ class IOSStoreAliasTests(unittest.TestCase):
     def fixture(self):
         case=IOSStoreExecuteTests(methodName='runTest');case.setUp();self.addCleanup(case.doCleanups)
         contents=case.app/'Contents';framework=contents/'SharedFrameworks/Upload.framework'
-        physical=framework/'Versions/A/Support/altool';physical.parent.mkdir(parents=True)
+        physical=framework/'Versions/A/Support/altoolShim';physical.parent.mkdir(parents=True)
         case.altool.rename(physical);case.altool=physical
         (framework/'Versions/Current').symlink_to('A')
         (framework/'Support').symlink_to('Versions/Current/Support')
         nomination=case.dev/'usr/bin/altool';nomination.parent.mkdir(parents=True)
-        nomination.symlink_to('../../../SharedFrameworks/Upload.framework/Support/altool')
+        nomination.symlink_to('../../../SharedFrameworks/Upload.framework/Support/altoolShim')
         original=case.resolve
         def resolve(argv,kw,engine,fault):
             result=original(argv,kw,engine,fault)
@@ -313,6 +313,15 @@ class IOSStoreAliasTests(unittest.TestCase):
         self.assertNotEqual(str(nomination),str(case.altool));self.assertTrue(nomination.is_symlink())
         self.assertTrue(e.service.closed());self.assertTrue(e.input.material_closed())
         self.assertLessEqual(high,e.service.quote['total']);self.assertLessEqual(len(e.service.tool_reader.descriptors),S.UPLOAD_TOOL_SLOTS)
+
+    def test_unexpected_physical_tool_name_refuses_before_pending_or_material(self):
+        case,nomination,_=self.fixture()
+        other=case.altool.with_name('differentTool');case.altool.rename(other);case.altool=other
+        nomination.unlink();nomination.symlink_to('../../../SharedFrameworks/Upload.framework/Support/differentTool')
+        t,e,events,calls,_=case.f.run_original(_execute=True)
+        self.assertIsNone(t['result']);self.assertEqual(len(calls),7);self.assertEqual(events,['lease-ready'])
+        self.assertEqual(case.f.current_phase(),'prepared');self.assertFalse(e.input._material_read)
+        self.assertTrue(e.service.closed());self.assertFalse(case.contexts)
 
     def test_escape_cycles_and_target_overflow_refuse_before_pending_or_material(self):
         for index,kind in enumerate(('escape','cycle','large','malformed')):
@@ -332,7 +341,7 @@ class IOSStoreAliasTests(unittest.TestCase):
         # `hop/..` means Versions/A, NOT the lexical parent of hop. A blanket
         # normpath would silently select the wrong path or reject this layout.
         (framework/'hop').symlink_to('Versions/A/Support')
-        nomination.unlink();nomination.symlink_to('../../../SharedFrameworks/Upload.framework/hop/../Support/altool')
+        nomination.unlink();nomination.symlink_to('../../../SharedFrameworks/Upload.framework/hop/../Support/altoolShim')
         t,e,_,_,_=case.f.run_original(_execute=True)
         self.assertEqual(t['outcome'],'complete',repr(e.primary))
         self.assertEqual(case.contexts[0]['transportTools']['altoolPath'],str(case.altool))

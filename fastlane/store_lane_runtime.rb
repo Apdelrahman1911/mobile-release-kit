@@ -560,7 +560,7 @@ module MobileReleaseKit
         return false unless developer.instance_of?(String) && developer.match?(%r{\A/Applications/Xcode[A-Za-z0-9_.+-]*\.app/Contents/Developer\z})
         app=developer.delete_suffix('/Contents/Developer')
         tool.instance_of?(String) && tool.bytesize<=4096 && tool.start_with?(app+'/Contents/') &&
-          tool.end_with?('/altool') && tool.split('/').length<=32 &&
+          tool.end_with?('/altool','/altoolShim') && tool.split('/').length<=32 &&
           tool.split('/').drop(1).all? { |part| !part.empty? && !%w[. ..].include?(part) && part.bytesize<=255 && !part.match?(/[\x00-\x1f\x7f\\:]/) }
       end
       def freeze_local(value)

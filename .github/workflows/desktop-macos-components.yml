@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, ios-tools-layout, ios-tools]
+        options: [all, integration, launcher, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools]
       architecture:
         description: Architecture for Store runtime and iOS resolver checks; other components use both
         type: choice
@@ -782,7 +782,7 @@ jobs:
 
   store-runtime:
     # Explicit reuse only: no gem/Ruby/app rebuild, signing or automatic rerun.
-    if: github.event_name == 'workflow_dispatch' && inputs.component == 'store-runtime'
+    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'store-runtime' || inputs.component == 'store-local-altool')
     name: Smoke signed Store runtime (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 12
@@ -836,6 +836,7 @@ jobs:
           WORK_ROOT: ${{ steps.work.outputs.root }}
           COMPONENT_TARGET: ${{ matrix.target }}
           COMPONENT_ARCH: ${{ matrix.arch }}
+          STORE_TEST_SCOPE: ${{ inputs.component }}
         run: |
           set -euo pipefail
           umask 077
@@ -910,19 +911,26 @@ jobs:
               # Six finite256KiB captures avoid verbose fixtures exhausting a
               # shared stream; successes need only their Minitest counts.
               clean["MT_CPU"] = "1"
-              for phase, filename, expected_count in (
+              suites = (
                   ("apple-lanes", "test_apple_lanes.rb", 40),
                   ("play-lanes", "test_play_lanes.rb", 60),
                   ("local-runtime", "test_local_store_execution_runtime.rb", 21),
                   ("apple-production", "test_apple_production.rb", 49),
                   ("lane-resources", "test_store_lane_resources.rb", 13),
                   ("lane-lifetime", "test_store_lane_lifetime.rb", 21),
-              ):
+              )
+              selected = os.environ["STORE_TEST_SCOPE"]
+              stager.need(selected in ("store-runtime", "store-local-altool"), "store-test-scope")
+              test_filter = []
+              if selected == "store-local-altool":
+                  suites = (("local-altool-bridge", "test_apple_lanes.rb", 2),)
+                  test_filter = ["-n", "/^test_local_ios_(original_pinned_bridge_constructor_key_parser_and_direct_send|lost_return_after_original_send_only_reads_back_without_resend)$/"]
+              for phase, filename, expected_count in suites:
                   capture_path = work / (phase + ".log")
                   with capture_path.open("xb") as capture:
                       subprocess.run(["/usr/bin/sandbox-exec", "-D", "RUNTIME=" + str(runtime), "-p", profile,
                           str(runtime / "bin/bundle"), "exec", "ruby",
-                          str(checkout / "tests/workflow" / filename), "--verbose"],
+                          str(checkout / "tests/workflow" / filename), "--verbose", *test_filter],
                           stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
                           # The production suite exercises49 screenshot/recovery cases;
                           # its45s blanket budget timed out on Intel, not a case assertion.
@@ -977,7 +985,7 @@ jobs:
   ios-tools:
     # Manual tool qualification only; no signed runtime/dependency/app rebuild.
     if: github.event_name == 'workflow_dispatch' && inputs.component == 'ios-tools'
-    name: Qualify original iOS resolver (${{ matrix.arch }})
+    name: Qualify iOS resolver and documented tool (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 42
     permissions:
@@ -1009,7 +1017,7 @@ jobs:
           [[ "$(/usr/bin/uname -m)" == "$COMPONENT_ARCH" && "$(/usr/bin/id -u)" != 0 ]] || exit 1
           root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-ios-tools.XXXXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
-      - name: Qualify the original selected Xcrun resolver before pending or ASC
+      - name: Qualify selected Xcrun resolution and credential-free tool help
         timeout-minutes: 2
         shell: bash
         env:
@@ -1033,7 +1041,9 @@ jobs:
           clean = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "TMPDIR": str(home),
               "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "PYTHONDONTWRITEBYTECODE": "1",
               "PYTHONPATH": os.pathsep.join(str(checkout / path) for path in ("src", "tests", "tests/desktop"))}
-          test = "test_local_ios_store_execute_macos.IOSStoreResolverMacTests.test_original_xcrun_resolution_post_and_close_before_pending_or_asc"
+          tests = ["test_local_ios_store_execute_macos.IOSStoreResolverMacTests." + name for name in (
+              "test_original_xcrun_resolution_post_and_close_before_pending_or_asc",
+              "test_documented_xcrun_altool_help_returns_and_settles")]
           profile = '(version 1) (allow default) (deny network*) (deny file-write* (subpath (param "CHECKOUT")))'
           def output():
               with capture_path.open("rb") as capture:
@@ -1045,10 +1055,10 @@ jobs:
               # Bound only captured output, not Apple runtime private files.
               # The resolver keeps its role cap and original parent deadline.
               run_bounded(["/usr/bin/sandbox-exec", "-D", "CHECKOUT=" + str(checkout), "-p", profile,
-                  os.environ["OWNER_PYTHON"], "-B", "-m", "unittest", "-v", test],
-                  capture_path=capture_path, env=clean, cwd=checkout, timeout=60, limit=limit)
-              if re.search(rb"\nRan 1 test in [0-9]+(?:\.[0-9]+)?s\n\nOK\n\Z", output()) is None:
-                  raise ValueError("resolver-exact-one-pass-required")
+                  os.environ["OWNER_PYTHON"], "-B", "-m", "unittest", "-v", *tests],
+                  capture_path=capture_path, env=clean, cwd=checkout, timeout=90, limit=limit)
+              if re.search(rb"\nRan 2 tests in [0-9]+(?:\.[0-9]+)?s\n\nOK\n\Z", output()) is None:
+                  raise ValueError("resolver-and-help-exact-two-pass-required")
           except Exception as error:
               try:
                   tail = output()[-4096:].decode("utf-8", "replace")
@@ -1057,10 +1067,10 @@ jobs:
                   tail = tail.encode("utf-8")[:4096].decode("utf-8", "ignore")
               except Exception as capture_error:
                   tail = "capture-unavailable:" + type(capture_error).__name__
-              print(json.dumps({"phase": "original-xcrun-resolver", "errorType": type(error).__name__,
+              print(json.dumps({"phase": "original-xcrun-resolver-and-help", "errorType": type(error).__name__,
                   "returncode": getattr(error, "returncode", None), "diagnosticTail": tail}), flush=True)
               raise SystemExit(1)
-          print(json.dumps({"originalXcrunResolver": "passed", "tests": 1, "skips": 0,
+          print(json.dumps({"originalXcrunResolver": "passed", "documentedAltoolHelp": "passed", "tests": 2, "skips": 0,
               "networkDenied": True, "liveStoreRun": False}))
           PY
       - name: Remove only this job's iOS tools scratch

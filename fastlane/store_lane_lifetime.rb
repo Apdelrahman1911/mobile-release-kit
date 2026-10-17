@@ -186,10 +186,14 @@ module MobileReleaseKit
           runtime.invocation.equal?(self) && !@local_spawn && @ios_dispatch_command.nil?
         tools=runtime.local_ios_transport!;runtime.local_ios_key!(api_key)
         @resources.local_altool_source!(source,api_key.fetch(:key_dir))
-        argv=[tools.fetch('altoolPath'),'--upload-app','--apiKey',api_key.fetch(:key_id),'--apiIssuer',api_key.fetch(:issuer_id),
+        # Invoke the documented Xcode tool name, not the physical shim as argv[0].
+        # Both xcrun and the resolved physical tool remain original inventory cells.
+        argv=['/usr/bin/xcrun','--no-cache','--run','altool','--upload-app','--apiKey',api_key.fetch(:key_id),'--apiIssuer',api_key.fetch(:issuer_id),
           '-t','ios','-f',source,'-k','100000'].map { |part| part.dup.freeze }.freeze
         env={'API_PRIVATE_KEYS_DIR'=>api_key.fetch(:key_dir).dup.freeze,
-          'DEVELOPER_DIR'=>tools.fetch('selection').fetch('developerDirectory')}.freeze
+          'DEVELOPER_DIR'=>tools.fetch('selection').fetch('developerDirectory'),
+          'PATH'=>'/usr/bin:/bin:/usr/sbin:/sbin','LANG'=>'C','LC_ALL'=>'C',
+          'SDKROOT'=>nil,'TOOLCHAINS'=>nil}.freeze
         # The opaque string satisfies the pinned parser interface, but only
         # this original adapter can consume the separately retained direct argv.
         require 'shellwords'
@@ -482,7 +486,7 @@ module MobileReleaseKit
         if local_ios?
           raise LifetimeError unless @local_spawn && command==@local_command
           runtime=StoreLaneRuntime.current_runtime!;runtime.send(:local_ios_inflight!,self,adapter)
-          @resources.local_altool_source!(@local_spawn[1][9],@local_spawn[0].fetch('API_PRIVATE_KEYS_DIR'))
+          @resources.local_altool_source!(@local_spawn[1][12],@local_spawn[0].fetch('API_PRIVATE_KEYS_DIR'))
         end
         @ios_dispatch_state = :attempted
         true

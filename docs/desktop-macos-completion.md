@@ -13,7 +13,8 @@ They are **not yet verified in an installed final application**.
 - Actual affected Mac native contracts: 73 passed on each architecture in
   run `39013642063/1`. The integrated native source is unchanged from that run.
 - Signed Ruby/runtime Store regressions: 204 passed on each architecture in
-  run `39013105410/1`. The integrated Ruby source is unchanged from that run.
+  run `39013105410/1`. A later local-altool invocation correction affects two
+  SDK bridge cases; those are rechecked separately, not credited from the old run.
   Service boundaries were synthetic/network-denied; no live Store mutation.
 - Focused local Python/UI regressions and independent source reviews accepted
   the integration, including keeping the original external receipt unchanged
@@ -23,9 +24,19 @@ They are **not yet verified in an installed final application**.
   Intel has also intermittently exceeded the original 10-second cold resolver
   limit. The source correction uses the existing integer, original-deadline
   clamp with a 30-second role cap; short-budget and timeout regressions pass.
-  The native physical executable's different basename is still under inspection.
+  Both Mac diagnostics resolved the physical executable as `altoolShim`. The
+  reviewed correction retains exact checked targets and uses documented
+  `xcrun --no-cache --run altool`, not direct undocumented shim invocation.
+  Seven alias and four Ruby invocation/admission regressions pass locally; actual
+  native resolver/help and two pinned-SDK bridge checks remain pending.
   Neither a resolved path nor Environment version success alone proves
   native protection or signing readiness.
+
+The updated external XCTest harness compiles on both architectures in
+run `39035744159/1` at `d87f4a2c`. This is compilation, not installed UI evidence.
+An ordinary final-DMG consumer now reuses six existing UI tests, including
+saved checks and no-credential Store navigation; its artifact nomination remains
+inactive until an actual final candidate exists.
 
 Next: finish native tool compatibility, reuse the final signed candidate for
 independent installation and real UI journeys, complete the readiness audit,

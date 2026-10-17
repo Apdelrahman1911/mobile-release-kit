@@ -1,7 +1,8 @@
 """Actual Darwin xcrun/checked-reader cut; native Document grant is modeled.
 
-Only the resolver crosses the real existing owned-process boundary. No ASC,
-Keychain, signing, build, IPA validation, upload or additional tool is invoked.
+The resolver and credential-free documented altool help each cross the real
+existing owned-process boundary. No ASC, Keychain, signing, build, IPA validation
+or upload is invoked. Tool help does not qualify a Store execution grant.
 The separate Rust Book test owns native selection qualification; this fixture's
 nomination is test DATA and does not claim that Book lives across this child.
 """
@@ -21,8 +22,37 @@ from test_local_ios_store_prepare import IOSStorePrepareTests
 from test_local_store_prepare import OP
 
 
-@unittest.skipUnless(sys.platform == 'darwin', 'actual macOS resolver qualification only')
+@unittest.skipUnless(sys.platform == 'darwin', 'actual macOS resolver and help qualification only')
 class IOSStoreResolverMacTests(unittest.TestCase):
+    def test_documented_xcrun_altool_help_returns_and_settles(self):
+        self.assertNotEqual(os.geteuid(), 0)
+        home = Path(os.environ['HOME'])
+        self.assertTrue(home.is_dir())
+        self.assertEqual(home.stat().st_uid, os.geteuid())
+        guard = process.DefaultCancellation(process.ProcessCleanupError, 'altool help cleanup failed')
+        try:
+            guard.install()
+            guard.activate()
+            result = process.run_command(
+                ['/usr/bin/xcrun', '--no-cache', '--run', 'altool', '--help'],
+                environ=dict(PATH='/usr/bin:/bin:/usr/sbin:/sbin', LANG='C', LC_ALL='C',
+                    DEVELOPER_DIR='/Applications/Xcode.app/Contents/Developer', HOME=str(home)),
+                cwd=home, timeout=30, capture=True, output_limit=64 * 1024,
+                cancellation=guard, on_start=None, cleanup=False,
+                execution_scope=None, journal_binding=None, text=False)
+        finally:
+            guard.restore()
+        # This is the original process result and ledger, not modeled receipts.
+        self.assertEqual(result.returncode, 0, 'credential-free altool help returned nonzero')
+        self.assertIn(b'--upload-app', result.stdout + result.stderr)
+        verdict = guard.lifetime_ledger.verdict()
+        self.assertEqual(verdict.commands, 1)
+        self.assertTrue(verdict.command_dispatched)
+        self.assertTrue(verdict.complete)
+        self.assertTrue(verdict.contained)
+        self.assertFalse(verdict.fatal)
+        self.assertEqual(guard.handler_state, 'RESTORED')
+
     def test_original_xcrun_resolution_post_and_close_before_pending_or_asc(self):
         self.assertNotEqual(os.geteuid(), 0)
         fixture = IOSStorePrepareTests(methodName='runTest')

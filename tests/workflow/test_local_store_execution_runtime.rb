@@ -263,9 +263,19 @@ class LocalStoreExecutionRuntimeTest < Minitest::Test
       assert_raises(R::Error) { runtime.local_execution_context }
     end
     ENV['DEVELOPER_DIR']=selection.fetch('developerDirectory')
+    shim=JSON.parse(M.canonical_json(value))
+    shim['transportTools']['altoolPath']=transport.fetch('altoolPath')+'Shim'
+    ENV[KEY]=M.canonical_json(shim)
+    shim_runtime,shim_invocation=model(lane:'ios_testflight_internal');shim_seen=[]
+    shim_runtime.resources.stub(:bind_local_transport!,->(c) { shim_seen << c }) { admit(shim_runtime) }
+    assert_equal shim.fetch('transportTools'),shim_seen.fetch(0).fetch(:transport_tools)
+    assert shim_invocation.local_ios_context?(shim_seen.fetch(0))
     [->(v){v['transportTools']['selection']['xcrun']['uid']=501},
      ->(v){v['transportTools']['selection']['appIdentity']['mode']=0040777},
      ->(v){v['transportTools']['altoolPath']='/tmp/altool'},
+     ->(v){v['transportTools']['altoolPath']+='ShimUnexpected'},
+     ->(v){v['transportTools']['altoolPath']+='shim'},
+     ->(v){v['transportTools']['altoolPath']+='Shim/../altool'},
      ->(v){v['transportTools']['altoolPath']='/Applications/Xcode_26.app/Contents/../altool'},
      ->(v){v['transportTools']['extra']=true}].each do |mutate|
       bad=JSON.parse(M.canonical_json(value));mutate.call(bad);ENV[KEY]=M.canonical_json(bad)

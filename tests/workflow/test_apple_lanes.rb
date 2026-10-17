@@ -302,7 +302,7 @@ class AppleReleaseLanesTest < Minitest::Test
     end
     if local
       transport={'selection'=>{'developerDirectory'=>'/Applications/Xcode_Test.app/Contents/Developer'},
-        'altoolPath'=>'/Applications/Xcode_Test.app/Contents/Support/altool'}
+        'altoolPath'=>'/Applications/Xcode_Test.app/Contents/Support/altoolShim'}
       runtime.define_singleton_method(:local_ios_transport!) { transport }
       runtime.define_singleton_method(:local_ios_key!) do |actual|
         raise MobileReleaseKit::StoreLaneRuntime::Error.new(:local_key) unless key.all? { |name,value| actual[name]==value }
@@ -346,8 +346,10 @@ class AppleReleaseLanesTest < Minitest::Test
       if local
         env,*argv=commands
         assert_equal '/Applications/Xcode_Test.app/Contents/Developer',env.fetch('DEVELOPER_DIR')
+        assert_equal '/usr/bin:/bin:/usr/sbin:/sbin',env.fetch('PATH')
+        assert_equal ['C','C',nil,nil],env.values_at('LANG','LC_ALL','SDKROOT','TOOLCHAINS')
         assert_equal File.dirname(resources.instance_variable_get(:@entries).fetch('key').fetch(:path)),env.fetch('API_PRIVATE_KEYS_DIR')
-        assert_equal ['/Applications/Xcode_Test.app/Contents/Support/altool','--upload-app','--apiKey','KEY123',
+        assert_equal ['/usr/bin/xcrun','--no-cache','--run','altool','--upload-app','--apiKey','KEY123',
           '--apiIssuer','synthetic-issuer','-t','ios','-f',resources.instance_variable_get(:@entries).fetch('upload-asset').fetch(:path),'-k','100000'],argv
       else
         assert_equal ["inert-upload-never-executed"], commands

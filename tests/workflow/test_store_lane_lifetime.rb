@@ -676,7 +676,7 @@ class StoreLaneLifetimeTest < Minitest::Test
   def with_local_direct_dispatch(post_error: nil)
     model,record=Model.new,invocation(upload:true)
     tools={'selection'=>{'developerDirectory'=>'/Applications/Xcode_Test.app/Contents/Developer'},
-      'altoolPath'=>'/Applications/Xcode_Test.app/Contents/Support/altool'}
+      'altoolPath'=>'/Applications/Xcode_Test.app/Contents/Support/altoolShim'}
     key={key_id:'KEY123',issuer_id:'11111111-1111-4111-8111-111111111111',key:'inert',key_dir:'/model/key'}
     resource=Object.new;checks=[]
     resource.define_singleton_method(:continuation_allowed?) { true }
@@ -710,11 +710,13 @@ class StoreLaneLifetimeTest < Minitest::Test
       assert_equal 0,record.spawn_with_pipes(command) { |stdout| stdout.each {} }
       assert_equal 1,captured.length
       args,options=captured.first
-      assert_equal({'API_PRIVATE_KEYS_DIR'=>'/model/key','DEVELOPER_DIR'=>'/Applications/Xcode_Test.app/Contents/Developer'},args.first)
-      assert_equal ['/Applications/Xcode_Test.app/Contents/Support/altool','--upload-app','--apiKey','KEY123','--apiIssuer',
+      assert_equal({'API_PRIVATE_KEYS_DIR'=>'/model/key','DEVELOPER_DIR'=>'/Applications/Xcode_Test.app/Contents/Developer',
+        'PATH'=>'/usr/bin:/bin:/usr/sbin:/sbin','LANG'=>'C','LC_ALL'=>'C','SDKROOT'=>nil,'TOOLCHAINS'=>nil},args.first)
+      assert_equal ['/usr/bin/xcrun','--no-cache','--run','altool','--upload-app','--apiKey','KEY123','--apiIssuer',
         '11111111-1111-4111-8111-111111111111','-t','ios','-f','/model/copied.ipa','-k','100000'],args.drop(1)
       assert options.fetch(:close_others)
       assert_equal 1,checks.count([:pre]);assert_equal 1,checks.count([:post])
+      assert_equal [[:source,'/model/copied.ipa','/model/key']]*2,checks.select { |row| row.first==:source }
       assert_equal [[4141,0]],model.wait_calls
       assert model.endpoints.all?(&:descriptor_retired);refute record.unknown?
       assert_raises(Lifetime::LifetimeError) { record.spawn_with_pipes(command) { |stdout| stdout.each {} } }

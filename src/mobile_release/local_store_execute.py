@@ -104,7 +104,7 @@ class _UploadReader(_Reader):
                 pending=combined;continue
             directory=bool(pending)
             self.owner._upload_protected(observed,directory)
-            require(directory or name=='altool')
+            require(directory or name in ('altool','altoolShim'))
             existing=[n for n in self.nodes if n.parent is parent.slot and n.name==name]
             require(len(existing)<=1)
             if existing:
