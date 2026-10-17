@@ -43,7 +43,17 @@ class IOSStoreResolverMacTests(unittest.TestCase):
         finally:
             guard.restore()
         # This is the original process result and ledger, not modeled receipts.
-        self.assertEqual(result.returncode, 0, 'credential-free altool help returned nonzero')
+        diagnostic = 'credential-free altool help returned nonzero'
+        if result.returncode != 0:
+            # Clean, credential-free command only. Redact this run's roots and
+            # bound AFTER escaping, so controls cannot create extra log lines.
+            def excerpt(stream):
+                value = stream[:2048].decode('utf-8', 'replace')
+                for prefix in (str(home), str(Path.cwd())):
+                    value = value.replace(prefix, '<task>')
+                return ascii(value)[:960]
+            diagnostic += '; stderr=' + excerpt(result.stderr) + '; stdout=' + excerpt(result.stdout)
+        self.assertEqual(result.returncode, 0, diagnostic)
         self.assertIn(b'--upload-app', result.stdout + result.stderr)
         verdict = guard.lifetime_ledger.verdict()
         self.assertEqual(verdict.commands, 1)
