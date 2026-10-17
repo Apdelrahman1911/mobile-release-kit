@@ -216,6 +216,15 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
         directory(&version.join("Inner"), 0o755)?;
         // Same exact raw target as Apple's Instruments XCContentsDir alias.
         symlink("../../../", version.join("Inner/Back"))?;
+        for relative in ["System", "System/Library", "System/Library/Frameworks",
+            "System/Library/Frameworks/SoundAnalysis.framework"] {
+            directory(&source.join(relative), 0o755)?;
+        }
+        file(&source.join("System/Library/Frameworks/SoundAnalysis.framework/SoundAnalysis.tbd"),
+            b"inert public SDK fixture", 0o644)?;
+        // Exact raw77-byte target observed in Apple's tvOS SDK on both hosts.
+        symlink("../../..//System/Library/Frameworks/SoundAnalysis.framework/SoundAnalysis.tbd",
+            version.join("Inner/SwiftSoundAnalysis"))?;
         set_attribute(&version.join("data"))?;
         let source_data = fs::symlink_metadata(version.join("data"))?;
         require(
@@ -358,6 +367,8 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
                 ("Versions/Current", b"A/".as_slice()),
                 ("Versions/Nested", b"Current/".as_slice()),
                 ("Versions/A/Inner/Back", b"../../../".as_slice()),
+                ("Versions/A/Inner/SwiftSoundAnalysis",
+                    b"../../..//System/Library/Frameworks/SoundAnalysis.framework/SoundAnalysis.tbd".as_slice()),
             ] {
                 require(
                     fs::read_link(output.join(path))?.as_os_str().as_bytes() == expected,
@@ -402,6 +413,9 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
             ("Current/data/", Failure::Kind),
             ("FileAlias/", Failure::Kind),
             ("Nested/../../../outside/", Failure::Links),
+            ("Current//data//", Failure::Kind),
+            ("FileAlias//", Failure::Kind),
+            ("Nested//../../../outside", Failure::Links),
         ] {
             let alias = versions.join("BadSuffix");
             symlink(target, &alias)?;

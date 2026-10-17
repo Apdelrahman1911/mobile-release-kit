@@ -259,17 +259,14 @@ pub(crate) fn component(name: &[u8]) -> bool {
 /// filesystem joins MUST be performed by the actual copier; lexical reduction
 /// here would hide `alias/..` traversal and is intentionally not provided.
 pub(crate) fn relative_link_shape(target: &[u8]) -> bool {
-    // A single terminal slash expresses directory intent. Inspect its body
-    // only for shape; retain the ORIGINAL bytes and empty final resolver token.
-    // Interior/repeated slash components remain outside this fixed profile.
-    let body = target.strip_suffix(b"/").unwrap_or(target);
-    !body.is_empty()
+    // POSIX relative targets may contain repeated separators. Keep every raw
+    // byte and split token for ordered resolution, including directory intent
+    // at the end; this shape check never normalizes or follows the target.
+    !target.is_empty()
         && target.len() <= LINK_LIMIT
         && target[0] != b'/'
         && !target.contains(&0)
-        && body
-            .split(|b| *b == b'/')
-            .all(|part| !part.is_empty() && part.len() <= 255)
+        && target.split(|b| *b == b'/').all(|part| part.len() <= 255)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -461,12 +458,16 @@ mod tests {
         assert!(!component(&vec![b'x'; 256]));
         assert!(relative_link_shape(b"../../Versions/A/Resources"));
         assert!(relative_link_shape(b"alias/../actual")); // Shape only; actual ordered resolver is required.
-        for target in [b"../../../".as_slice(), b"A/", b"alias/../actual/"] {
+        for target in [
+            b"../../../".as_slice(), b"A/", b"alias/../actual/", b"a//b", b"A//",
+            b"../../..//System/Library/Frameworks/SoundAnalysis.framework/SoundAnalysis.tbd",
+        ] {
             assert!(relative_link_shape(target));
         }
-        for bad in [b"".as_slice(), b"/Applications/Xcode.app", b"a//b", b"a\0b", b"/", b"A//"] {
+        for bad in [b"".as_slice(), b"/Applications/Xcode.app", b"a\0b", b"/", b"//relative"] {
             assert!(!relative_link_shape(bad));
         }
+        assert!(!relative_link_shape(&vec![b'x'; 256]));
         assert!(!relative_link_shape(&vec![b'x'; LINK_LIMIT + 1]));
     }
 }
