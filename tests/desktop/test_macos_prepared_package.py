@@ -4,6 +4,8 @@ import contextlib
 import importlib.util
 import os
 import stat
+import subprocess
+import textwrap
 import sys
 import tempfile
 from types import SimpleNamespace, ModuleType
@@ -243,6 +245,42 @@ class PreparedPackageData(unittest.TestCase):
             self.assertTrue(all(row['closed'] and row['fd'] is None for row in operation.entries))
             self.assertFalse(operation.receipt['passed'])
             self.assertFalse((work/operation.target_name).exists())
+
+    def test_actual_retention_gate_requires_one_successful_upload_before_service_cut(self):
+        workflow = (ROOT / P.WORKFLOW).read_text()
+        marker = '      - name: ' + P.PRODUCER_STEPS[-1] + '\n'
+        self.assertEqual(workflow.count(marker), 1)
+        gate = workflow.split(marker, 1)[1].split('\n      - name:', 1)[0]
+        script = textwrap.dedent(gate.split('        run: |\n', 1)[1])
+        _, _, service, _ = fixture()
+        outcomes = ('success', 'failure', 'skipped', 'cancelled', '')
+        for first in outcomes:
+            for retry in outcomes:
+                with self.subTest(first=first, retry=retry):
+                    result = subprocess.run(['/bin/bash', '-c', script],
+                        env={'PATH': '/usr/bin:/bin', 'FIRST_OUTCOME': first, 'RETRY_OUTCOME': retry},
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
+                    accepted = (first, retry) in (('success', 'skipped'), ('failure', 'success'))
+                    self.assertEqual(result.returncode, 0 if accepted else 1)
+                    self.assertEqual(result.stderr, '')
+                    self.assertEqual(result.stdout,
+                        'Prepared upload original outcomes: first=%s retry=%s\n' % (first, retry))
+                    # GitHub normalizes continue-on-error conclusions. These
+                    # cannot establish the cut when the real outcome gate fails.
+                    steps = copy.deepcopy(service['job']['steps'][:2])
+                    steps.extend(dict(name=name, number=index, status='completed', conclusion='success')
+                        for index, name in enumerate(('First upload attempt', 'Retry upload attempt'), 3))
+                    steps.append(dict(name=P.PRODUCER_STEPS[-1], number=5, status='completed',
+                        conclusion='success' if result.returncode == 0 else 'failure'))
+                    job = dict(service['job'], status='completed', conclusion='success', steps=steps)
+                    body = P.canonical(dict(total_count=1, jobs=[job]))
+                    if accepted:
+                        self.assertEqual(P.selected_job_data(body, '1'*40, '41', P.TARGETS[0], completed=True), job)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'prepared-service-cut'):
+                            P.producer_steps_data(job)
+                        with self.assertRaisesRegex(ValueError, 'prepared-one-target-job'):
+                            P.selected_job_data(body, '1'*40, '41', P.TARGETS[0], completed=True)
 
     def test_all_attempt_selection_keeps_the_unique_successful_old_producer(self):
         values,manifest,service,consumer=fixture()

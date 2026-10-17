@@ -2080,9 +2080,11 @@ jobs:
           printf '0\n' > "$MRK_MACOS_WORK/prepared-api.status"
           unset GH_TOKEN
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py export --target "$MRK_MACOS_TARGET"
-      - name: Retain prepared signed input for failed-job-only installation retries
-        id: prepared_upload
+      - name: Upload the immutable prepared input; first retention attempt
+        id: prepared_upload_first
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.prepared_export.outcome == 'success'
+        # The final gate below checks original outcomes, not normalized conclusions.
+        continue-on-error: true
         timeout-minutes: 5
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -2091,6 +2093,38 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+          overwrite: false
+      - name: Retry the same immutable prepared input once after returned upload failure
+        id: prepared_upload_retry
+        if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.prepared_export.outcome == 'success' && steps.prepared_upload_first.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-kit-macos26-${{ matrix.target }}-prepared-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/prepared/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: false
+      - name: Retain prepared signed input for failed-job-only installation retries
+        id: prepared_upload
+        if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.prepared_export.outcome == 'success' }}
+        timeout-minutes: 1
+        shell: bash
+        env:
+          FIRST_OUTCOME: ${{ steps.prepared_upload_first.outcome }}
+          RETRY_OUTCOME: ${{ steps.prepared_upload_retry.outcome }}
+        run: |
+          set -euo pipefail
+          # A failed attempt stays failed; only an actual successful action
+          # establishes this checkpoint. Ambiguous remote state is never
+          # deleted or overwritten to make a retry appear successful.
+          printf 'Prepared upload original outcomes: first=%s retry=%s\n' "$FIRST_OUTCOME" "$RETRY_OUTCOME"
+          case "$FIRST_OUTCOME:$RETRY_OUTCOME" in
+            success:skipped|failure:success) exit 0 ;;
+            *) exit 1 ;;
+          esac
       - name: Fixed nonshipping app-absence prepare-app-absence; no credentials or user artifact
         id: app_absence_prepare
         if: github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture'
