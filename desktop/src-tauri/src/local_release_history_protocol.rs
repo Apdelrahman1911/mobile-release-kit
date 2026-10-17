@@ -515,13 +515,13 @@ mod tests {
         value["headSequence"]=json!(4);value["history"].as_array_mut().unwrap().push(json!({"operationId":"12345678-1234-4234-9234-123456789abd","phase":"inputs-pending","recoveryRequired":true}));
         assert!(!ResultData::deserialize(&value).unwrap().matches_context(&c));
     }
+    fn prefix(c:&Context,head:u32)->Decoder{
+        let mut d=Decoder::new();decode(&mut d,c,0,"accepted",json!({"schemaVersion":1,"context":c})).unwrap();
+        decode(&mut d,c,1,"lease-ready",json!({})).unwrap();
+        decode(&mut d,c,2,"history-head",json!({"sequence":head,"sha256":"e".repeat(64)})).unwrap();d
+    }
     #[test]
     fn local_release_history_candidate_phases_bind_successor_and_terminal_head(){
-        fn prefix(c:&Context,head:u32)->Decoder{
-            let mut d=Decoder::new();decode(&mut d,c,0,"accepted",json!({"schemaVersion":1,"context":c})).unwrap();
-            decode(&mut d,c,1,"lease-ready",json!({})).unwrap();
-            decode(&mut d,c,2,"history-head",json!({"sequence":head,"sha256":"e".repeat(64)})).unwrap();d
-        }
         for action in [Action::ReviewInputs,Action::AbandonInputs]{
             let c=context(action);let mut d=prefix(&c,2);let mut t=terminal(&c);
             t["result"]=candidate_result(&c,if action==Action::ReviewInputs{"inputs-pending"}else{"settled-failure"});
