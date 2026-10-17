@@ -26,7 +26,19 @@ qualifies the Desktop's installed iOS workflows.
 
 The default manual operation, `prepared-install`, still requires the original
 `prepared_source`, `prepared_run` and target. Use it for an unchanged prepared
-package; it cannot insert a source fix into an already-built Installer.
+package; it cannot insert a source fix into an already-built Installer. A
+cross-source manual retry uses the current installed-record reader after the
+actual Installer succeeds, while retaining the original package, producer,
+signature and source bindings. This allows an observer correction to be tested
+without rebuilding or re-signing the application. It cannot finalize or
+nominate a release candidate; that still requires a coherent same-source run.
+
+If a companion installation fails, the job preserves the original Installer
+status and reports bounded hook/native/error observations from the existing
+Installer-log interval when available. These observations cover the interval
+from before the first installation through the failed installation, not an
+authenticated attribution to one process. Missing diagnostics are not success,
+and raw Installer-log text is not exported by this companion diagnostic.
 
 Only after the main package checks pass does it retain `MobileReleaseKit.dmg`,
 `PREVIEW.json` and an installation guide for 14 days. Use the complete DMG:
