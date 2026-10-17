@@ -11257,7 +11257,19 @@ def result_args(*, fixture=False):
                            installer_status=Path("/work/installer-fixture-output.status" if fixture else "/work/installer-output.status"))
 
 
-def maintenance_documents(actions=("fresh-install",), *, target="aarch64-apple-darwin"):
+def maintenance_launcher_fixture(outcome="restored"):
+    # Same synthetic ObservationData as the native CapsuleData regression
+    # optional_launcher_capsule_binds_finality_and_separately_accounts_noop_restoration.
+    # This literal is not a native-generated fixture or an installed observation.
+    return {"outcome": outcome,
+            "publishedIdentity": {"device": 1, "inode": 42, "birthSeconds": 1, "birthNanoseconds": 0},
+            "publicationPhase": None if outcome == "verified-existing" else {"stageInstance": "1" * 32, "sha256": "2" * 64},
+            "writeCount": 0 if outcome == "verified-existing" else 2,
+            "writeBytes": 0 if outcome == "verified-existing" else 17,
+            "originalsClosed": True, "withinOriginalDeadline": True, "readbackVerified": True, "workspaceCleared": True}
+
+
+def maintenance_documents(actions=("fresh-install",), *, target="aarch64-apple-darwin", launcher=False):
     """Synthetic closed records; no real signature, installer or native event."""
     prefix = "macos26-arm64-" if target == "aarch64-apple-darwin" else "macos26-x86_64-"
     profile = "fixed-macos26-arm64-maintenance-v2" if target == "aarch64-apple-darwin" else "fixed-macos26-x86_64-maintenance-v2"
@@ -11306,6 +11318,8 @@ def maintenance_documents(actions=("fresh-install",), *, target="aarch64-apple-d
                    "actualCurrent": selected, "intentSha256": TOOL.digest(raw_intent), "stateSha256": TOOL.digest(raw_state),
                    "outcome": {"fresh-install": "applied", "update": "applied", "same-package-noop": "same-package", "restore-fixed-app": "restored-app"}[action],
                    "writer": writer}
+        if launcher:
+            capsule["launcher"] = maintenance_launcher_fixture("restored" if action == "same-package-noop" else "published")
         raw_capsule = TOOL.canonical(capsule) + b"\n"
         records[invocation] = (raw_intent, raw_state, raw_capsule)
         hashes = {"intentSha256": TOOL.digest(raw_intent), "stateSha256": TOOL.digest(raw_state), "capsuleSha256": TOOL.digest(raw_capsule)}
@@ -13511,10 +13525,65 @@ class MacInstalledData(unittest.TestCase):
         for changed in ({}, before, {**after, "3" * 32: {}}, {**after, request: {}}, {**before, "bad": {}}):
             with self.assertRaises(TOOL.Refused): TOOL.same_package_new_request(before, changed, request)
 
+    def test_launcher_capsule_matches_native_success_contract_and_history(self):
+        producer, records, result = maintenance_documents(("fresh-install", "same-package-noop"), launcher=True)
+        _, parsed = TOOL.maintenance_history_data(result, records, producer)
+        capsule = parsed[result["invocation"]][2]
+        self.assertEqual(capsule["writer"]["payloadWriteBytes"], 0)
+        self.assertEqual(capsule["launcher"]["writeBytes"], 17)  # Separate copy, not a payload rewrite.
+        raw = lambda value: TOOL.canonical(value) + b"\n"
+        for outcome in ("verified-existing", "published", "restored"):
+            value = {**capsule, "launcher": maintenance_launcher_fixture(outcome)}
+            self.assertEqual(TOOL.maintenance_capsule_data(raw(value), producer, current=True), value)
+        legacy = {key: value for key, value in capsule.items() if key != "launcher"}
+        self.assertEqual(TOOL.maintenance_capsule_data(raw(legacy), producer, current=True), legacy)
+        # Match native signed-width/phase grammar without inventing extra policy.
+        boundary = copy.deepcopy(capsule)
+        boundary["launcher"]["publishedIdentity"] = {"device": 0, "inode": (1 << 64) - 1,
+            "birthSeconds": (1 << 63) - 1, "birthNanoseconds": 999_999_999}
+        boundary["launcher"]["publicationPhase"]["sha256"] = "0" * 64
+        TOOL.maintenance_capsule_data(raw(boundary), producer, current=True)
+        malformed = []
+        def changed(key, value):
+            row = copy.deepcopy(capsule); row["launcher"][key] = value; malformed.append(row)
+        for outcome in ("inverse-restored", "refused", "unknown", True): changed("outcome", outcome)
+        for key in ("originalsClosed", "withinOriginalDeadline", "readbackVerified", "workspaceCleared"):
+            changed(key, False); changed(key, 1)
+        for field, bad in (("device", -1), ("device", 1 << 63), ("device", True), ("inode", 0), ("inode", 1 << 64),
+                           ("birthSeconds", 0), ("birthSeconds", 1 << 63), ("birthNanoseconds", -1), ("birthNanoseconds", 1_000_000_000)):
+            identity = dict(capsule["launcher"]["publishedIdentity"], **{field: bad}); changed("publishedIdentity", identity)
+        changed("publishedIdentity", None)
+        changed("publicationPhase", None)
+        changed("publicationPhase", {"stageInstance": "0" * 32, "sha256": "2" * 64})
+        changed("publicationPhase", {"stageInstance": "1" * 32, "sha256": "G" * 64})
+        changed("publicationPhase", {**capsule["launcher"]["publicationPhase"], "extra": True})
+        for field, bad in (("writeCount", True), ("writeCount", -1), ("writeCount", 0), ("writeCount", 18),
+                           ("writeBytes", True), ("writeBytes", 0), ("writeBytes", sum(TOOL.LAUNCHER_LIMITS.values()) + 1024 * 1024 + 1)):
+            changed(field, bad)
+        row = copy.deepcopy(capsule); row["launcher"] = None; malformed.append(row)
+        row = copy.deepcopy(capsule); row["launcher"]["extra"] = True; malformed.append(row)
+        row = copy.deepcopy(capsule); del row["launcher"]["publicationPhase"]; malformed.append(row)
+        row = copy.deepcopy(capsule); row["launcher"] = maintenance_launcher_fixture("verified-existing")
+        row["launcher"]["publicationPhase"] = capsule["launcher"]["publicationPhase"]; malformed.append(row)
+        row = copy.deepcopy(capsule); row["launcher"] = maintenance_launcher_fixture("verified-existing")
+        row["launcher"]["writeCount"] = row["launcher"]["writeBytes"] = 1; malformed.append(row)
+        for index, value in enumerate(malformed):
+            with self.subTest(malformed=index), self.assertRaises(TOOL.Refused):
+                TOOL.maintenance_capsule_data(raw(value), producer, current=True)
+        # The same aggregate 512MiB cap includes the separately recorded launcher.
+        fresh_producer, fresh_records, fresh_result = maintenance_documents(launcher=True)
+        fresh = TOOL.decode(fresh_records[fresh_result["invocation"]][2])
+        fresh["writer"]["payloadWriteCount"] = 1
+        fresh["writer"]["payloadWriteBytes"] = TOOL.MAX_BYTES - fresh["launcher"]["writeBytes"]
+        TOOL.maintenance_capsule_data(raw(fresh), fresh_producer, current=True)
+        fresh["writer"]["payloadWriteBytes"] += 1
+        with self.assertRaisesRegex(TOOL.Refused, "^maintenance-launcher-write-accounting$"):
+            TOOL.maintenance_capsule_data(raw(fresh), fresh_producer, current=True)
+
     def test_same_package_readback_requires_actual_immediate_previous_state(self):
         for target in TOOL.MAC_TARGETS:
             for actions in (("fresh-install", "same-package-noop"), ("fresh-install", "same-package-noop", "same-package-noop")):
-                producer, records, result = maintenance_documents(actions, target=target)
+                producer, records, result = maintenance_documents(actions, target=target, launcher=True)
                 selected = TOOL.maintenance_producer_data(TOOL.canonical(producer), target=target)
                 _state, parsed = TOOL.maintenance_history_data(result, records, selected)
                 intent = parsed[result["invocation"]][0]
@@ -13524,7 +13593,7 @@ class MacInstalledData(unittest.TestCase):
                                 {**expected, "extra": True}, None):
                     with self.assertRaises(TOOL.Refused): TOOL.same_package_previous_data(result, parsed, changed)
             for action in ("restore-fixed-app", "update"):
-                producer, records, result = maintenance_documents(("fresh-install", action), target=target)
+                producer, records, result = maintenance_documents(("fresh-install", action), target=target, launcher=True)
                 selected = TOOL.maintenance_producer_data(TOOL.canonical(producer), target=target)
                 _state, parsed = TOOL.maintenance_history_data(result, records, selected)
                 with self.assertRaises(TOOL.Refused):
@@ -13538,7 +13607,7 @@ class MacInstalledData(unittest.TestCase):
         for target in TOOL.MAC_TARGETS:
             for fault in (None, "default", "previous", "status", "current-bytes"):
                 with self.subTest(target=target, ordinary_readback=fault):
-                    producer, old_records, result = maintenance_documents(("fresh-install", "same-package-noop"), target=target)
+                    producer, old_records, result = maintenance_documents(("fresh-install", "same-package-noop"), target=target, launcher=True)
                     release = producer["releaseSet"]["current"]
                     selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
                     record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
@@ -13635,8 +13704,9 @@ class MacInstalledData(unittest.TestCase):
                         body = {"producer.json": descriptor, "producer.sig": signed}[name]
                         self.assertLessEqual(len(body), limit)
                         return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
-                    def tree(path, *, installed):
+                    def tree(path, *, installed, mac_store_prefix=None):
                         self.assertIs(installed, True)
+                        self.assertEqual(mac_store_prefix, "store" if path.name == "runtime" else None)
                         prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
                                   TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
                         return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
@@ -13661,7 +13731,7 @@ class MacInstalledData(unittest.TestCase):
                         stack.enter_context(mock.patch.object(TOOL, "source_build_selection", return_value=selection))
                         stack.enter_context(mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((200, path.name))))
                         stack.enter_context(mock.patch.object(TOOL, "read", side_effect=lambda path, limit: inventory
-                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == 1024 * 1024 else self.fail("unexpected SOURCE read")))
+                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == TOOL.INVENTORY_BYTES else self.fail("unexpected SOURCE read")))
                         history = stack.enter_context(mock.patch.object(TOOL, "maintenance_history_data", wraps=TOOL.maintenance_history_data))
                         producer_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_producer_inputs", wraps=TOOL.maintenance_producer_inputs))
                         generation_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_generation_readback", wraps=TOOL.maintenance_generation_readback))
@@ -13699,7 +13769,7 @@ class MacInstalledData(unittest.TestCase):
         for target in TOOL.MAC_TARGETS:
             for fault in (None, "default", "previous", "root", "instance", "status", "current-bytes"):
                 with self.subTest(target=target, ordinary_readback=fault):
-                    producer, old_records, result = maintenance_documents(("fresh-install", "update"), target=target)
+                    producer, old_records, result = maintenance_documents(("fresh-install", "update"), target=target, launcher=True)
                     release = producer["releaseSet"]["current"]
                     selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
                     record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
@@ -13825,8 +13895,9 @@ class MacInstalledData(unittest.TestCase):
                         body = {"producer.json": descriptor, "producer.sig": signed}[name]
                         self.assertLessEqual(len(body), limit)
                         return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
-                    def tree(path, *, installed):
+                    def tree(path, *, installed, mac_store_prefix=None):
                         self.assertIs(installed, True)
+                        self.assertEqual(mac_store_prefix, "store" if path.name == "runtime" else None)
                         prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
                                   TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
                         return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
@@ -13852,7 +13923,7 @@ class MacInstalledData(unittest.TestCase):
                         stack.enter_context(mock.patch.object(TOOL, "source_build_selection", return_value=selection))
                         stack.enter_context(mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((200, path.name))))
                         stack.enter_context(mock.patch.object(TOOL, "read", side_effect=lambda path, limit: inventory
-                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == 1024 * 1024 else self.fail("unexpected SOURCE read")))
+                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == TOOL.INVENTORY_BYTES else self.fail("unexpected SOURCE read")))
                         history = stack.enter_context(mock.patch.object(TOOL, "maintenance_history_data", wraps=TOOL.maintenance_history_data))
                         producer_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_producer_inputs", wraps=TOOL.maintenance_producer_inputs))
                         generation_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_generation_readback", wraps=TOOL.maintenance_generation_readback))
@@ -13903,7 +13974,7 @@ class MacInstalledData(unittest.TestCase):
         for target in TOOL.MAC_TARGETS:
             for fault in (None, "default", "nomination", "status", "current-bytes"):
                 with self.subTest(target=target, ordinary_readback=fault):
-                    producer, old_records, result = maintenance_documents(("fresh-install",), target=target)
+                    producer, old_records, result = maintenance_documents(("fresh-install",), target=target, launcher=True)
                     release = producer["releaseSet"]["current"]
                     selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
                     record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
@@ -14005,8 +14076,9 @@ class MacInstalledData(unittest.TestCase):
                         body = {"producer.json": descriptor, "producer.sig": signed}[name]
                         self.assertLessEqual(len(body), limit)
                         return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
-                    def tree(path, *, installed):
+                    def tree(path, *, installed, mac_store_prefix=None):
                         self.assertIs(installed, True)
+                        self.assertEqual(mac_store_prefix, "store" if path.name == "runtime" else None)
                         prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
                                   TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
                         return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
@@ -14031,7 +14103,7 @@ class MacInstalledData(unittest.TestCase):
                         stack.enter_context(mock.patch.object(TOOL, "source_build_selection", return_value=selection))
                         stack.enter_context(mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((200, path.name))))
                         def source_read(path, limit):
-                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == 1024 * 1024: return inventory
+                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == TOOL.INVENTORY_BYTES: return inventory
                             if path == TOOL.DESKTOP / "macos-installed-inputs/update-predecessors.json" and limit == 16384:
                                 return TOOL.canonical(nominated_source)
                             self.fail("unexpected SOURCE read")
@@ -14075,7 +14147,7 @@ class MacInstalledData(unittest.TestCase):
         for target in TOOL.MAC_TARGETS:
             for fault in (None, "default", "previous", "status", "current-bytes"):
                 with self.subTest(target=target, ordinary_readback=fault):
-                    producer, old_records, result = maintenance_documents(("fresh-install", "restore-fixed-app"), target=target)
+                    producer, old_records, result = maintenance_documents(("fresh-install", "restore-fixed-app"), target=target, launcher=True)
                     release = producer["releaseSet"]["current"]
                     selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
                     record, inventory, root_identity, _ = installation_record_fixture(selection=selection)

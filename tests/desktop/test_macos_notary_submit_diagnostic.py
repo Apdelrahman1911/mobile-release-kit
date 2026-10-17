@@ -40,6 +40,17 @@ class StagerFailureLocationTests(unittest.TestCase):
             self.assertIsNone(HELPER.failure_stager_line(error, None))
         else:
             self.fail("original readback refusal was not raised")
+        # Shared exact-shape guard must locate its schema caller, not the same
+        # maintenance_map line for every unrelated installed-record mismatch.
+        try:
+            stager.maintenance_release_data({}, stager.ARM_TARGET)
+        except stager.Refused as error:
+            trace = error.__traceback__
+            while trace.tb_frame.f_code is not stager.maintenance_release_data.__code__:
+                trace = trace.tb_next
+            self.assertEqual(HELPER.failure_stager_line(error, stager), trace.tb_lineno)
+        else:
+            self.fail("original shape refusal was not raised")
         # A matching co_filename alone must not attribute outside code to stager.
         outside = {"Refused": stager.Refused, "private": PRIVATE.decode()}
         try:

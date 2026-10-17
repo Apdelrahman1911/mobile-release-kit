@@ -5745,10 +5745,43 @@ def maintenance_intent_data(body, producer, *, current):
     return value
 
 
+def maintenance_launcher_data(value, writer_bytes):
+    """Recorded successful launcher DATA, not live enrollment or signer authority."""
+    maintenance_map(value, ("outcome", "publishedIdentity", "publicationPhase", "writeCount", "writeBytes",
+                            "originalsClosed", "withinOriginalDeadline", "readbackVerified", "workspaceCleared"),
+                    "maintenance-launcher-shape")
+    need(type(value["outcome"]) is str and value["outcome"] in ("verified-existing", "published", "restored")
+         and all(value[key] is True for key in ("originalsClosed", "withinOriginalDeadline", "readbackVerified", "workspaceCleared")),
+         "maintenance-launcher-not-complete")
+    identity = maintenance_map(value["publishedIdentity"], ("device", "inode", "birthSeconds", "birthNanoseconds"),
+                               "maintenance-launcher-identity")
+    need(all(type(item) is int for item in identity.values())
+         and 0 <= identity["device"] < (1 << 63) and 0 < identity["inode"] < (1 << 64)
+         and 0 < identity["birthSeconds"] < (1 << 63) and 0 <= identity["birthNanoseconds"] < 1_000_000_000,
+         "maintenance-launcher-identity")
+    existing = value["outcome"] == "verified-existing"
+    phase = value["publicationPhase"]
+    if existing:
+        need(phase is None, "maintenance-launcher-phase")
+    else:
+        maintenance_map(phase, ("stageInstance", "sha256"), "maintenance-launcher-phase")
+        # Native PhaseReferenceData requires a nonzero instance, but its digest
+        # grammar does not exclude all-zero SHA256. Neither nominates a path.
+        need(maintenance_hex(phase["stageInstance"], 32) and sha(phase["sha256"]), "maintenance-launcher-phase")
+    count, byte_count = value["writeCount"], value["writeBytes"]
+    need(type(count) is int and type(byte_count) is int and 0 <= count <= byte_count
+         and byte_count <= sum(LAUNCHER_LIMITS.values()) + 1024 * 1024
+         and (count == 0) == (byte_count == 0) and (count == 0) == existing
+         and type(writer_bytes) is int and 0 <= writer_bytes <= MAX_BYTES
+         and writer_bytes + byte_count <= MAX_BYTES, "maintenance-launcher-write-accounting")
+    return value
+
+
 def maintenance_capsule_data(body, producer, *, current):
     value = maintenance_json(body, 64 * 1024)
     maintenance_map(value, ("schemaVersion", "kind", "target", "invocation", "requestId", "intendedAction", "previous", "next",
-                           "actualCurrent", "intentSha256", "stateSha256", "outcome", "writer"), "maintenance-capsule-shape")
+                           "actualCurrent", "intentSha256", "stateSha256", "outcome", "writer")
+                    + (("launcher",) if "launcher" in value else ()), "maintenance-capsule-shape")
     maintenance_record_header(value, "mrk-macos-maintenance-capsule-v2", producer)
     action = value["intendedAction"]
     maintenance_pair_data(action, value["previous"], value["next"], producer, current=current)
@@ -5760,6 +5793,8 @@ def maintenance_capsule_data(body, producer, *, current):
     need(all(writer[key] is True for key in ("returned", "originalJoined", "resultEof", "originalClosesKnown", "withinOriginalDeadline"))
          and type(writer["exitCode"]) is int and writer["exitCode"] == 0, "maintenance-writer-not-settled")
     maintenance_write_data(writer["payloadWriteCount"], writer["payloadWriteBytes"], action)
+    if "launcher" in value:
+        maintenance_launcher_data(value["launcher"], writer["payloadWriteBytes"])
     return value
 
 

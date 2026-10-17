@@ -378,10 +378,15 @@ class XcodeSetupPackageNative(unittest.TestCase):
             payload, scripts = work / "payload", work / "Scripts"
             stager.write_tree(payload, {PROBE_BUNDLE+"/Contents/Info.plist": (info, 0o444)}, root_mode=0o755)
             # Inert script fixture, not the A binary or a signing/admission stand-in.
-            helper = ("#!/bin/sh\nset -eu\numask 077\n[ \"$#\" -eq 0 ] || exit 1\nset -C\n"
+            helper = ("#!/bin/sh\nset -eu\numask 077\n"
+                      "if [ \"$#\" -eq 1 ] && [ \"$1\" = --carrier-preflight ]; then exit 0; fi\n"
+                      "[ \"$#\" -eq 0 ] || exit 1\nset -C\n"
                       "printf '%s\\n' 'MRK_XCODE_COMPONENT_CALLBACK=once' > '/Library/"+PROBE_BUNDLE+"/Contents/Callback.txt'\n"
                       "/bin/chmod 0444 '/Library/"+PROBE_BUNDLE+"/Contents/Callback.txt'\n").encode()
-            stager.write_tree(scripts, {"setup/postinstall": (sources["setup/postinstall"], 0o555),
+            # Exercise the exact top-level and component hooks together. The
+            # inert preflight returns only; it does not impersonate native A.
+            stager.write_tree(scripts, {"preinstall": (sources["preinstall"], 0o555),
+                                       "setup/postinstall": (sources["setup/postinstall"], 0o555),
                                        stager.XCODE_SETUP_PROGRAM: (helper, 0o555)}, root_mode=0o755)
             component = plistlib.loads(sources["Component.plist"])
             component[0]["RootRelativeBundlePath"] = PROBE_BUNDLE
@@ -434,11 +439,13 @@ class XcodeSetupPackageNative(unittest.TestCase):
             self.assertEqual(len(hooks), 1)
             self.assertEqual(hooks[0].get("timeout"), "3800")
             self.assertIn(hooks[0].get("file"), ("setup/postinstall", "./setup/postinstall"))
-            self.assertFalse(tree.findall(".//preinstall"))
+            preinstall = tree.findall(".//preinstall")
+            self.assertEqual(len(preinstall), 1)
+            self.assertEqual(preinstall[0].get("file"), "./preinstall")
             package_sha = hashlib.sha256(bounded(package, 1024 * 1024)).hexdigest()
             for iteration in (1, 2):
                 self.assertEqual(hashlib.sha256(bounded(package, 1024 * 1024)).hexdigest(), package_sha)
-                run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-pkg", str(package), "-target", "/"], seconds=90)
+                run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-pkg", str(package), "-target", "/", "-dumplog"], seconds=90)
                 observed = observe("inspect")
                 self.assertEqual(observed["state"], "observed")
                 self.assertEqual(observed["library"], initial["library"])

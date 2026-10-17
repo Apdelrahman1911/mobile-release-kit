@@ -2221,14 +2221,16 @@ def failure_stager_line(error, stager):
         return None
     namespace = stager.__dict__
     filename = namespace.get("__file__")
-    need_code = namespace["need"].__code__
+    # These two generic guards share every caller's location; report the
+    # actual schema/readback caller, without exposing exception text or locals.
+    guard_codes = (namespace["need"].__code__, namespace["maintenance_map"].__code__)
     current, selected = BaseException.__traceback__.__get__(error), None
     for _ in range(32):
         if current is None:
             return selected
         frame = current.tb_frame
         if (frame.f_globals is namespace and frame.f_code.co_filename == filename
-                and frame.f_code is not need_code and 0 < current.tb_lineno <= 100000):
+                and frame.f_code not in guard_codes and 0 < current.tb_lineno <= 100000):
             selected = current.tb_lineno
         current = current.tb_next
     return None  # Truncated trace is unavailable, not an invented location.
