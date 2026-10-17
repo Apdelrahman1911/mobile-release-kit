@@ -40,29 +40,40 @@ class StorePrepareRequest:
     native:dict
     digest:str
 
+def native(n):
+    require(type(n) is dict and set(n)=={'profile','projectRoot','rootIdentity','credentialConfig','cwd',
+        'home','leaseFd','nonce','clock','authorizationId','tooling'})
+    require(n['profile'] in access.PROFILES and history.integer(n['leaseFd'],255,3)
+        and sha(n['nonce'],32) and n['nonce']!='0'*32 and _uuid(n['authorizationId']))
+    for key in ('projectRoot','cwd','home'):history.path(n[key])
+    history.root(n['rootIdentity']);access.content(n['credentialConfig'])
+    require(type(n['clock']) is dict and set(n['clock'])=={'workEndNs','hardEndNs'})
+    for v in n['clock'].values():require(type(v) is str and re.fullmatch('[1-9][0-9]{0,19}',v) is not None)
+    work,hard=(int(n['clock'][k]) for k in ('workEndNs','hardEndNs'))
+    require(work<hard<1<<64 and hard-work<=10_000_000_000)
+    t=n['tooling'];require(type(t) is dict and set(t)=={'version','commit'} and sha(t['commit'],40)
+        and type(t['version']) is str and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?',t['version']))
+    return n
+
 def parse_request(raw):
     try:
         value=history.decode(raw,REQUEST_LIMIT)
         require(type(value) is dict and set(value)=={'protocol','operationId','ownerGeneration','context','native'}
             and value['protocol']==PROTOCOL and history.token(value['operationId']) and history.token(value['ownerGeneration']))
-        n=value['native']
-        require(type(n) is dict and set(n)=={'profile','projectRoot','rootIdentity','credentialConfig','cwd',
-            'home','leaseFd','nonce','clock','authorizationId','tooling'})
-        require(n['profile'] in access.PROFILES and history.integer(n['leaseFd'],255,3)
-            and sha(n['nonce'],32) and n['nonce']!='0'*32 and _uuid(n['authorizationId']))
-        for key in ('projectRoot','cwd','home'):history.path(n[key])
-        history.root(n['rootIdentity']);access.content(n['credentialConfig'])
-        require(type(n['clock']) is dict and set(n['clock'])=={'workEndNs','hardEndNs'})
-        for v in n['clock'].values():require(type(v) is str and re.fullmatch('[1-9][0-9]{0,19}',v) is not None)
-        work,hard=(int(n['clock'][k]) for k in ('workEndNs','hardEndNs'))
-        require(work<hard<1<<64 and hard-work<=10_000_000_000)
-        t=n['tooling'];require(type(t) is dict and set(t)=={'version','commit'} and sha(t['commit'],40)
-            and type(t['version']) is str and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?',t['version']))
+        n=native(value['native'])
         return StorePrepareRequest(value['operationId'],value['ownerGeneration'],context(value['context']),n,hashlib.sha256(raw).hexdigest())
     except (ValueError,TypeError,KeyError,OverflowError,RecursionError):raise ProtocolError() from None
 
+def _request_wire(request):
+    if type(request) is StorePrepareRequest:
+        from . import _desktop_store_prepare_protocol as prepare
+        return prepare
+    from . import _desktop_store_execute_protocol as execute
+    require(type(request) is execute.StoreExecuteRequest);return execute
+
 def response(request,kind,payload,sequence):
-    require(type(request) is StorePrepareRequest and type(sequence) is int and 0<=sequence<6
+    selected=_request_wire(request);PROTOCOL,PHASES=selected.PROTOCOL,selected.PHASES
+    require(_request_wire(request) is selected and type(sequence) is int and 0<=sequence<6
         and kind in {'accepted',*PHASES,'terminal'}
         and (kind=='terminal' and sequence>=1 or kind=='accepted' and sequence==0
              or kind in PHASES and sequence==PHASES.index(kind)+1))
@@ -71,6 +82,7 @@ def response(request,kind,payload,sequence):
     require(len(raw)<=(16*1024 if kind in {'accepted','terminal'} else 2048));return raw
 
 def reply(raw,request,kind,step):
+    PROTOCOL=_request_wire(request).PROTOCOL
     try:
         value=history.decode(raw,2048)
         require(type(value) is dict and set(value)=={'protocol','operationId','ownerGeneration','nonce','requestSha256','kind','step','payload'}

@@ -38,6 +38,7 @@ function selection(value: unknown): AndroidMacToolchainSelection | null {
       ![v.recordSha256, v.inventorySha256, v.osProviderSha256].every((h) => hex(h, 64))) return null;
   return v as unknown as AndroidMacToolchainSelection;
 }
+export { selection as parseAndroidMacToolchainSelection };
 function comparison(value: unknown): AndroidCatalogComparison | null {
   const v = fields(value, ['catalogGeneration', 'instance', 'recordSha256', 'inventorySha256', 'osProviderSha256']);
   if (!v || !counter(v.catalogGeneration) || v.catalogGeneration === 0 || !hex(v.instance, 32) ||

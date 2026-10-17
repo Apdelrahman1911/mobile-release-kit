@@ -33,7 +33,7 @@ def fixture(*, target=TOOL.ARM_TARGET):
                   TOOL.CURRENT_CA_SOURCE: b"synthetic CA, not usable TLS material\n",
                   TOOL.CURRENT_HELPER_SOURCE: helper,
                   "desktop/macos-installed-inputs/build-release-intel.json": intel_release, **tooling}
-        inputs.update({"desktop/" + name: b"# inert bootstrap\n" for name in TOOL.CURRENT_BOOTSTRAPS | {"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py"}})
+        inputs.update({"desktop/" + name: b"# inert bootstrap\n" for name in TOOL.CURRENT_BOOTSTRAPS | {"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py"}})
         for name, body in inputs.items():
             path = checkout / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +89,7 @@ class StoreComposition(unittest.TestCase):
                 self.assertEqual(output["store/tooling/" + name], (body, 0o444))
             self.assertEqual(output["local_store_preflight_bootstrap.py"], (b"# inert bootstrap\n", 0o444))
             self.assertEqual(output["local_store_prepare_bootstrap.py"], (b"# inert bootstrap\n", 0o444))
+            self.assertEqual(output["local_store_execute_bootstrap.py"], (b"# inert bootstrap\n", 0o444))
             self.assertNotIn("store/tooling/obsolete.rb", output)
             self.assertEqual((f.component / "tooling/fastlane/run_lane.rb").read_bytes(), b"# obsolete runner\n")
             self.assertEqual(output["python/bin/python3"], f.supplier["python/bin/python3"])
@@ -114,6 +115,7 @@ class StoreComposition(unittest.TestCase):
             self.assertFalse(any(name.startswith("store/") for name in files))
             self.assertNotIn("local_store_preflight_bootstrap.py", files)
             self.assertNotIn("local_store_prepare_bootstrap.py", files)
+            self.assertNotIn("local_store_execute_bootstrap.py", files)
             captured, _, _ = TOOL.current_source()
             self.assertTrue(set(f.tooling).isdisjoint(captured))
             rejected = args(f, "historical")

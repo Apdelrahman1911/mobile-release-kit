@@ -107,7 +107,7 @@ class LocalSourceObservation:
     this exact original owner's live invocation and reobserves before use.
     """
     def __init__(self, invocation, configuration_bytes, version_bytes, endpoint, execution_source):
-        prepare=getattr(invocation.cancellation,"_store_prepare_source",None) if type(invocation) is InvocationCustody else None
+        prepare=getattr(invocation.cancellation,"_local_store_source",None) if type(invocation) is InvocationCustody else None
         _need(type(invocation) is InvocationCustody and (invocation.mode == "build" or
               invocation.mode=="store" and prepare is not None and prepare.require_operation().invocation is invocation)
               and invocation.project_owner is not None, "owner")
@@ -411,6 +411,8 @@ def _retain_source(owner):
                 owner.acquire()
                 yield owner
                 owner.check()
+                execute=owner.guard._store_execute_source
+                if execute is not None:execute.require_operation().source_final(owner)
                 metadata = getattr(owner, "_metadata_owner", None)
                 if metadata is not None:
                     from .local_release_metadata import LocalMetadataSource

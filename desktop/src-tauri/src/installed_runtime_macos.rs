@@ -28,6 +28,10 @@ pub(crate) use history_runtime::history_installed_slot_data_checks;
 #[path = "android_toolchain_macos.rs"]
 mod android_tools;
 pub(crate) const LOCAL_CANDIDATE_ANDROID_FDS:usize=MAC_RUNTIME_FDS+android_tools::LIVE_FDS+crate::android_shared_lease_macos::LIVE_READ_FDS;
+// Distinct Execute composition; these are the same independently enforced
+// original Store/tool/shared-reader caps, not Android build authority.
+pub(crate) const LOCAL_EXECUTE_ORIGINAL_FDS:usize=MAC_RUNTIME_FDS+android_tools::LIVE_FDS+crate::android_shared_lease_macos::LIVE_READ_FDS;
+
 const MAC_RUNTIME_FDS:usize=48;
 pub(crate) use android_tools::AndroidToolchainSlots;
 #[cfg(not(feature = "macos-android-registration-helper"))]

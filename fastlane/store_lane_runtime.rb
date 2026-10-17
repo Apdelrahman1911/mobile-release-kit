@@ -14,6 +14,7 @@ module MobileReleaseKit
                ios_testflight_internal ios_testflight_external ios_app_store_submit].freeze
     PREFIX = "MOBILE_RELEASE_STORE_LANE_"
     PRIVATE_KEYS = %w[NONCE ROOT ROOT_ID CLOCK RUN_DEADLINE_NS HARD_DEADLINE_NS].map { |key| PREFIX + key }.freeze
+    LOCAL_EXECUTE_KEY = PREFIX + "LOCAL_EXECUTE"
     MAX_TIME = (1 << 63) - 1
     MAX_ID = (1 << 64) - 1
     RUN_NS = 3_600_000_000_000
@@ -69,6 +70,16 @@ module MobileReleaseKit
       @runtime
     end
 
+    # Ordinary lanes keep their exact default. Merely setting a private key
+    # outside the original admitted Runtime cannot choose a local decoder.
+    def self.local_execution_context
+      unless @runtime
+        raise Error.new(:local_outside_runtime) if ENV.key?(LOCAL_EXECUTE_KEY)
+        return nil
+      end
+      @runtime.local_execution_context
+    end
+
     def self.run_upload!(lane, &body)
       raise Error.new(:exit_not_captured) unless @exit_boundary
       @exit_boundary.origin!
@@ -118,6 +129,16 @@ module MobileReleaseKit
         origin!
         raise Error.new(:bridges_not_admitted) unless @bridges_installed && @xml_template
         @xml_template
+      end
+
+      def local_admission_context
+        origin!
+        raise Error.new(:local_admission) unless @state == :admitting && @local_execution && @resources
+        @local_execution
+      end
+      def local_execution_context
+        require_active!
+        @local_execution
       end
 
       def secondary_errors
@@ -267,7 +288,8 @@ module MobileReleaseKit
         raise Error.new(:lane) unless lane.instance_of?(String) && LANES.include?(lane)
         @environment = ENV.to_h.transform_values { |value| value.dup.freeze }.freeze
         env = @environment
-        unless env.keys.select { |key| key.start_with?(PREFIX) }.sort == PRIVATE_KEYS.sort &&
+        private_keys = PRIVATE_KEYS + (env.key?(LOCAL_EXECUTE_KEY) ? [LOCAL_EXECUTE_KEY] : [])
+        unless env.keys.select { |key| key.start_with?(PREFIX) }.sort == private_keys.sort &&
                env["MOBILE_RELEASE_OPERATION"] == lane && %w[prepare execute].include?(env["MOBILE_RELEASE_STORE_MODE"])
           raise Error.new(:environment)
         end
@@ -313,11 +335,47 @@ module MobileReleaseKit
         @resources = StoreLaneResources::Inventory.new(invocation: @invocation, binding: @binding)
         @invocation.bind_resources!(@resources)
         @resources.admit!
+        admit_local_execution! if env.key?(LOCAL_EXECUTE_KEY)
+      end
+
+      def admit_local_execution!
+        raise Error.new(:local_reused) if @local_execution || @binding.fetch("lane") != "android_internal_upload" || @binding.fetch("mode") != "execute"
+        require_relative "release_support"
+        raw=@environment.fetch(LOCAL_EXECUTE_KEY)
+        raise Error.new(:local_size) unless raw.bytesize <= 16*1024
+        value=MobileReleaseKit.strict_json(raw,label:"local execution context")
+        raise Error.new(:local_shape) unless value.instance_of?(Hash) && value.keys.sort == %w[authority expectedIntentSha256 toolchain].sort
+        path=MobileReleaseKit.safe_path(@environment.fetch("MOBILE_RELEASE_APP_ROOT"),@environment.fetch("MOBILE_RELEASE_OPERATION_INTENT_PATH"))
+        raise Error.new(:local_intent) unless File.file?(path) && !File.symlink?(path) && File.size(path) <= 2*1024*1024
+        body=File.binread(path,2*1024*1024+1)
+        payload,digest=MobileReleaseKit.local_operation_intent(body,expected_sha256:value.fetch("expectedIntentSha256"))
+        authority=MobileReleaseKit.local_execution_authority(MobileReleaseKit.canonical_json(value.fetch("authority")),
+          intent_content:body,expected_intent_sha256:digest,purpose:"execute")
+        raise Error.new(:local_binding) unless payload.fetch("confirmation") == @environment.fetch("MOBILE_RELEASE_CONFIRMATION") &&
+          payload.fetch("application").fetch("id") == @environment.fetch("MOBILE_RELEASE_APP_IDENTITY") &&
+          payload.fetch("version").fetch("marketing") == @environment.fetch("MOBILE_RELEASE_MARKETING_VERSION") &&
+          payload.fetch("version").fetch("build").to_s == @environment.fetch("MOBILE_RELEASE_BUILD_NUMBER")
+        # This tuple was emitted only by the exact typed native-backed Python
+        # owner and sealed with ALL command environment bytes. It is comparison
+        # DATA, not a new provider/consent grant or a caller runtime factory.
+        context={payload:payload,digest:digest,authority:authority,toolchain:value.fetch("toolchain")}
+        freeze_local(context);@local_execution=context
+        @invocation.bind_local_execution!(self,context)
+      end
+      def freeze_local(value)
+        value.each { |k,v| freeze_local(k);freeze_local(v) } if value.instance_of?(Hash)
+        value.each { |v| freeze_local(v) } if value.instance_of?(Array)
+        value.freeze
       end
 
       def check_environment!
-        keys = PRIVATE_KEYS + %w[MOBILE_RELEASE_OPERATION MOBILE_RELEASE_STORE_MODE MOBILE_RELEASE_STORE_RECEIPT_PATH
+        keys = PRIVATE_KEYS + [LOCAL_EXECUTE_KEY] + %w[MOBILE_RELEASE_OPERATION MOBILE_RELEASE_STORE_MODE MOBILE_RELEASE_STORE_RECEIPT_PATH
           MOBILE_RELEASE_ASC_APP_ID MOBILE_RELEASE_ASC_KEY_ID MOBILE_RELEASE_IOS_IPA_PATH TMPDIR TMP TEMP HOME]
+        if @local_execution
+          keys += %w[MOBILE_RELEASE_OPERATION_INTENT_PATH MOBILE_RELEASE_APP_ROOT MOBILE_RELEASE_CONFIG_PATH
+            MOBILE_RELEASE_APP_IDENTITY MOBILE_RELEASE_MARKETING_VERSION MOBILE_RELEASE_BUILD_NUMBER MOBILE_RELEASE_CONFIRMATION
+            JAVA_HOME MOBILE_RELEASE_BUNDLETOOL_JAR]
+        end
         raise Error.new(:environment_changed) unless keys.all? { |key| ENV[key] == @environment[key] }
       end
 

@@ -151,3 +151,50 @@ test('prepared review rejects stale project selection and retires pending consen
   }finally{h.controller.dispose();}
  }
 });
+
+const execution=()=>{const value=prepared();delete value.storePreconditionSha256;delete value.priorPrepareFinality;
+ return {...value,receiptSha256:'f'.repeat(64),authorizationId:'99999999-1234-4234-8234-123456789abc',result:'accepted',
+  limitations:['internal-testing-only','not-public-release','prior-prepare-finality-not-established','saved-inputs-not-atomic'],
+  observation:'current-execution-files-only',priorExecutionFinality:'not-established'};};
+function executionHistory(request){const value=inputHistory(request,'settled-success');value.result.headSequence=7;value.result.history[0].recoveryRequired=false;if(request.action==='review-execution')value.result.executionReceipt=execution();return value;}
+test('execution review admits only exact15 current-file fields and settled selected history, not Execute finality',()=>{
+ const request=localHistoryRequest('p1','review-execution',UUID);assert.ok(request);assert.ok(encodeLocalHistoryRequest('prepare_local_release_history',request));
+ assert.equal(localHistoryRequest('p1','review-execution'),null);
+ const complete=executionHistory(request);assert.ok(parseLocalHistoryStatus(status(1,complete)));assert.equal(Object.keys(complete.result.executionReceipt).length,15);
+ for(const key of Object.keys(complete.result.executionReceipt)){const bad=copy(complete);delete bad.result.executionReceipt[key];assert.equal(parseLocalHistoryStatus(status(1,bad)),null,key);}
+ for(const mutate of [r=>r.headSequence=6,r=>r.executionReceipt=null,r=>delete r.executionReceipt,r=>r.candidateInputs=null,r=>r.preparedIntent=prepared(),
+  r=>r.executionReceipt.receiptSha256='f'.repeat(63),r=>r.executionReceipt.authorizationId=UUID.toUpperCase(),r=>r.executionReceipt.operationId='99999999-1234-4234-8234-123456789abc',
+  r=>r.executionReceipt.result='pending',r=>r.executionReceipt.priorExecutionFinality='complete',r=>r.executionReceipt.observation='current-store-state',
+  r=>r.executionReceipt.destination.channel='production',r=>r.executionReceipt.observedAt='2026-02-30T12:34:56Z',r=>r.executionReceipt.version.build=2100000001,
+  r=>r.executionReceipt.limitations.reverse(),r=>r.executionReceipt.path='/private',r=>r.history[0].phase='execute-pending',r=>r.history[0].recoveryRequired=true]){
+  const bad=copy(complete);mutate(bad.result);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ for(const action of ['enroll','verify','review-inputs','abandon-inputs','review-prepared']){
+  const bad=copy(complete);bad.context=localHistoryRequest('p1',action,UUID);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ let getter=0;const unsafe=copy(complete);Object.defineProperty(unsafe.result.executionReceipt,'receiptSha256',{enumerable:true,get(){getter++;return'f'.repeat(64);}});assert.equal(parseLocalHistoryStatus(status(1,unsafe)),null);assert.equal(getter,0);
+});
+test('execution review selects completed current-project rows and uses existing original candidate consent once',async()=>{
+ const h=await fixture();try{
+  for(const [index,phase] of ['inputs-ready','prepared','execute-pending','settled-failure','reconciliation-required'].entries()){
+   const value=executionHistory(localHistoryRequest('p1','verify'));value.result.history[0]={operationId:UUID,phase,recoveryRequired:!phase.startsWith('settled-')};h.emit(status(index+1,value));assert.equal(h.controller.selectCandidate('review-execution',UUID),false);
+  }
+  const ready=executionHistory(localHistoryRequest('p1','verify'));ready.result.headSequence=8;ready.result.history.push({operationId:'99999999-1234-4234-8234-123456789abc',phase:'inputs-pending',recoveryRequired:true});h.emit(status(6,ready));
+  assert.equal(h.controller.selectCandidate('review-prepared',UUID),false);assert.equal(h.controller.selectCandidate('abandon-inputs',UUID),false);
+  assert.equal(h.controller.selectCandidate('review-execution',UUID),true);await h.controller.prepare();let calls=0;
+  h.api.startLocalReleaseHistory=async request=>{calls++;assert.equal(request.consentVersion,'local-android-candidate-inputs-v1');assert.deepEqual([request.operationId,request.ownerGeneration],[A,B]);return status(8,{...h.latest().operation,phase:'running',intentUsable:false});};
+  h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(calls,1);assert.equal(h.counts().cancel,0);
+  const result=executionHistory(h.latest().operation.context);result.operationId=A;h.emit(status(9,result));
+  assert.equal(h.controller.getSnapshot().status.operation.result.executionReceipt.priorExecutionFinality,'not-established');assert.equal(h.controller.getSnapshot().historical,false);
+ }finally{h.controller.dispose();}
+});
+test('execution review cannot follow old rows or pending-picker context into fresh consent',async()=>{
+ for(const change of [h=>h.project('p2'),h=>h.controller.setSelectionPending(true),h=>h.controller.setAction('verify')]){
+  const h=await fixture();try{
+   h.emit(status(1,executionHistory(localHistoryRequest('earlier','verify'))));assert.equal(h.controller.selectCandidate('review-execution',UUID),false);
+   h.emit(status(2,executionHistory(localHistoryRequest('p1','verify'))));assert.equal(h.controller.selectCandidate('review-execution','99999999-1234-4234-8234-123456789abc'),false);
+   assert.equal(h.controller.selectCandidate('review-execution',UUID),true);await h.controller.prepare();h.controller.acknowledge(true);change(h);await h.controller.start();
+   assert.equal(h.counts().start,0);assert.equal(h.counts().cancel,1);assert.equal(h.controller.getSnapshot().historical,true);assert.equal(h.controller.getSnapshot().consentUntil,null);
+  }finally{h.controller.dispose();}
+ }
+});

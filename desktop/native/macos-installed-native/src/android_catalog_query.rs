@@ -356,7 +356,7 @@ impl ClientBook {
             || !self.signal.admitted(false){return Err(Failure::Stopped);}
         if !self.request_available(false){return Err(Failure::Stopped);}
         let bounds=self.signal.bounds().ok_or(Failure::Unknown)?;
-        let role=match bounds.role{Role::Catalog=>prepare::Role::Catalog,Role::Start=>prepare::Role::Start};
+        let role=match bounds.role{Role::Catalog=>prepare::Role::Catalog,Role::Start=>prepare::Role::Start,Role::LocalStoreExecute=>prepare::Role::LocalStoreExecute};
         let request=prepare::Request{bounds:prepare::Bounds{role,origin:bounds.origin,work:bounds.work,hard:bounds.hard}};
         let input=request.encode().ok_or(Failure::Bounds)?;
         if self.prepare.is_none(){self.prepare=prepare::ClientAttempt::new(request);}
@@ -455,7 +455,7 @@ mod tests{
         instance:if kind==Kind::ReadIntent{[2;16]}else{[0;16]},first:0}}
     #[test]
     fn role_specific_original_bounds_and_prearrival_failure_never_renew(){
-        for role in[Role::Catalog,Role::Start]{
+        for role in[Role::Catalog,Role::Start,Role::LocalStoreExecute]{
             let signal=Signal::reserved();signal.failure_at(12,false);signal.arm_at(bounds(role),20).unwrap();
             assert_eq!(signal.snapshot().cleanup,Some(12+CLEANUP_NS));
             signal.failure_at(16,false);assert_eq!(signal.first(),Some(12));

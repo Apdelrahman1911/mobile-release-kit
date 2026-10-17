@@ -207,6 +207,50 @@ class PlayReleaseLanesTest < Minitest::Test
     @service.add_bundle(@aab) unless @service.state.fetch("bundles").any? { |bundle| bundle["versionCode"] == 200 }
   end
 
+  def local_execution_context
+    # Real existing lane/provider fixture. Only the admitted Runtime transport
+    # is supplied here; its exact same-Invocation gate has a separate test.
+    value=JSON.parse(File.binread(File.expand_path("../fixtures/local-intent-candidate-valid.json",__dir__)))
+    value.delete("integrity")
+    value["storePrecondition"]=@payload.fetch("storePrecondition")
+    value["application"]={"id"=>"test.example.release"}
+    value["version"]={"marketing"=>"2.0.0","build"=>200}
+    value["confirmation"]="candidate:android:2.0.0:200"
+    value["preparedBy"]["confirmationSha256"]=Digest::SHA256.hexdigest(value.fetch("confirmation"))
+    value["artifacts"][0].merge!("fileName"=>"candidate.aab","size"=>@aab.bytesize,"sha256"=>Digest::SHA256.hexdigest(@aab))
+    @payload=value;save_intent
+    payload,digest=MobileReleaseKit.local_operation_intent(File.binread(File.join(@root,"intent.json")),expected_sha256:@intent_digest)
+    authority=payload.fetch("preparedBy").merge("purpose"=>"execute","authorizationId"=>"55555555-5555-4555-8555-555555555555","intentSha256"=>digest)
+    {payload:payload,digest:digest,authority:authority}
+  end
+
+  def test_local_candidate_uses_same_supply_engine_and_distinct_receipt_without_ci_authority
+    prepare("candidate");context=local_execution_context
+    ENV.delete("MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON")
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) { execute }
+    assert_equal "local-store-execution-receipt",receipt.fetch("documentType")
+    assert_equal 1,receipt.fetch("schemaVersion");assert_equal "local-desktop",receipt.fetch("origin")
+    assert_equal context.fetch(:authority),receipt.fetch("executedBy")
+    assert_equal context.fetch(:payload).fetch("preparedBy"),receipt.fetch("preparedBy")
+    refute receipt.key?("authorizedBy");assert_equal "accepted",receipt.fetch("result")
+    assert_equal [File.join(@root,"candidate.aab")],@validation_calls
+    assert_equal 1,@service.commits.length
+    assert_equal 0,@service.commits.first.fetch(:retries)
+    assert_equal @unrelated,@service.state.fetch("tracks").fetch("internal").fetch("releases").reject { |r| r["versionCodes"]==["200"] }
+  end
+
+  def test_local_first_send_does_not_adopt_an_already_appeared_bundle_as_prior_execution
+    prepare("candidate");context=local_execution_context
+    @validation_hook=lambda do |_|
+      bundle=@service.add_bundle(@aab)
+      @service.edits.each_value { |state| state.fetch("bundles") << @service.clone(bundle) }
+    end
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) do
+      assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+    end
+    assert_empty @service.mutations;assert_no_receipt
+  end
+
   def test_candidate_prepare_is_read_only_and_real_supply_preserves_all_track_records
     prepare("candidate")
     assert_empty @service.mutations

@@ -39,7 +39,7 @@ export function LocalStorePrepare({ state, controller, compact = false, onCreden
       <p>Google Play state observed at {prepared.observedAt}. Local checkpoint {op?.result?.headSequence}.</p>
       <p>The application retained the snapshot and intent inside your project. No copying or command is needed. This result does not authorize execution, establish earlier build finality, or guarantee that Google Play is unchanged.</p>
       {state.historical && <p>This result belongs to an earlier context. It is not a preparation of your current selection.</p>}
-      <p>Direct execution and prepared-intent recovery are not available in this build. Do not treat this saved intent as a completed Store release.</p>
+      <p>Execution requires its separate internal-upload review and explicit consent, when supported by this installed runtime. Prepared-intent recovery is not offered here. Do not treat this saved intent as a completed Store release.</p>
     </div>}
   </section>;
 }

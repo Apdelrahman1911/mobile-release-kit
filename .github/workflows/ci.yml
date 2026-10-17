@@ -12,7 +12,7 @@ on:
         type: choice
         required: true
         default: full
-        options: [full, linux, macos, store-lane-macos, signing-adapter, signing-adapter-linux, signing-adapter-macos, signing-matrix-canary]
+        options: [full, linux, macos, play-lanes, store-lane-macos, signing-adapter, signing-adapter-linux, signing-adapter-macos, signing-matrix-canary]
 
 permissions:
   contents: read
@@ -26,6 +26,7 @@ concurrency:
 
 jobs:
   changes:
+    if: github.event_name != 'workflow_dispatch' || inputs.verification_target != 'play-lanes'
     name: Select affected core checks
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -42,6 +43,90 @@ jobs:
           CI_BASE: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
           CI_HEAD: ${{ github.sha }}
         run: python3 -I -B .github/scripts/ci_changes.py
+  test-play-lanes:
+    # Optional fail-fast check when only the locked Store business logic changed.
+    # Does not replace protected full CI or native Store-lane qualification.
+    if: github.event_name == 'workflow_dispatch' && inputs.verification_target == 'play-lanes'
+    name: Focused Play lane regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '3.3.12'
+          bundler: none
+          bundler-cache: false
+      - name: Allocate disposable dependency storage
+        id: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(id -u)" != 0 ]]
+          root=$(mktemp -d "$RUNNER_TEMP/mrk-play-tests.XXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          mkdir "$root/home" "$root/bootstrap" "$root/gems"
+      - name: Install only the frozen test dependencies
+        shell: bash
+        timeout-minutes: 10
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          if [[ ! -x /usr/bin/bwrap ]]; then
+            sudo -n apt-get update
+            sudo -n apt-get install --yes --no-install-recommends bubblewrap
+          fi
+          export HOME="$WORK_ROOT/home" GEM_HOME="$WORK_ROOT/bootstrap"
+          export GEM_PATH="$GEM_HOME" PATH="$GEM_HOME/bin:$PATH"
+          export BUNDLE_PATH="$WORK_ROOT/gems" BUNDLE_USER_HOME="$WORK_ROOT/home/bundle"
+          export BUNDLE_IGNORE_CONFIG=1 BUNDLE_FROZEN=true BUNDLE_DEPLOYMENT=true
+          gem --norc install bundler --version 4.0.16 --no-document --clear-sources --source https://rubygems.org
+          bundle _4.0.16_ install --jobs 2 --retry 1
+      - name: Test real Supply adapters against isolated fake Store fixtures
+        shell: bash
+        timeout-minutes: 4
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          ruby_prefix=$(ruby -rrbconfig -e 'puts RbConfig::CONFIG.fetch("prefix")')
+          [[ "$ruby_prefix" == /opt/hostedtoolcache/Ruby/* && -x "$ruby_prefix/bin/ruby" ]]
+          # Install needs network; the actual tests get none, no runner HOME,
+          # no secrets, and no writable source/dependencies. No native suites.
+          sudo -n /usr/bin/timeout --kill-after=5 180 /usr/bin/bwrap \
+            --unshare-all --die-with-parent --new-session \
+            --uid 65534 --gid 65534 --cap-drop ALL \
+            --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+            --symlink usr/bin /bin --proc /proc --dev /dev --tmpfs /tmp \
+            --ro-bind "$ruby_prefix" "$ruby_prefix" \
+            --ro-bind "$WORK_ROOT/bootstrap" "$WORK_ROOT/bootstrap" \
+            --ro-bind "$WORK_ROOT/gems" "$WORK_ROOT/gems" \
+            --ro-bind "$GITHUB_WORKSPACE" /work --chdir /work --clearenv \
+            --setenv PATH "$ruby_prefix/bin:/usr/bin:/bin" --setenv LANG C.UTF-8 \
+            --setenv HOME /tmp/home --setenv TMPDIR /tmp --setenv CI true \
+            --setenv GEM_HOME "$WORK_ROOT/bootstrap" --setenv GEM_PATH "$WORK_ROOT/bootstrap" \
+            --setenv BUNDLE_PATH "$WORK_ROOT/gems" --setenv BUNDLE_GEMFILE /work/Gemfile \
+            --setenv BUNDLE_USER_HOME /tmp/bundle --setenv BUNDLE_IGNORE_CONFIG 1 \
+            --setenv BUNDLE_FROZEN true --setenv BUNDLE_DEPLOYMENT true \
+            --setenv FASTLANE_SKIP_UPDATE_CHECK 1 --setenv FASTLANE_OPT_OUT_USAGE 1 \
+            /bin/bash -c '
+              set -euo pipefail; umask 077; mkdir /tmp/home
+              ulimit -c 0; ulimit -n 256; ulimit -v 1572864; ulimit -t 120
+              [[ "$(id -u)" != 0 ]]
+              ruby -rbundler/setup tests/workflow/test_play_lanes.rb | tee /tmp/play.log
+              grep -Eq "^52 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/play.log
+              ruby -rbundler/setup tests/workflow/test_local_store_execution_runtime.rb | tee /tmp/local.log
+              grep -Eq "^4 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/local.log
+            '
+      - name: Remove only this job's disposable dependencies and cache
+        if: always() && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: rm -rf -- "$WORK_ROOT"
   test-linux:
     needs: changes
     if: ${{ needs.changes.outputs.core == 'true' && (github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'linux')) }}
@@ -457,7 +542,7 @@ jobs:
   test:
     name: ${{ github.event_name == 'workflow_dispatch' && inputs.verification_target != 'full' && format('Targeted core check ({0})', inputs.verification_target) || 'test' }}
     needs: [changes, test-linux, test-native-profiles, test-native-support, test-signing-matrix, test-signing-adapter]
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.verification_target != 'play-lanes') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

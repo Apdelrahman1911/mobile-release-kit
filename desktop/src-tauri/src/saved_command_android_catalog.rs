@@ -775,27 +775,49 @@ mod frozen_row_data_tests {
     }
 }
 
-/// Read-only loan of the same published catalog original. It is not a build
-/// capability, a new catalog worker, or a renderer-deserializable root identity.
+/// Read-only loan of the same published catalog original. Neither loan creates
+/// a build/inspection capability or accepts a renderer-selected root.
 pub(crate) struct ArtifactToolLoan {original:Arc<Inner>,selected:Arc<Selection>}
+pub(crate) struct ExecuteToolLoan {original:Arc<Inner>,selected:Arc<Selection>,document:std::sync::Weak<()>}
+fn selection_loan_current(original:&Arc<Inner>,selected:&Arc<Selection>)->bool {
+    let Ok(r)=original.registry.try_lock() else{return false;};
+    selection_owner_current(original,&r)
+        &&r.android_catalog.selection().is_some_and(|v|Arc::ptr_eq(v,selected))&&selected.matches_owner(original)
+}
+fn selection_owner_current(original:&Arc<Inner>,r:&Registry)->bool {
+    !original.poisoned.load(Ordering::SeqCst)&&!r.disabled&&!r.exhausted&&!r.stopping&&!r.document_lost
+        &&!r.android_catalog.unknown()&&!r.android_catalog.busy()&&!r.android_registration.unknown()
+        &&!r.android_registration.busy()&&!original.android_registration_control.is_unknown()
+}
 impl ArtifactToolLoan {
-    pub(crate) fn current(&self)->bool {
-        let Ok(r)=self.original.registry.try_lock() else{return false;};
-        !self.original.poisoned.load(Ordering::SeqCst)&&!r.disabled&&!r.exhausted&&!r.stopping&&!r.document_lost
-            &&!r.android_catalog.unknown()&&!r.android_catalog.busy()&&!r.android_registration.unknown()
-            &&!r.android_registration.busy()&&!self.original.android_registration_control.is_unknown()
-            &&r.android_catalog.selection().is_some_and(|v|Arc::ptr_eq(v,&self.selected))&&self.selected.matches_owner(&self.original)
-    }
+    pub(crate) fn current(&self)->bool{selection_loan_current(&self.original,&self.selected)}
     pub(crate) fn selected_data(&self)->Option<&android_wire::MacToolchainSelection>{self.current().then_some(self.selected.data())}
 }
+impl ExecuteToolLoan {
+    pub(crate) fn current(&self)->bool{selection_loan_current(&self.original,&self.selected)}
+    pub(crate) fn selected_data(&self)->Option<&android_wire::MacToolchainSelection>{self.current().then_some(self.selected.data())}
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn census(&self)->Option<(usize,[Option<Arc<crate::asset_session::OriginalWork>>;3])>{
+        if !self.current(){return None;}let document=self.document.upgrade()?;
+        android_registration::execute_owner_census(&self.original,&document)
+    }
+    pub(crate) fn own_backing_bytes(&self)->Option<usize>{
+        // Actual catalog/Selection is visited separately by the same Document census.
+        // This is only the distinct retained loan and its Arc allocation.
+        std::mem::size_of::<Self>().checked_add(2*std::mem::size_of::<usize>())
+    }
+}
 impl SavedCommandOwner {
-    pub(crate) fn artifact_tool_loan(&self,document:&Arc<()>)->Result<Option<Arc<ArtifactToolLoan>>,BridgeError>{
+    fn current_selection_loan(&self,document:&Arc<()>)->Result<Option<Arc<Selection>>,BridgeError>{
         if self.inner.domain!=SavedCommandDomain::AndroidBuild||!self.inner.android_original_document_matches(Some(document)){return Err(BridgeError::cleanup_unknown());}
         let r=self.inner.lock();
-        if r.disabled||r.exhausted||r.stopping||r.document_lost||r.android_catalog.unknown()||r.android_catalog.busy()
-            ||r.android_registration.unknown()||r.android_registration.busy()||self.inner.android_registration_control.is_unknown()
-            ||self.inner.poisoned.load(Ordering::SeqCst){return Err(BridgeError::cleanup_unknown());}
-        match r.android_catalog.selection(){None=>Ok(None),Some(selected) if selected.matches_owner(&self.inner)=>
-            Ok(Some(Arc::new(ArtifactToolLoan{original:self.inner.clone(),selected:selected.clone()}))),Some(_)=>Err(BridgeError::cleanup_unknown())}
+        if !selection_owner_current(&self.inner,&r){return Err(BridgeError::cleanup_unknown());}
+        match r.android_catalog.selection(){None=>Ok(None),Some(selected) if selected.matches_owner(&self.inner)=>Ok(Some(selected.clone())),Some(_)=>Err(BridgeError::cleanup_unknown())}
+    }
+    pub(crate) fn artifact_tool_loan(&self,document:&Arc<()>)->Result<Option<Arc<ArtifactToolLoan>>,BridgeError>{
+        Ok(self.current_selection_loan(document)?.map(|selected|Arc::new(ArtifactToolLoan{original:self.inner.clone(),selected})))
+    }
+    pub(crate) fn execute_tool_loan(&self,document:&Arc<()>)->Result<Option<Arc<ExecuteToolLoan>>,BridgeError>{
+        Ok(self.current_selection_loan(document)?.map(|selected|Arc::new(ExecuteToolLoan{original:self.inner.clone(),selected,document:Arc::downgrade(document)})))
     }
 }

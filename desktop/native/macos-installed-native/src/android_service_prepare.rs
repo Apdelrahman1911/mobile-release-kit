@@ -12,15 +12,15 @@ const NONCE_PREFIX: &[u8; 8] = b"MRKACTX1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
-pub enum Role { Registration = 1, Catalog = 2, Start = 3 }
+pub enum Role { Registration = 1, Catalog = 2, Start = 3, LocalStoreExecute = 4 }
 impl Role {
     pub fn decode(value: u8) -> Option<Self> {
         match value { 1 => Some(Self::Registration), 2 => Some(Self::Catalog),
-            3 => Some(Self::Start), _ => None }
+            3 => Some(Self::Start), 4 => Some(Self::LocalStoreExecute), _ => None }
     }
     pub fn work_ns(self) -> u64 {
         match self { Self::Registration => 300_000_000_000,
-            Self::Catalog => 60_000_000_000, Self::Start => 3_000_000_000_000 }
+            Self::Catalog => 60_000_000_000, Self::Start => 3_000_000_000_000, Self::LocalStoreExecute => 1_200_000_000_000 }
     }
     pub fn hard_ns(self) -> u64 { self.work_ns() + CLEANUP_NS }
 }
@@ -214,7 +214,7 @@ mod tests {
     }
     #[test]
     fn fixed_layout_role_and_reserved_bytes_cannot_alias() {
-        for role in [Role::Registration, Role::Catalog, Role::Start] {
+        for role in [Role::Registration, Role::Catalog, Role::Start, Role::LocalStoreExecute] {
             let request = Request { bounds: bounds(role) };
             let raw = request.encode().unwrap();
             assert_eq!(Request::decode(&raw), Some(request));

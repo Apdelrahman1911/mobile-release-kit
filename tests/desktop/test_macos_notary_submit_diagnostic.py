@@ -308,11 +308,11 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
                     self.assertEqual(slots['installer']['markers']['phases'], ['pre-exec'])
                     self.assertEqual(slots['installer']['markers']['acl'][0]['phase'], 'acl-entry-present')
                     self.assertEqual(slots['installer']['markers']['parent'][0]['exit'], 1)
+                    self.assertEqual(slots['installer']['markers']['parent'][0]['reasonSha256'], 'a' * 64)
                 else:
                     self.assertIsNone(slots['installer']['markers'])
                 self.assertFalse(value['packageInstall']['systemServiceExitClaimed'])
                 self.assertNotIn(PRIVATE.decode(), json.dumps(value))
-                self.assertNotIn('a' * 64, json.dumps(value))
 
     def test_failed_publication_or_parser_does_not_replace_original_failure(self):
         from unittest import mock
@@ -413,10 +413,38 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
                     ';exit=1;originals=1;native=0;timely=1;unknown=1\n').encode()
                 value = HELPER.installer_markers(capture, PRIVATE)
                 self.assertEqual(value['parent'][0]['category'], category)
-                self.assertNotIn(reason_hash, json.dumps(value))
+                self.assertEqual(value['parent'][0]['reasonSha256'], reason_hash)
+                self.assertEqual({k: value['parent'][0][k] for k in ('exit', 'originals', 'native', 'timely', 'unknown')},
+                    {'exit': 1, 'originals': True, 'native': False, 'timely': True, 'unknown': True})
                 self.assertNotIn(PRIVATE.decode(), json.dumps(value))
+                for bad in (None, 123, '', reason_hash[:-1], reason_hash+'0', reason_hash.upper(), PRIVATE.decode()):
+                    altered = copy.deepcopy(value)
+                    altered['parent'][0]['reasonSha256'] = bad
+                    self.assertIsNone(HELPER.installer_markers_data(altered))
+                    malformed = capture.replace(reason_hash.encode(), str(bad).encode())
+                    self.assertEqual(HELPER.installer_markers(malformed, PRIVATE)['parent'], [])
                 value['parent'][0]['category'] = PRIVATE.decode()
                 self.assertIsNone(HELPER.installer_markers_data(value))
+        # Exercise the real call and final public projection: this diagnostic
+        # neither converts the original nonzero result nor mutates its ledger.
+        op = self.operation()
+        with self.assertRaisesRegex(HELPER.Refused, 'original-nonzero-installer'):
+            self.invoke(op)
+        before = copy.deepcopy(op.calls)
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            HELPER.emit_failure_diagnostic(HELPER.Refused('original-nonzero-installer'),
+                phase='package-install', target=HELPER.ARM_TARGET, operation=op)
+        emitted = json.loads(output.getvalue())
+        slot = emitted['packageInstall']['calls']['installer']
+        self.assertEqual(slot['returncode'], 1)
+        self.assertTrue(slot['capturesSettled'])
+        self.assertEqual(slot['markers']['parent'][0]['reasonSha256'], 'a' * 64)
+        self.assertEqual(slot['markers']['parent'][0]['category'], 'unclassified')
+        self.assertEqual(emitted['terminal']['reason'], 'original-nonzero-installer')
+        self.assertEqual(op.calls, before)
+        self.assertNotIn(PRIVATE.decode(), output.getvalue())
+        self.assertLessEqual(len(output.getvalue()), 4096)
 
 
 class PreparedInstallerLogTests(unittest.TestCase):
@@ -485,6 +513,8 @@ class PreparedInstallerLogTests(unittest.TestCase):
                 args.run_id = op.environment['GITHUB_RUN_ID']; args.run_attempt = op.environment['GITHUB_RUN_ATTEMPT']
                 args.package = HELPER.transport_mount_path_data(op.environment, target, 'package-install') / stager.distribution_request_name(args.request_id)
                 selected = (b'PackageKit: MRK_MACOS_POSTINSTALL_PHASE=pre-exec\n'
+                    b'PackageKit: MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=' + b'a' * 64 +
+                    b';exit=1;originals=1;native=1;timely=1;unknown=0\n'
                     b'PackageKit: Error Domain=PKInstallErrorDomain Code=112 private message\n' + PRIVATE + b'\n')
                 def diagnostic(parsed):
                     # Native log input is inert. Real CLI/parser+binding, owner
@@ -521,6 +551,9 @@ class PreparedInstallerLogTests(unittest.TestCase):
                     self.assertEqual(slots['installer']['returncode'], 1)
                     self.assertEqual(slots['installer']['markers']['phases'], [])
                     self.assertEqual(slots['installer-log-capture']['markers']['phases'], ['pre-exec'])
+                    self.assertEqual(slots['installer-log-capture']['markers']['parent'][0],
+                        dict(reasonSha256='a'*64, category='unclassified', exit=1, originals=True,
+                             native=True, timely=True, unknown=False))
                     self.assertEqual(slots['installer']['errors']['rows'], [{'domain':'NSPOSIXErrorDomain','code':13}])
                     self.assertEqual(slots['installer-log-capture']['errors']['rows'], [{'domain':'PKInstallErrorDomain','code':112}])
                     self.assertNotIn(PRIVATE.decode(), json.dumps(value))

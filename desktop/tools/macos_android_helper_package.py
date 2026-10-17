@@ -1539,9 +1539,10 @@ def installer_markers_data(value):
                         or any(type(row[k]) is not int or not -9999999999 <= row[k] <= 9999999999
                                for k in fields - {'role', 'phase'})):
                     return None
-            elif (type(row) is not dict or set(row) != {'exit', 'originals', 'native', 'timely', 'unknown', 'category'}
+            elif (type(row) is not dict or set(row) != {'exit', 'originals', 'native', 'timely', 'unknown', 'category', 'reasonSha256'}
                     or type(row['exit']) is not int or row['exit'] not in (1, 20)
                     or type(row['category']) is not str or row['category'] not in (*_INSTALLER_PARENT_REASONS.values(), 'unclassified')
+                    or type(row['reasonSha256']) is not str or re.fullmatch(r'[0-9a-f]{64}', row['reasonSha256']) is None
                     or any(type(row[k]) is not bool for k in ('originals', 'native', 'timely', 'unknown'))):
                 return None
     return {'phases': list(value['phases']), 'refusals': list(value['refusals']),
@@ -1579,6 +1580,10 @@ def installer_markers(stdout, stderr):
                         elif key == 'parent':
                             row = dict(zip(('exit', 'originals', 'native', 'timely', 'unknown'),
                                 [int(parts[1]), *[p == b'1' for p in parts[2:]]]))
+                            # Preserve the original native Parent's static-reason token,
+                            # not exception text. Unknown categories must remain diagnosable
+                            # against that exact producer source without exposing raw logs.
+                            row['reasonSha256'] = parts[0].decode('ascii')
                             row['category'] = next((category for reason, category in _INSTALLER_PARENT_REASONS.items()
                                 if digest(reason.encode('ascii')).encode('ascii') == parts[0]), 'unclassified')
                         else:

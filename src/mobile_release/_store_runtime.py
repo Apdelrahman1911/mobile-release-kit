@@ -49,7 +49,7 @@ class StoreRuntimeContext:
         self.check()
 
     def check(self) -> None:
-        source=getattr(self._invocation.cancellation,"_store_prepare_source",None) if type(self._invocation) is InvocationCustody else None
+        source=getattr(self._invocation.cancellation,"_local_store_source",None) if type(self._invocation) is InvocationCustody else None
         local=source is not None and source.require_operation().runtime_admitted(self)
         if (type(self._invocation) is not InvocationCustody or not (self._invocation.mode == "online" or local)
                 or type(self._home) is not FiniteScratch or self._home.layout != "online-runner"
@@ -94,7 +94,7 @@ class StoreRuntimeContext:
     def command(self, argv, *, capture: bool):
         # Existing CLI/context callers retain their original checked scope.
         # Only the exact Desktop source additionally admits its fixed six roles.
-        source = self._invocation.cancellation._store_preflight_source or self._invocation.cancellation._store_prepare_source
+        source = self._invocation.cancellation._store_preflight_source or self._invocation.cancellation._local_store_source
         if source is None:
             with self.checked():
                 yield

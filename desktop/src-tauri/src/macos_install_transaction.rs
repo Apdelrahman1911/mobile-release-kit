@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use crate::{macos_install_maintenance::{ActionData, ReleaseData, ReleaseSetData, PREDECESSOR_LIMIT},
-    macos_install_record::{DirectoryIdentity, FILE_LIMIT, PAYLOAD_LIMIT}, protocol::strict_json};
+    macos_install_record::{DirectoryIdentity, CONTROL_LIMIT, FILE_LIMIT, ORIGINAL_LIMIT, PAYLOAD_LIMIT}, protocol::strict_json};
 
 pub const STATE_LIMIT: usize = 16 * 1024;
 pub const INTENT_LIMIT: usize = 16 * 1024;
@@ -853,8 +853,8 @@ impl BudgetData {
     pub fn checked_data(generations: &[GenerationCostData], invocation_count: usize, evidence_bytes: u64,
         control_bytes: u64, original_records: u64, live_fds: u64) -> Result<Self> {
         require(!generations.is_empty() && generations.len() <= PREDECESSOR_LIMIT + 1
-            && invocation_count > 0 && invocation_count <= INVOCATION_LIMIT && control_bytes <= 16 * 1024 * 1024
-            && original_records <= 24576 && live_fds <= 96, TransactionDataError::Limit)?;
+            && invocation_count > 0 && invocation_count <= INVOCATION_LIMIT && control_bytes <= CONTROL_LIMIT as u64
+            && original_records <= ORIGINAL_LIMIT as u64 && live_fds <= 96, TransactionDataError::Limit)?;
         let (mut payload_bytes, mut payload_files) = (0u64, 0u64);
         for generation in generations {
             require(generation.files > 0 && generation.files <= FILE_LIMIT as u64 && generation.bytes <= PAYLOAD_LIMIT,
@@ -1778,12 +1778,25 @@ mod tests {
         let remaining = PAYLOAD_LIMIT-record_and_result-(nine as u64)*PRODUCER_CONTROL_LIMIT as u64;
         let mut costs = vec![GenerationCostData { files:1, bytes:0 }; nine];
         costs[0].bytes = remaining;
-        assert_eq!(BudgetData::checked_data(&costs,1,record_and_result,0,24576,96).unwrap().payload_totals_data(),
+        assert_eq!(BudgetData::checked_data(&costs,1,record_and_result,0,ORIGINAL_LIMIT as u64,96).unwrap().payload_totals_data(),
             (nine as u64, remaining));
         costs[0].bytes += 1;
-        assert!(BudgetData::checked_data(&costs,1,record_and_result,0,24576,96).is_err());
+        assert!(BudgetData::checked_data(&costs,1,record_and_result,0,ORIGINAL_LIMIT as u64,96).is_err());
+        // The actual Fresh observer charges three originals per copied leaf,
+        // plus three per directory and 259 fixed future records before its
+        // already-held originals/launcher additions. This realistic Store
+        // roster alone exceeded the obsolete 24,576 record ceiling.
+        let store = GenerationCostData { files: 8_622, bytes: 256 * 1024 * 1024 };
+        let fresh_minimum_records = store.files * 3 + 259;
+        assert_eq!(fresh_minimum_records, 26_125);
+        assert_eq!(BudgetData::checked_data(&[store],1,record_and_result,
+            4096,fresh_minimum_records,96).unwrap().payload_totals_data(),
+            (store.files,store.bytes));
+        assert!(BudgetData::checked_data(&[store],1,record_and_result,
+            CONTROL_LIMIT as u64,ORIGINAL_LIMIT as u64,96).is_ok());
         for (count, evidence, control, records, fds) in [(0,0,0,0,0),(INVOCATION_LIMIT+1,0,0,0,0),
-            (1,u64::MAX,0,0,0),(1,0,16*1024*1024+1,0,0),(1,0,0,24577,0),(1,0,0,0,97)] {
+            (1,u64::MAX,0,0,0),(1,0,CONTROL_LIMIT as u64+1,0,0),
+            (1,0,0,ORIGINAL_LIMIT as u64+1,0),(1,0,0,0,97)] {
             assert!(BudgetData::checked_data(&[one], count, evidence, control, records, fds).is_err());
         }
         assert!(BudgetData::checked_data(&[one; PREDECESSOR_LIMIT+2], 1, 0, 0, 0, 0).is_err());

@@ -48,6 +48,7 @@ CURRENT_BOOTSTRAPS = (
 )
 STORE_BOOTSTRAP = "local_store_preflight_bootstrap.py"
 STORE_PREPARE_BOOTSTRAP = "local_store_prepare_bootstrap.py"
+STORE_EXECUTE_BOOTSTRAP = "local_store_execute_bootstrap.py"
 GITHUB_CA_NAME = "github-ca.pem"
 MAX_GITHUB_CA_BYTES = 512 * 1024
 STORE_EXECUTABLES = frozenset({"bin/ruby", "bin/bundle"})
@@ -424,7 +425,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
             {"aarch64-apple-darwin", "x86_64-apple-darwin"} or not isinstance(store_component, Path)):
         raise PreparationError("Store component is an explicit current Mac input only")
     if store_component is not None:
-        bootstrap_names = (*bootstrap_names, STORE_BOOTSTRAP, STORE_PREPARE_BOOTSTRAP)
+        bootstrap_names = (*bootstrap_names, STORE_BOOTSTRAP, STORE_PREPARE_BOOTSTRAP, STORE_EXECUTE_BOOTSTRAP)
     source, runtime = _root(source), _root(runtime)
     provider = None
     provider_paths = None

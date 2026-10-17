@@ -65,8 +65,10 @@ class CandidateBundleReview:
     def __init__(self, owner, *, operation_id, enrollment, pending, candidate_sha256):
         from .local_release_history import LocalHistoryRun
         from .local_store_prepare import LocalStorePrepareRun
-        admitted=(type(owner) is LocalHistoryRun and owner.request.context["action"] in {"review-inputs","review-prepared"}
-                  or type(owner) is LocalStorePrepareRun and owner.request.context["operation"]=="local-store-prepare")
+        from .local_store_execute import LocalStoreExecuteRun
+        admitted=(type(owner) is LocalHistoryRun and owner.request.context["action"] in {"review-inputs","review-prepared","review-execution"}
+                  or type(owner) is LocalStorePrepareRun and owner.request.context["operation"]=="local-store-prepare"
+                  or type(owner) is LocalStoreExecuteRun and owner.request.context["operation"]=="local-store-execute")
         need(admitted and owner.bundle is None and not owner._close_claimed
              and owner.request.context["candidateOperationId"]==operation_id
              and _uuid(operation_id) and _sha(candidate_sha256))

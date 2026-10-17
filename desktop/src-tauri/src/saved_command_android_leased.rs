@@ -227,7 +227,7 @@ pub(super) struct AndroidObservations {
     pub(super) tail:Option<AppCloseTail>,pub(super) retained_bytes:Option<usize>,
 }
 impl AndroidObservations {
-    fn unknown()->Self{Self{entered:true,observations:false,integrity:false,tail:None,retained_bytes:None}}
+    pub(super) fn unknown()->Self{Self{entered:true,observations:false,integrity:false,tail:None,retained_bytes:None}}
 }
 #[derive(Default)]
 pub(super) struct AndroidObservationSlot {
@@ -404,17 +404,22 @@ pub(super) async fn settle_start_observations(book:&mut Resources,inner:&Arc<Inn
             if !native_consumers_returned(book,&startup,inner,owner){inner.unknown(owner);return;}
             startup.attempted
         };
-        let Some(native)=book.native.clone()else{inner.unknown(owner);return;};
+        let native=book.native.clone();let execute=book.execute_native.clone();
+        if !matches!((owner.domain,native.is_some(),execute.is_some()),(SavedCommandDomain::AndroidBuild,true,false)|(SavedCommandDomain::LocalStoreExecute,false,true)){inner.unknown(owner);return;}
+
         let original=owner.clone();let end=*owner.native_audit_cutoff.borrow();
         let (release,enter)=oneshot::channel();
         let Some(slot)=book.android_observations.as_mut()else{inner.unknown(owner);return;};
         slot.started=true;
         slot.handle=Some(tokio::task::spawn_blocking(move||{
             if enter.blocking_recv().is_err(){return AndroidObservations::unknown();}
-            let mut native=match native.lock(){
-                Ok(native)=>native,Err(error)=>{let mut native=error.into_inner();native.interrupted();native},
-            };
-            native.settle_observations(used,end,&mut|failure,at|original.observe_android_failure(failure,at))
+            if let Some(execute)=execute{
+                let mut n=match execute.lock(){Ok(n)=>n,Err(e)=>{let mut n=e.into_inner();n.interrupted();n}};
+                n.settle_observations(used,&original)
+            }else if let Some(native)=native{
+                let mut n=match native.lock(){Ok(n)=>n,Err(e)=>{let mut n=e.into_inner();n.interrupted();n}};
+                n.settle_observations(used,end,&mut|failure,at|original.observe_android_failure(failure,at))
+            }else{AndroidObservations::unknown()}
         }));
         let _=release.send(());
     }
@@ -432,7 +437,7 @@ pub(super) async fn settle_start_observations(book:&mut Resources,inner:&Arc<Inn
         // No native_worker_lost after any moved tail. A lost observation keeps
         // its original book/return and conservative charge, never probes it.
         if !safe || slot.failed{owner.resource_unknown.store(true,Ordering::SeqCst);inner.unknown(owner);}
-        else if !integrity{inner.stop(owner,Reason::ToolchainMismatch);}
+        else if !integrity{inner.stop(owner,if owner.domain==SavedCommandDomain::LocalStoreExecute{Reason::RuntimeUnavailable}else{Reason::ToolchainMismatch});}
     }
 }
 

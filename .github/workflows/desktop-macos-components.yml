@@ -133,7 +133,7 @@ jobs:
           set -euo pipefail
           export CARGO_HOME="$WORK_ROOT/cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
           export CARGO_TARGET_DIR="$WORK_ROOT/target" CARGO_INCREMENTAL=0
-          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
+          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
           # This is the existing reviewed native clock tuple on both Macs.
           # 1.98.0 is supported only on Intel, not Apple Silicon.
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
@@ -205,10 +205,11 @@ jobs:
           if [[ "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
             # Same dependency/target owner, separate pure transaction DATA target.
             # Neither this test filter nor the bin tests execute Installer main.
-            rustup run 1.98.1 cargo test --locked --no-default-features --lib \
-              macos_install_transaction::tests::restore_ -- --test-threads=1 \
-              | tee "$WORK_ROOT/installer-restore-transaction-tests.log"
-            grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/installer-restore-transaction-tests.log"
+            rustup run 1.98.1 cargo test --locked --no-default-features --lib -- \
+              macos_install_transaction::tests::restore_ \
+              macos_install_transaction::tests::retained_storage_and_original_budget_arithmetic_refuse_before_effects \
+              --test-threads=1 | tee "$WORK_ROOT/installer-restore-transaction-tests.log"
+            grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;' "$WORK_ROOT/installer-restore-transaction-tests.log"
           fi
       - name: Remove only this job's disposable compiler and dependencies
         if: always() && steps.work.outputs.root != ''
@@ -316,7 +317,7 @@ jobs:
           if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == local-keychain-contracts ]]; then
             # Contracts-only is an explicit retry scope when the unchanged app,
             # helper and wire/lease graph already passed on the same toolchain.
-            # It still compiles the actual library test graph and runs all37.
+            # It still compiles the actual library test graph and runs all48.
             if [[ "$APP_CHECKS" == local-keychain ]]; then
             # Separate Cargo invocation preserves helper-only native policy.
             # Closed DATA/DocumentState/driver contracts plus an owned temporary
@@ -380,8 +381,19 @@ jobs:
               saved_command_owner::store::tests::local_store_original_clock_and_private_backing_are_bounded \
               installed_runtime::store_runtime::tests::store_cleanup_points_ignore_work_stop_but_keep_original_expiry_and_failures \
               installed_runtime::store_runtime::tests::store_slots_do_not_lend_uninspected_or_settled_sources \
+              local_store_execute_protocol::tests::local_execute_requires_current_intent_tools_and_separate_consent \
+              local_store_execute_protocol::tests::local_execute_native_request_binds_original_mac_selection_and_profile \
+              local_store_execute_protocol::tests::local_execute_decoder_requires_original_order_and_final_checkpoint \
+              local_store_execute_protocol::tests::local_execute_success_binds_native_authorization_receipt_and_known_closes \
+              local_store_execute_protocol::tests::local_execute_failure_keeps_actual_prefix_including_entered_final_helper \
+              saved_command_owner::store_execute::tests::local_execute_uses_separate_domain_with_original_store_clock_and_no_cross_reason \
+              asset_session::store_material::tests::local_execute_comparison_cannot_replace_current_document_catalog_or_material \
+              asset_session::lookup_memory::local_execute_census_remaining_has_no_overflow_or_added_credit \
+              local_release_history_protocol::tests::local_release_history_execution_review_is_exact_receipt_not_old_finality \
+              local_release_history_protocol::tests::local_release_history_execution_review_requires_selected_success_not_latest_operation \
+              local_release_history_protocol::tests::local_release_history_execution_review_keeps_read_only_phases_and_finality \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 37 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 48 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.

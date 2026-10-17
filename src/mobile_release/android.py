@@ -623,9 +623,16 @@ def validate_aab(
 def _inspect_aab_contents(path: Path, findings: list[Finding], *, expected_application_id: str,
                           release: ReleaseVersion, expected_fingerprint: str | None, require_tools: bool,
                           check_signer: bool, cancellation: DefaultCancellation | None,
-                          tools: AndroidValidationTools | None = None) -> list[Finding]:
+                          tools: AndroidValidationTools | None = None, current_tools=None) -> list[Finding]:
+    if current_tools is not None:
+        from .android_current_tools_macos import RegisteredCurrentTools
+        if (type(current_tools) is not RegisteredCurrentTools or tools is not None
+                or cancellation is not current_tools.guard or not require_tools or not check_signer):
+            raise ValidationError("registered current-AAB input mismatch")
+        current_tools.point()
     try:
-        manifest = (_bundletool_manifest(path, cancellation=cancellation) if tools is None else
+        manifest = (current_tools.manifest(path) if current_tools is not None else
+                    _bundletool_manifest(path, cancellation=cancellation) if tools is None else
                     _bundletool_manifest(path, cancellation=cancellation, tools=tools))
     except ValidationError as error:
         fatal = fatal_lifetime_error(error, "Android manifest custody did not settle")
@@ -671,7 +678,8 @@ def _inspect_aab_contents(path: Path, findings: list[Finding], *, expected_appli
         )
     else:
         try:
-            signature_verified = (_verify_jar_signature(path, cancellation=cancellation) if tools is None else
+            signature_verified = (current_tools.signature(path) if current_tools is not None else
+                                  _verify_jar_signature(path, cancellation=cancellation) if tools is None else
                                   _verify_jar_signature(path, cancellation=cancellation, tools=tools))
         except ValidationError as error:
             fatal = fatal_lifetime_error(error, "Android signature custody did not settle")
@@ -704,7 +712,8 @@ def _inspect_aab_contents(path: Path, findings: list[Finding], *, expected_appli
         if signature_verified is not True:
             return findings
         try:
-            fingerprint = (_signer_fingerprint(path, cancellation=cancellation) if tools is None else
+            fingerprint = (current_tools.fingerprint(path) if current_tools is not None else
+                           _signer_fingerprint(path, cancellation=cancellation) if tools is None else
                            _signer_fingerprint(path, cancellation=cancellation, tools=tools))
         except ValidationError as error:
             fatal = fatal_lifetime_error(error, "Android signer custody did not settle")

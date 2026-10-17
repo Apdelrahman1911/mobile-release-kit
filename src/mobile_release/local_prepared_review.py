@@ -1,5 +1,6 @@
 """Current prepared files under the existing History lease; no Store authority."""
 from __future__ import annotations
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -51,7 +52,12 @@ def decode_quote(raw, maximum, *, checkpoint=None):
     if checkpoint is not None: checkpoint()
     return quote
 
-def _scan(owner, out):
+def _scan(owner, out, *, kind='prepared'):
+    require(kind in {'prepared', 'execution'})
+    if kind == 'execution':
+        from .local_release_history import LocalHistoryRun
+        require(type(owner) is LocalHistoryRun and owner.request.context['action'] == 'review-execution')
+    names_expected = set(FILES) if kind == 'prepared' else {'raw-store-receipt.json'}
     owner.checkpoint(); out.check()
     require(owner.prepared_scan_state in {'new', 'closed'} and owner.prepared_iterator is None)
     owner.prepared_scan_state = 'acquiring'
@@ -59,8 +65,8 @@ def _scan(owner, out):
         owner.prepared_iterator = os.scandir(out.fd); owner.prepared_scan_state = 'open'
         names = []
         for entry in owner.prepared_iterator:
-            owner.checkpoint(); out.check(); require(len(names) < len(FILES)); names.append(entry.name)
-        require(len(names) == len(FILES) and set(names) == set(FILES))
+            owner.checkpoint(); out.check(); require(len(names) < len(names_expected)); names.append(entry.name)
+        require(len(names) == len(names_expected) and set(names) == names_expected)
     finally:
         if owner.prepared_iterator is not None:
             original, owner.prepared_iterator = owner.prepared_iterator, None
@@ -102,20 +108,30 @@ def _intent(raw, *, enrollment, operation_id, rows, manifest, checkpoint):
     # with this semantic comparison of two independently parsed documents.
     return summary, hashlib.sha256(canonical_json_bytes(snapshot)).hexdigest()
 
-def _snapshot(raw, expected, *, checkpoint=None):
-    decode_quote(raw, FILES['store-precondition.json'], checkpoint=checkpoint)
+def _snapshot(raw, expected, *, checkpoint=None, retained_bytes=0):
+    require(type(retained_bytes) is int and 0 <= retained_bytes <= MAX_LOCAL_INTENT_BYTES)
+    require(decode_quote(raw, FILES['store-precondition.json'], checkpoint=checkpoint)
+            + retained_bytes <= MEMORY_LIMIT)
     value = json.loads(raw.decode('utf-8'), object_pairs_hook=_reject_duplicate_pairs,
         parse_constant=lambda _: require(False))
     validate_store_precondition(value, stage='candidate', platform='android')
     require(hashlib.sha256(canonical_json_bytes(value)).hexdigest() == expected)
 
-def review_prepared(owner, enrollment):
+@contextmanager
+def _prepared_files(owner, enrollment):
+    """Two exact History reads, with final originals checked after the consumer.
+
+    The extra receipt action retains raw intent bytes, not a parsed document.
+    This scope is not a caller-supplied file/roster or authority adapter.
+    """
     from .local_release_history import LocalHistoryRun
-    require(type(owner) is LocalHistoryRun and owner.request.context['action'] == 'review-prepared')
+    require(type(owner) is LocalHistoryRun and owner.request.context['action'] in {'review-prepared', 'review-execution'})
+    execution = owner.request.context['action'] == 'review-execution'
     operation_id = owner.request.context['candidateOperationId']
     rows = [r for r, _ in owner.journal._rows if r['operationId'] == operation_id]
-    require(owner.journal.head()['sequence'] >= 5 and [r['phase'] for r in rows] ==
-            ['inputs-pending', 'inputs-ready', 'prepare-pending', 'prepared'])
+    phases = ['inputs-pending', 'inputs-ready', 'prepare-pending', 'prepared']
+    if execution: phases += ['execute-pending', 'settled-success']
+    require(owner.journal.head()['sequence'] >= (7 if execution else 5) and [r['phase'] for r in rows] == phases)
     n = owner.request.native['rootIdentity']
     require(owner.journal._rows[0][0]['payload']['rootIdentity'] == dict(device=int(n['device']), inode=int(n['inode']),
         mode=n['mode'] & 0o7777, uid=n['uid'], gid=n['gid']))
@@ -132,14 +148,18 @@ def review_prepared(owner, enrollment):
         observed = _read_file(out.fd, 'operation-intent.json', owner.guard, FILES['operation-intent.json'], private=True)
         require(observed is not None)
         intent_binding, raw = observed; del observed
-        summary, snapshot_digest = _intent(raw, enrollment=enrollment, operation_id=operation_id, rows=rows, manifest=bundle.value, checkpoint=owner.checkpoint)
+        summary, snapshot_digest = _intent(raw, enrollment=enrollment, operation_id=operation_id, rows=rows[:4], manifest=bundle.value, checkpoint=owner.checkpoint)
+        intent_raw = raw if execution else None
         del raw  # _intent's complete parsed graph has already returned/retired.
         out.check(); owner.checkpoint()
         observed = _read_file(out.fd, 'store-precondition.json', owner.guard, FILES['store-precondition.json'], private=True)
         require(observed is not None)
         snapshot_binding, raw = observed; del observed
         require(snapshot_binding['sha256'] == rows[3]['payload']['storePreconditionSha256'])
-        _snapshot(raw, snapshot_digest, checkpoint=owner.checkpoint); del raw
+        _snapshot(raw, snapshot_digest, checkpoint=owner.checkpoint,
+                  retained_bytes=0 if intent_raw is None else len(intent_raw)); del raw
+        yield summary, intent_raw, rows
+        intent_raw = None
         # Every leaf is re-read under its original identity/hash after parsing.
         # No descriptor-number reuse is mistaken for a continuing file original.
         _scan(owner, out)
@@ -148,4 +168,9 @@ def review_prepared(owner, enrollment):
             require(observed is not None and observed[0] == binding and observed[1] == b'')
         _scan(owner, out); out.check(); owner.checkpoint()
     require(out.closed()); owner.checkpoint()
+
+def review_prepared(owner, enrollment):
+    require(owner.request.context['action'] == 'review-prepared')
+    with _prepared_files(owner, enrollment) as (summary, _, _rows):
+        pass
     return summary

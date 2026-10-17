@@ -113,8 +113,13 @@ class _PrepareJournal(LocalReleaseJournal):
 
 class LocalStorePrepareRun:
     def __init__(self,request,guard,source):
-        require(type(request) is wire.StorePrepareRequest and type(guard) is DefaultCancellation
-            and type(source) is StorePrepareInput and source.guard is guard and guard._store_prepare_source is source
+        from .local_store_execute import LocalStoreExecuteRun
+        from ._desktop_store_execute_control import StoreExecuteInput
+        from ._desktop_store_execute_protocol import StoreExecuteRequest
+        prepare=type(self) is LocalStorePrepareRun
+        require(type(self) in (LocalStorePrepareRun,LocalStoreExecuteRun)
+            and type(request) is (wire.StorePrepareRequest if prepare else StoreExecuteRequest) and type(guard) is DefaultCancellation
+            and type(source) is (StorePrepareInput if prepare else StoreExecuteInput) and source.guard is guard and guard._local_store_source is source
             and source.initial is request and source.active and source.request_returned
             and threading.current_thread() is threading.main_thread())
         self.request,self.guard,self.source=request,guard,source
@@ -230,7 +235,7 @@ class LocalStorePrepareRun:
     def lane_timing(self,files,label):
         from . import _store_lane_contract as lane
         self.checkpoint()
-        require(files is self.record._files_owner() and files.mode=='prepare' and files.phase=='SEALING'
+        require(files is self.record._files_owner() and files.mode==('prepare' if type(self) is LocalStorePrepareRun else 'execute') and files.phase=='SEALING'
             and len(self._runtime_rows)==5 and self._pending is None)
         # Same clock label already enforced by the existing native lane codec.
         # Map once from original monotonic endpoint, rounded DOWN; never renew.
@@ -418,7 +423,7 @@ class LocalStorePrepareRun:
         result=None
         if not settled:outcome,reason='unknown','cleanup-unknown'
         elif self.source.stop_reason!='none':outcome=reason=self.source.stop_reason
-        elif self.primary is not None or self.report is None:outcome,reason='refused','prepare-unavailable'
+        elif self.primary is not None or self.report is None:outcome,reason='refused',('prepare-unavailable' if type(self) is LocalStorePrepareRun else 'execute-unavailable')
         elif not self.store_completed or v.commands!=14 or self.source.reply_step!=4:outcome,reason='failed','command-incomplete'
         else:outcome,reason,result='complete','none',self.report
         return {'schemaVersion':1,'context':self.request.context,'outcome':outcome,'reason':reason,'result':result,'lifetime':lifetime}

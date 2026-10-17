@@ -471,6 +471,11 @@ impl ToolchainBinding {
     fn matches_profile(&self, profile: Profile) -> bool {
         self.valid() && self.profile == profile.toolchain_profile()
     }
+    /// Read-only comparison of an already native-bound Mac record. Not a grant.
+    pub(crate) fn matches_selection(&self,profile:Profile,selected:&MacToolchainSelection)->bool{
+        matches!(profile,Profile::MacArm64|Profile::MacX64)&&self.matches_profile(profile)
+            &&selected.valid()&&self.selection.as_ref()==Some(selected)
+    }
 }
 /// Only an actual registered native project and a native-selected tool binding
 /// enter this encoder. No savedVersion.source is used as a native path.

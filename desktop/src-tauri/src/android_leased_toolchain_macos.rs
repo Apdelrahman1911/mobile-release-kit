@@ -56,7 +56,10 @@ fn intent_from_reply(lease:&SharedUseLeaseSlots,reply:&mrk_macos_installed_nativ
 
 /// Original Start tool slot. No owner can reach the existing unleased tool
 /// reader through this API; inspection/pre-spawn/post-use remain under this SH.
+#[derive(Clone,Copy,PartialEq,Eq)]
+enum ToolUse {Build,Execute}
 pub(crate) struct LeasedAndroidToolchainSlots{
+    use_kind:ToolUse,
     identity:OriginalUseIdentity,client:QueryClient,lease:[SharedUseLeaseSlots;1],
     tools:AndroidToolchainSlots,selected:MacToolchainSelection,intent:Option<Intent>,
     entered:bool,in_call:bool,inspected:bool,observations:bool,tail_taken:bool,
@@ -64,9 +67,12 @@ pub(crate) struct LeasedAndroidToolchainSlots{
 impl LeasedAndroidToolchainSlots{
     pub(crate) fn new(selected:MacToolchainSelection,audit:watch::Receiver<Instant>)->Self{
         let identity=OriginalUseIdentity::reserved();
-        Self{identity:identity.clone(),client:QueryClient::new(audit.clone()),
+        Self{use_kind:ToolUse::Build,identity:identity.clone(),client:QueryClient::new(audit.clone()),
             lease:[SharedUseLeaseSlots::new(identity)],tools:AndroidToolchainSlots::new(selected.clone(),audit),
             selected,intent:None,entered:false,in_call:false,inspected:false,observations:false,tail_taken:false}
+    }
+    pub(crate) fn new_execute(selected:MacToolchainSelection,audit:watch::Receiver<Instant>)->Self{
+        let mut original=Self::new(selected,audit);original.use_kind=ToolUse::Execute;original
     }
     pub(crate) fn original_identity(&self)->OriginalUseIdentity{self.identity.clone()}
     pub(crate) fn query_signal(&self)->Arc<Signal>{self.client.signal()}
@@ -95,11 +101,19 @@ impl LeasedAndroidToolchainSlots{
         self.client.finish(stop)?;
         intent
     }
-    pub(crate) fn inspect_once(&mut self,t:Instant,w:Instant,h:Instant,first:Option<Instant>,
-        stop:&watch::Receiver<bool>)->Result<()>{
+    pub(crate) fn inspect_once(&mut self,t:Instant,w:Instant,h:Instant,first:Option<Instant>,stop:&watch::Receiver<bool>)->Result<()>{
+        if self.use_kind!=ToolUse::Build{return Err(self.note(Issue::Unknown));}
+        self.inspect_selected(t,w,h,first,stop)
+    }
+    pub(crate) fn inspect_execute_once(&mut self,t:Instant,w:Instant,h:Instant,first:Option<Instant>,stop:&watch::Receiver<bool>)->Result<()>{
+        if self.use_kind!=ToolUse::Execute{return Err(self.note(Issue::Unknown));}
+        self.inspect_selected(t,w,h,first,stop)
+    }
+    fn inspect_selected(&mut self,t:Instant,w:Instant,h:Instant,first:Option<Instant>,stop:&watch::Receiver<bool>)->Result<()>{
         if self.entered || self.tail_taken{return Err(self.note(Issue::Unknown));}
         self.entered=true;self.in_call=true;
-        let intent=self.client.arm(Role::Start,t,w,h,first).and_then(|clock|self.prepare_intent(clock,stop));
+        let role=match self.use_kind{ToolUse::Build=>Role::Start,ToolUse::Execute=>Role::LocalStoreExecute};
+        let intent=self.client.arm(role,t,w,h,first).and_then(|clock|self.prepare_intent(clock,stop));
         if let Err(issue)=intent.as_ref(){self.note(*issue);}
         // SAME inspector native client retirement before any caller can return,
         // even when SH/intent/native input failed. A later native worker may not

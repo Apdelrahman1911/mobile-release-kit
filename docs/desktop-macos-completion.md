@@ -1,6 +1,6 @@
 # macOS completion plan and working status
 
-Updated: 2026-10-16. **NOT READY; not delivered or approved for public release.**
+Updated: 2026-10-17. **NOT READY; not delivered or approved for public release.**
 
 ## Agreed target
 
@@ -62,9 +62,13 @@ binding is now integrated with optional signed-Mac candidate creation, durable
 local journal checkpoints, and the existing UI/native operation. Review checks
 the current retained bundle; Abandon records cancellation and preserves files.
 Candidate creation does not upload to a Store or authorize a release. Local
-Store intent/authority DATA now has separate closed Python/Ruby readers with
-shared business-rule validation; no local execution permission is created by
-parsing these records. Durable prepare, execution and recovery remain unfinished.
+Store intent/authority DATA has separate closed Python/Ruby readers; parsing
+these records grants no execution permission. Durable Android Prepare and
+explicit-consent Execute, plus read-only prepared-intent and completed-receipt
+History review, are integrated in source. Native Execute qualification and
+installed usage remain pending; direct Store recovery, promotion and Apple
+operations remain unfinished. Receipt review never establishes an old
+operation's finality or authorizes a retry.
 Candidate integration passed the actual Mac app/helper graphs and 27 focused
 native tests on each architecture in run `38969579047/1` at `18a54582`; positive
 installed Create/Review/Abandon and Keychain flows remain unverified.

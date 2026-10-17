@@ -1,3 +1,5 @@
+import { STORE_EXECUTE_EVENT, encodeLocalStoreExecuteRequest, parseLocalStoreExecuteStatus, localStoreExecuteError, type StoreExecuteCommand } from './localStoreExecuteProtocol.ts';
+import type { LocalStoreExecuteStatus } from './localStoreExecuteTypes.ts';
 import { STORE_PREPARE_EVENT, encodeLocalStorePrepareRequest, parseLocalStorePrepareStatus, localStorePrepareError, type StorePrepareCommand } from './localStorePrepareProtocol.ts';
 import type { LocalStorePrepareStatus } from './localStorePrepareTypes.ts';
 import { LOCAL_HISTORY_EVENT, encodeLocalHistoryRequest, parseLocalHistoryStatus, localHistoryError } from './localReleaseHistoryProtocol.ts';
@@ -78,7 +80,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -235,6 +237,12 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if(!body)throw localStorePrepareError();const status=parseLocalStorePrepareStatus(await invoke<unknown>(command,body));
       if(!status)throw localStorePrepareError();return status;
     }catch(error){throw localStorePrepareError(error);}
+  };
+  const storeExecuteCall = async (command:StoreExecuteCommand,value:unknown):Promise<LocalStoreExecuteStatus>=>{
+    try{if(mode!=='native')throw localStoreExecuteError();const body=encodeLocalStoreExecuteRequest(command,value);
+      if(!body)throw localStoreExecuteError();const status=parseLocalStoreExecuteStatus(await invoke<unknown>(command,body));
+      if(!status)throw localStoreExecuteError();return status;
+    }catch(error){throw localStoreExecuteError(error);}
   };
   const storeCall = async (command:StoreCommand,value:unknown):Promise<LocalStoreStatus>=>{
     try{if(mode!=='native')throw localStoreError();const body=encodeLocalStoreRequest(command,value);
@@ -558,6 +566,14 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     subscribeLocalStorePrepare:async onStatus=>{
       if(mode!=='native'||!listen)throw localStorePrepareError();
       return await listen(STORE_PREPARE_EVENT,value=>onStatus(parseLocalStorePrepareStatus(value)));
+    },
+    prepareLocalStoreExecute:request=>storeExecuteCall('prepare_local_store_execute',request),
+    startLocalStoreExecute:request=>storeExecuteCall('start_local_store_execute',request),
+    localStoreExecuteStatus:()=>storeExecuteCall('local_store_execute_status',{}),
+    cancelLocalStoreExecute:(operationId,ownerGeneration)=>storeExecuteCall('cancel_local_store_execute',{operationId,ownerGeneration}),
+    subscribeLocalStoreExecute:async onStatus=>{
+      if(mode!=='native'||!listen)throw localStoreExecuteError();
+      return await listen(STORE_EXECUTE_EVENT,value=>onStatus(parseLocalStoreExecuteStatus(value)));
     },
     prepareLocalStorePreflight:request=>storeCall('prepare_local_store_preflight',request),
     startLocalStorePreflight:request=>storeCall('start_local_store_preflight',request),

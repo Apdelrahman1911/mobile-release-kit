@@ -637,6 +637,7 @@ class CommandCallEvidence:
         self._reservation: tuple[object, str, str] | None = None
         self._lane_reservation: tuple[object, str, str, bytes] | None = None
         self._expected: tuple[Any, ...] | None = None
+        self._current_android: object | None = None
         self._lane_timing: store_wire.Timing | None = None
         self._timing_consumed = False
         self._desktop_readback_capped = False
@@ -653,10 +654,29 @@ class CommandCallEvidence:
         _require(guard is self._guard and guard.pid == self._pid
                  and guard.owner_thread is self._thread)
 
+    def _reserve_current_android(self, owner: object, role: str) -> None:
+        """Exactly three registered local validators; no generic argv/timer grant."""
+        from .android_current_tools_macos import RegisteredCurrentTools, ROLES
+        self._owner(self._guard)
+        _require(type(owner) is RegisteredCurrentTools and owner.guard is self._guard
+                 and type(role) is str and role in ROLES and self._current_android is None
+                 and self._reservation is None and self._lane_reservation is None
+                 and self._expected is None and not self._used)
+        argv, cwd, environment, timing, nominal = owner._command_seal(self, role)
+        _require(type(timing) is store_wire.Timing and timing.hard - timing.run == CLEANUP_NS
+                 and timing.hard <= owner.run_end and time.monotonic_ns() < timing.run)
+        request = {"argv": list(argv), "cwd": str(cwd), "capture": True, "limit": 2 * 1024**2}
+        _valid_request(request)
+        _require(len(_json(request)) <= REQUEST_LIMIT)
+        self._current_android, self._lane_timing = owner, timing
+        self._expected = (argv, os.fsencode(cwd),
+            tuple(sorted((os.fsencode(k), os.fsencode(v)) for k, v in environment.items())),
+            True, 2 * 1024**2, nominal)
+
     def _reserve_readback(self, owner: object, role: str, path: Path,
                           guard: DefaultCancellation) -> None:
         self._owner(guard)
-        _require(self._reservation is None and self._lane_reservation is None
+        _require(self._reservation is None and self._lane_reservation is None and self._current_android is None
                  and self._expected is None and not self._used
                  and role in ("android", "ios") and path.is_absolute()
                  and path.name == role + ".json")
@@ -670,7 +690,7 @@ class CommandCallEvidence:
         _require(type(owner) is StoreLaneCallEvidence and owner._command is self
                  and owner._guard is guard and owner._lane == lane
                  and owner._output == str(path) and owner._nonce == nonce
-                 and self._reservation is None and self._lane_reservation is None
+                 and self._reservation is None and self._lane_reservation is None and self._current_android is None
                  and self._expected is None and not self._used
                  and type(lane) is str and lane in _STORE_LANES and _nonce(nonce)
                  and path.is_absolute() and ".." not in path.parts and "\0" not in str(path))
@@ -740,10 +760,11 @@ class CommandCallEvidence:
                           False, PRIVATE_OUTPUT_LIMIT, 15 * 60)
         return argv
 
-    def _cap_store_prepare(self, source, *, timeout: int) -> None:
+    def _cap_local_store(self, source, *, timeout: int) -> None:
         from ._desktop_store_prepare_control import StorePrepareInput
+        from ._desktop_store_execute_control import StoreExecuteInput
         self._owner(source.guard)
-        _require(type(source) is StorePrepareInput and source.guard._saved_command_input() is source
+        _require(type(source) in (StorePrepareInput,StoreExecuteInput) and source.guard._saved_command_input() is source
                  and self._engine is None and not self._desktop_readback_capped
                  and not self._used and self._expected is not None and self._expected[5]==3600 and self._lane_reservation is not None
                  and self._reservation is None and self._lane_timing is not None
@@ -781,7 +802,7 @@ class CommandCallEvidence:
                  and engine.scope is None and engine.binding is None and not engine.owns
                  and engine.slot._engine is engine and engine.slot._scope is None
                  and engine.slot.read() is None)
-        if self._lane_reservation is not None:
+        if self._lane_reservation is not None or self._current_android is not None:
             _require(engine.evidence is None and self._timing_consumed
                      and engine._store_timing is self._lane_timing
                      and engine.ctx.run == self._lane_timing.run
@@ -793,6 +814,13 @@ class CommandCallEvidence:
         self._owner(guard)
         _require(self._used and self._expected is not None and timeout == self._expected[5]
                  and not owns and scope is None and binding is None and self._engine is None)
+        if self._current_android is not None:
+            from .android_current_tools_macos import RegisteredCurrentTools
+            _require(type(self._current_android) is RegisteredCurrentTools and not self._timing_consumed
+                     and self._reservation is None and self._lane_reservation is None)
+            self._timing_consumed = True
+            _require(self._current_android._command_timing(self) is self._lane_timing)
+            return self._lane_timing
         if self._lane_reservation is None:
             _require(self._lane_timing is None)
             return None  # Ordinary online-readback timing remains unchanged.
@@ -813,7 +841,7 @@ class CommandCallEvidence:
         actual = (frozen.args, frozen.cwd, tuple(sorted(frozen.environment)),
                   frozen.manifest.capture, frozen.manifest.limit, self._expected[5])
         _require(actual == self._expected)
-        if self._lane_reservation is not None:
+        if self._lane_reservation is not None or self._current_android is not None:
             _require(engine._store_timing is self._lane_timing
                      and engine.ctx.run == self._lane_timing.run
                      and engine.ctx.hard == self._lane_timing.hard)

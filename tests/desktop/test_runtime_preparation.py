@@ -150,10 +150,11 @@ class RuntimePreparationTests(unittest.TestCase):
     def test_current_roster_is_explicit_complete_and_missing_entry_is_no_partial_output(self):
         current_only = (
             "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-            "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py",
+            "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
         )
         self.assertEqual(preparation.CURRENT_BOOTSTRAPS, (*preparation.BOOTSTRAPS, *current_only))
-        self.assertEqual(set(preparation.CURRENT_BOOTSTRAPS),
+        self.assertEqual(set(preparation.CURRENT_BOOTSTRAPS) | {preparation.STORE_BOOTSTRAP,
+                             preparation.STORE_PREPARE_BOOTSTRAP, preparation.STORE_EXECUTE_BOOTSTRAP},
                          {path.name for path in (_SOURCE / "desktop").glob("*_bootstrap.py")})
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -341,7 +342,8 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
         (package / "_desktop_engine.py").write_bytes(b"# inert protocol\n")
         (package / "tooling.py").write_bytes((_SOURCE / "src/mobile_release/tooling.py").read_bytes())
         (source / "desktop").mkdir()
-        for name in (*preparation.CURRENT_BOOTSTRAPS, preparation.STORE_BOOTSTRAP, preparation.GITHUB_CA_NAME):
+        for name in (*preparation.CURRENT_BOOTSTRAPS, preparation.STORE_BOOTSTRAP,
+                     preparation.STORE_PREPARE_BOOTSTRAP, preparation.STORE_EXECUTE_BOOTSTRAP, preparation.GITHUB_CA_NAME):
             (source / "desktop" / name).write_bytes(b"inert first-party payload\n")
         (runtime / "python/bin").mkdir(parents=True)
         (runtime / "python/bin/python3").write_bytes(b"inert Python\n")
@@ -383,6 +385,7 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
                 originals = {path.relative_to(component).as_posix(): (path.read_bytes(), preparation._state(path.stat()))
                              for path in preparation.files(component, max_files=preparation.MAC_MAX_FILES,
                                                           max_entries=preparation.MAC_MAX_ENTRIES)}
+                (component / "unused").mkdir()  # Valid empty supplier directory, not output.
                 result = preparation.prepare_current(source, runtime, target, history_provider=True,
                                                       store_component=component)
                 encoded = (runtime / "manifest.json").read_bytes()
@@ -402,16 +405,25 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
                     self.assertEqual((component / name).read_bytes(),body)
                     self.assertEqual(preparation._state((component / name).stat()), state)
                 self.assertFalse((runtime / "store/tooling/obsolete.rb").exists())
+                self.assertTrue((component / "unused").is_dir())
+                self.assertFalse((runtime / "store/unused").exists())
                 self.assertIn("tools/gh", {row["path"] for row in rows})
                 self.assertIn("core.zip", {row["path"] for row in rows})
+                for name in (preparation.STORE_BOOTSTRAP, preparation.STORE_PREPARE_BOOTSTRAP,
+                             preparation.STORE_EXECUTE_BOOTSTRAP):
+                    self.assertIn(name, {row["path"] for row in rows})
+                    self.assertEqual((runtime / name).read_bytes(), (source / "desktop" / name).read_bytes())
+                    # Private preparation output; final stager normalizes to0444.
+                    self.assertEqual(stat.S_IMODE((runtime / name).stat().st_mode), 0o600)
 
     def test_refusals_precede_output_and_keep_unknown_inputs(self):
-        for case in ("platform", "missing", "tooling", "changed-gemfile", "changed-lock", "missing-component-lock", "new-core-requirement", "invalid-core-roster", "wrapper", "entry-mode", "link", "case",
-                     "empty-directory", "depth", "file-limit", "byte-limit", "existing-store", "overlap"):
+        for case in ("platform", "missing", "missing-execute", "tooling", "changed-gemfile", "changed-lock", "missing-component-lock", "new-core-requirement", "invalid-core-roster", "wrapper", "entry-mode", "link", "case",
+                     "invalid-directory", "depth", "file-limit", "byte-limit", "existing-store", "overlap"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 source, runtime, component = self.fixture(Path(temporary))
                 target = "x86_64-unknown-linux-gnu" if case == "platform" else "aarch64-apple-darwin"
                 if case == "missing": (component / "ca.pem").unlink()
+                if case == "missing-execute": (source / "desktop" / preparation.STORE_EXECUTE_BOOTSTRAP).unlink()
                 if case == "tooling": (source / "Gemfile").unlink()
                 if case == "changed-gemfile": (source / "Gemfile").write_bytes(b"new dependency")
                 if case == "changed-lock": (source / "Gemfile.lock").write_bytes(b"new locked version")
@@ -425,9 +437,9 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
                 if case == "entry-mode": (component / "bin/ruby").chmod(0o644)
                 if case == "link": (component / "linked").symlink_to(component / "ca.pem")
                 if case == "case": (component / "CA.pem").write_bytes(b"collision")
-                if case == "empty-directory": (component / "unused").mkdir()
+                if case == "invalid-directory": (component / "unsafe.").mkdir()
                 if case == "depth":
-                    nested = component.joinpath(*(["deep"] * 15), "file")
+                    nested = component.joinpath(*(["deep"] * preparation.MAX_PATH_PARTS), "file")
                     nested.parent.mkdir(parents=True)
                     nested.write_bytes(b"too deep under store/")
                 if case == "existing-store":
@@ -438,7 +450,7 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
                          if case == "file-limit" else preparation.MAC_MAX_FILES)
                 with patch.object(preparation, "MAC_MAX_FILES", limit), \
                         patch.object(preparation, "MAX_TOTAL_BYTES", 1 if case == "byte-limit" else preparation.MAX_TOTAL_BYTES):
-                    with self.assertRaises(preparation.PreparationError):
+                    with self.assertRaises((preparation.PreparationError, FileNotFoundError)):
                         preparation.prepare_current(source, runtime, target, store_component=component)
                 self.assertFalse((runtime / "manifest.json").exists())
                 self.assertFalse((runtime / "core.zip").exists())

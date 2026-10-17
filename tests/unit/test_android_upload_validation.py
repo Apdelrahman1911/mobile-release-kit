@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import copy
 import json
 import os
 import stat
@@ -13,7 +14,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mobile_release.android import _bundletool_manifest
-from mobile_release.android_upload_validation import main, validate_current_upload
+from mobile_release import android_upload_validation as upload
+from mobile_release.android_upload_validation import main, validate_current_upload, validate_current_local_upload
+from mobile_release.local_release_intent import MAX_LOCAL_INTENT_BYTES, decode_local_operation_intent
 from mobile_release.build_inputs import finite_scratch
 from mobile_release.config import load_config
 from mobile_release.credentials import artifact_validation_environment
@@ -106,6 +109,175 @@ class AndroidCurrentUploadTests(unittest.TestCase):
             "intent_path": self.intent_path, "aab_path": self.aab,
             "intent_sha256": self.intent["integrity"]["sha256"], **overrides,
         })
+
+    def local_fixture(self):
+        value = json.loads((Path(__file__).parents[1] / "fixtures/local-intent-candidate-valid.json").read_bytes())
+        del value["integrity"]
+        value["configuration"]["sha256"] = sha256_file(self.config.path)
+        local_aab = self.root / "app-release.aab"
+        self.aab.rename(local_aab)
+        self.aab = local_aab
+        value["artifacts"][0].update(size=self.aab.stat().st_size, sha256=sha256_file(self.aab))
+        self.intent = seal(value)
+        self.intent_path.write_text(json.dumps(self.intent))
+        decode_local_operation_intent(self.intent_path.read_bytes())
+        return dict(app_root=self.root, config_path=self.config.path,
+                    intent_path=self.intent_path, aab_path=self.aab,
+                    intent_sha256=self.intent["integrity"]["sha256"])
+
+    def test_local_fixed_decoder_uses_same_current_native_policy(self):
+        arguments = self.local_fixture()
+        self.validate = lambda **kw: validate_current_local_upload(**(arguments | kw))
+        self.test_exact_artifact_requires_all_current_native_gates()
+        self.test_current_warning_expiry_wrong_signer_and_missing_tools_never_allow_new_upload()
+        self.test_fail_skip_or_incomplete_native_result_cannot_be_reused_as_a_pass()
+
+    def test_local_current_gate_rejects_post_native_artifact_substitution(self):
+        arguments = self.local_fixture()
+        self.validate = lambda **kw: validate_current_local_upload(**(arguments | kw))
+        self.test_byte_or_path_substitution_during_native_validation_is_rejected()
+
+    def test_local_cross_origin_hybrid_digest_and_current_binding_fail_before_native(self):
+        ci = copy.deepcopy(self.intent)
+        arguments = self.local_fixture()
+        local = copy.deepcopy(self.intent)
+        with self.assertRaises(MobileReleaseError):
+            validate_current_upload(**arguments)
+        for value in (ci, local | {"authorizedBy": ci["authorizedBy"]}, local | {"origin": "github-actions"}):
+            payload = {key: item for key, item in value.items() if key != "integrity"}
+            self.intent_path.write_text(json.dumps(seal(payload)))
+            with self.subTest(kind=value.get("origin")), self.assertRaises(MobileReleaseError):
+                validate_current_local_upload(**arguments)
+        self.intent_path.write_text(json.dumps(local))
+        with self.assertRaisesRegex(ValidationError, "authenticated intent"):
+            validate_current_local_upload(**(arguments | {"intent_sha256": "0" * 64}))
+        for key, replacement in (("application", {"id": "com.example.other"}),
+                                 ("signing", [{"platform": "android", "kind": "android-upload", "certificateSha256": "b" * 64}])):
+            payload = {k: v for k, v in local.items() if k != "integrity"} | {key: replacement}
+            changed = seal(payload)
+            self.intent_path.write_text(json.dumps(changed))
+            with self.subTest(field=key), self.assertRaises(MobileReleaseError):
+                validate_current_local_upload(**(arguments | {"intent_sha256": changed["integrity"]["sha256"]}))
+        self.assertEqual([], self.native_calls)
+        self.manifest.assert_not_called()
+
+    def test_local_reader_cap_actual_originals_and_positive_close(self):
+        self.local_fixture()
+        original = self.intent_path.read_bytes()
+        real_open = open
+        reads = []
+
+        class Observed:
+            def __init__(inner, source, fault=None):
+                inner.source, inner.fault = source, fault
+            def __enter__(inner):
+                inner.source.__enter__()
+                return inner
+            def fileno(inner):
+                return inner.source.fileno()
+            def read(inner, maximum):
+                reads.append(maximum)
+                raw = inner.source.read(maximum)
+                if inner.fault == "named":
+                    other = self.intent_path.with_suffix(".replacement")
+                    other.write_bytes(raw)
+                    other.replace(self.intent_path)
+                elif inner.fault == "held":
+                    with real_open(self.intent_path, "r+b") as changed:
+                        changed.write(b"!")
+                return raw
+            def __exit__(inner, *exc):
+                result = inner.source.__exit__(*exc)
+                if inner.fault == "close":
+                    raise OSError("inert unknown close outcome")
+                return result
+
+        for fault in (None, "acquire", "named", "held", "close"):
+            self.intent_path.write_bytes(original + b" " * (MAX_LOCAL_INTENT_BYTES - len(original)))
+            def observed(*args, **kw):
+                if fault == "acquire":
+                    other = self.intent_path.with_suffix(".replacement")
+                    other.write_bytes(self.intent_path.read_bytes())
+                    other.replace(self.intent_path)
+                return Observed(real_open(*args, **kw), fault)
+            with self.subTest(fault=fault), patch.object(upload, "open", observed, create=True):
+                if fault is None:
+                    self.assertEqual(self.intent, upload._local_intent(self.intent_path))
+                else:
+                    with self.assertRaises((ValidationError, OSError)):
+                        upload._local_intent(self.intent_path)
+        self.assertEqual([MAX_LOCAL_INTENT_BYTES + 1] * 4, reads)
+        for raw in (b"", original + b" " * (MAX_LOCAL_INTENT_BYTES + 1 - len(original))):
+            self.intent_path.write_bytes(raw)
+            with patch.object(upload, "open", side_effect=AssertionError("must refuse before open"), create=True):
+                with self.assertRaises(ValidationError):
+                    upload._local_intent(self.intent_path)
+        self.intent_path.unlink()
+        target = self.root / "original-intent.json"
+        target.write_bytes(original)
+        self.intent_path.symlink_to(target)
+        with self.assertRaises(ValidationError):
+            upload._local_intent(self.intent_path)
+        self.assertEqual([], self.native_calls)
+
+    def test_local_cli_fixed_discriminant_and_mutual_exclusion(self):
+        arguments = self.local_fixture()
+        common = ["--app-root", str(self.root), "--config-path", str(self.config.path),
+                  "--aab", str(self.aab), "--intent-sha256", arguments["intent_sha256"]]
+        # Ambient local/CI identity cannot change the explicitly selected reader.
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "MOBILE_RELEASE_ORIGIN": "local-desktop"}):
+            for extra in ([], ["--operation-intent", str(self.intent_path), "--local-operation-intent", str(self.intent_path)]):
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as failure:
+                    main(common + extra)
+                self.assertEqual(2, failure.exception.code)
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(1, main(common + ["--operation-intent", str(self.intent_path)]))
+            self.assertEqual([], self.native_calls)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(0, main(common + ["--local-operation-intent", str(self.intent_path)]))
+            self.assertEqual(arguments["intent_sha256"], json.loads(output.getvalue())["operationIntentSha256"])
+
+    def test_registered_local_cli_uses_owned_roles_and_common_final_gates(self):
+        # Real current-input/ZIP policy and registered original reader composed;
+        # only Mac protection/host and actual command boundary are inert.
+        from . import test_android_current_tools_macos as tooling_fixture
+        from mobile_release import android_current_tools_macos as tools
+        helper = tooling_fixture.RegisteredCurrentMacTests()
+        arguments = self.local_fixture()
+        original = self.aab.read_bytes()
+        common = ["--app-root", str(self.root), "--config-path", str(self.config.path),
+                  "--aab", str(self.aab), "--intent-sha256", arguments["intent_sha256"]]
+        for fault in (None, "signer", "aab-post"):
+            self.aab.write_bytes(original)
+            with self.subTest(fault=fault), ExitStack() as stack:
+                request = helper.fixture(stack); records = []
+                actual = helper.capture(records)
+                def call(argv, **kwargs):
+                    result = actual(argv, **kwargs)
+                    if records[-1][0] == 'keytool':
+                        if fault == 'signer': result.stdout = result.stdout.replace('AA', 'BB')
+                        if fault == 'aab-post': self.aab.write_bytes(original + b'changed')
+                    return result
+                stack.enter_context(patch.object(tools, 'run_owned', call))
+                stack.enter_context(patch.dict(os.environ, {"GOOGLE_APPLICATION_CREDENTIALS":"secret-sentinel"}))
+                raw = json.dumps(request)
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as rejected:
+                    main(common + ['--operation-intent', str(self.intent_path), '--local-registered-tools-json', raw])
+                self.assertEqual(2, rejected.exception.code)
+                self.assertEqual([], records)
+                out, errors = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(errors):
+                    status = main(common + ['--local-operation-intent', str(self.intent_path), '--local-registered-tools-json', raw])
+                self.assertEqual(0 if fault is None else 1, status)
+                self.assertEqual(['bundletool','jarsigner','keytool'], [r[0] for r in records])
+                self.assertTrue(records[-1][1].closed)
+                if fault is None:
+                    self.assertEqual(arguments['intent_sha256'],json.loads(out.getvalue())['operationIntentSha256'])
+                else: self.assertEqual('',out.getvalue())
+                self.assertNotIn('secret-sentinel',out.getvalue()+errors.getvalue())
+        self.manifest.assert_not_called()
+        self.assertEqual([],self.native_calls)
 
     def test_exact_artifact_requires_all_current_native_gates(self) -> None:
         result = self.validate()

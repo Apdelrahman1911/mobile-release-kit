@@ -71,6 +71,7 @@ impl StoreRuntimeSlots {
     }
     pub(crate) fn inspect_preflight_once(&mut self,profile:runtime::LocalStorePreflightInstalledProfile)->std::result::Result<VerifiedRuntime,BridgeError>{self.inspect_selected(profile.selection()?)}
     pub(crate) fn inspect_prepare_once(&mut self,profile:runtime::LocalStorePrepareInstalledProfile)->std::result::Result<VerifiedRuntime,BridgeError>{self.inspect_selected(profile.selection()?)}
+    pub(crate) fn inspect_execute_once(&mut self,profile:runtime::LocalStoreExecuteInstalledProfile)->std::result::Result<VerifiedRuntime,BridgeError>{self.inspect_selected(profile.selection()?)}
     fn inspect_selected(&mut self,selected:VerifiedRuntime)->std::result::Result<VerifiedRuntime,BridgeError>{
         if self.inner.settlement || self.inner.selection.is_some() || self.inner.acquisition.is_some()
             || !self.inner.inspection.as_ref().is_some_and(Book::inspection_ready) { return Err(BridgeError::cleanup_unknown()); }

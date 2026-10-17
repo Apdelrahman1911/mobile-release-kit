@@ -288,3 +288,167 @@ class AndroidUploadOriginTest < Minitest::Test
     assert_equal "/inert/core.zip", calls[0].fetch(:module_root)
   end
 end
+
+class AndroidLocalUploadInputTest < Minitest::Test
+  # Real tiny paths, source admission and result policy; no validator process.
+  Gate = MobileReleaseKit::AndroidUploadValidation
+
+  def with_inputs
+    Dir.mktmpdir("mrk-local-current-") do |root|
+      root = File.realpath(root)
+      FileUtils.mkdir_p(File.join(root, "release"))
+      %w[release/mobile-release.json intent.json app-release.aab].each do |name|
+        File.binwrite(File.join(root, name), "inert current input")
+      end
+      yield({python: RbConfig.ruby, module_root: File.expand_path("../../src", __dir__), app_root: root,
+        config_path: "release/mobile-release.json", intent_path: "intent.json", aab_path: "app-release.aab",
+        intent_sha256: "a" * 64, environment: {"PATH" => "/usr/bin:/bin", "LANG" => "unsafe-locale",
+          "GOOGLE_APPLICATION_CREDENTIALS" => "secret-sentinel", "PYTHONPATH" => "untrusted",
+          "MOBILE_RELEASE_ORIGIN" => "local-desktop", "GITHUB_TOKEN" => "secret-sentinel"},
+        tooling_directory: File.expand_path("../../fastlane", __dir__)})
+    end
+  end
+
+  def test_local_and_ci_fixed_arguments_share_admission_capture_and_result_policy
+    with_inputs do |inputs|
+      artifact = File.join(inputs.fetch(:app_root), inputs.fetch(:aab_path))
+      result = {"documentType" => "android-current-upload-validation", "schemaVersion" => 1,
+        "operationIntentSha256" => inputs.fetch(:intent_sha256), "aabSize" => File.size(artifact),
+        "aabSha256" => Digest::SHA256.file(artifact).hexdigest}
+      original_reserve = MobileReleaseKit::StoreLaneLifetime.method(:reserve_current_validation!)
+      reservations = []
+      reserve = ->(**request) { reservations << request; original_reserve.call(**request) }
+      [:current!, :current_local!].each do |entry|
+        flag = entry == :current! ? "--operation-intent" : "--local-operation-intent"
+        captures = []
+        capture = lambda do |environment, argv, tooling, **limits|
+          captures << [environment, argv, tooling, limits]
+          assert_equal({"PATH" => "/usr/bin:/bin", "LANG" => "C", "LC_ALL" => "C"}, environment)
+          assert_equal [RbConfig.ruby, "-I", "-S", "-c", Gate::BOOTSTRAP, inputs.fetch(:module_root),
+            "--app-root", inputs.fetch(:app_root), "--config-path", File.join(inputs.fetch(:app_root), "release/mobile-release.json"),
+            flag, File.join(inputs.fetch(:app_root), "intent.json"), "--aab", artifact,
+            "--intent-sha256", inputs.fetch(:intent_sha256)], argv
+          assert_equal inputs.fetch(:tooling_directory), tooling
+          assert_equal 3_600, limits.fetch(:max_seconds)
+          assert_equal 65_536, limits.fetch(:max_output_bytes)
+          assert_nil limits.fetch(:store_binding)
+          JSON.generate(result)
+        end
+        MobileReleaseKit::StoreLaneLifetime.stub(:reserve_current_validation!, reserve) do
+          MobileReleaseKit::NativeUploadValidation.stub(:capture, capture) do
+            assert_equal result, Gate.public_send(entry, **inputs)
+          end
+        end
+        assert_equal 1, captures.length
+        reservation = reservations.last
+        assert_equal "current-android", reservation.fetch(:role)
+        assert_same Gate, reservation.fetch(:adapter)
+        assert_equal captures[0][0], reservation.fetch(:environment)
+        assert_equal captures[0][1], reservation.fetch(:argv)
+        assert_equal artifact, reservation.fetch(:artifact)
+      end
+      assert_equal 2, reservations.length
+      refute Gate.respond_to?(:current_input!)
+      # Even a syntactically successful child cannot hand off substituted bytes.
+      MobileReleaseKit::NativeUploadValidation.stub(:capture, ->(*) {
+        File.binwrite(artifact, "changed bytes")
+        JSON.generate(result)
+      }) do
+        assert_raises(MobileReleaseKit::ContractError) { Gate.current_local!(**inputs) }
+      end
+    end
+  end
+
+  def test_local_current_binding_failure_is_not_retired_as_success
+    with_inputs do |inputs|
+      calls = []
+      binding = Object.new
+      binding.define_singleton_method(:fail_unless_retired!) { |error| calls << [:failed, error] }
+      binding.define_singleton_method(:finish_call!) { calls << [:finish] }
+      binding.define_singleton_method(:accept_result!) { |**_| raise "must not accept a failed capture" }
+      failure = MobileReleaseKit::ContractError.new("inert joined refusal")
+      MobileReleaseKit::StoreLaneLifetime.stub(:reserve_current_validation!, binding) do
+        MobileReleaseKit::NativeUploadValidation.stub(:capture, ->(*args, **kw) {
+          assert_same binding, kw.fetch(:store_binding)
+          raise failure
+        }) do
+          assert_same failure, assert_raises(MobileReleaseKit::ContractError) { Gate.current_local!(**inputs) }
+        end
+      end
+      assert_equal [[:failed, failure], [:finish]], calls
+    end
+  end
+
+  def selected_invocation(digest, local: true)
+    lifetime = MobileReleaseKit::StoreLaneLifetime
+    invocation = lifetime::Invocation.new(lane: "android_internal_upload", nonce: "n"*16,
+      output: "/inert/result.json", mode: "execute",
+      run_deadline_ns: MobileReleaseKit::NativeUploadProcess.monotonic_ns + 90_000_000_000)
+    # Runtime's real original-resource admission has separate composed tests.
+    # This boundary tests the exact existing Invocation, not a minted grant.
+    invocation.instance_variable_set(:@local_execution, {digest: digest}.freeze) if local
+    raw = MobileReleaseKit.canonical_json({"schemaVersion"=>1,"toolchain"=>{"inert"=>true},
+      "runDeadlineNs"=>(invocation.run_deadline_ns-5_000_000_000).to_s,
+      "hardDeadlineNs"=>invocation.run_deadline_ns.to_s}).freeze
+    invocation.define_singleton_method(:local_current_validation_request) do |adapter:|
+      raise lifetime::LifetimeError unless adapter.equal?(MobileReleaseKit::AndroidUploadValidation) && local
+      raw
+    end
+    [invocation,raw]
+  end
+
+  def test_registered_request_is_forwarded_from_same_invocation_without_credentials
+    with_inputs do |inputs|
+      invocation,raw = selected_invocation(inputs.fetch(:intent_sha256))
+      failure = MobileReleaseKit::ContractError.new("inert capture boundary")
+      seen=[]
+      MobileReleaseKit::StoreLaneLifetime.stub(:current_invocation,invocation) do
+        MobileReleaseKit::NativeUploadValidation.stub(:capture, ->(env,argv,tooling,**kw) {
+          seen << kw.fetch(:store_binding)
+          assert_equal ["--local-registered-tools-json",raw], argv[-2,2]
+          assert_equal 1,argv.count("--local-operation-intent")
+          refute_includes argv,"--operation-intent"
+          refute_includes env.values,"secret-sentinel"
+          binding=seen.last
+          assert_same invocation,binding.instance_variable_get(:@invocation)
+          assert_equal [invocation.run_deadline_ns-5_000_000_000,invocation.run_deadline_ns],binding.instance_variable_get(:@deadlines)
+          raise failure
+        }) do
+          assert_same failure,assert_raises(MobileReleaseKit::ContractError){Gate.current_local!(**inputs)}
+        end
+      end
+      assert_equal 1,seen.length
+      assert invocation.unknown?
+      refute seen.first.retired?
+    end
+  end
+
+  def test_registered_nomination_digest_and_origin_are_one_use_exactly_bound
+    digest="a"*64
+    variations=[:good,:json,:digest,:argv_digest,:ci_flag,:missing_flag,:duplicate,:no_local]
+    variations.each do |variation|
+      invocation,raw=selected_invocation(digest,local:variation != :no_local)
+      argv=["/inert/python","--local-operation-intent","/inert/intent.json",
+        "--intent-sha256",digest,"--local-registered-tools-json",raw]
+      request={role:"current-android",adapter:Gate,environment:{"LANG"=>"C"},argv:argv,
+        tooling_directory:"/inert/tooling",intent_sha256:digest,artifact:"/inert/app-release.aab"}
+      case variation
+      when :json then argv[-1]=raw+" "
+      when :digest then request[:intent_sha256]="b"*64
+      when :argv_digest then argv[4]="b"*64
+      when :ci_flag then argv[1]="--operation-intent"
+      when :missing_flag then argv.slice!(-2,2)
+      when :duplicate then argv.unshift("--local-registered-tools-json")
+      end
+      if variation==:good
+        binding=invocation.reserve_current_validation!(**request)
+        refute binding.retired?
+        assert_raises(MobileReleaseKit::StoreLaneLifetime::LifetimeError){invocation.reserve_current_validation!(**request)}
+      else
+        assert_raises(MobileReleaseKit::StoreLaneLifetime::LifetimeError){invocation.reserve_current_validation!(**request)}
+        assert_nil invocation.instance_variable_get(:@nested)
+      end
+      assert invocation.unknown?
+    end
+  end
+end

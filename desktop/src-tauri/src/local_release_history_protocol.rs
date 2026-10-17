@@ -30,9 +30,9 @@ fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_as
 pub(crate) enum ExecutionMode { Local }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="kebab-case")]
-pub(crate) enum Action { Enroll, Verify, ReviewInputs, AbandonInputs, ReviewPrepared }
+pub(crate) enum Action { Enroll, Verify, ReviewInputs, AbandonInputs, ReviewPrepared, ReviewExecution }
 impl Action {
-    pub(crate) fn candidate(self)->bool{matches!(self,Self::ReviewInputs|Self::AbandonInputs|Self::ReviewPrepared)}
+    pub(crate) fn candidate(self)->bool{matches!(self,Self::ReviewInputs|Self::AbandonInputs|Self::ReviewPrepared|Self::ReviewExecution)}
     pub(crate) fn consent(self)->&'static str{if self.candidate(){CANDIDATE_CONSENT}else{CONSENT}}
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -161,12 +161,41 @@ pub(crate) struct ResultData {schema_version:u32,scope:String,enrolled:bool,head
     candidate_inputs:Option<Option<CandidateInputs>>,
     #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="prepared_field")]
     prepared_intent:Option<Option<PreparedReview>>,
+    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="execution_field")]
+    execution_receipt:Option<Option<ExecutionReview>>,
 }
 fn candidate_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Option<CandidateInputs>>,D::Error>{
     Ok(Some(Option::<CandidateInputs>::deserialize(decoder)?))
 }
 fn prepared_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Option<PreparedReview>>,D::Error>{
     Ok(Some(Option::<PreparedReview>::deserialize(decoder)?))
+}
+fn execution_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Option<ExecutionReview>>,D::Error>{
+    Ok(Some(Option::<ExecutionReview>::deserialize(decoder)?))
+}
+#[derive(Clone,Debug,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase")]
+struct ExecutionReview {
+    #[serde(flatten)]
+    receipt:crate::local_store_execute_protocol::ExecutionReceipt,
+    observation:String,prior_execution_finality:String,
+}
+impl<'de> Deserialize<'de> for ExecutionReview {
+    fn deserialize<D:serde::Deserializer<'de>>(decoder:D)->Result<Self,D::Error>{
+        let mut value=Value::deserialize(decoder)?;
+        if !keys(&value,&["operationId","candidateSha256","intentSha256","receiptSha256","authorizationId",
+            "sourceCommit","sourceTree","applicationId","version","destination","observedAt","result","limitations",
+            "observation","priorExecutionFinality"]){return Err(serde::de::Error::custom("invalid execution review"));}
+        let object=value.as_object_mut().ok_or_else(||serde::de::Error::custom("invalid execution review"))?;
+        let observation=String::deserialize(object.remove("observation").unwrap()).map_err(serde::de::Error::custom)?;
+        let prior_execution_finality=String::deserialize(object.remove("priorExecutionFinality").unwrap()).map_err(serde::de::Error::custom)?;
+        let receipt=crate::local_store_execute_protocol::ExecutionReceipt::deserialize(&value).map_err(serde::de::Error::custom)?;
+        Ok(Self{receipt,observation,prior_execution_finality})
+    }
+}
+impl ExecutionReview {
+    fn valid(&self,operation:&str)->bool{self.receipt.valid_for(operation)
+        &&self.observation=="current-execution-files-only"&&self.prior_execution_finality=="not-established"}
 }
 #[derive(Clone,Debug,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase")]
@@ -243,16 +272,20 @@ impl ResultData {fn valid(&self)->bool{self.schema_version==1&&self.scope=="loca
 impl ResultData {
     fn matches_context(&self,context:&Context)->bool{
         if !self.valid(){return false;}
-        if !context.action.candidate(){return self.candidate_inputs.is_none()&&self.prepared_intent.is_none();}
+        if !context.action.candidate(){return self.candidate_inputs.is_none()&&self.prepared_intent.is_none()&&self.execution_receipt.is_none();}
         let Some(id)=context.candidate_operation_id.as_deref() else{return false;};
         let Some(row)=self.history.iter().find(|row|row.operation_id==id) else{return false;};
         if context.action==Action::ReviewPrepared {
             // Latest state for this selected operation, not necessarily the
             // final operation in the genuine journal's public current table.
-            return self.head_sequence>=5&&row.phase==HistoryPhase::Prepared&&self.candidate_inputs.is_none()
+            return self.head_sequence>=5&&row.phase==HistoryPhase::Prepared&&self.candidate_inputs.is_none()&&self.execution_receipt.is_none()
                 &&self.prepared_intent.as_ref().and_then(Option::as_ref).is_some_and(|p|p.valid(id));
         }
-        if self.prepared_intent.is_some(){return false;}
+        if context.action==Action::ReviewExecution {
+            return self.head_sequence>=7&&row.phase==HistoryPhase::SettledSuccess&&self.candidate_inputs.is_none()&&self.prepared_intent.is_none()
+                &&self.execution_receipt.as_ref().and_then(Option::as_ref).is_some_and(|p|p.valid(id));
+        }
+        if self.prepared_intent.is_some()||self.execution_receipt.is_some(){return false;}
         match(context.action,row.phase,&self.candidate_inputs){
             (Action::ReviewInputs,HistoryPhase::InputsReady,Some(Some(bundle)))=>bundle.valid(id),
             (Action::ReviewInputs,HistoryPhase::InputsPending|HistoryPhase::SettledFailure,Some(None))=>true,
@@ -325,7 +358,7 @@ impl Decoder {
             let e=Envelope::deserialize(&value).map_err(|_|BridgeError::protocol())?;
             if e.protocol!=PROTOCOL||e.operation_id!=operation||e.owner_generation!=generation||e.nonce!=nonce
                 ||e.request_sha256!=digest||e.sequence!=self.next||self.next>=8{return Err(BridgeError::protocol());}
-            let expected=match (context.action,self.next){(_,0)=>"accepted",(_,1)=>"lease-ready",(Action::Enroll,2)=>"empty-journal-ready",(Action::Enroll,3)=>"durable-genesis",(Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared,2)=>"history-head",(Action::AbandonInputs,3)=>"abandoned-head",_=>"terminal"};
+            let expected=match (context.action,self.next){(_,0)=>"accepted",(_,1)=>"lease-ready",(Action::Enroll,2)=>"empty-journal-ready",(Action::Enroll,3)=>"durable-genesis",(Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution,2)=>"history-head",(Action::AbandonInputs,3)=>"abandoned-head",_=>"terminal"};
             if e.kind=="terminal" {
                 if self.next==0||!keys(&e.payload,&["schemaVersion","context","outcome","reason","result","lifetime"])
                     ||!e.payload.get("lifetime").is_some_and(|l|keys(l,&["complete","fatal","contained","commandDispatched","commands","profileCalls","inputClosed","handlersRestored","invocationClosed","stopObserved"])) {return Err(BridgeError::protocol());}
@@ -430,7 +463,7 @@ mod tests {
     }
     #[test]
     fn local_release_history_candidate_context_and_consent_are_action_specific(){
-        for action in [Action::Enroll,Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared]{
+        for action in [Action::Enroll,Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared,Action::ReviewExecution]{
             let c=context(action);let value=serde_json::to_value(&c).unwrap();
             assert_eq!(prepare(&value).unwrap(),c);assert_eq!(Context::deserialize(&value).unwrap(),c);
             assert_eq!(value.as_object().unwrap().len(),if action.candidate(){4}else{3});
@@ -592,6 +625,86 @@ mod tests {
         }
         let mut d=Decoder::new();for (i,(kind,payload)) in rows.iter().enumerate(){decode(&mut d,&c,i as u32,kind,payload.clone()).unwrap();}
         assert!(decode(&mut d,&c,3,"abandoned-head",json!({"sequence":8,"sha256":"f".repeat(64)})).is_err());
+    }
+    fn execution_result(c:&Context)->Value {
+        let mut r=prepared_result(c);r["headSequence"]=json!(8);
+        r["history"][0]["phase"]=json!("settled-success");r["history"][0]["recoveryRequired"]=json!(false);
+        r["history"][1]["phase"]=json!("inputs-pending");
+        let mut receipt=r.as_object_mut().unwrap().remove("preparedIntent").unwrap();
+        let object=receipt.as_object_mut().unwrap();object.remove("storePreconditionSha256");object.remove("priorPrepareFinality");
+        receipt["receiptSha256"]=json!("f".repeat(64));receipt["authorizationId"]=json!("12345678-1234-4234-9234-123456789abd");
+        receipt["result"]=json!("accepted");receipt["observation"]=json!("current-execution-files-only");receipt["priorExecutionFinality"]=json!("not-established");
+        receipt["limitations"]=json!(["internal-testing-only","not-public-release","prior-prepare-finality-not-established","saved-inputs-not-atomic"]);
+        r["executionReceipt"]=receipt;r
+    }
+    #[test]
+    fn local_release_history_execution_review_is_exact_receipt_not_old_finality(){
+        let c=context(Action::ReviewExecution);let ready=execution_result(&c);
+        let check=|v:&Value|ResultData::deserialize(v).is_ok_and(|r|r.matches_context(&c));
+        assert!(check(&ready));assert_eq!(serde_json::to_value(ResultData::deserialize(&ready).unwrap()).unwrap(),ready);
+        assert_eq!(ready.as_object().unwrap().len(),7);assert_eq!(ready["executionReceipt"].as_object().unwrap().len(),15);
+        for key in ready["executionReceipt"].as_object().unwrap().keys(){
+            let mut bad=ready.clone();bad["executionReceipt"].as_object_mut().unwrap().remove(key);assert!(!check(&bad),"{key}");
+        }
+        for(field,value) in [("operationId",json!("12345678-1234-4234-9234-123456789abd")),("receiptSha256",json!("f".repeat(63))),
+            ("authorizationId",json!("12345678-1234-1234-9234-123456789abd")),("candidateSha256",json!("A".repeat(64))),
+            ("intentSha256",json!(false)),("sourceCommit",json!("d".repeat(64))),("result",json!("pending")),
+            ("applicationId",json!("dev._bad")),("observedAt",json!("2026-02-30T12:00:00Z")),
+            ("observation",json!("current-store-state")),("priorExecutionFinality",json!("complete")),("path",json!("/private"))]{
+            let mut bad=ready.clone();bad["executionReceipt"][field]=value;assert!(!check(&bad),"{field}");
+        }
+        for value in [json!(0),json!(2_100_000_001u32)]{let mut bad=ready.clone();bad["executionReceipt"]["version"]["build"]=value;assert!(!check(&bad));}
+        for value in [json!(""),json!("a".repeat(65)),json!("1/2")]{let mut bad=ready.clone();bad["executionReceipt"]["version"]["name"]=value;assert!(!check(&bad));}
+        for key in ["candidateInputs","preparedIntent"]{let mut bad=ready.clone();bad[key]=Value::Null;assert!(!check(&bad));}
+        let mut bad=ready.clone();bad["executionReceipt"]=Value::Null;assert!(!check(&bad));
+        let mut bad=ready.clone();bad.as_object_mut().unwrap().remove("executionReceipt");assert!(!check(&bad));
+        let mut bad=ready.clone();bad["executionReceipt"]["destination"]["channel"]=json!("production");assert!(!check(&bad));
+        let mut bad=ready.clone();bad["executionReceipt"]["limitations"].as_array_mut().unwrap().reverse();assert!(!check(&bad));
+        for action in [Action::Enroll,Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared]{
+            let old=context(action);let base=if action==Action::ReviewPrepared{prepared_result(&old)}else if action.candidate(){candidate_result(&old,if action==Action::AbandonInputs{"settled-failure"}else{"inputs-ready"})}else{result()};
+            assert!(ResultData::deserialize(&base).unwrap().matches_context(&old));
+            for receipt in [Value::Null,ready["executionReceipt"].clone()]{let mut bad=base.clone();bad["executionReceipt"]=receipt;assert!(!ResultData::deserialize(&bad).unwrap().matches_context(&old));}
+        }
+        // Removing observation markers exposes only shared13 DATA. The actual
+        // Execute decoder separately retains original context/AUTH comparisons.
+        let mut summary=ready["executionReceipt"].clone();assert!(crate::local_store_execute_protocol::ExecutionReceipt::deserialize(&summary).is_err());
+        summary.as_object_mut().unwrap().remove("observation");summary.as_object_mut().unwrap().remove("priorExecutionFinality");
+        assert!(crate::local_store_execute_protocol::ExecutionReceipt::deserialize(&summary).unwrap().valid_for(c.candidate_operation_id.as_deref().unwrap()));
+    }
+    #[test]
+    fn local_release_history_execution_review_requires_selected_success_not_latest_operation(){
+        let c=context(Action::ReviewExecution);let ready=execution_result(&c);
+        let check=|v:&Value|ResultData::deserialize(v).is_ok_and(|r|r.matches_context(&c));
+        for head in [8,513]{let mut good=ready.clone();good["headSequence"]=json!(head);assert!(check(&good));}
+        let mut first=ready.clone();first["headSequence"]=json!(7);first["history"].as_array_mut().unwrap().pop();assert!(check(&first));
+        for head in [1,6,514]{let mut bad=ready.clone();bad["headSequence"]=json!(head);assert!(!check(&bad));}
+        for phase in ["inputs-pending","inputs-ready","prepare-pending","prepared","execute-pending","settled-failure","reconciliation-required"]{
+            let mut bad=ready.clone();bad["history"][0]["phase"]=json!(phase);bad["history"][0]["recoveryRequired"]=json!(!phase.starts_with("settled-"));assert!(!check(&bad));
+        }
+        let mut bad=ready.clone();bad["history"][0]["recoveryRequired"]=json!(true);assert!(!check(&bad));
+        let mut bad=ready.clone();bad["history"].as_array_mut().unwrap().remove(0);assert!(!check(&bad));
+        let mut bad=ready.clone();let duplicate=bad["history"][0].clone();bad["history"].as_array_mut().unwrap().push(duplicate);assert!(!check(&bad));
+    }
+    #[test]
+    fn local_release_history_execution_review_keeps_read_only_phases_and_finality(){
+        let c=context(Action::ReviewExecution);
+        let rows=[("accepted",json!({"schemaVersion":1,"context":c})),("lease-ready",json!({})),("history-head",json!({"sequence":8,"sha256":"e".repeat(64)}))];
+        let mut t=terminal(&c);t["result"]=execution_result(&c);
+        let mut d=Decoder::new();for(i,(kind,payload))in rows.iter().enumerate(){decode(&mut d,&c,i as u32,kind,payload.clone()).unwrap();}
+        assert!(decode(&mut d,&c,3,"terminal",t.clone()).is_ok()&&d.finish());
+        for prefix in 1..=3{
+            let mut d=Decoder::new();for(i,(kind,payload))in rows.iter().take(prefix).enumerate(){decode(&mut d,&c,i as u32,kind,payload.clone()).unwrap();}
+            let mut failed=t.clone();failed["outcome"]=json!("refused");failed["reason"]=json!("journal-unavailable");failed["result"]=Value::Null;
+            assert!(decode(&mut d,&c,prefix as u32,"terminal",failed).is_ok()&&d.finish());
+        }
+        for mutation in 0..4{
+            let mut d=Decoder::new();let prefix=if mutation==0{2}else{3};
+            for(i,(kind,payload))in rows.iter().take(prefix).enumerate(){decode(&mut d,&c,i as u32,kind,payload.clone()).unwrap();}
+            let mut bad=t.clone();match mutation{0=>{},1=>bad["result"]["headSequence"]=json!(9),2=>bad["lifetime"]["inputClosed"]=json!(false),_=>bad["lifetime"]["commands"]=json!(1)}
+            assert!(decode(&mut d,&c,prefix as u32,"terminal",bad).is_err()&&!d.finish());
+        }
+        let mut d=Decoder::new();for(i,(kind,payload))in rows.iter().enumerate(){decode(&mut d,&c,i as u32,kind,payload.clone()).unwrap();}
+        assert!(decode(&mut d,&c,3,"abandoned-head",json!({"sequence":9,"sha256":"f".repeat(64)})).is_err());
     }
     #[test]
     fn local_release_history_public_summary_cannot_hide_recovery_or_exceed_journal_bound(){

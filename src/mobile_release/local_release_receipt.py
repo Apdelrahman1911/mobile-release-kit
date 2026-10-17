@@ -1,7 +1,8 @@
 """Closed local execution receipt/attempt DATA, never dispatch or finality authority.
 
-No callers in the Store lane/native owner. An authenticated original intent,
-current one-use consent, enrolled journal and all original joins remain required.
+The exact local Execute owner supplies authenticated original intent, current
+one-use consent, enrolled journal and all original joins; these DATA functions
+alone provide none of that authority.
 A matching new authorization ID does not prove a previous request was dispatched.
 """
 from __future__ import annotations
@@ -40,8 +41,9 @@ def local_execution_attempt_key(*, intent_data: bytes, authority_data: bytes,
                                 purpose: str, expected_intent_sha256: str) -> str:
     """Prepare a fixed-domain refusal key; creates/looks up/removes no marker.
 
-    Separate from CI execution_attempt_key: no existing StoreLaneAttempt route
-    accepts this function's DATA as authority or original ownership.
+    Separate from CI execution_attempt_key. The closed local StoreLaneAttempt
+    seam additionally requires its same original Execute owner; this key alone
+    is not authority or original ownership.
     """
     try:
         _, authority = _inputs(intent_data=intent_data, authority_data=authority_data,

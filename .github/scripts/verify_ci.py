@@ -723,13 +723,14 @@ RUBY_PARTITION_CONTRACTS = (
     ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
     ("ruby-native-capture", "test_native_upload_validation.rb", 22, 18, 310, "NativeUploadValidationTest"),
     ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
-    ("ruby-android_upload_validation", "test_android_upload_validation.rb", 32, 23, 300, "AndroidUploadValidationTest"),
+    ("ruby-android_upload_validation", "test_android_upload_validation.rb", 37, 28, 300, "AndroidUploadValidationTest"),
 )
 PARTITIONED_RUBY_GATES = tuple(row[0] for row in RUBY_PARTITION_CONTRACTS)
 RUBY_SUITES = (
     ("ruby-support", "test_fastlane_support.rb", 12),
     ("ruby-metadata-image-catalog", "test_metadata_image_catalog.rb", 0),
     ("ruby-local-store-intent", "test_local_store_intent.rb", 0),
+    ("ruby-local-store-execution-runtime", "test_local_store_execution_runtime.rb", 0),
     ("ruby-store_document", "test_store_document.rb", 0),
     ("ruby-store_lane_lifetime", "test_store_lane_lifetime.rb", 0),
     ("ruby-store_lane_nested_validation", "test_store_lane_nested_validation.rb", 0),

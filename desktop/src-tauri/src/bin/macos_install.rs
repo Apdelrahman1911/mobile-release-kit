@@ -11601,7 +11601,8 @@ mod installer {
             let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12 + 1
                 + book.removal_live_reserved as u64 + if launcher.is_some() || launcher_removal.is_some() {20} else {0}
                 + if creates_launcher_phase {applications::PHASE_LIVE_QUOTE} else {0};
-            let budget=data(transaction::BudgetData::checked_data(&costs, invocation_count, planned_evidence, control_bound, records, live))?;
+            let budget=transaction::BudgetData::checked_data(&costs, invocation_count, planned_evidence, control_bound, records, live)
+                .map_err(|_| "maintenance-budget-admission")?;
             if restore_originals!=0 {
                 reserve_removal_original_storage(book,usize::try_from(records).map_err(|_|"restore-recovery-future-originals")?)?;
             }

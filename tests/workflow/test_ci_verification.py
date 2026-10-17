@@ -237,7 +237,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(workflow["env"], {"PYTHONSAFEPATH": "1"})
         self.assertNotIn("defaults", workflow)
         self.assertEqual(set(workflow["jobs"]), {"changes", "test", "test-linux", "test-native-profiles",
-                                                "test-native-support", "test-signing-matrix", "test-signing-adapter"})
+                                                "test-native-support", "test-signing-matrix", "test-signing-adapter", "test-play-lanes"})
         events = workflow["true"]  # Existing Psych loader's YAML boolean key.
         self.assertIn("pull_request", events)
         self.assertEqual(events["push"]["branches"], ["main"])
@@ -382,6 +382,18 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         variables = ("LINUX_RESULT", "NATIVE_RESULT", "NATIVE_SUPPORT_RESULT", "MATRIX_RESULT", "ADAPTER_RESULT")
         self.assertEqual(set(aggregate["needs"]), {"changes", *jobs})
         self.assertTrue(evaluate_condition(aggregate["if"], {}, success=False, cancelled=True))
+        # This optional business-logic smoke must not schedule or impersonate
+        # the protected full aggregate, even when the prior jobs are skipped.
+        for event in ("pull_request", "push", "workflow_dispatch"):
+            for target in ("full", "play-lanes"):
+                context = {"github": {"event_name": event}, "inputs": {"verification_target": target}}
+                smoke = event == "workflow_dispatch" and target == "play-lanes"
+                self.assertEqual(evaluate_condition(workflow["jobs"]["test-play-lanes"]["if"], context,
+                    success=True, cancelled=False), smoke)
+                self.assertEqual(evaluate_condition(workflow["jobs"]["changes"]["if"], context,
+                    success=True, cancelled=False), not smoke)
+                self.assertEqual(evaluate_condition(aggregate["if"], context,
+                    success=False, cancelled=True), not smoke)
         guard, *proof_steps = aggregate["steps"]
         self.assertEqual(guard["env"], {
             "CI_EVENT": "${{ github.event_name }}", "CI_TARGET": "${{ inputs.verification_target || 'full' }}",
@@ -2554,9 +2566,18 @@ class CIControllerContractTests(unittest.TestCase):
 
     def test_complete_fixed_gate_inventory_cannot_omit_duplicate_or_reorder_a_step(self):
         controller = controller_module()
+        android = controller.ruby_capture_ids(ROOT, "ruby-android_upload_validation")
+        healthy = controller.ruby_capture_ids(ROOT, "ruby-android_upload_validation", "healthy")
+        self.assertEqual((len(android), len(healthy)), (37, 28))
+        self.assertTrue({
+            "AndroidLocalUploadInputTest#test_registered_request_is_forwarded_from_same_invocation_without_credentials",
+            "AndroidLocalUploadInputTest#test_registered_nomination_digest_and_origin_are_one_use_exactly_bound",
+        } <= set(healthy))
+        self.assertEqual(len(controller.ruby_expected_ids(ROOT, "ruby-local-store-execution-runtime")), 4)
         before = ("source-copy", "source-environment", "source-dependencies", "bundler", "bundle-install",
                   "editable-install", "source-freeze", "source-pip-check", "bundle-check")
-        ruby = ("ruby-support", "ruby-metadata-image-catalog", "ruby-local-store-intent", "ruby-store_document", "ruby-store_lane_lifetime",
+        ruby = ("ruby-support", "ruby-metadata-image-catalog", "ruby-local-store-intent",
+                "ruby-local-store-execution-runtime", "ruby-store_document", "ruby-store_lane_lifetime",
                 "ruby-store_lane_nested_validation", "ruby-store_lane_resources", "ruby-store_lane_runtime",
                 "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture", "ruby-native-signal-observation",
                 "ruby-play_store", "ruby-play_lanes", "ruby-apple_store",
@@ -2587,7 +2608,7 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(set(expected["macos"]) - set(native_support), set(native_profiles))
         self.assertEqual(set(native_python) - set(native_support), set(native_profiles))
         catalogs = {}
-        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 60),
+        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 61),
                                                ("macos", "platform", expected["macos"], 41),
                                                ("macos", "native-python", native_python, 31),
                                                ("macos", "native-support", native_support, 39)):

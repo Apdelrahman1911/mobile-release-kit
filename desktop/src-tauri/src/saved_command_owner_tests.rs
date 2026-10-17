@@ -10,7 +10,7 @@ fn project() -> RegisteredRoot { RegisteredRoot { path: PathBuf::from("/unopened
 fn application(domain: SavedCommandDomain) -> SavedCommandOwner {
     SavedCommandOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-saved-command-runtime")), domain)
 }
-fn context(domain: SavedCommandDomain) -> Context { match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
+fn context(domain: SavedCommandDomain) -> Context { match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
     SavedCommandDomain::OfflinePreflight => Context::OfflinePreflight(wire::tests::context()),
     SavedCommandDomain::AndroidBuild => Context::AndroidBuild(android_wire::tests::context()),
     SavedCommandDomain::ProjectRecovery => Context::ProjectRecovery(recovery_wire::tests::context()),
@@ -100,7 +100,7 @@ fn active_with_context(application: SavedCommandOwner, context: Context) -> (Sav
     let clocks = Clocks::for_context(&p.context, Instant::now());
     let (native_audit_cutoff, _) = watch::channel(clocks.work);
     let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
-    let profile = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => Profile::OfflinePreflight(wire::Profile::LinuxX64),
+    let profile = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => Profile::OfflinePreflight(wire::Profile::LinuxX64),
         SavedCommandDomain::AndroidBuild => Profile::AndroidBuild(android_wire::Profile::LinuxX64),
         SavedCommandDomain::ProjectRecovery => Profile::ProjectRecovery(recovery_wire::Profile::LinuxX64),
         SavedCommandDomain::IOSArchive => Profile::IOSArchive(ios_wire::Profile::MacArm64),
@@ -148,7 +148,7 @@ fn bound_document_model() -> (Arc<crate::bridge::DesktopBridge>, crate::asset_se
 fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration_callback() {
     for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive, SavedCommandDomain::ArtifactInspection, SavedCommandDomain::LocalStorePreflight] {
         let (bridge, document) = bound_document_model();
-        let original = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
+        let original = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
             SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
             SavedCommandDomain::ProjectRecovery => bridge.project_recovery.original_for_test(),
@@ -198,7 +198,7 @@ fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration
 fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_and_cancel() {
     for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive, SavedCommandDomain::ArtifactInspection, SavedCommandDomain::LocalStorePreflight] {
         let (bridge, document) = bound_document_model();
-        let original = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
+        let original = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
             SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
             SavedCommandDomain::ProjectRecovery => bridge.project_recovery.original_for_test(),
@@ -246,7 +246,7 @@ fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_a
         assert!(document.configuration_edit_admit(|_| { entered.set(true); Ok(()) }).is_err());
         assert!(!entered.get());
         document.lost(); application.request_shutdown();
-        match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
+        match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
             SavedCommandDomain::OfflinePreflight => {
                 let status = document.cancel_offline_preflight(wire::Cancel { operation_id: owner.id.clone(), owner_generation: owner.generation.clone() }).unwrap();
                 assert_eq!(status.operation.unwrap().phase, wire::Phase::Unknown);
@@ -290,20 +290,20 @@ fn android_terminal(value: &Value) -> android_wire::Terminal {
     android_wire::terminal(value, &android_wire::tests::context()).unwrap()
 }
 fn frame(domain: SavedCommandDomain, sequence: u32, kind: &str, payload: Value) -> Vec<u8> {
-    let protocol = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => wire::PROTOCOL, SavedCommandDomain::AndroidBuild => android_wire::PROTOCOL,
+    let protocol = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => wire::PROTOCOL, SavedCommandDomain::AndroidBuild => android_wire::PROTOCOL,
         SavedCommandDomain::ProjectRecovery => recovery_wire::PROTOCOL, SavedCommandDomain::IOSArchive => ios_wire::PROTOCOL, SavedCommandDomain::ArtifactInspection => artifact_wire::PROTOCOL, SavedCommandDomain::LocalStorePreflight => store_wire::PROTOCOL };
     let mut bytes = serde_json::to_vec(&json!({"protocol":protocol,"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),
         "sequence":sequence,"kind":kind,"payload":payload})).unwrap(); bytes.push(b'\n'); bytes
 }
 fn accepted(domain: SavedCommandDomain) -> Vec<u8> {
-    let context = match context(domain) { Context::LocalReleaseHistory(_) | Context::LocalStorePrepare(_) => panic!("local history and preparation have their own closed consent fixtures"), Context::OfflinePreflight(c) => serde_json::to_value(c).unwrap(),
+    let context = match context(domain) { Context::LocalReleaseHistory(_) | Context::LocalStoreExecute(_) | Context::LocalStorePrepare(_) => panic!("local history and preparation have their own closed consent fixtures"), Context::OfflinePreflight(c) => serde_json::to_value(c).unwrap(),
         Context::AndroidBuild(c) => serde_json::to_value(c).unwrap(),
         Context::ProjectRecovery(c) => serde_json::to_value(c).unwrap(), Context::IOSArchive(c) => serde_json::to_value(c).unwrap(), Context::ArtifactInspection(c) => serde_json::to_value(c).unwrap(), Context::LocalStorePreflight(c) => serde_json::to_value(c).unwrap() };
     frame(domain, 0, "accepted", json!({"schemaVersion":1,"context":context}))
 }
 fn complete_stream(domain: SavedCommandDomain, progress: bool) -> Vec<Vec<u8>> {
     let mut frames = vec![accepted(domain)];
-    match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
+    match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
         SavedCommandDomain::ArtifactInspection => frames.push(frame(domain, 1, "terminal", artifact_wire::tests::terminal()["payload"].clone())),
         SavedCommandDomain::LocalStorePreflight => frames.push(frame(domain, 1, "terminal", store_wire::tests::complete())),
         SavedCommandDomain::OfflinePreflight => {
@@ -896,7 +896,7 @@ async fn late_inspection_data_is_cleanup_only_and_cannot_rearm_acquisition() {
 async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_never_renews() {
     for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive] {
         let (application, owner) = active(domain);
-        let selected = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
+        let selected = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
             SavedCommandDomain::OfflinePreflight => application.inner.offline_installed_selected(),
             SavedCommandDomain::AndroidBuild => false, // No original document/catalog selection was bound.
             SavedCommandDomain::ProjectRecovery => cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))
@@ -913,7 +913,7 @@ async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_
             application.inner.stop_locked(&mut r, &owner, Reason::Cancelled, owner.clocks.admitted);
             application.inner.stop_locked(&mut r, &owner, Reason::Shutdown, owner.clocks.admitted + Duration::from_secs(5));
             assert_eq!(r.active.as_ref().unwrap().first_stop, Some(owner.clocks.admitted));
-            let expected = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
+            let expected = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"),
                 SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive => owner.clocks.admitted + SETTLEMENT,
                 SavedCommandDomain::ArtifactInspection | SavedCommandDomain::LocalStorePreflight => owner.clocks.work,
                 SavedCommandDomain::OfflinePreflight | SavedCommandDomain::ProjectRecovery => owner.clocks.work,
@@ -955,7 +955,7 @@ async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_
 fn foreign_domain_frames_fail_closed_without_converting_any_result() {
     for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive] {
         let (application, owner) = active(domain);
-        let foreign = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => Frame::AndroidBuild(android_wire::Frame::Accepted),
+        let foreign = match domain { SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare => panic!("local history and preparation have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => Frame::AndroidBuild(android_wire::Frame::Accepted),
             SavedCommandDomain::AndroidBuild | SavedCommandDomain::ProjectRecovery | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::LocalStorePreflight => Frame::OfflinePreflight(wire::Frame::Accepted) };
         application.inner.accept_at(&owner, foreign, owner.clocks.admitted);
         let r = application.inner.lock(); let a = r.active.as_ref().unwrap();

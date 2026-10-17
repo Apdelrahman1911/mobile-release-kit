@@ -12,12 +12,12 @@ const REPLY_MAGIC: &[u8;8] = b"MRKAQR01";
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 #[repr(u32)]
-pub enum Role { Catalog=1, Start=2 }
+pub enum Role { Catalog=1, Start=2, LocalStoreExecute=3 }
 impl Role {
-    fn decode(v:u32)->Option<Self>{match v{1=>Some(Self::Catalog),2=>Some(Self::Start),_=>None}}
-    pub fn work_ns(self)->u64 {match self{Self::Catalog=>60_000_000_000,Self::Start=>3_000_000_000_000}}
+    fn decode(v:u32)->Option<Self>{match v{1=>Some(Self::Catalog),2=>Some(Self::Start),3=>Some(Self::LocalStoreExecute),_=>None}}
+    pub fn work_ns(self)->u64 {match self{Self::Catalog=>60_000_000_000,Self::Start=>3_000_000_000_000,Self::LocalStoreExecute=>1_200_000_000_000}}
     pub fn hard_ns(self)->u64 {self.work_ns()+CLEANUP_NS}
-    pub fn sequence_limit(self)->u32 {match self{Self::Catalog=>34,Self::Start=>2}}
+    pub fn sequence_limit(self)->u32 {match self{Self::Catalog=>34,Self::Start|Self::LocalStoreExecute=>2}}
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub struct Bounds {pub role:Role,pub origin:u64,pub work:u64,pub hard:u64}
@@ -65,7 +65,7 @@ impl Request {
         }else if self.instance!=[0;16]{return false;}
         match self.kind {
             Kind::Scan=>self.bounds.role==Role::Catalog && self.sequence==1,
-            Kind::ReadIntent=>match self.bounds.role{Role::Start=>self.sequence==1,Role::Catalog=>self.sequence>=2 && self.sequence<self.bounds.role.sequence_limit()},
+            Kind::ReadIntent=>match self.bounds.role{Role::Start|Role::LocalStoreExecute=>self.sequence==1,Role::Catalog=>self.sequence>=2 && self.sequence<self.bounds.role.sequence_limit()},
             Kind::Finish=>self.sequence>=2,
             Kind::Status=>self.first==0,
             Kind::Stop=>self.first>=self.bounds.origin && self.first<=MAX_RAW,
@@ -205,8 +205,17 @@ mod tests {
     #[test]
     fn query_keeps_original_roles_clocks_and_closed_request_without_path_or_account(){
         for q in[request(Role::Catalog,Kind::Scan,1),request(Role::Start,Kind::ReadIntent,1),
-            request(Role::Start,Kind::Finish,2)]{assert_eq!(Request::decode(&q.encode().unwrap()),Some(q));}
+            request(Role::Start,Kind::Finish,2),request(Role::LocalStoreExecute,Kind::ReadIntent,1),request(Role::LocalStoreExecute,Kind::Finish,2)]{assert_eq!(Request::decode(&q.encode().unwrap()),Some(q));}
         assert!(request(Role::Start,Kind::Scan,1).encode().is_none());
+        let local=bounds(Role::LocalStoreExecute);assert_eq!(local.work-local.origin,1_200_000_000_000);
+        assert_eq!(local.hard-local.origin,1_210_000_000_000);
+        assert!(request(Role::LocalStoreExecute,Kind::Scan,1).encode().is_none());
+        assert!(request(Role::LocalStoreExecute,Kind::ReadIntent,2).encode().is_none());
+        assert!(request(Role::LocalStoreExecute,Kind::Finish,3).encode().is_none());
+        let mut cross=request(Role::LocalStoreExecute,Kind::ReadIntent,1).encode().unwrap();
+        put(&mut cross,16,Role::Start as u32);assert!(Request::decode(&cross).is_none());
+        assert_eq!(local.cleanup(Some(local.origin+1)),Some(local.origin+1+CLEANUP_NS));
+        assert_eq!(local.cleanup(Some(local.work+1)),Some(local.hard));
         let mut q=request(Role::Catalog,Kind::Scan,1);q.bounds.work+=1;assert!(q.encode().is_none());
         q=request(Role::Catalog,Kind::Scan,1);let mut raw=q.encode().unwrap();raw[88]=1;
         assert!(Request::decode(&raw).is_none());

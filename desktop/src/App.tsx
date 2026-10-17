@@ -1,3 +1,5 @@
+import { LocalStoreExecuteController, localStoreExecuteOwnerReason } from './localStoreExecute.ts';
+import { LocalStoreExecute } from './components/LocalStoreExecute.tsx';
 import { LocalStorePrepareController, localStorePrepareOwnerReason } from './localStorePrepare.ts';
 import { LocalStorePrepare } from './components/LocalStorePrepare.tsx';
 import { LocalReleaseHistoryController, localHistoryOwnerReason } from './localReleaseHistory.ts';
@@ -133,6 +135,7 @@ export function App() {
   const localHistoryControllerRef = useRef<LocalReleaseHistoryController | null>(null);
   const localStoreControllerRef = useRef<LocalStorePreflightController | null>(null);
   const localStorePrepareControllerRef = useRef<LocalStorePrepareController | null>(null);
+  const localStoreExecuteControllerRef = useRef<LocalStoreExecuteController | null>(null);
   const offlinePreflightControllerRef = useRef<OfflinePreflightController | null>(null);
   const androidBuildControllerRef = useRef<AndroidBuildController | null>(null);
   const projectRecoveryControllerRef = useRef<ProjectRecoveryController | null>(null);
@@ -165,7 +168,8 @@ export function App() {
   const artifactBusy = useCallback(() => artifactInspectionControllerRef.current ? artifactInspectionOwnerReason(artifactInspectionControllerRef.current.getSnapshot()) : null, []);
   const localHistoryBusy = useCallback(() => localHistoryControllerRef.current ? localHistoryOwnerReason(localHistoryControllerRef.current.getSnapshot()) : null, []);
   const storePrepareBusy = useCallback(() => localStorePrepareControllerRef.current ? localStorePrepareOwnerReason(localStorePrepareControllerRef.current.getSnapshot()) : null, []);
-  const storeBusy = useCallback(() => storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storePrepareBusy]);
+  const storeExecuteBusy = useCallback(() => localStoreExecuteControllerRef.current ? localStoreExecuteOwnerReason(localStoreExecuteControllerRef.current.getSnapshot()) : null, []);
+  const storeBusy = useCallback(() => storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storeExecuteBusy, storePrepareBusy]);
   const preflightBusy = useCallback(() => offlinePreflightControllerRef.current ? offlinePreflightOwnerReason(offlinePreflightControllerRef.current.getSnapshot()) : null, []);
   const androidBusy = useCallback(() => androidBuildControllerRef.current ? androidBuildOwnerReason(androidBuildControllerRef.current.getSnapshot()) : null, []);
   const iosBusy = useCallback(() => iosArchiveControllerRef.current ? iosArchiveOwnerReason(iosArchiveControllerRef.current.getSnapshot()) : null, []);
@@ -207,7 +211,7 @@ export function App() {
     githubRemoteSetupControllerRef.current?.beforeWorkspaceAction();
     githubHistoryControllerRef.current?.beforeWorkspaceAction();
     artifactInspectionControllerRef.current?.beforeWorkspaceAction(action);
-    offlinePreflightControllerRef.current?.beforeWorkspaceAction(action); localStoreControllerRef.current?.beforeWorkspaceAction(); localStorePrepareControllerRef.current?.beforeWorkspaceAction(); localHistoryControllerRef.current?.beforeWorkspaceAction();
+    offlinePreflightControllerRef.current?.beforeWorkspaceAction(action); localStoreControllerRef.current?.beforeWorkspaceAction(); localStorePrepareControllerRef.current?.beforeWorkspaceAction(); localStoreExecuteControllerRef.current?.beforeWorkspaceAction(); localHistoryControllerRef.current?.beforeWorkspaceAction();
     androidBuildControllerRef.current?.beforeWorkspaceAction(action);
     projectRecoveryControllerRef.current?.beforeWorkspaceAction(action);
     iosArchiveControllerRef.current?.beforeWorkspaceAction(action);
@@ -238,7 +242,7 @@ export function App() {
     releaseInputControllerRef.current?.syncProject();
     diagnosticsControllerRef.current?.syncProject();
     artifactInspectionControllerRef.current?.syncProject();
-    offlinePreflightControllerRef.current?.syncProject(); localStoreControllerRef.current?.syncProject(); localStorePrepareControllerRef.current?.syncProject(); localHistoryControllerRef.current?.syncProject();
+    offlinePreflightControllerRef.current?.syncProject(); localStoreControllerRef.current?.syncProject(); localStorePrepareControllerRef.current?.syncProject(); localStoreExecuteControllerRef.current?.syncProject(); localHistoryControllerRef.current?.syncProject();
     androidBuildControllerRef.current?.syncProject();
     projectRecoveryControllerRef.current?.syncProject();
     iosArchiveControllerRef.current?.syncProject();
@@ -380,7 +384,7 @@ export function App() {
     onApplyIntent:projectId=>{
       dispatch({type:'initialization-intent',projectId});
       retirePathPicker(); releaseVersionControllerRef.current?.saveIntent(); releaseInputControllerRef.current?.saveIntent();
-      androidBuildControllerRef.current?.versionIntent();offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent();projectRecoveryControllerRef.current?.versionIntent();iosArchiveControllerRef.current?.versionIntent();
+      androidBuildControllerRef.current?.versionIntent();offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localStoreExecuteControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent();projectRecoveryControllerRef.current?.versionIntent();iosArchiveControllerRef.current?.versionIntent();
     },
     onConfirmed:completion=>dispatch({type:'initialization-final',projectId:completion.binding.projectId,completion}),
   }));
@@ -397,7 +401,7 @@ export function App() {
       // Recovery changes persisted saved-file facts, never the retained draft.
       // Invalidate existing passive/build consent; no replacement Read is made.
       releaseVersion.saveIntent(); releaseInputs.saveIntent();
-      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
+      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localStoreExecuteControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
     },
   }));
   metadataControllerRef.current = metadataText;
@@ -429,7 +433,7 @@ export function App() {
       // Retire before the submitted intent/outcome can notify subscribers, even
       // for unchanged, failed or out-of-context saves. Never fabricate a Read.
       releaseVersion.saveIntent(); releaseInputs.saveIntent();
-      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
+      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localStoreExecuteControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
     },
   }));
   versionEditControllerRef.current = versionEdit;
@@ -526,7 +530,7 @@ export function App() {
   const iosArchiveState = useSyncExternalStore(iosArchive.subscribe, iosArchive.getSnapshot, iosArchive.getSnapshot);
   const [localStore] = useState(() => new LocalStorePreflightController({
     project: () => androidBuild.getSnapshot().project, assets: assetSession.getSnapshot,
-    otherOperationReason: () => storePrepareBusy() ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+    otherOperationReason: () => storeExecuteBusy() ?? storePrepareBusy() ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   localStoreControllerRef.current=localStore;
   const localStoreState=useSyncExternalStore(localStore.subscribe,localStore.getSnapshot,localStore.getSnapshot);
@@ -543,10 +547,18 @@ export function App() {
     project: () => androidBuild.getSnapshot().project, assets: assetSession.getSnapshot,
     history: localHistory.getSnapshot,
     // Exclude this controller's own intent from reciprocal admission.
-    otherOperationReason: () => (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+    otherOperationReason: () => storeExecuteBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   localStorePrepareControllerRef.current=localStorePrepare;
   const localStorePrepareState=useSyncExternalStore(localStorePrepare.subscribe,localStorePrepare.getSnapshot,localStorePrepare.getSnapshot);
+  const [localStoreExecute] = useState(() => new LocalStoreExecuteController({
+    project: () => androidBuild.getSnapshot().project, assets: assetSession.getSnapshot,
+    history: localHistory.getSnapshot, tools: androidBuild.getSnapshot,
+    // Same reciprocal admission, excluding only this original's own slot.
+    otherOperationReason: () => storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+  }));
+  localStoreExecuteControllerRef.current=localStoreExecute;
+  const localStoreExecuteState=useSyncExternalStore(localStoreExecute.subscribe,localStoreExecute.getSnapshot,localStoreExecute.getSnapshot);
   const requests = useRef(0);
   const bootGeneration = useRef(0);
   const main = useRef<HTMLElement>(null);
@@ -586,7 +598,7 @@ export function App() {
     // Reconnection cannot discard a pending or unverified original picker.
     if (projectPathOwnerReason(pathPickerRef.current)) return;
     artifactInspection.beginConnection();
-    offlinePreflight.beginConnection(); localStore.beginConnection(); localStorePrepare.beginConnection(); localHistory.beginConnection();
+    offlinePreflight.beginConnection(); localStore.beginConnection(); localStorePrepare.beginConnection(); localStoreExecute.beginConnection(); localHistory.beginConnection();
     androidBuild.beginConnection();
     projectRecovery.beginConnection(); iosArchive.beginConnection();
     if (savedCommandBusy()) { setBootError(versionOwnerReason(versionEdit.getSnapshot(), workspaceRef.current.selectedId ?? '') ?
@@ -622,7 +634,7 @@ export function App() {
       // This fixed native Status has its own qualification gate. Passive
       // appInfo/catalogue success never enables tool execution.
       void artifactInspection.connect(connection);
-      void offlinePreflight.connect(connection); void localStore.connect(connection); void localStorePrepare.connect(connection); void localHistory.connect(connection).then(localHistory.syncProject);
+      void offlinePreflight.connect(connection); void localStore.connect(connection); void localStorePrepare.connect(connection); void localStoreExecute.connect(connection); void localHistory.connect(connection).then(localHistory.syncProject);
       void androidBuild.connect(connection);
       void projectRecovery.connect(connection);
       void iosArchive.connect(connection);
@@ -683,7 +695,7 @@ export function App() {
       passivePending.current -= 1; setPassivePending(passivePending.current);
       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); }
     }
-  }, [githubSetup, githubConnection, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localHistory, androidBuild, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker]);
+  }, [githubSetup, githubConnection, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localHistory, androidBuild, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker]);
 
   // Subscribe before bootstrap. A version read/replacement retires consent
   // synchronously, before React publishes another frame of the review.
@@ -727,6 +739,11 @@ export function App() {
   useEffect(() => () => offlinePreflight.dispose(), [offlinePreflight]);
   useEffect(() => () => localStore.dispose(), [localStore]);
   useEffect(() => () => localStorePrepare.dispose(), [localStorePrepare]);
+  useEffect(() => () => localStoreExecute.dispose(), [localStoreExecute]);
+  useEffect(() => {
+    const a=assetSession.subscribe(localStoreExecute.syncProject),b=androidBuild.subscribe(localStoreExecute.syncProject),c=localHistory.subscribe(localStoreExecute.syncProject);
+    localStoreExecute.syncProject();return()=>{a();b();c();};
+  },[assetSession,androidBuild,localHistory,localStoreExecute]);
   useEffect(() => {
     const a=assetSession.subscribe(localStorePrepare.syncProject),b=androidBuild.subscribe(localStorePrepare.syncProject),c=localHistory.subscribe(localStorePrepare.syncProject);
     localStorePrepare.syncProject();return()=>{a();b();c();};
@@ -779,7 +796,7 @@ export function App() {
     return () => window.removeEventListener('beforeunload', warn);
   }, []);
 
-  const navigate = (next: Page) => { initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
+  const navigate = (next: Page) => { initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
   const reviewCredentialChecks = (kind: 'offline' | 'android-signing') => {
     if (savedCommandBusy() || diagnosticsOwnerReason(diagnostics.getSnapshot())) return;
     // Navigation selects a review only. The existing controller still owns
@@ -811,7 +828,7 @@ export function App() {
     metadataText.snapshotIntent(projectId);
     retirePathPicker();
     artifactInspection.snapshotIntent(projectId);
-    offlinePreflight.snapshotIntent(projectId); localStore.snapshotIntent(); localStorePrepare.snapshotIntent(); localHistory.snapshotIntent();
+    offlinePreflight.snapshotIntent(projectId); localStore.snapshotIntent(); localStorePrepare.snapshotIntent(); localStoreExecute.snapshotIntent(); localHistory.snapshotIntent();
     androidBuild.snapshotIntent(projectId);
     projectRecovery.snapshotIntent(projectId);
     iosArchive.snapshotIntent(projectId);
@@ -835,7 +852,7 @@ export function App() {
     versionEdit.selectionIntent();
     retirePathPicker();
     artifactInspection.selectionIntent();
-    offlinePreflight.selectionIntent(); localStore.selectionIntent(); localStorePrepare.selectionIntent(); localHistory.selectionIntent();
+    offlinePreflight.selectionIntent(); localStore.selectionIntent(); localStorePrepare.selectionIntent(); localStoreExecute.selectionIntent(); localHistory.selectionIntent();
     androidBuild.selectionIntent();
     projectRecovery.selectionIntent();
     iosArchive.selectionIntent();
@@ -848,7 +865,7 @@ export function App() {
     releaseInputs.setSelectionPending(true);
     diagnostics.setSelectionPending(true);
     artifactInspection.setSelectionPending(true);
-    offlinePreflight.setSelectionPending(true); localStore.setSelectionPending(true); localStorePrepare.setSelectionPending(true); localHistory.setSelectionPending(true);
+    offlinePreflight.setSelectionPending(true); localStore.setSelectionPending(true); localStorePrepare.setSelectionPending(true); localStoreExecute.setSelectionPending(true); localHistory.setSelectionPending(true);
     androidBuild.setSelectionPending(true);
     projectRecovery.setSelectionPending(true);
     iosArchive.setSelectionPending(true);
@@ -863,7 +880,7 @@ export function App() {
       dispatch({ type: 'select', project });
       if (!alreadyLoaded) await loadSnapshot(project.id);
     } catch (error) { setChooseError(apiError(error)); }
-    finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); releaseVersion.setSelectionPending(false); releaseInputs.setSelectionPending(false); metadataText.setSelectionPending(false); metadataImages.setSelectionPending(false); versionEdit.setSelectionPending(false); diagnostics.setSelectionPending(false); artifactInspection.setSelectionPending(false); offlinePreflight.setSelectionPending(false); localStore.setSelectionPending(false); localStorePrepare.setSelectionPending(false); localHistory.setSelectionPending(false); androidBuild.setSelectionPending(false); projectRecovery.setSelectionPending(false); iosArchive.setSelectionPending(false); }
+    finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); releaseVersion.setSelectionPending(false); releaseInputs.setSelectionPending(false); metadataText.setSelectionPending(false); metadataImages.setSelectionPending(false); versionEdit.setSelectionPending(false); diagnostics.setSelectionPending(false); artifactInspection.setSelectionPending(false); offlinePreflight.setSelectionPending(false); localStore.setSelectionPending(false); localStorePrepare.setSelectionPending(false); localStoreExecute.setSelectionPending(false); localHistory.setSelectionPending(false); androidBuild.setSelectionPending(false); projectRecovery.setSelectionPending(false); iosArchive.setSelectionPending(false); }
   };
 
   const changeApplicationRepository = (value: string) => {
@@ -1008,7 +1025,7 @@ export function App() {
       <div className="sidebar-footer"><div className="foundation-label"><span className="local-dot" />{localEditingLabel}</div><p>Thoughtful preparation.<br />No accidental releases.</p><div className="sidebar-version"><span>{`DESKTOP ${info?.appVersion ?? 'Not loaded'}`}</span><Icon name="shield" size={14} /></div></div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />Every action has its own checks</span><Badge tone={preview || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project initialization owner retained' : recoveryBusy() ? 'Project recovery owner retained' : androidBusy() ? 'Android build owner retained' : iosBusy() ? 'iOS archive owner retained' : artifactBusy() ? 'Artifact inspection owner retained' : localHistoryBusy() ? 'Local history owner retained' : storeBusy() ? 'Local Store operation retained' : preflightBusy() ? 'Saved offline-check owner retained' : diagnosticsState.status?.active ? 'Build-tool diagnostics active' : saveState.status?.active ? 'Native save session active' : workflowState.status?.active ? 'Local workflow session active' : metadataImagesOwnerReason(metadataImagesState) ? 'Image operation retained' : metadataState.edit.status?.active ? 'Public-text session active' : versionEditState.edit.status?.active ? 'Saved-version session active' : localEditingLabel}</Badge></div></header>
+      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />Every action has its own checks</span><Badge tone={preview || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || localStoreExecuteState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project initialization owner retained' : recoveryBusy() ? 'Project recovery owner retained' : androidBusy() ? 'Android build owner retained' : iosBusy() ? 'iOS archive owner retained' : artifactBusy() ? 'Artifact inspection owner retained' : localHistoryBusy() ? 'Local history owner retained' : storeBusy() ? 'Local Store operation retained' : preflightBusy() ? 'Saved offline-check owner retained' : diagnosticsState.status?.active ? 'Build-tool diagnostics active' : saveState.status?.active ? 'Native save session active' : workflowState.status?.active ? 'Local workflow session active' : metadataImagesOwnerReason(metadataImagesState) ? 'Image operation retained' : metadataState.edit.status?.active ? 'Public-text session active' : versionEditState.edit.status?.active ? 'Saved-version session active' : localEditingLabel}</Badge></div></header>
       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
       <main id="main-content" tabIndex={-1} ref={main}>
         {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Loading desktop capabilities and the core field catalogue…</span></div>}
@@ -1023,6 +1040,7 @@ export function App() {
         <LocalReleaseHistory state={localHistoryState} controller={localHistory} compact={page!=='releases'} onShow={()=>navigate('releases')}/>
         <LocalStorePreflight state={localStoreState} controller={localStore} compact={page!=='releases'} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
         <LocalStorePrepare state={localStorePrepareState} controller={localStorePrepare} compact={page!=='releases'} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+        <LocalStoreExecute state={localStoreExecuteState} controller={localStoreExecute} compact={page!=='releases'} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
         {page !== 'releases' && <OfflinePreflight state={offlinePreflightState} controller={offlinePreflight} compact
           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}
           onShow={() => navigate('releases')} />}

@@ -4,13 +4,16 @@ import math
 import os
 import select
 import time
-from ._desktop_saved_command_control import SavedCommandDomain,_SavedCommandInput
+from ._desktop_saved_command_control import SavedCommandDomain,_SavedCommandInput,_protocol
 from ._desktop_local_history_control import LocalHistoryInput
 from ._desktop_store_preflight_control import StorePreflightInput
 from . import _desktop_store_prepare_protocol as wire
 class StorePrepareInput(_SavedCommandInput):
     def __init__(self,started):
-        super().__init__(started,domain=SavedCommandDomain.LocalStorePrepare)
+        from ._desktop_store_execute_control import StoreExecuteInput
+        self._require_type=type(self) in (StorePrepareInput,StoreExecuteInput)
+        if not self._require_type:raise wire.ProtocolError()
+        super().__init__(started,domain=SavedCommandDomain.LocalStorePrepare if type(self) is StorePrepareInput else SavedCommandDomain.LocalStoreExecute)
         self.initial=self.operation=self.engine=None
         self.material_pending=self.material_receiving=self._material_read=False
         self._material=None;self.reply_step=0;self.read_remaining=0;self.reading=False
@@ -19,7 +22,9 @@ class StorePrepareInput(_SavedCommandInput):
         self.hard_end=started+wire.FINALITY_SECONDS
     def _bind_engine(self,engine):
         from ._desktop_store_prepare_engine import _Engine
-        self._require(type(engine) is _Engine and engine.input is self and self.engine is None);self.engine=engine
+        from ._desktop_store_execute_engine import _Engine as ExecuteEngine
+        expected=_Engine if self.domain is SavedCommandDomain.LocalStorePrepare else ExecuteEngine
+        self._require(type(engine) is expected and engine.input is self and self.engine is None);self.engine=engine
     def request(self):
         request=super().request();self.initial=request;n=request.native
         clock=getattr(time,'CLOCK_UPTIME_RAW',None);self._require(type(clock) is int)
@@ -38,12 +43,16 @@ class StorePrepareInput(_SavedCommandInput):
         self.lease_identity=identity;os.set_inheritable(self.lease,False);self.guard.check();return request
     def bind_operation(self,operation):
         from .local_store_prepare import LocalStorePrepareRun
-        self._require(type(operation) is LocalStorePrepareRun and self.operation is None
+        from .local_store_execute import LocalStoreExecuteRun
+        expected=LocalStorePrepareRun if self.domain is SavedCommandDomain.LocalStorePrepare else LocalStoreExecuteRun
+        self._require(type(operation) is expected and self.operation is None
             and operation.source is self and operation.guard is self.guard and operation.request is self.initial)
         self.operation=operation
     def require_operation(self):
         from .local_store_prepare import LocalStorePrepareRun
-        self._owner();self._require(type(self.operation) is LocalStorePrepareRun and self.operation.source is self
+        from .local_store_execute import LocalStoreExecuteRun
+        expected=LocalStorePrepareRun if self.domain is SavedCommandDomain.LocalStorePrepare else LocalStoreExecuteRun
+        self._owner();self._require(type(self.operation) is expected and self.operation.source is self
             and self.operation.guard is self.guard);return self.operation
     # Identical original OFD checks: no new root open, flock or numeric retry.
     lease_post=LocalHistoryInput.lease_post
@@ -62,6 +71,7 @@ class StorePrepareInput(_SavedCommandInput):
             value[:]=b'\0'*len(value);raise
         finally:self.read_remaining=0
     def exchange(self,event,payload):
+        wire=_protocol(self.domain)
         op=self.require_operation();op.checkpoint()
         self._require(self.reply_step<4 and event==wire.PHASES[self.reply_step] and not self.reading
             and not self.material_pending and not self.buffer)

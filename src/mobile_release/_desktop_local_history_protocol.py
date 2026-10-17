@@ -38,12 +38,12 @@ def root(value):
             and integer(value["gid"], (1 << 32)-1))
     return value
 def candidate_action(value):
-    return type(value) is dict and value.get("action") in {"review-inputs","abandon-inputs","review-prepared"}
+    return type(value) is dict and value.get("action") in {"review-inputs","abandon-inputs","review-prepared","review-execution"}
 def context(value):
     extra={"candidateOperationId"} if candidate_action(value) else set()
     require(type(value) is dict and set(value)=={"projectId","executionMode","action"}|extra
             and token(value["projectId"]) and value["executionMode"]=="local"
-            and value["action"] in {"enroll","verify","review-inputs","abandon-inputs","review-prepared"})
+            and value["action"] in {"enroll","verify","review-inputs","abandon-inputs","review-prepared","review-execution"})
     if extra: require(_uuid(value["candidateOperationId"]))
     return value
 @dataclass(frozen=True)

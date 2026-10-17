@@ -16,17 +16,18 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
 }) {
   const retained = localHistoryOwnerReason(state), op = state.status?.operation;
   const action = state.request?.action ?? 'verify', reason = controller.prepareReason();
-  const labels = { enroll: 'Enroll project', verify: 'Verify history', 'review-inputs': 'Review candidate inputs', 'abandon-inputs': 'Abandon input operation', 'review-prepared': 'Review prepared intent' };
+  const labels = { enroll: 'Enroll project', verify: 'Verify history', 'review-inputs': 'Review candidate inputs', 'abandon-inputs': 'Abandon input operation', 'review-prepared': 'Review prepared intent', 'review-execution': 'Review execution receipt' };
   const consent = {
     enroll: 'Enrollment creates local project history and private Keychain state on this Mac. It does not replace an existing enrollment, build, sign, upload or publish.',
     verify: 'Verify this project’s existing local history against its Mac Keychain state. This does not enroll a project, repair an interrupted release, or authorize publishing.',
+    'review-execution': 'Read this operation’s retained execution receipt and candidate/prepared files against project history and Mac Keychain. This makes no Store call, does not repair the earlier execution’s finality or authorize retrying, and does not confirm current Play state.',
     'review-prepared': 'Read this operation’s retained prepared intent and candidate files against project history and Mac Keychain. This makes no Store call and does not execute, recover or retry a release, or prove that the earlier preparation finished cleanly.',
     'review-inputs': 'Read this operation’s current local inputs and verify them against its project history and Mac Keychain. This does not build, submit or authorize a release, or prove that the earlier build completed cleanly.',
     'abandon-inputs': 'Record this pending or ready input operation as cancelled so another input operation can be prepared. Existing files stay untouched. This does not stop a running build, undo a Store action, delete files or repair uncertain history.',
   };
   const selectedAction = op?.context.action ?? action;
-  const candidate = op?.result?.candidateInputs, prepared = op?.result?.preparedIntent;
-  const choose = (action:'review-inputs'|'abandon-inputs'|'review-prepared',id:string) => {
+  const candidate = op?.result?.candidateInputs, prepared = op?.result?.preparedIntent, execution = op?.result?.executionReceipt;
+  const choose = (action:'review-inputs'|'abandon-inputs'|'review-prepared'|'review-execution',id:string) => {
     if(controller.selectCandidate(action,id))void controller.prepare();
   };
   if (compact && !retained) return null;
@@ -40,7 +41,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
       </details>
       <label>History action <select value={action} disabled={!!retained} onChange={event => controller.setAction(event.target.value === 'enroll' ? 'enroll' : 'verify')}>
         <option value="verify">Verify existing history</option><option value="enroll">Enroll this project for the first time</option>
-        {(action === 'review-inputs' || action === 'abandon-inputs' || action === 'review-prepared') && <option value={action}>{labels[action]}</option>}
+        {(action === 'review-inputs' || action === 'abandon-inputs' || action === 'review-prepared' || action === 'review-execution') && <option value={action}>{labels[action]}</option>}
       </select></label>
       <p>No Store credentials, network access, build tools or release version are required.</p>
       {state.request?.candidateOperationId && <p>Selected operation: <code>{state.request.candidateOperationId}</code>. {labels[action]}.</p>}
@@ -67,6 +68,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
           {op.result!.history.at(-1) === row && ['inputs-pending','inputs-ready'].includes(row.phase) && <button onClick={() => choose('abandon-inputs',row.operationId)}>Review abandonment</button>}
         </div>}
         {!compact && !retained && !state.historical && row.phase === 'prepared' && <button onClick={() => choose('review-prepared',row.operationId)}>Review prepared intent</button>}
+        {!compact && !retained && !state.historical && row.phase === 'settled-success' && <button onClick={() => choose('review-execution',row.operationId)}>Review execution receipt</button>}
       </li>)}</ul>
       {candidate && state.historical && <p>This bundle was reviewed for an earlier project context. Its current files have not been checked for the selected project.</p>}
       {candidate && !state.historical && <div className="notice">
@@ -85,9 +87,18 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
         <p>Store snapshot originally observed at {prepared.observedAt}. It is not a current Store check; the temporary edit may have expired.</p>
         <p>This verifies the current retained files only, not the earlier preparation’s finality or the current working tree. It grants no Execute, Recover, retry or Store authority. Keep all files and history intact.</p>
       </div>}
+      {execution && state.historical && <p>This receipt was reviewed for an earlier project context. Its current files have not been checked for the selected project.</p>}
+      {execution && !state.historical && <div className="notice">
+        <h3>Execution receipt files currently verified</h3>
+        <p>{execution.applicationId} · Version {execution.version.name} · Build {execution.version.build} · Play internal testing</p>
+        <p>Operation: <code>{execution.operationId}</code> · Recorded result: {execution.result}</p>
+        <p>Receipt SHA-256: <code>{execution.receiptSha256}</code></p>
+        <p>Receipt originally observed at {execution.observedAt}. This is not a current Play check or proof of public release.</p>
+        <p>This verifies the current retained files only. It does not establish that the earlier execution’s native cleanup finished, repair an uncertain tail, or grant retry, recovery or promotion authority. Keep all files and history intact.</p>
+      </div>}
       {op.result.candidateInputs === null && <p>{op.context.action === 'abandon-inputs' ? 'The input operation was abandoned. Its files were preserved; no Store action was performed.' : 'No verified ready input bundle was returned. The operation is pending or abandoned; keep its files intact.'}</p>}
       {!compact && <details><summary>Help: review or abandon an input operation?</summary><p>Review checks the saved Android bundle without rebuilding or contacting a Store. If you no longer need a pending or ready input operation, review abandonment and confirm it. Abandonment records cancellation but keeps the files. Only the current pending or ready input operation can be abandoned; uncertain or changed history must be reconciled instead.</p></details>}
-      {!compact && <p>After restarting, Verify history and select a prepared row to inspect its retained intent without Store credentials or network access. Pending or uncertain states are not repaired by this review.</p>}
+      {!compact && <p>After restarting, Verify history and select a prepared or completed execution row to inspect its retained intent or receipt without Store credentials or network access. Pending or uncertain states are not repaired by this review.</p>}
       <p>This is a point-in-time local record, not Store access, publication proof, or permission to retry a release.</p>
     </>}
   </section>;

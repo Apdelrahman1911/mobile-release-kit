@@ -129,6 +129,25 @@ module MobileReleaseKit
         @ios_dispatch_active, @ios_dispatch_state = false, :unreserved
       end
 
+      # Exact original Runtime handoff only; direct Invocation construction,
+      # another Runtime or an environment-shaped Hash cannot install this arm.
+      def bind_local_execution!(runtime,context)
+        origin!
+        raise LifetimeError unless runtime.equal?(StoreLaneRuntime.current_runtime!) && runtime.invocation.equal?(self) &&
+          runtime.local_admission_context.equal?(context) && @resources && @mode == "execute" && @lane == "android_internal_upload" && !@local_execution
+        @local_execution=context
+      end
+      def local_current_validation_request(adapter:)
+        require_upload_continuation!
+        raise LifetimeError unless @local_execution && defined?(AndroidUploadValidation) && adapter.equal?(AndroidUploadValidation) &&
+          StoreLaneRuntime.current_runtime!.local_execution_context.equal?(@local_execution) && @nested.nil? &&
+          @run_deadline_ns && NativeProcessSpawn.monotonic_ns < @run_deadline_ns-NESTED_CLEANUP_NS
+        raw=MobileReleaseKit.canonical_json({"schemaVersion"=>1,"toolchain"=>@local_execution.fetch(:toolchain),
+          "runDeadlineNs"=>(@run_deadline_ns-NESTED_CLEANUP_NS).to_s,"hardDeadlineNs"=>@run_deadline_ns.to_s})
+        raise LifetimeError unless raw.bytesize <= 16*1024
+        raw.freeze
+      end
+
       def origin!
         # A forked/copied reference cannot operate on the parent's invocation.
         raise LifetimeError unless @pid == Process.pid && @thread.equal?(Thread.current)
@@ -189,10 +208,25 @@ module MobileReleaseKit
         origin!
         require_upload_continuation!
         expected = NESTED_ROLES[role]
-        unless expected && @lane == expected[0] && @mode == "execute" &&
+        unless expected && @lane == expected[0] && @mode == "execute" && argv.instance_of?(Array) &&
                MobileReleaseKit.const_defined?(expected[1], false) && adapter.equal?(MobileReleaseKit.const_get(expected[1], false)) &&
                !@nested_launches_closed && @nested.nil? && @run_deadline_ns &&
                monotonic_ns < @run_deadline_ns - NESTED_CLEANUP_NS
+          mark_unknown!(LifetimeError.new)
+          raise_unknown!
+        end
+        # A local registered-tools nomination comes only from this same admitted
+        # Invocation. Shape/argv DATA alone cannot grant a local upload.
+        if role == "current-android" && @local_execution
+          raw = local_current_validation_request(adapter: adapter)
+          unless intent_sha256 == @local_execution.fetch(:digest) &&
+                 argv.count("--intent-sha256") == 1 && argv[argv.index("--intent-sha256") + 1] == intent_sha256 &&
+                 argv.count("--local-operation-intent") == 1 && !argv.include?("--operation-intent") &&
+                 argv.count("--local-registered-tools-json") == 1 && argv[-2, 2] == ["--local-registered-tools-json", raw]
+            mark_unknown!(LifetimeError.new)
+            raise_unknown!
+          end
+        elsif argv.include?("--local-registered-tools-json") || argv.include?("--local-operation-intent")
           mark_unknown!(LifetimeError.new)
           raise_unknown!
         end

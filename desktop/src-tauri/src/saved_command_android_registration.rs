@@ -1615,41 +1615,10 @@ fn registration_base_retained_bytes(document_bytes:usize,control_bytes:usize,run
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 fn registration_retained_bytes(inner:&Inner,registry:&Registry,document:&Arc<()>,checked:&Checked,
     census:&crate::asset_session::AndroidRegistrationCensus<'_>)->Option<usize>{
-    // No hidden source/Review/native disposal or reconciliation in a census.
-    // Prepared/active work is an admission conflict; stable Last is visited.
-    if registry.active.is_some() || registry.prepared.is_some() || registry.recovery_review.is_some()
-        || registry.recovery.is_some() || inner.toolchain.is_some(){return None;}
-    #[cfg(all(test,debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
-        not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer")))]
-    if inner.ios_observation.try_lock().ok()?.is_some(){return None;}
-    #[cfg(all(test,debug_assertions,feature="development-runtime",not(feature="desktop-shell")))]
-    if inner.fixture.try_lock().ok()?.is_some(){return None;}
-    let binding=inner.android_document.try_lock().ok()?;
-    if !binding.as_ref().is_some_and(|bound|bound.as_ptr()==Arc::as_ptr(document)){return None;}
-    let control=inner.android_registration_control.book.try_lock().ok()?;
-    // A settled Review retires its control mirror. A leftover mirror with no
-    // active original is unresolved structure, not spare capacity for a new GO.
-    if control.original.is_some() || ControlSlot::pending(&control) || inner.android_registration_control.is_unknown(){return None;}
-    drop(control);
-    let mut bytes=registration_base_retained_bytes(census.for_originals(document,checked.picker_originals())?,
-        inner.android_registration_control.retained_bytes()?,inner.runtime.android_registration_retained_heap_bytes(document)?,
-        registry.android_sources.retained_data_bytes()?,registry.android_catalog.registration_retained_bytes()?,
-        registry.android_registration.retained_bytes(&checked.snapshot.source)?,checked.retained_bytes()?)?;
-    if inner.android_service_dispatcher.get().is_some(){bytes=bytes.checked_add(arc_bytes::<service_setup::Dispatcher>()?)?;}
-    #[cfg(all(test,debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
-        not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer")))]
-    {bytes=bytes.checked_add(arc_bytes::<()>()?)?;} // Actual retained iOS fixture identity, even when its option is absent.
-    if let Some(last)=&registry.last{
-        let Context::AndroidBuild(context)=&last.context else{return None;};
-        if last.stage.is_some_and(|stage|!matches!(stage,Stage::AndroidBuild(_))){return None;}
-        bytes=bytes.checked_add(last.operation_id.capacity())?.checked_add(last.owner_generation.capacity())?
-            .checked_add(context.retained_heap_bytes()?)?;
-        if let Some(terminal)=&last.result{
-            let Terminal::AndroidBuild(terminal)=terminal else{return None;};
-            bytes=bytes.checked_add(terminal.retained_heap_bytes()?)?;
-        }
-    }
-    (bytes<=OWNED_LIMIT).then_some(bytes)
+    original_owner_retained_bytes(inner,registry,document,
+        census.for_originals(document,checked.picker_originals())?,
+        registry.android_registration.retained_bytes(&checked.snapshot.source)?,checked.retained_bytes()?)
+
 }
 
 #[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
@@ -2126,4 +2095,53 @@ mod lifecycle_book_tests {
         drop(book);
         assert_eq!(gate.work(),Err((wire::Reason::Cancelled,first)));
     }
+}
+
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+fn original_owner_retained_bytes(inner:&Inner,registry:&Registry,document:&Arc<()>,document_bytes:usize,registration_bytes:usize,checked_bytes:usize)->Option<usize>{
+    // No hidden source/Review/native disposal or reconciliation in a census.
+    // Prepared/active work is an admission conflict; stable Last is visited.
+    if registry.active.is_some() || registry.prepared.is_some() || registry.recovery_review.is_some()
+        || registry.recovery.is_some() || inner.toolchain.is_some(){return None;}
+    #[cfg(all(test,debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+        not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer")))]
+    if inner.ios_observation.try_lock().ok()?.is_some(){return None;}
+    #[cfg(all(test,debug_assertions,feature="development-runtime",not(feature="desktop-shell")))]
+    if inner.fixture.try_lock().ok()?.is_some(){return None;}
+    let binding=inner.android_document.try_lock().ok()?;
+    if !binding.as_ref().is_some_and(|bound|bound.as_ptr()==Arc::as_ptr(document)){return None;}
+    let control=inner.android_registration_control.book.try_lock().ok()?;
+    // A settled Review retires its control mirror. A leftover mirror with no
+    // active original is unresolved structure, not spare capacity for a new GO.
+    if control.original.is_some() || ControlSlot::pending(&control) || inner.android_registration_control.is_unknown(){return None;}
+    drop(control);
+    let mut bytes=registration_base_retained_bytes(document_bytes,
+        inner.android_registration_control.retained_bytes()?,inner.runtime.android_registration_retained_heap_bytes(document)?,
+        registry.android_sources.retained_data_bytes()?,registry.android_catalog.registration_retained_bytes()?,
+        registration_bytes,checked_bytes)?;
+    if inner.android_service_dispatcher.get().is_some(){bytes=bytes.checked_add(arc_bytes::<service_setup::Dispatcher>()?)?;}
+    #[cfg(all(test,debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+        not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer")))]
+    {bytes=bytes.checked_add(arc_bytes::<()>()?)?;} // Actual retained iOS fixture identity, even when its option is absent.
+    if let Some(last)=&registry.last{
+        let Context::AndroidBuild(context)=&last.context else{return None;};
+        if last.stage.is_some_and(|stage|!matches!(stage,Stage::AndroidBuild(_))){return None;}
+        bytes=bytes.checked_add(last.operation_id.capacity())?.checked_add(last.owner_generation.capacity())?
+            .checked_add(context.retained_heap_bytes()?)?;
+        if let Some(terminal)=&last.result{
+            let Terminal::AndroidBuild(terminal)=terminal else{return None;};
+            bytes=bytes.checked_add(terminal.retained_heap_bytes()?)?;
+        }
+    }
+    (bytes<=OWNED_LIMIT).then_some(bytes)
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+pub(super) fn execute_owner_census(inner:&Inner,document:&Arc<()>)->Option<(usize,[Option<Arc<crate::asset_session::OriginalWork>>;3])>{
+    if inner.domain!=SavedCommandDomain::AndroidBuild||!inner.android_original_document_matches(Some(document)){return None;}
+    let registry=inner.registry.try_lock().ok()?;
+    // Execute neither consumes nor silently drops an old registration Review.
+    let registration=registry.android_registration.maintenance_retained_bytes()?;
+    let originals=registry.android_sources.census_originals()?;
+    let bytes=original_owner_retained_bytes(inner,&registry,document,0,registration,0)?;
+    Some((bytes,originals))
 }

@@ -278,7 +278,13 @@ def _store_environment(
         env["MOBILE_RELEASE_RECOVERY_RUN_ID"] = request.recovery_run_id
     if request.recovery_confirmation:
         env["MOBILE_RELEASE_RECOVERY_CONFIRMATION"] = request.recovery_confirmation
-    if authority is None:
+    execute=invocation.cancellation._store_execute_source
+    if execute is not None:
+        original=execute.require_operation()
+        if authority is not original.authority or not original.local_environment(request,lane_evidence):
+            raise StoreOperationError("Local execution authority is unavailable")
+        env["MOBILE_RELEASE_CONFIRMATION"]=request.confirmation
+    elif authority is None:
         local=getattr(invocation.cancellation,"_store_prepare_source",None)
         if local is None or not local.require_operation().local_environment(request,lane_evidence):
             raise StoreOperationError("Local preparation authority is unavailable")
@@ -626,7 +632,7 @@ def _run_store_lane(
     # Retain its original private ancestry on the encompassing resource stack
     # through the command, terminal read, file disposal and final scope checks.
     # A point-in-time mkdir (or chmod of existing state) is not that custody.
-    local=getattr(cancellation,"_store_prepare_source",None)
+    local=getattr(cancellation,"_local_store_source",None)
     namespace = resources.enter_context(_app_private_directory(
         receipt_path.parent, app_root=config.root, cancellation=cancellation,exclusive=local is not None))
     if namespace is None:
@@ -741,13 +747,18 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                      operation_intent: Mapping[str, object] | None,
                      lane_evidence: StoreLaneCallEvidence | None,
                      cancellation: DefaultCancellation | None,
-                     invocation: InvocationCustody | None, _local_prepare=None) -> dict[str, object] | StoreLaneReadback:
-    if _local_prepare is not None:
+                     invocation: InvocationCustody | None, _local_prepare=None, _local_execute=None) -> dict[str, object] | StoreLaneReadback:
+    if _local_execute is not None:
+        from .local_store_execute import LocalStoreExecuteRun
+        if _local_prepare is not None or type(_local_execute) is not LocalStoreExecuteRun or not _local_execute.admit_store(config,release,request,lane_evidence,cancellation,invocation):
+            raise StoreOperationError("Local execution requires its original owner")
+    elif _local_prepare is not None:
         from .local_store_prepare import LocalStorePrepareRun
         if type(_local_prepare) is not LocalStorePrepareRun or not _local_prepare.admit_store(config,release,request,lane_evidence,cancellation,invocation):
             raise StoreOperationError("Local preparation requires its original owner")
-    elif cancellation is not None and getattr(cancellation,"_store_prepare_source",None) is not None:
+    elif cancellation is not None and getattr(cancellation,"_local_store_source",None) is not None:
         raise StoreOperationError("Local preparation cannot use the CI route")
+    local=_local_execute or _local_prepare
     borrowed = lane_evidence is not None
     if invocation is not None and not borrowed:
         raise StoreLaneEvidenceError(attempted=False)
@@ -778,29 +789,34 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                 if not request.prepare:
                     if operation_intent is None or request.operation_intent is None:
                         raise StoreOperationError("Store execution requires its authenticated original operation intent")
-                    validate_operation_intent(operation_intent)
+                    if _local_execute is None:validate_operation_intent(operation_intent)
+                    else:
+                        _local_execute._prepared_post()
+                        record._require(operation_intent is _local_execute.intent)
                     intent_path = _repository_path(config, request.operation_intent, "operation intent path")
-                    if load_operation_intent(intent_path) != operation_intent:
+                    if _local_execute is None and load_operation_intent(intent_path) != operation_intent:
                         raise StoreOperationError("operation-intent file differs from the validated authorization")
                 output = Path(record._output)
                 if os.path.lexists(output):
+                    if local is not None:raise StoreOperationError("Local Store outputs are never adopted")
                     if request.prepare:
                         raise StoreOperationError("Store precondition output already exists; it is never renamed or adopted")
                     readback = _raw_readback(record=record, cancellation=guard, config=config, release=release,
                                              request=request, operation_intent=operation_intent)
                 else:
-                    source_environment = dict(os.environ) if _local_prepare is None else _local_prepare.runtime.environment()
-                    authority = workflow_authority(request.stage) if _local_prepare is None else None
-                    tooling_root = resolve_tooling_root() if _local_prepare is None else _local_prepare.runtime.tooling_root
+                    source_environment = (dict(os.environ) if local is None else local.runtime.environment()
+                        if _local_execute is None else _local_execute.runtime_environment())
+                    authority = workflow_authority(request.stage) if local is None else _local_execute.authority if _local_execute is not None else None
+                    tooling_root = resolve_tooling_root() if local is None else local.runtime.tooling_root
                     if tooling_root is None or not _complete_tooling_root(tooling_root):
                         raise StoreOperationError("Pinned shared Fastlane/Gem tooling is unavailable or incomplete")
                     _require_fastlane_bundle(tooling_root, cancellation=guard,
-                        **({"source_environment":source_environment} if _local_prepare is None else {"runtime_context":_local_prepare.runtime}))
+                        **({"source_environment":source_environment} if local is None else {"runtime_context":local.runtime}))
                     material = resources.enter_context(_selected_store_material(config,
-                        values=credential_values_from_environment(source_environment) if _local_prepare is None else _local_prepare.material_values(), platforms=(request.platform,),
+                        values=credential_values_from_environment(source_environment) if local is None else local.material_values(), platforms=(request.platform,),
                         stage="production" if request.stage == "production-submit" else request.stage,
                         invocation=invocation, cancellation=guard, lane_evidence=record,
-                        **({} if _local_prepare is None else {"scratch_parent":_local_prepare.home._path})))
+                        **({} if local is None else {"scratch_parent":local.home._path})))
                     findings = material.validate()
                     if any(item.status in FAILING_STATUSES for item in findings):
                         raise StoreOperationError("Selected Store credential material is missing or invalid")
@@ -811,7 +827,7 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                         operation_intent=operation_intent)
                     raw = _decode_store_document(content)
                     document = (validate_store_precondition(raw, stage=request.stage, platform=request.platform)
-                                if request.prepare else validate_store_receipt(raw, config=config, release=release,
+                                if request.prepare else _local_execute.validate_receipt(content) if _local_execute is not None else validate_store_receipt(raw, config=config, release=release,
                                     stage=request.stage, platform=request.platform, operation_intent=operation_intent,
                                     recovery_run_id=request.recovery_run_id))
                     readback = StoreLaneReadback(record, output, content, document)

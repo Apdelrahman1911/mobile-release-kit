@@ -174,7 +174,11 @@ impl ServiceDomain{
                     self.registration.prepare_binding(self.account,self.nonce,
                         registration::Bounds{origin:bounds.origin,work:bounds.work,hard:bounds.hard},now)
                 }else{
-                    let role=if bounds.role==prepare::Role::Catalog{query::Role::Catalog}else{query::Role::Start};
+                    let role=match bounds.role{
+                        prepare::Role::Catalog=>query::Role::Catalog,prepare::Role::Start=>query::Role::Start,
+                        prepare::Role::LocalStoreExecute=>query::Role::LocalStoreExecute,
+                        prepare::Role::Registration=>return None, // Handled above, never a query role.
+                    };
                     self.query.prepare_binding(self.account,self.nonce,query::Bounds{role,origin:bounds.origin,work:bounds.work,hard:bounds.hard},now)
                 };
                 if !bound{state.first.unknown();state.setup_failed=true;self.failure_at(now,true);}

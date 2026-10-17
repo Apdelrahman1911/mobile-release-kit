@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ from .android import validate_aab
 from .config import load_config
 from .credentials import artifact_validation_environment
 from .errors import MobileReleaseError, ValidationError
+from .local_release_intent import MAX_LOCAL_INTENT_BYTES, decode_local_operation_intent
 from .provenance import load_operation_intent, sha256_file, validate_operation_intent
 from .reporting import FAILING_STATUSES, Status
 
@@ -26,6 +28,50 @@ from .reporting import FAILING_STATUSES, Status
 def validate_current_upload(
     *, app_root: Path, config_path: Path, intent_path: Path,
     aab_path: Path, intent_sha256: str,
+) -> dict[str, Any]:
+    return _validate_current_upload(app_root=app_root, config_path=config_path,
+        intent_path=intent_path, aab_path=aab_path, intent_sha256=intent_sha256, local=False)
+
+
+def validate_current_local_upload(
+    *, app_root: Path, config_path: Path, intent_path: Path,
+    aab_path: Path, intent_sha256: str, registered_tools: str | None = None,
+) -> dict[str, Any]:
+    """Current eligibility only; the caller independently owns local authority."""
+    return _validate_current_upload(app_root=app_root, config_path=config_path,
+        intent_path=intent_path, aab_path=aab_path, intent_sha256=intent_sha256, local=True, registered_tools=registered_tools)
+
+
+def _local_intent(path: Path) -> dict[str, Any]:
+    def identity(value: os.stat_result) -> tuple[int, ...]:
+        return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+    # open() owns acquisition as well as its sole close; no loose fdopen handoff.
+    def opener(name: str, flags: int) -> int:
+        return os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= MAX_LOCAL_INTENT_BYTES:
+        raise ValidationError("current-upload local intent file is invalid")
+    original = identity(before)
+    with open(path, "rb", opener=opener) as source:
+        if identity(os.fstat(source.fileno())) != original:
+            raise ValidationError("current-upload local intent original changed")
+        raw = source.read(MAX_LOCAL_INTENT_BYTES + 1)
+        if (len(raw) != before.st_size or len(raw) > MAX_LOCAL_INTENT_BYTES
+                or identity(os.fstat(source.fileno())) != original
+                or identity(path.lstat()) != original):
+            raise ValidationError("current-upload local intent original changed")
+    # A read or close failure never becomes an eligible record.
+    if identity(path.lstat()) != original:
+        raise ValidationError("current-upload local intent original changed")
+    return decode_local_operation_intent(raw)
+
+
+def _validate_current_upload(
+    *, app_root: Path, config_path: Path, intent_path: Path,
+    aab_path: Path, intent_sha256: str, local: bool, registered_tools: str | None = None,
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{64}", intent_sha256):
         raise ValidationError("current-upload operation intent digest is invalid")
@@ -37,8 +83,8 @@ def validate_current_upload(
     for path in (intent_path, aab_path):
         if not path.is_absolute() or config.project_path(str(path)) != path or path.is_symlink() or not path.is_file():
             raise ValidationError("current-upload inputs must be regular files inside the application root")
-    document = load_operation_intent(intent_path)
-    intent = validate_operation_intent(document)
+    document = _local_intent(intent_path) if local else load_operation_intent(intent_path)
+    intent = document if local else validate_operation_intent(document)
     if document["integrity"]["sha256"] != intent_sha256:
         raise ValidationError("current-upload intent differs from the executor's authenticated intent")
     if intent["stage"] != "candidate" or intent["platform"] != "android":
@@ -58,10 +104,18 @@ def validate_current_upload(
     before_hash = sha256_file(aab_path)
     if aab_path.name != record["fileName"] or aab_path.stat().st_size != record["size"] or before_hash != record["sha256"]:
         raise ValidationError("current-upload AAB differs from the original intent's exact artifact")
-    findings = validate_aab(
-        aab_path, expected_application_id=section["applicationId"], release=release,
-        expected_fingerprint=fingerprint, require_tools=True, check_signer=True,
-    )
+    if registered_tools is not None:
+        if not local:
+            raise ValidationError("registered current-AAB requires a local intent")
+        from .android_current_tools_macos import registered_current_tools
+        with registered_current_tools(registered_tools) as tools:
+            findings = tools.validate(aab_path, expected_application_id=section["applicationId"],
+                release=release, expected_fingerprint=fingerprint)
+    else:
+        findings = validate_aab(
+            aab_path, expected_application_id=section["applicationId"], release=release,
+            expected_fingerprint=fingerprint, require_tools=True, check_signer=True,
+        )
     required = {"android.aab.structure", "android.aab.manifest", "android.aab.signature", "android.aab.signer"}
     if any(item.status in FAILING_STATUSES or item.status == Status.SKIP for item in findings) or not required <= {item.code for item in findings if item.status == Status.PASS}:
         raise ValidationError("new AAB upload is ineligible: complete current bundletool/jarsigner/keytool validation is required")
@@ -87,15 +141,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--app-root", type=Path, required=True)
     parser.add_argument("--config-path", type=Path, required=True)
-    parser.add_argument("--operation-intent", type=Path, required=True)
+    intent_input = parser.add_mutually_exclusive_group(required=True)
+    intent_input.add_argument("--operation-intent", type=Path)
+    intent_input.add_argument("--local-operation-intent", type=Path)
+    parser.add_argument("--local-registered-tools-json")
     parser.add_argument("--aab", type=Path, required=True)
     parser.add_argument("--intent-sha256", required=True)
     args = parser.parse_args(argv)
+    if args.local_registered_tools_json is not None and args.local_operation_intent is None:
+        parser.error("registered tools require --local-operation-intent")
     try:
-        result = validate_current_upload(
+        validate = validate_current_local_upload if args.local_operation_intent is not None else validate_current_upload
+        result = validate(
             app_root=args.app_root, config_path=args.config_path,
-            intent_path=args.operation_intent, aab_path=args.aab,
+            intent_path=args.local_operation_intent if args.local_operation_intent is not None else args.operation_intent, aab_path=args.aab,
             intent_sha256=args.intent_sha256,
+            **({"registered_tools": args.local_registered_tools_json} if args.local_operation_intent is not None else {}),
         )
     except MobileReleaseError as error:
         print(f"Current AAB upload validation failed: {error}", file=sys.stderr)

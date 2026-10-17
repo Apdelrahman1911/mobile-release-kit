@@ -1,9 +1,10 @@
+import type { LocalExecutionReceipt } from './localStoreExecuteTypes.ts';
 import type { LocalPreparedIntent } from './localStorePrepareTypes.ts';
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
-export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs' | 'review-prepared';
+export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution';
 export type PrepareLocalHistory = { projectId: string; executionMode: 'local' } & (
   { action: 'enroll' | 'verify'; candidateOperationId?: never } |
-  { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared'; candidateOperationId: string }
+  { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution'; candidateOperationId: string }
 );
 export interface LocalCandidateInputs {
   operationId: string; candidateSha256: string; sourceCommit: string; sourceTree: string;
@@ -14,6 +15,9 @@ export interface LocalCandidateInputs {
 export interface LocalPreparedIntentReview extends LocalPreparedIntent {
   observation: 'current-prepared-files-only'; priorPrepareFinality: 'not-established';
 }
+export interface LocalExecutionReceiptReview extends LocalExecutionReceipt {
+  observation: 'current-execution-files-only'; priorExecutionFinality: 'not-established';
+}
 export interface LocalHistoryIdentity { operationId: string; ownerGeneration: string }
 export type LocalHistoryReason = 'none'|'cancelled'|'context-changed'|'document-lost'|'shutdown'|'timed-out'|'protocol-error'|'runtime-unavailable'|'intent-expired'|'stale-intent'|'saved-source-changed'|'saved-source-invalid'|'credentials-unavailable'|'query-prerequisites'|'command-incomplete'|'cleanup-unknown'|'journal-unavailable'|'enrollment-exists'|'recovery-required'|'project-busy';
 export type LocalJournalPhase = 'inputs-pending'|'inputs-ready'|'prepare-pending'|'prepared'|'execute-pending'|'settled-success'|'settled-failure'|'reconciliation-required';
@@ -23,6 +27,7 @@ export interface LocalHistoryResult {
   limitations: ['no-store-authority', 'no-build-or-publishing', 'keychain-intact-rollback-boundary'];
   candidateInputs?: LocalCandidateInputs | null;
   preparedIntent?: LocalPreparedIntentReview;
+  executionReceipt?: LocalExecutionReceiptReview;
 }
 export interface LocalHistoryOperation extends LocalHistoryIdentity {
   context: PrepareLocalHistory; phase: OfflinePreflightPhase; intentUsable: boolean;

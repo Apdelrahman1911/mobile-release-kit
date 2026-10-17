@@ -180,12 +180,12 @@ def run_owned(
                     execution_scope=execution_scope, journal_binding=journal_binding)
         if cleanup:
             raise ValueError("Saved command cleanup has no original signed account owner")
-        if domain in (SavedCommandDomain.LocalStorePreflight,SavedCommandDomain.LocalStorePrepare):
+        if domain in (SavedCommandDomain.LocalStorePreflight,SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute):
             source.require_operation().command_arguments(argv, capture=capture, evidence=_evidence)
         timeout, output_limit = source.command_limits(timeout, capture, output_limit)
-        if domain is SavedCommandDomain.LocalStorePrepare and _evidence is not None:
+        if domain in (SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute) and _evidence is not None:
             if type(_evidence) is not CommandCallEvidence:raise ValueError("Store prepare requires its original lane")
-            _evidence._cap_store_prepare(source,timeout=timeout)
+            _evidence._cap_local_store(source,timeout=timeout)
         if domain is SavedCommandDomain.LocalStorePreflight and _evidence is not None:
             if type(_evidence) is not CommandCallEvidence:
                 raise ValueError("Store access requires its original readback record")

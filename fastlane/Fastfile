@@ -15,6 +15,7 @@ require_relative "apple_create_retry"
 require_relative "ios_upload_validation"
 require_relative "android_upload_validation"
 require_relative "store_document"
+require_relative "store_lane_runtime"
 
 PLAY_SCOPE = "https://www.googleapis.com/auth/androidpublisher"
 IOS_PLATFORM = Spaceship::ConnectAPI::Platform::IOS
@@ -87,12 +88,16 @@ def prepare_mode?
 end
 
 def operation_intent
+  local = MobileReleaseKit::StoreLaneRuntime.local_execution_context
   return @operation_intent if @operation_intent
-
+  if local
+    payload,digest=local.fetch(:payload),local.fetch(:digest)
+  else
   payload, digest = MobileReleaseKit.operation_intent(
     app_root,
     required_env("MOBILE_RELEASE_OPERATION_INTENT_PATH"),
   )
+  end
   expected_operation = required_env("MOBILE_RELEASE_OPERATION")
   unless payload["stage"].to_s != "" && payload["platform"] == required_env("MOBILE_RELEASE_PLATFORM")
     UI.user_error!("Operation intent stage/platform is invalid")
@@ -183,6 +188,7 @@ end
 def write_receipt(operation:, platform:, identity:, result:, extra:)
   intent = operation_intent
   version = release_version
+  local = MobileReleaseKit::StoreLaneRuntime.local_execution_context
   receipt = {
     schemaVersion: 3,
     operation: operation,
@@ -193,9 +199,16 @@ def write_receipt(operation:, platform:, identity:, result:, extra:)
     observedAt: Time.now.utc.iso8601,
     result: result,
     operationIntentSha256: intent.fetch(:digest),
-    authorizedBy: intent.fetch(:payload).fetch("authorizedBy"),
-    executedBy: MobileReleaseKit.execution_authority(ENV),
+    authorizedBy: local ? nil : intent.fetch(:payload).fetch("authorizedBy"),
+    executedBy: local ? local.fetch(:authority) : MobileReleaseKit.execution_authority(ENV),
   }.merge(extra)
+  if local
+    payload=local.fetch(:payload)
+    receipt.delete(:authorizedBy)
+    receipt.merge!(schemaVersion:1,documentType:"local-store-execution-receipt",origin:"local-desktop",
+      project:payload.fetch("project"),operationId:payload.fetch("operationId"),candidateSha256:payload.fetch("candidateSha256"),
+      preparedBy:payload.fetch("preparedBy"),executedBy:local.fetch(:authority))
+  end
   MobileReleaseKit::StoreLaneLifetime.require_upload_continuation!
   atomic_store_document(receipt, label: "a Store receipt")
 end
@@ -668,6 +681,10 @@ end
 # THIS process dispatched. Adoption always additionally proves the complete
 # authenticated intent target and the Store bundle digest in a fresh edit.
 def play_prior_execution?
+  # This first local action cannot adopt an old target/bundle from a copied
+  # diagnostic. Same-invocation commit ambiguity is reconciled by the existing
+  # uploader's own guarded readback, not this prior-invocation predicate.
+  return false if MobileReleaseKit::StoreLaneRuntime.local_execution_context
   authorized = operation_intent.fetch(:payload).fetch("authorizedBy")
   executed = MobileReleaseKit.execution_authority(ENV)
   return true if authorized["runId"] != executed["runId"] || authorized["attempt"] != executed["attempt"]
@@ -960,7 +977,9 @@ rescue MobileReleaseKit::ContractError => e
 end
 
 def validate_current_android_upload!(aab)
-  MobileReleaseKit::AndroidUploadValidation.current!(
+  local=MobileReleaseKit::StoreLaneRuntime.local_execution_context
+  adapter=local ? :current_local! : :current!
+  MobileReleaseKit::AndroidUploadValidation.public_send(adapter,
     python: required_env("MOBILE_RELEASE_VALIDATION_PYTHON"),
     module_root: required_env("MOBILE_RELEASE_VALIDATION_MODULE_ROOT"),
     app_root: app_root, config_path: required_env("MOBILE_RELEASE_CONFIG_PATH"),
