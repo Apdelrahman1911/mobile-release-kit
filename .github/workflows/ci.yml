@@ -94,10 +94,15 @@ jobs:
           WORK_ROOT: ${{ steps.work.outputs.root }}
         run: |
           set -euo pipefail
+          run_uid=$(id -u); run_gid=$(id -g)
+          [[ "$run_uid" =~ ^[1-9][0-9]*$ && "$run_gid" =~ ^[1-9][0-9]*$ ]]
           ruby_prefix=$(ruby -rrbconfig -e 'puts RbConfig::CONFIG.fetch("prefix")')
           [[ "$ruby_prefix" == /opt/hostedtoolcache/Ruby/* && -x "$ruby_prefix/bin/ruby" ]]
           # Show only public tool permissions if a hosted image changes them.
           stat -c '%a %u:%g %n' "$ruby_prefix" "$ruby_prefix/bin" "$ruby_prefix/bin/ruby"
+          /usr/bin/namei -l -- "$ruby_prefix/bin/ruby"
+          # Retain the SDK owner's nonroot UID; read-only mounts, namespaces and
+          # capability removal provide confinement, not a foreign workload UID.
           # Install needs network; the actual tests get none, no runner HOME,
           # no secrets, and no writable source/dependencies. No native suites.
           sudo -n /usr/bin/timeout --kill-after=5 180 /usr/bin/bwrap \
@@ -111,18 +116,19 @@ jobs:
             --ro-bind "$GITHUB_WORKSPACE" /work --chdir /work --clearenv \
             --setenv PATH "$ruby_prefix/bin:/usr/bin:/bin" --setenv LANG C.UTF-8 \
             --setenv MRK_TEST_RUBY "$ruby_prefix/bin/ruby" \
+            --setenv MRK_TEST_UID "$run_uid" --setenv MRK_TEST_GID "$run_gid" \
             --setenv HOME /tmp/home --setenv TMPDIR /tmp --setenv CI true \
             --setenv GEM_HOME "$WORK_ROOT/bootstrap" --setenv GEM_PATH "$WORK_ROOT/bootstrap" \
             --setenv BUNDLE_PATH "$WORK_ROOT/gems" --setenv BUNDLE_GEMFILE /work/Gemfile \
             --setenv BUNDLE_USER_HOME /tmp/bundle --setenv BUNDLE_IGNORE_CONFIG 1 \
             --setenv BUNDLE_FROZEN true --setenv BUNDLE_DEPLOYMENT true \
             --setenv FASTLANE_SKIP_UPDATE_CHECK 1 --setenv FASTLANE_OPT_OUT_USAGE 1 \
-            /usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups \
+            /usr/bin/setpriv --reuid="$run_uid" --regid="$run_gid" --clear-groups \
             --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
             /bin/bash -c '
               set -euo pipefail; umask 077; mkdir /tmp/home
               ulimit -c 0; ulimit -n 256; ulimit -v 1572864; ulimit -t 120
-              [[ "$(id -u)" == 65534 && "$(id -g)" == 65534 ]]
+              [[ "$(id -u)" == "$MRK_TEST_UID" && "$(id -g)" == "$MRK_TEST_GID" ]]
               grep -Eq "^CapEff:[[:space:]]+0000000000000000$" /proc/self/status
               grep -Eq "^CapBnd:[[:space:]]+0000000000000000$" /proc/self/status
               "$MRK_TEST_RUBY" -rrbconfig -e '\''abort "Wrong test Ruby" unless RUBY_VERSION == "3.3.12" && File.realpath(RbConfig.ruby) == File.realpath(ENV.fetch("MRK_TEST_RUBY"))'\''
