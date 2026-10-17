@@ -1012,24 +1012,7 @@ jobs:
           [[ "$(/usr/bin/uname -m)" == "$COMPONENT_ARCH" && "$(/usr/bin/id -u)" != 0 ]] || exit 1
           root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-ios-tools.XXXXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
-      - name: Observe selected public Defaults resources before fixture changes
-        id: resources_before
-        timeout-minutes: 2
-        shell: bash
-        env:
-          COMPONENT: ios-tools
-          WORK_ROOT: ${{ steps.work.outputs.root }}
-        run: /usr/bin/python3 -I -B desktop/tools/observe_ci_xcode_resources.py before
       - *protected-xcode
-      - name: Observe the same public resources after fixture changes
-        id: resources_after
-        if: always() && steps.resources_before.outcome == 'success'
-        timeout-minutes: 2
-        shell: bash
-        env:
-          COMPONENT: ios-tools
-          WORK_ROOT: ${{ steps.work.outputs.root }}
-        run: /usr/bin/python3 -I -B desktop/tools/observe_ci_xcode_resources.py after
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         id: python
         with:
