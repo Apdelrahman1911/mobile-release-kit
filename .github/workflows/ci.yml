@@ -67,6 +67,9 @@ jobs:
           [[ "$(id -u)" != 0 ]]
           root=$(mktemp -d "$RUNNER_TEMP/mrk-play-tests.XXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          # Only public test dependencies live here. The later user namespace
+          # needs directory traversal, not directory listing or write access.
+          chmod 0711 "$root"
           mkdir "$root/home" "$root/bootstrap" "$root/gems"
       - name: Install only the frozen test dependencies
         shell: bash
@@ -117,9 +120,9 @@ jobs:
               ulimit -c 0; ulimit -n 256; ulimit -v 1572864; ulimit -t 120
               [[ "$(id -u)" != 0 ]]
               ruby -rbundler/setup tests/workflow/test_play_lanes.rb | tee /tmp/play.log
-              grep -Eq "^52 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/play.log
+              grep -Eq "^55 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/play.log
               ruby -rbundler/setup tests/workflow/test_local_store_execution_runtime.rb | tee /tmp/local.log
-              grep -Eq "^4 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/local.log
+              grep -Eq "^7 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/local.log
             '
       - name: Remove only this job's disposable dependencies and cache
         if: always() && steps.work.outputs.root != ''

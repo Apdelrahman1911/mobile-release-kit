@@ -15,6 +15,7 @@ module MobileReleaseKit
     PREFIX = "MOBILE_RELEASE_STORE_LANE_"
     PRIVATE_KEYS = %w[NONCE ROOT ROOT_ID CLOCK RUN_DEADLINE_NS HARD_DEADLINE_NS].map { |key| PREFIX + key }.freeze
     LOCAL_EXECUTE_KEY = PREFIX + "LOCAL_EXECUTE"
+    LOCAL_RECONCILE_KEY = PREFIX + "LOCAL_RECONCILE"
     MAX_TIME = (1 << 63) - 1
     MAX_ID = (1 << 64) - 1
     RUN_NS = 3_600_000_000_000
@@ -74,7 +75,7 @@ module MobileReleaseKit
     # outside the original admitted Runtime cannot choose a local decoder.
     def self.local_execution_context
       unless @runtime
-        raise Error.new(:local_outside_runtime) if ENV.key?(LOCAL_EXECUTE_KEY)
+        raise Error.new(:local_outside_runtime) if ENV.key?(LOCAL_EXECUTE_KEY) || ENV.key?(LOCAL_RECONCILE_KEY)
         return nil
       end
       @runtime.local_execution_context
@@ -288,7 +289,9 @@ module MobileReleaseKit
         raise Error.new(:lane) unless lane.instance_of?(String) && LANES.include?(lane)
         @environment = ENV.to_h.transform_values { |value| value.dup.freeze }.freeze
         env = @environment
-        private_keys = PRIVATE_KEYS + (env.key?(LOCAL_EXECUTE_KEY) ? [LOCAL_EXECUTE_KEY] : [])
+        local_keys = [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY].select { |key| env.key?(key) }
+        raise Error.new(:environment) if local_keys.length > 1
+        private_keys = PRIVATE_KEYS + local_keys
         unless env.keys.select { |key| key.start_with?(PREFIX) }.sort == private_keys.sort &&
                env["MOBILE_RELEASE_OPERATION"] == lane && %w[prepare execute].include?(env["MOBILE_RELEASE_STORE_MODE"])
           raise Error.new(:environment)
@@ -335,22 +338,28 @@ module MobileReleaseKit
         @resources = StoreLaneResources::Inventory.new(invocation: @invocation, binding: @binding)
         @invocation.bind_resources!(@resources)
         @resources.admit!
-        admit_local_execution! if env.key?(LOCAL_EXECUTE_KEY)
+        admit_local_execution! if env.key?(LOCAL_EXECUTE_KEY) || env.key?(LOCAL_RECONCILE_KEY)
       end
 
       def admit_local_execution!
         raise Error.new(:local_reused) if @local_execution || @binding.fetch("lane") != "android_internal_upload" || @binding.fetch("mode") != "execute"
         require_relative "release_support"
-        raw=@environment.fetch(LOCAL_EXECUTE_KEY)
+        # Exact private transport, never authority selected from a decoded
+        # purpose or an ambient fallback. Execute keeps its original grammar.
+        keys=[LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY].select { |key| @environment.key?(key) }
+        raise Error.new(:local_shape) unless keys.length == 1
+        recover=keys.first == LOCAL_RECONCILE_KEY
+        raw=@environment.fetch(keys.first)
         raise Error.new(:local_size) unless raw.bytesize <= 16*1024
         value=MobileReleaseKit.strict_json(raw,label:"local execution context")
-        raise Error.new(:local_shape) unless value.instance_of?(Hash) && value.keys.sort == %w[authority expectedIntentSha256 toolchain].sort
+        fields=recover ? %w[authority expectedIntentSha256] : %w[authority expectedIntentSha256 toolchain]
+        raise Error.new(:local_shape) unless value.instance_of?(Hash) && value.keys.sort == fields.sort
         path=MobileReleaseKit.safe_path(@environment.fetch("MOBILE_RELEASE_APP_ROOT"),@environment.fetch("MOBILE_RELEASE_OPERATION_INTENT_PATH"))
         raise Error.new(:local_intent) unless File.file?(path) && !File.symlink?(path) && File.size(path) <= 2*1024*1024
         body=File.binread(path,2*1024*1024+1)
         payload,digest=MobileReleaseKit.local_operation_intent(body,expected_sha256:value.fetch("expectedIntentSha256"))
         authority=MobileReleaseKit.local_execution_authority(MobileReleaseKit.canonical_json(value.fetch("authority")),
-          intent_content:body,expected_intent_sha256:digest,purpose:"execute")
+          intent_content:body,expected_intent_sha256:digest,purpose:recover ? "recover" : "execute")
         raise Error.new(:local_binding) unless payload.fetch("confirmation") == @environment.fetch("MOBILE_RELEASE_CONFIRMATION") &&
           payload.fetch("application").fetch("id") == @environment.fetch("MOBILE_RELEASE_APP_IDENTITY") &&
           payload.fetch("version").fetch("marketing") == @environment.fetch("MOBILE_RELEASE_MARKETING_VERSION") &&
@@ -358,7 +367,8 @@ module MobileReleaseKit
         # This tuple was emitted only by the exact typed native-backed Python
         # owner and sealed with ALL command environment bytes. It is comparison
         # DATA, not a new provider/consent grant or a caller runtime factory.
-        context={payload:payload,digest:digest,authority:authority,toolchain:value.fetch("toolchain")}
+        context={payload:payload,digest:digest,authority:authority}
+        context[:toolchain]=value.fetch("toolchain") unless recover
         freeze_local(context);@local_execution=context
         @invocation.bind_local_execution!(self,context)
       end
@@ -369,7 +379,7 @@ module MobileReleaseKit
       end
 
       def check_environment!
-        keys = PRIVATE_KEYS + [LOCAL_EXECUTE_KEY] + %w[MOBILE_RELEASE_OPERATION MOBILE_RELEASE_STORE_MODE MOBILE_RELEASE_STORE_RECEIPT_PATH
+        keys = PRIVATE_KEYS + [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY] + %w[MOBILE_RELEASE_OPERATION MOBILE_RELEASE_STORE_MODE MOBILE_RELEASE_STORE_RECEIPT_PATH
           MOBILE_RELEASE_ASC_APP_ID MOBILE_RELEASE_ASC_KEY_ID MOBILE_RELEASE_IOS_IPA_PATH TMPDIR TMP TEMP HOME]
         if @local_execution
           keys += %w[MOBILE_RELEASE_OPERATION_INTENT_PATH MOBILE_RELEASE_APP_ROOT MOBILE_RELEASE_CONFIG_PATH

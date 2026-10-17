@@ -978,6 +978,7 @@ end
 
 def validate_current_android_upload!(aab)
   local=MobileReleaseKit::StoreLaneRuntime.local_execution_context
+  UI.user_error!("Local reconciliation cannot validate a new upload") if local && local.fetch(:authority).fetch("purpose") == "recover"
   adapter=local ? :current_local! : :current!
   MobileReleaseKit::AndroidUploadValidation.public_send(adapter,
     python: required_env("MOBILE_RELEASE_VALIDATION_PYTHON"),
@@ -1752,7 +1753,15 @@ lane :android_internal_upload do
   end
   intent_snapshot = require_operation_intent!("android_internal_upload", "android")
   classified = classify_play_intent_state("candidate", intent_snapshot)
-  if classified.fetch(:phase) == :target
+  local = MobileReleaseKit::StoreLaneRuntime.local_execution_context
+  if local && local.fetch(:authority).fetch("purpose") == "recover"
+    # A new readback action, NOT the ordinary recovery branch below: that
+    # branch may replay mapping and the :before branch may upload/commit.
+    # Classification has already positively deleted its own temporary edit.
+    UI.user_error!("Local reconciliation requires the complete authenticated internal target") unless classified.fetch(:phase) == :target
+    result = "reconciled"
+    state_evidence = play_intent_state_evidence("candidate", intent_snapshot, classified, mode: "recovery")
+  elsif classified.fetch(:phase) == :target
     require_play_recovery_dispatch!
     replay_recovered_play_mapping!(intent_snapshot)
     classified = classify_play_intent_state("candidate", intent_snapshot)

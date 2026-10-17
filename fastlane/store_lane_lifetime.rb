@@ -139,7 +139,8 @@ module MobileReleaseKit
       end
       def local_current_validation_request(adapter:)
         require_upload_continuation!
-        raise LifetimeError unless @local_execution && defined?(AndroidUploadValidation) && adapter.equal?(AndroidUploadValidation) &&
+        raise LifetimeError unless @local_execution && @local_execution.fetch(:authority).fetch("purpose") == "execute" &&
+          defined?(AndroidUploadValidation) && adapter.equal?(AndroidUploadValidation) &&
           StoreLaneRuntime.current_runtime!.local_execution_context.equal?(@local_execution) && @nested.nil? &&
           @run_deadline_ns && NativeProcessSpawn.monotonic_ns < @run_deadline_ns-NESTED_CLEANUP_NS
         raw=MobileReleaseKit.canonical_json({"schemaVersion"=>1,"toolchain"=>@local_execution.fetch(:toolchain),

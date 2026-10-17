@@ -251,6 +251,78 @@ class PlayReleaseLanesTest < Minitest::Test
     assert_empty @service.mutations;assert_no_receipt
   end
 
+  def local_reconcile_context
+    context=local_execution_context
+    context[:authority]=context.fetch(:authority).merge("purpose"=>"recover")
+    MobileReleaseKit.local_execution_authority(MobileReleaseKit.canonical_json(context.fetch(:authority)),
+      intent_content:File.binread(File.join(@root,"intent.json")),expected_intent_sha256:context.fetch(:digest),purpose:"recover")
+    # These are dangerous ordinary recovery/mutation callsites, not provider
+    # fakes. Their invocation would fail this actual Fastfile route immediately.
+    %i[play_prior_execution? require_play_recovery_dispatch! replay_recovered_play_mapping!
+       guarded_play_upload validate_current_android_upload!].each do |name|
+      @fastfile.define_singleton_method(name) { |*_, **_| raise "Reconcile reached forbidden #{name}" }
+    end
+    ENV.delete("MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON")
+    context
+  end
+
+  def test_local_reconcile_observes_full_target_without_replaying_mapping_or_old_journal
+    prepare("candidate",mapping:true);context=local_reconcile_context;target_state!
+    before=@service.clone(@service.state);start=@service.requests.length
+    journal=File.join(@root,"journal.json");File.binwrite(journal,"old unknown attempt is not recovery authority")
+    old=[File.stat(journal).ino,File.binread(journal)]
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) { execute }
+    assert_equal before,@service.state
+    assert_empty @service.mutations;assert_empty @service.commits;assert_empty @validation_calls;assert_empty @service.edits
+    calls=@service.requests.drop(start)
+    assert_equal 1,calls.count { |r| r[:method]==:post && r[:path].end_with?("/edits") }
+    assert_equal 1,calls.count { |r| r[:method]==:delete }
+    assert_equal old,[File.stat(journal).ino,File.binread(journal)]
+    assert_equal "local-store-execution-receipt",receipt.fetch("documentType")
+    assert_equal context.fetch(:authority),receipt.fetch("executedBy")
+    assert_equal "recover",receipt.dig("executedBy","purpose")
+    assert_equal "reconciled",receipt.fetch("result")
+    assert_equal "recovery",receipt.dig("storeState","mode")
+    refute receipt.fetch("storeState").key?("mutationEditId")
+    refute receipt.key?("authorizedBy")
+  end
+
+  def test_local_reconcile_before_bundle_only_and_conflict_never_mutate_or_accept_receipt
+    %i[before bundle_only foreign_bundle unrelated_track].each do |state|
+      reset_case;prepare("candidate",mapping:true);context=local_reconcile_context
+      @service.add_bundle(@aab) if state==:bundle_only
+      if state==:foreign_bundle
+        target_state!;@service.state.fetch("bundles").find { |b| b["versionCode"]==200 }["sha256"]="e"*64
+      elsif state==:unrelated_track
+        target_state!;@service.state.fetch("tracks").fetch("internal").fetch("releases").first["name"]="another operator"
+      end
+      before=@service.clone(@service.state);start=@service.requests.length
+      MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) do
+        assert_raises(FastlaneCore::Interface::FastlaneError,state.to_s) { execute }
+      end
+      assert_equal before,@service.state
+      assert_empty @service.mutations;assert_empty @service.commits;assert_empty @validation_calls
+      assert_empty @service.edits;assert_no_receipt
+      assert_equal 1,@service.requests.drop(start).count { |r| r[:method]==:delete }
+    end
+  end
+
+  def test_local_reconcile_edit_delete_failure_or_lost_return_never_accepts_receipt
+    %i[before_request after_request].each do |hook|
+      reset_case;prepare("candidate");context=local_reconcile_context;target_state!
+      before=@service.clone(@service.state);start=@service.requests.length
+      @service.public_send("#{hook}=",lambda { |row| raise IOError,"synthetic uncertain delete" if row[:method]==:delete })
+      MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) do
+        assert_raises(IOError) { execute }
+      end
+      assert_equal before,@service.state
+      assert_empty @service.mutations;assert_empty @service.commits;assert_empty @validation_calls;assert_no_receipt
+      calls=@service.requests.drop(start)
+      assert_equal 1,calls.count { |r| r[:method]==:post && r[:path].end_with?("/edits") }
+      assert_equal 1,calls.count { |r| r[:method]==:delete }
+    end
+  end
+
   def test_candidate_prepare_is_read_only_and_real_supply_preserves_all_track_records
     prepare("candidate")
     assert_empty @service.mutations

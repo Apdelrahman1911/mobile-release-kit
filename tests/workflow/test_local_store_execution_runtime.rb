@@ -91,6 +91,62 @@ class LocalStoreExecutionRuntimeTest < Minitest::Test
       runtime,_=model(**arguments);assert_raises(R::Error) { runtime.send(:admit_local_execution!) }
     end
   end
+  def reconcile_transport
+    ENV.delete(KEY)
+    @authority=@authority.merge('purpose'=>'recover')
+    ENV[R::LOCAL_RECONCILE_KEY]=M.canonical_json({'authority'=>@authority,'expectedIntentSha256'=>@digest})
+  end
+  def test_reconcile_admits_only_original_readback_transport_without_upload_tools
+    reconcile_transport
+    assert_raises(R::Error) { R.local_execution_context }
+    runtime,invocation=model;admit(runtime)
+    M::NativeProcessSpawn.stub(:monotonic_ns,1) do
+      context=R.local_execution_context
+      assert_equal @authority,context.fetch(:authority)
+      assert_equal [:authority,:digest,:payload],context.keys.sort
+      assert_same context,invocation.instance_variable_get(:@local_execution)
+      assert context.frozen?;assert context.fetch(:authority).frozen?
+      assert_raises(L::LifetimeError) { invocation.local_current_validation_request(adapter:M::AndroidUploadValidation) }
+      assert_raises(R::Error) { runtime.send(:admit_local_execution!) }
+      ENV[R::LOCAL_RECONCILE_KEY]+=' '
+      assert_raises(R::Error) { R.local_execution_context }
+      assert invocation.unknown?
+    end
+  end
+  def test_reconcile_real_admission_env_gate_preserves_exact_private_roster
+    reconcile_transport
+    %w[NONCE ROOT ROOT_ID CLOCK RUN_DEADLINE_NS HARD_DEADLINE_NS].each { |name| ENV['MOBILE_RELEASE_STORE_LANE_'+name]='inert' }
+    ENV['MOBILE_RELEASE_OPERATION']='android_internal_upload';ENV['MOBILE_RELEASE_STORE_MODE']='execute'
+    # Actual admit! must pass its exact env gate, then deliberately refuse the
+    # invalid nonce before any native/filesystem/runtime acquisition.
+    runtime,_=model
+    assert_equal :nonce,assert_raises(R::Error) { runtime.send(:admit!,'android_internal_upload') }.reason
+    ENV[KEY]=ENV.fetch(R::LOCAL_RECONCILE_KEY)
+    runtime,_=model
+    assert_equal :environment,assert_raises(R::Error) { runtime.send(:admit!,'android_internal_upload') }.reason
+    ENV.delete(KEY);ENV['MOBILE_RELEASE_STORE_LANE_FOREIGN']='inert'
+    runtime,_=model
+    assert_equal :environment,assert_raises(R::Error) { runtime.send(:admit!,'android_internal_upload') }.reason
+  end
+  def test_reconcile_transport_rejects_execute_purpose_hybrid_extra_and_mismatch
+    reconcile_transport
+    original=ENV.fetch(R::LOCAL_RECONCILE_KEY)
+    changes=[lambda { |v| v['authority']['purpose']='execute' },lambda { |v| v['toolchain']=@tool },
+      lambda { |v| v['expectedIntentSha256']='f'*64 },lambda { |v| v['authority']['assignment']['expectedRevision']=99 }]
+    changes.each do |change|
+      value=JSON.parse(original);change.call(value);ENV[R::LOCAL_RECONCILE_KEY]=M.canonical_json(value)
+      runtime,_=model
+      assert_raises(R::Error,M::ContractError) { runtime.send(:admit_local_execution!) }
+      assert_nil runtime.instance_variable_get(:@local_execution)
+    end
+    ENV[R::LOCAL_RECONCILE_KEY]=original;ENV[KEY]=original
+    runtime,_=model;assert_raises(R::Error) { runtime.send(:admit_local_execution!) }
+    assert_nil runtime.instance_variable_get(:@local_execution)
+    ENV.delete(KEY)
+    [{mode:'prepare'},{lane:'android_external_promote'}].each do |arguments|
+      runtime,_=model(**arguments);assert_raises(R::Error) { runtime.send(:admit_local_execution!) }
+    end
+  end
   def test_changed_transport_or_original_thread_refuses_and_latches_unknown
     runtime,invocation=model;admit(runtime)
     ENV[KEY]+=' '
