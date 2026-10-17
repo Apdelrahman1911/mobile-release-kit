@@ -37,6 +37,7 @@ pub(crate) struct CopierFiles {
     cleanup: Instant,
     first: Option<Instant>,
     inherited: usize,
+    cleaning: bool,
 }
 impl CopierFiles {
     pub(crate) fn new(
@@ -52,12 +53,17 @@ impl CopierFiles {
             cleanup: original_cleanup,
             first: None,
             inherited: actual_inherited_originals,
+            cleaning: false,
         })
     }
     pub(crate) fn note_failure(&mut self) {
-        if self.first.is_none() {
-            self.first = Some(Instant::now());
-        }
+        self.fail_at(Instant::now());
+    }
+    pub(crate) fn fail_at(&mut self, at: Instant) {
+        self.first = Some(self.first.map_or(at, |old| old.min(at)));
+    }
+    pub(crate) fn first_failure(&self) -> Option<Instant> {
+        self.first
     }
     fn cleanup_end(&self) -> Instant {
         self.first
@@ -68,8 +74,11 @@ impl CopierFiles {
         if self.unknown {
             return Err(Failure::Close);
         }
-        if self.first.is_some() {
+        if self.first.is_some() && !self.cleaning {
             return Err(Failure::Binding);
+        }
+        if self.cleaning && Instant::now() >= self.cleanup_end() {
+            return Err(Failure::Deadline);
         }
         if self
             .live()
@@ -157,6 +166,39 @@ impl CopierFiles {
             return Err(Failure::Access);
         }
         copy::exact(original, parent, name, expected, work)?;
+        Ok(slot)
+    }
+    fn open_reserved_root(
+        &mut self,
+        parent: BorrowedFd<'_>,
+        expected: Identity,
+        work: &Work,
+    ) -> Result<usize> {
+        work.point()?;
+        copy::private_stage(expected)?;
+        let slot = self.reserve()?;
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                c"Xcode.app".as_ptr(),
+                libc::O_RDONLY
+                    | libc::O_DIRECTORY
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+            )
+        };
+        self.slots[slot] = if fd < 0 {
+            Slot::Closed
+        } else {
+            Slot::Owned(fd)
+        };
+        if fd < 0 {
+            return Err(Failure::Read);
+        }
+        work.point()?;
+        copy::exact(self.fd(slot)?, parent, c"Xcode.app", expected, work)?;
+        copy::empty_acl(self.fd(slot)?, work)?;
         Ok(slot)
     }
     /// Only the fixed child's private stage. Exclusive creation never reuses
@@ -301,6 +343,295 @@ impl CopierFiles {
             self.note_failure();
         }
         result
+    }
+    /// One fixed bounded control original; no general filesystem reader API.
+    pub(crate) fn read_attempt(
+        &mut self,
+        namespace: BorrowedFd<'_>,
+        expected: Identity,
+        expected_bytes: usize,
+        work: &Work,
+    ) -> Result<Vec<u8>> {
+        work.point()?;
+        if self.cleaning || expected.retiring_kind()? != profile::Kind::Regular {
+            return Err(Failure::Binding);
+        }
+        let slot = self.reserve()?;
+        let fd = unsafe {
+            libc::openat(
+                namespace.as_raw_fd(),
+                c"attempt.json".as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        self.slots[slot] = if fd < 0 {
+            Slot::Closed
+        } else {
+            Slot::Owned(fd)
+        };
+        if fd < 0 {
+            return Err(Failure::Read);
+        }
+        work.point()?;
+        copy::exact(self.fd(slot)?, namespace, c"attempt.json", expected, work)?;
+        copy::empty_acl(self.fd(slot)?, work)?;
+        let mut bytes = [0u8; 4097];
+        let n = unsafe { libc::pread(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+        work.point()?;
+        if n <= 0 || n > 4096 || n as usize != expected_bytes {
+            return Err(Failure::Bounds);
+        }
+        copy::exact(self.fd(slot)?, namespace, c"attempt.json", expected, work)?;
+        self.close(slot)?;
+        Ok(bytes[..n as usize].to_vec())
+    }
+    /// The same actual table changes to one-way fixed-pending cleanup only
+    /// after every earlier tracked original has positively closed. No unknown
+    /// slot is reusable and the original first-failure cleanup cutoff survives.
+    fn cleanup_mode(&mut self, parent: libc::pid_t) -> Result<Work> {
+        if self.unknown || self.live() != 0 || self.cleaning {
+            return Err(Failure::Close);
+        }
+        let work = Work {
+            end: self.cleanup_end(),
+            parent,
+        };
+        work.point()?;
+        self.cleaning = true;
+        Ok(work)
+    }
+    fn open_retiring(
+        &mut self,
+        parent: BorrowedFd<'_>,
+        name: &CStr,
+        expected: Identity,
+        work: &Work,
+    ) -> Result<usize> {
+        if !self.cleaning {
+            return Err(Failure::Binding);
+        }
+        work.point()?;
+        let kind = expected.retiring_kind()?;
+        if !profile::component(name.to_bytes()) {
+            return Err(Failure::Bounds);
+        }
+        let slot = self.reserve()?;
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK
+                    | match kind {
+                        profile::Kind::Directory => libc::O_DIRECTORY,
+                        profile::Kind::Symlink => libc::O_SYMLINK,
+                        profile::Kind::Regular => 0,
+                    },
+            )
+        };
+        self.slots[slot] = if fd < 0 {
+            Slot::Closed
+        } else {
+            Slot::Owned(fd)
+        };
+        if fd < 0 {
+            return Err(Failure::Read);
+        }
+        work.point()?;
+        copy::exact(self.fd(slot)?, parent, name, expected, work)?;
+        copy::empty_acl(self.fd(slot)?, work)?;
+        Ok(slot)
+    }
+    /// This is deliberately NOT an arbitrary tree remover. The authenticated
+    /// caller lends the original private pending wrapper and durable stage ID;
+    /// the only root name this routine can unlink is its Xcode.app child.
+    pub(crate) fn retire_pending(
+        &mut self,
+        pending: BorrowedFd<'_>,
+        pending_id: Identity,
+        device: u64,
+        inode: u64,
+        parent_pid: libc::pid_t,
+    ) -> Result<()> {
+        let work = self.cleanup_mode(parent_pid)?;
+        copy::private_stage(pending_id)?;
+        if copy::fstat(pending, &work)? != pending_id {
+            return Err(Failure::Binding);
+        }
+        let mut missing = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let present = unsafe {
+            libc::fstatat(
+                pending.as_raw_fd(),
+                c"Xcode.app".as_ptr(),
+                missing.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if present != 0 {
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+                return Err(Failure::Read);
+            }
+            work.point()?;
+            let mut budget = NameBudget { live: 0 };
+            let rows = names(pending, pending_id, &mut budget, &work)?;
+            let empty = rows.is_empty();
+            budget.release(&rows);
+            if !empty {
+                return Err(Failure::Binding);
+            }
+            return work.point();
+        }
+        let root = copy::named(pending, c"Xcode.app", &work)?;
+        if root.device() as u64 != device
+            || root.inode() != inode
+            || root.retiring_kind()? != profile::Kind::Directory
+        {
+            return Err(Failure::Binding);
+        }
+        let mut budget = NameBudget { live: 0 };
+        let mut entries = 0u64;
+        let result = self.retire_walk(
+            pending,
+            c"Xcode.app",
+            root,
+            0,
+            9,
+            &mut entries,
+            &mut budget,
+            &work,
+        );
+        if result.is_err() {
+            self.note_failure();
+        }
+        let closed = self.close_all();
+        result?;
+        if !closed || budget.live != 0 {
+            return Err(Failure::Close);
+        }
+        let after = copy::fstat(pending, &work)?;
+        if !pending_id.same_owned_directory(after) {
+            return Err(Failure::Binding);
+        }
+        let rows = names(pending, after, &mut budget, &work)?;
+        let empty = rows.is_empty();
+        budget.release(&rows);
+        if !empty {
+            return Err(Failure::Binding);
+        }
+        native::sync(pending, false).map_err(|_| Failure::Sync)?;
+        work.point()
+    }
+    fn retire_walk(
+        &mut self,
+        parent: BorrowedFd<'_>,
+        name: &CStr,
+        expected: Identity,
+        depth: usize,
+        path_bytes: usize,
+        entries: &mut u64,
+        budget: &mut NameBudget,
+        work: &Work,
+    ) -> Result<()> {
+        work.point()?;
+        *entries = entries.checked_add(1).ok_or(Failure::Bounds)?;
+        if *entries > profile::ENTRY_LIMIT
+            || depth > profile::DEPTH_LIMIT
+            || path_bytes > profile::PATH_LIMIT
+        {
+            return Err(Failure::Bounds);
+        }
+        let kind = expected.retiring_kind()?;
+        let slot = self.open_retiring(parent, name, expected, work)?;
+        let raw = self.fd(slot)?.as_raw_fd();
+        let original = unsafe { BorrowedFd::borrow_raw(raw) };
+        let mut current = expected;
+        if kind == profile::Kind::Directory {
+            let rows = names(original, current, budget, work)?;
+            let traversed = (|| -> Result<()> {
+                for row in &rows {
+                    copy::exact(original, parent, name, current, work)?;
+                    let child = copy::named(original, row.cstr()?, work)?;
+                    let child_kind = child.retiring_kind()?;
+                    let listed_kind = match child_kind {
+                        profile::Kind::Directory => libc::DT_DIR,
+                        profile::Kind::Regular => libc::DT_REG,
+                        profile::Kind::Symlink => libc::DT_LNK,
+                    };
+                    if row.inode != child.inode()
+                        || row.kind != listed_kind
+                        || child.device() != expected.device()
+                    {
+                        return Err(Failure::Binding);
+                    }
+                    self.retire_walk(
+                        original,
+                        row.cstr()?,
+                        child,
+                        depth + 1,
+                        path_bytes
+                            .checked_add(1 + row.key().len())
+                            .ok_or(Failure::Bounds)?,
+                        entries,
+                        budget,
+                        work,
+                    )?;
+                    let changed = copy::fstat(original, work)?;
+                    if !current.same_owned_directory(changed) {
+                        return Err(Failure::Binding);
+                    }
+                    current = changed;
+                }
+                let remaining = names(original, current, budget, work)?;
+                let empty = remaining.is_empty();
+                budget.release(&remaining);
+                if !empty {
+                    return Err(Failure::Binding);
+                }
+                Ok(())
+            })();
+            budget.release(&rows);
+            traversed?;
+        }
+        copy::exact(original, parent, name, current, work)?;
+        copy::empty_acl(original, work)?;
+        work.point()?;
+        let removed = unsafe {
+            libc::unlinkat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                if kind == profile::Kind::Directory {
+                    libc::AT_REMOVEDIR
+                } else {
+                    0
+                },
+            )
+        };
+        if removed != 0 {
+            return Err(Failure::Write);
+        }
+        work.point()?;
+        // Recheck absence without following any former leaf, then consume the
+        // still-held inode independently. No close error is treated as success.
+        let mut absent = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let r = unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                absent.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if r == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+            return Err(Failure::Binding);
+        }
+        let retired = copy::fstat(original, work)?;
+        if !current.same_retired_inode(retired) {
+            return Err(Failure::Binding);
+        }
+        self.close(slot)?;
+        work.point()
     }
     pub(crate) fn close(&mut self, index: usize) -> Result<()> {
         // Consuming cleanup uses the original F, not expired W/getppid. Losing
@@ -826,14 +1157,16 @@ impl<'a> SourceTree<'a> {
         copy::exact(fd, parent, name, id, self.work)
     }
     /// Caller has already admitted signed source/ancestors and the original
-    /// empty private pending wrapper. The first content effect is exclusive
-    /// Xcode.app creation, after a fresh full census and real free-space check.
+    /// private pending wrapper and recorded empty Xcode.app original. Payload
+    /// content starts only after a fresh full census and real free-space check.
     /// Result is provisional until Apple POST, all original closes and Parent.
     pub(crate) fn copy_to(
         &mut self,
         files: &mut CopierFiles,
         stage: BorrowedFd<'_>,
         stage_identity: Identity,
+        recorded_device: u64,
+        recorded_inode: u64,
         admitted: &Census,
     ) -> Result<SealedCopy> {
         if self.copy_started {
@@ -876,13 +1209,21 @@ impl<'a> SourceTree<'a> {
             if copy::fstat(stage, self.work)? != stage_identity {
                 return Err(Failure::Binding);
             }
-            let (slot, created) = files.create_output(
-                stage,
-                c"Xcode.app",
-                profile::Kind::Directory,
-                None,
-                self.work,
-            )?;
+            let created = copy::named(stage, c"Xcode.app", self.work)?;
+            copy::private_stage(created)?;
+            if created.device() as u64 != recorded_device || created.inode() != recorded_inode {
+                return Err(Failure::Binding);
+            }
+            // Open the pre-reserved root without creating/replacing it. Mode
+            // 0700 is intentionally private, not a source/public tree claim.
+            let slot = files.open_reserved_root(stage, created, self.work)?;
+            let mut empty_budget = NameBudget { live: 0 };
+            let rows = names(files.fd(slot)?, created, &mut empty_budget, self.work)?;
+            let empty = rows.is_empty();
+            empty_budget.release(&rows);
+            if !empty {
+                return Err(Failure::Binding);
+            }
             let output_raw = files.fd(slot)?.as_raw_fd();
             let output = unsafe { BorrowedFd::borrow_raw(output_raw) };
             let mut budget = NameBudget { live: 0 };

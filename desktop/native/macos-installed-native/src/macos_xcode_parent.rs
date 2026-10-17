@@ -43,6 +43,7 @@ struct Reserved {
     kind: String,
     namespace: Node,
     pending: Node,
+    staged: Node,
     source_sha256: String,
     version: u32,
 }
@@ -64,19 +65,27 @@ fn hex(value: &str, length: usize) -> bool {
 /// Exactly two possible appends, on one original0600 file. Canonical field
 /// order is this closed schema's serialization order; LF is part of the record.
 /// No third line, duplicate field, whitespace alternative or incomplete line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Record {
     reserved: Reserved,
     copied: Option<Copied>,
 }
 impl Record {
-    fn reserved(id: String, namespace: Node, pending: Node, source_sha256: String) -> Result<Self> {
+    fn reserved(
+        id: String,
+        namespace: Node,
+        pending: Node,
+        staged: Node,
+        source_sha256: String,
+    ) -> Result<Self> {
         let out = Self {
             reserved: Reserved {
                 id,
                 kind: "reserved".into(),
                 namespace,
                 pending,
+                staged,
                 source_sha256,
                 version: 1,
             },
@@ -92,7 +101,12 @@ impl Record {
             || r.version != 1
             || !r.namespace.valid()
             || !r.pending.valid()
+            || !r.staged.valid()
             || r.namespace.device != r.pending.device
+            || r.namespace.device != r.staged.device
+            || r.pending == r.namespace
+            || r.staged == r.pending
+            || r.staged == r.namespace
             || !hex(&r.source_sha256, 64)
         {
             return Err(Failure::Binding);
@@ -102,7 +116,7 @@ impl Record {
                 || c.kind != "copied"
                 || c.version != 1
                 || !c.staged.valid()
-                || c.staged.device != r.namespace.device
+                || c.staged != r.staged
                 || !hex(&c.tree_sha256, 64)
             {
                 return Err(Failure::Binding);
@@ -143,6 +157,12 @@ impl Record {
             return Err(Failure::Binding);
         }
         Ok(out)
+    }
+    fn binds_originals(&self, namespace: Node, pending: Node, source_sha256: &str) -> bool {
+        self.validate().is_ok()
+            && self.reserved.namespace == namespace
+            && self.reserved.pending == pending
+            && self.reserved.source_sha256 == source_sha256
     }
     fn add_copied(&mut self, staged: Node, tree_sha256: String) -> Result<()> {
         if self.copied.is_some() {
@@ -195,6 +215,16 @@ impl Clock {
         self.first = Some(at);
         if let Some(cut) = at.checked_add(Duration::from_secs(120)) {
             self.finish = self.finish.min(cut);
+        }
+    }
+    /// Merge a subordinate's ORIGINAL first failure before starting any
+    /// independent cleanup. A later return cannot buy a fresh 120 seconds.
+    fn absorb(&mut self, first: Option<Instant>, failed: bool) {
+        if let Some(at) = first {
+            self.fail_at(at);
+        }
+        if failed && self.first.is_none() {
+            self.fail();
         }
     }
     fn point(&mut self, cleanup: bool) -> Result<()> {
@@ -304,8 +334,8 @@ impl Lifecycle {
 ))]
 mod native {
     use super::*;
-    use crate::{macos_xcode_copy as copy, macos_xcode_setup as profile};
     use crate as abi;
+    use crate::{macos_xcode_copy as copy, macos_xcode_setup as profile};
     use nix::{libc, mount::MntFlags, sys::statfs};
     use std::{
         ffi::{CStr, CString},
@@ -416,24 +446,134 @@ mod native {
         }
         Ok(Some(Stat::from(unsafe { s.assume_init() })?))
     }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Purpose {
+        Carrier,
+        Copy,
+        RetirePending,
+    }
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "purpose", deny_unknown_fields)]
+    enum Loans {
+        #[serde(rename = "carrier")]
+        Carrier { fds: [i32; 2], nodes: [Node; 2] },
+        #[serde(rename = "copy")]
+        Copy {
+            fds: [i32; 7],
+            nodes: [Node; 7],
+            staged: Node,
+        },
+        #[serde(rename = "retire-pending")]
+        RetirePending {
+            fds: [i32; 7],
+            nodes: [Node; 7],
+            record: Record,
+            attempt: Node,
+        },
+    }
+    impl Loans {
+        fn fds(&self) -> &[i32] {
+            match self {
+                Self::Carrier { fds, .. } => fds,
+                Self::Copy { fds, .. } | Self::RetirePending { fds, .. } => fds,
+            }
+        }
+        fn nodes(&self) -> &[Node] {
+            match self {
+                Self::Carrier { nodes, .. } => nodes,
+                Self::Copy { nodes, .. } | Self::RetirePending { nodes, .. } => nodes,
+            }
+        }
+        fn staged(&self) -> Option<Node> {
+            match self {
+                Self::Copy { staged, .. } => Some(*staged),
+                Self::RetirePending { record, .. } => Some(record.reserved.staged),
+                Self::Carrier { .. } => None,
+            }
+        }
+        fn purpose(&self) -> Purpose {
+            match self {
+                Self::Carrier { .. } => Purpose::Carrier,
+                Self::Copy { .. } => Purpose::Copy,
+                Self::RetirePending { .. } => Purpose::RetirePending,
+            }
+        }
+        fn copy(fds: [i32; 7], staged: Node) -> Result<Self> {
+            if !staged.valid() {
+                return Err(Failure::Binding);
+            }
+            let mut nodes = [Node {
+                device: 0,
+                inode: 0,
+            }; 7];
+            for (n, fd) in fds.iter().enumerate() {
+                nodes[n] = fstat(unsafe { BorrowedFd::borrow_raw(*fd) })?.node;
+            }
+            Ok(Self::Copy { fds, nodes, staged })
+        }
+        fn retirement(&self) -> Option<(Record, Node)> {
+            match self {
+                Self::RetirePending {
+                    record, attempt, ..
+                } => Some((record.clone(), *attempt)),
+                _ => None,
+            }
+        }
+        fn retire(fds: [i32; 7], record: Record, attempt: Node) -> Result<Self> {
+            record.validate()?;
+            if !attempt.valid() {
+                return Err(Failure::Binding);
+            }
+            let Self::Copy { fds, nodes, .. } = Self::copy(fds, record.reserved.staged)? else {
+                return Err(Failure::State);
+            };
+            if nodes[2] != record.reserved.namespace || nodes[4] != record.reserved.pending {
+                return Err(Failure::Binding);
+            }
+            Ok(Self::RetirePending {
+                fds,
+                nodes,
+                record,
+                attempt,
+            })
+        }
+        fn carrier(fds: [i32; 2]) -> Result<Self> {
+            let mut nodes = [Node {
+                device: 0,
+                inode: 0,
+            }; 2];
+            for (n, fd) in fds.iter().enumerate() {
+                nodes[n] = fstat(unsafe { BorrowedFd::borrow_raw(*fd) })?.node;
+            }
+            Ok(Self::Carrier { fds, nodes })
+        }
+    }
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Start {
-        fds: [i32; 5],
-        hard_ns: u64,
         finish_ns: u64,
-        nodes: [Node; 5],
+        hard_ns: u64,
+        loans: Loans,
         nonce: String,
         parent: i32,
         version: u32,
         work_ns: u64,
     }
     #[derive(Serialize, Deserialize)]
+    #[serde(tag = "outcome", deny_unknown_fields)]
+    enum Proof {
+        #[serde(rename = "carrier-checked")]
+        Carrier,
+        #[serde(rename = "pending-empty-needs-rerun")]
+        PendingEmpty,
+        #[serde(rename = "copied")]
+        Copied { staged: Node, tree_sha256: String },
+    }
+    #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Report {
         nonce: String,
-        staged: Node,
-        tree_sha256: String,
+        proof: Proof,
         version: u32,
     }
     fn monotonic() -> Result<u64> {
@@ -494,28 +634,28 @@ mod native {
         incoming: [u8; PRIVATE_LIMIT + 5],
         used: usize,
         nonce: String,
+        purpose: Purpose,
         report: Option<Report>,
         unknown: bool,
     }
     impl Copier {
-        fn spawn(executable: &str, loans: [i32; 5], clock: Clock, nonce: String) -> Result<Self> {
-            if !hex(&nonce, 32) || loans.iter().any(|fd| *fd < 3) {
+        fn spawn(executable: &str, loans: Loans, clock: Clock, nonce: String) -> Result<Self> {
+            let purpose = loans.purpose();
+            let mut inherited = [-1; 7];
+            if !hex(&nonce, 32) || loans.fds().iter().any(|fd| *fd < 3) {
                 return Err(Failure::Binding);
             }
-            for (n, fd) in loans.iter().enumerate() {
-                if loans[..n].contains(fd) {
+            for (n, fd) in loans.fds().iter().enumerate() {
+                if loans.fds()[..n].contains(fd) {
                     return Err(Failure::Binding);
                 }
+                inherited[n] = *fd;
             }
-            let nodes =
-                loans.map(|fd| fstat(unsafe { BorrowedFd::borrow_raw(fd) }).map(|s| s.node));
-            let nodes = [nodes[0]?, nodes[1]?, nodes[2]?, nodes[3]?, nodes[4]?];
             let (work_ns, finish_ns, hard_ns) = wire_endpoints(&clock)?;
             let request = frame(&Start {
-                fds: loans,
+                loans,
                 hard_ns,
                 finish_ns,
-                nodes,
                 nonce: nonce.clone(),
                 parent: unsafe { libc::getpid() },
                 version: 1,
@@ -578,8 +718,8 @@ mod native {
                         if libc::fcntl(sockets[1], libc::F_SETFD, 0) != 0 {
                             libc::_exit(74);
                         }
-                        for fd in loans {
-                            if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
+                        for fd in inherited {
+                            if fd >= 0 && libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
                                 libc::_exit(74);
                             }
                         }
@@ -611,6 +751,7 @@ mod native {
                     incoming: [0; PRIVATE_LIMIT + 5],
                     used: 0,
                     nonce,
+                    purpose,
                     report: None,
                     unknown: !closed,
                 })
@@ -738,8 +879,18 @@ mod native {
                 .map_err(|_| Failure::Binding)?;
             if report.version != 1
                 || report.nonce != self.nonce
-                || !report.staged.valid()
-                || !hex(&report.tree_sha256, 64)
+                || !match (&report.proof, self.purpose) {
+                    (Proof::Carrier, Purpose::Carrier) => true,
+                    (Proof::PendingEmpty, Purpose::RetirePending) => true,
+                    (
+                        Proof::Copied {
+                            staged,
+                            tree_sha256,
+                        },
+                        Purpose::Copy,
+                    ) => staged.valid() && hex(tree_sha256, 64),
+                    _ => false,
+                }
                 || frame(&report)? != self.incoming[..self.used]
             {
                 return Err(Failure::Binding);
@@ -804,6 +955,1006 @@ mod native {
             }
             result.map_or(Ok(()), Err)
         }
+    }
+
+    /// Child adopts only the original private-channel and seven exact loans.
+    /// Raw descriptor numbers are nomination DATA until all original path,
+    /// parent/UID/channel and immutable-start bindings pass. No callerchosenpath.
+    struct ChildAdmission {
+        channel: Slot,
+        loans: [Slot; 7],
+        original: [Option<Stat>; 7],
+        clock: Clock,
+        parent: i32,
+        nonce: String,
+        purpose: Purpose,
+        staged: Option<Node>,
+        retirement: Option<(Record, Node)>,
+        actual_loans: usize,
+        unknown: bool,
+        admitted: bool,
+    }
+    impl ChildAdmission {
+        fn receive(channel: i32) -> Result<Self> {
+            if unsafe { libc::getuid() } != 0 || unsafe { libc::geteuid() } != 0 || channel < 3 {
+                return Err(Failure::Access);
+            }
+            let parent = unsafe { libc::getppid() };
+            if parent <= 1 {
+                return Err(Failure::Child);
+            }
+            let mut uid = 1;
+            let mut gid = 1;
+            if unsafe { libc::getpeereid(channel, &mut uid, &mut gid) } != 0 || uid != 0 || gid != 0
+            {
+                return Err(Failure::Access);
+            }
+            // This finite read limit is only pre-admission. Parent already owns
+            // originalH. No forward/file work occurs until ORIGINAL clocks parse.
+            let limit = Instant::now()
+                .checked_add(Duration::from_secs(10))
+                .ok_or(Failure::Clock)?;
+            let mut bytes = [0u8; PRIVATE_LIMIT + 5];
+            let mut used = 0;
+            loop {
+                if Instant::now() >= limit || unsafe { libc::getppid() } != parent {
+                    return Err(Failure::Clock);
+                }
+                if used == bytes.len() {
+                    return Err(Failure::Bounds);
+                }
+                let n = unsafe {
+                    libc::read(
+                        channel,
+                        bytes[used..].as_mut_ptr().cast(),
+                        bytes.len() - used,
+                    )
+                };
+                if n > 0 {
+                    used += n as usize;
+                } else if n == 0 {
+                    break;
+                } else if !matches!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EAGAIN) | Some(libc::EINTR)
+                ) {
+                    return Err(Failure::Read);
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if used < 5 {
+                return Err(Failure::Bounds);
+            }
+            let n =
+                u32::from_be_bytes(bytes[..4].try_into().map_err(|_| Failure::Bounds)?) as usize;
+            if n == 0 || n > PRIVATE_LIMIT || n + 4 != used {
+                return Err(Failure::Bounds);
+            }
+            let start: Start =
+                serde_json::from_slice(&bytes[4..used]).map_err(|_| Failure::Binding)?;
+            if frame(&start)? != bytes[..used]
+                || start.version != 1
+                || start.parent != parent
+                || !hex(&start.nonce, 32)
+                || start.loans.fds().contains(&channel)
+                || start.loans.fds().iter().any(|fd| *fd < 3)
+            {
+                return Err(Failure::Binding);
+            }
+            for (at, fd) in start.loans.fds().iter().enumerate() {
+                if start.loans.fds()[..at].contains(fd) {
+                    return Err(Failure::Binding);
+                }
+            }
+            // Instant sampled BEFORE rawnow, opposite conservative bracket to
+            // Parent. No duration is restarted or H inferred from a new W.
+            let sampled = Instant::now();
+            let raw = monotonic()?;
+            if !(raw < start.work_ns
+                && start.work_ns < start.finish_ns
+                && start.finish_ns < start.hard_ns)
+                || start.work_ns - raw > 3_600_000_000_000
+                || start.finish_ns - start.work_ns > 120_000_000_000
+                || start.hard_ns - start.finish_ns > 10_000_000_000
+            {
+                return Err(Failure::Clock);
+            }
+            let endpoint = |end: u64| {
+                sampled
+                    .checked_add(Duration::from_nanos(end - raw))
+                    .ok_or(Failure::Clock)
+            };
+            let clock = Clock::new(
+                endpoint(start.work_ns)?,
+                endpoint(start.finish_ns)?,
+                endpoint(start.hard_ns)?,
+            )?;
+            let actual_loans = start.loans.fds().len();
+            let purpose = start.loans.purpose();
+            let mut slots = [Slot::Vacant; 7];
+            for (n, fd) in start.loans.fds().iter().enumerate() {
+                slots[n] = Slot::Owned(*fd);
+            }
+            let mut owner = Self {
+                channel: Slot::Owned(channel),
+                loans: slots,
+                original: [None; 7],
+                clock,
+                parent,
+                nonce: start.nonce,
+                purpose,
+                staged: start.loans.staged(),
+                retirement: start.loans.retirement(),
+                actual_loans,
+                unknown: false,
+                admitted: false,
+            };
+            let admitted = (|| -> Result<()> {
+                for index in 0..actual_loans {
+                    let observed = fstat(owner.loan(index)?)?;
+                    if observed.node != start.loans.nodes()[index] {
+                        return Err(Failure::Binding);
+                    }
+                    owner.original[index] = Some(observed);
+                }
+                owner.post()?;
+                owner.admitted = true;
+                Ok(())
+            })();
+            if admitted.is_err() {
+                owner.clock.fail();
+                let closed = owner.settle();
+                return if closed.is_err() {
+                    Err(Failure::Unknown)
+                } else {
+                    admitted.map(|_| owner)
+                };
+            }
+            Ok(owner)
+        }
+        fn loan(&self, index: usize) -> Result<BorrowedFd<'_>> {
+            match self.loans.get(index) {
+                Some(Slot::Owned(fd)) => Ok(unsafe { BorrowedFd::borrow_raw(*fd) }),
+                _ => Err(Failure::Binding),
+            }
+        }
+        fn point(&mut self) -> Result<()> {
+            self.clock.point(false)?;
+            if unsafe { libc::getppid() } != self.parent {
+                return Err(Failure::Child);
+            }
+            Ok(())
+        }
+        fn post(&mut self) -> Result<()> {
+            self.point()?;
+            let names = if self.purpose != Purpose::Carrier {
+                [
+                    None,
+                    Some((0, "Library")),
+                    Some((1, "MobileReleaseKitDeveloper")),
+                    Some((2, profile::LOCK)),
+                    Some((2, profile::PENDING)),
+                    None,
+                    None,
+                ]
+            } else {
+                [None; 7]
+            };
+            for index in 0..self.actual_loans {
+                let old = self.original[index].ok_or(Failure::Binding)?;
+                let held = fstat(self.loan(index)?)?;
+                let stable = if old.mode & libc::S_IFMT == libc::S_IFDIR {
+                    old.same_directory(held)
+                } else {
+                    old == held
+                };
+                if !stable {
+                    return Err(Failure::Binding);
+                }
+                if let Some((parent, name)) = names[index] {
+                    let current = named(self.loan(parent)?, &c(name)?)?.ok_or(Failure::Binding)?;
+                    if !(if old.mode & libc::S_IFMT == libc::S_IFDIR {
+                        held.same_directory(current)
+                    } else {
+                        held == current
+                    }) {
+                        return Err(Failure::Binding);
+                    }
+                }
+                if ((self.purpose != Purpose::Carrier && index < 3)
+                    || (self.purpose == Purpose::Carrier && index == 0))
+                    && !held.directory(if self.purpose != Purpose::Carrier && index == 2 {
+                        Some(0o755)
+                    } else {
+                        None
+                    })
+                {
+                    return Err(Failure::Access);
+                }
+                if self.purpose != Purpose::Carrier
+                    && index == 3
+                    && (!held.control() || held.size != 0)
+                {
+                    return Err(Failure::Access);
+                }
+                if self.purpose != Purpose::Carrier && index == 4 && !held.directory(Some(0o700)) {
+                    return Err(Failure::Access);
+                }
+                let acl = abi::empty_acl_observed(self.loan(index)?);
+                if let Err(error) = acl {
+                    if error.free_result != 0 || error.refusal_code.is_none() {
+                        self.unknown = true;
+                        return Err(Failure::Unknown);
+                    }
+                    return Err(Failure::Access);
+                }
+                self.point()?;
+            }
+            if self.purpose != Purpose::Carrier {
+                let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+                if unsafe { libc::lstat(c("/")?.as_ptr(), stat.as_mut_ptr()) } != 0
+                    || !self.original[0]
+                        .ok_or(Failure::Binding)?
+                        .same_directory(Stat::from(unsafe { stat.assume_init() })?)
+                {
+                    return Err(Failure::Binding);
+                }
+            }
+            self.point()
+        }
+        fn bind_source(
+            &mut self,
+            source: &mut crate::macos_xcode_source::SetupSource,
+        ) -> Result<()> {
+            self.post()?;
+            source.post().map_err(|_| Failure::Binding)?;
+            let setup = if self.purpose != Purpose::Carrier {
+                5
+            } else {
+                0
+            };
+            if fstat(source.setup().map_err(|_| Failure::Binding)?)?
+                != self.original[setup].ok_or(Failure::Binding)?
+                || fstat(source.image().map_err(|_| Failure::Binding)?)?
+                    != self.original[setup + 1].ok_or(Failure::Binding)?
+            {
+                return Err(Failure::Binding);
+            }
+            self.point()
+        }
+        /// Every loan is consumed exactly once independently. No unlock call:
+        /// closing THIS inherited description cannot unlock Parent's stillheldOFD.
+        fn settle(&mut self) -> Result<()> {
+            let mut failed = false;
+            for cell in self.loans.iter_mut().rev() {
+                if let Slot::Owned(fd) = *cell {
+                    if self.clock.point(true).is_err() {
+                        self.unknown = true;
+                        failed = true;
+                        continue;
+                    }
+                    *cell = Slot::Unknown;
+                    if unsafe { libc::close(fd) } == 0 {
+                        *cell = Slot::Closed;
+                    } else {
+                        self.unknown = true;
+                        failed = true;
+                    }
+                } else if !matches!(cell, Slot::Closed | Slot::Vacant) {
+                    self.unknown = true;
+                    failed = true;
+                }
+            }
+            if failed || self.unknown {
+                Err(Failure::Unknown)
+            } else {
+                Ok(())
+            }
+        }
+        fn finish(&mut self, proof: Proof) -> Result<()> {
+            self.point()?;
+            if !self.admitted
+                || self.unknown
+                || !self.loans[..self.actual_loans]
+                    .iter()
+                    .all(|s| matches!(s, Slot::Closed))
+                || !match (&proof, self.purpose) {
+                    (Proof::Carrier, Purpose::Carrier) => true,
+                    (Proof::PendingEmpty, Purpose::RetirePending) => true,
+                    (
+                        Proof::Copied {
+                            staged,
+                            tree_sha256,
+                        },
+                        Purpose::Copy,
+                    ) => staged.valid() && hex(tree_sha256, 64),
+                    _ => false,
+                }
+            {
+                return Err(Failure::State);
+            }
+            let bytes = frame(&Report {
+                nonce: self.nonce.clone(),
+                proof,
+                version: 1,
+            })?;
+            let fd = match self.channel {
+                Slot::Owned(fd) => fd,
+                _ => return Err(Failure::Unknown),
+            };
+            let mut at = 0;
+            while at < bytes.len() {
+                self.point()?;
+                let n = unsafe { libc::send(fd, bytes[at..].as_ptr().cast(), bytes.len() - at, 0) };
+                if n > 0 {
+                    at += n as usize;
+                } else if n == 0 {
+                    return Err(Failure::Write);
+                } else if !matches!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EAGAIN) | Some(libc::EINTR)
+                ) {
+                    return Err(Failure::Write);
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            self.clock.point(true)?;
+            self.channel = Slot::Unknown;
+            if unsafe { libc::close(fd) } != 0 {
+                self.unknown = true;
+                return Err(Failure::Close);
+            }
+            self.channel = Slot::Closed;
+            self.point()
+        }
+    }
+
+    /// Fixed legacy source selection for provisioning ONLY. Managed destination
+    /// is never recursively adopted as source, and user paths are not accepted.
+    struct SourceSelection {
+        applications: usize,
+        alias: Option<usize>,
+        app: usize,
+        name: CString,
+        applications_id: copy::Identity,
+        alias_id: Option<copy::Identity>,
+        app_id: copy::Identity,
+        target: Vec<u8>,
+        path: std::path::PathBuf,
+    }
+    impl SourceSelection {
+        fn selected(
+            root: BorrowedFd<'_>,
+            files: &mut crate::macos_xcode_tree::CopierFiles,
+            work: &copy::Work,
+        ) -> Result<Self> {
+            let apps_name = c("Applications")?;
+            let apps_id = copy::named(root, &apps_name, work).map_err(|_| Failure::Binding)?;
+            let applications = files
+                .open_source(root, &apps_name, apps_id, work)
+                .map_err(|_| Failure::Binding)?;
+            let raw = files
+                .fd(applications)
+                .map_err(|_| Failure::Binding)?
+                .as_raw_fd();
+            let apps = unsafe { BorrowedFd::borrow_raw(raw) };
+            let fixed = c(profile::APP)?;
+            let selected = copy::named(apps, &fixed, work).map_err(|_| Failure::Binding)?;
+            let kind = selected.source_kind().map_err(|_| Failure::Access)?;
+            let (alias, alias_id, target, name) = match kind {
+                profile::Kind::Directory => (None, None, Vec::new(), fixed),
+                profile::Kind::Symlink => {
+                    let alias = files
+                        .open_source(apps, &fixed, selected, work)
+                        .map_err(|_| Failure::Binding)?;
+                    let mut bytes = [0u8; 1025];
+                    work.point().map_err(|_| Failure::Clock)?;
+                    let n = unsafe {
+                        libc::readlinkat(
+                            apps.as_raw_fd(),
+                            fixed.as_ptr(),
+                            bytes.as_mut_ptr().cast(),
+                            bytes.len(),
+                        )
+                    };
+                    work.point().map_err(|_| Failure::Clock)?;
+                    if !(1..=1024).contains(&n) {
+                        return Err(Failure::Bounds);
+                    }
+                    let target = &bytes[..n as usize];
+                    let text = std::str::from_utf8(target).map_err(|_| Failure::Binding)?;
+                    // Same exact ios_toolchain::sibling_target SOURCE grammar.
+                    // It grants selection DATA only; every actual original below
+                    // remains open/named and wholecopy requires Apple signature.
+                    let sibling = text.strip_prefix("/Applications/").unwrap_or(text);
+                    if sibling == profile::APP
+                        || sibling.len() > 255
+                        || !sibling.starts_with("Xcode")
+                        || !sibling.ends_with(".app")
+                        || !sibling
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
+                    {
+                        return Err(Failure::Binding);
+                    }
+                    copy::exact(
+                        files.fd(alias).map_err(|_| Failure::Binding)?,
+                        apps,
+                        &fixed,
+                        selected,
+                        work,
+                    )
+                    .map_err(|_| Failure::Binding)?;
+                    (Some(alias), Some(selected), target.to_vec(), c(sibling)?)
+                }
+                _ => return Err(Failure::Access),
+            };
+            let app_id = copy::named(apps, &name, work).map_err(|_| Failure::Binding)?;
+            if app_id.source_kind().map_err(|_| Failure::Access)? != profile::Kind::Directory {
+                return Err(Failure::Access);
+            }
+            let app = files
+                .open_source(apps, &name, app_id, work)
+                .map_err(|_| Failure::Binding)?;
+            let path = std::path::Path::new("/Applications")
+                .join(name.to_str().map_err(|_| Failure::Binding)?);
+            let out = Self {
+                applications,
+                alias,
+                app,
+                name,
+                applications_id: apps_id,
+                alias_id,
+                app_id,
+                target,
+                path,
+            };
+            out.post(root, files, work)?;
+            Ok(out)
+        }
+        fn post(
+            &self,
+            root: BorrowedFd<'_>,
+            files: &crate::macos_xcode_tree::CopierFiles,
+            work: &copy::Work,
+        ) -> Result<()> {
+            let apps = files.fd(self.applications).map_err(|_| Failure::Binding)?;
+            copy::exact(apps, root, &c("Applications")?, self.applications_id, work)
+                .map_err(|_| Failure::Binding)?;
+            if let Some(index) = self.alias {
+                let fixed = c(profile::APP)?;
+                copy::exact(
+                    files.fd(index).map_err(|_| Failure::Binding)?,
+                    apps,
+                    &fixed,
+                    self.alias_id.ok_or(Failure::Binding)?,
+                    work,
+                )
+                .map_err(|_| Failure::Binding)?;
+                let mut bytes = [0u8; 1025];
+                work.point().map_err(|_| Failure::Clock)?;
+                let n = unsafe {
+                    libc::readlinkat(
+                        apps.as_raw_fd(),
+                        fixed.as_ptr(),
+                        bytes.as_mut_ptr().cast(),
+                        bytes.len(),
+                    )
+                };
+                work.point().map_err(|_| Failure::Clock)?;
+                if n != self.target.len() as isize || bytes[..self.target.len()] != self.target[..]
+                {
+                    return Err(Failure::Binding);
+                }
+            }
+            copy::exact(
+                files.fd(self.app).map_err(|_| Failure::Binding)?,
+                apps,
+                &self.name,
+                self.app_id,
+                work,
+            )
+            .map_err(|_| Failure::Binding)
+        }
+    }
+
+    fn source_signed(
+        source: &mut crate::macos_xcode_source::SetupSource,
+        owner: &mut ChildAdmission,
+    ) -> Result<()> {
+        owner.bind_source(source)?;
+        // Real dynamic SELF Security invocation stays in this actual retained
+        // child. No synchronous Security call runs in sole unobserved Parent.
+        let signed = {
+            let path = std::path::Path::new(source.executable().map_err(|_| Failure::Binding)?);
+            let mut signer =
+                crate::macos_xcode_self::SelfSigner::new(owner.clock.work, owner.clock.finish);
+            let observed = signer.verify(
+                path,
+                source.setup().map_err(|_| Failure::Binding)?,
+                source.image().map_err(|_| Failure::Binding)?,
+            );
+            owner.clock.absorb(signer.first_failure(), !observed);
+            let closed = signer.settle(owner.clock.first);
+            let accepted = observed && closed && signer.accepted();
+            owner.clock.absorb(signer.first_failure(), !accepted);
+            if signer.unknown() {
+                owner.unknown = true;
+            }
+            accepted
+        };
+        // All borrowed SELF originals above remain actual Source-owned until
+        // this independent original Source POST and later consuming settlement.
+        owner.bind_source(source)?;
+        if !signed {
+            return Err(Failure::Access);
+        }
+        Ok(())
+    }
+    fn carrier_child(owner: &mut ChildAdmission) -> Result<Proof> {
+        if owner.purpose != Purpose::Carrier {
+            return Err(Failure::State);
+        }
+        let mut source =
+            crate::macos_xcode_source::SetupSource::new(owner.clock.work, owner.clock.finish)
+                .map_err(|_| Failure::Binding)?;
+        let result = (|| -> Result<()> {
+            source.admit().map_err(|_| Failure::Binding)?;
+            source_signed(&mut source, owner)?;
+            const TEMPLATE: &str =
+                include_str!("../../../macos-xcode-setup-inputs/CarrierInfo.plist");
+            const VERSION: &str = env!("MRK_XCODE_SETUP_PACKAGE_VERSION");
+            if TEMPLATE.len() > 4096
+                || TEMPLATE.matches("__MRK_PACKAGE_VERSION__").count() != 1
+                || VERSION.len() > 64
+                || !VERSION.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            {
+                return Err(Failure::Binding);
+            }
+            let info = TEMPLATE.replacen("__MRK_PACKAGE_VERSION__", VERSION, 1);
+            let checked = {
+                let mut carrier = crate::macos_xcode_carrier::CarrierPreflight::new(
+                    owner.clock.work,
+                    owner.clock.finish,
+                    source.setup().map_err(|_| Failure::Binding)?,
+                )
+                .map_err(|_| Failure::Binding)?;
+                let admitted = carrier.check(VERSION, info.as_bytes());
+                owner
+                    .clock
+                    .absorb(carrier.first_failure(), admitted.is_err());
+                let closed = carrier.settle();
+                owner.clock.absorb(carrier.first_failure(), closed.is_err());
+                // Work failure and positive cleanup are separate. No proof on
+                // unknown native/FD settlement, even when receipt bytes match.
+                let ok = admitted.is_ok() && closed.is_ok() && carrier.accepted();
+                if closed.is_err() || !carrier.settled() {
+                    owner.unknown = true;
+                }
+                ok
+            };
+            if !checked {
+                return Err(Failure::Access);
+            }
+            source.post().map_err(|_| Failure::Binding)?;
+            owner.bind_source(&mut source)?;
+            owner.point()
+        })();
+        owner.clock.absorb(source.first_failure(), result.is_err());
+        let closed = source.settle(owner.clock.first).map_err(|_| Failure::Close);
+        owner.clock.absorb(source.first_failure(), closed.is_err());
+        if !source.settled() {
+            owner.unknown = true;
+        }
+        result?;
+        closed?;
+        if !source.accepted() {
+            return Err(Failure::Binding);
+        }
+        Ok(Proof::Carrier)
+    }
+    fn observed_facts(
+        app: BorrowedFd<'_>,
+        owner: &mut ChildAdmission,
+    ) -> Result<crate::macos_xcode_facts::Observed> {
+        let mut facts = crate::macos_xcode_facts::Facts::new(owner.clock.work, owner.clock.finish)
+            .map_err(|_| Failure::Binding)?;
+        let observed = facts.inspect(app);
+        owner.clock.absorb(facts.first_failure(), observed.is_err());
+        let posted = if observed.is_ok() {
+            facts.post()
+        } else {
+            Err(crate::macos_xcode_facts::Failure::Used)
+        };
+        owner
+            .clock
+            .absorb(facts.first_failure(), observed.is_err() || posted.is_err());
+        let closed = facts.settle(owner.clock.first);
+        owner.clock.absorb(facts.first_failure(), closed.is_err());
+        if !facts.settled() || facts.unknown() {
+            owner.unknown = true;
+        }
+        if posted.is_err() || closed.is_err() || !facts.accepted() {
+            return Err(Failure::Binding);
+        }
+        observed.map_err(|_| Failure::Binding)
+    }
+    fn apple_checked(
+        role: crate::macos_xcode_apple::Role,
+        path: &std::path::Path,
+        parent: BorrowedFd<'_>,
+        app: BorrowedFd<'_>,
+        owner: &mut ChildAdmission,
+    ) -> Result<()> {
+        let mut apple = crate::macos_xcode_apple::Apple::new(owner.clock.work, owner.clock.finish);
+        let observed = apple.verify(role, path, parent, app);
+        owner.clock.absorb(apple.first_failure(), !observed);
+        let closed = apple.settle(owner.clock.first);
+        owner.clock.absorb(apple.first_failure(), !closed);
+        if apple.unknown() {
+            owner.unknown = true;
+        }
+        if !observed || !closed || !apple.accepted() {
+            return Err(Failure::Access);
+        }
+        owner.point()
+    }
+    fn copy_child_work(owner: &mut ChildAdmission) -> Result<Proof> {
+        if owner.purpose != Purpose::Copy || owner.actual_loans != 7 {
+            return Err(Failure::State);
+        }
+        let mut source =
+            crate::macos_xcode_source::SetupSource::new(owner.clock.work, owner.clock.finish)
+                .map_err(|_| Failure::Binding)?;
+        let mut files = None;
+        let result = (|| -> Result<Proof> {
+            source.admit().map_err(|_| Failure::Binding)?;
+            source_signed(&mut source, owner)?;
+            // Copied source/input, all inherited originals including private
+            // channel+stdio, and fixed Facts8 reserve are charged BEFORE opens.
+            let inherited = owner
+                .actual_loans
+                .checked_add(1 + 3)
+                .and_then(|n| n.checked_add(source.held_count()))
+                .and_then(|n| n.checked_add(crate::macos_xcode_facts::OWNED_FDS))
+                .ok_or(Failure::Bounds)?;
+            if crate::macos_xcode_facts::OWNED_BYTES
+                + crate::macos_xcode_self::OWNED_BYTES
+                + crate::macos_xcode_apple::OWNED_BYTES
+                + profile::NAME_CONTROL_LIMIT as usize
+                + 24 * 1024 * 1024
+                + 1024 * 1024
+                > profile::OWNED_MEMORY_LIMIT
+            {
+                return Err(Failure::Bounds);
+            }
+            files = Some(
+                crate::macos_xcode_tree::CopierFiles::new(owner.clock.finish, inherited)
+                    .map_err(|_| Failure::Bounds)?,
+            );
+            let files = files.as_mut().ok_or(Failure::State)?;
+            let work = copy::Work {
+                end: owner.clock.work,
+                parent: owner.parent,
+            };
+            let root_raw = owner.loan(0)?.as_raw_fd();
+            let root = unsafe { BorrowedFd::borrow_raw(root_raw) };
+            let selection = SourceSelection::selected(root, files, &work)?;
+            let apps_raw = files
+                .fd(selection.applications)
+                .map_err(|_| Failure::Binding)?
+                .as_raw_fd();
+            let app_raw = files
+                .fd(selection.app)
+                .map_err(|_| Failure::Binding)?
+                .as_raw_fd();
+            let apps = unsafe { BorrowedFd::borrow_raw(apps_raw) };
+            let app = unsafe { BorrowedFd::borrow_raw(app_raw) };
+            apple_checked(
+                crate::macos_xcode_apple::Role::Source,
+                &selection.path,
+                apps,
+                app,
+                owner,
+            )?;
+            selection.post(root, files, &work)?;
+            let source_facts = observed_facts(app, owner)?;
+            selection.post(root, files, &work)?;
+            owner.bind_source(&mut source)?;
+            let mut tree = crate::macos_xcode_tree::SourceTree::original(
+                app,
+                apps,
+                &selection.name,
+                selection.app_id,
+                &work,
+            )
+            .map_err(|_| Failure::Binding)?;
+            let stage_raw = owner.loan(4)?.as_raw_fd();
+            let stage = unsafe { BorrowedFd::borrow_raw(stage_raw) };
+            let stage_id = copy::fstat(stage, &work).map_err(|_| Failure::Binding)?;
+            copy::private_stage(stage_id).map_err(|_| Failure::Access)?;
+            let fs = statfs::fstatfs(stage).map_err(|_| Failure::Read)?;
+            let unit = u64::try_from(fs.block_size()).map_err(|_| Failure::Bounds)?;
+            let census = tree.census(files, unit).map_err(|_| Failure::Binding)?;
+            // Actual copy_to repeats full original source admission and exact
+            // destination free-space quote immediately before first content.
+            owner.point()?;
+            owner.post()?;
+            let copied = tree
+                .copy_to(
+                    files,
+                    stage,
+                    stage_id,
+                    owner.staged.ok_or(Failure::Binding)?.device,
+                    owner.staged.ok_or(Failure::Binding)?.inode,
+                    &census,
+                )
+                .map_err(|_| Failure::Binding)?;
+            let copied_raw = files
+                .fd(copied.slot)
+                .map_err(|_| Failure::Binding)?
+                .as_raw_fd();
+            let copied_fd = unsafe { BorrowedFd::borrow_raw(copied_raw) };
+            let path =
+                std::path::Path::new("/Library/MobileReleaseKitDeveloper/.pending/Xcode.app");
+            apple_checked(
+                crate::macos_xcode_apple::Role::Staged,
+                path,
+                stage,
+                copied_fd,
+                owner,
+            )?;
+            let copied_facts = observed_facts(copied_fd, owner)?;
+            if source_facts != copied_facts {
+                return Err(Failure::Binding);
+            }
+            copy::exact(copied_fd, stage, &c(profile::APP)?, copied.identity, &work)
+                .map_err(|_| Failure::Binding)?;
+            let final_source = tree.census(files, unit).map_err(|_| Failure::Binding)?;
+            if final_source.quote != census.quote || final_source.digest != census.digest {
+                return Err(Failure::Binding);
+            }
+            selection.post(root, files, &work)?;
+            owner.bind_source(&mut source)?;
+            owner.point()?;
+            Ok(Proof::Copied {
+                staged: Node {
+                    device: copied.identity.device() as u64,
+                    inode: copied.identity.inode(),
+                },
+                tree_sha256: copied.digest.iter().map(|b| format!("{b:02x}")).collect(),
+            })
+        })();
+        owner.clock.absorb(source.first_failure(), result.is_err());
+        let mut all_closed = true;
+        if let Some(files) = files.as_mut() {
+            owner.clock.absorb(files.first_failure(), result.is_err());
+            if let Some(at) = owner.clock.first {
+                files.fail_at(at);
+            }
+            let files_closed = files.close_all();
+            owner.clock.absorb(files.first_failure(), !files_closed);
+            if !files_closed {
+                owner.unknown = true;
+                all_closed = false;
+            }
+        }
+        // SOURCE is consumed independently even when copy/Apple/Facts fails.
+        let source_closed = source.settle(owner.clock.first).map_err(|_| Failure::Close);
+        owner
+            .clock
+            .absorb(source.first_failure(), source_closed.is_err());
+        if !source.settled() {
+            owner.unknown = true;
+            all_closed = false;
+        }
+        result.and_then(|proof| {
+            source_closed?;
+            if !all_closed || !source.accepted() || owner.unknown {
+                return Err(Failure::Unknown);
+            }
+            owner.point()?;
+            Ok(proof)
+        })
+    }
+
+    fn retire_child(owner: &mut ChildAdmission) -> Result<Proof> {
+        if owner.purpose != Purpose::RetirePending || owner.actual_loans != 7 {
+            return Err(Failure::State);
+        }
+        let (record, attempt) = owner.retirement.clone().ok_or(Failure::Binding)?;
+        record.validate()?;
+        if record.reserved.id != owner.nonce
+            || record.reserved.namespace != owner.original[2].ok_or(Failure::Binding)?.node
+            || record.reserved.pending != owner.original[4].ok_or(Failure::Binding)?.node
+        {
+            return Err(Failure::Binding);
+        }
+        let mut source =
+            crate::macos_xcode_source::SetupSource::new(owner.clock.work, owner.clock.finish)
+                .map_err(|_| Failure::Binding)?;
+        let mut files = None;
+        let result = (|| -> Result<Proof> {
+            source.admit().map_err(|_| Failure::Binding)?;
+            source_signed(&mut source, owner)?;
+            let hash: String = source
+                .image_sha256()
+                .map_err(|_| Failure::Binding)?
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            if hash != record.reserved.source_sha256 {
+                return Err(Failure::Binding);
+            }
+            let inherited = source
+                .held_count()
+                .checked_add(owner.actual_loans + 1 + 3)
+                .ok_or(Failure::Bounds)?;
+            files = Some(
+                crate::macos_xcode_tree::CopierFiles::new(owner.clock.finish, inherited)
+                    .map_err(|_| Failure::Bounds)?,
+            );
+            let files = files.as_mut().ok_or(Failure::State)?;
+            let work = copy::Work {
+                end: owner.clock.work,
+                parent: owner.parent,
+            };
+            let namespace_raw = owner.loan(2)?.as_raw_fd();
+            let namespace = unsafe { BorrowedFd::borrow_raw(namespace_raw) };
+            let pending_raw = owner.loan(4)?.as_raw_fd();
+            let pending = unsafe { BorrowedFd::borrow_raw(pending_raw) };
+            // No parent nomination alone authorizes deletion: inspect and
+            // positively close the exact current protected attempt original.
+            let info = named(namespace, &c(profile::ATTEMPT)?)?.ok_or(Failure::Binding)?;
+            if !info.control() || info.node != attempt {
+                return Err(Failure::Binding);
+            }
+            let id = copy::named(namespace, &c(profile::ATTEMPT)?, &work)
+                .map_err(|_| Failure::Binding)?;
+            let bytes = files
+                .read_attempt(namespace, id, info.size as usize, &work)
+                .map_err(|_| Failure::Binding)?;
+            if Record::decode(&bytes)? != record {
+                return Err(Failure::Binding);
+            }
+            if !files.close_all() {
+                owner.unknown = true;
+                return Err(Failure::Unknown);
+            }
+            owner.bind_source(&mut source)?;
+            owner.post()?;
+            if named(namespace, &c(profile::APP)?)?.is_some() {
+                return Err(Failure::Present);
+            }
+            let pending_id = copy::fstat(pending, &work).map_err(|_| Failure::Binding)?;
+            files
+                .retire_pending(
+                    pending,
+                    pending_id,
+                    record.reserved.staged.device,
+                    record.reserved.staged.inode,
+                    owner.parent,
+                )
+                .map_err(|_| Failure::Binding)?;
+            // The old operation is still not established. This proves only
+            // current cleanup by this fresh original signed helper invocation.
+            owner.bind_source(&mut source)?;
+            Ok(Proof::PendingEmpty)
+        })();
+        owner.clock.absorb(source.first_failure(), result.is_err());
+        let mut all_closed = true;
+        if let Some(files) = files.as_mut() {
+            owner.clock.absorb(files.first_failure(), result.is_err());
+            if let Some(at) = owner.clock.first {
+                files.fail_at(at);
+            }
+            let files_closed = files.close_all();
+            owner.clock.absorb(files.first_failure(), !files_closed);
+            if !files_closed {
+                all_closed = false;
+                owner.unknown = true;
+            }
+        }
+        let source_closed = source.settle(owner.clock.first).map_err(|_| Failure::Close);
+        owner
+            .clock
+            .absorb(source.first_failure(), source_closed.is_err());
+        if !source.settled() {
+            all_closed = false;
+            owner.unknown = true;
+        }
+        result.and_then(|proof| {
+            source_closed?;
+            if !all_closed || owner.unknown || !source.accepted() {
+                return Err(Failure::Unknown);
+            }
+            owner.point()?;
+            Ok(proof)
+        })
+    }
+
+    /// Read-only public purpose uses the SAME one-child owner. No Namespace
+    /// allocation, lock, source tree, receipt modification or publication here.
+    pub(crate) fn carrier_preflight(
+        source: &mut crate::macos_xcode_source::SetupSource,
+        work: Instant,
+        finish: Instant,
+        hard: Instant,
+    ) -> Result<()> {
+        source.post().map_err(|_| Failure::Binding)?;
+        let clock = Clock::new(work, finish, hard)?;
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|_| Failure::Read)?;
+        let nonce = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let loans = Loans::carrier([
+            source.setup().map_err(|_| Failure::Binding)?.as_raw_fd(),
+            source.image().map_err(|_| Failure::Binding)?.as_raw_fd(),
+        ])?;
+        let mut child = Copier::spawn(
+            source.executable().map_err(|_| Failure::Binding)?,
+            loans,
+            clock,
+            nonce,
+        )?;
+        let observed = child.pump();
+        if observed.is_err() {
+            child.clock.fail();
+        }
+        let closed = child.settle();
+        observed?;
+        closed?;
+        if !child.reaped
+            || !child.exit_zero
+            || !child.eof
+            || !matches!(child.endpoint, Slot::Closed)
+            || child.unknown
+            || !matches!(
+                child.report.as_ref().map(|r| &r.proof),
+                Some(Proof::Carrier)
+            )
+        {
+            return Err(Failure::Unknown);
+        }
+        source.post().map_err(|_| Failure::Binding)?;
+        child.clock.point(false)
+    }
+    /// Private carrier branch is callable only after actual Source/currentimage
+    /// and fixed peer/fd/clock admission. Public bin remains inert until Copy and
+    /// recovery are fully joined and reviewed; this is not feature activation.
+    pub(crate) fn copier_entry(channel: i32) -> i32 {
+        let mut owner = match ChildAdmission::receive(channel) {
+            Ok(v) => v,
+            Err(_) => return 74,
+        };
+        let result = match owner.purpose {
+            Purpose::Carrier => carrier_child(&mut owner),
+            Purpose::Copy => copy_child_work(&mut owner),
+            Purpose::RetirePending => retire_child(&mut owner),
+        };
+        if result.is_err() {
+            owner.clock.fail();
+        }
+        let closed = owner.settle();
+        let result = match (result, closed) {
+            (Ok(proof), Ok(())) => owner.finish(proof),
+            _ => Err(Failure::Unknown),
+        };
+        // On refusal still consume original private endpoint once under F; no
+        // success frame, no implicit Drop closure/late success after deadline.
+        if result.is_err() {
+            if let Slot::Owned(fd) = owner.channel {
+                if owner.clock.point(true).is_ok() {
+                    owner.channel = Slot::Unknown;
+                    if unsafe { libc::close(fd) } == 0 {
+                        owner.channel = Slot::Closed;
+                    } else {
+                        owner.unknown = true;
+                    }
+                }
+            }
+            return 74;
+        }
+        0
     }
 
     /// Original table is deliberately small: SetupSource16 + namespace10 +
@@ -1082,7 +2233,7 @@ mod native {
         /// Admit fixed protected ancestry before even the small reservation.
         /// An existing pending/attempt or final is not silently cleaned here.
         /// Recovery is a separate exact state under the same original EX.
-        fn admit_fresh(&mut self) -> Result<()> {
+        fn admit_namespace(&mut self, recovery: bool) -> Result<()> {
             self.point(false)?;
             self.slots[ROOT] = Slot::Acquiring;
             self.store(ROOT, unsafe {
@@ -1101,6 +2252,9 @@ mod native {
             }
             let ns = named(self.fd(LIBRARY)?, &c("MobileReleaseKitDeveloper")?)?;
             if ns.is_none() {
+                if recovery {
+                    return Err(Failure::Present);
+                }
                 // Tiny metadata reserve precedes tree census, not a full-copy
                 // space promise. No user content/publication/tool execution.
                 let fs = statfs::fstatfs(self.fd(LIBRARY)?).map_err(|_| Failure::Read)?;
@@ -1120,15 +2274,29 @@ mod native {
                     return Err(Failure::Access);
                 }
             }
-            for name in [profile::PENDING, profile::ATTEMPT, profile::APP] {
-                self.absent(NAMESPACE, name)?;
+            if recovery {
+                self.absent(NAMESPACE, profile::APP)?;
+                self.roster(
+                    NAMESPACE,
+                    &[profile::LOCK, profile::PENDING, profile::ATTEMPT],
+                    false,
+                )?;
+            } else {
+                for name in [profile::PENDING, profile::ATTEMPT, profile::APP] {
+                    self.absent(NAMESPACE, name)?;
+                }
             }
             if named(self.fd(NAMESPACE)?, &c(profile::LOCK)?)?.is_none() {
+                if recovery {
+                    return Err(Failure::Present);
+                }
                 self.roster(NAMESPACE, &[], false)?;
                 self.create_control(LOCK, profile::LOCK)?;
                 self.new_lock = true;
             } else {
-                self.roster(NAMESPACE, &[profile::LOCK], false)?;
+                if !recovery {
+                    self.roster(NAMESPACE, &[profile::LOCK], false)?;
+                }
                 self.open(LOCK, NAMESPACE, profile::LOCK, libc::O_RDWR)?;
                 if !self.original[LOCK].is_some_and(|s| s.control() && s.size == 0) {
                     return Err(Failure::Access);
@@ -1143,9 +2311,18 @@ mod native {
             self.locked = true;
             // Re-admit after EX: first observation was not the exclusion cut.
             self.roots(false)?;
-            self.roster(NAMESPACE, &[profile::LOCK], false)?;
-            for name in [profile::PENDING, profile::ATTEMPT, profile::APP] {
-                self.absent(NAMESPACE, name)?;
+            if recovery {
+                self.roster(
+                    NAMESPACE,
+                    &[profile::LOCK, profile::PENDING, profile::ATTEMPT],
+                    false,
+                )?;
+                self.absent(NAMESPACE, profile::APP)?;
+            } else {
+                self.roster(NAMESPACE, &[profile::LOCK], false)?;
+                for name in [profile::PENDING, profile::ATTEMPT, profile::APP] {
+                    self.absent(NAMESPACE, name)?;
+                }
             }
             Ok(())
         }
@@ -1154,16 +2331,21 @@ mod native {
                 if self.life.phase != Phase::New || !hex(&id, 32) || !hex(&source_sha256, 64) {
                     return Err(Failure::State);
                 }
-                self.admit_fresh()?;
+                self.admit_namespace(false)?;
                 self.mkdir(NAMESPACE, profile::PENDING, PENDING, 0o700)?;
                 self.own_pending = true;
                 self.roster(PENDING, &[], false)?;
+                // Empty root metadata only. Its genuine original identity is
+                // durable BEFORE the child may write any payload content.
+                self.mkdir(PENDING, profile::APP, STAGED, 0o700)?;
+                self.roster(STAGED, &[], false)?;
                 self.create_control(ATTEMPT, profile::ATTEMPT)?;
                 self.own_attempt = true;
                 let record = Record::reserved(
                     id,
                     self.original[NAMESPACE].ok_or(Failure::Binding)?.node,
                     self.original[PENDING].ok_or(Failure::Binding)?.node,
+                    self.original[STAGED].ok_or(Failure::Binding)?.node,
                     source_sha256,
                 )?;
                 self.append_record(&record)?;
@@ -1243,6 +2425,8 @@ mod native {
                 source.post().map_err(|_| Failure::Binding)?;
                 let executable = source.executable().map_err(|_| Failure::Binding)?;
                 let loans = [
+                    self.fd(ROOT)?.as_raw_fd(),
+                    self.fd(LIBRARY)?.as_raw_fd(),
                     self.fd(NAMESPACE)?.as_raw_fd(),
                     self.fd(LOCK)?.as_raw_fd(),
                     self.fd(PENDING)?.as_raw_fd(),
@@ -1256,7 +2440,15 @@ mod native {
                     .reserved
                     .id
                     .clone();
-                let child = Copier::spawn(executable, loans, self.clock, nonce)?;
+                let child = Copier::spawn(
+                    executable,
+                    Loans::copy(
+                        loans,
+                        self.record.as_ref().ok_or(Failure::State)?.reserved.staged,
+                    )?,
+                    self.clock,
+                    nonce,
+                )?;
                 self.child = Some(child);
                 self.life.spawned()?;
                 let child = self.child.as_mut().ok_or(Failure::State)?;
@@ -1264,7 +2456,9 @@ mod native {
                 if worked.is_err() {
                     child.clock.fail();
                 }
+                self.clock.absorb(child.clock.first, worked.is_err());
                 let settled = child.settle();
+                self.clock.absorb(child.clock.first, settled.is_err());
                 // Consume independently, preserve primary error over cleanup.
                 worked?;
                 settled?;
@@ -1278,23 +2472,32 @@ mod native {
                 self.roots(false)?;
                 self.join(PENDING, NAMESPACE, profile::PENDING, false)?;
                 self.roster(PENDING, &[profile::APP], false)?;
-                self.open(
-                    STAGED,
-                    PENDING,
-                    profile::APP,
-                    libc::O_RDONLY | libc::O_DIRECTORY,
-                )?;
-                let staged = self.original[STAGED].ok_or(Failure::Binding)?;
+                // Same original root was retained across the entire child.
+                // Only the admitted copier may normalize 0700 to sealed 0555.
+                let staged = fstat(self.fd(STAGED)?)?;
+                if staged.node != self.record.as_ref().ok_or(Failure::State)?.reserved.staged
+                    || named(self.fd(PENDING)?, &c(profile::APP)?)? != Some(staged)
+                {
+                    return Err(Failure::Binding);
+                }
+                self.original[STAGED] = Some(staged);
                 let report = self
                     .child
                     .as_ref()
                     .and_then(|c| c.report.as_ref())
                     .ok_or(Failure::State)?;
-                if !staged.directory(Some(0o555)) || staged.node != report.staged {
+                let Proof::Copied {
+                    staged: reported,
+                    tree_sha256,
+                } = &report.proof
+                else {
+                    return Err(Failure::Binding);
+                };
+                if !staged.directory(Some(0o555)) || staged.node != *reported {
                     return Err(Failure::Binding);
                 }
                 let mut record = self.record.clone().ok_or(Failure::State)?;
-                record.add_copied(staged.node, report.tree_sha256.clone())?;
+                record.add_copied(staged.node, tree_sha256.clone())?;
                 self.append_record(&record)?;
                 self.record = Some(record);
                 self.life.copied()?;
@@ -1307,7 +2510,9 @@ mod native {
                     self.life.unknown();
                 }
                 if let Some(child) = self.child.as_mut() {
-                    if child.settle().is_err() || !child.reaped || child.unknown {
+                    let child_closed = child.settle();
+                    self.clock.absorb(child.clock.first, child_closed.is_err());
+                    if child_closed.is_err() || !child.reaped || child.unknown {
                         self.unknown = true;
                         self.life.unknown();
                     }
@@ -1315,6 +2520,140 @@ mod native {
             }
             result
         }
+        /// Fresh original signed-helper recovery. Existing state is only DATA
+        /// until the one actual child reauthenticates SELF/source and reports
+        /// positively closed pending-empty. This invocation never publishes.
+        pub(crate) fn retire_interrupted(
+            &mut self,
+            source: &mut crate::macos_xcode_source::SetupSource,
+        ) -> Result<()> {
+            let result = (|| -> Result<()> {
+                if self.life.phase != Phase::New || self.child.is_some() {
+                    return Err(Failure::State);
+                }
+                source.post().map_err(|_| Failure::Binding)?;
+                let source_hash: String = source
+                    .image_sha256()
+                    .map_err(|_| Failure::Binding)?
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                self.admit_namespace(true)?;
+                self.open(
+                    PENDING,
+                    NAMESPACE,
+                    profile::PENDING,
+                    libc::O_RDONLY | libc::O_DIRECTORY,
+                )?;
+                if !self.original[PENDING].is_some_and(|s| s.directory(Some(0o700))) {
+                    return Err(Failure::Access);
+                }
+                self.open(ATTEMPT, NAMESPACE, profile::ATTEMPT, libc::O_RDONLY)?;
+                let original = self.original[ATTEMPT].ok_or(Failure::Binding)?;
+                if !original.control() || original.size == 0 {
+                    return Err(Failure::Binding);
+                }
+                self.point(false)?;
+                let mut bytes = [0u8; RECORD_LIMIT + 1];
+                let n = unsafe {
+                    libc::pread(
+                        self.fd(ATTEMPT)?.as_raw_fd(),
+                        bytes.as_mut_ptr().cast(),
+                        bytes.len(),
+                        0,
+                    )
+                };
+                self.point(false)?;
+                if n != original.size as isize {
+                    return Err(Failure::Binding);
+                }
+                self.join(ATTEMPT, NAMESPACE, profile::ATTEMPT, false)?;
+                let record = Record::decode(&bytes[..n as usize])?;
+                if !record.binds_originals(
+                    self.original[NAMESPACE].ok_or(Failure::Binding)?.node,
+                    self.original[PENDING].ok_or(Failure::Binding)?.node,
+                    &source_hash,
+                ) {
+                    return Err(Failure::Binding);
+                }
+                if let Some(staged) = named(self.fd(PENDING)?, &c(profile::APP)?)? {
+                    if staged.node != record.reserved.staged
+                        || !(staged.directory(Some(0o700)) || staged.directory(Some(0o555)))
+                    {
+                        return Err(Failure::Binding);
+                    }
+                    self.roster(PENDING, &[profile::APP], false)?;
+                    self.open(
+                        STAGED,
+                        PENDING,
+                        profile::APP,
+                        libc::O_RDONLY | libc::O_DIRECTORY,
+                    )?;
+                } else {
+                    self.roster(PENDING, &[], false)?;
+                }
+                self.record_bytes = bytes[..n as usize].to_vec();
+                self.record = Some(record.clone());
+                self.own_pending = true;
+                self.own_attempt = true;
+                self.life.reserve()?;
+                let fds = [
+                    self.fd(ROOT)?.as_raw_fd(),
+                    self.fd(LIBRARY)?.as_raw_fd(),
+                    self.fd(NAMESPACE)?.as_raw_fd(),
+                    self.fd(LOCK)?.as_raw_fd(),
+                    self.fd(PENDING)?.as_raw_fd(),
+                    source.setup().map_err(|_| Failure::Binding)?.as_raw_fd(),
+                    source.image().map_err(|_| Failure::Binding)?.as_raw_fd(),
+                ];
+                let loans = Loans::retire(fds, record.clone(), original.node)?;
+                self.child = Some(Copier::spawn(
+                    source.executable().map_err(|_| Failure::Binding)?,
+                    loans,
+                    self.clock,
+                    record.reserved.id,
+                )?);
+                self.life.spawned()?;
+                let child = self.child.as_mut().ok_or(Failure::State)?;
+                let observed = child.pump();
+                if observed.is_err() {
+                    child.clock.fail();
+                }
+                self.clock.absorb(child.clock.first, observed.is_err());
+                let closed = child.settle();
+                self.clock.absorb(child.clock.first, closed.is_err());
+                observed?;
+                closed?;
+                self.life.output_complete = matches!(
+                    child.report.as_ref().map(|r| &r.proof),
+                    Some(Proof::PendingEmpty)
+                );
+                self.life.eof = child.eof;
+                self.life.exit_zero = child.reaped && child.exit_zero;
+                self.life.controls_closed =
+                    matches!(child.endpoint, Slot::Closed) && !child.unknown;
+                self.life.joined()?;
+                source.post().map_err(|_| Failure::Binding)?;
+                self.roots(false)?;
+                self.close(STAGED)?;
+                self.retire_empty_refusal()?;
+                self.life.phase = Phase::Retired;
+                Ok(())
+            })();
+            if result.is_err() {
+                self.clock.fail();
+                if let Some(child) = self.child.as_mut() {
+                    let child_closed = child.settle();
+                    self.clock.absorb(child.clock.first, child_closed.is_err());
+                    if child_closed.is_err() || !child.reaped || child.unknown {
+                        self.unknown = true;
+                        self.life.unknown();
+                    }
+                }
+            }
+            result
+        }
+
         /// Parent sole publication. Neither child report nor record alone can
         /// reach this branch; actual live route must have consumed originalchild.
         pub(crate) fn publish(&mut self) -> Result<()> {
@@ -1446,7 +2785,20 @@ mod native {
         /// refusal cut handles only this invocation's actually empty reservation.
         pub(crate) fn retire_empty_refusal(&mut self) -> Result<()> {
             let result = (|| -> Result<()> {
-                if !self.life.may_remove_empty_reservation()
+                let joined_retirement = self.life.phase == Phase::Joined
+                    && self.child.as_ref().is_some_and(|child| {
+                        child.purpose == Purpose::RetirePending
+                            && child.reaped
+                            && child.exit_zero
+                            && child.eof
+                            && !child.unknown
+                            && matches!(child.endpoint, Slot::Closed)
+                            && matches!(
+                                child.report.as_ref().map(|r| &r.proof),
+                                Some(Proof::PendingEmpty)
+                            )
+                    });
+                if !(self.life.may_remove_empty_reservation() || joined_retirement)
                     || !self.own_pending
                     || !self.own_attempt
                 {
@@ -1454,6 +2806,28 @@ mod native {
                 }
                 self.roots(true)?;
                 self.join(PENDING, NAMESPACE, profile::PENDING, true)?;
+                if self.life.phase == Phase::Reserved && self.child.is_none() {
+                    let record = self.record.as_ref().ok_or(Failure::State)?;
+                    if self.original[STAGED].ok_or(Failure::Binding)?.node != record.reserved.staged
+                    {
+                        return Err(Failure::Binding);
+                    }
+                    self.join(STAGED, PENDING, profile::APP, true)?;
+                    self.roster(STAGED, &[], true)?;
+                    self.point(true)?;
+                    if unsafe {
+                        libc::unlinkat(
+                            self.fd(PENDING)?.as_raw_fd(),
+                            c(profile::APP)?.as_ptr(),
+                            libc::AT_REMOVEDIR,
+                        )
+                    } != 0
+                    {
+                        return Err(Failure::Write);
+                    }
+                    self.sync(PENDING, true)?;
+                    self.close(STAGED)?;
+                }
                 self.roster(PENDING, &[], true)?;
                 self.join(ATTEMPT, NAMESPACE, profile::ATTEMPT, true)?;
                 // Remove pending first. An interruption with attempt alone is
@@ -1509,7 +2883,10 @@ mod native {
                 if let Some(at) = self.clock.first {
                     child.clock.fail_at(at);
                 }
-                if let Err(e) = child.settle() {
+                self.clock.absorb(child.clock.first, false);
+                let closed = child.settle();
+                self.clock.absorb(child.clock.first, closed.is_err());
+                if let Err(e) = closed {
                     self.unknown = true;
                     failure = Some(e);
                 }
@@ -1547,7 +2924,7 @@ mod native {
     target_pointer_width = "64",
     any(target_arch = "aarch64", target_arch = "x86_64")
 ))]
-pub(crate) use native::Namespace;
+pub(crate) use native::{carrier_preflight, copier_entry, Namespace};
 
 #[cfg(test)]
 mod tests {
@@ -1562,6 +2939,10 @@ mod tests {
             Node {
                 device: 1,
                 inode: 3,
+            },
+            Node {
+                device: 1,
+                inode: 4,
             },
             "a".repeat(64),
         )
@@ -1604,6 +2985,48 @@ mod tests {
         assert!(wrong.encode().is_err());
     }
     #[test]
+    fn xcode_reserved_root_is_durable_exact_identity_not_a_name_or_old_format() {
+        let r = record();
+        assert!(r.binds_originals(r.reserved.namespace, r.reserved.pending, &"a".repeat(64)));
+        assert!(!r.binds_originals(
+            r.reserved.namespace,
+            Node {
+                device: 1,
+                inode: 99
+            },
+            &"a".repeat(64)
+        ));
+        assert!(!r.binds_originals(r.reserved.namespace, r.reserved.pending, &"b".repeat(64)));
+        let mut mismatch = r.clone();
+        assert!(mismatch
+            .add_copied(
+                Node {
+                    device: 1,
+                    inode: 99
+                },
+                "b".repeat(64)
+            )
+            .is_err());
+        assert_eq!(
+            mismatch, r,
+            "failed append cannot change the reserved identity"
+        );
+        let mut old: serde_json::Value = serde_json::from_slice(&r.encode().unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("staged");
+        let mut bytes = serde_json::to_vec(&old).unwrap();
+        bytes.push(b'\n');
+        assert!(
+            Record::decode(&bytes).is_err(),
+            "unrecorded stage never recovered by basename"
+        );
+        let mut foreign = r.clone();
+        foreign.reserved.staged.device = 2;
+        assert!(foreign.encode().is_err());
+        let mut reused = r.clone();
+        reused.reserved.staged = reused.reserved.pending;
+        assert!(reused.encode().is_err());
+    }
+    #[test]
     fn xcode_parent_requires_actual_join_and_never_unknown_cleanup_credit() {
         let mut life = Lifecycle::new();
         life.reserve().unwrap();
@@ -1641,5 +3064,19 @@ mod tests {
         c.fail_at(now + Duration::from_secs(20));
         assert_eq!(c.finish, now + Duration::from_secs(119));
         assert_eq!(c.work, now + Duration::from_secs(10));
+        let mut combined = Clock::new(
+            now + Duration::from_secs(300),
+            now + Duration::from_secs(420),
+            now + Duration::from_secs(430),
+        )
+        .unwrap();
+        combined.absorb(Some(now - Duration::from_secs(100)), true);
+        assert_eq!(combined.finish, now + Duration::from_secs(20));
+        // A subordinate that spent time closing may return much later; both
+        // its original failure and the next owner's cutoff stay the earliest.
+        combined.absorb(Some(now - Duration::from_secs(90)), true);
+        combined.absorb(None, true);
+        assert_eq!(combined.first, Some(now - Duration::from_secs(100)));
+        assert_eq!(combined.finish, now + Duration::from_secs(20));
     }
 }

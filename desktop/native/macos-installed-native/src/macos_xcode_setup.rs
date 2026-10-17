@@ -324,6 +324,18 @@ mod tests {
             copied_mode(Kind::Directory, 0o040700, 2),
             Err(Refusal::PublicAccess)
         );
+        // Both producer and fixed retirement use this exact symlink policy:
+        // no chmod/new 0777 demand, even for an actual private-mode link.
+        for permissions in [0o000, 0o700, 0o755, 0o777] {
+            assert_eq!(
+                copied_mode(Kind::Symlink, 0o120000 | permissions, 1),
+                Ok(None)
+            );
+        }
+        assert_eq!(
+            copied_mode(Kind::Symlink, 0o124755, 1),
+            Err(Refusal::SpecialMode)
+        );
         assert_eq!(copied_mode(Kind::Symlink, 0o120755, 1), Ok(None));
         assert_eq!(copied_mode(Kind::Symlink, 0o120755, 2), Err(Refusal::Links));
         assert_eq!(copied_mode(Kind::Regular, 0o120755, 1), Err(Refusal::Kind));

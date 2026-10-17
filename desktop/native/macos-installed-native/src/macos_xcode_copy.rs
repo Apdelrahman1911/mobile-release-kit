@@ -145,6 +145,56 @@ impl Identity {
             .map_err(|_| Failure::Access)?;
         Ok(kind)
     }
+    /// Only actual private output inodes qualify for fixed-stage retirement.
+    /// Private unfinished 0600/0700 modes are not public source admission.
+    pub(crate) fn retiring_kind(self) -> Result<profile::Kind> {
+        if self.dev <= 0
+            || self.ino == 0
+            || self.uid != 0
+            || self.gid != 0
+            || self.flags != 0
+            || self.size < 0
+            || self.mode & 0o7000 != 0
+        {
+            return Err(Failure::Access);
+        }
+        match self.mode & libc::S_IFMT {
+            libc::S_IFDIR if matches!(self.mode & 0o777, 0o700 | 0o555) => {
+                Ok(profile::Kind::Directory)
+            }
+            libc::S_IFREG
+                if self.links == 1
+                    && matches!(self.mode & 0o777, 0o600 | 0o444 | 0o555)
+                    && self.size as u64 <= profile::FILE_LIMIT =>
+            {
+                Ok(profile::Kind::Regular)
+            }
+            libc::S_IFLNK
+                if self.links == 1
+                    && profile::copied_mode(
+                        profile::Kind::Symlink,
+                        u32::from(self.mode),
+                        u64::from(self.links),
+                    )
+                    .is_ok()
+                    && (1..=profile::LINK_LIMIT as i64).contains(&self.size) =>
+            {
+                Ok(profile::Kind::Symlink)
+            }
+            _ => Err(Failure::Kind),
+        }
+    }
+    pub(crate) fn same_owned_directory(self, other: Self) -> bool {
+        self.mode & libc::S_IFMT == libc::S_IFDIR && self.same_retired_inode(other)
+    }
+    pub(crate) fn same_retired_inode(self, other: Self) -> bool {
+        self.dev == other.dev
+            && self.ino == other.ino
+            && self.mode == other.mode
+            && self.uid == other.uid
+            && self.gid == other.gid
+            && self.flags == other.flags
+    }
     pub(crate) fn device(self) -> libc::dev_t {
         self.dev
     }

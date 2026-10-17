@@ -154,6 +154,14 @@ jobs:
               installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error \
               --exact --test-threads=1 | tee "$WORK_ROOT/installer-diagnostic-tests.log"
             grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$WORK_ROOT/installer-diagnostic-tests.log"
+            # New managed-selection checks: private temporary file originals
+            # and DATA only. No privileged namespace, Xcode or Store operation.
+            rustup run 1.98.1 cargo test --locked --no-default-features --lib -- \
+              installed_runtime::ios_validation_tools_data_tests::ios_managed_absence_is_enoent_only_and_rechecked_on_the_original_directory \
+              installed_runtime::ios_validation_tools_data_tests::ios_managed_presence_never_mints_missing_original_or_renews_cleanup \
+              ios_toolchain::tests::managed_developer_is_exact_without_relaxing_legacy_selection \
+              --exact --test-threads=1 | tee "$WORK_ROOT/managed-selection-tests.log"
+            grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/managed-selection-tests.log"
             exit 0
           fi
           if [[ "$INSTALLER_CHECKS" == installer-restore-chain ]]; then
