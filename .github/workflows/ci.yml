@@ -96,6 +96,8 @@ jobs:
           set -euo pipefail
           ruby_prefix=$(ruby -rrbconfig -e 'puts RbConfig::CONFIG.fetch("prefix")')
           [[ "$ruby_prefix" == /opt/hostedtoolcache/Ruby/* && -x "$ruby_prefix/bin/ruby" ]]
+          # Show only public tool permissions if a hosted image changes them.
+          stat -c '%a %u:%g %n' "$ruby_prefix" "$ruby_prefix/bin" "$ruby_prefix/bin/ruby"
           # Install needs network; the actual tests get none, no runner HOME,
           # no secrets, and no writable source/dependencies. No native suites.
           sudo -n /usr/bin/timeout --kill-after=5 180 /usr/bin/bwrap \
@@ -108,6 +110,7 @@ jobs:
             --ro-bind "$WORK_ROOT/gems" "$WORK_ROOT/gems" \
             --ro-bind "$GITHUB_WORKSPACE" /work --chdir /work --clearenv \
             --setenv PATH "$ruby_prefix/bin:/usr/bin:/bin" --setenv LANG C.UTF-8 \
+            --setenv MRK_TEST_RUBY "$ruby_prefix/bin/ruby" \
             --setenv HOME /tmp/home --setenv TMPDIR /tmp --setenv CI true \
             --setenv GEM_HOME "$WORK_ROOT/bootstrap" --setenv GEM_PATH "$WORK_ROOT/bootstrap" \
             --setenv BUNDLE_PATH "$WORK_ROOT/gems" --setenv BUNDLE_GEMFILE /work/Gemfile \
@@ -122,9 +125,10 @@ jobs:
               [[ "$(id -u)" == 65534 && "$(id -g)" == 65534 ]]
               grep -Eq "^CapEff:[[:space:]]+0000000000000000$" /proc/self/status
               grep -Eq "^CapBnd:[[:space:]]+0000000000000000$" /proc/self/status
-              ruby -rbundler/setup tests/workflow/test_play_lanes.rb | tee /tmp/play.log
+              "$MRK_TEST_RUBY" -rrbconfig -e '\''abort "Wrong test Ruby" unless RUBY_VERSION == "3.3.12" && File.realpath(RbConfig.ruby) == File.realpath(ENV.fetch("MRK_TEST_RUBY"))'\''
+              "$MRK_TEST_RUBY" -rbundler/setup tests/workflow/test_play_lanes.rb | tee /tmp/play.log
               grep -Eq "^55 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/play.log
-              ruby -rbundler/setup tests/workflow/test_local_store_execution_runtime.rb | tee /tmp/local.log
+              "$MRK_TEST_RUBY" -rbundler/setup tests/workflow/test_local_store_execution_runtime.rb | tee /tmp/local.log
               grep -Eq "^7 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/local.log
             '
       - name: Remove only this job's disposable dependencies and cache
