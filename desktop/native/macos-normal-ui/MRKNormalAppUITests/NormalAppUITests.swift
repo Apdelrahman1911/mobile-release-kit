@@ -1184,7 +1184,7 @@ final class NormalAppUITests: XCTestCase {
     }
     // End engineering main fixture; ordinary installed cases below are unchanged.
 
-    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap }
+    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap, currentCandidateSavedVersion }
 
     private let fixedNormalBatches: [String: Set<String>] = [
         "launch-project": ["test.xcresult", "project-test.xcresult"],
@@ -1196,6 +1196,12 @@ final class NormalAppUITests: XCTestCase {
 
     @MainActor private func normalJourneyProfile(for result: String) throws -> SourceProfile {
         let context = ProcessInfo.processInfo.environment
+        if let candidate = context["MRK_NORMAL_UI_CURRENT_SAVED_VERSION"] {
+            try require(candidate == "current-candidate-saved-version-only-v1" && result == "saved-version-recovery-test.xcresult"
+                        && context["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == nil && context["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"] == nil,
+                        "current candidate scope permits only saved-version recovery")
+            return .currentCandidateSavedVersion
+        }
         guard let scope = context["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] else {
             try require(context["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"] == nil,
                         "a normal batch cannot be selected without its closed source profile")
@@ -1247,6 +1253,11 @@ final class NormalAppUITests: XCTestCase {
         case .sameBuild:
             try require(applicationSource == harnessSource,
                         "this same-build scenario needs exact application and harness source bindings")
+        case .currentCandidateSavedVersion:
+            try require(applicationSource != harnessSource
+                        && context["MRK_NORMAL_UI_CURRENT_SAVED_VERSION"] == "current-candidate-saved-version-only-v1"
+                        && context["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == nil && context["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"] == nil,
+                        "current recovery requires distinct candidate and harness sources")
         case .fixedCarrierResume:
             #if arch(arm64)
             try require(applicationSource == "ce644711fb6e2bea26182473441aac192d5638e1" && harnessSource != applicationSource
@@ -3691,7 +3702,10 @@ final class NormalAppUITests: XCTestCase {
             try Self.need(handoff.bytes.count <= 16 * 1024 && handoff.bytes.last == 10, "recovery handoff bound")
             let fixedSaved = env["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == "fixed-ce644-arm-carrier-normal-local-batch-v1"
                 && env["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"] == "saved-version-recovery"
-            let fixedKeys: Set<String> = fixedSaved ? ["applicationSourceCommit", "runtimeOrigin"] : []
+            let currentSaved = env["MRK_NORMAL_UI_CURRENT_SAVED_VERSION"] == "current-candidate-saved-version-only-v1"
+            try Self.need(!currentSaved || !fixedSaved && env["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == nil,
+                          "current recovery cannot inherit historical runtime authority")
+            let fixedKeys: Set<String> = fixedSaved ? ["applicationSourceCommit", "runtimeOrigin"] : currentSaved ? ["applicationSourceCommit"] : []
             guard let raw = try JSONSerialization.jsonObject(with: handoff.bytes) as? [String: Any],
                   Set(raw.keys) == fixedKeys.union(Set(["schemaVersion", "scope", "sourceCommit", "sourceInputsSha256", "runtimeManifestSha256",
                       "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256", "root",
@@ -3699,9 +3713,9 @@ final class NormalAppUITests: XCTestCase {
                   let schema = raw["schemaVersion"] as? Int, schema == 1,
                   let source = raw["sourceCommit"] as? String,
                   source == env["MRK_NORMAL_UI_HARNESS_SOURCE"],
-                  fixedSaved || source == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
-                  raw["scope"] as? String == (fixedSaved ? "one-owned-original-release-saved-version-recovery-fixture" : "one-owned-saved-version-recovery-fixture"),
-                  raw["sourceInputsSha256"] as? String == "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2",
+                  fixedSaved || currentSaved || source == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
+                  raw["scope"] as? String == (fixedSaved ? "one-owned-original-release-saved-version-recovery-fixture" : currentSaved ? "current-candidate-saved-version-only-v1" : "one-owned-saved-version-recovery-fixture"),
+                  currentSaved || raw["sourceInputsSha256"] as? String == "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2",
                   let root = raw["root"] as? String,
                   root.range(of: #"^/private/tmp/mrk-normal-project-[A-Za-z0-9_-]{6,16}$"#, options: .regularExpression) != nil,
                   let transaction = raw["transactionId"] as? String,
@@ -3710,6 +3724,13 @@ final class NormalAppUITests: XCTestCase {
                   let directoryFacts = raw["directories"] as? [String: [String]],
                   let fileFacts = raw["files"] as? [String: [String: Any]] else {
                 throw Refusal.condition("fixture: closed recovery handoff differs")
+            }
+            if currentSaved {
+                guard let application = raw["applicationSourceCommit"] as? String,
+                      application.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil,
+                      application == env["MRK_NORMAL_UI_APPLICATION_SOURCE"], application != source else {
+                    throw Refusal.condition("fixture: current candidate application source differs")
+                }
             }
             if fixedSaved {
                 guard let origin = raw["runtimeOrigin"] as? [String: Any],
@@ -3738,7 +3759,7 @@ final class NormalAppUITests: XCTestCase {
             }
             let canonical = try JSONSerialization.data(withJSONObject: canonicalObject, options: [.sortedKeys, .withoutEscapingSlashes]) + Data([10])
             try Self.need(canonical == handoff.bytes, "recovery handoff is not the exact canonical document")
-            for key in ["runtimeManifestSha256", "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256"] {
+            for key in ["sourceInputsSha256", "runtimeManifestSha256", "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256"] {
                 guard let digest = raw[key] as? String,
                       digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
                     throw Refusal.condition("fixture: recovery handoff digest unavailable")

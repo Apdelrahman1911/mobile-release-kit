@@ -2623,6 +2623,173 @@ class NormalPhaseDataTests(unittest.TestCase):
                     self.assertEqual(json.loads(receipt.read_bytes())["observation"]["gateFree"], "unqualified")
 
 
+    def test_current_saved_version_candidate_context_is_two_source_and_single_journey(self):
+        root = MODULE.SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper"
+        env = {MODULE.SAVED_VERSION_CURRENT_ENV: MODULE.SAVED_VERSION_CURRENT_SCOPE,
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": "a" * 40,
+            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE": "b" * 40}
+        for mode in ("build", "test", "summary"):
+            request = dict(phase=mode, result=None if mode == "build" else Path(MODULE.SAVED_VERSION_RESULT))
+            self.assertEqual(MODULE.saved_version_candidate_context(request, env, root),
+                             {MODULE.SAVED_VERSION_CURRENT_ENV: MODULE.SAVED_VERSION_CURRENT_SCOPE})
+        request = dict(phase="test", result=Path(MODULE.SAVED_VERSION_RESULT))
+        for change in ({MODULE.SAVED_VERSION_CURRENT_ENV: "unknown"},
+                       {"TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": "b" * 40},
+                       {"TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": "unknown"},
+                       {MODULE.FIXED_RESUME_ENV: MODULE.FIXED_NORMAL_SCOPE},
+                       {MODULE.FIXED_NORMAL_BATCH_ENV: "saved-version-recovery"}):
+            with self.subTest(environment=change), self.assertRaises(MODULE.Refused):
+                MODULE.saved_version_candidate_context(request, {**env, **change}, root)
+        for changed in (dict(request, result=Path("project-test.xcresult")), dict(request, phase="query"),
+                        dict(request, iosUnsigned=True), dict(request, androidPositive=True)):
+            with self.assertRaises(MODULE.Refused): MODULE.saved_version_candidate_context(changed, env, root)
+        with self.assertRaises(MODULE.Refused):
+            MODULE.saved_version_candidate_context(request, env, MODULE.SAVED_VERSION_CANDIDATE_ROOT)
+        self.assertEqual(MODULE.saved_version_candidate_context(request, {}, root), {})
+
+    def test_current_saved_version_actual_core_parser_and_retained_originals(self):
+        # Real ZIP/manifest parsers and real private file originals; installation
+        # ownership/xattrs/Apple directory admission are explicitly inert Linux
+        # fixtures. No native app, installer or core subprocess is executed here.
+        import zipfile
+        module_name = "_mrk_current_saved_version_test_stager"
+        spec = importlib.util.spec_from_file_location(module_name, ROOT / MODULE.SAVED_VERSION_STAGER)
+        stage = importlib.util.module_from_spec(spec)
+        self.assertNotIn(module_name, sys.modules)
+        sys.modules[module_name] = stage
+        try:
+            spec.loader.exec_module(stage)
+            for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+                for fault in (None, "git-source", "core-bytes", "manifest-core", "manifest-target", "wrapper", "post-core", "post-source", "late-post", "child-zero", "child-unknown", "close"):
+                    with self.subTest(target=target, fault=fault), tempfile.TemporaryDirectory(prefix="mrk-current-version-data-") as temporary:
+                        base = Path(temporary); source = base / "candidate"; source.mkdir()
+                        normal = base / "normal-ui"; normal.mkdir()
+                        installed = base / "installed"; installed.mkdir(); runtime = installed / "runtime"; runtime.mkdir()
+                        wrappers = set(stage.CURRENT_BOOTSTRAPS) | {"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py",
+                            "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py"}
+                        bodies = {"desktop/" + name: b"inert matching wrapper data\n" for name in wrappers}
+                        bodies.update({"src/mobile_release/__init__.py": b'__version__ = "0.3.0"\n',
+                            "src/mobile_release/_desktop_engine.py": (ROOT / "src/mobile_release/_desktop_engine.py").read_bytes(),
+                            "desktop/cpython-source-inputs/github-ca.pem": b"inert CA data\n",
+                            "desktop/tools/prepare_runtime.py": b"inert producer source\n",
+                            "desktop/packaging/macos-history-provider.profile": b"inert profile\n",
+                            MODULE.SAVED_VERSION_STAGER: b"inert selected parser SOURCE not executed in test\n",
+                            MODULE.SAVED_VERSION_PRODUCER: b"inert selected producer SOURCE not executed in test\n",
+                            MODULE.SAVED_VERSION_DATA: (ROOT / MODULE.SAVED_VERSION_DATA).read_bytes()})
+                        for leaf in ("build-release.json", "build-release-intel.json"):
+                            bodies["desktop/macos-installed-inputs/" + leaf] = (ROOT / "desktop/macos-installed-inputs" / leaf).read_bytes()
+                        git_rows = []
+                        for name, body in sorted(bodies.items()):
+                            path = source / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(body); path.chmod(0o600)
+                            blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
+                            git_rows.append(b"100644 blob " + blob.encode() + b"\t" + name.encode() + b"\0")
+                        packed = io.BytesIO()
+                        with zipfile.ZipFile(packed, "w") as archive:
+                            for name in sorted(n for n in bodies if n.startswith("src/mobile_release/")):
+                                info = zipfile.ZipInfo(name[4:], date_time=(1980, 1, 1, 0, 0, 0))
+                                info.compress_type = zipfile.ZIP_DEFLATED; info.create_system = 3
+                                info.external_attr = (stat.S_IFREG | 0o644) << 16
+                                content = bodies[name] + (b"# changed\n" if fault == "core-bytes" else b"")
+                                archive.writestr(info, content)
+                        files = {name: bodies["desktop/" + name] for name in wrappers}
+                        files.update({"core.zip": packed.getvalue(), "github-ca.pem": bodies["desktop/cpython-source-inputs/github-ca.pem"],
+                                      "python/bin/python3": b"inert interpreter bytes; never executed"})
+                        if fault == "wrapper": files["config_edit_bootstrap.py"] += b"wrong"
+                        rows = [dict(path=name, size=len(body), sha256=MODULE.sha(body)) for name, body in sorted(files.items())]
+                        if fault == "manifest-core":
+                            next(row for row in rows if row["path"] == "core.zip")["sha256"] = "c" * 64
+                        manifest = dict(schemaVersion=1, protocol=1, coreVersion="0.3.0", target=target,
+                            coreSha256=next(row for row in rows if row["path"] == "core.zip")["sha256"],
+                            protocolSha256=stage.CURRENT_PROTOCOL, inventorySha256=stage.digest(stage.canonical(rows)), files=rows)
+                        if fault == "manifest-target": manifest["target"] = "invalid"
+                        files["manifest.json"] = stage.canonical(manifest)
+                        for name, body in files.items():
+                            path = runtime / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(body); path.chmod(0o600)
+                        if fault == "git-source": (source / MODULE.SAVED_VERSION_PRODUCER).write_bytes(b"different selected source")
+                        called, tick = [], [0]
+                        def owned(argv, **kwargs):
+                            called.append(argv)
+                            if argv[0] == "/inert/python":
+                                self.assertEqual(argv[4], str(source / MODULE.SAVED_VERSION_PRODUCER))
+                                self.assertEqual(argv[-2:], ["release_version", "interrupt"])
+                                self.assertEqual((kwargs["timeout"], kwargs["output_limit"]), (20, 65536))
+                                if fault == "child-unknown": raise MODULE.Refused("synthetic unreturned interrupt")
+                                return subprocess.CompletedProcess(argv, 0, b"", b"")
+                            self.assertEqual(argv[:3], ["/usr/bin/git", "-C", str(source)])
+                            self.assertIn("a" * 40, argv); self.assertNotIn("b" * 40, argv)
+                            return subprocess.CompletedProcess(argv, 0, b"".join(git_rows), b"")
+                        env = {MODULE.SAVED_VERSION_CURRENT_ENV: MODULE.SAVED_VERSION_CURRENT_SCOPE,
+                            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": "a" * 40,
+                            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE": "b" * 40}
+                        phase = MODULE.NormalPhase(SimpleNamespace(run_owned=owned), env, base / "helper", MODULE.PhaseClock(585, now=lambda: tick[0]))
+                        selected = []
+                        @contextmanager
+                        def installation(root, names, *, selection):
+                            selected.append(selection)
+                            self.assertEqual(selection.target, target)
+                            self.assertEqual(selection.release, stage.source_build_selection(target).release)
+                            fd = os.open(installed, os.O_RDONLY | os.O_DIRECTORY)
+                            try: yield None, None, fd
+                            finally: os.close(fd)
+                        @contextmanager
+                        def directory(parent, name, mode):
+                            self.assertEqual((name, mode), ("runtime", 0o555))
+                            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=parent)
+                            try: yield fd, None
+                            finally: os.close(fd)
+                        with patch.object(MODULE, "SAVED_VERSION_CANDIDATE_ROOT", source), \
+                                patch.object(stage, "installation_metadata_directory", installation), patch.object(stage, "maintenance_directory", directory):
+                            fixture = MODULE.SavedVersionFixture(phase, "b" * 40, normal); fixture.phase_target = target
+                            def parser():
+                                fixture.runtime_stager = stage; sys.modules[fixture.runtime_module_name] = stage
+                                return stage
+                            def leaf(parent, name, limit):
+                                entry = fixture._read(parent, name, limit)
+                                fixture.runtime_entries.append((parent, name, entry, limit, False))
+                                return entry[1]
+                            try:
+                                with patch.object(fixture, "_current_stager", parser), patch.object(fixture, "_installed_runtime_leaf", leaf):
+                                    if fault in ("child-zero", "child-unknown"):
+                                        fake_sys = SimpleNamespace(flags=SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1),
+                                                                   executable="/inert/python", modules=sys.modules)
+                                        def staged(): fixture.root = base / "inert-project"
+                                        with patch.object(fixture, "_stage", staged), patch.object(MODULE, "sys", fake_sys), self.assertRaises(MODULE.Refused):
+                                            fixture.interrupt(target)
+                                        self.assertFalse(fixture.handoff.exists()); self.assertIsNone(fixture.receipt)
+                                    elif fault in ("git-source", "core-bytes", "manifest-core", "manifest-target", "wrapper"):
+                                        with self.assertRaises((MODULE.Refused, stage.Refused)):
+                                            fixture._sources()
+                                        self.assertIsNone(fixture.root); self.assertFalse(fixture.handoff.exists())
+                                    else:
+                                        fixture._sources()
+                                        self.assertNotEqual(fixture.source_inputs, MODULE.SAVED_VERSION_SOURCE)
+                                        self.assertEqual(fixture.runtime_name, "manifest.json")
+                                        self.assertFalse((normal.parent / "runtime-result.json").exists())
+                                        self.assertEqual(fixture.runtime_witness["applicationSourceCommit"], "a" * 40)
+                                        self.assertEqual(fixture.runtime_witness["harnessSourceCommit"], "b" * 40)
+                                        self.assertTrue(fixture.runtime_witness["installedCoreMatched"])
+                                        if fault == "post-core": (runtime / "core.zip").write_bytes(b"changed")
+                                        if fault == "post-source": (source / MODULE.SAVED_VERSION_PRODUCER).write_bytes(b"changed")
+                                        if fault == "late-post": tick[0] = 585 * 10**9
+                                        if fault in ("post-core", "post-source", "late-post"):
+                                            with self.assertRaises(MODULE.Refused): fixture.check_sources()
+                                        else: fixture.check_sources()
+                                    self.assertEqual(len(called), 2 if fault in ("child-zero", "child-unknown") else 1)
+                                    # Failed binding never dispatches child/UI; unreturned/non86 child never publishes handoff.
+                            finally:
+                                if fault == "close":
+                                    original_close = MODULE.os.close; closed = []
+                                    def consuming(fd):
+                                        original_close(fd); closed.append(fd)
+                                        if len(closed) == 1: raise OSError("synthetic consuming close")
+                                    with patch.object(MODULE.os, "close", consuming), self.assertRaises(OSError): fixture.close()
+                                    self.assertEqual(len(closed), len(set(closed)))
+                                else: fixture.close()
+                                self.assertFalse(fixture.fds)
+                                self.assertNotIn(MODULE.SAVED_VERSION_CURRENT_STAGER_MODULE, sys.modules)
+        finally:
+            if sys.modules.get(module_name) is stage: del sys.modules[module_name]
+
     def test_normal_phase_deadlines_file_limits_source_and_receipt_finality(self):
         for phase, limit in (("build", 32 * 1024**3), ("test", 1024**3), ("summary", 1024**3)):
             self.assertEqual(MODULE.normal_file_limit(phase, (limit, limit)), (limit, limit))
