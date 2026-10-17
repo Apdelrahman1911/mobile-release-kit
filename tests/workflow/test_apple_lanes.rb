@@ -424,7 +424,7 @@ class AppleReleaseLanesTest < Minitest::Test
     @payload=value;@intent_digest=Digest::SHA256.hexdigest(MobileReleaseKit.canonical_json(value))
     File.binwrite(File.join(@root,'intent.json'),MobileReleaseKit.canonical_json(value.merge(
       'integrity'=>{'algorithm'=>'sha256','sha256'=>@intent_digest})))
-    payload,digest=MobileReleaseKit.local_operation_intent(File.binread(File.join(@root,'intent.json')),expected_sha256:@intent_digest)
+    payload,digest=MobileReleaseKit.local_operation_intent(File.binread(File.join(@root,'intent.json')),expected_sha256:@intent_digest,platform:'ios')
     authority=payload.fetch('preparedBy').merge('purpose'=>'execute','authorizationId'=>'55555555-5555-4555-8555-555555555555','intentSha256'=>digest)
     {payload:payload,digest:digest,authority:authority}
   end

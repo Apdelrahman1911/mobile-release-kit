@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 from types import SimpleNamespace
@@ -174,7 +175,7 @@ class LocalStorePrepareTests(unittest.TestCase):
         if fault=='snapshot-missing':fixture=None
         model=LocalLaneModel(self.execution_receipt if _execute or _reconcile else lambda argv,env:(fixture,0),terminal=fault!='nested-terminal')
         self.addCleanup(model.close)
-        def peak():high[0]=max(high[0],len(os.listdir('/proc/self/fd')))
+        def peak():high[0]=max(high[0],len(os.listdir('/dev/fd' if sys.platform=='darwin' else '/proc/self/fd')))
         def parent_reply(engine,kind,payload):
             peak();original_event(engine,kind,payload);events.append(kind)
             self.assertEqual(engine.service.journals[-1]._rows[-1][0]['phase'] if engine.service.journals and not engine.service.journals[-1].closed else self.current_phase(),final_phase if kind==settled else initial_phase if _reconcile else pending if kind==pending else initial_phase)

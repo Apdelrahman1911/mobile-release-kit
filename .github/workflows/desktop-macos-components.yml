@@ -679,6 +679,61 @@ jobs:
               "projectedCrc32FastlaneSmoke": "passed", "appleP256PemDerSigning": "passed",
               "networkDenied": True, "syntheticStoreTests": test_results, "liveStoreRun": False}))
           PY
+      - name: Qualify the original selected Xcrun resolver before pending or ASC
+        timeout-minutes: 2
+        shell: bash
+        env:
+          OWNER_PYTHON: ${{ steps.python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$OWNER_PYTHON" -I -S -B - <<'PY'
+          import json, os, re, resource, subprocess, unicodedata
+          from pathlib import Path
+          checkout, work = Path.cwd(), Path(os.environ["WORK_ROOT"])
+          home = work / "resolver-home"
+          home.mkdir(mode=0o700)
+          capture_path = work / "resolver-output.log"
+          limit = 256 * 1024
+          resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+          resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+          resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+          clean = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "TMPDIR": str(home),
+              "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "PYTHONDONTWRITEBYTECODE": "1",
+              "PYTHONPATH": os.pathsep.join(str(checkout / path) for path in ("src", "tests", "tests/desktop"))}
+          test = "test_local_ios_store_execute_macos.IOSStoreResolverMacTests.test_original_xcrun_resolution_post_and_close_before_pending_or_asc"
+          profile = '(version 1) (allow default) (deny network*) (deny file-write* (subpath (param "CHECKOUT")))'
+          def output():
+              with capture_path.open("rb") as capture:
+                  raw = capture.read(limit + 1)
+              if len(raw) > limit:
+                  raise ValueError("resolver-capture-bound")
+              return raw
+          try:
+              with capture_path.open("xb") as capture:
+                  # Only the fixed resolver uses the original native command
+                  # owner (<=10s). Outer timeout kills+waits this original test.
+                  subprocess.run(["/usr/bin/sandbox-exec", "-D", "CHECKOUT=" + str(checkout), "-p", profile,
+                      os.environ["OWNER_PYTHON"], "-B", "-m", "unittest", "-v", test],
+                      stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
+                      env=clean, cwd=checkout, check=True, timeout=60)
+              if re.search(rb"\nRan 1 test in [0-9]+(?:\.[0-9]+)?s\n\nOK\n\Z", output()) is None:
+                  raise ValueError("resolver-exact-one-pass-required")
+          except Exception as error:
+              try:
+                  tail = output()[-4096:].decode("utf-8", "replace")
+                  tail = tail.replace(str(work), "<work>").replace(str(checkout), "<checkout>")
+                  tail = "".join(char for char in tail if not unicodedata.category(char).startswith("C"))
+                  tail = tail.encode("utf-8")[:4096].decode("utf-8", "ignore")
+              except Exception as capture_error:
+                  tail = "capture-unavailable:" + type(capture_error).__name__
+              print(json.dumps({"phase": "original-xcrun-resolver", "errorType": type(error).__name__,
+                  "returncode": getattr(error, "returncode", None), "diagnosticTail": tail}), flush=True)
+              raise SystemExit(1)
+          print(json.dumps({"originalXcrunResolver": "passed", "tests": 1, "skips": 0,
+              "networkDenied": True, "liveStoreRun": False}))
+          PY
       - name: Remove only this job's restored component and smoke scratch
         if: always() && steps.work.outputs.root != ''
         shell: bash

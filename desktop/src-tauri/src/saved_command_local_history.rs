@@ -399,7 +399,7 @@ pub(super) fn decode_execute(owner:&Session,decoder:&mut execute_wire::Decoder,b
     let(nonce,digest)=route.original.as_ref().ok_or_else(BridgeError::protocol)?;
     decoder.decode(bytes,&owner.id,&owner.generation,context,nonce,digest)
 }
-pub(super) fn execute_request(owner:&Session,runtime:&VerifiedRuntime,binding:&android_wire::ToolchainBinding)->Result<Vec<u8>,BridgeError>{
+pub(super) fn execute_request(owner:&Session,runtime:&VerifiedRuntime,binding:&crate::local_store_execute_protocol::NativeTools)->Result<Vec<u8>,BridgeError>{
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
     {native::execute_request(owner,runtime,binding)}
     #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
