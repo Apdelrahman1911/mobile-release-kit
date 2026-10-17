@@ -933,6 +933,19 @@ jobs:
                       raise SystemExit(1)
 
           def main():
+              # Fixed public tool metadata only, not tool admission or execution.
+              for name in ("pkgbuild", "lsbom", "tar", "bsdtar", "xar", "productbuild"):
+                  path = "/usr/bin/" + name
+                  row = observe("package-tool-" + name, path)
+                  if row is not None and stat.S_ISLNK(row.st_mode):
+                      try:
+                          target = os.readlink(path)
+                      except OSError:
+                          emit("package-tool-alias-" + name, state="unavailable")
+                      else:
+                          emit("package-tool-alias-" + name, state="observed",
+                               target=target if target in ("bsdtar", "/usr/bin/bsdtar") else "other",
+                               qualification=False)
               # No contents, directory census, credentials, selected-path echo,
               # subprocesses, writes, or ACL/finality claims from these snapshots.
               observe("root", b"/")
