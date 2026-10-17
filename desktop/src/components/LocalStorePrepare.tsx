@@ -1,3 +1,4 @@
+import { localStoreStageLabel } from '../localStoreStageProtocol.ts';
 import { localStorePrepareOwnerReason, type LocalStorePrepareController, type LocalStorePrepareState } from '../localStorePrepare.ts';
 
 export function LocalStorePrepare({ state, controller, compact = false, onCredentials, onShow }: {
@@ -7,6 +8,8 @@ export function LocalStorePrepare({ state, controller, compact = false, onCreden
   const op = state.status?.operation, retained = localStorePrepareOwnerReason(state), reason = controller.prepareReason();
   const prepared = op?.result?.preparedIntent, displayedRequest = retained && op ? op.context : state.request;
   const ios = displayedRequest?.platform === 'ios';
+  const stage = displayedRequest && 'stage' in displayedRequest ? displayedRequest.stage : null;
+  const target = stage ? localStoreStageLabel(stage,ios?'ios':'android') : ios ? 'TestFlight internal' : 'Play internal testing';
   const displayedApplication = retained && state.historical ? 'Original retained candidate' : state.applicationId;
   if (compact && !retained) return null;
   return <section className="card" aria-label="Prepare local Store release">
@@ -17,16 +20,17 @@ export function LocalStorePrepare({ state, controller, compact = false, onCreden
         <p>Enroll this project, create candidate inputs, then choose the matching platform and Review inputs in Release history. Use the same saved version and unchanged project. The application keeps the bundle in your project; you do not need to copy or register its files.</p>
         <p>In Credentials choose This Mac → the matching platform → Candidate → Store (or Full), then keep and assign the Store credential. Android requires a Google service-account JSON with app access in Play Console. iOS requires an App Store Connect P8, Key ID and Issuer ID with access to the configured app.</p>
         <p>Get Google JSON from Google Cloud Console → IAM &amp; Admin → Service Accounts → Keys. Get the App Store Connect API key from Users and Access → Integrations → App Store Connect API. Keep these private files and identifiers out of Git and GitHub.</p>
+        <p>To move an uploaded build forward, review the latest successful execution receipt in Release history and select External testing or Production in Credentials. Assign credentials for that exact stage. iOS also needs an Apple review contact, an operation commitment key, and a demo login if the saved configuration requires it. These are managed in Credentials with field help; none belong in Git. Production reuses an external release available to testers and never enables public release automatically.</p>
         <p>Incorrect credentials, permissions, version or candidate files cause preparation to refuse; they never trigger an automatic release.</p>
       </details>
-      {displayedRequest && <p><strong>{displayedApplication}</strong> · Version {displayedRequest.savedVersion.name} · Build {displayedRequest.savedVersion.build} · {ios ? 'TestFlight internal' : 'Play internal testing'}</p>}
+      {displayedRequest && <p><strong>{displayedApplication}</strong> · Version {displayedRequest.savedVersion.name} · Build {displayedRequest.savedVersion.build} · {target}</p>}
       <p><strong>What changes:</strong> {ios ? 'App Store Connect is read to capture a current snapshot; no Store write or upload is requested.' : displayedRequest ? 'Google Play receives a temporary uncommitted edit. The app reads its state and attempts to delete that edit.' : 'Android preparation uses a temporary uncommitted Play edit; iOS preparation only reads App Store Connect.'} The app saves a local snapshot and intent. It does not rebuild, sign, upload, commit a track or publish.</p>
       {!state.request && <button onClick={onCredentials}>Configure local credentials</button>}
       <button disabled={!!reason || state.pending} onClick={() => void controller.prepare()}>Review Store preparation</button>
       {reason && <p className="save-note">{reason}</p>}
     </>}
     {state.consentUntil !== null && <div className="notice">
-      <p>{op?.context.platform === 'ios' ? 'Read App Store Connect for this iOS candidate and save a local TestFlight-internal plan. No build is uploaded and no Store release is changed.' : 'Prepare this Android candidate for internal testing, without uploading or publishing. This contacts Google Play and creates a temporary uncommitted edit. Cancellation or a network failure can leave that edit until Google expires it.'}</p>
+      <p>{stage ? `Prepare ${target} using the original uploaded binary and the current saved metadata. This reads Store state and saves a new local plan; it does not send the promotion or publish. Android may create a temporary uncommitted edit.` : op?.context.platform === 'ios' ? 'Read App Store Connect for this iOS candidate and save a local TestFlight-internal plan. No build is uploaded and no Store release is changed.' : 'Prepare this Android candidate for internal testing, without uploading or publishing. This contacts Google Play and creates a temporary uncommitted edit. Cancellation or a network failure can leave that edit until Google expires it.'}</p>
       <p>Version {op?.context.savedVersion.name} · Build {op?.context.savedVersion.build}. Candidate <code>{op?.context.candidateOperationId}</code>.</p>
       <label><input type="checkbox" checked={state.acknowledged} onChange={event => controller.acknowledge(event.target.checked)} /> I authorize this preparation only, not a release.</label>
       <button disabled={!state.acknowledged || state.pending} onClick={() => void controller.start()}>Prepare local Store intent</button>

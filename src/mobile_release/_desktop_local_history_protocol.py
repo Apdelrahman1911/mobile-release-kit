@@ -37,9 +37,16 @@ def root(value):
             and value["mode"] & 0o7022 == 0 and integer(value["uid"], (1 << 32)-1, 1)
             and integer(value["gid"], (1 << 32)-1))
     return value
+def stage_action(value):
+    return type(value) is dict and value.get("action") in {"review-stage-prepared","review-stage-execution","review-external-readiness"}
 def candidate_action(value):
-    return type(value) is dict and value.get("action") in {"review-inputs","abandon-inputs","review-prepared","review-execution","review-reconcile","review-recovery"}
+    return stage_action(value) or type(value) is dict and value.get("action") in {"review-inputs","abandon-inputs","review-prepared","review-execution","review-reconcile","review-recovery"}
 def context(value):
+    if stage_action(value):
+        require(set(value)=={"projectId","executionMode","action","platform","stageOperationId"}
+            and token(value["projectId"]) and value["executionMode"]=="local" and value["platform"] in {"android","ios"}
+            and _uuid(value["stageOperationId"]) and (value["action"]!="review-external-readiness" or value["platform"]=="ios"))
+        return value
     extra={"candidateOperationId"} if candidate_action(value) else set()
     ios=type(value) is dict and "platform" in value
     if ios:

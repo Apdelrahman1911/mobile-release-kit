@@ -12,7 +12,7 @@ import type { BridgeMode } from './types.ts';
 import type { LocalStoreIdentity, LocalStorePreflightApi, LocalStoreStatus, PrepareLocalStorePreflight } from './localStorePreflightTypes.ts';
 type Port=LocalStorePreflightApi&{mode:BridgeMode};
 export interface LocalStoreState {mode:BridgeMode;platform:'android'|'ios';request:PrepareLocalStorePreflight|null;status:LocalStoreStatus|null;pending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
-export type LocalStoreProject=Pick<AndroidBuildProject,'projectId'|'draftRevision'|'baselineGeneration'|'observationGeneration'|'savedConfig'|'savedVersion'|'dirtyDraft'|'snapshotPending'|'versionPending'|'saveRecoveryRequired'|'inputIssue'>;
+export type LocalStoreProject=Pick<AndroidBuildProject,'projectId'|'draftRevision'|'baselineGeneration'|'observationGeneration'|'savedConfig'|'savedVersion'|'dirtyDraft'|'snapshotPending'|'versionPending'|'saveRecoveryRequired'|'inputIssue'> & { iosDemoRequired?: boolean | null };
 interface Source {project:()=>LocalStoreProject|null;assets:()=>AssetDisplayState|null;otherOperationReason:()=>string|null;now?:()=>number}
 const active=(s:LocalStoreStatus|null)=>!!s?.operation&&s.operation.phase!=='terminal';
 const identity=(v:LocalStoreIdentity)=>({operationId:v.operationId,ownerGeneration:v.ownerGeneration});
@@ -130,6 +130,8 @@ export function localStoreProjectObservation(session: ProjectSession, version: R
     const savedVersion = parseAndroidBuildSavedVersion({ ...result.savedVersion, source: result.source, name: result.version.name, build: result.version.build });
     if (!savedVersion) return project;
     project.savedVersion = savedVersion;
+    const demoRequired = own(own(own(data, 'ios'), 'review'), 'demoAccountRequired');
+    project.iosDemoRequired = typeof demoRequired === 'boolean' ? demoRequired : null;
     project.inputIssue = null;
   } catch { /* Snapshot hooks and parser exceptions never become UI text. */ }
   return project;

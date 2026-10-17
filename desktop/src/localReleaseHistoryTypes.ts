@@ -1,13 +1,17 @@
+import type { ExternalReadinessReview } from './localExternalReadinessProtocol.ts';
+import type { StagePreparedIntent, StageExecutionReceipt } from './localStoreStageProtocol.ts';
 import type { IOSCandidateInputs } from './iosArchiveTypes.ts';
 import type { LocalReconciliationReceipt } from './localStoreReconcileTypes.ts';
 import type { LocalExecutionReceipt, IOSExecutionReceipt } from './localStoreExecuteTypes.ts';
 import type { LocalPreparedIntent, IOSPreparedIntent } from './localStorePrepareTypes.ts';
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
-export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile' | 'review-recovery';
+export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile' | 'review-recovery' | 'review-stage-prepared' | 'review-stage-execution' | 'review-external-readiness';
 export type PrepareLocalHistory = { projectId: string; executionMode: 'local' } & (
   { action: 'enroll' | 'verify'; candidateOperationId?: never; platform?: never } |
   { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile'; candidateOperationId: string; platform?: 'ios' } |
-  { action: 'review-recovery'; candidateOperationId: string; platform?: never }
+  { action: 'review-recovery'; candidateOperationId: string; platform?: never } |
+  { action: 'review-stage-prepared' | 'review-stage-execution'; stageOperationId: string; candidateOperationId?: never; platform: 'android' | 'ios' } |
+  { action: 'review-external-readiness'; stageOperationId: string; candidateOperationId?: never; platform: 'ios' }
 );
 export interface LocalCandidateInputs {
   operationId: string; candidateSha256: string; sourceCommit: string; sourceTree: string;
@@ -27,20 +31,23 @@ export interface LocalExecutionReceiptReview extends LocalExecutionReceipt {
 export interface IOSExecutionReceiptReview extends IOSExecutionReceipt {
   observation: 'current-execution-files-only'; priorExecutionFinality: 'not-established';
 }
+export type StagePreparedIntentReview = StagePreparedIntent & { observation: 'current-prepared-files-only'; priorPrepareFinality: 'not-established' };
+export type StageExecutionReceiptReview = StageExecutionReceipt & { observation: 'current-execution-files-only'; priorExecutionFinality: 'not-established' };
 export interface LocalRecoveryReceiptReview extends Omit<LocalReconciliationReceipt, 'observation'> {
   observation: 'current-recovery-files-only';
 }
 export interface LocalHistoryIdentity { operationId: string; ownerGeneration: string }
 export type LocalHistoryReason = 'none'|'cancelled'|'context-changed'|'document-lost'|'shutdown'|'timed-out'|'protocol-error'|'runtime-unavailable'|'intent-expired'|'stale-intent'|'saved-source-changed'|'saved-source-invalid'|'credentials-unavailable'|'query-prerequisites'|'command-incomplete'|'cleanup-unknown'|'journal-unavailable'|'enrollment-exists'|'recovery-required'|'project-busy';
-export type LocalJournalPhase = 'inputs-pending'|'inputs-ready'|'prepare-pending'|'prepared'|'execute-pending'|'settled-success'|'settled-failure'|'reconciliation-required'|'target-reconciled';
+export type LocalJournalPhase = 'inputs-pending'|'inputs-ready'|'promotion-pending'|'prepare-pending'|'prepared'|'execute-pending'|'settled-success'|'settled-failure'|'reconciliation-required'|'target-reconciled'|'external-ready';
 export interface LocalHistoryResult {
   schemaVersion: 1; scope: 'local-release-history'; enrolled: true; headSequence: number;
   history: { operationId: string; phase: LocalJournalPhase; recoveryRequired: boolean }[];
   limitations: ['no-store-authority', 'no-build-or-publishing', 'keychain-intact-rollback-boundary'];
   candidateInputs?: LocalCandidateInputs | IOSCandidateInputs | null;
-  preparedIntent?: LocalPreparedIntentReview | IOSPreparedIntentReview;
-  executionReceipt?: LocalExecutionReceiptReview | IOSExecutionReceiptReview;
+  preparedIntent?: LocalPreparedIntentReview | IOSPreparedIntentReview | StagePreparedIntentReview;
+  executionReceipt?: LocalExecutionReceiptReview | IOSExecutionReceiptReview | StageExecutionReceiptReview;
   reconciliationReceipt?: LocalRecoveryReceiptReview;
+  readinessReceipt?: ExternalReadinessReview;
 }
 export interface LocalHistoryOperation extends LocalHistoryIdentity {
   context: PrepareLocalHistory; phase: OfflinePreflightPhase; intentUsable: boolean;

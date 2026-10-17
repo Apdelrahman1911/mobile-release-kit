@@ -239,6 +239,34 @@ def write_receipt(operation:, platform:, identity:, result:, extra:)
   atomic_store_document(receipt, label: "a Store receipt")
 end
 
+# Only the fixed readonly branch calls this writer. The complete second Store
+# snapshot was classified against the same original intent; no third GET or
+# mutation-shaped execution receipt is used to manufacture readiness/finality.
+def write_external_readiness(context, current)
+  payload=context.fetch(:payload)
+  unless context.equal?(MobileReleaseKit::StoreLaneRuntime.local_readiness_context)
+    UI.user_error!("External readiness lost its original Runtime")
+  end
+  external=current.fetch("external")
+  value={
+    documentType:"local-store-external-readiness-receipt",schemaVersion:1,origin:"local-desktop",
+    operation:"ios_testflight_external",platform:"ios",stage:"external-testing",
+    project:payload.fetch("project"),operationId:payload.fetch("operationId"),
+    candidateOperationId:payload.fetch("candidateOperationId"),candidateSha256:payload.fetch("candidateSha256"),
+    operationIntentSha256:context.fetch(:digest),executionReceiptSha256:context.fetch(:execution_receipt_sha256),
+    preparedBy:payload.fetch("preparedBy"),observedBy:context.fetch(:authority),
+    appIdentity:payload.fetch("application").fetch("id"),appStoreAppId:payload.fetch("application").fetch("storeAppId"),
+    marketingVersion:payload.fetch("version").fetch("marketing"),buildNumber:payload.fetch("version").fetch("build"),
+    observedAt:Time.now.utc.iso8601,result:"ready",state:"available-to-testers",
+    buildResourceId:current.fetch("build").fetch("id"),processingState:current.fetch("build").fetch("processingState"),
+    externalGroup:external.fetch("groupName"),autoNotifyEnabled:external.fetch("autoNotifyEnabled"),
+    betaReviewState:external.fetch("betaReviewState"),priorExecutionFinality:"not-established",
+  }
+  UI.user_error!("External readiness receipt exceeds its fixed bound") if JSON.pretty_generate(value).bytesize+1>64*1024
+  MobileReleaseKit::StoreLaneLifetime.require_upload_continuation!
+  atomic_store_document(value,label:"an external readiness observation")
+end
+
 def play_service
   service = Google::Apis::AndroidpublisherV3::AndroidPublisherService.new
   service.authorization = Google::Auth.get_application_default([PLAY_SCOPE])
@@ -2270,6 +2298,25 @@ lane :ios_testflight_external do
     current
   end
   current = read.call
+  if (readiness=MobileReleaseKit::StoreLaneRuntime.local_readiness_context)
+    # No prior-execution marker, create inventory/guard, mutation loop or retry
+    # may be entered for this purpose. Both complete GET snapshots must match
+    # the authenticated original target AND each other; approval alone is not
+    # readiness. Existing original Runtime/metadata checks bracket both reads.
+    classified=classify_ios_external!(intent_snapshot,current)
+    unless classified.fetch(:final) && classified.fetch(:normalized_state)=="available-to-testers"
+      UI.user_error!("TestFlight external target is not available to testers")
+    end
+    MobileReleaseKit::StoreLaneRuntime.current_runtime!.local_metadata_root!
+    observed=read.call
+    classified=classify_ios_external!(intent_snapshot,observed)
+    unless observed==current && classified.fetch(:final) && classified.fetch(:normalized_state)=="available-to-testers"
+      UI.user_error!("TestFlight external target changed during readiness readback")
+    end
+    MobileReleaseKit::StoreLaneRuntime.current_runtime!.local_metadata_root!
+    write_external_readiness(readiness,observed)
+    next
+  end
   resuming = apple_prior_execution?
   initial = classify_ios_external!(intent_snapshot, current)
   if local_stage_context("external-testing") && (resuming || initial.fetch(:prepared_final) || initial.fetch(:final))

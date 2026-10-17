@@ -1175,4 +1175,86 @@ class AppleReleaseLanesTest < Minitest::Test
     assert_equal before,@service.writes;assert_equal 0,@upload_count;assert_empty @upload_validation_calls
   end
 
+  def completed_local_external_for_readiness
+    value=local_external_prepare
+    ENV.delete('MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON')
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'receipt.json',intent:value) { execute }
+    assert_equal 'accepted',receipt.fetch('result');assert_equal 'submitted-for-review',receipt.fetch('state')
+    originals=%w[intent.json receipt.json journal.json].to_h { |name| [name,File.binread(File.join(@root,name))] }
+    @service.resources.fetch('betaAppReviewSubmissions').each_value { |row| row.fetch('attributes')['betaReviewState']='APPROVED' }
+    @service.attributes('buildBetaDetails','detail-1')['externalBuildState']='IN_BETA_TESTING'
+    fresh_process
+    test=self
+    %i[apple_prior_execution? apple_create_guard write_apple_state_journal validate_current_ios_upload! upload_to_testflight].each do |name|
+      @fastfile.define_singleton_method(name) { |*args,**kwargs| test.flunk "readonly readiness entered #{name}" }
+    end
+    @readiness_reads=0
+    original=@fastfile.method(:ios_external_current)
+    @fastfile.define_singleton_method(:ios_external_current) do |app,build|
+      current=original.call(app,build)
+      test.instance_variable_set(:@readiness_reads,test.instance_variable_get(:@readiness_reads)+1)
+      test.instance_variable_get(:@after_readiness_read)&.call
+      current
+    end
+    [value,originals,Digest::SHA256.hexdigest(originals.fetch('receipt.json'))]
+  end
+  def test_local_external_readiness_uses_two_full_get_snapshots_and_preserves_original_evidence
+    value,originals,digest=completed_local_external_for_readiness
+    before=Marshal.load(Marshal.dump(@service.writes));requests=@service.requests.length
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'readiness.json',
+      intent:value,readiness_receipt_sha256:digest) { execute }
+    observed=JSON.parse(File.binread(File.join(@root,'readiness.json')))
+    keys=%w[documentType schemaVersion origin operation platform stage project operationId candidateOperationId candidateSha256
+      operationIntentSha256 executionReceiptSha256 preparedBy observedBy appIdentity appStoreAppId marketingVersion buildNumber
+      observedAt result state buildResourceId processingState externalGroup autoNotifyEnabled betaReviewState priorExecutionFinality]
+    assert_equal keys.sort,observed.keys.sort
+    assert_equal 'local-store-external-readiness-receipt',observed.fetch('documentType')
+    assert_equal ['ready','available-to-testers','VALID','APPROVED',false],
+      observed.values_at('result','state','processingState','betaReviewState','autoNotifyEnabled')
+    assert_equal digest,observed.fetch('executionReceiptSha256')
+    assert_equal digest,observed.fetch('observedBy').fetch('executionReceiptSha256')
+    assert_equal 'external-readiness',observed.fetch('observedBy').fetch('purpose')
+    assert_equal value.fetch('operationId'),observed.fetch('operationId')
+    refute_equal receipt.fetch('executedBy').fetch('authorizationId'),observed.fetch('observedBy').fetch('authorizationId')
+    assert_equal 'not-established',observed.fetch('priorExecutionFinality')
+    assert_equal 2,@readiness_reads
+    assert_equal before,@service.writes
+    assert @service.requests.drop(requests).all? { |method,_,_| method==:get }
+    originals.each { |name,bytes| assert_equal bytes,File.binread(File.join(@root,name)) }
+    assert_equal 0,@upload_count;assert_empty @upload_validation_calls
+  end
+  def test_local_external_readiness_refuses_pending_or_partial_target_and_between_read_drift_without_writes
+    %i[pending rejected expired build group private locale notify encryption drift].each do |fault|
+      teardown;setup
+      value,originals,digest=completed_local_external_for_readiness
+      case fault
+      when :pending
+        @service.attributes('buildBetaDetails','detail-1')['externalBuildState']='WAITING_FOR_BETA_REVIEW'
+        @service.resources.fetch('betaAppReviewSubmissions').each_value { |r| r.fetch('attributes')['betaReviewState']='WAITING_FOR_REVIEW' }
+      when :rejected
+        @service.attributes('buildBetaDetails','detail-1')['externalBuildState']='BETA_REJECTED'
+        @service.resources.fetch('betaAppReviewSubmissions').each_value { |r| r.fetch('attributes')['betaReviewState']='REJECTED' }
+      when :expired then @service.attributes('builds','build-1')['expired']=true
+      when :build then @service.attributes('builds','build-1')['version']='124'
+      when :group then @service.assigned=false
+      when :private then @service.attributes('betaAppReviewDetails','private-detail-1')['contactFirstName']='foreign contact'
+      when :locale then @service.attributes('betaBuildLocalizations','locale-en')['whatsNew']='foreign metadata'
+      when :notify then @service.attributes('buildBetaDetails','detail-1')['autoNotifyEnabled']=true
+      when :encryption then @service.attributes('builds','build-1')['usesNonExemptEncryption']=true
+      when :drift
+        @after_readiness_read=-> { @service.attributes('buildBetaDetails','detail-1')['autoNotifyEnabled']=true if @readiness_reads==1 }
+      end
+      before=Marshal.load(Marshal.dump(@service.writes));requests=@service.requests.length
+      with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'readiness.json',
+        intent:value,readiness_receipt_sha256:digest) do
+        assert_raises(FastlaneCore::Interface::FastlaneError,MobileReleaseKit::ContractError,fault.to_s) { execute }
+      end
+      refute File.exist?(File.join(@root,'readiness.json')),fault.to_s
+      assert_equal before,@service.writes
+      assert @service.requests.drop(requests).all? { |method,_,_| method==:get }
+      originals.each { |name,bytes| assert_equal bytes,File.binread(File.join(@root,name)) }
+      assert_equal 0,@upload_count;assert_empty @upload_validation_calls
+    end
+  end
+
 end

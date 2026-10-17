@@ -158,6 +158,13 @@ class LocalSourceObservation:
             raise LocalSourceError("input") from None
         _need(policy.enabled is True, "configuration")
         self.branch = policy.candidate_branch
+        if prepare is not None:
+            from .local_store_prepare import LocalStorePrepareRun
+            from .local_store_execute import LocalStoreExecuteRun
+            from ._desktop_store_prepare_protocol import stage
+            op=prepare.require_operation()
+            if type(op) in (LocalStorePrepareRun,LocalStoreExecuteRun) and stage(op.request.context)=="production-submit":
+                self.branch=policy.production_branch
         self.version_path = _relative(self.config.section("version")["source"])
         _need(self.version_path != CONFIG_PATH, "path")
 
@@ -392,6 +399,12 @@ class LocalSourceObservation:
 
     def _close(self):
         first = None
+        from .local_store_prepare import LocalStorePrepareRun
+        from .local_store_execute import LocalStoreExecuteRun
+        from .local_store_reconcile import LocalStoreReconcileRun
+        if (type(self._composition) in (LocalStorePrepareRun,LocalStoreExecuteRun) or type(self._composition) is LocalStoreReconcileRun and self._composition.readiness) and self._composition.later_stage:
+            try:self._composition.stage_inputs_close()
+            except BaseException as error:first=error
         metadata = getattr(self, "_metadata_owner", None)
         if metadata is not None:
             from .local_release_metadata import LocalMetadataSource
@@ -400,7 +413,7 @@ class LocalSourceObservation:
                 if metadata.composition is not None:
                     metadata._close()  # Independent consuming closes BEFORE borrowed source parents.
             except BaseException as error:
-                first = error
+                if first is None:first = error
         self.active, self.closed = False, True
         for reader in reversed(self.readers):
             try:
@@ -435,6 +448,9 @@ def _retain_source(owner):
                     from .local_release_metadata import LocalMetadataSource
                     _need(type(metadata) is LocalMetadataSource and metadata.source is owner, "input")
                     metadata._source_post(owner)
+                from .local_store_prepare import LocalStorePrepareRun
+                if type(owner._composition) is LocalStorePrepareRun and owner._composition.later_stage:
+                    owner._composition.stage_source_final(owner)
         finally:
             scope.__exit__(*sys.exc_info())
         for reader in owner.readers:

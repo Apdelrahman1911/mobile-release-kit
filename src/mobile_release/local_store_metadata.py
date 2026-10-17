@@ -76,6 +76,14 @@ class StoreMetadataTree:
         # Caller additionally quotes the complete remaining Store phase. This
         # local floor counts actual scratch originals + fixed native reserve.
         _need(len(self.scratch.parent.slots)+1+len(directories)+2+128 <= 256)
+        source=getattr(self.guard,'_local_store_source',None)
+        if source is not None:
+            from .local_store_execute import LocalStoreExecuteRun
+            owner=source.require_operation()
+            from .local_store_reconcile import LocalStoreReconcileRun
+            if (type(owner) is LocalStoreExecuteRun or type(owner) is LocalStoreReconcileRun and owner.readiness) and owner.later_stage:
+                from .local_store_stage import execute_tree_quote
+                execute_tree_quote(owner,self,len(directories)+2)
         return len(directories)+2
 
     def _mkdir(self, name):

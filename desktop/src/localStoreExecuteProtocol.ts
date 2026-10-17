@@ -1,3 +1,4 @@
+import { parseStageExecuteRequest, parseStageExecutionSummary } from './localStoreStageProtocol.ts';
 import { executionReceiptSummary, iosExecutionReceiptSummary } from './localReleaseHistoryProtocol.ts';
 import { copyBoundedComparisonData, sameOfflineData } from './offlinePreflightProtocol.ts';
 import { parseLocalStorePrepareRequest } from './localStorePrepareProtocol.ts';
@@ -8,7 +9,7 @@ import type { LocalStoreExecuteStatus, PrepareLocalStoreExecute } from './localS
 export const STORE_EXECUTE_EVENT = 'local-store-execute-state-changed';
 export const STORE_EXECUTE_CONSENT = 'local-android-store-execute-v1' as const;
 export const IOS_STORE_EXECUTE_CONSENT = 'local-ios-store-execute-v1' as const;
-export const storeExecuteConsent = (request: PrepareLocalStoreExecute) => request.platform === 'ios' ? IOS_STORE_EXECUTE_CONSENT : STORE_EXECUTE_CONSENT;
+export const storeExecuteConsent = (request: PrepareLocalStoreExecute) => 'stage' in request ? (request.platform === 'ios' ? 'local-ios-store-stage-execute-v1' as const : 'local-android-store-stage-execute-v1' as const) : request.platform === 'ios' ? IOS_STORE_EXECUTE_CONSENT : STORE_EXECUTE_CONSENT;
 export type StoreExecuteCommand = 'prepare_local_store_execute' | 'start_local_store_execute' | 'local_store_execute_status' | 'cancel_local_store_execute';
 const phases = ['awaiting-consent', 'starting', 'running', 'stopping', 'terminal', 'unknown'];
 const outcomes = ['complete', 'refused', 'cancelled', 'timed-out', 'failed', 'unknown'];
@@ -20,6 +21,7 @@ const keys = (v: unknown, names: string[]): v is Record<string, unknown> => obje
 const member = (values: string[], v: unknown) => typeof v === 'string' && values.includes(v);
 const contextKeys = ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'credentialContextRevision', 'recordId', 'recordRevision', 'executionMode', 'candidateOperationId', 'candidateSha256', 'confirmation', 'intentSha256'];
 function request(v: unknown): v is PrepareLocalStoreExecute {
+  if (object(v) && Object.hasOwn(v, 'stage')) return parseStageExecuteRequest(v) !== null;
   const ios = object(v) && Object.hasOwn(v, 'platform');
   if (!keys(v, [...contextKeys, ios ? 'platform' : 'toolchainSelection']) || !hex(v.intentSha256, 64) ||
     (ios ? v.platform !== 'ios' : !parseAndroidMacToolchainSelection(v.toolchainSelection))) return false;
@@ -34,7 +36,7 @@ export function encodeLocalStoreExecuteRequest(command: StoreExecuteCommand, inp
     const v = copyBoundedComparisonData(input, 16384);
     const valid = command === 'prepare_local_store_execute' ? request(v) : command === 'local_store_execute_status' ? keys(v, []) :
       keys(v, command === 'start_local_store_execute' ? ['operationId', 'ownerGeneration', 'consentVersion'] : ['operationId', 'ownerGeneration']) &&
-      hex(v.operationId, 32) && hex(v.ownerGeneration, 32) && (command !== 'start_local_store_execute' || member([STORE_EXECUTE_CONSENT, IOS_STORE_EXECUTE_CONSENT], v.consentVersion));
+      hex(v.operationId, 32) && hex(v.ownerGeneration, 32) && (command !== 'start_local_store_execute' || member([STORE_EXECUTE_CONSENT, IOS_STORE_EXECUTE_CONSENT, 'local-android-store-stage-execute-v1', 'local-ios-store-stage-execute-v1'], v.consentVersion));
     if (!valid) return null;
     const bytes = new TextEncoder().encode(JSON.stringify(v)); return bytes.length <= 16384 ? bytes : null;
   } catch { return null; }
@@ -49,7 +51,8 @@ export function parseLocalStoreExecuteStatus(input: unknown): LocalStoreExecuteS
     if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result']) || !hex(op.operationId, 32) || !hex(op.ownerGeneration, 32) || !member(phases, op.phase) || typeof op.intentUsable !== 'boolean' || !member(reasons, op.reason)) return null;
     const c = op.context;
     if (!object(c) || !member(['android', 'ios'], c.platform) || c.operation !== 'local-store-execute') return null;
-    const prepared = { ...c }; if (c.platform === 'android') delete prepared.platform; delete prepared.operation;
+    const later = Object.hasOwn(c, 'stage');
+    const prepared = { ...c }; if (!later && c.platform === 'android') delete prepared.platform; delete prepared.operation;
     if (!request(prepared)) return null;
     if (op.phase === 'terminal') {
       if (!member(outcomes, op.outcome) || op.outcome === 'unknown' || op.intentUsable || op.reason === 'cleanup-unknown' ||
@@ -61,9 +64,9 @@ export function parseLocalStoreExecuteStatus(input: unknown): LocalStoreExecuteS
     else if (op.outcome !== null || op.result !== null || op.intentUsable && op.phase !== 'awaiting-consent') return null;
     if (op.result !== null) {
       const r = op.result;
-      if (op.phase !== 'terminal' || op.outcome !== 'complete' || op.reason !== 'none' || !keys(r, ['schemaVersion', 'scope', 'headSequence', 'executionReceipt']) || r.schemaVersion !== 1 || r.scope !== (c.platform === 'ios' ? 'local-ios-store-execute' : 'local-android-store-execute') || !counter(r.headSequence) || r.headSequence < 7 || r.headSequence > 513) return null;
+      if (op.phase !== 'terminal' || op.outcome !== 'complete' || op.reason !== 'none' || !keys(r, ['schemaVersion', 'scope', 'headSequence', 'executionReceipt']) || r.schemaVersion !== 1 || r.scope !== `local-${c.platform}-store-${later ? 'stage-' : ''}execute` || !counter(r.headSequence) || r.headSequence < (later ? (c.stage === 'external-testing' ? 11 : 15) : 7) || r.headSequence > 513) return null;
       const i = r.executionReceipt;
-      if (!object(i) || !(c.platform === 'ios' ? iosExecutionReceiptSummary(i, prepared.candidateOperationId) : executionReceiptSummary(i, prepared.candidateOperationId)) || i.candidateSha256 !== prepared.candidateSha256 || i.intentSha256 !== prepared.intentSha256 ||
+      if (!object(i) || !(later ? parseStageExecutionSummary(i, c.stageOperationId, c.platform as 'android' | 'ios') : c.platform === 'ios' ? iosExecutionReceiptSummary(i, prepared.candidateOperationId) : executionReceiptSummary(i, prepared.candidateOperationId)) || later && (i.stage !== c.stage || i.candidateOperationId !== prepared.candidateOperationId || i.predecessorOperationId !== c.predecessorOperationId || i.predecessorReceiptSha256 !== c.predecessorReceiptSha256) || i.candidateSha256 !== prepared.candidateSha256 || i.intentSha256 !== prepared.intentSha256 ||
         !sameOfflineData(i.version, { name: prepared.savedVersion.name, build: prepared.savedVersion.build })) return null;
     } else if (op.outcome === 'complete') return null;
     return v as unknown as LocalStoreExecuteStatus;

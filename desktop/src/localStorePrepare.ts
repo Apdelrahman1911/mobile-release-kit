@@ -1,4 +1,5 @@
 // UI coordination only. The native saved-command Session owns work and cleanup.
+import { localStoreStagePrepareRequest } from './localStoreStage.ts';
 import type { AssetDisplayState } from './assetSessionTypes.ts';
 import { localStoreRequest, type LocalStoreProject } from './localStorePreflight.ts';
 import { localHistoryOwnerReason, type LocalHistoryState } from './localReleaseHistory.ts';
@@ -17,6 +18,7 @@ const error='The original Store preparation is unverified. Keep its status and c
 export function localStorePrepareOwnerReason(s:LocalStorePrepareState):string|null{return s.blocked||s.unconfirmed||s.pending||active(s.status)?'A local Store preparation intent or operation is retained. Cancel or finish it before other work.':null;}
 // This is current UI context, not a grant or proof of native file finality.
 export function localStorePrepareRequest(project:LocalStoreProject|null,assets:AssetDisplayState|null,history:LocalHistoryState|null):PrepareLocalStoreIntent|null {
+ if(assets?.scope.stage!=='candidate')return localStoreStagePrepareRequest(project,assets,history);
  const base=localStoreRequest(project,assets);
  if(!base||assets?.status?.context?.stage!=='candidate'||assets.scope.stage!=='candidate'||!history||history.historical||localHistoryOwnerReason(history))return null;
  const status=parseLocalHistoryStatus(history.status),op=status?.operation;
@@ -38,7 +40,7 @@ export class LocalStorePrepareController {
  private now(){return(this.source.now??(()=>performance.now()))();}
  private update(patch:Partial<LocalStorePrepareState>){this.state=Object.freeze({...this.state,...patch});if(!this.disposed)for(const listener of this.listeners)listener();}
  private clearTimer(){if(this.timer!==null)clearTimeout(this.timer);this.timer=null;}
- syncProject=()=>{const history=this.source.history(),next=this.selectionPending?null:localStorePrepareRequest(this.source.project(),this.source.assets(),history);const candidate=history?.status?.operation?.result?.candidateInputs;const applicationId=next&&candidate?('bundleId' in candidate?candidate.bundleId:candidate.applicationId):null;const head=next?history?.status?.operation?.result?.headSequence??null:null;if(applicationId!==this.state.applicationId||head!==this.historyHead||!sameOfflineData(next,this.state.request)){this.invalidate();this.historyHead=head;this.update({request:next,applicationId});}};
+ syncProject=()=>{const history=this.source.history(),next=this.selectionPending?null:localStorePrepareRequest(this.source.project(),this.source.assets(),history);const result=history?.status?.operation?.result;const candidate=next&&'stage' in next?result?.executionReceipt:result?.candidateInputs;const applicationId=next&&candidate?('bundleId' in candidate?candidate.bundleId:candidate.applicationId):null;const head=next?history?.status?.operation?.result?.headSequence??null:null;if(applicationId!==this.state.applicationId||head!==this.historyHead||!sameOfflineData(next,this.state.request)){this.invalidate();this.historyHead=head;this.update({request:next,applicationId});}};
  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
@@ -60,7 +62,7 @@ export class LocalStorePrepareController {
   if(ours&&op?.phase==='terminal'){this.clearTimer();this.update({unconfirmed:false,pending:false,acknowledged:false,consentUntil:null});if(this.disposed){this.unlisten?.();this.unlisten=null;}}
  }
  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading)return;this.reading=true;try{this.receive(await this.api.localStorePrepareStatus());}catch{this.fail();}finally{this.reading=false;}}
- prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Stores.';if(localStorePrepareOwnerReason(this.state))return localStorePrepareOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local Store preparation.';if(!this.state.request)return'Review the current ready candidate in Release history, read the matching saved version, then assign matching credentials in Credentials → This Mac → Android or iOS → Candidate → Store (or Full). Use a Google service-account JSON for Android, or an App Store Connect P8 with Key ID and Issuer ID for iOS.';return this.source.otherOperationReason();}
+ prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Stores.';if(localStorePrepareOwnerReason(this.state))return localStorePrepareOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local Store preparation.';if(!this.state.request&&this.source.assets()?.scope.stage!=='candidate')return'Review the latest successful execution receipt in Release history. Choose External testing after internal testing, or Production after an external release available to testers. Read the same saved version and assign Store credentials for that exact stage in Credentials → This Mac. iOS also needs review contact, commitment key and demo account when required. Pending or uncertain history cannot be promoted.';if(!this.state.request)return'Review the current ready candidate in Release history, read the matching saved version, then assign matching credentials in Credentials → This Mac → Android or iOS → Candidate → Store (or Full). Use a Google service-account JSON for Android, or an App Store Connect P8 with Key ID and Issuer ID for iOS.';return this.source.otherOperationReason();}
  async prepare(){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status)return;const api=this.api,request=this.state.request;
   this.attempt={request,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
   this.update({pending:true,unconfirmed:true,error:null,historical:false});
@@ -73,7 +75,7 @@ export class LocalStorePrepareController {
   if(a?.started)return; // A queued second click cannot cancel the running original.
   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});
-  try{this.receive(await api.startLocalStorePrepare({...a.id,consentVersion:storePrepareConsent(a.request.platform)}));}catch{this.fail();}finally{this.update({pending:false});}}
+  try{this.receive(await api.startLocalStorePrepare({...a.id,consentVersion:storePrepareConsent(a.request.platform,'stage' in a.request?a.request.stage:undefined)}));}catch{this.fail();}finally{this.update({pending:false});}}
  cancel=()=>{this.invalidate();return this.cancelOriginal(true);};
  private async cancelOriginal(explicitRetry:boolean){const api=this.api,id=this.attempt?.id??this.state.status?.operation;if(!api||!id||this.state.status?.operation?.phase==='terminal')return;
   const key=id.operationId+id.ownerGeneration;if(this.cancelClaim===key||!explicitRetry&&this.failedCancel===key)return;this.cancelClaim=key;this.failedCancel=null;this.clearTimer();this.update({acknowledged:false,consentUntil:null});

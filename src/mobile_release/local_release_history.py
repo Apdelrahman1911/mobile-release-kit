@@ -40,6 +40,7 @@ class LocalHistoryRun:
         self.operation=self
         self.root=Path(request.native["projectRoot"])
         self.invocation=self.journal=self.bundle=None
+        self.stage_inputs=None
         self.prepared_readers=[];self.prepared_iterator=None;self.prepared_scan_state="new"
         self.primary=self.report=None
         self._ran=self._close_claimed=False
@@ -72,6 +73,8 @@ class LocalHistoryRun:
             # namespace walks coexist. Include both fixed four-component walks,
             # original project/journal ancestry, stdio/lease and leaf/iterator.
             wire.require(3*project+home+24 <=256)
+        if wire.stage_action(self.request.context):
+            wire.require(7*project+home+40<=256) # previous2/4 +current1/2 literal walks, AFTER candidate close
         wire.require(513*8192*8 + 32768 <=96*1024*1024)  # raw+closed-shape decoded/parser reserve.
     def _candidate_inputs(self, enrollment):
         action=self.request.context["action"]
@@ -130,7 +133,10 @@ class LocalHistoryRun:
                     wire.require(self.journal.head()==head)
                     candidate=None
                     if wire.candidate_action(self.request.context):
-                        if self.request.context["action"] in {"review-prepared","review-reconcile"}:
+                        if wire.stage_action(self.request.context):
+                            from .local_store_stage_review import review_stage
+                            candidate=review_stage(self,enrollment)
+                        elif self.request.context["action"] in {"review-prepared","review-reconcile"}:
                             from .local_prepared_review import review_prepared
                             candidate=review_prepared(self,enrollment)
                         elif self.request.context["action"] in {"review-execution","review-recovery"}:
@@ -143,7 +149,7 @@ class LocalHistoryRun:
                         "headSequence":head["sequence"],"history":self.journal.history_summary(),
                         "limitations":["no-store-authority","no-build-or-publishing","keychain-intact-rollback-boundary"]}
                     if wire.candidate_action(self.request.context):
-                        key={"review-prepared":"preparedIntent","review-reconcile":"preparedIntent","review-execution":"executionReceipt","review-recovery":"reconciliationReceipt"}.get(self.request.context["action"],"candidateInputs")
+                        key={"review-external-readiness":"readinessReceipt","review-stage-prepared":"preparedIntent","review-stage-execution":"executionReceipt","review-prepared":"preparedIntent","review-reconcile":"preparedIntent","review-execution":"executionReceipt","review-recovery":"reconciliationReceipt"}.get(self.request.context["action"],"candidateInputs")
                         result[key]=candidate
                     self.journal.close();self.checkpoint()
                     self.report=result
@@ -155,6 +161,7 @@ class LocalHistoryRun:
             wire.require(self.closed());return
         self._close_claimed=True
         actions=[]
+        if self.stage_inputs is not None and not self.stage_inputs.closed:actions.append(self.stage_inputs.close)
         if self.bundle is not None and not self.bundle.closed:actions.append(self.bundle.close)
         if self.journal is not None and not self.journal.closed:actions.append(self.journal.close)
         if self.invocation is not None:actions.append(self.invocation.cleanup)
@@ -177,7 +184,7 @@ class LocalHistoryRun:
             bundle=bundle and type(self.bundle) is IOSCandidateBundleReview and self.bundle.tree_closed()
         prepared=(self.prepared_iterator is None and self.prepared_scan_state in {"new","closed"}
                   and all(p.closed() for p in self.prepared_readers))
-        return self._close_claimed and journal and invocation and project and bundle and prepared
+        return self._close_claimed and journal and invocation and project and bundle and prepared and (self.stage_inputs is None or self.stage_inputs.closed)
     def terminal(self):
         v=self.guard.lifetime_ledger.verdict()
         if v.commands or v.profile_calls:self.guard._abort(wire.ProtocolError());v=self.guard.lifetime_ledger.verdict()

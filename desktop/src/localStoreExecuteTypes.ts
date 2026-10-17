@@ -1,15 +1,16 @@
-import type { PrepareLocalStoreIntent } from './localStorePrepareTypes.ts';
+import type { ExecuteLocalStoreStage, StageExecutionReceipt } from './localStoreStageProtocol.ts';
+import type { PrepareLocalCandidateIntent } from './localStorePrepareTypes.ts';
 import type { LocalStoreIdentity, LocalStoreReason } from './localStorePreflightTypes.ts';
 import type { AndroidMacToolchainSelection } from './androidBuildTypes.ts';
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 
 // Renderer comparison DATA only. Native Document/material/tool originals own admission.
-type ExecuteBase = Omit<PrepareLocalStoreIntent,'platform'> & { intentSha256: string };
-export type PrepareLocalStoreExecute = ExecuteBase & (
+type ExecuteBase = Omit<PrepareLocalCandidateIntent,'platform'> & { intentSha256: string };
+export type PrepareLocalStoreExecute = ExecuteLocalStoreStage | ExecuteBase & (
   { platform?: never; toolchainSelection: AndroidMacToolchainSelection } |
   { platform: 'ios'; toolchainSelection?: never }
 );
-export type LocalStoreExecuteContext = ExecuteBase & { operation: 'local-store-execute' } & (
+export type LocalStoreExecuteContext = (ExecuteLocalStoreStage & { operation: 'local-store-execute' }) | ExecuteBase & { operation: 'local-store-execute' } & (
   { platform: 'android'; toolchainSelection: AndroidMacToolchainSelection } |
   { platform: 'ios'; toolchainSelection?: never }
 );
@@ -24,8 +25,8 @@ export interface IOSExecutionReceipt extends Omit<LocalExecutionReceipt,'applica
   bundleId: string; appStoreAppId: string; destination: { channel: 'testflight-internal' };
 }
 export interface LocalStoreExecuteResult {
-  schemaVersion: 1; scope: 'local-android-store-execute' | 'local-ios-store-execute'; headSequence: number;
-  executionReceipt: LocalExecutionReceipt | IOSExecutionReceipt;
+  schemaVersion: 1; scope: 'local-android-store-execute' | 'local-ios-store-execute' | 'local-android-store-stage-execute' | 'local-ios-store-stage-execute'; headSequence: number;
+  executionReceipt: LocalExecutionReceipt | IOSExecutionReceipt | StageExecutionReceipt;
 }
 export interface LocalStoreExecuteOperation extends LocalStoreExecuteIdentity {
   context: LocalStoreExecuteContext; phase: OfflinePreflightPhase; intentUsable: boolean;
@@ -36,7 +37,7 @@ export interface LocalStoreExecuteStatus {
 }
 export interface LocalStoreExecuteApi {
   prepareLocalStoreExecute(request: PrepareLocalStoreExecute): Promise<LocalStoreExecuteStatus>;
-  startLocalStoreExecute(request: LocalStoreExecuteIdentity & { consentVersion: 'local-android-store-execute-v1' | 'local-ios-store-execute-v1' }): Promise<LocalStoreExecuteStatus>;
+  startLocalStoreExecute(request: LocalStoreExecuteIdentity & { consentVersion: 'local-android-store-execute-v1' | 'local-ios-store-execute-v1' | 'local-android-store-stage-execute-v1' | 'local-ios-store-stage-execute-v1' }): Promise<LocalStoreExecuteStatus>;
   localStoreExecuteStatus(): Promise<LocalStoreExecuteStatus>;
   cancelLocalStoreExecute(operationId: string, ownerGeneration: string): Promise<LocalStoreExecuteStatus>;
   subscribeLocalStoreExecute(listener: (status: unknown) => void): Promise<() => void>;

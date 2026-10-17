@@ -11,11 +11,16 @@ SUFFIX = b"\nMRK-STORE-MATERIAL-END\n"
 HEADER_LIMIT, MATERIAL_LIMIT = 1024, 16 * 1024
 
 
-def parse_header(raw: bytes, *, platform="android"):
+def parse_header(raw: bytes, *, platform="android", stage=None, review_demo=False):
     require(type(raw) is bytes and 0 < len(raw) <= HEADER_LIMIT and raw.endswith(b"\n")
-            and platform in ("android", "ios"))
+            and platform in ("android", "ios") and type(review_demo) is bool
+            and (stage is None and not review_demo or platform == "ios" and stage in ("external-testing", "production-submit")))
     roles = (("google-service-account", MATERIAL_LIMIT),) if platform == "android" else (
         ("asc-p8", MATERIAL_LIMIT), ("asc-key-id", 10), ("asc-issuer-id", 36))
+    if stage is not None:
+        roles += tuple((role,4096) for role in ("contact-first-name","contact-last-name","contact-email","contact-phone"))
+        roles += (("commitment-key-base64",44),("commitment-version",64))
+        if review_demo:roles += (("demo-username",4096),("demo-password",4096))
     try:
         value = json.loads(raw, object_pairs_hook=_pairs,
                            parse_constant=lambda _: require(False))
@@ -26,7 +31,7 @@ def parse_header(raw: bytes, *, platform="android"):
         for row, (role, maximum) in zip(value["files"], roles):
             require(type(row) is dict and set(row) == {"role", "bytes"}
                     and row["role"] == role and integer(row["bytes"], maximum, 1)
-                    and (role not in ("asc-key-id", "asc-issuer-id") or row["bytes"] == maximum))
+                    and (role not in ("asc-key-id", "asc-issuer-id", "commitment-key-base64") or row["bytes"] == maximum))
             lengths.append(row["bytes"])
         return lengths[0] if platform == "android" else tuple(lengths)
     except (ValueError, TypeError, UnicodeError, RecursionError):
@@ -98,7 +103,15 @@ class StorePreflightInput(_SavedCommandInput):
                 self._require(len(header) < HEADER_LIMIT)
                 header.extend(take(1))
             platform = operation.request.context["platform"]
-            lengths = parse_header(bytes(header), platform=platform)
+            options={}
+            from .local_store_prepare import LocalStorePrepareRun
+            from .local_store_execute import LocalStoreExecuteRun
+            from ._desktop_store_prepare_protocol import stage as selected_stage
+            from .local_store_reconcile import LocalStoreReconcileRun
+            if (type(operation) in (LocalStorePrepareRun,LocalStoreExecuteRun) or type(operation) is LocalStoreReconcileRun and operation.readiness) and platform=="ios" and operation.later_stage:
+                options=dict(stage=operation.stage,
+                    review_demo=operation.request.context["supplementalAssignments"]["reviewDemo"] is not None)
+            lengths = parse_header(bytes(header), platform=platform, **options)
             if platform == "android":
                 self._material = take(lengths)
                 self._require(take(len(SUFFIX)) == SUFFIX)

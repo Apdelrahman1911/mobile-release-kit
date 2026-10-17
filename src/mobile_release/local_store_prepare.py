@@ -1,4 +1,4 @@
-"""One candidate-only prepare composition on existing Store/native owners."""
+"""Closed local candidate/later-stage Prepare on existing Store/native owners."""
 from __future__ import annotations
 from ._desktop_store_prepare_protocol import require
 
@@ -65,7 +65,7 @@ from .local_release_journal import LocalReleaseJournal,MAX_ENTRIES,canonical
 from ._store_runtime import StoreRuntimeContext
 from .owned_process import fatal_lifetime_error
 from .stores import (_fastlane_probe_commands,StoreRequest,new_store_lane_evidence,
-    _store_operation,complete_store_operation)
+    _store_operation,complete_store_operation,LANES)
 
 
 def prepared_intent_data(*,request,enrollment,manifest,observed,config,precondition):
@@ -161,7 +161,17 @@ class LocalStorePrepareRun:
         self.project_ancestry=();self.quote=None;self.primary=self.report=None
         self._ran=self._close_claimed=self._store_entered=self.store_completed=False
         self._pending=None;self._command_claimed=False;self._source_rows=[];self._runtime_rows=[]
+        self.metadata=self.metadata_scratch=self.metadata_snapshot=self.metadata_tree=None
+        self.stage_predecessors=self.stage_facts=self.stage_extra_quote=None
+        self.stage_intent_bytes=self.stage_intent=None;self.stage_source_closed=False;self.stage_copy_slots=[]
         source.bind_operation(self) # Before any fallible resource admission.
+    @property
+    def stage(self):return wire.stage(self.request.context)
+    @property
+    def later_stage(self):return self.stage!='candidate'
+    @property
+    def stage_id(self):
+        return wire.stage_operation_id(self.request) if type(self) is LocalStorePrepareRun and self.later_stage else self.request.context.get('stageOperationId',self.request.context['candidateOperationId'])
     @property
     def protocol(self):
         from ._desktop_saved_command_control import _protocol
@@ -175,7 +185,11 @@ class LocalStorePrepareRun:
         self.guard.check();self.source.lease_post()
     remember=StorePreflightRun.remember
     validate_material_shape=staticmethod(StorePreflightRun.validate_material_shape)
-    validate_apple_shape=staticmethod(StorePreflightRun.validate_apple_shape)
+    def validate_apple_shape(self,parts):
+        if self.later_stage:
+            from .local_store_stage import material_parts
+            material_parts(parts,self.request.context)
+        else:StorePreflightRun.validate_apple_shape(parts)
     @property
     def apple_prepare(self):
         return type(self) is LocalStorePrepareRun and self.request.context['platform']=='ios'
@@ -215,12 +229,49 @@ class LocalStorePrepareRun:
             and owner.lane_evidence is self.record)
         self.invocation=owner
     def bind_scratch(self,scratch):
+        if scratch.layout=='store-metadata' and self.later_stage:
+            require(type(scratch) is FiniteScratch and scratch.cancellation is self.guard
+                and self.metadata_scratch is None and self.observation is not None and self.observation.calls==6
+                and self.invocation is not None and self.pending_head is None and not self._runtime_rows
+                and scratch.journal is None and scratch._lane_binding is None)
+            self.metadata_scratch=scratch;return
         layouts=('online-runner','store-selection','store-selection')
         require(type(scratch) is FiniteScratch and scratch.cancellation is self.guard
             and len(self.scratches)<3 and scratch.layout==layouts[len(self.scratches)]
             and self.invocation is not None and self.material_head is not None and self.source.reply_step==self.protocol.MATERIAL_STEP
             and scratch.journal is None and scratch._lane_binding is None)
         self.scratches.append(scratch)
+    def _metadata_cut(self):
+        self.checkpoint()
+        require(self.later_stage and self.observation is not None and self.observation.calls==6
+            and self.pending_head is None and not self._runtime_rows)
+    def metadata_quote(self,directories,scratch):
+        from .local_store_stage import metadata_quote
+        return metadata_quote(self,directories,scratch)
+    def stage_inputs_close(self):
+        # Called by the existing original source cleanup BEFORE borrowed
+        # project/source parents can close, on success and failure alike.
+        from .local_store_execute import LocalStoreExecuteRun
+        from .local_store_reconcile import LocalStoreReconcileRun
+        require((type(self) in (LocalStorePrepareRun,LocalStoreExecuteRun) or type(self) is LocalStoreReconcileRun and self.readiness) and self.later_stage)
+        actions=[]
+        if self.metadata_tree is not None and not self.metadata_tree.closed:actions.append(self.metadata_tree.cleanup)
+        if self.stage_predecessors is not None and not self.stage_predecessors.closed:actions.append(self.stage_predecessors.close)
+        if self.metadata is not None and not self.metadata.closed:actions.append(self.metadata._close)
+        if type(self) in (LocalStoreExecuteRun,LocalStoreReconcileRun):actions.append(self.prepared_scope.close)
+        actions.extend(j.close for j in self.journals if not j.closed)
+        _attempt_all(self.guard,actions)
+    def stage_source_final(self,source):
+        from .local_store_stage import final_source
+        return final_source(self,source)
+    def lane_context(self,files):
+        require(type(self) is LocalStorePrepareRun and self.later_stage)
+        self.checkpoint()
+        require(files is self.record._files_owner() and files.mode=='prepare' and files.phase=='SEALING'
+            and self._store_entered and self.metadata_tree is not None)
+        self.metadata_tree.post();self.stage_predecessors.post()
+        raw=canonical(dict(stage=self.stage,platform=self.request.context['platform'],metadataInputs=self.metadata_tree.binding_data()))
+        require(len(raw)<=16384);return raw.decode('utf-8')
     def runtime_admitted(self,runtime):
         self.checkpoint()
         require(type(runtime) is StoreRuntimeContext and runtime._invocation is self.invocation
@@ -264,15 +315,15 @@ class LocalStorePrepareRun:
     @contextmanager
     def command(self,runtime,argv,*,capture):
         self.checkpoint();self.runtime_admitted(runtime)
-        index=len(self._runtime_rows)-(1 if self.apple_execute else 0)
+        index=len(self._runtime_rows)-(1 if self.apple_execute and not self.later_stage else 0)
         expected=tuple(_fastlane_probe_commands(runtime.tooling_root))
         if self.apple_store:
             # P8 is already selected by the original material validator; callers
             # cannot arm this role using a path or a fabricated material object.
             expected+=((self.apple_material_command(self._apple_material) if index==5 else ()),)
         expected+=(('bundle','exec','ruby',str(runtime.tooling_root/'fastlane/run_lane.rb'),
-                    'ios_testflight_internal' if self.apple_store else 'android_internal_upload'),)
-        lane=self.runtime_count-1-(1 if self.apple_execute else 0)
+                    LANES[(self.stage,'ios' if self.apple_store else 'android')]),)
+        lane=self.runtime_count-1-(1 if self.apple_execute and not self.later_stage else 0)
         require(self._store_entered and len(self._source_rows)==6 and self._pending is None and 0<=index<=lane
             and tuple(argv)==expected[index] and capture is (index<lane))
         self._arm('lane' if index==lane else 'apple-key' if self.apple_store and index==5 else 'probe',
@@ -317,9 +368,16 @@ class LocalStorePrepareRun:
         self.checkpoint();require(self._store_entered and self.source.reply_step==self.protocol.MATERIAL_STEP and self.material_original is not None)
         if self.apple_store:
             self._received_post()
-            return {'MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH':str(self.received.require(self.material_original)),
+            values={'MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH':str(self.received.require(self.material_original)),
                 'MOBILE_RELEASE_ASC_KEY_ID':self._received_material[1].decode('ascii'),
                 'MOBILE_RELEASE_ASC_ISSUER_ID':self._received_material[2].decode('ascii')}
+            if self.later_stage:
+                names=('MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME','MOBILE_RELEASE_APPLE_REVIEW_CONTACT_LAST_NAME',
+                    'MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL','MOBILE_RELEASE_APPLE_REVIEW_CONTACT_PHONE',
+                    'MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64','MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION',
+                    'MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_USERNAME','MOBILE_RELEASE_APPLE_DEMO_ACCOUNT_PASSWORD')
+                values.update((name,raw.decode('utf-8')) for name,raw in zip(names,self._received_material[3:]))
+            return values
         return {'GOOGLE_APPLICATION_CREDENTIALS':str(self.received.require(self.material_original))}
     def admit_store(self,config,release,request,record,guard,invocation):
         self.checkpoint()
@@ -327,7 +385,7 @@ class LocalStorePrepareRun:
             and record is self.record and guard is self.guard and invocation is self.invocation
             and request.prepare and not request.execute and request.operation_intent is None
             and request.recovery_run_id is None and request.recovery_confirmation is None
-            and request.stage=='candidate' and request.platform==('ios' if self.apple_prepare else 'android') and self.source.reply_step==self.protocol.MATERIAL_STEP
+            and request.stage==self.stage and request.platform==('ios' if self.apple_prepare else 'android') and self.source.reply_step==self.protocol.MATERIAL_STEP
             and self.pending_head is not None and self.material_original is not None
             and len(self._source_rows)==6 and not self._runtime_rows and self.bundle is not None and not self.bundle.closed)
         self._store_entered=True;return True
@@ -349,6 +407,9 @@ class LocalStorePrepareRun:
         j.close();require(j.closed and not j.ancestors and not j._close_errors)
         j._rows.clear();j._operations.clear();j.leaves.clear()
     def _begin(self):
+        if self.later_stage:
+            from .local_store_stage import begin
+            return begin(self)
         self.checkpoint();require(self.observation.calls==6 and not self.journals and self.bundle is None)
         self.enrollment,self.key=self.source.exchange('lease-ready',{})
         require(type(self.key) is bytearray and len(self.key)==32)
@@ -386,6 +447,9 @@ class LocalStorePrepareRun:
     def _saved_closed(self):
         return all(d.slots and all(s.number is None and s.close_state=='CLOSED' for s in d.slots) for d in self.directories)
     def _publication(self,raw):
+        if self.later_stage:
+            from .local_store_stage import publication
+            return publication(self,raw)
         self.checkpoint();require(self.store_completed and self._lane_owners_closed() and self.pending_head is not None)
         raw_intent,intent=prepared_intent_data(request=self.request,enrollment=self.enrollment,manifest=self.bundle.value,
             observed=self.observation.observed,config=self.config,precondition=json.loads(raw))
@@ -442,8 +506,8 @@ class LocalStorePrepareRun:
         try:
             self._quote() # Conservative original peak BEFORE any source/material/file acquisition.
             self.config,self.version=self._saved()
-            output=self.root/'.mobile-release/store/local'/UUID(self.request.context['candidateOperationId']).hex
-            self.store_request=StoreRequest(stage='candidate',platform='ios' if self.apple_prepare else 'android',confirmation=self.request.context['confirmation'],
+            output=self.root/'.mobile-release/store/local'/UUID(self.stage_id).hex
+            self.store_request=StoreRequest(stage=self.stage,platform='ios' if self.apple_prepare else 'android',confirmation=self.request.context['confirmation'],
                 execute=False,prepare=True,output_dir=output,store_precondition=output/'store-precondition.json')
             self.record=new_store_lane_evidence(self.config,self.store_request,self.guard)
             with invocation_custody(self.root,mode='store',cancellation=self.guard,lane_evidence=self.record) as invocation:
@@ -453,6 +517,9 @@ class LocalStorePrepareRun:
                     observation=LocalSourceObservation(invocation,self.saved_bytes['release/mobile-release.json'],
                         self.saved_bytes[self.request.context['savedVersion']['source']],endpoint=self.source.work_end,execution_source=None)
                     self.observation=observation;observation._composition=self;self._quote(observation.descriptor_quote())
+                    if self.later_stage:
+                        from .local_release_metadata import LocalMetadataSource
+                        self.metadata=LocalMetadataSource(observation,platform=self.request.context['platform'])
                     with _retain_source(observation):
                         self._retire_saved();self._begin()
                         with finite_scratch(layout='online-runner',cancellation=self.guard,parent=Path('/private/tmp')) as home:
@@ -463,7 +530,8 @@ class LocalStorePrepareRun:
                                 self._received_material=self.source._material
                                 self.readback=_store_operation(config=self.config,release=self.version,request=self.store_request,
                                     operation_intent=None,lane_evidence=self.record,cancellation=self.guard,invocation=invocation,_local_prepare=self)
-                                observation.check();self.bundle.finish()
+                                observation.check()
+                                if not self.later_stage:self.bundle.finish()
             require(self._lane_owners_closed() and len(self._source_rows)==8 and len(self._runtime_rows)==self.runtime_count)
             complete_store_operation(self.readback,lane_evidence=self.record,cancellation=self.guard)
             self.store_completed=True;self._publication(self.readback._content)
@@ -480,11 +548,18 @@ class LocalStorePrepareRun:
                  and (not self.apple_prepare or b.tree_closed()))
             and all(s.claimed and not s.active and s._cleanup_complete and not s.created
                 and all(v.number is None and v.close_state=='CLOSED' for v in (*s.writer_slots,s.slot,*s.parent.slots)) for s in self.scratches)
+            and (self.metadata is None or self.metadata.closed)
+            and (self.metadata_tree is None or self.metadata_tree.closed)
+            and (self.stage_predecessors is None or self.stage_predecessors.closed)
             and self._saved_closed())
     def close(self):
         if self._close_claimed:require(self.closed());return
         self._close_claimed=True
         actions=[]
+        if self.stage_predecessors is not None and not self.stage_predecessors.closed:actions.append(self.stage_predecessors.close)
+        if self.metadata is not None and not self.metadata.closed:actions.append(self.metadata._close)
+        if self.metadata_scratch is not None:actions.append(self.metadata_scratch.cleanup)
+        actions.extend(s.close for s in reversed(self.stage_copy_slots))
         if self.bundle is not None and not self.bundle.closed:actions.append(self.bundle.close)
         if self.observation is not None and not self.observation.closed:actions.append(self.observation._close)
         actions.extend(s.cleanup for s in reversed(self.scratches))
@@ -499,7 +574,10 @@ class LocalStorePrepareRun:
         require(self.source.operation is self)
         return (self._close_claimed and self._pending is None and self._lane_owners_closed()
             and all(j.closed and not j.ancestors and not j._close_errors for j in self.journals)
-            and all(p.closed() for p in self.publishers) and (self.key is None or not any(self.key)))
+            and all(p.closed() for p in self.publishers)
+            and (self.metadata_scratch is None or self.metadata_scratch.claimed and self.metadata_scratch._cleanup_complete
+                and all(s.number is None and s.close_state=='CLOSED' for s in (*self.metadata_scratch.writer_slots,self.metadata_scratch.slot,*self.metadata_scratch.parent.slots)))
+            and all(s.number is None and s.close_state=='CLOSED' for s in self.stage_copy_slots) and (self.key is None or not any(self.key)))
     def terminal(self):
         from ._desktop_store_prepare_protocol import request_phases
         v=self.guard.lifetime_ledger.verdict()

@@ -22,7 +22,7 @@ from .local_candidate_bundle import CandidateBundleReview
 from .local_release_journal import MAX_ENTRIES
 from .local_release_source import LocalSourceObservation,_retain_source,source_descriptor_quote
 from .build_inputs import (invocation_custody,finite_scratch,_app_private_directory,_read_file,_attempt_all)
-from .checked_files import _Reader,_Policy,_Node
+from .checked_files import _Reader,_Policy,_Node,_file_identity
 from ._store_runtime import StoreRuntimeContext
 from .stores import StoreRequest,new_store_lane_evidence,_store_operation,complete_store_operation
 
@@ -33,12 +33,97 @@ XCRUN=Path('/usr/bin/xcrun')
 class _UploadReader(_Reader):
     def __init__(self,owner):
         require(type(owner) is LocalStoreExecuteRun and owner.apple_execute)
-        self.owner=owner;super().__init__(owner.guard)
+        self.owner=owner;self.tool_aliases=[];super().__init__(owner.guard)
     def _open(self,name,*,parent,directory):
         self.owner.checkpoint()
         require(self.owner.tool_reader is self and len(self.descriptors)+1<=UPLOAD_TOOL_SLOTS
             and self.owner.quote is not None and self.owner.quote['total']<=256)
         return super()._open(name,parent=parent,directory=directory)
+
+    def terminal(self):
+        super().terminal()
+        # A link never supplies executable authority. Its immutable text is
+        # observed through the original protected parent; the physical target
+        # has its own retained, no-follow, root-protected chain.
+        for parent,name,observed,target in self.tool_aliases:
+            self.owner.checkpoint()
+            self.owner._upload_protected(os.fstat(self._number(parent)),True)
+            current=self._stat(parent,name)
+            require(_file_identity(current)==_file_identity(observed)
+                and getattr(current,'st_flags',0)==getattr(observed,'st_flags',0)
+                and os.readlink(name,dir_fd=self._number(parent))==target)
+            current=self._stat(parent,name)
+            require(_file_identity(current)==_file_identity(observed)
+                and getattr(current,'st_flags',0)==getattr(observed,'st_flags',0))
+
+    def altool(self,path,contents):
+        """Expand only selected-Xcode links, in order, without OS path following."""
+        self.owner.checkpoint();self.terminal()
+        matches=[n for n in self.nodes if n.directory and n.canonical==contents]
+        require(len(matches)==1 and path.is_relative_to(contents))
+        base=matches[0];stack=[base];pending=list(path.relative_to(contents).parts)
+        device=base.observed.st_dev
+        # Eight bounded targets and one <=4096-byte pending path fit the
+        # existing fixed tool allowance; descriptor capacity is not increased.
+        def bound(parts):
+            require(0<len(parts)<=128 and all(type(v) is str and v and len(os.fsencode(v))<=255
+                and not any(ord(c)<32 or ord(c)==127 or c in ('\\',':') for c in v) for v in parts))
+            require(len(os.fsencode(str(stack[-1].canonical)))+sum(len(os.fsencode(v))+1 for v in parts)<=4096)
+        bound(pending)
+        while pending:
+            self.owner.checkpoint();self.terminal()
+            name=pending.pop(0)
+            if name=='.':
+                continue
+            if name=='..':
+                require(len(stack)>1);stack.pop();continue
+            parent=stack[-1];canonical=parent.canonical/name
+            require(canonical.is_relative_to(contents))
+            observed=self._stat(parent.slot,name)
+            require(observed.st_dev==device)
+            if stat.S_ISLNK(observed.st_mode):
+                # Owning a link is not permission to replace it in a protected
+                # parent, just as for the native Xcode selection alias.
+                self.owner._upload_protected(os.fstat(self._number(parent.slot)),True)
+                require(len(self.tool_aliases)<8 and observed.st_uid in (0,os.geteuid())
+                    and observed.st_nlink==1 and 0<observed.st_size<=1024)
+                target=os.readlink(name,dir_fd=self._number(parent.slot))
+                require(len(os.fsencode(target))==observed.st_size)
+                current=self._stat(parent.slot,name)
+                require(_file_identity(current)==_file_identity(observed)
+                    and getattr(current,'st_flags',0)==getattr(observed,'st_flags',0))
+                parts=target.split('/')
+                if target.startswith('/'):
+                    prefix=list(contents.parts[1:])
+                    require(parts[:len(prefix)+1]==['',*prefix])
+                    parts=parts[len(prefix)+1:];stack=[base]
+                # Do not normpath: a queued alias/.. must inspect the alias
+                # before interpreting its parent traversal.
+                require(len(parts)+len(pending)<=128)
+                combined=parts+pending;bound(combined)
+                self.tool_aliases.append((parent.slot,name,observed,target))
+                pending=combined;continue
+            directory=bool(pending)
+            self.owner._upload_protected(observed,directory)
+            require(directory or name=='altool')
+            existing=[n for n in self.nodes if n.parent is parent.slot and n.name==name]
+            require(len(existing)<=1)
+            if existing:
+                node=existing[0]
+                require(node.directory==directory and node.canonical==canonical)
+                self.terminal() # Full held/named binding; never inode-only reuse.
+            else:
+                # _open prequotes and registers this attempted slot itself.
+                slot=self._open(name,parent=parent.slot,directory=directory)
+                node=_Node(slot,parent.slot,name,canonical,observed,directory)
+                self.nodes.append(node)
+                self.owner.upload_flags[id(slot)]=getattr(observed,'st_flags',0)
+                self.terminal()
+            if directory:
+                stack.append(node)
+            else:
+                return node
+        raise wire.ProtocolError()
 
 class LocalStoreExecuteRun(LocalStorePrepareRun):
     def __init__(self,request,guard,source):
@@ -55,11 +140,14 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         return type(self) is LocalStoreExecuteRun and self.request.context['platform']=='ios'
     @property
     def runtime_count(self):
-        return 8 if self.apple_execute else 6
+        return (7 if self.later_stage else 8) if self.apple_execute else 6
     @property
     def platform(self):
         return 'ios' if self.apple_store else 'android'
     def _quote(self,source=96):
+        if self.later_stage:
+            from .local_store_stage import execute_quote
+            return execute_quote(self,source)
         self.checkpoint()
         value=resource_quote(project_depth=len(self.root.parts),version_parent_depth=len((self.root/self.request.context['savedVersion']['source']).parent.parts),
             source=source,history_depth=len(Path(self.request.native['home']).parts),platform=self.platform)
@@ -86,7 +174,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         # Only checked saved reads exist in this phase. Count all three
         # independent ancestry walks, a transient leaf, stdio/lease and cleanup.
         # Do not publish this as the later full quote or credit any future close.
-        self.checkpoint();require(self.apple_execute and self.quote is None
+        self.checkpoint();require((self.apple_execute or self.later_stage) and self.quote is None
             and not self.directories and self.invocation is None)
         p=len(self.root.parts)
         v=len((self.root/self.request.context['savedVersion']['source']).parent.parts)
@@ -175,15 +263,9 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         raw=result.stdout;require(type(raw) is bytes and 0<len(raw)<=4097 and raw.endswith(b'\n') and raw.count(b'\n')==1)
         path=Path(path_data(raw[:-1].decode('utf-8')))
         require(path.name=='altool' and path.is_relative_to(app/'Contents'))
-        # Quote this literal independent path walk before any descendant opens.
-        require(len(r.descriptors)+len(path.parts)-1<=UPLOAD_TOOL_SLOTS)
-        parent,canonical=r._directories(path.parts[1:-1])
-        observed=r._stat(parent,path.name);self._upload_protected(observed)
-        slot=r._open(path.name,parent=parent,directory=False)
-        node=_Node(slot,parent,path.name,canonical/path.name,observed,False);r.nodes.append(node)
+        node=r.altool(path,app/'Contents')
         self.tool_manifest=node;self.upload_nodes['altool']=node
-        self.upload_flags.update({id(n.slot):getattr(n.observed,'st_flags',0) for n in r.nodes})
-        self.transport_tools={'selection':selection,'altoolPath':str(node.canonical),'altoolIdentity':tool_data(observed)}
+        self.transport_tools={'selection':selection,'altoolPath':str(node.canonical),'altoolIdentity':tool_data(node.observed)}
         self.tool_environment={'DEVELOPER_DIR':str(directory)}
         self._upload_post(resolved=True)
     def _tool_bytes(self):
@@ -196,6 +278,9 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         from . import local_recovery_fence as fence
         fence.open_fence(self,self.prepared_scope);fence.post(self)
     def _begin(self):
+        if self.later_stage:
+            from .local_store_stage import execute_begin
+            return execute_begin(self)
         self.checkpoint();require(self.observation.calls==6 and not self.journals)
         self.enrollment,self.key=self.source.exchange('lease-ready',{})
         require(type(self.key) is bytearray and len(self.key)==32)
@@ -248,6 +333,9 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
             'expectedRevision':c['recordRevision'],'contextRevision':c['credentialContextRevision']})
         validate_local_execution_authority(canonical(self.authority),intent_data=self.intent_bytes,purpose=self.authority_purpose,platform=self.platform)
     def _prepared_post(self):
+        if self.later_stage:
+            from .local_store_stage import execute_post
+            return execute_post(self)
         out=self.prepared_out;require(out is not None);_scan(self,out)
         for name,binding in self.prepared_bindings.items():
             actual=_read_file(out.fd,name,self.guard,FILES[name],private=True,binding_only=True)
@@ -261,6 +349,9 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         if len(self._source_rows)==7:self._final_source_fence()
         return super()._arm_source(source,args,timeout,limit)
     def source_final(self,observation):
+        if self.later_stage:
+            from .local_store_stage import execute_final_source
+            return execute_final_source(self,observation)
         require(observation is self.observation and observation.calls==8 and not self._source_final)
         self._prepared_post()
         from .local_recovery_fence import post
@@ -274,6 +365,8 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         if self.apple_execute:self.bundle.finish()
         self._source_final=True
     def runtime_environment(self):
+        if self.later_stage:
+            self.checkpoint();self._prepared_post();return self.runtime.environment()
         self.checkpoint();require(self.tool_environment is not None and self.tool_reader is not None)
         if self.apple_execute:
             self._upload_post(resolved=True);env=self.runtime.environment();env.update(self.tool_environment)
@@ -292,15 +385,15 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
     def admit_store(self,config,release,request,record,guard,invocation):
         self.checkpoint();require(not self._store_entered and config is self.config and release is self.version and request is self.store_request
             and record is self.record and guard is self.guard and invocation is self.invocation and request.execute and not request.prepare
-            and request.recovery_run_id is None and request.recovery_confirmation is None and request.stage=='candidate' and request.platform==self.platform
+            and request.recovery_run_id is None and request.recovery_confirmation is None and request.stage==self.stage and request.platform==self.platform
             and self.source.reply_step==self.protocol.MATERIAL_STEP and self.material_head is not None and self.material_original is not None
             and len(self._source_rows)==6 and (len(self._runtime_rows)==1 and self._runtime_rows[0]['kind']=='tool-resolution'
-                and self._runtime_rows[0]['returned'] and self._runtime_rows[0]['code']==0 if self.apple_execute else not self._runtime_rows) and self.bundle is not None and not self.bundle.closed)
+                and self._runtime_rows[0]['returned'] and self._runtime_rows[0]['code']==0 if self.apple_execute and not self.later_stage else not self._runtime_rows) and self.bundle is not None and not self.bundle.closed)
         self._prepared_post();self._store_entered=True;return True
     def attempt_key(self,record,root,mode,digest,authority):
         self.checkpoint();require(record is self.record and root==self.root and mode=='execute' and self._store_entered
             and digest==bytes.fromhex(self.request.context['intentSha256']) and authority==self.authority)
-        return local_execution_attempt_key(intent_data=self.intent_bytes,authority_data=canonical(self.authority),purpose=self.authority_purpose,expected_intent_sha256=self.request.context['intentSha256'],platform=self.platform)
+        return local_execution_attempt_key(intent_data=self.intent_bytes,authority_data=canonical(self.authority),purpose=self.authority_purpose,expected_intent_sha256=self.request.context['intentSha256'],platform=self.platform,stage=self.stage)
     def attempt_directory(self,attempt,directory):
         self.checkpoint();require(attempt is self.record._pending_attempt and attempt.phase=='ACQUIRING' and self.fence_readers)
         out=self.fence_readers[0];out.check();directory.check()
@@ -312,7 +405,9 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         self.checkpoint();require(files is self.record._files_owner() and files.mode=='execute' and files.phase=='SEALING' and self._store_entered)
         self._prepared_post()
         value={'authority':self.authority,'expectedIntentSha256':self.request.context['intentSha256']}
-        if self.apple_execute:
+        if self.later_stage:
+            self.metadata_tree.post();value['metadataInputs']=self.metadata_tree.binding_data()
+        elif self.apple_execute:
             self._upload_post(resolved=True)
             value.update(signingTools=self.request.native['signingTools'],transportTools=self.transport_tools)
         else:value['toolchain']=self.request.native['toolchain']
@@ -320,11 +415,11 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         require(len(raw)<=16384);return raw.decode('utf-8')
     def validate_receipt(self,raw):
         self.checkpoint();self._memory(raw,65536)
-        return validate_local_execution_receipt(raw,intent_data=self.intent_bytes,authority_data=canonical(self.authority),purpose=self.authority_purpose,expected_intent_sha256=self.request.context['intentSha256'],platform=self.platform)
+        return validate_local_execution_receipt(raw,intent_data=self.intent_bytes,authority_data=canonical(self.authority),purpose=self.authority_purpose,expected_intent_sha256=self.request.context['intentSha256'],platform=self.platform,stage=self.stage)
     def run(self):
         self.checkpoint();require(not self._ran and sys.platform=='darwin' and os.getcwd()==self.request.native['cwd']);self._ran=True
         try:
-            if self.apple_execute:
+            if self.apple_execute or self.later_stage:
                 self._saved_input_quote()
                 self.config,self.version=self._saved()
                 # These exact names are authenticated above. Reserve every
@@ -332,13 +427,13 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
                 # the real source owner recomputes the same bound below.
                 self._quote(source_descriptor_quote(self.root,
                     self.config.section('version')['source'],
-                    self.config.section('source')['candidateBranch']))
+                    self.config.section('source')['productionBranch' if self.stage=='production-submit' else 'candidateBranch']))
             else:
                 self._quote();self.config,self.version=self._saved()
-            c=self.request.context;prepared=self.root/'.mobile-release/store/local'/UUID(c['candidateOperationId']).hex
+            c=self.request.context;prepared=self.root/'.mobile-release/store/local'/UUID(self.stage_id).hex
             output=prepared.with_name(prepared.name+'-'+self.authority_purpose+'-'+UUID(self.request.native['authorizationId']).hex)
             require(not os.path.lexists(output))
-            self.store_request=StoreRequest(stage='candidate',platform=self.platform,confirmation=c['confirmation'],execute=True,prepare=False,
+            self.store_request=StoreRequest(stage=self.stage,platform=self.platform,confirmation=c['confirmation'],execute=True,prepare=False,
                 output_dir=output,store_receipt=output/'raw-store-receipt.json',operation_intent=prepared/'operation-intent.json')
             self.record=new_store_lane_evidence(self.config,self.store_request,self.guard)
             with invocation_custody(self.root,mode='store',cancellation=self.guard,lane_evidence=self.record) as invocation:
@@ -372,7 +467,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
             binding=value[0];identity=self.record._files_owner().document_identity
             require(identity is not None and all(binding[k]==getattr(identity,k) for k in ('device','inode','uid','gid','mode')))
             j=self._open_journal();require(j.head()==self.pending_head and j._rows[-1][0]['phase']=='execute-pending')
-            digest=hashlib.sha256(raw).hexdigest();head=j._append(expected_head=self.pending_head,operation_id=self.request.context['candidateOperationId'],phase='settled-success',
+            digest=hashlib.sha256(raw).hexdigest();head=j._append(expected_head=self.pending_head,operation_id=self.stage_id,phase='settled-success',
                 payload={'intentSha256':self.request.context['intentSha256'],'receiptSha256':digest})
             self.source.exchange('execute-settled',{'head':head,'phase':'settled-success'});self.checkpoint();require(j.head()==head)
             value=_read_file(out.fd,target.name,self.guard,65536,private=True,binding_only=True);require(value is not None and value==(binding,b''));out.check();self._retire_journal(j)
@@ -383,7 +478,12 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
             observedAt=receipt['observedAt'],result=receipt['result'],limitations=list(wire.LIMITATIONS))
         summary['bundleId' if self.apple_execute else 'applicationId']=i['application']['id']
         if self.apple_execute:summary['appStoreAppId']=i['application']['storeAppId']
-        self.report={'schemaVersion':1,'scope':'local-%s-store-execute'%self.platform,'headSequence':head['sequence'],'executionReceipt':summary};wire.validate_result(self.report,platform=self.platform)
+        if self.later_stage:
+            c=self.request.context
+            summary.update(stage=self.stage,candidateOperationId=c['candidateOperationId'],predecessorOperationId=c['predecessorOperationId'],
+                predecessorReceiptSha256=c['predecessorReceiptSha256'],state=receipt['state'],limitations=list(wire.STAGE_LIMITATIONS))
+        self.report={'schemaVersion':1,'scope':('local-%s-store-stage-execute' if self.later_stage else 'local-%s-store-execute')%self.platform,
+            'headSequence':head['sequence'],'executionReceipt':summary};wire.validate_result(self.report,platform=self.platform,selected=self.stage)
     def _lane_owners_closed(self):
         return (super()._lane_owners_closed() and self.prepared_iterator is None and self.prepared_scan_state in {'new','closed'}
             and self.fence_iterator is None and self.fence_state in {'new','closed'}

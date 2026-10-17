@@ -385,7 +385,13 @@ class StoreLaneFiles(_Owner):
             execute=self.guard._store_execution_source
             if execute is not None:
                 key='LOCAL_RECONCILE' if self.guard._store_reconcile_source is not None else 'LOCAL_EXECUTE'
+                if self.guard._store_reconcile_source is not None and execute.require_operation().readiness:key='LOCAL_READINESS'
                 result[wire.PREFIX+key]=execute.require_operation().lane_context(self)
+            elif local is not None:
+                from .local_store_prepare import LocalStorePrepareRun
+                owner=local.require_operation()
+                if type(owner) is LocalStorePrepareRun and owner.later_stage:
+                    result[wire.PREFIX+'LOCAL_STAGE']=owner.lane_context(self)
             if self.shell_home:
                 # The caller admits its concrete toolchain before this private
                 # shell-HOME selection; ambient key directories are never used.

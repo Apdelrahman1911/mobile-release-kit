@@ -1,9 +1,10 @@
 // UI coordination only. The native saved-command Session owns work and cleanup.
+import { localStoreStageExecuteContext } from './localStoreStage.ts';
 import { androidBuildOwnerReason, type AndroidBuildState, type AndroidBuildProject } from './androidBuild.ts';
 import type { AssetDisplayState } from './assetSessionTypes.ts';
 import { localStoreRequest, type LocalStoreProject } from './localStorePreflight.ts';
 import { localHistoryOwnerReason, type LocalHistoryState } from './localReleaseHistory.ts';
-import type { LocalPreparedIntentReview, IOSPreparedIntentReview } from './localReleaseHistoryTypes.ts';
+import type { LocalPreparedIntentReview, IOSPreparedIntentReview, StagePreparedIntentReview } from './localReleaseHistoryTypes.ts';
 import { parseAndroidToolchainCatalogStatus } from './androidToolchainCatalogProtocol.ts';
 import { parseLocalHistoryStatus } from './localReleaseHistoryProtocol.ts';
 import { sameOfflineData } from './offlinePreflightProtocol.ts';
@@ -12,7 +13,7 @@ import type { BridgeMode } from './types.ts';
 import type { LocalStoreExecuteIdentity, LocalStoreExecuteApi, LocalStoreExecuteStatus, PrepareLocalStoreExecute } from './localStoreExecuteTypes.ts';
 type Port=LocalStoreExecuteApi&{mode:BridgeMode};
 type ExecuteProject=LocalStoreProject & {selection?:AndroidBuildProject['selection']};
-type PreparedReview=LocalPreparedIntentReview|IOSPreparedIntentReview;
+type PreparedReview=LocalPreparedIntentReview|IOSPreparedIntentReview|StagePreparedIntentReview;
 const requestContext=(request:PrepareLocalStoreExecute)=>({...request,platform:request.platform??'android',operation:'local-store-execute'});
 const appId=(value:PreparedReview)=>'bundleId' in value?value.bundleId:value.applicationId;
 export interface LocalStoreExecuteState {mode:BridgeMode;platform:'android'|'ios';applicationId:string|null;prepared:PreparedReview|null;request:PrepareLocalStoreExecute|null;status:LocalStoreExecuteStatus|null;pending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
@@ -25,6 +26,7 @@ export function localStoreExecuteOwnerReason(s:LocalStoreExecuteState):string|nu
 // Current UI context only: the native owner independently rechecks the enrolled
 // journal, exact files/source, Google assignment and actual registered tool lease.
 function executeContext(project:ExecuteProject|null,assets:AssetDisplayState|null,history:LocalHistoryState|null,tools:AndroidBuildState|null) {
+ if(assets?.scope.stage!=='candidate')return localStoreStageExecuteContext(project,assets,history);
  const base=localStoreRequest(project,assets);
  if(!base||assets?.status?.context?.stage!=='candidate'||assets.scope.stage!=='candidate'||!history||history.historical||localHistoryOwnerReason(history))return null;
  const ios=base.platform==='ios';
@@ -38,7 +40,7 @@ function executeContext(project:ExecuteProject|null,assets:AssetDisplayState|nul
  const status=parseLocalHistoryStatus(history.status),op=status?.operation;
  if(history.mode!=='native'||!op||op.phase!=='terminal'||op.outcome!=='complete'||op.context.projectId!==base.projectId||op.context.platform!==base.platform||op.context.action!=='review-prepared'||!op.result)return null;
  const prepared=op.result.preparedIntent,last=op.result.history.at(-1);
- if(!prepared||!last||last.phase!=='prepared'||last.operationId!==prepared.operationId||op.context.candidateOperationId!==prepared.operationId||
+ if(!prepared||'stage' in prepared||!last||last.phase!=='prepared'||last.operationId!==prepared.operationId||op.context.candidateOperationId!==prepared.operationId||
    prepared.version.name!==base.savedVersion.name||prepared.version.build!==base.savedVersion.build)return null;
  if(ios?!('bundleId' in prepared):!('applicationId' in prepared)||project?.selection?.applicationId!==prepared.applicationId)return null;
  const request=parseLocalStoreExecuteRequest({...base,candidateOperationId:prepared.operationId,candidateSha256:prepared.candidateSha256,
@@ -61,7 +63,7 @@ export class LocalStoreExecuteController {
  private now(){return(this.source.now??(()=>performance.now()))();}
  private update(patch:Partial<LocalStoreExecuteState>){this.state=Object.freeze({...this.state,...patch});if(!this.disposed)for(const listener of this.listeners)listener();}
  private clearTimer(){if(this.timer!==null)clearTimeout(this.timer);this.timer=null;}
- syncProject=()=>{const assets=this.source.assets(),platform=assets?.scope.platform==='ios'?'ios':'android';const next=this.selectionPending?null:executeContext(this.source.project(),assets,this.source.history(),this.source.tools());
+ syncProject=()=>{const assets=this.source.assets(),platform=assets?.scope.platform==='ios'?'ios':'android';const next=this.selectionPending?null:executeContext(this.source.project(),assets,this.source.history(),assets?.scope.stage==='candidate'?this.source.tools():null);
   const request=next?.request??null,prepared=next?.prepared??null,head=next?.head??null;
   if(platform!==this.state.platform||head!==this.historyHead||!sameOfflineData(request,this.state.request)||!sameOfflineData(prepared,this.state.prepared)){
    this.invalidate();this.historyHead=head;this.update({request,prepared,platform,applicationId:prepared?appId(prepared):null});
@@ -88,7 +90,7 @@ export class LocalStoreExecuteController {
   if(ours&&op?.phase==='terminal'){this.clearTimer();this.update({unconfirmed:false,pending:false,acknowledged:false,consentUntil:null});if(this.disposed){this.unlisten?.();this.unlisten=null;}}
  }
  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading)return;this.reading=true;try{this.receive(await this.api.localStoreExecuteStatus());}catch{this.fail();}finally{this.reading=false;}}
- prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot upload to a Store.';if(localStoreExecuteOwnerReason(this.state))return localStoreExecuteOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local Store execution.';if(!this.state.request)return'Review the matching prepared intent in Release history, read the saved version, and assign the same credential in Credentials → This Mac → the candidate platform → Candidate → Store (or Full). Android also requires the protected Android tool copy; iOS requires local Xcode (check Environment doctor).';return this.source.otherOperationReason();}
+ prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot upload to a Store.';if(localStoreExecuteOwnerReason(this.state))return localStoreExecuteOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local Store execution.';if(!this.state.request&&this.source.assets()?.scope.stage!=='candidate')return'Review the current stage-prepared intent in Release history, read the matching saved version and assign the same stage-specific Store credentials and iOS review inputs. This reuses the original uploaded binary; Java, Xcode and another build are not required. A changed, pending or failed stage cannot be resent.';if(!this.state.request)return'Review the matching prepared intent in Release history, read the saved version, and assign the same credential in Credentials → This Mac → the candidate platform → Candidate → Store (or Full). Android also requires the protected Android tool copy; iOS requires local Xcode (check Environment doctor).';return this.source.otherOperationReason();}
  async prepare(){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.prepared||!this.state.status)return;const api=this.api,request=this.state.request;
   this.attempt={request,prepared:this.state.prepared,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
   this.update({pending:true,unconfirmed:true,error:null,historical:false});

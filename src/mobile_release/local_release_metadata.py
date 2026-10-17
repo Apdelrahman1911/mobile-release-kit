@@ -51,7 +51,10 @@ class LocalMetadataSource:
         _need(platform in {"android", "ios"})
         if platform == "ios":
             from .local_ios_candidate_source import IOSCandidateComposition
-            _need(type(source._composition) is IOSCandidateComposition and source._composition.source is source)
+            from .local_store_prepare import LocalStorePrepareRun
+            _need(type(source._composition) is IOSCandidateComposition and source._composition.source is source
+                or type(source._composition) is LocalStorePrepareRun and source._composition.later_stage
+                and source._composition.observation is source)
         self.platform = platform
         self.source, self.guard = source, source.guard
         self.pid, self.thread = os.getpid(), threading.current_thread()
@@ -199,12 +202,27 @@ class LocalMetadataSource:
         quote = composition.metadata_quote(directories, scratch)
         return self._reserve(scratch, quote, directories)
 
+    def _reserve_store(self, composition, scratch):
+        from .local_store_prepare import LocalStorePrepareRun
+        self._scratch_new(scratch)
+        _need(type(composition) is LocalStorePrepareRun and composition.later_stage
+              and self.source._composition is composition and composition.observation is self.source
+              and composition.metadata is self and composition.metadata_scratch is scratch
+              and scratch.parent.path == self.source.root / ".mobile-release")
+        composition.checkpoint()
+        directories=sum(path not in self.source.directories for path in self.planned)
+        self.composition=composition
+        total=composition.metadata_quote(directories,scratch)
+        return self._reserve(scratch,total,directories)
+
     def _scratch_parent(self, scratch):
         """After original parent acquire, BEFORE any scratch mkdir/publication."""
         self.check()
         _need(scratch is self.scratch and scratch._local_metadata_owner is self
               and self.source.active and self.reservation is not None)
-        if self.composition is None or self.platform == "ios":
+        from .local_store_prepare import LocalStorePrepareRun
+        store=type(self.composition) is LocalStorePrepareRun
+        if self.composition is None or self.platform == "ios" or store:
             if self.composition is not None:
                 self.composition._metadata_cut()
             number = self.source.project.meta.number
@@ -444,8 +462,15 @@ class LocalMetadataSource:
                     yield tuple(sorted(path for path in self.rows if path.name != ".gitkeep"))
                     _need(self.read_paths == set(self.rows))
                     self._post()  # AFTER original _publish, before token escapes.
-                    self.source.check()
-                    self._post()  # Last native status may have overlapped selected-tree change.
+                    from .local_store_prepare import LocalStorePrepareRun
+                    if type(self.composition) is LocalStorePrepareRun:
+                        # Store still owes probes/lane after source6. The same
+                        # outer scope performs real source7/8 and final POST;
+                        # do not insert an early ninth Git role or renew time.
+                        _need(self.composition.later_stage and self.source.calls==6)
+                    else:
+                        self.source.check()
+                        self._post()  # Last native status may have overlapped selected-tree change.
             finally:
                 scope.__exit__(*sys.exc_info())
             self.guard.check()

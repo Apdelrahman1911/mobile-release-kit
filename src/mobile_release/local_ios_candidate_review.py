@@ -28,7 +28,7 @@ class IOSCandidateBundleReview(CandidateBundleReview):
         from .local_store_execute import LocalStoreExecuteRun
         from .local_store_reconcile import LocalStoreReconcileRun
         need(owner.request.context.get('platform') == 'ios' and
-             (type(owner) is LocalHistoryRun and owner.request.context['action'] in {'review-inputs','review-prepared','review-execution','review-reconcile'}
+             (type(owner) is LocalHistoryRun and owner.request.context['action'] in {'review-inputs','review-prepared','review-execution','review-reconcile','review-stage-prepared','review-stage-execution','review-external-readiness'}
               or type(owner) is LocalStorePrepareRun and owner.request.context['operation']=='local-store-prepare'
               or type(owner) is LocalStoreExecuteRun and owner.apple_execute
               or type(owner) is LocalStoreReconcileRun and owner.apple_reconcile))

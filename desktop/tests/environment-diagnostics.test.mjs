@@ -497,3 +497,19 @@ test('browser, artifact-validation, missing listener and another original owner 
   offline.controller.beginConnection(); await offline.controller.connect(previewApi); assert.equal(offline.controller.start(), false); assert.equal(offline.calls.length, 0);
   await assert.rejects(previewApi.environmentDiagnosticsStatus()); await assert.rejects(previewApi.startEnvironmentDiagnostics(request())); offline.controller.dispose();
 });
+
+test('matched iOS version remains an observation without SDK or release-readiness authority', async () => {
+  const h = harness(); await h.ready; h.controller.setContext('ios', 'build');
+  assert.equal(h.controller.start(), true);
+  const context = { ...CONTEXT, platform: 'ios' };
+  h.reply(h.calls[0], status(1, owner({ context, phase: 'checking' })));
+  await flush();
+  const terminal = finished({ context, result: core(context, 'macos') });
+  h.emit(status(2, null, terminal));
+  const report = h.state.observation.projection.result;
+  assert.equal(report.checks.find(row => row.id === 'xcode').assessment, 'match');
+  assert.equal(report.assurance.sdkInspected, false);
+  assert.equal(report.assurance.releaseReadiness, 'unknown');
+  assert.equal(h.calls.length, 1); // Receiving the result does not send another Start.
+  h.controller.dispose();
+});

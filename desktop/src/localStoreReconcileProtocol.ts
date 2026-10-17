@@ -1,3 +1,4 @@
+import { EXTERNAL_READINESS_CONSENT, parseExternalReadinessRequest, parseExternalReadinessSummary } from './localExternalReadinessProtocol.ts';
 import { recoveryReceiptFields } from './localReleaseHistoryProtocol.ts';
 import { copyBoundedComparisonData, sameOfflineData } from './offlinePreflightProtocol.ts';
 import { parseLocalStorePrepareRequest } from './localStorePrepareProtocol.ts';
@@ -8,7 +9,7 @@ export const STORE_RECONCILE_EVENT = 'local-store-reconcile-state-changed';
 export const STORE_RECONCILE_CONSENT = 'local-android-store-reconcile-v1' as const;
 export const STORE_RECOVERY_CONSENT = 'local-android-recovery-settle-v1' as const;
 export const IOS_STORE_RECONCILE_CONSENT = 'local-ios-store-reconcile-v1' as const;
-export const reconcileConsent = (request: PrepareLocalStoreReconcile) => request.platform==='ios' ? IOS_STORE_RECONCILE_CONSENT : request.settlement ? STORE_RECOVERY_CONSENT : STORE_RECONCILE_CONSENT;
+export const reconcileConsent = (request: PrepareLocalStoreReconcile) => request.action==='external-readiness' ? EXTERNAL_READINESS_CONSENT : request.platform==='ios' ? IOS_STORE_RECONCILE_CONSENT : request.settlement ? STORE_RECOVERY_CONSENT : STORE_RECONCILE_CONSENT;
 export function reconcileRequestContext(request: PrepareLocalStoreReconcile): LocalStoreReconcileContext {
   if(request.platform==='ios')return {...request,operation:'local-store-reconcile'};
   return { ...request, platform: 'android', operation: request.settlement ? 'local-store-recovery-settle' : 'local-store-reconcile' };
@@ -24,6 +25,7 @@ const keys = (v: unknown, names: string[]): v is Record<string, unknown> => obje
 const member = (values: string[], v: unknown) => typeof v === 'string' && values.includes(v);
 const contextKeys = ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'credentialContextRevision', 'recordId', 'recordRevision', 'executionMode', 'candidateOperationId', 'candidateSha256', 'confirmation', 'intentSha256'];
 function request(v: unknown): v is PrepareLocalStoreReconcile {
+  if(object(v)&&Object.hasOwn(v,'action'))return parseExternalReadinessRequest(v)!==null;
   if (!(keys(v,[...contextKeys,'platform']) && v.platform==='ios' || keys(v, contextKeys) || keys(v, [...contextKeys, 'settlement']) && v.settlement === 'record-current-target') || !hex(v.intentSha256, 64)) return false;
   const base = { ...v }; delete base.intentSha256; delete base.settlement;
   return parseLocalStorePrepareRequest(base) !== null;
@@ -36,7 +38,7 @@ export function encodeLocalStoreReconcileRequest(command: StoreReconcileCommand,
     const v = copyBoundedComparisonData(input, 16384);
     const valid = command === 'prepare_local_store_reconcile' ? request(v) : command === 'local_store_reconcile_status' ? keys(v, []) :
       keys(v, command === 'start_local_store_reconcile' ? ['operationId', 'ownerGeneration', 'consentVersion'] : ['operationId', 'ownerGeneration']) &&
-      hex(v.operationId, 32) && hex(v.ownerGeneration, 32) && (command !== 'start_local_store_reconcile' || (v.consentVersion === STORE_RECONCILE_CONSENT || v.consentVersion === STORE_RECOVERY_CONSENT || v.consentVersion === IOS_STORE_RECONCILE_CONSENT));
+      hex(v.operationId, 32) && hex(v.ownerGeneration, 32) && (command !== 'start_local_store_reconcile' || (v.consentVersion === EXTERNAL_READINESS_CONSENT || v.consentVersion === STORE_RECONCILE_CONSENT || v.consentVersion === STORE_RECOVERY_CONSENT || v.consentVersion === IOS_STORE_RECONCILE_CONSENT));
     if (!valid) return null;
     const bytes = new TextEncoder().encode(JSON.stringify(v)); return bytes.length <= 16384 ? bytes : null;
   } catch { return null; }
@@ -50,7 +52,8 @@ export function parseLocalStoreReconcileStatus(input: unknown): LocalStoreReconc
     if (op === null) return v as unknown as LocalStoreReconcileStatus;
     if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result']) || !hex(op.operationId, 32) || !hex(op.ownerGeneration, 32) || !member(phases, op.phase) || typeof op.intentUsable !== 'boolean' || !member(reasons, op.reason)) return null;
     const c = op.context;
-    if (!(keys(c, [...contextKeys, 'platform', 'operation']) && c.operation === 'local-store-reconcile' ||
+    if (!(keys(c, [...contextKeys, 'platform', 'operation','action','stageOperationId','executionReceiptSha256','supplementalAssignments']) && c.platform==='ios' && c.action==='external-readiness' && c.operation==='local-store-reconcile' ||
+      keys(c, [...contextKeys, 'platform', 'operation']) && c.operation === 'local-store-reconcile' ||
       keys(c, [...contextKeys, 'platform', 'operation', 'settlement']) && c.operation === 'local-store-recovery-settle' && c.settlement === 'record-current-target') || !member(['android','ios'],c.platform) || c.platform==='ios'&&Object.hasOwn(c,'settlement')) return null;
     const prepared = { ...c }; if(c.platform==='android')delete prepared.platform; delete prepared.operation;
     if (!request(prepared)) return null;
@@ -65,10 +68,16 @@ export function parseLocalStoreReconcileStatus(input: unknown): LocalStoreReconc
     else if (op.outcome !== null || op.result !== null || op.intentUsable && op.phase !== 'awaiting-consent') return null;
     if (op.result !== null) {
       const r = op.result;
+      if (prepared.action==='external-readiness') {
+        if(op.phase!=='terminal'||op.outcome!=='complete'||op.reason!=='none'||!keys(r,['schemaVersion','scope','headSequence','readinessReceipt'])||r.schemaVersion!==1||r.scope!=='local-ios-external-readiness'||!counter(r.headSequence)||r.headSequence<12||r.headSequence>509)return null;
+        const i=parseExternalReadinessSummary(r.readinessReceipt,prepared.stageOperationId);
+        if(!i||i.candidateOperationId!==prepared.candidateOperationId||i.candidateSha256!==prepared.candidateSha256||i.intentSha256!==prepared.intentSha256||i.executionReceiptSha256!==prepared.executionReceiptSha256||!sameOfflineData(i.version,{name:prepared.savedVersion.name,build:prepared.savedVersion.build}))return null;
+      } else {
       if (op.phase !== 'terminal' || op.outcome !== 'complete' || op.reason !== 'none' || !keys(r, ['schemaVersion', 'scope', 'headSequence', 'reconciliationReceipt']) || r.schemaVersion !== 1 || r.scope !== (c.platform==='ios'?'local-ios-store-reconcile':prepared.settlement ? 'local-android-recovery-settlement' : 'local-android-store-reconcile') || !counter(r.headSequence) || r.headSequence < (prepared.settlement ? 7 : 6) || r.headSequence > 513) return null;
       const i = r.reconciliationReceipt;
       if (!reconciliationReceiptSummary(i, prepared.candidateOperationId, c.platform==='ios'?'ios':'android') || i.candidateSha256 !== prepared.candidateSha256 || i.intentSha256 !== prepared.intentSha256 ||
         !sameOfflineData(i.version, { name: prepared.savedVersion.name, build: prepared.savedVersion.build })) return null;
+      }
     } else if (op.outcome === 'complete') return null;
     return v as unknown as LocalStoreReconcileStatus;
   } catch { return null; }

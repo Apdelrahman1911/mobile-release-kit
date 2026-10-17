@@ -67,12 +67,21 @@ class CandidateBundleReview:
         from .local_store_prepare import LocalStorePrepareRun
         from .local_store_execute import LocalStoreExecuteRun
         from .local_store_reconcile import LocalStoreReconcileRun
-        admitted=(type(owner) is LocalHistoryRun and owner.request.context["action"] in {"review-inputs","review-prepared","review-execution","review-reconcile","review-recovery"}
+        admitted=(type(owner) is LocalHistoryRun and owner.request.context["action"] in {"review-inputs","review-prepared","review-execution","review-reconcile","review-recovery","review-stage-prepared","review-stage-execution","review-external-readiness"}
                   or type(owner) is LocalStorePrepareRun and owner.request.context["operation"]=="local-store-prepare"
                   or type(owner) is LocalStoreExecuteRun and owner.request.context["operation"]=="local-store-execute"
                   or type(owner) is LocalStoreReconcileRun and owner.request.context["operation"] in {"local-store-reconcile","local-store-recovery-settle"})
+        selected=owner.request.context.get("candidateOperationId")
+        if type(owner) is LocalHistoryRun and owner.request.context["action"] in {"review-stage-prepared","review-stage-execution","review-external-readiness"}:
+            owner.checkpoint();need(owner.journal is not None and not owner.journal.closed)
+            rows=[r for r,_ in owner.journal._rows if r['operationId']==owner.request.context['stageOperationId']]
+            need(rows and rows[0]['phase']=='promotion-pending')
+            selected=rows[0]['payload']['candidateOperationId']
+            original=[r for r,_ in owner.journal._rows if r['operationId']==selected]
+            need(original and original[0]['phase']=='inputs-pending' and original[0]['payload']==pending
+                and rows[0]['payload']['candidateSha256']==candidate_sha256)
         need(admitted and owner.bundle is None and not owner._close_claimed
-             and owner.request.context["candidateOperationId"]==operation_id
+             and selected==operation_id
              and _uuid(operation_id) and _sha(candidate_sha256))
         self.owner,self.operation_id,self.enrollment,self.pending=owner,operation_id,enrollment,pending
         self.expected=candidate_sha256

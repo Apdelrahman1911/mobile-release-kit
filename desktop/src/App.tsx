@@ -557,7 +557,7 @@ export function App() {
   const localStorePrepareState=useSyncExternalStore(localStorePrepare.subscribe,localStorePrepare.getSnapshot,localStorePrepare.getSnapshot);
   const [localStoreExecute] = useState(() => new LocalStoreExecuteController({
     project: () => {
-      if(assetSession.getSnapshot().scope.platform!=='ios')return androidBuild.getSnapshot().project;
+      if(assetSession.getSnapshot().scope.platform!=='ios'&&assetSession.getSnapshot().scope.stage==='candidate')return androidBuild.getSnapshot().project;
       const current=workspaceRef.current;
       return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?localStoreProjectObservation(current.projects[current.selectedId]!,releaseVersion.getSnapshot()):null;
     }, assets: assetSession.getSnapshot,

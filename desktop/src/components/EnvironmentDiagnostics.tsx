@@ -4,6 +4,15 @@ import type { EnvironmentCheckId, EnvironmentCheckReason, EnvironmentDiagnostics
 import { Badge, ErrorNotice, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 
+// Known setup guidance only; no host observation or repair authority.
+const xcodePrerequisites = {
+  setup: 'Open the Mac App Store and search for Xcode from Apple. Install full Xcode and complete its normal first-launch setup, including the iOS platform support your project needs. Command Line Tools alone are not full Xcode.',
+  version: 'Compare both the version and build with the current core requirements. No fixed version is inferred while those requirements are unavailable or stale.',
+  selection: 'The native archive and IPA-upload profile selects /Applications/Xcode.app, either the concrete app or one link to a supported direct Xcode app sibling in /Applications. A different developer selection in Xcode does not override this profile.',
+  protection: 'The supported protected layout requires root-owned concrete tool directories, no group/world-write access, and the existing native filesystem and access-control checks. This is a separate setup requirement, not a guarantee made by the normal Apple installer.',
+  boundary: 'A matching observed version and build does not establish native tool protection, signing or upload readiness. This app does not install Xcode or repair its ownership, permissions or access controls. A setup outside the supported profile remains unavailable.',
+};
+
 const labels: Record<EnvironmentCheckId, string> = {
   'developer-selection': 'macOS developer selection', git: 'Git version', java: 'Java runtime version', javac: 'Java compiler version', xcode: 'Xcode version and build',
 };
@@ -39,6 +48,13 @@ export function EnvironmentDiagnostics({ state, controller, compact = false, loa
     <SectionHeading title={compact ? 'Build-tool diagnostics owner' : 'Observed build-tool checks'}
       description={compact ? 'The original native run remains owned outside the Environment page.' : 'Separate from expected requirements. Only an explicit check requests local tool-version commands.'} />
     {!compact && <>
+      <details id="environment-xcode-prerequisites">
+        <summary>iOS: Xcode prerequisites and supported layout</summary>
+        <p><strong>Known setup requirements — not a physical or native check.</strong></p>
+        <p>{xcodePrerequisites.setup}</p><p>{xcodePrerequisites.version}</p>
+        <p>{xcodePrerequisites.selection}</p><p>{xcodePrerequisites.protection}</p>
+        <p className="review-caution">{xcodePrerequisites.boundary}</p>
+      </details>
       <p>Startup and all work share a <strong>6-second work limit</strong>. The original native owner has a fixed <strong>10-second total finality cutoff</strong> from admission, including cleanup. Each call gets at most 3 seconds within that shared budget. A slow tool may be incomplete or time out; this is not the full CLI doctor.</p>
       <p className="save-note">At most four commands, with 16 KiB aggregate stdout + stderr per command. No builds, Gradle or wrapper commands, project hooks, SDK inventory, repository queries, signing, credential access, installations, license acceptance, report files or network actions are requested. Administratively trusted host tools can still have OS or tool-cache effects; this is not a malware sandbox.</p>
     </>}
@@ -73,6 +89,7 @@ export function EnvironmentDiagnostics({ state, controller, compact = false, loa
       <div className="environment-requirements">{result.checks.map((row) => <article className="tool-card" key={row.id}>
         <h3>{labels[row.id]}</h3><div className="button-row"><Badge>{row.state}</Badge><Badge tone={row.assessment === 'mismatch' ? 'warning' : 'neutral'}>{row.assessment}</Badge></div>
         <p>{reasons[row.reason]}</p>
+        {row.id === 'xcode' && <p className="review-caution">{xcodePrerequisites.boundary} <a href="#environment-xcode-prerequisites">Review Xcode prerequisites</a></p>}
         <dl className="environment-baseline"><dt>Observed version</dt><dd>{row.version ?? 'Not assessed'}{row.build && ` · build ${row.build}`}</dd>
           <dt>{row.baseline.kind === 'workflow-reference' ? 'Workflow reference · not a local compatibility rule' : row.baseline.kind === 'exact-pin' ? 'Expected exact core baseline · not the observation' : 'No local version policy'}</dt>
           <dd>{row.baseline.version ?? 'No version requirement inferred'}{row.baseline.build && ` · build ${row.baseline.build}`}</dd>

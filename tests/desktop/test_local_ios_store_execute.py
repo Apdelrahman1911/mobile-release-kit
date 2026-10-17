@@ -201,9 +201,9 @@ class IOSStoreExecuteTests(unittest.TestCase):
         for action in ('review-recovery',):
             with self.assertRaises(ValueError):h.context({**row,'action':action})
     def test_actual_resolved_original_quote_exact_fit_and_pre_effect_overflow(self):
-        # Exact three independently held walks: initial xcrun, selectedDeveloper,
-        # resolved altool; the reader never deduplicates numeric/inode slots.
-        needed=len(self.xcrun.parts)+len(self.dev.parts)-1+len(self.altool.parts)-1
+        # Original selected Contents is reused by its same parent slot/name;
+        # only the physical suffix acquires new slots, never inode-only credit.
+        needed=len(self.xcrun.parts)+len(self.dev.parts)-1+len(self.altool.relative_to(self.app/'Contents').parts)
         with patch.object(S,'UPLOAD_TOOL_SLOTS',needed):t,e,_,_,_=self.f.run_original(_execute=True)
         self.assertEqual(t['outcome'],'complete',repr(e.primary));self.assertEqual(len(e.service.tool_reader.descriptors),needed)
         self.doCleanups();self.setUp()
@@ -239,3 +239,81 @@ class IOSStoreExecuteTests(unittest.TestCase):
         target.write_bytes(before+b' ')
         t,_,h=LocalHistoryTests.run_original(self.f,'review-execution')
         self.assertEqual(t['outcome'],'refused');self.assertIsNone(t['result']);self.assertEqual(target.read_bytes(),before+b' ')
+
+
+class IOSStoreAliasTests(unittest.TestCase):
+    def fixture(self):
+        case=IOSStoreExecuteTests(methodName='runTest');case.setUp();self.addCleanup(case.doCleanups)
+        contents=case.app/'Contents';framework=contents/'SharedFrameworks/Upload.framework'
+        physical=framework/'Versions/A/Support/altool';physical.parent.mkdir(parents=True)
+        case.altool.rename(physical);case.altool=physical
+        (framework/'Versions/Current').symlink_to('A')
+        (framework/'Support').symlink_to('Versions/Current/Support')
+        nomination=case.dev/'usr/bin/altool';nomination.parent.mkdir(parents=True)
+        nomination.symlink_to('../../../SharedFrameworks/Upload.framework/Support/altool')
+        original=case.resolve
+        def resolve(argv,kw,engine,fault):
+            result=original(argv,kw,engine,fault)
+            result.stdout=(str(nomination)+'\n').encode()
+            return result
+        case.f.resolve_tool=resolve
+        return case,nomination,framework
+
+    def test_framework_links_produce_only_original_physical_tool_and_close(self):
+        case,nomination,_=self.fixture()
+        t,e,events,calls,high=case.f.run_original(_execute=True)
+        self.assertEqual(t['outcome'],'complete',''.join(__import__('traceback').format_exception(e.primary)))
+        self.assertEqual(len(calls),16);self.assertEqual(len(e.service.tool_reader.tool_aliases),3)
+        self.assertEqual(case.contexts[0]['transportTools']['altoolPath'],str(case.altool))
+        self.assertNotEqual(str(nomination),str(case.altool));self.assertTrue(nomination.is_symlink())
+        self.assertTrue(e.service.closed());self.assertTrue(e.input.material_closed())
+        self.assertLessEqual(high,e.service.quote['total']);self.assertLessEqual(len(e.service.tool_reader.descriptors),S.UPLOAD_TOOL_SLOTS)
+
+    def test_escape_cycles_and_target_overflow_refuse_before_pending_or_material(self):
+        for index,kind in enumerate(('escape','cycle','large','malformed')):
+            with self.subTest(kind=kind):
+                if index:self.doCleanups()
+                case,nomination,_=self.fixture();nomination.unlink()
+                target={'escape':'../../../../outside/altool','cycle':'altool','large':'x'*1025,'malformed':'../../../SharedFrameworks/../\t/altool'}[kind]
+                nomination.symlink_to(target)
+                t,e,events,calls,_=case.f.run_original(_execute=True)
+                self.assertIsNone(t['result']);self.assertEqual(len(calls),7);self.assertEqual(events,['lease-ready'])
+                self.assertEqual(case.f.current_phase(),'prepared');self.assertFalse(e.input._material_read)
+                self.assertTrue(e.service.closed());self.assertFalse(case.contexts)
+                self.assertLessEqual(len(e.service.tool_reader.tool_aliases),8)
+
+    def test_alias_parent_components_are_interpreted_after_the_alias(self):
+        case,nomination,framework=self.fixture()
+        # `hop/..` means Versions/A, NOT the lexical parent of hop. A blanket
+        # normpath would silently select the wrong path or reject this layout.
+        (framework/'hop').symlink_to('Versions/A/Support')
+        nomination.unlink();nomination.symlink_to('../../../SharedFrameworks/Upload.framework/hop/../Support/altool')
+        t,e,_,_,_=case.f.run_original(_execute=True)
+        self.assertEqual(t['outcome'],'complete',repr(e.primary))
+        self.assertEqual(case.contexts[0]['transportTools']['altoolPath'],str(case.altool))
+
+    def test_same_target_alias_replacement_after_lane_never_publishes(self):
+        case,nomination,_=self.fixture();original=nomination.lstat();target=os.readlink(nomination)
+        def replace(engine,fault):
+            replacement=nomination.with_name('replacement');replacement.symlink_to(target);replacement.replace(nomination)
+        case.f.after_lane=replace
+        t,e,events,_,_=case.f.run_original(_execute=True)
+        self.assertNotEqual(nomination.lstat().st_ino,original.st_ino)
+        self.assertIsNone(t['result']);self.assertNotIn('execute-settled',events)
+        self.assertFalse(e.service.store_completed);self.assertEqual(case.f.current_phase(),'execute-pending')
+        self.assertTrue(list((case.f.root/'.mobile-release/store/lane-attempts-v1').iterdir()))
+
+    def test_alias_original_unknown_tool_close_still_blocks_final_tree(self):
+        case,_,_=self.fixture()
+        t,e,events,_,_=case.f.run_original(_execute=True,fault='tool-close-cancel')
+        self.assertEqual(t['outcome'],'unknown');self.assertIsNone(t['result'])
+        self.assertFalse(e.service.closed());self.assertFalse(e.service.store_completed)
+        self.assertNotIn('execute-settled',events);self.assertEqual(case.f.current_phase(),'execute-pending')
+
+    def test_real_target_and_parent_protection_predicate_is_not_relaxed(self):
+        from types import SimpleNamespace
+        protect=S.LocalStoreExecuteRun._upload_protected
+        for mode,uid,directory in ((stat.S_IFREG|0o777,0,False),(stat.S_IFREG|0o755,501,False),
+                (stat.S_IFDIR|0o775,0,True),(stat.S_IFDIR|0o755,501,True)):
+            with self.subTest(mode=mode,uid=uid),self.assertRaises(W.ProtocolError):
+                protect(SimpleNamespace(st_mode=mode,st_uid=uid,st_nlink=1,st_size=1),directory)

@@ -456,7 +456,7 @@ pub(super) fn acquire_reconcile_sources(owner:&Session,runtime:&Arc<Mutex<StoreR
 }
 pub(super) fn reconcile_complete(owner:&Session)->bool{
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
-    {owner.domain==SavedCommandDomain::LocalStoreReconcile&&owner.history.route.try_lock().is_ok_and(|r|r.reconcile_replies_complete(owner.recovery_settlement()))&&native::reconcile_helpers_complete(owner)}
+    {owner.domain==SavedCommandDomain::LocalStoreReconcile&&owner.history.route.try_lock().is_ok_and(|r|r.reconcile_replies_complete(owner.reconcile_checkpointing()))&&native::reconcile_helpers_complete(owner)}
     #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
     {let _=owner;false}
 }
@@ -499,6 +499,21 @@ mod reconcile_route_tests {
         r.reply_writing=true;assert!(!r.reconcile_replies_complete(true));r.reply_writing=false;
         r.pending=Some(PhaseEvent::Reconcile(reconcile_wire::Event::LeaseReady));assert!(!r.reconcile_replies_complete(true));r.pending=None;
         r.failed=true;assert!(!r.reconcile_replies_complete(true));r.failed=false;r.authorization=None;assert!(!r.reconcile_replies_complete(true));
+    }
+
+    #[test]
+    fn local_external_readiness_route_needs_third_actual_ack_and_preserves_pending_failure(){
+        let c=reconcile_wire::tests::readiness_context();assert!(c.checkpointing());
+        let mut r=Route{reconcile_head:Some(11),authorization:Some("23456789-1234-4234-8234-123456789abc".into()),original:Some(("a".repeat(32),"b".repeat(64))),
+            received:2,completed:2,pending:None,reply_writing:false,failed:false};
+        assert!(!r.reconcile_replies_complete(c.checkpointing()));
+        r.received=3;r.pending=Some(PhaseEvent::Reconcile(reconcile_wire::Event::ExternalReady(history_wire::Head{sequence:12,sha256:"c".repeat(64)})));
+        assert!(!r.reconcile_replies_complete(c.checkpointing()));r.pending=None;r.reply_writing=true;
+        r.completed=3;assert!(!r.reconcile_replies_complete(c.checkpointing()));r.reply_writing=false;
+        assert!(r.reconcile_replies_complete(c.checkpointing()));assert!(!r.reconcile_replies_complete(false));
+        for head in [11,508]{assert!(c.head_valid(head));r.reconcile_head=Some(head);assert!(r.reconcile_replies_complete(c.checkpointing()));}
+        for head in [6,10,509,513]{assert!(!c.head_valid(head));} // Independently applied by native completion.
+        r.failed=true;assert!(!r.reconcile_replies_complete(c.checkpointing()));r.failed=false;r.original=None;assert!(!r.reconcile_replies_complete(c.checkpointing()));
     }
 
 }

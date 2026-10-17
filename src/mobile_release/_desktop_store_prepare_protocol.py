@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from . import _desktop_local_history_protocol as history
 from . import _desktop_store_preflight_protocol as access
 from .local_release_journal import canonical, _uuid, _enrollment
+from uuid import UUID
 
 PROTOCOL = 'mrk-local-store-prepare/1'
 CONSENT = 'local-android-store-prepare-v1'
@@ -25,15 +26,64 @@ def sha(value,count=64):return type(value) is str and re.fullmatch('[0-9a-f]{%d}
 IOS_LIMITATIONS = ['non-publishing','prepare-not-execute','current-asc-snapshot-may-change',
                     'current-bundle-not-historical-finality','saved-inputs-not-atomic']
 
+STAGES=('external-testing','production-submit')
+STAGE_LIMITATIONS=['non-publishing','prepare-not-execute','current-store-snapshot-may-change',
+    'original-binary-reused','prior-native-finality-not-established','saved-inputs-not-atomic']
+def stage(value):
+    result=value.get('stage','candidate')
+    require('stage' not in value or result in STAGES)
+    return result
+
+def stage_operation_id(request):
+    require(stage(request.context)!='candidate')
+    try:
+        parsed=UUID(hex=request.operation_id)
+        require(parsed.version==4 and parsed.hex==request.operation_id)
+        return str(parsed)
+    except (ValueError,AttributeError):raise ProtocolError() from None
+
+def supplemental(value):
+    require(type(value) is dict and set(value)=={'reviewContact','commitment','reviewDemo'})
+    seen=set()
+    for name in ('reviewContact','commitment','reviewDemo'):
+        row=value[name]
+        if name=='reviewDemo' and row is None:continue
+        require(type(row) is dict and set(row)=={'recordId','recordRevision'}
+            and history.token(row['recordId']) and history.integer(row['recordRevision'],0xffffffff,1)
+            and row['recordId'] not in seen)
+        seen.add(row['recordId'])
+    return value
+
+def destination(value,*,platform,selected):
+    require(selected in ('candidate',*STAGES) and platform in ('android','ios') and type(value) is dict)
+    if platform=='android':
+        require(set(value)=={'channel','releaseStatus'} and type(value['channel']) is str
+            and 1<=len(value['channel'])<=255 and not any(ord(c)<32 for c in value['channel'])
+            and value['releaseStatus']==('draft' if selected=='production-submit' else 'completed'))
+        require(value['channel']=='internal' if selected=='candidate' else value['channel']=='production'
+            if selected=='production-submit' else value['channel'] not in ('internal','production'))
+    else:
+        require(value==({'channel':'testflight-internal'} if selected=='candidate' else
+            {'channel':'testflight-external'} if selected=='external-testing' else {'channel':'app-store-review','automaticRelease':False}))
+    return True
+
 def context(value, *, apple_prepare=False):
     require(type(value) is dict)
+    selected=stage(value)
     extra={'candidateOperationId','candidateSha256','confirmation'}
+    if selected!='candidate':
+        extra|={'stage','predecessorOperationId','predecessorReceiptSha256'}
+        require(_uuid(value.get('predecessorOperationId')) and sha(value.get('predecessorReceiptSha256')))
+        if value.get('platform')=='ios':
+            extra.add('supplementalAssignments');supplemental(value.get('supplementalAssignments'))
     require(extra <= value.keys() and value.get('operation')=='local-store-prepare')
     old={k:v for k,v in value.items() if k not in extra};old['operation']='local-store-preflight'
     try:access.context(old, apple_access=apple_prepare)
     except (ValueError,TypeError,KeyError):raise ProtocolError() from None
     require(_uuid(value['candidateOperationId']) and sha(value['candidateSha256'])
-        and value['confirmation']=='candidate:%s:%s:%s'%(value['platform'],value['savedVersion']['name'],value['savedVersion']['build']))
+        and value['confirmation']=='%s:%s:%s:%s'%(selected,value['platform'],value['savedVersion']['name'],value['savedVersion']['build']))
+    if selected=='external-testing':require(value['predecessorOperationId']==value['candidateOperationId'])
+    elif selected=='production-submit':require(value['predecessorOperationId']!=value['candidateOperationId'])
     return value
 
 @dataclass(frozen=True)
@@ -65,7 +115,9 @@ def parse_request(raw):
         require(type(value) is dict and set(value)=={'protocol','operationId','ownerGeneration','context','native'}
             and value['protocol']==PROTOCOL and history.token(value['operationId']) and history.token(value['ownerGeneration']))
         n=native(value['native'])
-        return StorePrepareRequest(value['operationId'],value['ownerGeneration'],context(value['context'],apple_prepare=True),n,hashlib.sha256(raw).hexdigest())
+        request=StorePrepareRequest(value['operationId'],value['ownerGeneration'],context(value['context'],apple_prepare=True),n,hashlib.sha256(raw).hexdigest())
+        if stage(request.context)!='candidate':require(stage_operation_id(request) not in (request.context['candidateOperationId'],request.context['predecessorOperationId']))
+        return request
     except (ValueError,TypeError,KeyError,OverflowError,RecursionError):raise ProtocolError() from None
 
 def _request_wire(request):
@@ -106,18 +158,26 @@ def reply(raw,request,kind,step):
         require(value['payload']=={});return None
     except (ValueError,TypeError,KeyError):raise ProtocolError() from None
 
-def validate_result(value, *, platform='android'):
+def validate_result(value, *, platform='android', selected='candidate'):
     require(platform in {'android','ios'})
+    require(selected in ('candidate',*STAGES));later=selected!='candidate'
     apple=platform=='ios'
     identity='bundleId' if apple else 'applicationId'
     from .config import IOS_ID_RE, APP_STORE_ID_RE
     from ._desktop_android_build_protocol import ANDROID_ID_RE,_VERSION_TEXT
     require(type(value) is dict and set(value)=={'schemaVersion','scope','headSequence','preparedIntent'}
         and type(value['schemaVersion']) is int and value['schemaVersion']==1
-        and value['scope']=='local-%s-store-prepare'%platform and history.integer(value['headSequence'],513,5 if apple else 1))
+        and value['scope']==('local-%s-store-stage-prepare' if later else 'local-%s-store-prepare')%platform
+        and history.integer(value['headSequence'],511 if later else 513,9 if selected=='external-testing' else 13 if later else 5 if apple else 1))
     p=value['preparedIntent']
+    extra={'stage','candidateOperationId','predecessorOperationId','predecessorReceiptSha256'} if later else set()
+    if later:
+        require(type(p) is dict and extra<=p.keys() and p['stage']==selected
+            and _uuid(p['candidateOperationId']) and _uuid(p['predecessorOperationId'])
+            and sha(p['predecessorReceiptSha256']) and p.get('operationId') not in (p['candidateOperationId'],p['predecessorOperationId'])
+            and (p['predecessorOperationId']==p['candidateOperationId'])==(selected=='external-testing'))
     require(type(p) is dict and set(p)=={'operationId','candidateSha256','intentSha256','storePreconditionSha256',
-        'sourceCommit','sourceTree',identity,'version','destination','observedAt','limitations'} | ({'appStoreAppId'} if apple else set())
+        'sourceCommit','sourceTree',identity,'version','destination','observedAt','limitations'} | ({'appStoreAppId'} if apple else set()) | extra
         and _uuid(p['operationId']) and all(sha(p[k]) for k in ('candidateSha256','intentSha256','storePreconditionSha256'))
         and all(sha(p[k],40) for k in ('sourceCommit','sourceTree'))
         and type(p[identity]) is str and len(p[identity])<=255 and (IOS_ID_RE if apple else ANDROID_ID_RE).fullmatch(p[identity])
@@ -125,7 +185,7 @@ def validate_result(value, *, platform='android'):
         and type(p['version']) is dict and set(p['version'])=={'name','build'}
         and type(p['version']['name']) is str and _VERSION_TEXT.fullmatch(p['version']['name'])
         and history.integer(p['version']['build'],2100000000,1)
-        and p['destination']==({'channel':'testflight-internal'} if apple else {'channel':'internal','releaseStatus':'completed'})
+        and destination(p['destination'],platform=platform,selected=selected)
         and type(p['observedAt']) is str and re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z',p['observedAt'])
-        and p['limitations']==(IOS_LIMITATIONS if apple else LIMITATIONS) and len(canonical(value))<=16*1024)
+        and p['limitations']==(STAGE_LIMITATIONS if later else IOS_LIMITATIONS if apple else LIMITATIONS) and len(canonical(value))<=16*1024)
     return value

@@ -135,3 +135,51 @@ def validate_local_execution_receipt(data: bytes, *, intent_data: bytes,
         return receipt
     except (ValidationError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise LocalReceiptError() from None
+
+
+_READINESS_FIELDS = frozenset("documentType schemaVersion origin operation platform stage project operationId candidateOperationId candidateSha256 operationIntentSha256 executionReceiptSha256 preparedBy observedBy appIdentity appStoreAppId marketingVersion buildNumber observedAt result state buildResourceId processingState externalGroup autoNotifyEnabled betaReviewState priorExecutionFinality".split())
+
+
+def local_readiness_attempt_key(*, intent_data, authority_data, expected_intent_sha256, execution_receipt_sha256):
+    from .local_release_intent import validate_local_readiness_authority
+    authority = validate_local_readiness_authority(authority_data, intent_data=intent_data,
+        expected_intent_sha256=expected_intent_sha256, execution_receipt_sha256=execution_receipt_sha256)
+    raw = canonical_json_bytes(authority); lane = b'ios_testflight_external'
+    return hashlib.sha256(_ATTEMPT_DOMAIN + bytes.fromhex(expected_intent_sha256)
+        + len(raw).to_bytes(4,'big') + raw + bytes((len(lane),)) + lane).hexdigest()
+
+
+def validate_local_readiness_receipt(data: bytes, *, intent_data: bytes, authority_data: bytes,
+        expected_intent_sha256: str, execution_receipt_sha256: str) -> dict:
+    """Distinct compact observation, never the old execution receipt/finality."""
+    from .local_release_intent import validate_local_readiness_authority, _text
+    try:
+        intent = decode_local_operation_intent(intent_data, platform='ios', stage='external-testing')
+        authority = validate_local_readiness_authority(authority_data, intent_data=intent_data,
+            expected_intent_sha256=expected_intent_sha256, execution_receipt_sha256=execution_receipt_sha256)
+        value = _keys(_local_json(data, MAX_LOCAL_RECEIPT_BYTES), _READINESS_FIELDS)
+        _need(value['documentType']=='local-store-external-readiness-receipt'
+            and type(value['schemaVersion']) is int and value['schemaVersion']==1
+            and value['origin']=='local-desktop' and value['operation']=='ios_testflight_external'
+            and value['platform']=='ios' and value['stage']=='external-testing')
+        _local_project(value['project'])
+        _local_authority(value['preparedBy'],purpose='prepare',platform='ios',stage='external-testing')
+        _local_authority(value['observedBy'],purpose='external-readiness',platform='ios',stage='external-testing')
+        _need(all(value[k]==intent[k] for k in ('project','operationId','candidateOperationId','candidateSha256','preparedBy'))
+            and value['observedBy']==authority and value['operationIntentSha256']==expected_intent_sha256
+            and value['executionReceiptSha256']==execution_receipt_sha256
+            and value['appIdentity']==intent['application']['id'] and value['appStoreAppId']==intent['application']['storeAppId']
+            and value['marketingVersion']==intent['version']['marketing']
+            and type(value['buildNumber']) is int and value['buildNumber']==intent['version']['build']
+            and value['result']=='ready' and value['state']=='available-to-testers'
+            and value['processingState']=='VALID' and value['autoNotifyEnabled'] is False
+            and value['priorExecutionFinality']=='not-established')
+        _validate_timestamp(value['observedAt'],'local readiness observedAt')
+        target=intent['storePrecondition']['snapshot']
+        _need(value['buildResourceId']==target['build']['id']
+            and value['externalGroup']==target['external']['groupName']
+            and _text(value['buildResourceId'],255) and _text(value['externalGroup'],255)
+            and value['betaReviewState'] in {'NOT_SUBMITTED','WAITING_FOR_REVIEW','WAITING_FOR_BETA_REVIEW','SUBMITTED','IN_REVIEW','IN_BETA_REVIEW','BETA_APPROVED','APPROVED'})
+        return value
+    except (ValidationError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise LocalReceiptError() from None

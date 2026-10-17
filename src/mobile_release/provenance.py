@@ -1385,6 +1385,9 @@ def _validate_operation_intent_body(intent: dict[str, Any], *, stage: str, platf
             "externalReceiptSha256",
         },
     }[stage]
+    if (artifact_encoding == "local-ios-stage-directory" and stage == "production-submit"
+            and type(predecessors) is dict and "externalReadinessReceiptSha256" in predecessors):
+        expected_predecessors = expected_predecessors | {"externalReadinessReceiptSha256"}
     predecessors = _exact_keys(predecessors, expected_predecessors, "intent.predecessors")
     if not all(isinstance(item, str) and HEX_SHA256_RE.fullmatch(item) for item in predecessors.values()):
         raise ValidationError("intent predecessor digest is invalid")

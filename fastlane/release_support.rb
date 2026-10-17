@@ -250,17 +250,20 @@ module MobileReleaseKit
 
   def self.local_authority_data(value, purpose:, platform: "android", stage: "candidate")
     local_stage_lane(platform, stage)
-    local_need(stage == "candidate" || %w[prepare execute].include?(purpose))
+    readiness = purpose == "external-readiness" && platform == "ios" && stage == "external-testing"
+    local_need(stage == "candidate" || %w[prepare execute].include?(purpose) || readiness)
     extra = stage != "candidate" && platform == "ios"
-    local_keys(value, LOCAL_AUTHORITY_FIELDS + (extra ? ["supplementalAssignments"] : []))
-    local_need(%w[prepare execute recover].include?(purpose) && value["purpose"] == purpose &&
+    local_keys(value, LOCAL_AUTHORITY_FIELDS + (extra ? ["supplementalAssignments"] : []) +
+      (readiness ? ["executionReceiptSha256"] : []))
+    local_need(local_hex(value["executionReceiptSha256"], 64)) if readiness
+    local_need((%w[prepare execute recover].include?(purpose) || readiness) && value["purpose"] == purpose &&
       value["origin"] == "local-desktop" && value["schemaVersion"].instance_of?(Integer) && value["schemaVersion"] == 1)
     local_project(value["project"])
     local_source(value["source"])
     local_need(%w[operationId authorizationId].all? { |k| local_uuid(value[k]) } &&
       %w[candidateSha256 confirmationSha256].all? { |k| local_hex(value[k], 64) })
     row = local_keys(value["assignment"], %w[kind recordId expectedRevision contextRevision])
-    local_need(%w[android ios].include?(platform) && (platform != "ios" || %w[prepare execute recover].include?(purpose)) &&
+    local_need(%w[android ios].include?(platform) && (platform != "ios" || %w[prepare execute recover].include?(purpose) || readiness) &&
       row["kind"] == (platform == "android" ? "google-service-account" : "asc-p8") && local_hex(row["recordId"], 32) &&
       %w[expectedRevision contextRevision].all? { |k| row[k].instance_of?(Integer) && row[k].between?(1, 2**32 - 2) })
     if extra
@@ -306,6 +309,13 @@ module MobileReleaseKit
     else
       local_need(local_uuid(payload["candidateOperationId"]) && payload["candidateOperationId"] != payload["operationId"])
       keys = %w[candidateManifestSha256 candidateReceiptSha256] + (stage == "production-submit" ? ["externalReceiptSha256"] : [])
+      if platform == "ios" && stage == "production-submit" && payload["predecessors"].instance_of?(Hash) &&
+          payload["predecessors"].key?("externalReadinessReceiptSha256")
+        # Explicit reference only. The original core predecessor reader must
+        # authenticate the separate anchored observation; never replace the
+        # original external receipt or treat this scalar as readiness authority.
+        keys += ["externalReadinessReceiptSha256"]
+      end
       previous = local_keys(payload["predecessors"], keys)
       local_need(previous.values.all? { |digest| local_hex(digest, 64) } && previous["candidateManifestSha256"] == payload["candidateSha256"])
       local_need(payload["storePrecondition"].instance_of?(Hash) && payload["storePrecondition"]["operation"] == lane &&
@@ -326,6 +336,23 @@ module MobileReleaseKit
     local_need(value["intentSha256"] == digest && value["authorizationId"] != prepared["authorizationId"] &&
       %w[project operationId candidateSha256 source assignment confirmationSha256].all? { |k| value[k] == prepared[k] } &&
       value["supplementalAssignments"] == prepared["supplementalAssignments"])
+    value
+  rescue ContractError, JSON::ParserError, EncodingError, ArgumentError, TypeError, KeyError
+    raise ContractError, "Invalid local Store intent or authority DATA"
+  end
+
+  # Distinct readonly purpose. This does not extend Execute/recover or prove
+  # original receipt custody; the same core reader owns that comparison input.
+  def self.local_readiness_authority(content, intent_content:, expected_intent_sha256:, execution_receipt_sha256:)
+    local_need(local_hex(execution_receipt_sha256, 64))
+    intent, digest = local_operation_intent(intent_content, expected_sha256: expected_intent_sha256,
+      platform: "ios", stage: "external-testing")
+    value = local_authority_data(local_json(content, 8 * 1024), purpose: "external-readiness",
+      platform: "ios", stage: "external-testing")
+    prepared = intent.fetch("preparedBy")
+    local_need(value["intentSha256"] == digest && value["executionReceiptSha256"] == execution_receipt_sha256 &&
+      value["authorizationId"] != prepared["authorizationId"] &&
+      %w[project operationId candidateSha256 source assignment supplementalAssignments confirmationSha256].all? { |k| value[k] == prepared[k] })
     value
   rescue ContractError, JSON::ParserError, EncodingError, ArgumentError, TypeError, KeyError
     raise ContractError, "Invalid local Store intent or authority DATA"

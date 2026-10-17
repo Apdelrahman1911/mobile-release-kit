@@ -152,15 +152,18 @@ class LocalStorePrepareTests(unittest.TestCase):
             from mobile_release import local_store_prepare as S,_desktop_store_prepare_protocol as W
             from mobile_release._desktop_store_prepare_engine import _Engine
             owner_type=S.LocalStorePrepareRun
+        readiness=_reconcile and W.readiness(self.value["context"])
         settlement=_reconcile and W.settling(self.value["context"])
-        pending,settled=("history-head","recovery-settled" if settlement else None) if _reconcile else W.PHASES[2:]
-        initial_phase=self.current_phase() if _reconcile else 'prepared' if _execute else 'inputs-ready'
-        final_phase='target-reconciled' if settlement else 'settled-success' if _execute else 'prepared'
+        pending,settled=("history-head","external-ready" if readiness else "recovery-settled" if settlement else None) if _reconcile else W.PHASES[2:]
+        later=self.value['context'].get('stage') is not None or readiness
+        pending_row='promotion-pending' if later and not _execute else pending
+        initial_phase=self.current_phase() if _reconcile or later else 'prepared' if _execute else 'inputs-ready'
+        final_phase='external-ready' if readiness else 'target-reconciled' if settlement else 'settled-success' if _execute else 'prepared'
         parent=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC);fcntl.flock(parent,fcntl.LOCK_EX|fcntl.LOCK_NB)
         loan=os.dup(parent);os.set_inheritable(loan,True)
         value=copy.deepcopy(self.value);now=time.monotonic_ns();value['native'].update(home=str(self.home),leaseFd=loan,
             nonce='e'*32,clock=dict(workEndNs=str(now+1200_000_000_000),hardEndNs=str(now+1210_000_000_000)),
-            authorizationId='66666666-6666-4666-8666-666666666666' if _reconcile else '55555555-5555-4555-8555-555555555555' if _execute else '44444444-4444-4444-8444-444444444444',tooling=dict(version='0.3.0',commit='c'*40))
+            authorizationId=getattr(self,'readiness_authorization','66666666-6666-4666-8666-666666666666') if _reconcile else '55555555-5555-4555-8555-555555555555' if _execute else '44444444-4444-4444-8444-444444444444',tooling=dict(version='0.3.0',commit='c'*40))
         if _reconcile and fault=='same-authorization':value['native']['authorizationId']='55555555-5555-4555-8555-555555555555'
         if fault=='saved':value['native']['credentialConfig']={'bytes':2,'sha256':hashlib.sha256(b'{}').hexdigest()}
         old=[os.dup(n) for n in (0,1,2)];ir,iw=os.pipe();orr,ow=os.pipe();er,ew=os.pipe()
@@ -170,15 +173,16 @@ class LocalStorePrepareTests(unittest.TestCase):
         e=_Engine(time.monotonic());events=[];calls=[];high=[0];lost_target=[None];original_event=_Engine.local_event
         apple=value['context']['platform']=='ios'
         fixture=json.loads((Path(access_fixture.__file__).resolve().parents[1]/('fixtures/local-intent-ios-candidate-valid.json' if apple else 'fixtures/local-intent-candidate-valid.json')).read_bytes())['storePrecondition']
+        if later:fixture=copy.deepcopy(self.stage_precondition)
         fixture['appIdentity']=self.manifest['bundleId' if apple else 'applicationId']
         if fault=='snapshot-platform':fixture['platform']='android'
         if fault=='snapshot-missing':fixture=None
-        model=LocalLaneModel(self.execution_receipt if _execute or _reconcile else lambda argv,env:(fixture,0),terminal=fault!='nested-terminal')
+        model=LocalLaneModel(self.execution_receipt if _execute or _reconcile else lambda argv,env:self.stage_snapshot(argv,env,fixture) if later else (fixture,0),terminal=fault!='nested-terminal')
         self.addCleanup(model.close)
         def peak():high[0]=max(high[0],len(os.listdir('/dev/fd' if sys.platform=='darwin' else '/proc/self/fd')))
         def parent_reply(engine,kind,payload):
             peak();original_event(engine,kind,payload);events.append(kind)
-            self.assertEqual(engine.service.journals[-1]._rows[-1][0]['phase'] if engine.service.journals and not engine.service.journals[-1].closed else self.current_phase(),final_phase if kind==settled else initial_phase if _reconcile else pending if kind==pending else initial_phase)
+            self.assertEqual(engine.service.journals[-1]._rows[-1][0]['phase'] if engine.service.journals and not engine.service.journals[-1].closed else self.current_phase(),final_phase if kind==settled else initial_phase if _reconcile else pending_row if kind==pending else initial_phase)
             reply=dict(protocol=W.PROTOCOL,operationId=engine.request.operation_id,ownerGeneration=engine.request.owner_generation,
                 nonce=engine.request.native['nonce'],requestSha256=engine.request.digest,kind='key-material' if kind=='lease-ready' else 'checkpoint-settled',
                 step=engine.input.reply_step,payload=ENROLLMENT if kind=='lease-ready' else {})
@@ -189,8 +193,14 @@ class LocalStorePrepareTests(unittest.TestCase):
             if kind==pending:
                 if apple:
                     parts=access_fixture.apple_material()
+                    roles=('asc-p8','asc-key-id','asc-issuer-id')
+                    if later:
+                        parts+=(b'Ada',b'Example',b'ada@example.test',b'+12025550123',__import__('base64').b64encode(b'k'*32),b'v1')
+                        roles+=('contact-first-name','contact-last-name','contact-email','contact-phone','commitment-key-base64','commitment-version')
+                        if value['context']['supplementalAssignments']['reviewDemo'] is not None:
+                            parts+=(b'demo-user',b'demo-password');roles+=('demo-username','demo-password')
                     data+=PREFIX+encode(dict(schemaVersion=1,files=[dict(role=role,bytes=len(body))
-                        for role,body in zip(('asc-p8','asc-key-id','asc-issuer-id'),parts)]))+b''.join(parts)+SUFFIX
+                        for role,body in zip(roles,parts)]))+b''.join(parts)+SUFFIX
                 else:
                     body=encode(account());data+=PREFIX+encode(dict(schemaVersion=1,files=[dict(role='google-service-account',bytes=len(body))]))+body+SUFFIX
             os.write(iw,data)
@@ -218,18 +228,19 @@ class LocalStorePrepareTests(unittest.TestCase):
                 else:
                     out=b''
                     if _reconcile and settlement and hasattr(self,'recovery_final_source') and len(e.service._source_rows)==8:self.recovery_final_source(e)
+                    if later and hasattr(self,'stage_final_source') and len(e.service._source_rows)==8:self.stage_final_source(e)
                     if (_execute or _reconcile) and fault=='last-source' and len(e.service._source_rows)==8:
                         (self.root/'.mobile-release/store/local'/OP.replace('-','')/'operation-intent.json').write_bytes(b'changed at last source status')
                 e.guard.lifetime_ledger._commands+=1;e.guard.lifetime_ledger._command_dispatched=True
                 return subprocess.CompletedProcess(argv,0,stdout=out,stderr=b'')
-            if apple and _execute and e.service._pending['kind']=='tool-resolution':
+            if apple and _execute and not later and e.service._pending['kind']=='tool-resolution':
                 self.assertNotIn(pending,events);self.assertFalse(e.input._material_read)
                 self.assertEqual(e.service.journals[-1]._rows[-1][0]['phase'],'prepared')
                 return self.resolve_tool(argv,kwargs,e,fault)
-            self.assertIn(pending,events);self.assertEqual(self.current_phase(),initial_phase if _reconcile else pending)
+            self.assertIn(pending,events);self.assertEqual(e.service.journals[0]._rows[-1][0]['phase'] if later and not e.service.journals[0].closed else self.current_phase(),initial_phase if _reconcile else pending_row)
             for name in ('GITHUB_ACTIONS','MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON','RUBYOPT'):self.assertNotIn(name,kwargs['environ'])
             if kwargs['capture']:
-                i=len(e.service._runtime_rows)-1-(1 if apple and _execute else 0)
+                i=len(e.service._runtime_rows)-1-(1 if apple and _execute and not later else 0)
                 if apple and i==5:
                     from mobile_release.credentials import APPLE_P8_CHECK
                     self.assertEqual(tuple(argv[:6]),('bundle','exec','ruby','-ropenssl','-e',APPLE_P8_CHECK))
@@ -239,7 +250,7 @@ class LocalStorePrepareTests(unittest.TestCase):
                 else:out=('3.3.12','4.0.16','','MRK_RUNTIME_3.3.12_FIDDLE_1.1.2','MRK_RUNTIME_3.3.12_FIDDLE_1.1.2')[i]
                 e.guard.lifetime_ledger._commands+=1;e.guard.lifetime_ledger._command_dispatched=True
                 return subprocess.CompletedProcess(argv,1 if apple and i==5 and fault=='bad-p8' else 0,stdout=out,stderr='')
-            self.assertEqual(argv[-1],'ios_testflight_internal' if apple else 'android_internal_upload');self.assertLessEqual(kwargs['timeout'],900)
+            self.assertEqual(argv[-1],__import__('mobile_release.stores',fromlist=['LANES']).LANES[('external-testing' if readiness else value['context'].get('stage','candidate'),'ios' if apple else 'android')]);self.assertLessEqual(kwargs['timeout'],900)
             if apple:
                 self.assertEqual(kwargs['environ']['MOBILE_RELEASE_STORE_MODE'],'execute' if _execute or _reconcile else 'prepare')
                 self.assertEqual(e.service.record._files_owner().mode,'execute' if _execute or _reconcile else 'prepare')
@@ -249,11 +260,12 @@ class LocalStorePrepareTests(unittest.TestCase):
             self.assertEqual(timing.hard-timing.run,3_000_000_000)
             self.assertLessEqual(timing.hard,__import__('math').floor(e.input.hard_end*1e9))
             answer=model(argv,**kwargs)
+            if later and fault=='stage-tree-close':lost_target[0]=e.service.metadata_tree.slots[-1].number
             if _reconcile and fault=='prepared-close':lost_target[0]=e.service.prepared_out.fd
             if _execute and fault=='tool-close-cancel':lost_target[0]=e.service.tool_manifest.slot.number
             if _execute and not apple and fault=='tool-manifest-post':
                 path=self.tools/'android-toolchain.json';path.chmod(0o600);path.write_bytes(b'changed original manifest')
-            if apple and _execute and hasattr(self,'after_lane'):self.after_lane(e,fault)
+            if apple and _execute and not later and hasattr(self,'after_lane'):self.after_lane(e,fault)
             if fault=='bundle-post':(self.bundle/('export/App.ipa' if apple else 'app-release.aab')).write_bytes(b'changed during original lane')
             return answer
         original_begin=owner_type._begin
@@ -281,6 +293,7 @@ class LocalStorePrepareTests(unittest.TestCase):
             if fault=='publication-close' and not lost and e.service is not None and e.service.publishers and settled in events:
                 target=lost_target[0]
             if (_execute and fault=='tool-close-cancel' or _reconcile and fault in {'prepared-close','recovery-marker-close'}) and not lost:target=lost_target[0]
+            if later and fault=='stage-tree-close' and not lost:target=lost_target[0]
             native_close(number)
             if number==target and fault=='tool-close-cancel':e.input.stop('cancelled')
             if number==target:lost.append(number);raise RuntimeError('inert lost original close')

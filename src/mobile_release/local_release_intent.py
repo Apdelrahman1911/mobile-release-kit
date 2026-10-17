@@ -355,10 +355,11 @@ def _local_source(value: object) -> None:
 
 
 def _local_authority(value: object, *, purpose: str, platform: str = "android", stage: str = "candidate") -> dict:
-    _need(type(stage) is str and stage in STAGES and (stage == "candidate" or purpose in {"prepare", "execute"}))
+    readiness = purpose == "external-readiness" and platform == "ios" and stage == "external-testing"
+    _need(type(stage) is str and stage in STAGES and (stage == "candidate" or purpose in {"prepare", "execute"} or readiness))
     later_apple = stage != "candidate" and platform == "ios"
-    _keys(value, _LOCAL_AUTHORITY | ({"supplementalAssignments"} if later_apple else set()))
-    _need(type(purpose) is str and purpose in {"prepare", "execute", "recover"}
+    _keys(value, _LOCAL_AUTHORITY | ({"supplementalAssignments"} if later_apple else set()) | ({"executionReceiptSha256"} if readiness else set()))
+    _need(type(purpose) is str and (purpose in {"prepare", "execute", "recover"} or readiness)
         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
         and value["origin"] == ORIGIN and value["purpose"] == purpose)
     _local_project(value["project"])
@@ -367,7 +368,7 @@ def _local_authority(value: object, *, purpose: str, platform: str = "android", 
         and _sha(value["candidateSha256"]) and _sha(value["confirmationSha256"]))
     assignment = _keys(value["assignment"], {"kind", "recordId", "expectedRevision", "contextRevision"})
     _need(type(platform) is str and platform in {"android", "ios"}
-        and (platform != "ios" or purpose in {"prepare", "execute", "recover"})
+        and (platform != "ios" or (purpose in {"prepare", "execute", "recover"} or readiness))
         and assignment["kind"] == ("google-service-account" if platform == "android" else "asc-p8"))
     _assignments([assignment], platform)
     if later_apple:
@@ -377,6 +378,7 @@ def _local_authority(value: object, *, purpose: str, platform: str = "android", 
               ["apple-review-contact", "operation-commitment"] + (["apple-review-demo"] if len(extra) == 3 else []))
         _assignments([assignment, *extra], platform)
     _need(value["intentSha256"] is None if purpose == "prepare" else _sha(value["intentSha256"]))
+    if readiness: _need(_sha(value["executionReceiptSha256"]))
     return value
 
 
@@ -459,6 +461,25 @@ def validate_local_execution_authority(data: bytes, *, intent_data: bytes, purpo
             and all(value[k] == prepared[k] for k in ("project", "operationId", "candidateSha256",
                 "source", "assignment", "confirmationSha256"))
             and value.get("supplementalAssignments") == prepared.get("supplementalAssignments"))
+        return value
+    except (ValidationError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise LocalIntentError() from None
+
+
+def validate_local_readiness_authority(data: bytes, *, intent_data: bytes,
+        expected_intent_sha256: str, execution_receipt_sha256: str) -> dict:
+    """Fixed read-only comparison DATA; never Execute/recover permission."""
+    try:
+        _need(_sha(expected_intent_sha256) and _sha(execution_receipt_sha256))
+        intent = decode_local_operation_intent(intent_data, platform='ios', stage='external-testing')
+        value = _local_authority(_local_json(data, MAX_LOCAL_AUTHORITY_BYTES),
+            purpose='external-readiness', platform='ios', stage='external-testing')
+        prepared = intent['preparedBy']
+        _need(value['intentSha256'] == intent['integrity']['sha256'] == expected_intent_sha256
+            and value['executionReceiptSha256'] == execution_receipt_sha256
+            and value['authorizationId'] != prepared['authorizationId']
+            and all(value[k] == prepared[k] for k in ('project','operationId','candidateSha256',
+                'source','assignment','supplementalAssignments','confirmationSha256')))
         return value
     except (ValidationError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise LocalIntentError() from None

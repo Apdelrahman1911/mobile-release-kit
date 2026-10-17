@@ -18,6 +18,10 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
         self.marker_scope=ExitStack();self.preserved_attempt=None;self.execution_pending=None
         super().__init__(request,guard,source)
     @property
+    def readiness(self):return wire.readiness(self.request.context)
+    @property
+    def stage(self):return 'external-testing' if self.readiness else super().stage
+    @property
     def settlement(self):return wire.settling(self.request.context)
     @property
     def apple_reconcile(self):
@@ -27,8 +31,11 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
     @property
     def material_head(self):return self.observed_head
     @property
-    def authority_purpose(self):return 'recover'
+    def authority_purpose(self):return 'external-readiness' if self.readiness else 'recover'
     def _quote(self,source=96):
+        if self.readiness:
+            from .local_store_stage import execute_quote
+            return execute_quote(self,source)
         self.checkpoint()
         q=resource_quote(project_depth=len(self.root.parts),version_parent_depth=len((self.root/self.request.context['savedVersion']['source']).parent.parts),
             source=source,history_depth=len(Path(self.request.native['home']).parts),platform=self.platform)
@@ -46,6 +53,9 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
         if self.quote is not None:require(q['total']<=self.quote['total'])
         self.quote=q;return q
     def _begin(self):
+        if self.readiness:
+            from .local_store_stage import execute_begin
+            return execute_begin(self)
         self.checkpoint();require(self.observation.calls==6 and not self.journals)
         self.enrollment,self.key=self.source.exchange('lease-ready',{})
         require(type(self.key) is bytearray and len(self.key)==32)
@@ -76,6 +86,9 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
     def _final_source_fence(self):
         if self.settlement:fence.post(self,own_pending=True)
     def source_final(self,observation):
+        if self.readiness:
+            from .local_store_stage import execute_final_source
+            return execute_final_source(self,observation)
         require(observation is self.observation and observation.calls==8 and not self._source_final)
         self._prepared_post()
         if self.settlement:fence.post(self,own_pending=True)
@@ -86,12 +99,20 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
         if self.apple_reconcile:self.bundle.finish()
         self._source_final=True
     def runtime_environment(self):
+        if self.readiness:return self.runtime.environment()
         env=self.runtime.environment()
         if self.apple_reconcile:
             self._prepared_post();self.bundle._scan();self.bundle.reader.terminal()
             env['MOBILE_RELEASE_IOS_IPA_PATH']=str(self.bundle.members[0].canonical)
             env['MOBILE_RELEASE_IOS_ARCHIVE_PATH']=str(self.bundle.archive.canonical)
         return env
+    def attempt_key(self,record,root,mode,digest,authority):
+        if not self.readiness:return super().attempt_key(record,root,mode,digest,authority)
+        self.checkpoint();require(record is self.record and root==self.root and mode=='execute' and self._store_entered
+            and digest==bytes.fromhex(self.request.context['intentSha256']) and authority==self.authority)
+        from .local_release_receipt import local_readiness_attempt_key
+        return local_readiness_attempt_key(intent_data=self.intent_bytes,authority_data=canonical(self.authority),
+            expected_intent_sha256=self.request.context['intentSha256'],execution_receipt_sha256=self.request.context['executionReceiptSha256'])
     def attempt_directory(self,attempt,directory):
         self.checkpoint();require(attempt is self.record._pending_attempt and attempt.phase=='ACQUIRING' and self.fence_readers)
         out=self.fence_readers[0];out.check();directory.check()
@@ -100,10 +121,17 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
         if self.settlement:fence.post(self)
     def lane_context(self,files):
         self.checkpoint();require(files is self.record._files_owner() and files.mode=='execute' and files.phase=='SEALING' and self._store_entered)
-        self._prepared_post();raw=canonical({'authority':self.authority,'expectedIntentSha256':self.request.context['intentSha256']})
+        self._prepared_post();value={'authority':self.authority,'expectedIntentSha256':self.request.context['intentSha256']}
+        if self.readiness:
+            self.metadata_tree.post();value.update(executionReceiptSha256=self.request.context['executionReceiptSha256'],metadataInputs=self.metadata_tree.binding_data())
+        raw=canonical(value)
         require(len(raw)<=16384);return raw.decode('utf-8')
     def validate_receipt(self,raw):
         self.checkpoint();self._memory(raw,65536)
+        if self.readiness:
+            from .local_release_receipt import validate_local_readiness_receipt
+            return validate_local_readiness_receipt(raw,intent_data=self.intent_bytes,authority_data=canonical(self.authority),
+                expected_intent_sha256=self.request.context["intentSha256"],execution_receipt_sha256=self.request.context["executionReceiptSha256"])
         return validate_local_execution_receipt(raw,intent_data=self.intent_bytes,authority_data=canonical(self.authority),
             purpose='recover',expected_intent_sha256=self.request.context['intentSha256'],platform=self.platform)
     def _settlement_payload(self,digest):
@@ -122,6 +150,9 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
             and self.fence_state in {'new','closed'}
             and all(p.closed() for p in (*self.prepared_readers,*self.prior_readers)))
     def _publication(self,raw):
+        if self.readiness:
+            from .local_store_readiness import publication
+            return publication(self,raw)
         self.checkpoint();require(self.store_completed and self._source_final and self._lane_owners_closed())
         receipt=self.validate_receipt(raw);target=Path(self.record._output)
         with _app_private_directory(target.parent,app_root=self.root,cancellation=self.guard,create=False) as out:
@@ -156,6 +187,34 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
         self.report={'schemaVersion':1,'scope':'local-android-recovery-settlement' if self.settlement else 'local-%s-store-reconcile'%self.platform,
             'headSequence':head['sequence'],'reconciliationReceipt':summary}
         wire.validate_result(self.report,settlement=self.settlement,platform=self.platform)
+    def _close_failed_readiness(self):
+        # This current original only; no pathname/history interpretation and no
+        # receipt publication. Ordinary mutation/recover owners never enter it.
+        from ._store_lane_files import StoreLaneAttempt
+        from ._store_lane_evidence import StoreLaneCallEvidence
+        from .stores import settle_store_operation
+        require(type(self) is LocalStoreReconcileRun and self.readiness and self.primary is not None
+            and self._close_claimed and self.source.require_operation() is self)
+        record=self.record
+        if record is None:return
+        require(type(record) is StoreLaneCallEvidence);record._origin(self.guard)
+        pending=record._pending_attempt
+        if pending is None:return
+        require(type(pending) is StoreLaneAttempt and pending.record is record and pending.guard is self.guard
+            and pending.app_root==self.root and pending.mode=='execute')
+        try:
+            facts=self.guard.lifetime_ledger.verdict();verdict=record.verdict(cancellation=self.guard)
+            if (pending.phase=='PENDING' and self._store_entered and self.authority is not None
+                and self.authority['purpose']=='external-readiness' and self.intent_bytes is not None
+                and self._request_bytes==canonical([self.request.context,self.request.native])
+                and super().closed() and all(p.closed() for p in self.fence_readers)
+                and not self.source.material_receiving and not self.source.material_pending
+                and verdict.dependents_settled and facts.cleanup_complete and facts.contained and not facts.fatal):
+                settle_store_operation(record,cancellation=self.guard,primary=self.primary)
+        finally:
+            # Even an ineligible unknown attempt consumes its own held handles;
+            # only settle_store_operation above may retire its original marker.
+            pending.close(primary=self.primary)
     def close(self):
         if self._close_claimed:return super().close()
         first=None
@@ -165,8 +224,16 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
             else:self.marker_scope.__exit__(type(error),error,error.__traceback__)
         except BaseException as error:self.remember(error);first=error
         try:super().close()
-        except BaseException:
-            if first is None:raise
+        except BaseException as error:
+            self.remember(error)
+            if first is None:first=error
+        if self.readiness and self.primary is not None:
+            try:self._close_failed_readiness()
+            except BaseException as error:
+                self.remember(error)
+                if first is None:first=error
         if first is not None:raise first
     def closed(self):
-        return super().closed() and all(p.closed() for p in self.fence_readers)
+        pending=None if self.record is None else self.record._pending_attempt
+        return (super().closed() and all(p.closed() for p in self.fence_readers)
+            and (not self.readiness or pending is None or pending.handles_closed()))

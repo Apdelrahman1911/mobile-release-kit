@@ -18,8 +18,22 @@ LIMITATIONS=['non-publishing','not-retry-permission','old-evidence-preserved','s
 SETTLEMENT='record-current-target'
 def settling(value):
     return type(value) is dict and value.get('operation')=='local-store-recovery-settle'
+def readiness(value):
+    return type(value) is dict and value.get('action')=='external-readiness'
 def context(value):
     require(type(value) is dict and sha(value.get('intentSha256')))
+    if readiness(value):
+        from ._desktop_store_preflight_protocol import context as access_context
+        from .local_release_journal import _uuid
+        extra={'action','candidateOperationId','candidateSha256','stageOperationId','executionReceiptSha256','intentSha256','confirmation','supplementalAssignments'}
+        require(extra<=value.keys() and value.get('operation')=='local-store-reconcile' and value.get('platform')=='ios'
+            and _uuid(value.get('stageOperationId')) and _uuid(value.get('candidateOperationId'))
+            and value['stageOperationId']!=value['candidateOperationId'] and sha(value.get('candidateSha256')) and sha(value.get('executionReceiptSha256')))
+        prepare.supplemental(value['supplementalAssignments'])
+        old={k:v for k,v in value.items() if k not in extra};old['operation']='local-store-preflight'
+        access_context(old,apple_access=True)
+        require(value['confirmation']=='external-testing:ios:%s:%s'%(value['savedVersion']['name'],value['savedVersion']['build']))
+        return value
     if settling(value):require(value.get('settlement')==SETTLEMENT and value.get('platform')=='android')
     else:require(value.get('operation')=='local-store-reconcile' and 'settlement' not in value)
     old={k:v for k,v in value.items() if k not in {'intentSha256','settlement'}};old['operation']='local-store-prepare'
@@ -41,7 +55,7 @@ def parse_request(raw):
     except (ValueError,TypeError,KeyError,OverflowError,RecursionError):raise ProtocolError() from None
 def phases(request):
     require(type(request) is StoreReconcileRequest);context(request.context)
-    return PHASES+('recovery-settled',) if settling(request.context) else PHASES
+    return PHASES+('external-ready',) if readiness(request.context) else PHASES+('recovery-settled',) if settling(request.context) else PHASES
 response,reply=prepare.response,prepare.reply
 def validate_result(value,*,settlement=False,platform='android'):
     require(type(settlement) is bool and platform in {'android','ios'} and not (settlement and platform=='ios'))
@@ -69,3 +83,26 @@ def execution_binding(intent,rows):
     require(pending['intentSha256']==intent['integrity']['sha256']
         and pending['confirmationSha256']==intent['preparedBy']['confirmationSha256']
         and pending['assignmentRevision']==intent['preparedBy']['assignment']['expectedRevision'])
+
+
+def readiness_summary(r,*,offline=False):
+    from .local_release_journal import _uuid
+    require(type(r) is dict and set(r)=={'operationId','candidateOperationId','candidateSha256','intentSha256','executionReceiptSha256',
+        'receiptSha256','authorizationId','sourceCommit','sourceTree','bundleId','appStoreAppId','version','destination','observedAt',
+        'result','state','limitations','observation','priorExecutionFinality'}
+        and _uuid(r['candidateOperationId']) and r['candidateOperationId']!=r['operationId']
+        and sha(r['executionReceiptSha256']) and r['state']=='available-to-testers' and r['result']=='ready'
+        and r['observation']==('current-external-readiness-files-only' if offline else 'current-external-target-only')
+        and r['priorExecutionFinality']=='not-established')
+    # Reuse only the unchanged scalar summary grammar, not an execution grant.
+    core={k:v for k,v in r.items() if k not in {'candidateOperationId','executionReceiptSha256','state','observation','priorExecutionFinality'}}
+    core['result']='reconciled';core['destination']={'channel':'testflight-internal'}
+    execute.receipt_summary(core,LIMITATIONS,platform='ios')
+    require(r['destination']=={'channel':'testflight-external'})
+    return r
+
+def validate_readiness_result(value):
+    require(type(value) is dict and set(value)=={'schemaVersion','scope','headSequence','readinessReceipt'}
+        and type(value['schemaVersion']) is int and value['schemaVersion']==1
+        and value['scope']=='local-ios-external-readiness' and integer(value['headSequence'],509,12))
+    readiness_summary(value['readinessReceipt']);require(len(canonical(value))<=16384);return value

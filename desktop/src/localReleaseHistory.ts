@@ -1,6 +1,6 @@
 // UI coordination only. The native saved-command Session owns work and cleanup.
 import { sameOfflineData } from './offlinePreflightProtocol.ts';
-import { parseLocalHistoryRequest, parseLocalHistoryStatus, localHistoryConsent, candidateHistoryAction } from './localReleaseHistoryProtocol.ts';
+import { parseLocalHistoryRequest, parseLocalHistoryStatus, localHistoryConsent, candidateHistoryAction, stageHistoryAction } from './localReleaseHistoryProtocol.ts';
 import type { BridgeMode } from './types.ts';
 import type { LocalHistoryIdentity, LocalHistoryApi, LocalHistoryStatus, PrepareLocalHistory, LocalHistoryAction } from './localReleaseHistoryTypes.ts';
 type Port=LocalHistoryApi&{mode:BridgeMode};
@@ -11,8 +11,8 @@ const identity=(v:LocalHistoryIdentity)=>({operationId:v.operationId,ownerGenera
 const sameId=(a:LocalHistoryIdentity|null|undefined,b:LocalHistoryIdentity|null|undefined)=>!!a&&!!b&&a.operationId===b.operationId&&a.ownerGeneration===b.ownerGeneration;
 const error='The original local history operation is unverified. Keep its status and cancel; another run is not safe until native cleanup is confirmed.';
 export function localHistoryOwnerReason(s:LocalHistoryState):string|null{return s.blocked||s.unconfirmed||s.pending||active(s.status)?'A local release-history intent or operation is retained. Cancel or finish it before other work.':null;}
-export function localHistoryRequest(projectId:string|null, action:LocalHistoryAction,candidateOperationId?:string,platform?:'ios'):PrepareLocalHistory|null{
- return parseLocalHistoryRequest({projectId,executionMode:'local',action,...(candidateHistoryAction(action)?{candidateOperationId}:{}),...(platform===undefined?{}:{platform})});
+export function localHistoryRequest(projectId:string|null, action:LocalHistoryAction,candidateOperationId?:string,platform?:'android'|'ios'):PrepareLocalHistory|null{
+ return parseLocalHistoryRequest({projectId,executionMode:'local',action,...(stageHistoryAction(action)?{stageOperationId:candidateOperationId,platform:platform??'android'}:{...(candidateHistoryAction(action)?{candidateOperationId}:{}),...(platform===undefined?{}:{platform})})});
 }
 export class LocalReleaseHistoryController {
  private state:LocalHistoryState={mode:'unavailable',inputPlatform:'android',request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
@@ -27,14 +27,14 @@ export class LocalReleaseHistoryController {
  private now(){return(this.source.now??(()=>performance.now()))();}
  private update(patch:Partial<LocalHistoryState>){this.state=Object.freeze({...this.state,...patch});if(!this.disposed)for(const listener of this.listeners)listener();}
  private clearTimer(){if(this.timer!==null)clearTimeout(this.timer);this.timer=null;}
- syncProject=()=>{const projectId=this.source.projectId();if(this.observedProjectId!==projectId){this.observedProjectId=projectId;this.update({inputPlatform:'android'});}if(this.candidateProjectId!==null&&this.candidateProjectId!==projectId){this.action='verify';this.candidateOperationId=undefined;this.candidateProjectId=null;this.update({inputPlatform:'android'});}const next=this.selectionPending?null:localHistoryRequest(projectId,this.action,this.candidateOperationId,(this.action==='review-inputs'||this.action==='abandon-inputs'||this.action==='review-prepared'||this.action==='review-execution'||this.action==='review-reconcile')&&this.state.inputPlatform==='ios'?'ios':undefined);if(!sameOfflineData(next,this.state.request)){this.invalidate();this.update({request:next});}};
+ syncProject=()=>{const projectId=this.source.projectId();if(this.observedProjectId!==projectId){this.observedProjectId=projectId;this.update({inputPlatform:'android'});}if(this.candidateProjectId!==null&&this.candidateProjectId!==projectId){this.action='verify';this.candidateOperationId=undefined;this.candidateProjectId=null;this.update({inputPlatform:'android'});}const next=this.selectionPending?null:localHistoryRequest(projectId,this.action,this.candidateOperationId,(this.action==='review-inputs'||this.action==='abandon-inputs'||this.action==='review-prepared'||this.action==='review-execution'||this.action==='review-reconcile'||stageHistoryAction(this.action))&&this.state.inputPlatform==='ios'?'ios':undefined);if(!sameOfflineData(next,this.state.request)){this.invalidate();this.update({request:next});}};
  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
  setAction=(action:LocalHistoryAction)=>{if(action!==this.action||this.candidateOperationId!==undefined){this.action=action;this.candidateOperationId=undefined;this.candidateProjectId=null;this.update({inputPlatform:'android'});this.syncProject();}};
  setInputPlatform=(platform:'android'|'ios'):boolean=>{
   if(this.disposed||!['android','ios'].includes(platform)||this.state.blocked||(this.attempt?.started||this.state.status?.operation?.phase==='running'||this.state.status?.operation?.phase==='starting'||this.state.status?.operation?.phase==='stopping'||this.state.status?.operation?.phase==='unknown')&&active(this.state.status))return false;
-  if(platform!==this.state.inputPlatform){if(this.action==='review-inputs'||this.action==='abandon-inputs'||this.action==='review-prepared'||this.action==='review-execution'||this.action==='review-reconcile')this.invalidate();this.update({inputPlatform:platform});this.syncProject();}
+  if(platform!==this.state.inputPlatform){if(this.action==='review-inputs'||this.action==='abandon-inputs'||this.action==='review-prepared'||this.action==='review-execution'||this.action==='review-reconcile'||stageHistoryAction(this.action))this.invalidate();this.update({inputPlatform:platform});this.syncProject();}
   return true;
  };
  selectCandidate=(action:'review-inputs'|'abandon-inputs'|'review-prepared'|'review-execution'|'review-reconcile'|'review-recovery',operationId:string):boolean=>{
@@ -44,6 +44,15 @@ export class LocalReleaseHistoryController {
   if(!row||(action==='review-prepared'?row.phase!=='prepared':action==='review-execution'?row.phase!=='settled-success':action==='review-recovery'?row.phase!=='target-reconciled':action==='review-reconcile'?(op.result.history.at(-1)!==row||!['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(row.phase)):!['inputs-pending','inputs-ready','settled-failure'].includes(row.phase))||action==='abandon-inputs'&&(row.phase==='settled-failure'||op.result.history.at(-1)!==row))return false;
   if(this.state.inputPlatform==='ios'&&action==='review-recovery')return false;
   this.action=action;this.candidateOperationId=operationId;this.candidateProjectId=op.context.projectId;this.syncProject();return this.state.request?.candidateOperationId===operationId&&this.state.request.action===action;
+ };
+ selectStage=(action:'review-stage-prepared'|'review-stage-execution'|'review-external-readiness',operationId:string):boolean=>{
+  const op=this.state.status?.operation;
+  if(localHistoryOwnerReason(this.state)||this.state.historical||op?.phase!=='terminal'||op.outcome!=='complete'||!op.result||op.context.projectId!==this.source.projectId())return false;
+  const row=op.result.history.find(row=>row.operationId===operationId);
+  if(!row||action==='review-external-readiness'&&this.state.inputPlatform!=='ios'||row.phase!==(action==='review-stage-prepared'?'prepared':action==='review-external-readiness'?'external-ready':'settled-success'))return false;
+  this.action=action;this.candidateOperationId=operationId;this.candidateProjectId=op.context.projectId;this.syncProject();
+  const request=this.state.request;
+  return !!request&&'stageOperationId' in request&&request.stageOperationId===operationId&&request.action===action;
  };
  setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};
  beginConnection=()=>{this.invalidate();if(localHistoryOwnerReason(this.state)){this.update({blocked:true});return;}this.unlisten?.();this.unlisten=null;this.api=null;this.update({mode:'unavailable',status:null});};

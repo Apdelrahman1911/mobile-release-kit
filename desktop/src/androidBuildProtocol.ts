@@ -1,4 +1,4 @@
-import { candidateInputs, LOCAL_CANDIDATE_CONSENT } from './localReleaseHistoryProtocol.ts';
+import { candidateInputs, LOCAL_CANDIDATE_CONSENT as ANDROID_CANDIDATE_CONSENT } from './localReleaseHistoryProtocol.ts';
 import type { AndroidCandidateInputsResult, AndroidBuildPublishedResult } from './androidBuildTypes.ts';
 // Renderer-consumed closed DATA only. The four requests are original UTF-8 Raw
 // IPC, never InvokeBody::Json. Native owns duplicate-aware raw decoding, core
@@ -15,7 +15,9 @@ import type { AndroidBuildAbi, AndroidBuildActivity, AndroidBuildArtifact, Andro
 
 export const ANDROID_BUILD_EVENT = 'android-build-state-changed';
 export const ANDROID_BUILD_CONSENT = 'saved-android-build-inspect-v3';
-export const ANDROID_CANDIDATE_CONSENT = LOCAL_CANDIDATE_CONSENT;
+// Re-export the shared live binding; copying its value during module initialization
+// would make Store/History parser import order observable through an ESM cycle.
+export { ANDROID_CANDIDATE_CONSENT };
 export const ANDROID_BUILD_SIGNED_CONSENT = 'saved-android-local-sign-v1';
 export const ANDROID_BUILD_SCOPE = 'local-post-build-artifact-observation';
 export const ANDROID_BUILD_TOOLCHAIN_PROFILE = 'android-local-linux-gnu-x86_64-v1';

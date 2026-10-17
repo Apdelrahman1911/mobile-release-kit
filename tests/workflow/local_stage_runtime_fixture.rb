@@ -13,10 +13,10 @@ module LocalStageRuntimeFixture
     end
     tree
   end
-  def with_original_stage_runtime(stage:,tree:,mode:,output:,intent:nil)
+  def with_original_stage_runtime(stage:,tree:,mode:,output:,intent:nil,readiness_receipt_sha256:nil)
     m=MobileReleaseKit;r=m::StoreLaneRuntime;l=m::StoreLaneLifetime
     old_runtime=r.instance_variable_get(:@runtime);old_invocation=l.instance_variable_get(:@invocation)
-    keys=[r::LOCAL_STAGE_KEY,r::LOCAL_EXECUTE_KEY,r::LOCAL_RECONCILE_KEY]
+    keys=[r::LOCAL_STAGE_KEY,r::LOCAL_EXECUTE_KEY,r::LOCAL_RECONCILE_KEY,r::LOCAL_READINESS_KEY]
     old_keys=keys.to_h { |key| [key,ENV[key]] };keys.each { |key| ENV.delete(key) }
     stat=File.stat(tree)
     metadata={'schemaVersion'=>1,'root'=>tree,'rootIdentity'=>{'device'=>stat.dev.to_s,'inode'=>stat.ino.to_s,
@@ -26,10 +26,18 @@ module LocalStageRuntimeFixture
     if intent
       digest=intent.fetch('integrity').fetch('sha256')
       authority=intent.fetch('preparedBy').merge('purpose'=>'execute','authorizationId'=>'55555555-5555-4555-8555-555555555555','intentSha256'=>digest)
+      local_key=r::LOCAL_EXECUTE_KEY
+      local={'authority'=>authority,'expectedIntentSha256'=>digest,'metadataInputs'=>metadata}
+      if readiness_receipt_sha256
+        assert_equal ['ios','external-testing','execute'],[intent.fetch('platform'),stage,mode]
+        authority.merge!('purpose'=>'external-readiness','executionReceiptSha256'=>readiness_receipt_sha256,
+          'authorizationId'=>'66666666-6666-4666-8666-666666666666')
+        local['executionReceiptSha256']=readiness_receipt_sha256;local_key=r::LOCAL_READINESS_KEY
+      end
       ENV.update('MOBILE_RELEASE_CONFIRMATION'=>intent.fetch('confirmation'),'MOBILE_RELEASE_APP_IDENTITY'=>intent.fetch('application').fetch('id'),
         'MOBILE_RELEASE_ASC_APP_ID'=>intent.fetch('application').fetch('storeAppId'),'MOBILE_RELEASE_MARKETING_VERSION'=>intent.fetch('version').fetch('marketing'),
         'MOBILE_RELEASE_BUILD_NUMBER'=>intent.fetch('version').fetch('build').to_s,
-        r::LOCAL_EXECUTE_KEY=>m.canonical_json({'authority'=>authority,'expectedIntentSha256'=>digest,'metadataInputs'=>metadata}))
+        local_key=>m.canonical_json(local))
     else
       ENV[r::LOCAL_STAGE_KEY]=m.canonical_json({'stage'=>stage,'platform'=>'ios','metadataInputs'=>metadata})
     end
