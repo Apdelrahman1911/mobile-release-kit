@@ -13898,8 +13898,15 @@ mod installer {
                 && entry == Some(CurrentProductResult::PurposeVerified)
                 && payload == Some(CurrentProductResult::PurposeVerified)
         }
+        // Preserve the first Parent error; otherwise retain the already-joined
+        // writer's closed diagnostic instead of losing it at the outer boundary.
+        // This selection changes neither the outcome nor any finality gate.
+        fn completed_reason_data(parent: Option<&'static str>, writer: Option<&str>) -> Option<&'static str> {
+            parent.or_else(|| writer.map(closed_reason))
+        }
         // Failure-only diagnostic DATA, never a receipt or future-exit claim.
-        // The caller supplies only its first static Parent error after original settlement.
+        // The caller supplies its first static Parent or joined-writer error
+        // after original settlement. No private worker frames are published.
         fn completed_failure_line_data(reason: Option<&'static str>, exit: i32, originals: bool,
             native: bool, timely: bool, unknown: bool, native_settled: bool) -> Option<String> {
             if !matches!(exit,1|20) || !originals || !timely || !native_settled { return None; }
@@ -13911,6 +13918,10 @@ mod installer {
         #[cfg(test)]
         pub(super) fn completed_failure_diagnostic_data_checks() {
             // Pure diagnostic formatting only: no native/Installer/FD execution.
+            assert_eq!(completed_reason_data(Some("worker-self-image"),Some("deadline")),Some("worker-self-image"));
+            assert_eq!(completed_reason_data(None,Some("deadline")),Some("deadline"));
+            assert_eq!(completed_reason_data(None,Some("/private/not-a-public-diagnostic")),Some("other-original-refusal"));
+            assert_eq!(completed_reason_data(None,None),None);
             let refusal = completed_failure_line_data(Some("worker-self-image"),1,true,false,true,true,true).unwrap();
             assert_eq!(refusal,format!("MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256={};exit=1;originals=1;native=0;timely=1;unknown=1\n",hash(b"worker-self-image")));
             assert!(!refusal.contains("worker-self-image"));assert!(refusal.len()<=256 && refusal.is_ascii());
@@ -20767,12 +20778,14 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         fn completed_entry(source: &str, completed_path: &str, started: u64) -> i32 {
             let mut parent = match Deadline::from_entry(started).and_then(Parent::new) { Ok(parent) => parent, Err(_) => return 1 };
             let returned = parent.run_completed(source,completed_path);
+            let mut writer_reason = None;
             let mut writer_exit = None;
             let mut published = false;
             let mut exported = false;
             match returned {
                 Ok(joined) => {
                     writer_exit = Some(joined.outcome.exit);
+                    writer_reason = joined.outcome.reason.as_deref().map(closed_reason);
                     published = joined.outcome.runtime == "confirmed" || joined.outcome.app == "confirmed";
                     match parent.record_maintenance_export(&joined) {
                         Ok(_) => exported = true,
@@ -20796,7 +20809,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             // Missing producer is unentered-known for this diagnostic gate, not native success.
             let native_settled = parent.producer.as_ref().is_none_or(|producer| producer.signature.settled()
                 && producer.entry.settled() && producer.payload.settled());
-            if let Some(line) = completed_failure_line_data(parent.errors.first().copied(),exit,
+            if let Some(line) = completed_failure_line_data(
+                completed_reason_data(parent.errors.first().copied(),writer_reason),exit,
                 originals,native,timely,unknown,native_settled) {
                 // One bounded best-effort write; no retry, panic, or success-path output.
                 let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
