@@ -156,13 +156,17 @@ impl OriginWitness {
         Some(bytes)
     }
 }
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(all(test, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 impl CapturedSource {
     pub(crate) fn memory_data(bytes: Vec<u8>) -> Self {
         // Inert census DATA, not source-custody/identity or native test evidence.
         let common = DirectoryIdentity { dev: 1, ino: 2, mode: 0o100600, uid: 123, gid: 123 };
         Self { bytes, origin: Arc::new(OriginWitness { path: "/inert/census".into(), ancestry: Vec::new(),
-            leaf: FileIdentity { common, nlink: 1, size: 0, mtime: (0, 0), ctime: (0, 0) } }) }
+            leaf: FileIdentity { common, nlink: 1, size: 0, mtime: (0, 0), ctime: (0, 0) },
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            alias: None,
+        }) }
     }
 }
 pub(crate) struct ProjectProbe { path: PathBuf, identity: ProjectIdentity }
