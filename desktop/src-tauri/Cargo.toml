@@ -12,6 +12,14 @@ description = "Desktop application for Mobile Release Kit"
 name = "mobile_release_desktop"
 path = "src/lib.rs"
 
+# Compile-only setup graph: current main refuses all entry until full review.
+[[bin]]
+name = "mrk-macos-xcode-setup"
+path = "src/bin/macos_xcode_setup.rs"
+required-features = ["macos-xcode-setup"]
+test = false
+bench = false
+
 [[bin]]
 name = "mobile-release-kit-desktop"
 path = "src/main.rs"
@@ -80,6 +88,7 @@ development-runtime = []
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
+macos-xcode-setup = ["mrk-macos-installed-native/xcode-setup"]
 # NONSHIPPING: fixed compile-time Restore cuts, no runtime failpoint selector.
 macos-installed-restore-app-write-fixture = ["macos-installed-installer", "mrk-macos-installed-native/installed-restore-cut-fixture"]
 macos-installed-restore-own-attempt-fixture = ["macos-installed-installer", "mrk-macos-installed-native/installed-restore-cut-fixture"]
