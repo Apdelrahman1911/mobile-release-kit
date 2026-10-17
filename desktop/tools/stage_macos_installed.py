@@ -4966,6 +4966,24 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest, *, 
 
 
 def installer_log_binding(args):
+    if getattr(args, "xcode_setup", False):
+        # Genuine companion identity. No invented main-app inventory, manifest,
+        # request ID or result marker is used to correlate this interval.
+        package = os.fspath(args.package)
+        need(args.fixture is False and getattr(args, "request_id", None) is None
+             and getattr(args, "expected_inventory", None) is None
+             and getattr(args, "expected_manifest", None) is None
+             and getattr(args, "selected_output", None) is None
+             and type(args.expected_source) is str and re.fullmatch(r"[0-9a-f]{40}", args.expected_source)
+             and type(args.run_id) is str and re.fullmatch(r"[1-9][0-9]{0,23}", args.run_id)
+             and type(args.run_attempt) is str and re.fullmatch(r"[1-9][0-9]{0,5}", args.run_attempt)
+             and type(package) is str and package.startswith("/") and len(os.fsencode(package)) <= 4096
+             and all(ord(c) >= 32 and ord(c) != 127 for c in package)
+             and all(part and part not in (".", "..") for part in package.split("/")[1:])
+             and package.split("/")[-2:] == ["xcode-setup-final", "Prepare Xcode.pkg"], "log-input-binding")
+        return {"packageKind": "xcode-setup", "packageIdentifier": XCODE_SETUP_ID, "packagePath": package,
+                "target": command_target(args), "sourceCommit": args.expected_source,
+                "runId": args.run_id, "runAttempt": args.run_attempt}
     need(type(args.fixture) is bool and type(args.expected_source) is str
          and re.fullmatch(r"[0-9a-f]{40}", args.expected_source)
          and sha(args.expected_inventory) and sha(args.expected_manifest)
@@ -5127,6 +5145,61 @@ def select_installer_log(body, binding):
                              "markerCounts": counts, "resultMarkerState": state}
 
 
+def select_xcode_setup_log(body, binding):
+    """Finite interval facts only. Never retain or attribute neighboring log text."""
+    need(type(body) is bytes and len(body) <= LOG_INTERVAL_BYTES
+         and (not body or body.endswith(b"\n")), "log-interval-bound")
+    stages = ("input", "source", "self", "carrier", "selection", "source-apple", "staged-apple", "final-apple",
+              "facts", "census", "copy", "record", "retire-tree", "current", "source-post", "files-settle", "source-settle",
+              "loans-settle", "reply", "endpoint-settle", "namespace", "reservation", "child", "publication",
+              "namespace-settle", "finality")
+    reasons = ("clock", "access", "bounds", "state", "binding", "present", "read", "write", "sync", "close", "child", "unknown")
+    hook = re.compile(rb"(?:^|[ \t])MRK_XCODE_HOOK=hook=(preinstall|postinstall);stage="
+                      rb"(entry|target-refused|path-refused|cwd-refused|pre-exec)\r?\n$")
+    native = re.compile(rb"(?:^|[ \t])MRK_XCODE_SETUP_REFUSED=scope=(public|child);stage=(" +
+                        b"|".join(v.encode() for v in stages) + rb");reason=(" +
+                        b"|".join(v.encode() for v in reasons) + rb")\r?\n$")
+    error = re.compile(rb"(?<![A-Za-z0-9_])Error[ \t]+Domain="
+                       rb"(PKInstallErrorDomain|NSCocoaErrorDomain|NSPOSIXErrorDomain|NSOSStatusErrorDomain)"
+                       rb"[ \t]+Code=(-?[0-9]{1,10})(?![A-Za-z0-9_+.-])")
+    anchors = [re.compile(rb"(?<![A-Za-z0-9._+~%/-])" + re.escape(binding[key].encode()) +
+                          rb"(?![A-Za-z0-9._+~%/-])") for key in ("packageIdentifier", "packagePath")]
+    hooks, natives, errors = [], [], []
+    correlated, omitted = False, False
+    for line in body.splitlines(keepends=True):
+        need(line.endswith(b"\n") and len(line) <= LOG_LINE_BYTES, "log-line-bound")
+        correlated = correlated or any(pattern.search(line) for pattern in anchors)
+        if len(line) <= 4096:
+            for pattern, keys, rows, cap in ((hook, ("hook", "stage"), hooks, 10),
+                    (native, ("scope", "stage", "reason"), natives, 4)):
+                match = pattern.search(line)
+                if match is not None:
+                    correlated = True
+                    row = dict(zip(keys, (part.decode("ascii") for part in match.groups())))
+                    if row not in rows:
+                        if len(rows) < cap:
+                            rows.append(row)
+                        else:
+                            omitted = True  # Existing flag covers omitted interval facts, not just error rows.
+        if len(line) > 16384:
+            omitted = True
+            continue
+        for match in error.finditer(line):
+            code = int(match[2])
+            if not -(1 << 31) <= code < 1 << 31:
+                continue
+            row = {"domain": match[1].decode("ascii"), "code": code}
+            if row not in errors:
+                if len(errors) == 4:
+                    omitted = True
+                else:
+                    errors.append(row)
+    need(bool(correlated), "log-no-project-lines")
+    return {"hooks": {"available": bool(hooks), "observations": hooks},
+            "native": {"available": bool(natives), "observations": natives},
+            "errors": {"rows": errors, "omitted": omitted}}
+
+
 def write_log_selection(path, body):
     need(type(body) is bytes and 0 < len(body) <= LOG_SELECTED_BYTES, "log-selected-bound")
     with parent(path) as (outer, name):
@@ -5180,6 +5253,13 @@ def installer_log_diagnostic(args):
             validate_log_window(cursor, identity, end, anchor, body)
             need(positioned_log_read(fd, start - len(anchor), len(anchor)) == anchor, "log-anchor-rewritten")
             growth = log_growth(fd, outer, name, identity, end)
+        if binding["packageKind"] == "xcode-setup":
+            # The shared reader has positively closed. Raw interval bytes never
+            # leave this process or reach write_log_selection / an artifact.
+            projection = select_xcode_setup_log(body, binding)
+            return {"schemaVersion": 1, "kind": "installer-log-capture", "state": "observed-project-correlated",
+                    "authority": LOG_AUTHORITY, "scriptOutputFinality": "unestablished",
+                    "intervalScope": "before-first-through-failed-installer", "projection": projection}, 0
         selected, selection = select_installer_log(body, binding)
         result = {"schemaVersion": 1, "kind": "installer-log-capture", "state": "observed-project-correlated",
                   "binding": binding, "logPath": str(INSTALL_LOG), "identity": identity, "cursorSha256": digest(cursor_bytes),
@@ -5692,10 +5772,24 @@ def maintenance_generation_data(value, producer, *, retained):
     return value
 
 
+def maintenance_noop_recovery_data(value, action):
+    """Closed recorded reference only; private preservation remains native-owned."""
+    if "recovery" not in value:
+        return None
+    reference = maintenance_map(value["recovery"], ("stageInvocation", "tornInvocation", "receiptSha256"),
+                                "maintenance-noop-recovery-shape")
+    need(action == "same-package-noop" and maintenance_hex(reference["stageInvocation"], 32)
+         and maintenance_hex(reference["tornInvocation"], 32) and maintenance_hex(reference["receiptSha256"], 64)
+         and reference["stageInvocation"] != reference["tornInvocation"]
+         and reference["tornInvocation"] != value["invocation"], "maintenance-noop-recovery-binding")
+    return reference
+
+
 def maintenance_state_data(body, producer):
     value = maintenance_json(body, 16 * 1024)
     maintenance_map(value, ("schemaVersion", "kind", "target", "invocation", "requestId", "capsuleInvocation", "intendedAction",
-                           "phase", "current", "retained", "previousEvidence", "residue"), "maintenance-state-shape")
+                           "phase", "current", "retained", "previousEvidence", "residue")
+                    + (("recovery",) if "recovery" in value else ()), "maintenance-state-shape")
     maintenance_record_header(value, "mrk-macos-maintenance-state-v2", producer)
     need(value["capsuleInvocation"] == value["invocation"] and type(value["intendedAction"]) is str
          and value["intendedAction"] in MAINTENANCE_ACTIONS and value["phase"] == "mutation-recorded" and value["residue"] is None
@@ -5725,15 +5819,19 @@ def maintenance_state_data(body, producer):
         previous = row["invocation"]
         links.add(previous)
     need(retained_names <= links | {value["invocation"]}, "maintenance-retained-app-link")
+    recovery = maintenance_noop_recovery_data(value, value["intendedAction"])
+    need(recovery is None or recovery["stageInvocation"] == value["current"]["instance"]
+         and recovery["tornInvocation"] not in links, "maintenance-noop-recovery-state")
     return value
 
 
 def maintenance_intent_data(body, producer, *, current):
     value = maintenance_json(body, 16 * 1024)
-    maintenance_map(value, ("schemaVersion", "kind", "target", "invocation", "requestId", "action", "previous", "next", "previousState"),
-                    "maintenance-intent-shape")
+    maintenance_map(value, ("schemaVersion", "kind", "target", "invocation", "requestId", "action", "previous", "next", "previousState")
+                    + (("recovery",) if "recovery" in value else ()), "maintenance-intent-shape")
     maintenance_record_header(value, "mrk-macos-maintenance-intent-v2", producer)
     maintenance_pair_data(value["action"], value["previous"], value["next"], producer, current=current)
+    maintenance_noop_recovery_data(value, value["action"])
     previous = value["previousState"]
     if previous is None:
         need(value["action"] == "fresh-install", "maintenance-intent-previous-state")
@@ -5811,6 +5909,7 @@ def maintenance_history_data(result, records, producer):
         need(intent["invocation"] == state["invocation"] == capsule["invocation"] == invocation
              and intent["requestId"] == state["requestId"] == capsule["requestId"] and intent["requestId"] not in requests
              and intent["action"] == state["intendedAction"] == capsule["intendedAction"]
+             and intent.get("recovery") == state.get("recovery")
              and intent["previous"] == capsule["previous"] and intent["next"] == capsule["next"] == state["current"]["release"]
              and capsule["intentSha256"] == digest(bodies[0]) and capsule["stateSha256"] == digest(bodies[1]),
              "maintenance-linked-records")
@@ -5837,7 +5936,9 @@ def maintenance_history_data(result, records, producer):
         need(current_state["previousEvidence"] == sorted(evidence, key=lambda row: row["invocation"]), "maintenance-history-derivation")
         now, old = current_state["current"], previous_state["current"]
         if action == "same-package-noop":
-            need(now == old and current_state["retained"] == previous_state["retained"], "maintenance-noop-objects")
+            need(now == old and current_state["retained"] == previous_state["retained"]
+                 and ("recovery" not in current_intent or current_intent["recovery"]["stageInvocation"] == old["instance"]),
+                 "maintenance-noop-objects")
         elif action == "restore-fixed-app":
             need(all(now[key] == old[key] for key in ("release", "instance", "releaseDirectory"))
                  and current_state["retained"] == previous_state["retained"], "maintenance-restore-objects")
@@ -6911,16 +7012,17 @@ def main(argv=None):
     for name in ("installer-log-cursor", "installer-log-capture"):
         diagnostic = commands.add_parser(name)
         diagnostic.add_argument("--fixture", action="store_true")
+        diagnostic.add_argument("--xcode-setup", action="store_true")
         diagnostic.add_argument("--package", required=True, type=Path)
         diagnostic.add_argument("--request-id", help="Ordinary fixed mounted package correlation only; absent for fixtures")
         diagnostic.add_argument("--expected-source", required=True)
-        diagnostic.add_argument("--expected-inventory", required=True)
-        diagnostic.add_argument("--expected-manifest", required=True)
+        diagnostic.add_argument("--expected-inventory")
+        diagnostic.add_argument("--expected-manifest")
         diagnostic.add_argument("--run-id", required=True)
         diagnostic.add_argument("--run-attempt", required=True)
         if name == "installer-log-capture":
             diagnostic.add_argument("--cursor", required=True, type=Path)
-            diagnostic.add_argument("--selected-output", required=True, type=Path)
+            diagnostic.add_argument("--selected-output", type=Path)
     for command in commands.choices.values():
         command.add_argument("--target", choices=MAC_TARGETS, default=ARM_TARGET,
                              help="Exact Mac build target; unqualified legacy routes remain ARM-only")

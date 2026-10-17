@@ -56,8 +56,9 @@ UPDATE_REF = "refs/heads/verify/desktop-macos-positive-update"
 UPDATE_PHASE = "update-baseline"
 UPDATE_ROLES = ("update-baseline-attach", "update-baseline-installer", "update-baseline-detach")
 XCODE_SETUP_VERIFY = "verify-xcode-setup-package"
-XCODE_SETUP_VERIFY_ROLES = ("setup-signature-before", "setup-installer-first", "setup-installer-repeat", "setup-signature-after")
-XCODE_SETUP_VERIFY_TIMEOUTS = (30, 3900, 900, 30)
+XCODE_SETUP_VERIFY_ROLES = ("setup-signature-before", "setup-log-cursor", "setup-installer-first", "setup-installer-repeat", "setup-signature-after")
+XCODE_SETUP_VERIFY_TIMEOUTS = (30, 30, 3900, 900, 30)
+XCODE_SETUP_LOG_CAPTURE = "setup-log-capture"
 SAME_PACKAGE_PHASE = "same-package-noop"
 SAME_PACKAGE_ROLES = ("distribution-attach", "installer", "distribution-detach")
 PHASES = ("prepare", "verify-before", "verify-after", "package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE, XCODE_SETUP_VERIFY) + APP_ABSENCE_PHASES
@@ -795,6 +796,43 @@ def setup_installer_diagnostics(stdout, stderr):
                 if value not in found and len(found) < 4:
                     found.append(value)
     return {"available": bool(found), "observations": found}
+
+
+def setup_failed_installer_index(calls):
+    """Exact original failure cut; a terminal diagnostic never replaces it."""
+    if type(calls) is not list:
+        return None
+    prefix = calls[:-1] if calls and type(calls[-1]) is dict and calls[-1].get("role") == XCODE_SETUP_LOG_CAPTURE else calls
+    if len(prefix) not in (3, 4) or not all(type(row) is dict for row in prefix):
+        return None
+    if (tuple(row.get("role") for row in prefix) != XCODE_SETUP_VERIFY_ROLES[:len(prefix)]
+            or not all(row.get("entered") is True and row.get("returned") is True
+                       and row.get("capturesSettled") is True for row in prefix)
+            or not all(type(row.get("returncode")) is int and row["returncode"] in
+                       ((0, 1) if row["role"] == "setup-log-cursor" else (0,)) for row in prefix[:-1])
+            or type(prefix[-1].get("returncode")) is not int
+            or not -65536 <= prefix[-1]["returncode"] <= 65535 or prefix[-1]["returncode"] == 0):
+        return None
+    return len(prefix) - 1
+
+
+def setup_log_projection_data(value):
+    if (type(value) is not dict or set(value) != {"state", "reason", "intervalScope", "hooks", "native", "errors", "omitted"}
+            or value.get("intervalScope") != "before-first-through-failed-installer"
+            or type(value.get("omitted")) is not bool):
+        return None
+    if value["state"] == "unknown":
+        if (type(value["reason"]) is not str or value["reason"] not in _INSTALLER_LOG_REASONS
+                or any(value[name] is not None for name in ("hooks", "native", "errors"))):
+            return None
+        return dict(value)
+    if value["state"] != "observed-project-correlated" or value["reason"] is not None:
+        return None
+    hooks, native, errors = (setup_hook_diagnostics_data(value["hooks"]),
+                             setup_installer_diagnostics_data(value["native"]), installer_errors_data(value["errors"]))
+    if any(row is None for row in (hooks, native, errors)):
+        return None
+    return dict(value, hooks=hooks, native=native, errors=errors)
 
 
 def package_signature_data(body, selection, certificates, path, *, after_staple=False):
@@ -1868,7 +1906,7 @@ _FAILURE_SETUP_REASONS = (
     'xcode-setup-source-binding',
     'xcode-setup-source-version',
 )
-_FAILURE_SETUP_ROLES = XCODE_SETUP_VERIFY_ROLES + XCODE_SETUP_COMPONENT_ROLES + ("final-package-productbuild",) + FINAL_PACKAGE_ROLES
+_FAILURE_SETUP_ROLES = XCODE_SETUP_VERIFY_ROLES + (XCODE_SETUP_LOG_CAPTURE,) + XCODE_SETUP_COMPONENT_ROLES + ("final-package-productbuild",) + FINAL_PACKAGE_ROLES
 _FAILURE_SETUP_STAGES = ("setup-verification-input", "setup-verification-cleanup") + _FAILURE_SETUP_ROLES + tuple(role + "-adoption" for role in XCODE_SETUP_MUTATION_ROLES) + (
     "sign-xcode-setup", "sign-xcode-setup-verify", "setup-carrier", "setup-scripts-original", "setup-scripts-final",
     "setup-input-root", "setup-presentation", "setup-packager-directory", "setup-original-component-audit",
@@ -1922,6 +1960,8 @@ _FAILURE_REASONS = frozenset((*_FAILURE_SETUP_REASONS, *_FAILURE_PRODUCT_REASONS
     'package-source-signing-selection', 'package-final-audit-original', 'package-output-readback',
     'installer-original-clock-reserve', 'installer-diagnostic-original-status', 'installer-diagnostic-original-output',
     'installer-diagnostic-source-purpose', 'installer-diagnostic-source-head',
+    'prepared-readback-purpose', 'prepared-readback-built-selection', 'prepared-readback-installer-not-zero',
+    'prepared-readback-original-bindings', 'prepared-readback-current-selection',
     'installer-diagnostic-selected', 'installer-diagnostic-selected-close',
     'producer-original-clock-reserve', 'producer-exact-descriptor-emission',
     'producer-tests-bound', 'producer-tests-framing', 'producer-tests-roster', 'producer-tests-result',
@@ -2339,19 +2379,20 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
             "systemServiceExitClaimed": False}
     setup = None
     calls = state.get("calls")
-    if (state.get("phase") == XCODE_SETUP_VERIFY and type(calls) is list and len(calls) in (2, 3)
-            and all(type(r) is dict and r.get("role") == XCODE_SETUP_VERIFY_ROLES[i]
-                    for i, r in enumerate(calls))
-            and all(r.get("entered") is True and r.get("returned") is True
-                    and r.get("capturesSettled") is True for r in calls)
-            and all(type(r.get("returncode")) is int and r["returncode"] == 0 for r in calls[:-1])
-            and type(calls[-1].get("returncode")) is int and calls[-1]["returncode"] != 0
-            and -65536 <= calls[-1]["returncode"] <= 65535):
-        current = calls[-1]
-        setup = {"role": current["role"], "index": len(calls), "returncode": current["returncode"],
+    failed = setup_failed_installer_index(calls) if state.get("phase") == XCODE_SETUP_VERIFY else None
+    if failed is not None:
+        current = calls[failed]
+        log = None
+        if len(calls) == failed + 2:
+            capture = calls[-1]
+            if (calls[1].get("returncode") == 0 and capture.get("entered") is True and capture.get("returned") is True
+                    and capture.get("capturesSettled") is True and type(capture.get("returncode")) is int
+                    and capture["returncode"] in (0, 1)):
+                log = setup_log_projection_data(capture.get("setupLog"))
+        setup = {"role": current["role"], "index": failed + 1, "returncode": current["returncode"],
             "hooks": setup_hook_diagnostics_data(current.get("setupHooks")),
             "native": setup_installer_diagnostics_data(current.get("setupDiagnostic")),
-            "errors": installer_errors_data(current.get("installerErrors")),
+            "errors": installer_errors_data(current.get("installerErrors")), "log": log,
             "systemServiceExitClaimed": False}
     return {
         "schemaVersion": 1, "kind": "android-helper-failure", "outcome": "failure",
@@ -2426,6 +2467,16 @@ def emit_failure_diagnostic(error, **context):
                 while len(body) > 4096 and errors["rows"]:
                     errors["rows"].pop()
                     errors["omitted"] = True
+                    body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        setup_log = value["setupInstall"].get("log") if value["setupInstall"] is not None else None
+        if setup_log is not None:
+            for name, key in (("hooks", "observations"), ("errors", "rows"), ("native", "observations")):
+                row = setup_log[name]
+                while len(body) > 4096 and row is not None and row[key]:
+                    row[key].pop(0)
+                    setup_log["omitted"] = True
+                    if name != "errors": row["available"] = bool(row[key])
+                    else: row["omitted"] = True
                     body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
         if body.isascii() and len(body) <= 4096:
             written = sys.stderr.write(body)
@@ -2734,6 +2785,9 @@ class Operation:
         self.prepared_staging = False
         self.diagnostic_source_entry = None
         self.diagnostic_program = None
+        self.diagnostic_program_entry = None
+        self.current_readback_module = None
+        self.stager_failure_module = stager
         self.phase, self.environment, self.stager = phase, environment, stager
         # Exhaustive SOURCE-selected purpose. No filenames/roles come from DATA.
         self.removal = phase in REMOVE_PHASES + REMOVAL_OWNER_PHASES
@@ -2746,6 +2800,7 @@ class Operation:
              and not any(key in environment for key in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES + (NOTARY_KEY_VARIABLE,))),
              "setup-verification-purpose")
         self.setup_verify_complete = False
+        self.setup_log_cursor = False
         self.setup_verify_inputs = []
         self.setup_verify_system = []
         self.setup_verify_returned = []
@@ -3174,13 +3229,24 @@ class Operation:
                  "same-package-original-boundary")
             self.notary_clock()
         if self.setup_verify:
-            need(len(self.calls) < len(XCODE_SETUP_VERIFY_ROLES)
-                 and role == XCODE_SETUP_VERIFY_ROLES[len(self.calls)]
-                 and all(row["returned"] and row.get("capturesSettled") is True and row.get("returncode") == 0 for row in self.calls),
-                 "setup-verification-role-order")
-            self.setup_verification_post()
-            if role == "setup-installer-first":
-                self.setup_verification_absent()  # Same original parents, immediately before first dispatch.
+            if role == XCODE_SETUP_LOG_CAPTURE:
+                need(setup_failed_installer_index(self.calls) == len(self.calls) - 1
+                     and self.setup_log_cursor is True and self.calls[1].get("returncode") == 0,
+                     "setup-verification-role-order")
+                # A failed Installer may leave a legitimate partial namespace.
+                # Recheck immutable inputs only, not the success-only final tree.
+                self.setup_verification_quote()
+                self.package_post()
+            else:
+                need(len(self.calls) < len(XCODE_SETUP_VERIFY_ROLES)
+                     and role == XCODE_SETUP_VERIFY_ROLES[len(self.calls)]
+                     and all(row["returned"] and row.get("capturesSettled") is True
+                         and type(row.get("returncode")) is int and row["returncode"] in
+                         ((0, 1) if row["role"] == "setup-log-cursor" else (0,)) for row in self.calls),
+                     "setup-verification-role-order")
+                self.setup_verification_post()
+                if role == "setup-installer-first":
+                    self.setup_verification_absent()
         prepared_capture = self.prepared_staging and role == "prepared-resource-memory"
         if prepared_capture:
             need(self.phase == "package-install" and self.target_entry is not None and len(self.calls) < 16
@@ -3244,7 +3310,7 @@ class Operation:
         if self.phase == "package-install" and role == "installer":
             self.publish("installer-output.txt", result.stdout + result.stderr)
         record["capturesSettled"] = True  # All original output/readback/closes returned.
-        if self.setup_verify and role in XCODE_SETUP_VERIFY_ROLES[1:3] and result.returncode != 0:
+        if self.setup_verify and role in XCODE_SETUP_VERIFY_ROLES[2:4] and result.returncode != 0:
             # All three consume only this returned original after its captures
             # positively settled. A diagnostic failure cannot replace its exit.
             for key, parser in (("setupDiagnostic", setup_installer_diagnostics),
@@ -3269,7 +3335,8 @@ class Operation:
                 self.compiler_failure = compiler_diagnostic(result.stdout, result.stderr, str(self.checkout))
             except BaseException:
                 pass  # No diagnostic failure may replace the SAME nonzero result.
-        diagnostic = self.phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
+        diagnostic = (self.phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
+                      or self.setup_verify and role in ("setup-log-cursor", XCODE_SETUP_LOG_CAPTURE))
         need(result.returncode == 0 and not (self.app_absence is not None and self.app_absence_module.cut_role_data(self, role))
              or diagnostic and result.returncode == 1
              or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, role, result.returncode)
@@ -7958,6 +8025,8 @@ class Operation:
         # refusal can mask that stager's local finally/close uncertainty; only a
         # normal return proves completion. Never infer it from an error token.
         need(operation in ("final-audit", "result-absence", "v2-readback")
+             or operation == "readback-admission" and self.phase == "package-install"
+                and self.prepared_binding is not None and not self.prepared_binding.same_source and args is None
              or operation == "setup-final-audit" and self.setup_verify
              or operation == "remove-input" and self.phase == "package-remove"
              or operation in ("same-package-census", "same-package-readback") and self.phase == SAME_PACKAGE_PHASE,
@@ -7965,8 +8034,11 @@ class Operation:
         need(self.package_settled(), "package-io-finality-unknown")
         self.package_clock()
         self.stager_io_pending = operation
+        self.stager_failure_module = self.stager
         try:
-            if operation == "setup-final-audit":
+            if operation == "readback-admission":
+                result = self.package_readback_module()
+            elif operation == "setup-final-audit":
                 result = self.stager.audit_xcode_setup_product_command(args)
             elif operation == "final-audit":
                 audit = self.stager.audit_install_product_command if self.install_product else self.stager.audit_command
@@ -7980,7 +8052,13 @@ class Operation:
             elif operation == "same-package-readback":
                 result = self.stager.observation_command(args, expected_previous=args.expected_previous)
             else:
-                result = self.stager.observation_command(args)
+                observer = self.package_readback_module(args)
+                self.stager_failure_module = observer
+                result = observer.observation_command(args)
+                if observer is not self.stager:
+                    # Keep pending until the SAME current-source originals POST.
+                    self.package_post()
+                self.stager_failure_module = self.stager
         except BaseException:
             self.errors.append({"stage": "package-stager-io", "operation": operation, "type": "CompletionUnknown"})
             raise  # Preserve the identical primary error; the pending latch stays.
@@ -8568,7 +8646,7 @@ class Operation:
 
     def setup_verification_current(self, first):
         need(self.setup_verify and not self.setup_verify_returned
-             and len(self.calls) == (2 if first else 3)
+             and len(self.calls) == (3 if first else 4)
              and self.calls[-1].get("returncode") == 0
              and self.calls[-1].get("capturesSettled") is True,
              "setup-verification-returned-cut")
@@ -8629,6 +8707,56 @@ class Operation:
                  "setup-verification-returned-changed")
         self.package_clock()
 
+    def setup_log_diagnostic(self, *, capture):
+        need(self.setup_verify and self.package_settled(), "package-io-finality-unknown")
+        role = XCODE_SETUP_LOG_CAPTURE if capture else "setup-log-cursor"
+        # No new clock. Optional failed-call diagnostics may use only a complete
+        # 30-second reservation within the original work endpoint.
+        need(package_timeout_data(self.package_clock(), self.package_endpoint, 30) == 30,
+             "package-group-settlement-reserve")
+        command = "installer-log-capture" if capture else "installer-log-cursor"
+        argv = [sys.executable, "-I", "-S", "-B", str(self.checkout / "desktop/tools/stage_macos_installed.py"),
+            command, "--xcode-setup", "--target", self.target,
+            "--package", str(self.work / "xcode-setup-final/Prepare Xcode.pkg"),
+            "--expected-source", self.image_source, "--run-id", self.environment["GITHUB_RUN_ID"],
+            "--run-attempt", self.environment["GITHUB_RUN_ATTEMPT"]]
+        if capture:
+            argv.extend(("--cursor", str(self.work / "xcode-setup-log-cursor.json")))
+        result = self.package_call(role, argv, timeout=30, limit=self.stager.LOG_METADATA_BYTES,
+            environment={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin", "LANG":"C", "LC_ALL":"C", "TZ":"UTC"})
+        # DATA parsing is optional; the original child/capture ledger above is not.
+        try:
+            document = self.stager.decode(result.stdout)
+            need(type(document) is dict and document.get("authority") == self.stager.LOG_AUTHORITY,
+                 "installer-diagnostic-original-output")
+            if not capture:
+                args = argparse.Namespace(xcode_setup=True, fixture=False, target=self.target,
+                    package=self.work / "xcode-setup-final/Prepare Xcode.pkg", expected_source=self.image_source,
+                    run_id=self.environment["GITHUB_RUN_ID"], run_attempt=self.environment["GITHUB_RUN_ATTEMPT"])
+                self.stager.validate_log_cursor(document, self.stager.installer_log_binding(args))
+                need(result.returncode == 0, "installer-diagnostic-original-status")
+                self.publish("xcode-setup-log-cursor.json", result.stdout)
+                self.setup_log_cursor = True
+            else:
+                observed = document.get("state") == "observed-project-correlated"
+                if observed:
+                    need(result.returncode == 0 and set(document) == {"schemaVersion", "kind", "state", "authority",
+                         "scriptOutputFinality", "intervalScope", "projection"}
+                         and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+                         and document["kind"] == "installer-log-capture" and document["scriptOutputFinality"] == "unestablished"
+                         and type(document["projection"]) is dict and set(document["projection"]) == {"hooks", "native", "errors"},
+                         "installer-diagnostic-original-output")
+                value = {"state": document.get("state"), "reason": None if observed else document.get("reason"),
+                    "intervalScope": document.get("intervalScope", "before-first-through-failed-installer"),
+                    **(document["projection"] if observed else {"hooks":None, "native":None, "errors":None}), "omitted":False}
+                if observed:
+                    value["omitted"] = document["projection"]["errors"]["omitted"]
+                parsed = setup_log_projection_data(value)
+                need(parsed is not None, "installer-diagnostic-original-output")
+                self.calls[-1]["setupLog"] = parsed
+        except BaseException:
+            pass
+
     def verify_xcode_setup_package(self):
         self.stage = "setup-verification-input"
         self.setup_verification_quote(40)
@@ -8646,6 +8774,8 @@ class Operation:
             entry = self.setup_source_original(name, "setup-verification-source")
             self.package_sources.append((entry, self.read(entry)))
         entry = self.source_original("desktop/src-tauri/Cargo.toml", "setup-verification-cargo", 128 * 1024)
+        self.package_sources.append((entry, self.read(entry)))
+        entry = self.source_original("desktop/tools/stage_macos_installed.py", "setup-log-reader-source", 1024 * 1024)
         self.package_sources.append((entry, self.read(entry)))
         def keep(path, maximum, modes=(0o444, 0o600)):
             parent = self.descend(self.work_entry, path.split("/")[:-1])
@@ -8701,18 +8831,30 @@ class Operation:
         path = str(self.work / "xcode-setup-final/Prepare Xcode.pkg")
         for index, (role, maximum) in enumerate(zip(XCODE_SETUP_VERIFY_ROLES, XCODE_SETUP_VERIFY_TIMEOUTS)):
             self.stage = role
-            if index == 2:
+            if role == "setup-log-cursor":
+                self.setup_log_diagnostic(capture=False)
+                continue
+            if role == "setup-installer-repeat":
                 self.setup_verification_consume_returned()
-            argv = (["/usr/sbin/pkgutil", "--check-signature", path] if index in (0,3) else
+            signing = role in ("setup-signature-before", "setup-signature-after")
+            argv = (["/usr/sbin/pkgutil", "--check-signature", path] if signing else
                     ["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-pkg", path, "-target", "/", "-dumplog", "-verboseR"])
-            result = self.package_call(role, argv, timeout=maximum, limit=256*1024,
-                environment={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin", "LANG":"C", "LC_ALL":"C", "TZ":"UTC"})
+            try:
+                result = self.package_call(role, argv, timeout=maximum, limit=256*1024,
+                    environment={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin", "LANG":"C", "LC_ALL":"C", "TZ":"UTC"})
+            except BaseException:
+                if setup_failed_installer_index(self.calls) == len(self.calls) - 1 and self.setup_log_cursor:
+                    try:
+                        self.setup_log_diagnostic(capture=True)
+                    except BaseException:
+                        pass  # Preserve the identical original Installer exception.
+                raise
             need(result.returncode == 0, "setup-verification-native-nonzero")
-            if index in (0,3):
+            if signing:
                 package_signature_data(result.stdout, self.installer_selection, self.installer_certificates,
                                        Path(path), after_staple=True)
             else:
-                self.setup_verification_current(index == 1)
+                self.setup_verification_current(role == "setup-installer-first")
             self.setup_verification_post()
         self.receipt["xcodeSetupVerification"] = {"packageSha256": package_sha, "firstInstallerZero":True,
             "samePackageRepeatZero":True, "sameManagedFinalNode":True, "currentCarrierObserved":True,
@@ -8733,6 +8875,9 @@ class Operation:
             ("MRK_MACOS_INSTALL_INVENTORY_SHA256", "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"))
         need(self.stager.maintenance_hex(inventory_hash, 64) and self.stager.maintenance_hex(manifest_hash, 64), "package-compiled-bindings")
         selection = self.stager.BuildSelection(self.target, self.stager.build_release_data(self.read(self.release_entry), target=self.target)["packageVersion"], self.image_release)
+        if self.prepared_binding is not None and not self.prepared_binding.same_source:
+            # Same pending/clock boundary also owns import and selection I/O.
+            self.package_stager_io("readback-admission", None)
         source = self.stager.packaging_signing_data(self.producer_profile, self.service_profile)
         need(self.signing == (source.team, source.leaf_sha1), "package-source-signing-selection")
         original = self.original(self.directory(self.work_entry, "package-final", "package-final"), "MobileReleaseKit.pkg",
@@ -9016,7 +9161,7 @@ class Operation:
 
     def package_diagnostic_program(self):
         # Product readers/compiler remain rooted in the built source. Only the
-        # two nonroot diagnostic commands use the current admitted harness.
+        # nonroot diagnostics and explicit cross-source readback use the current harness.
         if self.prepared_binding is None:
             return self.checkout / "desktop/tools/stage_macos_installed.py"
         need(self.phase == "package-install", "installer-diagnostic-source-purpose")
@@ -9033,9 +9178,58 @@ class Operation:
             entry = self.original(self.descend(root, ("desktop", "tools")), "stage_macos_installed.py",
                 "diagnostic-source-program", 1024 * 1024, (0o444, 0o644))
             self.package_sources.append((entry, self.read(entry)))
+            self.diagnostic_program_entry = entry
             self.diagnostic_program = CHECKOUT / "desktop/tools/stage_macos_installed.py"
         self.package_post()  # Same retained originals, including on the second call.
         return self.diagnostic_program
+
+    def package_readback_module(self, args=None):
+        # Only a genuine manual retry may use newer observer code. Every build,
+        # package audit, producer/signature input and absence check remains built-source.
+        binding = self.prepared_binding
+        if binding is None or binding.same_source:
+            return self.stager
+        need(self.phase == "package-install" and self.environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+             and self.environment.get("GITHUB_REF") == CANDIDATE_REF
+             and self.app_absence is None and self.update is None, "prepared-readback-purpose")
+        binding.finalization_environment(self.environment)
+        manifest = binding.manifest
+        expected = (self.target, manifest["packageVersion"], manifest["release"])
+        built = self.stager.source_build_selection(self.target)
+        need((built.target, built.package_version, built.release) == expected
+             and binding.origin["target"] == self.target and self.image_source == binding.source
+             and self.image_release == manifest["release"], "prepared-readback-built-selection")
+        if args is not None:
+            need(self.installer_zero is True, "prepared-readback-installer-not-zero")
+            package = next(row for row in manifest["members"] if row["name"] == "MobileReleaseKit.pkg")
+            need((args.target, args.expected_source, args.expected_inventory, args.expected_manifest, args.expected_package)
+                 == (self.target, binding.source, manifest["inventorySha256"], manifest["runtimeManifestSha256"], package["sha256"]),
+                 "prepared-readback-original-bindings")
+        if self.current_readback_module is None:
+            path = self.package_diagnostic_program()
+            parent = self.descend(self.diagnostic_source_entry, ("desktop", "macos-installed-inputs"))
+            # Module import always reads ARM; an Intel observation also reads its
+            # fixed Intel selection. Retain BOTH where needed, not only the target.
+            names = ("build-release.json",) + (("build-release-intel.json",) if self.target == INTEL_TARGET else ())
+            for name in names:
+                entry = self.original(parent, name, "readback-source-" + name, self.stager.BUILD_RELEASE_LIMIT, (0o444, 0o644))
+                self.package_sources.append((entry, self.read(entry)))
+            body = self.read(self.diagnostic_program_entry)
+            spec = importlib.util.spec_from_file_location("mrk_prepared_current_readback", path)
+            module = importlib.util.module_from_spec(spec)
+            self.stager_failure_module = module
+            exec(compile(body, str(path), "exec"), module.__dict__)
+            self.package_post()
+            self.current_readback_module = module
+        module = self.current_readback_module
+        self.stager_failure_module = module
+        current = module.source_build_selection(self.target)
+        # Different modules have different namedtuple classes: compare exact fields.
+        need((current.target, current.package_version, current.release) == expected
+             and module.CURRENT_PROTOCOL == self.stager.CURRENT_PROTOCOL, "prepared-readback-current-selection")
+        self.package_post()
+        self.stager_failure_module = self.stager
+        return module
 
     def package_log_markers(self, document):
         # The current log reader's selected snapshot is diagnostic DATA only.
@@ -9317,17 +9511,17 @@ class Operation:
                 need(self.read(self.release_entry) == release_body, "source-image-release-changed")
         except BaseException as error:
             try:
-                self.diagnostic_failure = failure_exception(error, self.stager)
+                self.diagnostic_failure = failure_exception(error, self.stager_failure_module)
             except BaseException:
                 pass  # Do not replace the same original failure or its cleanup.
             try:
-                self.stager_failure_line = failure_stager_line(error, self.stager)
+                self.stager_failure_line = failure_stager_line(error, self.stager_failure_module)
             except BaseException:
                 pass  # Location is optional and never changes original finality.
             self.receipt["failure"] = {"stage": self.stage, "type": type(error).__name__,
                                        "reason": str(error) if type(error) is Refused else "original-operation-refused"}
             captured = self.diagnostic_failure
-            if (type(self.stager) is type(sys) and type(error) is self.stager.__dict__.get("Refused")
+            if (type(self.stager_failure_module) is type(sys) and type(error) is self.stager_failure_module.__dict__.get("Refused")
                     and type(captured) is dict and all(type(key) is str for key in captured)
                     and tuple(captured) == ("type", "reason", "errno")
                     and type(captured["type"]) is str and captured["type"] == "stager-refused"
@@ -9382,6 +9576,7 @@ class Operation:
                                        and (call["returncode"] == 0 and not (self.app_absence is not None and self.app_absence_module.cut_role_data(self, call["role"]))
                                        or self.phase == "package-install"
                                        and call["role"] in ("installer-log-cursor", "installer-log-capture") and call["returncode"] == 1
+                                       or self.setup_verify and call["role"] == "setup-log-cursor" and call["returncode"] == 1
                                        or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, call["role"], call["returncode"])
                                        or self.app_absence is not None and self.app_absence_module.cut_return_data(self, call["role"], call["returncode"])) for call in self.calls)
                                   and self.sha256 is not None

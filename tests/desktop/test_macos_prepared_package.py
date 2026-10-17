@@ -1,5 +1,6 @@
 """Inert prepared-package correspondence; no signing, native or network calls."""
 import copy
+import contextlib
 import importlib.util
 import os
 import stat
@@ -319,6 +320,190 @@ class PreparedPackageData(unittest.TestCase):
                                 finally:later.finish()
                             self.assertTrue(later.receipt['originalClosesKnown'] and later.receipt['targetRetired'])
                             self.assertFalse(later.receipt['passed'])
+
+
+    @contextlib.contextmanager
+    def current_readback_fixture(self, target=P.TARGETS[0]):
+        import time
+        T, tool, helper = real_modules()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            built, current, work = root/'built', root/'current', root/'work'
+            built.mkdir(); current.mkdir(); work.mkdir(mode=0o700)
+            def put(relative, body):
+                path = current/relative; path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(body); path.chmod(0o644); return path
+            program = put('desktop/tools/stage_macos_installed.py', (ROOT/'desktop/tools/stage_macos_installed.py').read_bytes())
+            put('.git/HEAD', b'6'*40+b'\n')
+            for name in ('build-release.json', 'build-release-intel.json'):
+                put('desktop/macos-installed-inputs/'+name, (tool.DESKTOP/'macos-installed-inputs'/name).read_bytes())
+            values, manifest, service, consumer = fixture(target)
+            selection = tool.source_build_selection(target)
+            manifest.update(packageVersion=selection.package_version, release=selection.release)
+            values['PREPARED.json'] = P.canonical(manifest)
+            consumer.update(source='6'*40, tree='7'*40)
+            binding = P.admit_data(values, service, consumer)
+            env = dict(GITHUB_SHA=consumer['source'], GITHUB_WORKFLOW_SHA=consumer['source'], GITHUB_RUN_ID='41',
+                GITHUB_RUN_ATTEMPT='2', GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF=helper.CANDIDATE_REF,
+                GITHUB_WORKFLOW_REF=P.REPOSITORY+'/'+P.WORKFLOW+'@refs/heads/'+P.BRANCH,
+                MRK_MACOS_PACKAGE_ROLE='ordinary-image')
+            owner = SimpleNamespace(run_owned=mock.Mock(side_effect=AssertionError('no native call in source readback test')))
+            with mock.patch.dict(sys.modules, {'desktop.tools.macos_prepared_package': P}), mock.patch.object(helper, 'CHECKOUT', current):
+                op = helper.Operation(owner, built, work, 'package-install', env, tool, target=target, prepared=binding)
+                op.open()
+                op.package_started = op.package_observed = time.monotonic_ns()
+                op.package_endpoint = op.package_started + 990_000_000_000
+                op.image_source, op.image_release = binding.source, selection.release
+                # Explicit inert previous-Installer boundary; no native execution claimed.
+                op.installer_zero = True
+                args = SimpleNamespace(target=target, expected_source=binding.source,
+                    expected_inventory=manifest['inventorySha256'], expected_manifest=manifest['runtimeManifestSha256'],
+                    expected_package=P.sha(values['MobileReleaseKit.pkg']))
+                try:
+                    yield SimpleNamespace(T=T, tool=tool, helper=helper, op=op, args=args, current=current, program=program,
+                                          binding=binding, environment=env, owner=owner)
+                finally:
+                    op.finish()
+                    owner.run_owned.assert_not_called()
+                    self.assertTrue(all(e['closed'] and e['fd'] is None for e in op.entries))
+                    self.assertFalse(op.receipt['passed'])  # No package/GUI/native authority from this fixture.
+
+    def test_current_readback_original_source_and_built_readers_stay_separate(self):
+        for target in P.TARGETS:
+            with self.subTest(target=target), self.current_readback_fixture(target) as f:
+                current = f.op.package_stager_io('readback-admission', None)
+                self.assertIsNot(current, f.tool)
+                self.assertIs(f.op.stager, f.tool)
+                self.assertNotEqual(type(current.source_build_selection(target)), type(f.tool.source_build_selection(target)))
+                self.assertEqual(tuple(current.source_build_selection(target)), tuple(f.tool.source_build_selection(target)))
+                names = {e['name'] for e in f.op.entries if e['role'].startswith('readback-source-')}
+                self.assertEqual(names, {'build-release.json'} | ({'build-release-intel.json'} if target == P.TARGETS[1] else set()))
+                self.assertEqual(f.op.read(f.op.diagnostic_program_entry), f.program.read_bytes())
+                producer, records, result = f.T.maintenance_documents(('fresh-install', 'same-package-noop'), launcher=True, target=target)
+                def readback(args):
+                    self.assertIs(args, f.args)
+                    # Actual current capsule/history parser; only OS observation port is inert.
+                    return current.maintenance_history_data(result, records, producer)[0]
+                with mock.patch.object(current, 'observation_command', side_effect=readback) as fresh, \
+                     mock.patch.object(f.tool, 'observation_command', side_effect=AssertionError('built readback not selected')) as old, \
+                     mock.patch.object(f.tool, 'audit_install_product_command', return_value='built audit') as audit, \
+                     mock.patch.object(f.tool, 'installer_result_absent_command', return_value='built absence') as absent:
+                    self.assertEqual(f.op.package_stager_io('final-audit', f.args), 'built audit')
+                    self.assertEqual(f.op.package_stager_io('result-absence', f.args), 'built absence')
+                    self.assertEqual(f.op.package_stager_io('v2-readback', f.args)['invocation'], result['invocation'])
+                    fresh.assert_called_once_with(f.args); old.assert_not_called()
+                    audit.assert_called_once_with(f.args); absent.assert_called_once_with(f.args)
+                self.assertIsNone(f.op.stager_io_pending)
+                self.assertIs(f.op.current_readback_module, current)
+                self.assertIs(f.op.stager_failure_module, f.tool)
+                self.assertEqual(f.op.image_source, '1'*40)
+                self.assertEqual(f.op.environment['GITHUB_SHA'], '6'*40)
+                f.op.package_post()
+            self.assertTrue(f.op.receipt['targetRetired'])
+
+    def test_current_readback_refuses_wrong_scope_selection_and_original_arguments(self):
+        with self.current_readback_fixture() as f:
+            for key, value in (('GITHUB_EVENT_NAME', 'push'), ('GITHUB_REF', 'refs/heads/other')):
+                with mock.patch.dict(f.environment, {key: value}), self.assertRaisesRegex(f.helper.Refused, 'prepared-readback-purpose'):
+                    f.op.package_readback_module()
+            with mock.patch.object(f.op, 'phase', 'finalize-image'), self.assertRaisesRegex(f.helper.Refused, 'prepared-readback-purpose'):
+                f.op.package_readback_module()
+            self.assertIsNone(f.op.current_readback_module)
+            for binding in (None, P.PreparedBinding(P._SEAL, f.binding.manifest,
+                    dict(f.binding.consumer, source=f.binding.source), {})):
+                with mock.patch.object(f.op, 'prepared_binding', binding):
+                    self.assertIs(f.op.package_readback_module(f.args), f.tool)
+            with mock.patch.object(f.op, 'image_release', 'wrong'), self.assertRaisesRegex(f.helper.Refused, 'prepared-readback-built-selection'):
+                f.op.package_readback_module()
+            current = f.op.package_readback_module()
+            original = current.source_build_selection()
+            with mock.patch.object(current, 'source_build_selection', return_value=original._replace(package_version='99.0.0')), \
+                 self.assertRaisesRegex(f.helper.Refused, 'prepared-readback-current-selection'):
+                f.op.package_readback_module()
+            with mock.patch.object(current, 'CURRENT_PROTOCOL', '0'*64), self.assertRaisesRegex(f.helper.Refused, 'prepared-readback-current-selection'):
+                f.op.package_readback_module()
+            for key in vars(f.args):
+                wrong = SimpleNamespace(**vars(f.args)); setattr(wrong, key, 'wrong')
+                with self.subTest(key=key), self.assertRaisesRegex(f.helper.Refused, 'prepared-readback-original-bindings'):
+                    f.op.package_readback_module(wrong)
+            with mock.patch.object(f.op, 'installer_zero', False), self.assertRaisesRegex(f.helper.Refused, 'prepared-readback-installer-not-zero'):
+                f.op.package_readback_module(f.args)
+            f.op.package_post()
+            # The actual install method reaches compatibility before signing or any Installer effect.
+            f.op.release_entry = next(e for e in f.op.entries if e['role'] == 'readback-source-build-release.json')
+            f.environment.update(MRK_MACOS_INSTALL_INVENTORY_SHA256=f.args.expected_inventory,
+                                 MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=f.args.expected_manifest)
+            refusal = f.helper.Refused('prepared-readback-current-selection')
+            with mock.patch.object(f.op, 'package_readback_module', side_effect=refusal) as preflight, \
+                 mock.patch.object(f.tool, 'packaging_signing_data', side_effect=AssertionError('signing must remain unentered')) as signing:
+                with self.assertRaises(f.helper.Refused) as caught:
+                    f.op.package_install()
+                self.assertIs(caught.exception, refusal); preflight.assert_called_once_with(); signing.assert_not_called()
+                self.assertEqual(f.op.stager_io_pending, 'readback-admission')
+                self.assertEqual(f.op.errors[-1], dict(stage='package-stager-io', operation='readback-admission', type='CompletionUnknown'))
+
+    def test_current_readback_source_post_and_unknown_original_cannot_pass(self):
+        for mutation in ('program', 'release', 'unknown'):
+            with self.subTest(mutation=mutation), self.current_readback_fixture(P.TARGETS[1]) as f:
+                current = f.op.package_stager_io('readback-admission', None)
+                def readback(_):
+                    path = f.program if mutation == 'program' else f.current/'desktop/macos-installed-inputs/build-release-intel.json'
+                    path.write_bytes(path.read_bytes()+b' ')
+                    return {'not': 'accepted after source drift'}
+                with mock.patch.object(current, 'observation_command', side_effect=readback) as observed:
+                    if mutation == 'unknown':
+                        f.op.calls.append(dict(role='installer', returned=True, capturesSettled=False))
+                    with self.assertRaises(f.helper.Refused):
+                        f.op.package_stager_io('v2-readback', f.args)
+                    if mutation == 'unknown':
+                        observed.assert_not_called(); self.assertIsNone(f.op.stager_io_pending)
+                    else:
+                        observed.assert_called_once_with(f.args)
+                        self.assertEqual(f.op.stager_io_pending, 'v2-readback')
+                        self.assertEqual(f.op.errors[-1]['type'], 'CompletionUnknown')
+                    self.assertFalse(f.op.installation_readback)
+            self.assertFalse(f.op.receipt['targetRetired'])
+
+    def test_current_readback_failure_uses_actual_module_line_and_same_pending_tail(self):
+        for point in ('readback', 'preflight-import', 'preflight-selection'):
+            target = P.TARGETS[1] if point == 'preflight-selection' else P.TARGETS[0]
+            with self.subTest(point=point), self.current_readback_fixture(target) as f:
+                current = (None if point == 'preflight-import' else
+                           f.op.package_stager_io('readback-admission', None))
+                producer, _records, _result = f.T.maintenance_documents()
+                failure = []
+                def readback(_):
+                    return current.maintenance_capsule_data(b'{}\n', producer, current=True)
+                pending = 'v2-readback' if point == 'readback' else 'readback-admission'
+                if point != 'readback':
+                    # Actual imported/selected source JSON parser fails after its original read.
+                    name = 'build-release-intel.json' if point == 'preflight-selection' else 'build-release.json'
+                    (f.current/'desktop/macos-installed-inputs'/name).write_bytes(b'{}\n')
+                def boundary():
+                    try:
+                        return f.op.package_stager_io(pending, f.args if point == 'readback' else None)
+                    except BaseException as error:
+                        failure.append(error); raise
+                patch = (mock.patch.object(current, 'observation_command', side_effect=readback)
+                         if point == 'readback' else contextlib.nullcontext())
+                with patch, mock.patch.object(f.op, 'open', side_effect=boundary):
+                    # Exercise the real execute catch/finish/finite receipt, not a copied classifier.
+                    with self.assertRaisesRegex(f.helper.Refused, 'helper-package-incomplete'):
+                        f.op.execute()
+                current = f.op.stager_failure_module
+                self.assertEqual(len(failure), 1)
+                self.assertIs(type(failure[0]), current.Refused)
+                self.assertEqual(f.op.diagnostic_failure['type'], 'stager-refused')
+                self.assertEqual(f.op.stager_failure_line, f.helper.failure_stager_line(failure[0], current))
+                self.assertIsInstance(f.op.stager_failure_line, int)
+                self.assertIsNone(f.helper.failure_stager_line(failure[0], f.tool))
+                self.assertEqual(f.op.stager_io_pending, pending)
+                self.assertFalse(f.op.receipt['passed'])
+                self.assertFalse(f.op.receipt['targetRetired'])
+                self.assertFalse(f.op.receipt['originalClosesKnown'])  # Pending observer is not whole-operation finality.
+                self.assertTrue(all(e['closed'] and e['fd'] is None for e in f.op.entries))
+                self.assertIs(f.op.stager, f.tool)
+                if point == 'preflight-import': self.assertIsNone(f.op.current_readback_module)
 
     def resource_original(self, helper, tool, root, target=P.TARGETS[0]):
         import subprocess

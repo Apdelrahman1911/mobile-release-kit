@@ -4470,7 +4470,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     with self.assertRaises(module.Refused):
                         module.final_package_receipt(TOOL.canonical(dict(record, packageStapleObservation=None)), *arguments)
 
-    def test_setup_qualification_same_original_four_calls_and_no_failure_repeat(self):
+    def test_setup_qualification_same_original_calls_and_no_failure_repeat(self):
         """Whole Operation; native Installer/ACL/APFS/root observations are inert.
 
         All source/package/receipt/returned nodes are real task-owned files.
@@ -4478,7 +4478,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         """
         import datetime, plistlib
         module = ANDROID_HELPER
-        for fault, count in ((None, 4), ("dispatch-success", 4), ("pre-first-presence", 1), ("first75", 2), ("first-unknown", 2), ("final-drift", 2), ("after-repeat-drift", 3)):
+        for fault, count in ((None, 5), ("dispatch-success", 5), ("cursor-unavailable", 5), ("pre-first-presence", 2), ("first75", 3), ("repeat75", 4), ("log-unknown", 3), ("log-late", 3), ("first-unknown", 3), ("final-drift", 3), ("after-repeat-drift", 4)):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 dispatch = fault == "dispatch-success"
                 if dispatch: fault = None
@@ -4536,8 +4536,30 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     role = operation.calls[-1]["role"]; observed.append(role)
                     self.assertEqual(options["environ"], {"PATH":"/usr/bin:/bin:/usr/sbin:/sbin", "LANG":"C","LC_ALL":"C","TZ":"UTC"})
                     self.assertEqual(options["cwd"],state.work)
-                    self.assertEqual(options["timeout"], module.XCODE_SETUP_VERIFY_TIMEOUTS[len(observed)-1])
+                    self.assertEqual(options["timeout"], 30 if role == module.XCODE_SETUP_LOG_CAPTURE else module.XCODE_SETUP_VERIFY_TIMEOUTS[len(observed)-1])
                     path = str(state.work/"xcode-setup-final/Prepare Xcode.pkg")
+                    if role in ("setup-log-cursor", module.XCODE_SETUP_LOG_CAPTURE):
+                        self.assertEqual(argv[:5],[sys.executable,"-I","-S","-B",str(state.checkout/"desktop/tools/stage_macos_installed.py")])
+                        self.assertIn("--xcode-setup",argv)
+                        self.assertFalse(set(argv)&{"--expected-inventory","--expected-manifest","--request-id","--selected-output"})
+                        if role == module.XCODE_SETUP_LOG_CAPTURE:
+                            self.assertEqual(module.setup_failed_installer_index(operation.calls),len(operation.calls)-2)
+                            if fault=="log-unknown": raise RuntimeError("inert unknown diagnostic owner")
+                            data={"schemaVersion":1,"kind":"installer-log-capture","state":"observed-project-correlated",
+                                "authority":TOOL.LOG_AUTHORITY,"scriptOutputFinality":"unestablished",
+                                "intervalScope":"before-first-through-failed-installer",
+                                "projection":TOOL.select_xcode_setup_log(b"MRK_XCODE_SETUP_REFUSED=scope=child;stage=self;reason=binding\n",
+                                    {"packageIdentifier":TOOL.XCODE_SETUP_ID,"packagePath":path})}
+                        elif fault=="cursor-unavailable":
+                            data={"schemaVersion":1,"kind":"installer-log-cursor","state":"unknown",
+                                "authority":TOOL.LOG_AUTHORITY,"reason":"log-file-policy"}
+                            return CompletedProcess(argv,1,TOOL.canonical(data),b"")
+                        else:
+                            args=SimpleNamespace(xcode_setup=True,fixture=False,package=Path(path),target=state.target,
+                                expected_source=operation.image_source,run_id=env["GITHUB_RUN_ID"],run_attempt=env["GITHUB_RUN_ATTEMPT"])
+                            data=TOOL.make_log_cursor(TOOL.installer_log_binding(args),
+                                dict(device=1,inode=2,mode=0o100644,uid=0,gid=0,links=1),0,b"",0)
+                        return CompletedProcess(argv,0,TOOL.canonical(data),b"")
                     if "signature" in role:
                         self.assertEqual(argv,["/usr/sbin/pkgutil","--check-signature",path])
                         if fault == "pre-first-presence":
@@ -4545,7 +4567,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         return CompletedProcess(argv,0,state.signature_text,b"")
                     self.assertEqual(argv,["/usr/bin/sudo","-n","/usr/sbin/installer","-pkg",path,"-target","/","-dumplog","-verboseR"])
                     if fault == "first-unknown": raise RuntimeError("inert owner outcome unknown")
-                    if fault == "first75":
+                    if (fault in ("first75", "log-unknown", "log-late") and role.endswith("first")
+                            or fault=="repeat75" and role.endswith("repeat")):
+                        if fault=="log-late": state.clock[0]=operation.package_endpoint-20_000_000_000
                         return CompletedProcess(argv,75,b"",b"installer: MRK_XCODE_SETUP_REFUSED=scope=child;stage=copy;reason=write\n")
                     install(role.endswith("repeat"))
                     if fault == "after-repeat-drift" and role.endswith("repeat"):
@@ -4593,26 +4617,38 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         raise
                 operation.verify_xcode_setup_package=traced_verify
                 before=len(os.listdir('/proc/self/fd'))
-                with mock.patch.object(module.time,"monotonic_ns",return_value=state.clock[0]), \
+                with mock.patch.object(module.time,"monotonic_ns",side_effect=lambda:state.clock[0]), \
                      mock.patch.object(operation,"normal_mount_host",side_effect=host), \
                      mock.patch.object(operation,"setup_verification_consume_returned",side_effect=before_repeat), \
                      mock.patch.object(operation,"removal_open_directory",side_effect=opened_directory),mock.patch.object(module.os,"fstat",side_effect=fst), \
                      mock.patch.object(module.os,"stat",side_effect=st):
-                    if fault is None:
+                    if fault in (None,"cursor-unavailable"):
                         try: operation.execute()
                         except module.Refused: self.fail(str((operation.receipt.get("failure"),operation.errors,failures)))
                     else:
                         with self.assertRaises(module.Refused): operation.execute()
-                self.assertEqual(observed,list(module.XCODE_SETUP_VERIFY_ROLES[:count]), operation.receipt.get("failure"))
-                self.assertEqual(operation.receipt["passed"],fault is None)
+                expected=list(module.XCODE_SETUP_VERIFY_ROLES[:count])
+                if fault in ("first75","repeat75","log-unknown"): expected.append(module.XCODE_SETUP_LOG_CAPTURE)
+                self.assertEqual(observed,expected, operation.receipt.get("failure"))
+                self.assertEqual(operation.receipt["passed"],fault in (None,"cursor-unavailable"))
+                if fault=="log-unknown": self.assertFalse(operation.receipt["targetRetired"])
+                if fault in ("first75","repeat75","log-unknown","log-late"):
+                    wanted="setup-installer-repeat" if fault=="repeat75" else "setup-installer-first"
+                    self.assertEqual(operation.receipt["failure"]["reason"],"original-nonzero-"+wanted)
+                self.assertFalse((state.work/"installer-log-selected.txt").exists())
                 self.assertTrue(operation.receipt["originalClosesKnown"])
                 self.assertEqual(operation.credential_calls,[])
                 self.assertEqual(len(os.listdir('/proc/self/fd')),before)
-                if fault is None:
+                if fault in (None,"cursor-unavailable"):
                     self.assertEqual(first_nodes,[first_nodes[0]]*2)
                     self.assertFalse(operation.receipt["xcodeSetupVerification"]["desktopBookQualified"])
                 if fault == "first75":
-                    self.assertEqual(operation.calls[-1]["setupDiagnostic"]["observations"],[{"scope":"child","stage":"copy","reason":"write"}])
+                    self.assertEqual(operation.calls[2]["setupDiagnostic"]["observations"],[{"scope":"child","stage":"copy","reason":"write"}])
+                if fault in ("first75","repeat75"):
+                    failure=module.failure_diagnostic(module.Refused("helper-package-incomplete"),operation=operation)
+                    self.assertEqual(failure["setupInstall"]["returncode"],75)
+                    self.assertEqual(failure["setupInstall"]["log"]["native"]["observations"],
+                        [{"scope":"child","stage":"self","reason":"binding"}])
                 # Nonroot fixture cleanup owns its whole root; no production
                 # cleanup grants and no removal of a real managed installation.
                 for path in root.rglob('*'):
@@ -11269,7 +11305,7 @@ def maintenance_launcher_fixture(outcome="restored"):
             "originalsClosed": True, "withinOriginalDeadline": True, "readbackVerified": True, "workspaceCleared": True}
 
 
-def maintenance_documents(actions=("fresh-install",), *, target="aarch64-apple-darwin", launcher=False):
+def maintenance_documents(actions=("fresh-install",), *, target="aarch64-apple-darwin", launcher=False, recovery=False):
     """Synthetic closed records; no real signature, installer or native event."""
     prefix = "macos26-arm64-" if target == "aarch64-apple-darwin" else "macos26-x86_64-"
     profile = "fixed-macos26-arm64-maintenance-v2" if target == "aarch64-apple-darwin" else "fixed-macos26-x86_64-maintenance-v2"
@@ -11296,7 +11332,7 @@ def maintenance_documents(actions=("fresh-install",), *, target="aarch64-apple-d
                   "previous": None if previous is None else previous["current"]["release"], "next": selected,
                   "previousState": None if previous is None else {"invocation": previous["invocation"],
                       "sha256": TOOL.digest(records[previous["invocation"]][1])}}
-        generation = {"release": selected, "instance": f"{1000+index:032x}", "releaseDirectory": identity(200+index, 0o755),
+        generation = {"release": selected, "instance": invocation if recovery else f"{1000+index:032x}", "releaseDirectory": identity(200+index, 0o755),
                       "app": {"location": "canonical", "identity": identity(300+index, 0o555)}}
         retained = [] if previous is None else copy.deepcopy(previous["retained"])
         if action == "same-package-noop":
@@ -11309,6 +11345,10 @@ def maintenance_documents(actions=("fresh-install",), *, target="aarch64-apple-d
         state = {"schemaVersion": 2, "kind": "mrk-macos-maintenance-state-v2", "target": target, "invocation": invocation,
                  "requestId": request_id, "capsuleInvocation": invocation, "intendedAction": action, "phase": "mutation-recorded",
                  "current": generation, "retained": retained, "previousEvidence": list(evidence), "residue": None}
+        if recovery and action == "same-package-noop":
+            reference = {"stageInvocation": generation["instance"], "tornInvocation": f"{9000+index:032x}",
+                         "receiptSha256": "f" * 64}
+            intent["recovery"], state["recovery"] = copy.deepcopy(reference), copy.deepcopy(reference)
         raw_intent, raw_state = TOOL.canonical(intent) + b"\n", TOOL.canonical(state) + b"\n"
         count = 0 if action == "same-package-noop" else 24577
         writer = {"returned": True, "exitCode": 0, "originalJoined": True, "resultEof": True, "originalClosesKnown": True,
@@ -13580,6 +13620,49 @@ class MacInstalledData(unittest.TestCase):
         with self.assertRaisesRegex(TOOL.Refused, "^maintenance-launcher-write-accounting$"):
             TOOL.maintenance_capsule_data(raw(fresh), fresh_producer, current=True)
 
+    def test_noop_recovery_references_require_matching_successful_history(self):
+        for target in TOOL.MAC_TARGETS:
+            producer, records, result = maintenance_documents(
+                ("fresh-install", "same-package-noop", "same-package-noop"), target=target, launcher=True, recovery=True)
+            selected = TOOL.maintenance_producer_data(TOOL.canonical(producer), target=target)
+            current, parsed = TOOL.maintenance_history_data(result, records, selected)
+            self.assertEqual(current["recovery"]["stageInvocation"], current["current"]["instance"])
+            names, stages = TOOL.maintenance_roster_data(current, parsed, target)
+            self.assertIn(".install-" + current["recovery"]["stageInvocation"], stages)
+            self.assertFalse(any(name.startswith(".noop-recovery-") for name in names))
+            # Rebind outer hashes to exercise the actual reference/history checks.
+            invocation = result["invocation"]
+            original = [TOOL.decode(body) for body in records[invocation]]
+            for fault in ("null", "extra", "zero", "same-stage", "current-torn", "successful-torn",
+                          "wrong-stage", "missing-state", "different-receipt", "restore-reference"):
+                with self.subTest(target=target, fault=fault):
+                    intent, state, capsule = copy.deepcopy(original)
+                    ref = intent["recovery"]
+                    if fault == "null": intent["recovery"] = None
+                    elif fault == "extra": ref["unexpected"] = True
+                    elif fault == "zero": ref["receiptSha256"] = "0" * 64
+                    elif fault == "same-stage": ref["tornInvocation"] = ref["stageInvocation"]
+                    elif fault == "current-torn": ref["tornInvocation"] = invocation
+                    elif fault == "successful-torn": ref["tornInvocation"] = state["previousEvidence"][0]["invocation"]
+                    elif fault == "wrong-stage": ref["stageInvocation"] = "e" * 32
+                    elif fault == "missing-state": state.pop("recovery")
+                    elif fault == "different-receipt": state["recovery"]["receiptSha256"] = "e" * 64
+                    else: intent["restoreRecovery"] = ref  # Not implemented; keep rejecting it.
+                    if fault not in ("missing-state", "different-receipt"):
+                        state["recovery"] = copy.deepcopy(intent["recovery"])
+                    raw_intent, raw_state = TOOL.canonical(intent), TOOL.canonical(state)
+                    capsule.update(intentSha256=TOOL.digest(raw_intent), stateSha256=TOOL.digest(raw_state))
+                    raw_capsule = TOOL.canonical(capsule)
+                    changed = dict(records, **{invocation: (raw_intent, raw_state, raw_capsule)})
+                    wrong = dict(result, intentSha256=TOOL.digest(raw_intent), stateSha256=TOOL.digest(raw_state),
+                                 capsuleSha256=TOOL.digest(raw_capsule))
+                    with self.assertRaises(TOOL.Refused): TOOL.maintenance_history_data(wrong, changed, selected)
+            for index, reader in ((0, lambda b: TOOL.maintenance_intent_data(b, selected, current=False)),
+                                  (1, lambda b: TOOL.maintenance_state_data(b, selected))):
+                fresh = TOOL.decode(records[sorted(records)[0]][index])
+                fresh["recovery"] = copy.deepcopy(current["recovery"])
+                with self.assertRaises(TOOL.Refused): reader(TOOL.canonical(fresh))
+
     def test_same_package_readback_requires_actual_immediate_previous_state(self):
         for target in TOOL.MAC_TARGETS:
             for actions in (("fresh-install", "same-package-noop"), ("fresh-install", "same-package-noop", "same-package-noop")):
@@ -13605,9 +13688,10 @@ class MacInstalledData(unittest.TestCase):
         # reducers execute. No fake FD below reaches the host and no installed
         # ownership, signature, native Installer or Store qualification is made.
         for target in TOOL.MAC_TARGETS:
-            for fault in (None, "default", "previous", "status", "current-bytes"):
+            for fault in (None, "recovery", "default", "previous", "status", "current-bytes"):
                 with self.subTest(target=target, ordinary_readback=fault):
-                    producer, old_records, result = maintenance_documents(("fresh-install", "same-package-noop"), target=target, launcher=True)
+                    producer, old_records, result = maintenance_documents(("fresh-install", "same-package-noop"), target=target,
+                                                                         launcher=True, recovery=fault == "recovery")
                     release = producer["releaseSet"]["current"]
                     selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
                     record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
@@ -13750,6 +13834,9 @@ class MacInstalledData(unittest.TestCase):
                             if fault is None:
                                 self.assertIs(observed["samePackagePredecessorMatched"], True)
                                 ordinary_shape = {key: value for key, value in observed.items() if key != "samePackagePredecessorMatched"}
+                            elif fault == "recovery":
+                                self.assertIs(observed["samePackagePredecessorMatched"], True)
+                                self.assertEqual(observed["historicalOuterExit"], "unverified")
                             else:
                                 self.assertEqual(observed, ordinary_shape)
                         self.assertEqual(producer_read.call_count, 0 if fault == "status" else 1)

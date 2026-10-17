@@ -736,7 +736,7 @@ class SetupInstallerDiagnosticTests(unittest.TestCase):
         stdout = b"installer: MRK_XCODE_HOOK=hook=preinstall;stage=pre-exec\n"
         stderr = (b"installer: MRK_XCODE_SETUP_REFUSED=scope=public;stage=source;reason=binding\n"
                   b'Error Domain=PKInstallErrorDomain Code=112 "' + PRIVATE + b'"\n')
-        for index in (1, 2):
+        for index in (2, 3):
             role = HELPER.XCODE_SETUP_VERIFY_ROLES[index]
             for fault in (None, "zero", "owner", "publication", *[name for _, name in parsers]):
                 with self.subTest(role=role, fault=fault):
@@ -810,7 +810,7 @@ class SetupInstallerDiagnosticTests(unittest.TestCase):
             op.calls[-1].update(returncode=1, setupHooks=copy.deepcopy(hooks),
                                 setupDiagnostic=copy.deepcopy(native), installerErrors=copy.deepcopy(errors))
             return op
-        for index in (1,2):
+        for index in (2,3):
             op = operation(index); before=copy.deepcopy(op.__dict__)
             output=io.StringIO()
             with contextlib.redirect_stderr(output):
@@ -819,7 +819,7 @@ class SetupInstallerDiagnosticTests(unittest.TestCase):
             encoded=output.getvalue(); value=json.loads(encoded)
             self.assertLessEqual(len(encoded),4096)
             self.assertEqual(value["setupInstall"], {"role":HELPER.XCODE_SETUP_VERIFY_ROLES[index], "index":index+1,
-                "returncode":1, "hooks":hooks, "native":native, "errors":errors, "systemServiceExitClaimed":False})
+                "returncode":1, "hooks":hooks, "native":native, "errors":errors, "log":None, "systemServiceExitClaimed":False})
             self.assertFalse(value["productReady"])
             self.assertTrue(value["diagnosticOnly"])
             self.assertIsNone(value["packageInstall"])
@@ -833,7 +833,7 @@ class SetupInstallerDiagnosticTests(unittest.TestCase):
                 self.assertIsNone(data[projected]); self.assertNotIn(PRIVATE.decode(),json.dumps(data))
         for fault in ("phase","zero","bool-status","unentered","unreturned","unsettled","prior-failed",
                       "prior-unsettled","wrong-role","duplicate","extra-call","status-bound"):
-            op=operation(1)
+            op=operation(2)
             if fault=="phase": op.phase="package-install"
             elif fault=="zero": op.calls[-1]["returncode"]=0
             elif fault=="bool-status": op.calls[-1]["returncode"]=True
@@ -848,3 +848,124 @@ class SetupInstallerDiagnosticTests(unittest.TestCase):
             elif fault=="status-bound": op.calls[-1]["returncode"]=65536
             with self.subTest(fault=fault):
                 self.assertIsNone(HELPER.failure_diagnostic(HELPER.Refused("helper-package-incomplete"),operation=op)["setupInstall"])
+
+
+class SetupIntervalLogTests(unittest.TestCase):
+    def test_companion_binding_and_finite_interval_never_export_neighbor_text(self):
+        stager = load("xcode_interval_binding_data", "stage_macos_installed.py")
+        args = SimpleNamespace(xcode_setup=True, fixture=False, target=HELPER.ARM_TARGET,
+            package=Path("/work/xcode-setup-final/Prepare Xcode.pkg"), expected_source="a"*40,
+            run_id="123", run_attempt="1")
+        binding = stager.installer_log_binding(args)
+        self.assertEqual(binding["packageKind"], "xcode-setup")
+        self.assertFalse({"inventorySha256", "runtimeManifestSha256", "requestId"} & set(binding))
+        for changes in ({"fixture":True}, {"request_id":"1"*32}, {"expected_inventory":"b"*64},
+                {"expected_manifest":"c"*64}, {"selected_output":Path("/work/raw.txt")},
+                {"package":Path("/work/package-mount/Install.pkg")}, {"run_attempt":"0"}):
+            with self.subTest(changes=changes), self.assertRaises(stager.Refused):
+                stager.installer_log_binding(SimpleNamespace(**{**vars(args), **changes}))
+        body = (PRIVATE + b"\nPackageKit: MRK_XCODE_HOOK=hook=preinstall;stage=pre-exec\n"
+            b"PackageKit: MRK_XCODE_SETUP_REFUSED=scope=child;stage=self;reason=binding\n"
+            b'Error Domain=PKInstallErrorDomain Code=112 "' + PRIVATE + b'"\n'
+            b"MRK_XCODE_SETUP_REFUSED=scope=child;stage=arbitrary-private;reason=binding\n"
+            b"prefixMRK_XCODE_HOOK=hook=postinstall;stage=pre-exec\n")
+        projected = stager.select_xcode_setup_log(body, binding)
+        self.assertEqual(projected["hooks"]["observations"], [{"hook":"preinstall","stage":"pre-exec"}])
+        self.assertEqual(projected["native"]["observations"], [{"scope":"child","stage":"self","reason":"binding"}])
+        self.assertEqual(projected["errors"]["rows"], [{"domain":"PKInstallErrorDomain","code":112}])
+        self.assertNotIn(PRIVATE.decode(), json.dumps(projected))
+        capped = stager.select_xcode_setup_log(b"".join(
+            ("MRK_XCODE_SETUP_REFUSED=scope=child;stage="+stage+";reason=binding\n").encode()
+            for stage in ("input","source","self","carrier","selection")),binding)
+        self.assertEqual(len(capped["native"]["observations"]),4)
+        self.assertTrue(capped["errors"]["omitted"])
+        for bad in (b"unrelated\n", b"Error Domain=PKInstallErrorDomain Code=112\n",
+                    body[:-1], b"x"*(stager.LOG_INTERVAL_BYTES+1)):
+            with self.assertRaises(stager.Refused): stager.select_xcode_setup_log(bad,binding)
+        # Genuine bounded file reader/cursor logic reused; only fixed physical
+        # APIs are modeled, never a native process or another host log.
+        from unittest import mock
+        tail = b"existing private log line\n"
+        identity = dict(device=1,inode=2,mode=0o100644,uid=0,gid=0,links=1)
+        cursor = stager.make_log_cursor(binding, identity, len(tail), tail, 0)
+        args.command="installer-log-capture"; args.cursor=Path("/work/cursor.json")
+        info=SimpleNamespace(st_dev=1,st_ino=2,st_mode=0o100644,st_uid=0,st_gid=0,st_nlink=1,st_size=len(tail)+len(body))
+        cursor_info=SimpleNamespace(st_uid=stager.os.getuid(),st_mode=0o100600)
+        @contextlib.contextmanager
+        def original(): yield 9,8,"install.log",info
+        with mock.patch.object(stager,"parent") as parent, \
+             mock.patch.object(stager,"read_at",return_value=(stager.canonical(cursor),cursor_info)), \
+             mock.patch.object(stager,"installer_log_file",side_effect=original), \
+             mock.patch.object(stager,"positioned_log_read",side_effect=[tail,body,tail]), \
+             mock.patch.object(stager,"log_growth",return_value=0), \
+             mock.patch.object(stager,"write_log_selection") as writer:
+            parent.return_value.__enter__.return_value=(8,"cursor.json")
+            result,status=stager.installer_log_diagnostic(args)
+        self.assertEqual(status,0); writer.assert_not_called()
+        self.assertEqual(result["projection"],projected)
+        self.assertEqual(result["intervalScope"],"before-first-through-failed-installer")
+        self.assertEqual(result["scriptOutputFinality"],"unestablished")
+        self.assertNotIn("selectedData",result)
+        self.assertNotIn(PRIVATE.decode(),json.dumps(result))
+        self.assertNotIn(tail.decode().strip(),json.dumps(result))
+        cli=["installer-log-cursor","--xcode-setup","--package",str(args.package),
+             "--expected-source",args.expected_source,"--run-id",args.run_id,"--run-attempt",args.run_attempt]
+        with mock.patch.object(stager,"installer_log_diagnostic",return_value=({"state":"unknown"},1)) as call, \
+             mock.patch.object(stager,"print",create=True):
+            self.assertEqual(stager.main(cli),1)
+            self.assertTrue(call.call_args.args[0].xcode_setup)
+            self.assertEqual(stager.installer_log_binding(call.call_args.args[0]),binding)
+
+    def test_terminal_log_never_replaces_installer_or_unknown_owner_custody(self):
+        stages = [{"scope":"child","stage":"self","reason":"binding"}]
+        projection={"state":"observed-project-correlated","reason":None,
+            "intervalScope":"before-first-through-failed-installer",
+            "hooks":{"available":True,"observations":[{"hook":"preinstall","stage":"pre-exec"}]},
+            "native":{"available":True,"observations":stages},
+            "errors":{"rows":[{"domain":"PKInstallErrorDomain","code":112}],"omitted":False},"omitted":False}
+        for index in (2,3):
+            originals=[dict(role=r,entered=True,returned=True,capturesSettled=True,returncode=0)
+                       for r in HELPER.XCODE_SETUP_VERIFY_ROLES[:index+1]]
+            originals[-1]["returncode"]=75
+            for fault in (None,"unreturned","unsettled","wrongrole","private","cursor-unavailable"):
+                rows=copy.deepcopy(originals)
+                rows.append(dict(role=HELPER.XCODE_SETUP_LOG_CAPTURE,entered=True,returned=True,
+                    capturesSettled=True,returncode=0,setupLog=copy.deepcopy(projection)))
+                if fault=="unreturned": rows[-1]["returned"]=False
+                if fault=="unsettled": rows[-1]["capturesSettled"]=False
+                if fault=="wrongrole": rows[-1]["role"]="unrelated"
+                if fault=="private": rows[-1]["setupLog"]["native"]["observations"][0]["reason"]=PRIVATE.decode()
+                if fault=="cursor-unavailable": rows[1]["returncode"]=1
+                op=object.__new__(HELPER.Operation)
+                op.__dict__.update(phase=HELPER.XCODE_SETUP_VERIFY,calls=rows,receipt={},errors=[],
+                    credential_calls=[],credential_contexts=[])
+                value=HELPER.failure_diagnostic(HELPER.Refused("original-nonzero-"+originals[-1]["role"]),operation=op)
+                if fault=="wrongrole": self.assertIsNone(value["setupInstall"]);continue
+                self.assertEqual(value["setupInstall"]["returncode"],75)
+                self.assertEqual(value["setupInstall"]["role"],originals[-1]["role"])
+                self.assertEqual(value["setupInstall"]["log"],projection if fault is None else None)
+                self.assertNotIn(PRIVATE.decode(),json.dumps(value))
+        # Worst-case finite rows still produce a bounded public line; trimming
+        # changes only the projected copy and keeps the original exit/ledger.
+        op=object.__new__(HELPER.Operation)
+        rows=[dict(role=r,entered=True,returned=True,capturesSettled=True,returncode=0)
+              for r in HELPER.XCODE_SETUP_VERIFY_ROLES[:3]]
+        rows[-1].update(returncode=75,
+            setupHooks={"available":True,"observations":[{"hook":h,"stage":s}
+                for h in HELPER._SETUP_HOOKS for s in HELPER._SETUP_HOOK_STAGES]},
+            setupDiagnostic={"available":True,"observations":[{"scope":"child","stage":s,"reason":"binding"}
+                for s in ("source", "self", "carrier", "finality")]},
+            installerErrors={"rows":[{"domain":d,"code":112} for d in HELPER._INSTALLER_ERROR_DOMAINS],"omitted":False})
+        maximum=copy.deepcopy(projection)
+        maximum.update(hooks=copy.deepcopy(rows[-1]["setupHooks"]),native=copy.deepcopy(rows[-1]["setupDiagnostic"]),
+                       errors=copy.deepcopy(rows[-1]["installerErrors"]))
+        rows.append(dict(role=HELPER.XCODE_SETUP_LOG_CAPTURE,entered=True,returned=True,capturesSettled=True,
+                         returncode=0,setupLog=maximum))
+        op.__dict__.update(phase=HELPER.XCODE_SETUP_VERIFY,calls=rows,receipt={},errors=[],credential_calls=[],credential_contexts=[])
+        before=copy.deepcopy(op.__dict__); output=io.StringIO()
+        with contextlib.redirect_stderr(output):
+            HELPER.emit_failure_diagnostic(HELPER.Refused("original-nonzero-setup-installer-first"),
+                phase=HELPER.XCODE_SETUP_VERIFY,target=HELPER.ARM_TARGET,operation=op)
+        self.assertLessEqual(len(output.getvalue()),4096)
+        self.assertEqual(json.loads(output.getvalue())["setupInstall"]["returncode"],75)
+        self.assertEqual(op.__dict__,before)
