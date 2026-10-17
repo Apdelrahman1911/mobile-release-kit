@@ -88,7 +88,7 @@ class CandidateCreateRun:
         _need(type(self.key) is bytearray and len(self.key)==32)
         journal=self._open_journal()
         head=journal.head();last=journal._rows[-1][0] if journal._rows else None
-        if last is None or last['phase'] not in {'genesis','settled-success','settled-failure'}:
+        if last is None or last['phase'] not in {'genesis','settled-success','settled-failure','target-reconciled'}:
             self.failure='recovery-required';raise LocalCandidateError('Local candidate history requires recovery')
         _need(head['sequence']<=MAX_ENTRIES-2 and self.operation_id not in journal._operations
             and len(journal._operations)<64)

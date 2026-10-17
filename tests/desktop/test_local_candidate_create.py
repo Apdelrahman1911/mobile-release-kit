@@ -75,6 +75,67 @@ class CandidateCreateChainTests(unittest.TestCase):
             except BaseException as error:f.run.remember(error)
             adapter.close();f.settle_outer()
         return f.run.terminal()
+    def prior_execution(self,home,*,phase='target-reconciled',operation='77777777-7777-4777-8777-777777777777'):
+        """Authenticate prior DATA; the NEW candidate must use its real owner.
+
+        This fixture is not Store/native recovery proof. Settlement behavior is
+        exercised separately by test_local_recovery_settlement.
+        """
+        journal=LocalReleaseJournal(str(home),end=time.monotonic()+30,enrollment=ENROLLMENT,key=KEY)
+        journal.open_existing()
+        rows=[('inputs-pending',dict(configurationSha256='a'*64,versionSha256='b'*64,sourceCommit='c'*40,sourceTree='d'*40)),
+            ('inputs-ready',dict(candidateSha256='1'*64)),
+            ('prepare-pending',dict(candidateSha256='1'*64,confirmationSha256='2'*64)),
+            ('prepared',dict(candidateSha256='1'*64,intentSha256='3'*64,storePreconditionSha256='4'*64)),
+            ('execute-pending',dict(intentSha256='3'*64,confirmationSha256='5'*64,
+                authorizationId='55555555-5555-4555-8555-555555555555',assignmentRevision=1))]
+        if phase=='target-reconciled':
+            rows.append((phase,dict(intentSha256='3'*64,receiptSha256='6'*64,
+                executeAuthorizationId='55555555-5555-4555-8555-555555555555',
+                recoveryAuthorizationId='66666666-6666-4666-8666-666666666666',assignmentRevision=1,
+                preservedAttempt=None,priorExecutionFinality='not-established')))
+        elif phase=='reconciliation-required':
+            rows.append((phase,dict(phase='execute-pending',reason='response-unknown')))
+        else:self.assertEqual(phase,'execute-pending')
+        try:
+            for kind,payload in rows:
+                journal._append(expected_head=journal.head(),operation_id=operation,phase=kind,payload=payload)
+        finally:journal.close()
+        parent=home/'.local/share/mobile-release-kit/local-releases'/ENROLLMENT['projectLocator']
+        return {p:(p.stat().st_ino,p.read_bytes()) for p in parent.iterdir()}
+    def test_actual_create_after_target_reconciled_uses_new_id_and_preserves_old_rows(self):
+        f,path,owner,adapter,phases,home=self.subject()
+        before=self.prior_execution(home)
+        terminal=self.finish(f,owner,adapter)
+        self.assertIsNone(owner.failure)
+        self.assertEqual(terminal['outcome'],'complete',repr(f.run.primary))
+        self.assertEqual(terminal['lifetime']['commands'],14)
+        self.assertEqual([p[0] for p in phases],list(data.C.PHASES))
+        self.assertEqual(terminal['result']['headSequence'],9)
+        self.assertEqual(terminal['result']['candidateInputs']['operationId'],owner.operation_id)
+        self.assertTrue(owner.originals_closed());self.assertTrue(adapter.closed)
+        self.assertEqual(path.read_bytes(),f.signed_bytes)
+        for p,value in before.items():self.assertEqual((p.stat().st_ino,p.read_bytes()),value)
+        journal=LocalReleaseJournal(str(home),end=time.monotonic()+30,enrollment=ENROLLMENT,key=KEY)
+        journal.open_existing()
+        try:
+            self.assertEqual([r['phase'] for r,_ in journal._rows[-3:]],['target-reconciled','inputs-pending','inputs-ready'])
+            self.assertEqual([r['operationId'] for r,_ in journal._rows[-2:]],[owner.operation_id]*2)
+            self.assertNotEqual(journal._rows[-3][0]['operationId'],owner.operation_id)
+        finally:journal.close()
+    def test_actual_create_still_refuses_unknown_history_and_reused_recovered_id(self):
+        for phase,same in (('execute-pending',False),('reconciliation-required',False),('target-reconciled',True)):
+            with self.subTest(phase=phase,same=same):
+                if phase!='execute-pending':self.doCleanups();self.setUp()
+                f,path,owner,adapter,phases,home=self.subject()
+                before=self.prior_execution(home,phase=phase,operation=owner.operation_id if same else '77777777-7777-4777-8777-777777777777')
+                terminal=self.finish(f,owner,adapter)
+                self.assertNotEqual(terminal['outcome'],'complete');self.assertIsNone(terminal['result'])
+                self.assertEqual(terminal['lifetime']['commands'],6);f.run._signed_body.assert_not_called()
+                self.assertEqual([p[0] for p in phases],['lease-ready'])
+                self.assertFalse(path.exists());self.assertTrue(owner.originals_closed());self.assertTrue(adapter.closed)
+                self.assertEqual({p.name for p in next(iter(before)).parent.iterdir()},{p.name for p in before})
+                for p,value in before.items():self.assertEqual((p.stat().st_ino,p.read_bytes()),value)
     def test_complete_same_aab_retained_metadata_journal_and_actual14(self):
         f,path,owner,adapter,phases,home=self.subject()
         terminal=self.finish(f,owner,adapter)
