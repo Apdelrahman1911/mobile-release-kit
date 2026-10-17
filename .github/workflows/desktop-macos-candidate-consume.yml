@@ -1,4 +1,4 @@
-name: Same-candidate ordinary UI or interrupted Restore observation
+name: Same-candidate independent installed-app checks
 
 on:
   push:
@@ -15,10 +15,13 @@ concurrency:
 jobs:
   consume:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate-consume'
-    name: candidate-consume-${{ matrix.target }}
+    name: candidate-consume-${{ matrix.target }}-${{ matrix.mode }}
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+        mode: [ordinary-ui, ordinary-ios-ui]
         include:
           - runner: macos-26
             target: aarch64-apple-darwin
@@ -33,9 +36,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:
-      # SOURCE-owned closed selector; restore preserves the prior inactive default.
-      # Change only with an independently reviewed genuine candidate nomination.
-      MRK_CANDIDATE_MODE: restore # restore | ordinary-ui | ordinary-ios-ui
+      # Independent SOURCE-selected cohorts, each on its own fresh Mac.
+      # For a later focused recovery run, select only mode: [restore] above.
+      MRK_CANDIDATE_MODE: ${{ matrix.mode }}
       # All routes stay inactive until this and candidate-carrier-selection.json
       # name the same genuine retained candidate. No guessed/latest artifact.
       # This is checkout routing, not artifact/source admission authority.
