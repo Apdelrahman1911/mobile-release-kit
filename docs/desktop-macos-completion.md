@@ -30,9 +30,15 @@ They are **not yet verified in an installed final application**.
   Seven alias and four Ruby invocation/admission regressions pass locally.
   Both native original resolvers and the two affected pinned-SDK bridge checks
   passed on both Macs (`39036613968/1`, `39036617869/1`). The separate native
-  help check still fails: diagnostic ARM run `39037357899/1` reports that
-  `Defaults.properties` could not be opened. A reviewed read-only before/after
-  resource observation is running; the precise access cause is not yet proved.
+  help check initially failed because it was tested with networking denied:
+  diagnostic ARM run `39037357899/1` reported that `Defaults.properties` could
+  not be opened. The complete physical Xcode scan found no such local file;
+  public upstream evidence identifies an Apple-hosted startup resource. The
+  unchanged offline resolver and separately network-enabled, credential-free
+  `xcrun --no-cache --run altool --help` now both pass on ARM
+  (`39039914315/1`) and Intel (`39040589552/1`), with no skipped cases or Store
+  mutation. This establishes the practical network distinction, not a trace
+  of the current binary's exact HTTP call. Temporary diagnostics were removed.
   Neither a resolved path nor Environment version success alone proves
   native protection or signing readiness.
 
@@ -47,11 +53,19 @@ journeys; it is also inactive and not installed-qualified.
 Candidate packaging run `39037373530/1` stopped before application build/signing:
 its nominated signed GitHub helper artifacts were no longer available. Both
 history-helper replacement jobs passed (`38012102679/2`); the seal-helper Intel
-job passed, but ARM stopped on actual CLT SDK `27.0` against a 26.x recipe
-(`38012102780/2`). Toolchain diagnosis and supplier renewal are in progress.
+job passed. ARM exposed two genuine hosted-toolchain changes: unversioned CLT
+SDK selection had moved to `27.0`, and stable Rust had moved to `1.99.0`.
+Explicit SDK `macosx26.5` and the standard versioned Rust `1.98.1` installation
+retain the reviewed recipe; the actual ARM build passed (`39041321127/1`).
+All four new helper signing jobs passed (`39041837994/1`, source `45b5fec1`),
+including original signing/strict verification and credential cleanup. The
+complete fresh nominations and both History signed hashes are now integrated.
 Other nominated Python/Store/Android artifacts remain available as checked on
 October 17. Signed-helper retention is now 30 days, with separate original
-public receipts for enrollment; no signed binary carrier was downloaded locally.
+public receipts for enrollment; the new signed artifacts expire November 16.
+No signed binary carrier was downloaded locally. Current application packaging,
+notarization and installed UI qualification remain pending; helper signing is
+not application readiness.
 
 Next: finish native tool compatibility, reuse the final signed candidate for
 independent installation and real UI journeys, complete the readiness audit,
