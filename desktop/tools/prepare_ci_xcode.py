@@ -284,6 +284,29 @@ def verify(path, end):
                    cwd="/", check=True, timeout=min(SIGNATURE_SECONDS, end - time.monotonic()))
 
 
+def ci_profile(arguments, environment, platform, effective_uid, script):
+    """Closed accident-prevention profiles, never environment-derived authority."""
+    need(platform == "darwin" and effective_uid == 0 and int(environment["SUDO_UID"]) > 0
+         and environment.get("GITHUB_ACTIONS") == "true"
+         and environment.get("RUNNER_ENVIRONMENT") == "github-hosted"
+         and environment.get("RUNNER_OS") == "macOS")
+    if arguments == []:
+        need(environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
+        return
+    source = environment.get("GITHUB_SHA", "")
+    repository = "Apdelrahman1911/mobile-release-kit"
+    ref = "refs/heads/verify/desktop-macos-candidate-consume"
+    need(arguments == ["--candidate-consume"] and environment.get("GITHUB_EVENT_NAME") == "push"
+         and environment.get("GITHUB_REPOSITORY") == repository and environment.get("GITHUB_REF") == ref
+         and environment.get("GITHUB_WORKFLOW_REF") == repository +
+             "/.github/workflows/desktop-macos-candidate-consume.yml@" + ref
+         and re.fullmatch(r"[0-9a-f]{40}", source) and source != "0" * 40
+         and environment.get("GITHUB_WORKFLOW_SHA") == source
+         and environment.get("MRK_CANDIDATE_MODE") == "ordinary-ios-ui"
+         and os.path.abspath(script) == "/Users/runner/work/mobile-release-kit/mobile-release-kit/"
+             ".candidate-consumer-helper/desktop/tools/prepare_ci_xcode.py", "candidate-consume-profile")
+
+
 def main():
     stage = "ci-profile"
     end = time.monotonic() + SECONDS
@@ -294,11 +317,7 @@ def main():
     try:
         # Accident-prevention checks, not an authorization mechanism. Only the
         # explicit reviewed workflow invokes this privileged fixture on a VM.
-        need(sys.platform == "darwin" and os.geteuid() == 0 and int(os.environ["SUDO_UID"]) > 0
-             and os.environ.get("GITHUB_ACTIONS") == "true"
-             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-             and os.environ.get("RUNNER_OS") == "macOS"
-             and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
+        ci_profile(sys.argv[1:], os.environ, sys.platform, os.geteuid(), __file__)
         clone = native_clone()  # Resolve the supported API before any fixture mutation.
         stage = "selection"
         root = open_original("/", None, True); fds.append(root)

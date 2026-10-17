@@ -49,11 +49,31 @@ def saved_checks_body(reverse=False):
     return ('\n'.join([*lines,''])).encode()
 
 
-def phase_fixture(name, target=R.TARGETS[0]):
+def diagnostics_body():
+    method='-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectBuildToolDiagnostics]'
+    return ('\n'.join(["Test Case '"+method+"' started.",N.ORIGINAL_MARKER,
+        'MRK_MACOS_NORMAL_DIAGNOSTICS_UI=ordinary-ui-observed-original-diagnostics-report-and-settled-projection;'
+        'commandsAttempted=4;cleanExitStatus=unavailable;allWorkerFinality=unavailable',
+        "Test Case '"+method+"' passed (1.0 seconds).",''])).encode()
+
+
+def ios_body():
+    value=dict(schemaVersion=1,scope='one-ordinary-local-unsigned-ios-archive',sourceCommit='a'*40,
+        savedVersion='1.2.3',savedBuild=7,inputFiles=9,inputBytes=7264,topLevelDirectories=4,
+        archiveDescendantsObserved=False,nativeResultDisplayed=True,outputPostMatched=True,originalsClosed=True,
+        normalQuitObserved=True,successBeforeCutoff=True,signed=False,ipaExported=False,releaseQualified=False,
+        parentReturncodeRequired=0,operationId='1'*32,ownerGeneration='2'*32,originalEntries=8,originalBytes=999)
+    method='-[MRKNormalAppUITests.NormalAppUITests '+N.IOS_UNSIGNED_METHOD+']'
+    return ('\n'.join(["Test Case '"+method+"' started.",N.ORIGINAL_MARKER,
+        N.IOS_UNSIGNED_PREFIX.decode()+N.encoded(value).decode(),"Test Case '"+method+"' passed (1.0 seconds).",''])).encode()
+
+
+def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False):
     selected, context, install=fixture(target)
-    args, req=U.phase_request(N,name,target,WORK)
+    args, req=U.phase_request(N,name,target,WORK,ios_tools=ios_tools)
     mode=req['phase']; result=None if req['result'] is None else req['result'].name
-    out=(persistence_body() if name=='persistence-test' else saved_checks_body() if name=='saved-checks-test' else
+    out=(diagnostics_body() if name=='diagnostics-test' else ios_body() if name=='ios-unsigned-archive-test' else
+         persistence_body() if name=='persistence-test' else saved_checks_body() if name=='saved-checks-test' else
          R.canonical(dict(totalTestCount=2 if name in ('project-summary','saved-checks-summary') else 1,
             passedTests=2 if name in ('project-summary','saved-checks-summary') else 1,failedTests=0,skippedTests=0,expectedFailures=0))
          if mode=='summary' else b'inert returned native output\n')
@@ -68,6 +88,8 @@ def phase_fixture(name, target=R.TARGETS[0]):
         row.update(originalClosesCompleted=True,originalProductsPrePostMatched=True,strictCodesignOriginalZero=True,reSignedOrRepaired=False)
         if name=='project-test':row.update(projectFieldAndEditMarkersObserved=True,androidToolSourceBrowseMarkerObserved=True)
         if name=='applications-test':row['applicationsLaunchObservationMarker']=True
+    if name=='ios-unsigned-archive-test':row['iosUnsignedObservation']=N.ios_unsigned_marker(out,source=selected['source'])
+    if name=='ios-unsigned-archive-summary':row['iosUnsignedTestCounts']=N.ios_unsigned_summary(out)
     src=('normal-ui-source-roster',15,1048576)
     roles=([src,*[('normal-toolchain-'+k,15,4096) for k in ('xcode','sdkPath','sdkVersion','sdkBuild')],
         ('normal-ui-build',240,1048576),src] if mode=='build' else
@@ -109,6 +131,34 @@ class CandidateUITests(unittest.TestCase):
             self.assertFalse(any('FIXED' in k or 'CREDENTIAL' in k or 'SIGNING' in k for k in env))
         for name in ('remove','sign','ios-unsigned-archive-test','saved-version-recovery-test','--normal-build'):
             with self.assertRaises(R.Refused):U.phase_request(N,name,N.ARM_TARGET,WORK)
+
+    def test_closed_ios_cohort_reuses_original_requests_markers_and_counts(self):
+        for target in (N.ARM_TARGET,N.INTEL_TARGET):
+            for phase in U.IOS_TOOL_PHASES:
+                selected,_,_,args,request,row,body=phase_fixture(phase,target,ios_tools=True)
+                self.assertEqual(N.normal_request(args,str(WORK/'normal-ui/tmp')+'/'),request)
+                self.assertEqual(U.phase_admission_data(row,request,selected['source'],body,b'',normal=N),'f'*64)
+                if phase=='ios-unsigned-archive-test':
+                    self.assertEqual(args[-1],'--normal-ios-unsigned-archive-test')
+                    self.assertEqual((request['allowance'],request['timeout'],request['phaseSeconds']),(900,1020,1245))
+                    for key,bad in (('signed',True),('schemaVersion',True)):
+                        wrong=deepcopy(row);wrong['iosUnsignedObservation'][key]=bad
+                        with self.assertRaises((R.Refused,N.Refused)):U.phase_admission_data(wrong,request,selected['source'],body,b'',normal=N)
+                if phase=='ios-unsigned-archive-summary':
+                    wrong=deepcopy(row);wrong['iosUnsignedTestCounts']['totalTestCount']=True
+                    with self.assertRaises((R.Refused,N.Refused)):U.phase_admission_data(wrong,request,selected['source'],body,b'',normal=N)
+            for phase in ('project-test','persistence-test','saved-checks-test','applications-test'):
+                with self.assertRaises(R.Refused):U.phase_request(N,phase,target,WORK,ios_tools=True)
+        for args in (['--ios-tools'],['--ios-tools','project-test'],['--other','build'],['--ios-tools','build','extra']):
+            with mock.patch.object(sys,'argv',['helper',*args]),mock.patch.object(U.consumer,'entry_context') as entry:
+                with self.assertRaises(R.Refused):U.main()
+                entry.assert_not_called()
+        body=diagnostics_body()
+        for changed in (body.replace(b'commandsAttempted=4',b'commandsAttempted=0'),
+                body.replace(b'commandsAttempted=4',b'commandsAttempted=5'),body+body,
+                body.replace(b'originalTerminated=1',b'originalTerminated=0'),body.replace(b' passed (',b' skipped ('),
+                body+b'MRK_MACOS_UI_FAILURE_CLEANUP=1\n'):
+            with self.assertRaises(R.Refused):U.diagnostics_markers(changed)
 
     def test_restart_requires_both_original_lifetimes_one_attempt_and_no_failure_cleanup(self):
         body=persistence_body();self.assertTrue(U.persistence_markers(body))
@@ -215,7 +265,7 @@ class CandidateUITests(unittest.TestCase):
 
 
 class CandidateUIMainTests(unittest.TestCase):
-    def exercise(self, name, target, unknown_close=False):
+    def exercise(self, name, target, unknown_close=False, *, ios_tools=False):
         import os, stat
         selected,context,install=fixture(target)
         files={};directories=set();books=[];effects=[];modes={}
@@ -254,10 +304,12 @@ class CandidateUIMainTests(unittest.TestCase):
         snapshot,_=R.host_snapshot(host,lambda p:(R.identity(info(p)),children(p)),lambda p,n:(R.identity(info(p)),files[p]))
         files[host/'host-binding.json']=R.canonical(dict(schemaVersion=1,source=context['helperSource'],runId='31',runAttempt='1',
             base=basevalue,prefix=str(host),basePrefix='/inert-base',baseExecutable=str(base),**snapshot,retainedUntilHostedTeardown=True))
-        previous=U.PHASES if name=='result' else U.PHASES[:U.PHASES.index(name)]
+        phases=U.IOS_TOOL_PHASES if ios_tools else U.PHASES
+        arguments=['candidate-ui',*(['--ios-tools'] if ios_tools else []),name]
+        previous=phases if name=='result' else phases[:phases.index(name)]
         if name!='build':directories.add(WORK/'normal-ui');directories.add(WORK/'normal-ui/tmp')
         for phase in previous:
-            _,_,_,_,_,row,out=phase_fixture(phase,target)
+            _,_,_,_,_,row,out=phase_fixture(phase,target,ios_tools=ios_tools)
             for suffix,body in (('.status',b'0\n'),('.stdout',out),('.stderr',b'')):
                 files[WORK/'normal-ui'/(phase+suffix)]=body
             files[WORK/'normal-ui'/U.admission_name(phase)]=R.canonical(row)
@@ -296,7 +348,7 @@ class CandidateUIMainTests(unittest.TestCase):
                         out=b''.join(b'100644 blob '+__import__('hashlib').sha1(b'blob '+str(len(files[gitroot/p])).encode()+b'\0'+files[gitroot/p]).hexdigest().encode()+b'\t'+p.encode()+b'\0' for p in names)
                     return subprocess.CompletedProcess(argv,0,out,b'')
                 effects.append('native-cli')
-                _,_,_,_,_,row,out=phase_fixture(name,target)
+                _,_,_,_,_,row,out=phase_fixture(name,target,ios_tools=ios_tools)
                 files[WORK/'normal-ui'/U.admission_name(name)]=R.canonical(row)
                 return subprocess.CompletedProcess(argv,0,out,b'')
         def mkdir(path,mode):
@@ -311,13 +363,13 @@ class CandidateUIMainTests(unittest.TestCase):
             q=original_quota();quotas.append(q);return q
         from contextlib import ExitStack
         with ExitStack() as stack:
-            for patch in (mock.patch('resource.setrlimit'),mock.patch.object(U.consumer,'entry_context',return_value=context),
+            for patch in (mock.patch('resource.setrlimit'),mock.patch.object(U.consumer,'entry_context',side_effect=lambda actual:(self.assertEqual(actual,tuple(arguments[1:])),context)[1]),
                 mock.patch.object(U,'ROOT',root),mock.patch.object(U.Path,'cwd',return_value=U.consumer.CANDIDATE_ROOT),
                 mock.patch.object(U.Path,'resolve',lambda p:p),mock.patch.object(U.resume,'bootstrap_originals',return_value=Book),
                 mock.patch.object(U.resume,'load_module',return_value=N),mock.patch.object(U.resume,'OriginalQuota',side_effect=quota_factory),
                 mock.patch.object(N,'load_normal_owner',return_value=Owner()),mock.patch.object(U.os,'stat',side_effect=lambda p,**kw:info(p)),
                 mock.patch.object(U.os,'mkdir',side_effect=mkdir),mock.patch.object(U.os,'listdir',side_effect=listdir),
-                mock.patch.object(sys,'argv',['candidate-ui',name]),mock.patch.object(sys,'executable',str(host/'bin/python3')),
+                mock.patch.object(sys,'argv',arguments),mock.patch.object(sys,'executable',str(host/'bin/python3')),
                 mock.patch.object(sys,'prefix',str(host)),mock.patch.object(sys,'base_prefix','/inert-base'),
                 mock.patch.object(sys,'_base_executable',str(base))):stack.enter_context(patch)
             if unknown_close:
@@ -340,6 +392,21 @@ class CandidateUIMainTests(unittest.TestCase):
             self.assertEqual(value['savedOfflineChecksTests'],1)
             self.assertEqual(value['emptyBuildInputInspectionTests'],1)
 
+    def test_actual_ios_cohort_main_both_targets_77_originals_and_late_unknown(self):
+        for target in (N.ARM_TARGET,N.INTEL_TARGET):
+            for phase in ('build','diagnostics-test','ios-unsigned-archive-test','result'):
+                value,effects,count=self.exercise(phase,target,ios_tools=True)
+                self.assertEqual(value['cohort'],'ios-tools')
+                self.assertEqual(effects,[] if phase=='result' else ['native-cli'])
+                if phase=='result':
+                    self.assertEqual(count,77);self.assertEqual(value['totalTests'],2)
+                    self.assertEqual(value['unsignedIosArchiveTests'],1)
+                    self.assertEqual(value['androidBuildToolDiagnosticsTests'],1)
+                    self.assertFalse(value['signed'] or value['ipaExported'] or value['fullDoctorQualified'])
+                    self.assertNotIn('storeEntryRefusalObserved',value)
+            value,effects,_=self.exercise('ios-unsigned-archive-summary',target,unknown_close=True,ios_tools=True)
+            self.assertIsNone(value);self.assertEqual(effects,['native-cli'])
+
     def test_actual_main_late_consuming_close_prevents_success_and_status(self):
         for name in ('project-test','saved-checks-summary'):
             value,effects,_=self.exercise(name,N.ARM_TARGET,unknown_close=True)
@@ -355,6 +422,19 @@ class CandidateUICleanupTests(unittest.TestCase):
             self.assertNotIn('PRIVATE_SENTINEL',R.canonical(data).decode())
         self.assertEqual(U.failure_data(R.Refused('candidate-ui-original-cli-nonzero'),'project-test')['reason'],
                          'candidate-ui-original-cli-nonzero')
+
+    def test_real_ios_cohort_cleanup_retires_only_its_original_harness_outputs(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)/'normal-ui';root.mkdir(mode=0o700)
+            for name in ('DerivedData','tmp','diagnostics-test.xcresult','ios-unsigned-archive-test.xcresult'):
+                (root/name).mkdir();(root/name/'inert').write_bytes(b'DATA')
+            for phase in U.IOS_TOOL_PHASES:
+                for suffix in ('.stdout','.stderr'):(root/(phase+suffix)).write_bytes(b'inert')
+            for name in ('ios-unsigned-archive.facts.json','project-test.xcresult'):
+                (root/name).write_bytes(b'not selected for cleanup')
+            U.cleanup_outputs(root,R.identity(root.stat())[:5],N.PhaseClock(30),ios_tools=True)
+            self.assertEqual(sorted(p.name for p in root.iterdir()),['ios-unsigned-archive.facts.json','project-test.xcresult'])
 
     def test_real_inert_cleanup_only_known_outputs_and_foreign_link_refusal(self):
         import os,tempfile

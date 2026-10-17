@@ -18,6 +18,29 @@ SPEC.loader.exec_module(ci)
 
 
 class ProtectedXcodeFixtureTests(unittest.TestCase):
+    def test_candidate_push_profile_is_closed_before_any_privileged_work(self):
+        script='/Users/runner/work/mobile-release-kit/mobile-release-kit/.candidate-consumer-helper/desktop/tools/prepare_ci_xcode.py'
+        ref='refs/heads/verify/desktop-macos-candidate-consume'
+        env=dict(SUDO_UID='501',GITHUB_ACTIONS='true',RUNNER_ENVIRONMENT='github-hosted',RUNNER_OS='macOS',
+            GITHUB_EVENT_NAME='push',GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit',GITHUB_REF=ref,
+            GITHUB_WORKFLOW_REF='Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-consume.yml@'+ref,
+            GITHUB_SHA='a'*40,GITHUB_WORKFLOW_SHA='a'*40,MRK_CANDIDATE_MODE='ordinary-ios-ui')
+        ci.ci_profile(['--candidate-consume'],env,'darwin',0,script)
+        manual=dict(SUDO_UID='501',GITHUB_ACTIONS='true',RUNNER_ENVIRONMENT='github-hosted',RUNNER_OS='macOS',GITHUB_EVENT_NAME='workflow_dispatch')
+        ci.ci_profile([],manual,'darwin',0,'unchanged manual path')
+        for args in ([],['--candidate-consume','extra'],['--other']):
+            with self.assertRaises(ci.Refused):ci.ci_profile(args,env,'darwin',0,script)
+        for key,bad in [('GITHUB_EVENT_NAME','workflow_dispatch'),('GITHUB_REPOSITORY','foreign/repo'),
+                ('GITHUB_REF','refs/heads/main'),('GITHUB_WORKFLOW_REF','foreign'),('GITHUB_SHA','0'*40),
+                ('GITHUB_WORKFLOW_SHA','b'*40),('MRK_CANDIDATE_MODE','ordinary-ui'),('MRK_CANDIDATE_MODE','restore'),
+                ('RUNNER_ENVIRONMENT','self-hosted'),('SUDO_UID','0')]:
+            changed=dict(env,**{key:bad})
+            with self.subTest(key=key,bad=bad),patch.dict(ci.os.environ,changed,clear=True),patch.object(ci.sys,'platform','darwin'),                 patch.object(ci.sys,'argv',['prepare','--candidate-consume']),patch.object(ci.os,'geteuid',return_value=0),                 patch.object(ci,'__file__',script),patch.object(ci,'native_clone') as clone,patch.object(ci,'open_original') as opened,                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ci.main(),1);clone.assert_not_called();opened.assert_not_called()
+        for foreign in (script.replace('.candidate-consumer-helper/',''),script.replace('prepare_ci_xcode.py','foreign.py')):
+            with self.assertRaises(ci.Refused):ci.ci_profile(['--candidate-consume'],env,'darwin',0,foreign)
+        with self.assertRaises(ci.Refused):ci.ci_profile(['--candidate-consume'],manual,'darwin',0,script)
+
     def test_physical_walk_preserves_bytes_execution_groups_and_external_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'selected'; root.mkdir(); root.chmod(0o775)

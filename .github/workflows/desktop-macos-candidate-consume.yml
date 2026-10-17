@@ -35,8 +35,8 @@ jobs:
     env:
       # SOURCE-owned closed selector; restore preserves the prior inactive default.
       # Change only with an independently reviewed genuine candidate nomination.
-      MRK_CANDIDATE_MODE: restore # restore | ordinary-ui
-      # Both routes stay inactive until this and candidate-carrier-selection.json
+      MRK_CANDIDATE_MODE: restore # restore | ordinary-ui | ordinary-ios-ui
+      # All routes stay inactive until this and candidate-carrier-selection.json
       # name the same genuine retained candidate. No guessed/latest artifact.
       # This is checkout routing, not artifact/source admission authority.
       MRK_CANDIDATE_SOURCE: '0000000000000000000000000000000000000000'
@@ -49,7 +49,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          case "$MRK_CANDIDATE_MODE" in restore|ordinary-ui) ;; *) exit 1 ;; esac
+          case "$MRK_CANDIDATE_MODE" in restore|ordinary-ui|ordinary-ios-ui) ;; *) exit 1 ;; esac
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$RUNNER_OS" = macOS
           test "$GITHUB_WORKSPACE" = /Users/runner/work/mobile-release-kit/mobile-release-kit
@@ -75,6 +75,27 @@ jobs:
           ref: ${{ github.sha }}
           path: .candidate-consumer-helper
           persist-credentials: false
+      - name: Prepare only the selected Xcode for this disposable unsigned-iOS cohort
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui'
+        timeout-minutes: 36
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_ACTIONS" == true && "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]]
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate-consume ]]
+          [[ "$GITHUB_WORKFLOW_REF" == Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-consume.yml@refs/heads/verify/desktop-macos-candidate-consume ]]
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$(/usr/bin/id -u)" != 0 ]]
+          helper="$GITHUB_WORKSPACE/.candidate-consumer-helper"
+          [[ "$(/usr/bin/git -C "$helper" rev-parse HEAD)" == "$GITHUB_WORKFLOW_SHA" ]]
+          /usr/bin/git -C "$helper" diff --quiet HEAD -- desktop/tools/prepare_ci_xcode.py
+          # Existing bounded Apple-signed fixture setup, before artifact access
+          # or install. This does not qualify ordinary writable Mac layouts.
+          # Candidate source/harness remain separate from actual helper source.
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_EVENT_NAME,GITHUB_REPOSITORY,GITHUB_REF,GITHUB_WORKFLOW_REF,GITHUB_SHA,GITHUB_WORKFLOW_SHA,MRK_CANDIDATE_MODE \
+            /usr/bin/python3 -I -B "$helper/desktop/tools/prepare_ci_xcode.py" --candidate-consume
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14.7'
@@ -236,7 +257,7 @@ jobs:
 
       - name: Install the exact final candidate once without rebuilding or signing it
         id: ordinary_install
-        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui'
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui'
         timeout-minutes: 12
         shell: bash
         env:
@@ -320,16 +341,69 @@ jobs:
           # build/test outputs, not the installed app, finite phase controls or
           # private synthetic fixtures.
           # Unknown owners stop the sequence and remain for hosted VM disposal.
+      - name: Observe unsigned iOS archive and limited Android diagnostics on the same candidate
+        id: ordinary_ios_ui
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' && steps.ordinary_install.outcome == 'success'
+        timeout-minutes: 70
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          unset GITHUB_TOKEN GH_TOKEN
+          # Each existing helper keeps its original inner and outer deadlines;
+          # this containing step/job does not grant a new native clock. Only the
+          # nonshipping XCTest harness builds, once, from the actual candidate
+          # checkout. Application/harness source are never relabeled as helper.
+          ui() {
+            local phase=$1 status saved status_path
+            case "$phase" in
+              build|diagnostics-test|diagnostics-summary|ios-unsigned-archive-test|ios-unsigned-archive-summary)
+                status_path="$MRK_MACOS_WORK/normal-ui/$phase.status" ;;
+              result|cleanup) status_path="$MRK_MACOS_WORK/candidate-ui-$phase.status" ;;
+              *) return 1 ;;
+            esac
+            set +e
+            "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B \
+              "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_ui.py" --ios-tools "$phase" \
+              > "$MRK_MACOS_WORK/candidate-ui-$phase.json"
+            status=$?
+            printf '%s\n' "$status" > "$status_path"
+            saved=$?
+            set -e
+            printf 'MRK_CANDIDATE_UI_PHASE=%s;originalReturncode=%s;observationOnly=true\n' "$phase" "$status"
+            if [[ "$status" != 0 ]]; then return "$status"; fi
+            [[ "$saved" == 0 ]] || return "$saved"
+          }
+          # Two existing methods only: Android four-card Environment observation
+          # (NOT full/iOS doctor), then unsigned archive (NO signing/IPA/Store).
+          # Fixed order, never a retry or a roster supplied by a downloaded file.
+          # read_phase admits each prior actual0 + its original captures/receipt.
+          ui build
+          ui diagnostics-test
+          ui diagnostics-summary
+          ui ios-unsigned-archive-test
+          ui ios-unsigned-archive-summary
+          ui result
+          ui cleanup
+          # Cleanup runs only after every original succeeded. It retires known
+          # build/test outputs, not the installed app, finite phase controls or
+          # private synthetic fixtures.
+          # Unknown owners stop the sequence and remain for hosted VM disposal.
       - name: Retain only the bounded ordinary UI observation and positive cleanup
-        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' && steps.ordinary_ui.outcome == 'success'
+        if: (env.MRK_CANDIDATE_MODE == 'ordinary-ui' && steps.ordinary_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' && steps.ordinary_ios_ui.outcome == 'success')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: candidate-ordinary-ui-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: candidate-${{ env.MRK_CANDIDATE_MODE }}-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.MRK_MACOS_WORK }}/candidate-ui-result.json
             ${{ env.MRK_MACOS_WORK }}/candidate-ui-cleanup.json
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
-          # Six existing local tests only (including saved-checks navigation). No raw captures, xcresult,
+          # Selected cohort only: ordinary6 or unsigned-iOS/Android-diagnostics2. No raw captures, xcresult,
           # credential fixtures, signed carrier or full-feature readiness claim.

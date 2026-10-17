@@ -1,6 +1,7 @@
 """Same-candidate installed UI handoff; detached, not activated.
 
-Only existing Applications, project edits, synthetic-vault restart and saved-check journeys are selected.
+Existing ordinary journeys or a separate unsigned-iOS/Android-diagnostics cohort
+are selected; neither is a full-feature or Store qualification.
 Candidate source remains the real canonical checkout; helper identity is separate.
 No historical fixed-carrier profile, Store operation or application build is used.
 """
@@ -16,6 +17,8 @@ from desktop.tools import macos_fixed_carrier_resume as resume
 
 PHASES = ('build', 'applications-test', 'applications-summary', 'project-test', 'project-summary',
           'persistence-test', 'persistence-summary', 'saved-checks-test', 'saved-checks-summary')
+IOS_TOOL_PHASES = ('build', 'diagnostics-test', 'diagnostics-summary',
+                   'ios-unsigned-archive-test', 'ios-unsigned-archive-summary')
 RUNNER = 'desktop/tools/macos_normal_ui_runner.py'
 STAGE = 'admission'
 NATIVE_STATUS = None
@@ -57,12 +60,16 @@ def install_admission_data(value, selected, context):
     return dict(value)
 
 
-def phase_request(normal, name, target, work):
-    resume.need(type(name) is str and name in PHASES, 'candidate-ui-phase')
+def phase_request(normal, name, target, work, *, ios_tools=False):
+    resume.need(type(ios_tools) is bool, 'candidate-ui-cohort')
+    phases = IOS_TOOL_PHASES if ios_tools else PHASES
+    resume.need(type(name) is str and name in phases, 'candidate-ui-phase')
     machine, _ = normal.normal_target_data(target)
     root = work / 'normal-ui'
     if name == 'build':
         arguments = ['--normal-build']
+    elif name in ('ios-unsigned-archive-test', 'ios-unsigned-archive-summary'):
+        arguments = ['--normal-' + name]
     elif name.endswith('-summary'):
         arguments = ['--normal-summary', name.replace('-summary', '-test') + '.xcresult']
     else:
@@ -159,7 +166,28 @@ def saved_checks_markers(body):
     return True
 
 
-def phase_admission_data(row, request, source, stdout, stderr):
+def diagnostics_markers(body):
+    """Original Android four-card observation, explicitly not a full doctor."""
+    resume.need(type(body) is bytes and 0 < len(body) <= 1 << 20 and body.endswith(b'\n'),
+                'candidate-ui-diagnostics-markers')
+    lines = body.decode('utf-8', 'strict').splitlines()
+    method = '-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectBuildToolDiagnostics]'
+    attempts = [(n, line) for n, line in enumerate(lines) if line.startswith('Test Case ')]
+    original = 'MRK_MACOS_UI_ORIGINAL=' + LIFETIME_SUFFIX[1:]
+    prefix = 'MRK_MACOS_NORMAL_DIAGNOSTICS_UI='
+    observed = [(n, line) for n, line in enumerate(lines) if line.startswith(prefix)]
+    resume.need(len(attempts) == 2 and attempts[0][1] == "Test Case '" + method + "' started."
+        and re.fullmatch("Test Case '" + re.escape(method) + r"' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", attempts[1][1])
+        and lines.count(original) == 1 and sum(line.startswith('MRK_MACOS_UI_ORIGINAL=') for line in lines) == 1
+        and len(observed) == 1 and re.fullmatch(re.escape(prefix) +
+            r'ordinary-ui-observed-original-diagnostics-report-and-settled-projection;commandsAttempted=[1-4];'
+            r'cleanExitStatus=unavailable;allWorkerFinality=unavailable', observed[0][1])
+        and attempts[0][0] < lines.index(original) < observed[0][0] < attempts[1][0]
+        and not any('MRK_MACOS_UI_FAILURE_CLEANUP=' in line for line in lines), 'candidate-ui-diagnostics-markers')
+    return True
+
+
+def phase_admission_data(row, request, source, stdout, stderr, *, normal=None):
     """Current normal runner's original receipt, without fixed P0 decoration."""
     mode = request['phase']; target = request['target']
     result = None if request['result'] is None else request['result'].name
@@ -220,12 +248,23 @@ def phase_admission_data(row, request, source, stdout, stderr):
                         and row.get('androidToolSourceBrowseMarkerObserved') is True, 'candidate-ui-project-markers')
         elif result == 'applications-test.xcresult':
             resume.need(row.get('applicationsLaunchObservationMarker') is True, 'candidate-ui-applications-marker')
+        elif result == 'diagnostics-test.xcresult':
+            diagnostics_markers(stdout)
+        elif result == 'ios-unsigned-archive-test.xcresult':
+            resume.need(normal is not None and request.get('iosUnsigned') is True
+                and normal.ios_unsigned_facts(row.get('iosUnsignedObservation'), source=source)
+                    == normal.ios_unsigned_marker(stdout, source=source),
+                'candidate-ui-ios-original-facts')
         elif result == 'saved-checks-test.xcresult':
             resume.need(saved_checks_markers(stdout),
                 'candidate-ui-saved-checks-markers')
         else:
             resume.need(result == 'persistence-test.xcresult' and persistence_markers(stdout), 'candidate-ui-restart-selection')
     if mode == 'summary':
+        if result == 'ios-unsigned-archive-test.xcresult':
+            resume.need(normal is not None and request.get('iosUnsigned') is True
+                and normal.encoded(row.get('iosUnsignedTestCounts')) == normal.encoded(normal.ios_unsigned_summary(stdout)),
+                'candidate-ui-ios-original-facts')
         count = 2 if result in ('project-test.xcresult', 'saved-checks-test.xcresult') else 1
         counts = resume.decode(stdout, allow_finite_floats=True)
         wanted = {'totalTestCount': count, 'passedTests': count, 'failedTests': 0, 'skippedTests': 0, 'expectedFailures': 0}
@@ -239,17 +278,17 @@ def admission_name(name):
             name + '.command-admission.json' if name.endswith('-summary') else name + '.runner-admission.json')
 
 
-def read_phase(read, normal, name, selected, work):
-    _, request = phase_request(normal, name, selected['target'], work)
+def read_phase(read, normal, name, selected, work, *, ios_tools=False):
+    _, request = phase_request(normal, name, selected['target'], work, ios_tools=ios_tools)
     root = work / 'normal-ui'
     resume.need(read(root / (name + '.status'), 16) == b'0\n', 'candidate-ui-prior-caller-zero')
     row = resume.decode(read(root / admission_name(name), 32768))
     stdout = read(root / (name + '.stdout'), 1 << 20)
     stderr = read(root / (name + '.stderr'), 1 << 20)
-    return phase_admission_data(row, request, selected['source'], stdout, stderr)
+    return phase_admission_data(row, request, selected['source'], stdout, stderr, normal=normal)
 
 
-def run_phase(normal, owner, book, quota, context, selected, name, clock, verify_sources):
+def run_phase(normal, owner, book, quota, context, selected, name, clock, verify_sources, *, ios_tools=False):
     """One fixed existing CLI under the existing owned-process API.
 
     Outer success requires inner zero, its exact original native records, POST,
@@ -258,7 +297,7 @@ def run_phase(normal, owner, book, quota, context, selected, name, clock, verify
     """
     global STAGE, NATIVE_STATUS, NATIVE_DIAGNOSTIC
     work = context['work'].parent; directory = work / 'normal-ui'
-    args, request = phase_request(normal, name, selected['target'], work)
+    args, request = phase_request(normal, name, selected['target'], work, ios_tools=ios_tools)
     env = clean_environment(normal, selected, work)
     argv = [str(work / 'host-python/bin/python3'), '-I', '-S', '-B', str(consumer.CANDIDATE_ROOT / RUNNER), *args]
     quota.check(); verify_sources()
@@ -290,7 +329,7 @@ def run_phase(normal, owner, book, quota, context, selected, name, clock, verify
     resume.need(original.returncode == 0, 'candidate-ui-original-cli-nonzero')
     row_entry, body = quota.call(book, 'file', directory / admission_name(name), 32768, modes=(0o600,))
     row = resume.decode(body)
-    roster = phase_admission_data(row, request, selected['source'], original.stdout, original.stderr)
+    roster = phase_admission_data(row, request, selected['source'], original.stdout, original.stderr, normal=normal)
     verify_sources(); quota.check(); clock.check()
     return roster
 
@@ -298,9 +337,12 @@ def run_phase(normal, owner, book, quota, context, selected, name, clock, verify
 def main():
     global STAGE, NATIVE_STATUS, NATIVE_DIAGNOSTIC, CLOSES_KNOWN
     STAGE, NATIVE_STATUS, NATIVE_DIAGNOSTIC, CLOSES_KNOWN = 'admission', None, None, None
-    name = sys.argv[1] if len(sys.argv) == 2 else None
-    resume.need(name in (*PHASES, 'result', 'cleanup'), 'candidate-ui-fixed-command')
-    context = consumer.entry_context((name,))
+    arguments = tuple(sys.argv[1:])
+    ios_tools = len(arguments) == 2 and arguments[0] == '--ios-tools'
+    name = arguments[1] if ios_tools else arguments[0] if len(arguments) == 1 else None
+    phases = IOS_TOOL_PHASES if ios_tools else PHASES
+    resume.need(name in (*phases, 'result', 'cleanup'), 'candidate-ui-fixed-command')
+    context = consumer.entry_context(arguments)
     resume.need(ROOT == consumer.HELPER_ROOT and Path.cwd() == consumer.CANDIDATE_ROOT,
                 'candidate-ui-real-source-roots')
     import resource
@@ -329,7 +371,7 @@ def main():
         runner_body = read(consumer.CANDIDATE_ROOT / RUNNER, 1 << 20, source=True, mode=0o644)
         normal = resume.load_module('_mrk_candidate_ui_owner', consumer.HELPER_ROOT / RUNNER,
                                     sources[consumer.HELPER_ROOT / RUNNER])
-        _, request = phase_request(normal, name if name in PHASES else 'persistence-summary', selected['target'], work)
+        _, request = phase_request(normal, name if name in phases else phases[-1], selected['target'], work, ios_tools=ios_tools)
         # Exact existing inner budget plus bounded admission/source/final closes;
         # never restarted on cancellation, a late result or another native call.
         clock = normal.PhaseClock(request['phaseSeconds'] + 180, started=consumer.STARTED_NS)
@@ -382,16 +424,16 @@ def main():
         held_directory = quota.call(book, 'directory', directory)
         resume.need(held_directory['identity'][2:] == (0o40700, os.getuid(), os.getgid()), 'candidate-ui-private-root')
         STAGE = 'predecessors'
-        previous = PHASES if name in ('result', 'cleanup') else PHASES[:PHASES.index(name)]
-        rosters = [read_phase(lambda p, n: read(p, n), normal, phase, selected, work) for phase in previous]
+        previous = phases if name in ('result', 'cleanup') else phases[:phases.index(name)]
+        rosters = [read_phase(lambda p, n: read(p, n), normal, phase, selected, work, ios_tools=ios_tools) for phase in previous]
         resume.need(not rosters or len(set(rosters)) == 1, 'candidate-ui-same-harness-roster')
-        if name in PHASES:
+        if name in phases:
             # All sources/host/prior result originals have been quoted before the
             # new native entry. Remaining cells: two captures, one admission,
             # No in-process success status: only the enclosing workflow may record
             # its actual returned caller status after this final close/clock.
             resume.need(quota.reserved + 3 <= resume.MAX_ORIGINALS, 'candidate-ui-original-capacity')
-            roster = run_phase(normal, owner, book, quota, context, selected, name, clock, verify_sources)
+            roster = run_phase(normal, owner, book, quota, context, selected, name, clock, verify_sources, ios_tools=ios_tools)
             resume.need(not rosters or roster == rosters[0], 'candidate-ui-same-harness-roster')
         else:
             verify_sources(); quota.check(); clock.check()
@@ -408,14 +450,20 @@ def main():
             'artifactId': selected['artifactId'], 'artifactSha256': selected['artifactSha256'],
             'originalClosesKnown': True, 'productReady': False, 'allApplicationWorkerFinality': 'unavailable',
             'applicationsEntryQualified': False, 'p0Qualified': False}
-        if name in ('result', 'cleanup'):
+        if ios_tools:
+            value['cohort'] = 'ios-tools'
+        if name in ('result', 'cleanup') and ios_tools:
+            value.update(unsignedIosArchiveTests=1, androidBuildToolDiagnosticsTests=1, totalTests=2,
+                         failedTests=0, skippedTests=0, sameInstalledApplication=True, signed=False, ipaExported=False,
+                         fullDoctorQualified=False, sourceRosterSha256=rosters[0])
+        elif name in ('result', 'cleanup'):
             value.update(applicationsLaunchObservations=1, projectEditingTests=2, syntheticPersistenceRestartTests=1,
                          savedOfflineChecksTests=1, emptyBuildInputInspectionTests=1, storeEntryRefusalObserved=True,
                          totalTests=6, failedTests=0, skippedTests=0, sameInstalledApplication=True,
                          sourceRosterSha256=rosters[0])
         if name == 'cleanup':
             STAGE = 'cleanup'
-            cleanup_outputs(directory, held_directory['identity'], clock)
+            cleanup_outputs(directory, held_directory['identity'], clock, ios_tools=ios_tools)
             value.update(taskHarnessOutputsRetired=True, installedApplicationRetained=True,
                          syntheticPrivateFixturesRetainedForHostedTeardown=True)
         clock.finish()
@@ -436,8 +484,10 @@ def main():
             BaseException.add_note(primary, 'candidate-ui-original-final-closes')
 
 
-def cleanup_outputs(directory, expected, clock):
+def cleanup_outputs(directory, expected, clock, *, ios_tools=False):
     """Only known settled harness outputs; no app/vault/shared services removed."""
+    resume.need(type(ios_tools) is bool, 'candidate-ui-cohort')
+    phases = IOS_TOOL_PHASES if ios_tools else PHASES
     import shutil
     import stat
     resume.need(shutil.rmtree.avoids_symlink_attacks, 'candidate-ui-cleanup-primitive')
@@ -452,13 +502,14 @@ def cleanup_outputs(directory, expected, clock):
                 and expected[2:] == (stat.S_IFDIR | 0o700, os.getuid(), os.getgid()),
                 'candidate-ui-cleanup-root')
         post()
-        for name in ('DerivedData', 'tmp', 'applications-test.xcresult', 'project-test.xcresult', 'persistence-test.xcresult',
-                     'saved-checks-test.xcresult'):
+        results = (('diagnostics-test.xcresult', 'ios-unsigned-archive-test.xcresult') if ios_tools else
+                   ('applications-test.xcresult', 'project-test.xcresult', 'persistence-test.xcresult', 'saved-checks-test.xcresult'))
+        for name in ('DerivedData', 'tmp', *results):
             info = os.stat(name, dir_fd=fd, follow_symlinks=False)
             resume.need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and info.st_dev == expected[0],
                         'candidate-ui-cleanup-directory')
             post(); shutil.rmtree(name, dir_fd=fd); post()
-        for phase in PHASES:
+        for phase in phases:
             for suffix in ('.stdout', '.stderr'):
                 name = phase + suffix
                 info = os.stat(name, dir_fd=fd, follow_symlinks=False)
@@ -478,6 +529,7 @@ def cleanup_outputs(directory, expected, clock):
 
 
 PUBLIC_REASONS = frozenset((
+    'candidate-ui-cohort', 'candidate-ui-diagnostics-markers', 'candidate-ui-ios-original-facts',
     'candidate-ui-install-handoff', 'candidate-ui-phase', 'candidate-ui-existing-request',
     'candidate-ui-persistence-output', 'candidate-ui-persistence-lifetimes', 'candidate-ui-persistence-one-attempt',
     'candidate-ui-original-receipt', 'candidate-ui-original-file-limit', 'candidate-ui-source-roster',
@@ -499,7 +551,7 @@ def failure_data(error, phase):
     reason = args[0] if len(args) == 1 and type(args[0]) is str and args[0] in PUBLIC_REASONS else None
     classes = (resume.Refused, OSError, FileNotFoundError, PermissionError, ValueError, TypeError, RuntimeError,
                KeyError, AttributeError, ImportError, KeyboardInterrupt, SystemExit)
-    return {'scope': 'candidate-ui-failure-only', 'phase': phase if phase in (*PHASES, 'result', 'cleanup') else None,
+    return {'scope': 'candidate-ui-failure-only', 'phase': phase if phase in (*PHASES, *IOS_TOOL_PHASES, 'result', 'cleanup') else None,
             'stage': STAGE if STAGE in ('admission', 'source', 'host', 'predecessors', 'native', 'native-post',
                                         'final-closes', 'cleanup', 'complete') else None,
             'exceptionClass': type(error).__name__ if type(error) in classes else 'other',
@@ -513,6 +565,6 @@ if __name__ == '__main__':
     try:
         result = main()
     except BaseException as error:
-        sys.stderr.buffer.write(resume.canonical(failure_data(error, sys.argv[1] if len(sys.argv) == 2 else None)) + b'\n')
+        sys.stderr.buffer.write(resume.canonical(failure_data(error, sys.argv[-1] if len(sys.argv) in (2, 3) else None)) + b'\n')
         raise SystemExit(1) from None
     sys.stdout.buffer.write(resume.canonical(result) + b'\n')
