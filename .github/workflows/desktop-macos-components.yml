@@ -1044,24 +1044,26 @@ jobs:
           set -euo pipefail
           umask 077
           "$OWNER_PYTHON" -I -S -B - <<'PY'
-          import json, os, re, resource, sys, unicodedata
+          import json, os, re, resource, sys, time, unicodedata
           from pathlib import Path
           checkout, work = Path.cwd(), Path(os.environ["WORK_ROOT"])
           sys.path.insert(0, str(checkout / "desktop/tools"))
           from ci_bounded_output import run_bounded
           home = work / "resolver-home"
           home.mkdir(mode=0o700)
-          capture_path = work / "resolver-output.log"
+          capture_path = None
           limit = 256 * 1024
           resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
           resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
           clean = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "TMPDIR": str(home),
               "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "PYTHONDONTWRITEBYTECODE": "1",
               "PYTHONPATH": os.pathsep.join(str(checkout / path) for path in ("src", "tests", "tests/desktop"))}
-          tests = ["test_local_ios_store_execute_macos.IOSStoreResolverMacTests." + name for name in (
-              "test_original_xcrun_resolution_post_and_close_before_pending_or_asc",
-              "test_documented_xcrun_altool_help_returns_and_settles")]
-          profile = '(version 1) (allow default) (deny network*) (deny file-write* (subpath (param "CHECKOUT")))'
+          cases = (
+              ("offline-resolver", "test_original_xcrun_resolution_post_and_close_before_pending_or_asc", True),
+              ("online-help", "test_documented_xcrun_altool_help_returns_and_settles", False),
+          )
+          deadline = time.monotonic() + 90
+          phase = "not-started"
           def output():
               with capture_path.open("rb") as capture:
                   raw = capture.read(limit + 1)
@@ -1069,13 +1071,24 @@ jobs:
                   raise ValueError("resolver-capture-bound")
               return raw
           try:
-              # Bound only captured output, not Apple runtime private files.
-              # The resolver keeps its role cap and original parent deadline.
-              run_bounded(["/usr/bin/sandbox-exec", "-D", "CHECKOUT=" + str(checkout), "-p", profile,
-                  os.environ["OWNER_PYTHON"], "-B", "-m", "unittest", "-v", *tests],
-                  capture_path=capture_path, env=clean, cwd=checkout, timeout=90, limit=limit)
-              if re.search(rb"\nRan 2 tests in [0-9]+(?:\.[0-9]+)?s\n\nOK\n\Z", output()) is None:
-                  raise ValueError("resolver-and-help-exact-two-pass-required")
+              for phase, method, offline in cases:
+                  # Apple's shim may fetch public Transporter defaults even for
+                  # --help. This credential-free startup check is explicitly online;
+                  # the resolver and synthetic Store tests remain network-denied.
+                  profile = '(version 1) (allow default) ' + ('(deny network*) ' if offline else '')
+                  profile += '(deny file-write* (subpath (param "CHECKOUT")))'
+                  capture_path = work / (phase + "-output.log")
+                  remaining = deadline - time.monotonic()
+                  if remaining <= 0:
+                      raise TimeoutError("resolver-and-help-aggregate-deadline")
+                  run_bounded(["/usr/bin/sandbox-exec", "-D", "CHECKOUT=" + str(checkout), "-p", profile,
+                      os.environ["OWNER_PYTHON"], "-B", "-m", "unittest", "-v",
+                      "test_local_ios_store_execute_macos.IOSStoreResolverMacTests." + method],
+                      capture_path=capture_path, env=clean, cwd=checkout, timeout=remaining, limit=limit)
+                  if time.monotonic() >= deadline:
+                      raise TimeoutError("resolver-and-help-aggregate-deadline")
+                  if re.search(rb"\nRan 1 test in [0-9]+(?:\.[0-9]+)?s\n\nOK\n\Z", output()) is None:
+                      raise ValueError("each-original-test-must-pass-without-skips")
           except Exception as error:
               try:
                   tail = output()[-4096:].decode("utf-8", "replace")
@@ -1084,11 +1097,11 @@ jobs:
                   tail = tail.encode("utf-8")[:4096].decode("utf-8", "ignore")
               except Exception as capture_error:
                   tail = "capture-unavailable:" + type(capture_error).__name__
-              print(json.dumps({"phase": "original-xcrun-resolver-and-help", "errorType": type(error).__name__,
+              print(json.dumps({"phase": phase, "errorType": type(error).__name__,
                   "returncode": getattr(error, "returncode", None), "diagnosticTail": tail}), flush=True)
               raise SystemExit(1)
           print(json.dumps({"originalXcrunResolver": "passed", "documentedAltoolHelp": "passed", "tests": 2, "skips": 0,
-              "networkDenied": True, "liveStoreRun": False}))
+              "offlineResolverNetworkDenied": True, "helpNetworkDenied": False, "liveStoreRun": False}))
           PY
       - name: Remove only this job's iOS tools scratch
         if: always() && steps.work.outputs.root != ''
