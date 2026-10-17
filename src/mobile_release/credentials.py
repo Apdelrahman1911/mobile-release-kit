@@ -1426,7 +1426,9 @@ def _validate_installed_p8(material, runtime):
         source = guard._local_store_source
         from ._desktop_store_execute_control import StoreExecuteInput
         from .local_store_execute import LocalStoreExecuteRun
-        owners={StorePrepareInput:LocalStorePrepareRun,StoreExecuteInput:LocalStoreExecuteRun}
+        from ._desktop_store_reconcile_control import StoreReconcileInput
+        from .local_store_reconcile import LocalStoreReconcileRun
+        owners={StorePrepareInput:LocalStorePrepareRun,StoreExecuteInput:LocalStoreExecuteRun,StoreReconcileInput:LocalStoreReconcileRun}
         if (type(source) not in owners or type(source.require_operation()) is not owners[type(source)]
                 or source.initial.context['platform'] != 'ios'):
             raise CredentialError("Bundled Apple validation lacks its original Prepare input")

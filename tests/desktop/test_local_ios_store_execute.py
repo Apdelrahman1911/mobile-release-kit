@@ -11,11 +11,11 @@ from unittest.mock import patch
 from mobile_release import local_store_execute as S,_desktop_store_execute_protocol as W
 from mobile_release.local_release_journal import canonical
 from test_local_store_prepare import OP
-from test_local_ios_store_prepare import IOSStorePrepareTests
+import test_local_ios_store_prepare as prepare_fixture
 
 class IOSStoreExecuteTests(unittest.TestCase):
     def setUp(self):
-        self.f=IOSStorePrepareTests(methodName='runTest');self.f.setUp();self.addCleanup(self.f.doCleanups)
+        self.f=prepare_fixture.IOSStorePrepareTests(methodName='runTest');self.f.setUp();self.addCleanup(self.f.doCleanups)
         t,e,_,_,_=self.f.run_original();self.assertEqual(t['outcome'],'complete',repr(e.primary))
         self.prepared=self.f.root/'.mobile-release/store/local'/OP.replace('-','')
         self.intent=json.loads((self.prepared/'operation-intent.json').read_bytes())
@@ -147,7 +147,7 @@ class IOSStoreExecuteTests(unittest.TestCase):
         from mobile_release import _desktop_local_history_protocol as h
         row=dict(projectId='p',executionMode='local',action='review-execution',platform='ios',candidateOperationId=OP)
         self.assertEqual(h.context(row),row)
-        for action in ('review-reconcile','review-recovery'):
+        for action in ('review-recovery',):
             with self.assertRaises(ValueError):h.context({**row,'action':action})
     def test_actual_resolved_original_quote_exact_fit_and_pre_effect_overflow(self):
         # Exact three independently held walks: initial xcrun, selectedDeveloper,

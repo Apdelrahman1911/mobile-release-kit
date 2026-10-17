@@ -429,6 +429,83 @@ class AppleReleaseLanesTest < Minitest::Test
     {payload:payload,digest:digest,authority:authority}
   end
 
+  def local_ios_reconcile_context
+    @service.visible=false;prepare('candidate');value=local_ios_execution_context
+    @service.visible=true
+    @service.attributes('builds','build-1')['usesNonExemptEncryption']=false
+    @service.attributes('buildBetaDetails','detail-1')['autoNotifyEnabled']=false
+    File.binwrite(File.join(@root,'journal.json'),'preserved old ambiguous original')
+    # Real local codec/intent and actual SDK models/lane below. Only the native
+    # admitted Runtime is inert, independently covered by its original gate tests.
+    value.merge(authority:value.fetch(:authority).merge('purpose'=>'recover'))
+  end
+  def with_local_ios_readonly(context)
+    runtime=Object.new
+    runtime.define_singleton_method(:local_ios_transport!) { raise 'readback requested upload tools' }
+    @fastfile.define_singleton_method(:finish_ios_candidate!) { |*| raise 'readback requested mutating finisher' }
+    @fastfile.define_singleton_method(:validate_current_ios_upload!) { |*| raise 'readback requested current IPA tool' }
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,context) do
+      MobileReleaseKit::StoreLaneRuntime.stub(:current_runtime!,runtime) { yield }
+    end
+  end
+  def assert_local_ios_readonly_preserved
+    assert_equal 0,@upload_count;assert_empty @upload_validation_calls;assert_empty @service.writes
+    assert_equal 'preserved old ambiguous original',File.binread(File.join(@root,'journal.json'))
+  end
+  def test_local_ios_reconcile_current_complete_build_double_reads_without_mutation
+    context=local_ios_reconcile_context
+    before=@service.requests.count { |method,path,_| method==:get && path=='/v1/builds' }
+    with_local_ios_readonly(context) { execute }
+    assert_equal 2,@service.requests.count { |method,path,_| method==:get && path=='/v1/builds' }-before
+    assert_local_ios_readonly_preserved
+    assert_equal 'local-store-execution-receipt',receipt.fetch('documentType')
+    assert_equal 'recover',receipt.fetch('executedBy').fetch('purpose')
+    assert_equal context.fetch(:authority),receipt.fetch('executedBy')
+    assert_equal 'reconciled',receipt.fetch('result');assert_equal 'processed',receipt.fetch('state')
+    assert_equal 'VALID',receipt.fetch('processingState');assert_equal false,receipt.fetch('autoNotifyEnabled')
+    assert_equal 'build-1',receipt.fetch('buildResourceId');refute receipt.key?('authorizedBy')
+  end
+  def test_local_ios_reconcile_absent_partial_or_foreign_never_finishes_or_retries
+    context=local_ios_reconcile_context
+    build=@service.attributes('builds','build-1');detail=@service.attributes('buildBetaDetails','detail-1')
+    original=Marshal.load(Marshal.dump([build,detail]))
+    cases=[-> { @service.visible=false },-> { build['processingState']='PROCESSING' },
+      -> { build['usesNonExemptEncryption']=nil },-> { detail['autoNotifyEnabled']=true },
+      -> { detail['internalBuildState']='PROCESSING' },-> { build['expired']=true },
+      -> { build['version']='124' },-> { build['uploadedDate']=(@wall_clock-86400).iso8601 }]
+    with_local_ios_readonly(context) do
+      cases.each do |change|
+        @service.visible=true;build.replace(original[0]);detail.replace(original[1]);change.call
+        assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+        refute File.exist?(File.join(@root,'receipt.json'));assert_local_ios_readonly_preserved
+      end
+    end
+  end
+  def test_local_ios_reconcile_final_read_change_or_lost_reply_cannot_publish
+    context=local_ios_reconcile_context
+    [:changed,:lost_reply].each do |failure|
+      reads=0
+      @service.before_read=lambda do |path|
+        if path=='/v1/builds'
+          reads+=1
+          if reads>=2
+            if failure==:changed
+              @service.attributes('buildBetaDetails','detail-1')['autoNotifyEnabled']=true
+            else
+              raise Faraday::TimeoutError,'Synthetic final GET outcome unknown'
+            end
+          end
+        end
+      end
+      @service.attributes('buildBetaDetails','detail-1')['autoNotifyEnabled']=false
+      with_local_ios_readonly(context) do
+        assert_raises(FastlaneCore::Interface::FastlaneError,Faraday::TimeoutError) { execute }
+      end
+      assert_operator reads,:>=,2
+      refute File.exist?(File.join(@root,'receipt.json'));assert_local_ios_readonly_preserved
+    end
+  end
+
   def local_original_bridge_case(response_loss:)
     @service.visible=false;prepare('candidate');context=local_ios_execution_context
     with_real_upload_bridge(cut:nil,local:context,response_loss:response_loss) do |record,resources,endpoints,calls,waits|

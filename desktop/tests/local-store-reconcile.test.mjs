@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { LocalStoreReconcileController, localStoreReconcileRequest, localStoreReconcileOwnerReason } from '../src/localStoreReconcile.ts';
-import { encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, STORE_RECONCILE_CONSENT, STORE_RECOVERY_CONSENT, reconcileRequestContext } from '../src/localStoreReconcileProtocol.ts';
+import { encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, STORE_RECONCILE_CONSENT, STORE_RECOVERY_CONSENT, IOS_STORE_RECONCILE_CONSENT, reconcileRequestContext } from '../src/localStoreReconcileProtocol.ts';
 import { encodeLocalStorePrepareRequest, parseLocalStorePrepareStatus } from '../src/localStorePrepareProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
@@ -17,11 +17,11 @@ const history=()=>({mode:'native',historical:false,pending:false,blocked:false,u
 const op=request=>({operationId:A,ownerGeneration:B,context:reconcileRequestContext(copy(request)),phase:'awaiting-consent',intentUsable:true,outcome:null,reason:'none',result:null});
 const cancelled=o=>({...o,phase:'terminal',intentUsable:false,outcome:'cancelled',reason:'cancelled',result:null});
 const complete=o=>({...o,phase:'terminal',intentUsable:false,outcome:'complete',reason:'none',result:{schemaVersion:1,scope:o.context.settlement?'local-android-recovery-settlement':'local-android-store-reconcile',headSequence:o.context.settlement?7:6,reconciliationReceipt:{operationId:U,candidateSha256:'a'.repeat(64),intentSha256:'b'.repeat(64),receiptSha256:'d'.repeat(64),authorizationId:V,sourceCommit:'b'.repeat(40),sourceTree:'c'.repeat(40),applicationId:'dev.example.app',version:{name:'1.2.3',build:42},destination:{channel:'internal',releaseStatus:'completed'},observedAt:'2026-10-16T20:01:00Z',result:'reconciled',observation:'current-internal-target-only',priorExecutionFinality:'not-established',limitations:['non-publishing','not-retry-permission','old-evidence-preserved','saved-inputs-not-atomic']}}});
-async function fixture(){let p=project(),a=assets(),h=history(),now=100,listener,latest=status(),starts=0,cancels=0,prepares=0,gate=null,other=null;
+async function fixture(ios=false){let p=project(),a=ios?iosAssets():assets(),h=ios?iosHistory():history(),now=100,listener,latest=status(),starts=0,cancels=0,prepares=0,gate=null,other=null;
  const controller=new LocalStoreReconcileController({project:()=>p,assets:()=>a,history:()=>h,otherOperationReason:()=>other,now:()=>now});
  const api={mode:'native',subscribeLocalStoreReconcile:async f=>{listener=f;return()=>{};},localStoreReconcileStatus:async()=>latest,
  prepareLocalStoreReconcile:async request=>{prepares++;if(gate)await gate;latest=status(latest.statusRevision+1,op(request));return copy(latest);},
- startLocalStoreReconcile:async request=>{starts++;assert.equal(request.consentVersion,latest.operation.context.settlement?STORE_RECOVERY_CONSENT:STORE_RECONCILE_CONSENT);latest=status(latest.statusRevision+1,{...latest.operation,phase:'running',intentUsable:false});return copy(latest);},
+ startLocalStoreReconcile:async request=>{starts++;assert.equal(request.consentVersion,latest.operation.context.platform==='ios'?IOS_STORE_RECONCILE_CONSENT:latest.operation.context.settlement?STORE_RECOVERY_CONSENT:STORE_RECONCILE_CONSENT);latest=status(latest.statusRevision+1,{...latest.operation,phase:'running',intentUsable:false});return copy(latest);},
  cancelLocalStoreReconcile:async(x,y)=>{assert.equal(x,A);assert.equal(y,B);cancels++;latest=status(latest.statusRevision+1,cancelled(latest.operation));return copy(latest);}};
  await controller.connect(api);controller.syncProject();
  return{controller,api,counts:()=>({starts,cancels,prepares}),change:fn=>{fn(p,a,h);controller.syncProject();},time:v=>now=v,busy:v=>other=v,defer:()=>{let release;gate=new Promise(r=>release=r);return release;},emit:v=>{latest=v;listener(copy(v));},latest:()=>copy(latest)};
@@ -118,4 +118,57 @@ test('recovery successor uses the original reviewed head and late cancelled Prep
   if(wrongHead){await h.controller.prepare();h.controller.acknowledge(true);await h.controller.start();const result=complete(h.latest().operation);result.result.headSequence=8;h.emit(status(h.latest().statusRevision+1,result));assert.equal(h.controller.getSnapshot().blocked,true);assert.equal(h.controller.getSnapshot().status.operation.result,null);}
   else{const release=h.defer(),pending=h.controller.prepare();await h.controller.cancel();assert.equal(h.controller.setSettlement(false),false);release();await pending;await Promise.resolve();assert.equal(h.counts().starts,0);assert.equal(h.counts().cancels,1);assert.equal(h.controller.getSnapshot().consentUntil,null);}
  }finally{h.controller.dispose();}}
+});
+
+// Actual Reconcile controller and wire; native/provider boundaries stay inert.
+function iosAssets(){const a=assets();a.scope.platform=a.status.context.platform='ios';a.status.assignments[0].kind=a.status.records[0].kind='asc-p8';return a;}
+function iosHistory(){const h=history(),p=h.status.operation.result.preparedIntent;h.status.operation.context.platform='ios';delete p.applicationId;p.bundleId='org.example.ios-app';p.appStoreAppId='0012345';p.destination={channel:'testflight-internal'};p.limitations[2]='current-asc-snapshot-may-change';return h;}
+function iosComplete(o){const v=complete(o),r=v.result.reconciliationReceipt;v.result.scope='local-ios-store-reconcile';delete r.applicationId;r.bundleId='org.example.ios-app';r.appStoreAppId='0012345';r.destination={channel:'testflight-internal'};r.observation='current-internal-build-only';return v;}
+test('iOS readback has exact ASC current-last context, no Android selection or settlement authority',()=>{
+ const p=project();delete p.selection;const request=localStoreReconcileRequest(p,iosAssets(),iosHistory());assert.ok(request);assert.equal(request.platform,'ios');assert.equal(request.confirmation,'candidate:ios:1.2.3:42');assert.ok(encodeLocalStoreReconcileRequest('prepare_local_store_reconcile',request));
+ for(const extra of [{platform:null},{platform:'android'},{settlement:null},{settlement:'record-current-target'},{toolchainSelection:{}},{developerDirectory:'/Applications/Xcode.app/Contents/Developer'}])assert.equal(encodeLocalStoreReconcileRequest('prepare_local_store_reconcile',{...request,...extra}),null);
+ assert.equal(localStoreReconcileRequest(p,iosAssets(),iosHistory(),true),null);
+ for(const mutate of [(p,a,h)=>delete h.status.operation.context.platform,(p,a)=>a.status.assignments[0].kind='google-service-account',(p,a)=>a.scope.platform='android',(p,a,h)=>h.status.operation.result.history.push({operationId:V,phase:'execute-pending',recoveryRequired:true}),p=>p.savedVersion.build++]){const p=project(),a=iosAssets(),h=iosHistory();mutate(p,a,h);assert.equal(localStoreReconcileRequest(p,a,h),null);}
+});
+test('iOS readback receipt is exact16 current processed-build observation, not retry or recovery',()=>{
+ const good=iosComplete(op(localStoreReconcileRequest(project(),iosAssets(),iosHistory())));assert.ok(parseLocalStoreReconcileStatus(status(1,good)));assert.equal(Object.keys(good.result.reconciliationReceipt).length,16);
+ for(const mutate of [o=>o.result.scope='local-android-store-reconcile',o=>o.result.reconciliationReceipt.applicationId='org.example.app',o=>o.result.reconciliationReceipt.appStoreAppId=123,o=>o.result.reconciliationReceipt.bundleId='invalid..bundle',o=>o.result.reconciliationReceipt.destination.channel='testflight-external',o=>o.result.reconciliationReceipt.observation='current-internal-target-only',o=>o.result.reconciliationReceipt.result='processing',o=>o.result.reconciliationReceipt.priorExecutionFinality='complete',o=>o.result.reconciliationReceipt.observedAt='2026-02-30T20:01:00Z',o=>o.context.settlement='record-current-target',o=>o.context.operation='local-store-recovery-settle']){const bad=copy(good);mutate(bad);assert.equal(parseLocalStoreReconcileStatus(status(1,bad)),null);}
+});
+test('iOS readback uses retained consent, starts once and binds current source and both app identifiers',async()=>{
+ for(const field of [null,'bundleId','appStoreAppId','sourceTree']){const h=await fixture(true);try{assert.equal(h.controller.prepareReason(),null);assert.equal(h.controller.setSettlement(true),false);await h.controller.prepare();assert.equal(h.counts().starts,0);h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(h.counts().starts,1);assert.equal(h.counts().cancels,0);const done=iosComplete(h.latest().operation);if(field)done.result.reconciliationReceipt[field]=field==='bundleId'?'other.app':field==='appStoreAppId'?'999':'f'.repeat(40);h.emit(status(h.latest().statusRevision+1,done));assert.equal(h.controller.getSnapshot().blocked,!!field);assert.equal(!!h.controller.getSnapshot().status.operation.result,!field);}finally{h.controller.dispose();}}
+});
+test('iOS readback scope, saved version and ASC changes retire original once; missing keys keep Apple guidance',async()=>{
+ for(const change of [(p,a)=>a.scope.platform='android',(p,a)=>a.status.context.revision++,(p,a,h)=>h.status.operation.result.headSequence++,p=>p.savedVersion.sha256='e'.repeat(64)]){const h=await fixture(true);try{await h.controller.prepare();h.controller.acknowledge(true);h.change(change);await h.controller.start();assert.equal(h.counts().starts,0);assert.equal(h.counts().cancels,1);}finally{h.controller.dispose();}}
+ const h=await fixture(true);try{h.change((p,a)=>a.status.assignments=[]);assert.equal(h.controller.getSnapshot().platform,'ios');assert.equal(h.controller.getSnapshot().request,null);assert.match(h.controller.prepareReason(),/App Store Connect/);await h.controller.prepare();assert.equal(h.counts().prepares,0);}finally{h.controller.dispose();}
+});
+test('iOS History readback selection keeps platform and never unlocks Apple recovery',async()=>{
+ const value=iosHistory().status;assert.ok(parseLocalHistoryStatus(value));const verified=copy(value);verified.operation.context={projectId:'p1',executionMode:'local',action:'verify'};delete verified.operation.result.preparedIntent;
+ const controller=new LocalReleaseHistoryController({projectId:()=> 'p1',otherOperationReason:()=>null});controller.syncProject();try{await controller.connect({mode:'native',subscribeLocalReleaseHistory:async()=>()=>{},localReleaseHistoryStatus:async()=>verified});controller.syncProject();controller.setInputPlatform('ios');assert.equal(controller.selectCandidate('review-recovery',U),false);assert.equal(controller.selectCandidate('review-reconcile',U),true);assert.equal(controller.getSnapshot().request.platform,'ios');assert.equal(controller.getSnapshot().request.action,'review-reconcile');}finally{controller.dispose();}
+});
+
+test('iOS-only workspace reaches readback through actual saved-version observation without an Android selection',async()=>{
+ const {localStoreProjectObservation}=await import('../src/localStorePreflight.ts');const {ReleaseVersionController}=await import('../src/releaseVersion.ts');const {initialWorkspace,workspaceReducer}=await import('../src/drafts.ts');const {AndroidBuildController}=await import('../src/androidBuild.ts');
+ const assurance={basis:'static-text',projectCodeExecuted:false,toolsProbed:false,credentialsRead:false,gitObserved:false,storeContacted:false,writesPerformed:false,releaseReadiness:'unknown'},config={bytes:100,sha256:'a'.repeat(64)},source='release/version.properties';
+ const snapshot={root:'/inert/never-opened',observedAt:'',observationScope:'single-request-non-atomic',config:{path:'release/mobile-release.json',state:'format-valid',content:copy(config),issues:[],data:{ios:{enabled:true,bundleId:'org.example.ios-app'},version:{source}}},discovery:{state:'unverified',partial:false,hints:{},scan:{entries:0,sourceFiles:0,sourceBytes:0,excludedEntries:0},limits:{}},assurance:copy(assurance),issues:[]};
+ let workspace=workspaceReducer(initialWorkspace,{type:'select',project:{id:'p1',name:'iOS only',path:'/inert/never-opened'}});workspace=workspaceReducer(workspace,{type:'snapshot-start',projectId:'p1',requestId:1});workspace=workspaceReducer(workspace,{type:'snapshot-done',projectId:'p1',requestId:1,snapshot,observedAt:1});const session=workspace.projects.p1;
+ const version=new ReleaseVersionController(()=>session),android=new AndroidBuildController({selectedProject:()=>session,releaseVersion:version.getSnapshot,otherOperationReason:()=>null});
+ const observation={schemaVersion:2,source,version:{name:'1.2.3',build:42},savedConfig:copy(config),savedVersion:{bytes:40,sha256:'b'.repeat(64)},observationScope:'single-request-non-atomic',assurance:copy(assurance)};
+ version.setConnection({mode:'native',observeReleaseVersion:async()=>copy(observation)},{runtime:{state:'available',mode:'installed',reason:null},capabilities:{methods:[{method:'release.version.observe',available:true,reason:''}]}});version.syncProject();
+ const controller=new LocalStoreReconcileController({project:()=>localStoreProjectObservation(session,version.getSnapshot()),assets:iosAssets,history:iosHistory,otherOperationReason:()=>null});let latest=status(),starts=0,cancels=0;
+ const unlisten=version.subscribe(controller.syncProject);
+ try{
+  await controller.connect({mode:'native',subscribeLocalStoreReconcile:async()=>()=>{},localStoreReconcileStatus:async()=>latest,prepareLocalStoreReconcile:async request=>{assert.equal(request.platform,'ios');latest=status(1,op(request));return copy(latest);},startLocalStoreReconcile:async()=>{starts++;throw Error('must not start after version re-read');},cancelLocalStoreReconcile:async()=>{cancels++;latest=status(2,cancelled(latest.operation));return copy(latest);}});
+  controller.syncProject();assert.equal(controller.getSnapshot().request,null);await version.read();android.syncProject();assert.ok(android.getSnapshot().project.inputIssue);assert.equal(localStoreReconcileRequest(android.getSnapshot().project,iosAssets(),iosHistory()),null);
+  assert.equal(controller.getSnapshot().request.platform,'ios');assert.equal(controller.getSnapshot().request.confirmation,'candidate:ios:1.2.3:42');assert.equal(controller.prepareReason(),null);
+  await controller.prepare();controller.acknowledge(true);await version.read();await Promise.resolve();await controller.start();assert.equal(starts,0);assert.equal(cancels,1);assert.equal(controller.getSnapshot().consentUntil,null);
+ }finally{unlisten();controller.dispose();version.dispose();android.dispose();}
+});
+
+
+test('known cancellation of retained Android recovery refreshes idle iOS readback without another selection event',async()=>{
+ const h=await fixture();try{assert.equal(h.controller.setSettlement(true),true);await h.controller.prepare();h.controller.acknowledge(true);
+  h.change((p,a,history)=>{Object.assign(a,iosAssets());Object.assign(history,iosHistory());});
+  await Promise.resolve();await Promise.resolve();
+  assert.equal(h.counts().starts,0);assert.equal(h.counts().cancels,1);assert.equal(h.controller.getSnapshot().settlement,false);assert.equal(h.controller.getSnapshot().platform,'ios');assert.equal(h.controller.getSnapshot().request.platform,'ios');assert.equal(h.controller.prepareReason(),null);assert.equal(h.controller.getSnapshot().consentUntil,null);
+ }finally{h.controller.dispose();}
 });

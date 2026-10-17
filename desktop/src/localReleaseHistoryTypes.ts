@@ -6,8 +6,8 @@ import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePrefli
 export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile' | 'review-recovery';
 export type PrepareLocalHistory = { projectId: string; executionMode: 'local' } & (
   { action: 'enroll' | 'verify'; candidateOperationId?: never; platform?: never } |
-  { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution'; candidateOperationId: string; platform?: 'ios' } |
-  { action: 'review-reconcile' | 'review-recovery'; candidateOperationId: string; platform?: never }
+  { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile'; candidateOperationId: string; platform?: 'ios' } |
+  { action: 'review-recovery'; candidateOperationId: string; platform?: never }
 );
 export interface LocalCandidateInputs {
   operationId: string; candidateSha256: string; sourceCommit: string; sourceTree: string;

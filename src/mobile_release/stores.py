@@ -248,8 +248,9 @@ def _store_environment(
         local=getattr(invocation.cancellation,'_local_store_source',None)
         if name=='MOBILE_RELEASE_IOS_ARCHIVE_PATH' and local is not None:
             from .local_store_execute import LocalStoreExecuteRun
+            from .local_store_reconcile import LocalStoreReconcileRun
             owner=local.require_operation()
-            if type(owner) is not LocalStoreExecuteRun or not owner.archive_artifact(config,request,lane_evidence,invocation,artifact):
+            if type(owner) not in (LocalStoreExecuteRun,LocalStoreReconcileRun) or not owner.archive_artifact(config,request,lane_evidence,invocation,artifact):
                 raise StoreOperationError("Local archive lacks its original Execute owner")
         elif not artifact.is_file():
             raise StoreOperationError(f"{name} must identify a regular release artifact")

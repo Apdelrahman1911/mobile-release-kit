@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, ios-tools-layout]
+        options: [all, integration, launcher, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, ios-tools-layout, ios-tools]
 
 permissions:
   contents: read
@@ -429,8 +429,12 @@ jobs:
               saved_command_owner::execute_native::ios_tests::local_ios_execute_independent_original_closes_never_create_android_tail \
               local_release_history_protocol::tests::local_release_history_ios_execution_has_exact_sixteen_fields_and_no_recovery \
               installed_runtime::ios_upload_tools_tests::ios_upload_actual_selected_tools_pre_post_and_positive_consume \
+              local_store_reconcile_protocol::tests::local_ios_reconcile_original_context_consent_and_request_have_no_tools_or_settlement \
+              local_store_reconcile_protocol::tests::local_ios_reconcile_four_frames_exact_receipt_and_fifteen_roles_do_not_repair_finality \
+              asset_session::store_material::tests::apple_reconcile_loan_is_original_asc_and_cannot_grant_android_settlement_or_document \
+              local_release_history_protocol::tests::local_release_history_ios_reconcile_requires_current_last_execution_and_exact_prepared_files \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 85 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 89 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.
@@ -726,9 +730,9 @@ jobs:
               # shared stream; successes need only their Minitest counts.
               clean["MT_CPU"] = "1"
               for phase, filename, expected_count in (
-                  ("apple-lanes", "test_apple_lanes.rb", 33),
+                  ("apple-lanes", "test_apple_lanes.rb", 36),
                   ("play-lanes", "test_play_lanes.rb", 58),
-                  ("local-runtime", "test_local_store_execution_runtime.rb", 11),
+                  ("local-runtime", "test_local_store_execution_runtime.rb", 13),
                   ("lane-resources", "test_store_lane_resources.rb", 13),
                   ("lane-lifetime", "test_store_lane_lifetime.rb", 21),
               ):
@@ -768,6 +772,61 @@ jobs:
               "projectedCrc32FastlaneSmoke": "passed", "appleP256PemDerSigning": "passed",
               "networkDenied": True, "syntheticStoreTests": test_results, "liveStoreRun": False}))
           PY
+      - name: Remove only this job's restored component and smoke scratch
+        if: always() && steps.work.outputs.root != ''
+        shell: bash
+        env:
+          OWNER_PYTHON: ${{ steps.python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          "$OWNER_PYTHON" -I -S -B - <<'PY'
+          import os, shutil, stat
+          from pathlib import Path
+          work = Path(os.environ["WORK_ROOT"])
+          info = work.lstat()
+          assert work.parent == Path(os.environ["RUNNER_TEMP"]) and work.name.startswith("mrk-store-smoke.")
+          assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
+          shutil.rmtree(work)
+          PY
+
+  ios-tools:
+    # Manual tool qualification only; no signed runtime/dependency/app rebuild.
+    if: github.event_name == 'workflow_dispatch' && inputs.component == 'ios-tools'
+    name: Qualify original iOS resolver (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: '3.14.7'
+      - name: Allocate one task-owned iOS tools directory
+        id: work
+        shell: bash
+        env:
+          COMPONENT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]] || exit 1
+          [[ "$RUNNER_OS" == macOS && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == "$COMPONENT_ARCH" && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-ios-tools.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
       - name: Qualify the original selected Xcrun resolver before pending or ASC
         timeout-minutes: 2
         shell: bash
@@ -823,7 +882,7 @@ jobs:
           print(json.dumps({"originalXcrunResolver": "passed", "tests": 1, "skips": 0,
               "networkDenied": True, "liveStoreRun": False}))
           PY
-      - name: Remove only this job's restored component and smoke scratch
+      - name: Remove only this job's iOS tools scratch
         if: always() && steps.work.outputs.root != ''
         shell: bash
         env:
@@ -835,7 +894,7 @@ jobs:
           from pathlib import Path
           work = Path(os.environ["WORK_ROOT"])
           info = work.lstat()
-          assert work.parent == Path(os.environ["RUNNER_TEMP"]) and work.name.startswith("mrk-store-smoke.")
+          assert work.parent == Path(os.environ["RUNNER_TEMP"]) and work.name.startswith("mrk-ios-tools.")
           assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
           shutil.rmtree(work)
           PY

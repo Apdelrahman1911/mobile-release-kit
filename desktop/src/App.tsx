@@ -568,7 +568,11 @@ export function App() {
   localStoreExecuteControllerRef.current=localStoreExecute;
   const localStoreExecuteState=useSyncExternalStore(localStoreExecute.subscribe,localStoreExecute.getSnapshot,localStoreExecute.getSnapshot);
   const [localStoreReconcile] = useState(() => new LocalStoreReconcileController({
-    project: () => androidBuild.getSnapshot().project, assets: assetSession.getSnapshot,
+    project: () => {
+      if(assetSession.getSnapshot().scope.platform!=='ios')return androidBuild.getSnapshot().project;
+      const current=workspaceRef.current;
+      return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?localStoreProjectObservation(current.projects[current.selectedId]!,releaseVersion.getSnapshot()):null;
+    }, assets: assetSession.getSnapshot,
     history: localHistory.getSnapshot,
     // Same reciprocal admission, excluding only this original's own slot.
     otherOperationReason: () => storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
@@ -762,9 +766,9 @@ export function App() {
   },[assetSession,androidBuild,localHistory,releaseVersion,localStoreExecute]);
   useEffect(() => () => localStoreReconcile.dispose(), [localStoreReconcile]);
   useEffect(() => {
-    const a=assetSession.subscribe(localStoreReconcile.syncProject),b=androidBuild.subscribe(localStoreReconcile.syncProject),c=localHistory.subscribe(localStoreReconcile.syncProject);
-    localStoreReconcile.syncProject();return()=>{a();b();c();};
-  },[assetSession,androidBuild,localHistory,localStoreReconcile]);
+    const a=assetSession.subscribe(localStoreReconcile.syncProject),b=androidBuild.subscribe(localStoreReconcile.syncProject),c=localHistory.subscribe(localStoreReconcile.syncProject),d=releaseVersion.subscribe(localStoreReconcile.syncProject);
+    localStoreReconcile.syncProject();return()=>{a();b();c();d();};
+  },[assetSession,androidBuild,localHistory,releaseVersion,localStoreReconcile]);
   useEffect(() => {
     const a=assetSession.subscribe(localStorePrepare.syncProject),b=releaseVersion.subscribe(localStorePrepare.syncProject),c=localHistory.subscribe(localStorePrepare.syncProject);
     localStorePrepare.syncProject();return()=>{a();b();c();};

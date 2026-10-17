@@ -58,7 +58,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         return 8 if self.apple_execute else 6
     @property
     def platform(self):
-        return 'ios' if self.apple_execute else 'android'
+        return 'ios' if self.apple_store else 'android'
     def _quote(self,source=96):
         self.checkpoint()
         value=resource_quote(project_depth=len(self.root.parts),version_parent_depth=len((self.root/self.request.context['savedVersion']['source']).parent.parts),
@@ -89,7 +89,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         # overlap. Reserve their actual prequoted size, journal and16MiB fixed
         # source/candidate/control space before any decoder or pending effects.
         retained=3*(own if intent else self._intent_memory)
-        archive=32<<20 if self.apple_execute and self.bundle is not None and not self.bundle.closed else 0
+        archive=32<<20 if self.apple_store and self.bundle is not None and not self.bundle.closed else 0
         require(RETAINED_JOURNAL+retained+(0 if intent else own)+(16<<20)+archive<=MEMORY_LIMIT)
         if intent:self._intent_memory=own
         return quote
@@ -210,7 +210,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
     def _admit_prepared(self,rows):
         c=self.request.context
         reader=CandidateBundleReview
-        if self.apple_execute:
+        if self.apple_store:
             from .local_ios_candidate_review import IOSCandidateBundleReview
             reader=IOSCandidateBundleReview
         bundle=reader(self,operation_id=c['candidateOperationId'],enrollment=self.enrollment,
@@ -235,7 +235,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         self.intent=decode_local_operation_intent(self.intent_bytes,platform=self.platform)
         require(self.intent['integrity']['sha256']==c['intentSha256'] and self.intent['confirmation']==c['confirmation'])
         self.authority=dict(self.intent['preparedBy'],purpose=self.authority_purpose,authorizationId=self.request.native['authorizationId'],intentSha256=c['intentSha256'],
-            source={'commit':o.commit,'tree':o.tree,'ref':o.ref},assignment={'kind':'asc-p8' if self.apple_execute else 'google-service-account','recordId':c['recordId'],
+            source={'commit':o.commit,'tree':o.tree,'ref':o.ref},assignment={'kind':'asc-p8' if self.apple_store else 'google-service-account','recordId':c['recordId'],
             'expectedRevision':c['recordRevision'],'contextRevision':c['credentialContextRevision']})
         validate_local_execution_authority(canonical(self.authority),intent_data=self.intent_bytes,purpose=self.authority_purpose,platform=self.platform)
     def _prepared_post(self):
@@ -276,7 +276,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         env['MOBILE_RELEASE_ANDROID_AAB_PATH']=str(self.bundle.members[0].canonical)
         return env
     def archive_artifact(self,config,request,record,invocation,path):
-        self.checkpoint();require(self.apple_execute and self._store_entered and config is self.config
+        self.checkpoint();require(self.apple_store and self._store_entered and config is self.config
             and request is self.store_request and record is self.record and invocation is self.invocation
             and path==self.bundle.archive.canonical and not self.bundle.closed)
         self._prepared_post();self.bundle._scan();self.bundle.reader.terminal();return True
@@ -334,7 +334,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
                             self.home=home;self.runtime=StoreRuntimeContext.installed(Path(self.request.native['cwd']),invocation=invocation,private_home=home)
                             with finite_scratch(layout='store-selection',cancellation=self.guard,parent=home._path) as received:
                                 self.received=received;self.material_original=self.source.receive_material(self,received)
-                                if self.apple_execute:self._received_material=self.source._material
+                                if self.apple_store:self._received_material=self.source._material
                                 self.readback=_store_operation(config=self.config,release=self.version,request=self.store_request,operation_intent=self.intent,
                                     lane_evidence=self.record,cancellation=self.guard,invocation=invocation,**({"_local_execute":self} if type(self) is LocalStoreExecuteRun else {"_local_reconcile":self}))
                                 observation.check()

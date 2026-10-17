@@ -382,7 +382,6 @@ module MobileReleaseKit
         raise Error.new(:local_shape) unless keys.length == 1
         recover=keys.first == LOCAL_RECONCILE_KEY
         platform=@binding.fetch("lane") == "ios_testflight_internal" ? "ios" : "android"
-        raise Error.new(:local_shape) if recover && platform != "android"
         raw=@environment.fetch(keys.first)
         raise Error.new(:local_size) unless raw.bytesize <= 16*1024
         value=MobileReleaseKit.strict_json(raw,label:"local execution context")
@@ -404,6 +403,9 @@ module MobileReleaseKit
         # owner and sealed with ALL command environment bytes. It is comparison
         # DATA, not a new provider/consent grant or a caller runtime factory.
         context={payload:payload,digest:digest,authority:authority}
+        if platform == "ios"
+          raise Error.new(:local_binding) unless payload.fetch("application").fetch("storeAppId") == @environment.fetch("MOBILE_RELEASE_ASC_APP_ID")
+        end
         if !recover && platform == "ios"
           tools=value.fetch("signingTools")
           raise Error.new(:local_shape) unless tools.instance_of?(Hash) && tools.keys.sort == %w[codesign openssl security] &&

@@ -244,7 +244,7 @@ module MobileReleaseKit
     local_need(%w[operationId authorizationId].all? { |k| local_uuid(value[k]) } &&
       %w[candidateSha256 confirmationSha256].all? { |k| local_hex(value[k], 64) })
     row = local_keys(value["assignment"], %w[kind recordId expectedRevision contextRevision])
-    local_need(%w[android ios].include?(platform) && (platform != "ios" || %w[prepare execute].include?(purpose)) &&
+    local_need(%w[android ios].include?(platform) && (platform != "ios" || %w[prepare execute recover].include?(purpose)) &&
       row["kind"] == (platform == "android" ? "google-service-account" : "asc-p8") && local_hex(row["recordId"], 32) &&
       %w[expectedRevision contextRevision].all? { |k| row[k].instance_of?(Integer) && row[k].between?(1, 2**32 - 2) })
     local_need(purpose == "prepare" ? value["intentSha256"].nil? : local_hex(value["intentSha256"], 64))

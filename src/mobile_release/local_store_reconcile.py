@@ -20,17 +20,29 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
     @property
     def settlement(self):return wire.settling(self.request.context)
     @property
+    def apple_reconcile(self):
+        return type(self) is LocalStoreReconcileRun and self.request.context['platform']=='ios' and not self.settlement
+    @property
+    def runtime_count(self):return 7 if self.apple_reconcile else 6
+    @property
     def material_head(self):return self.observed_head
     @property
     def authority_purpose(self):return 'recover'
     def _quote(self,source=96):
         self.checkpoint()
         q=resource_quote(project_depth=len(self.root.parts),version_parent_depth=len((self.root/self.request.context['savedVersion']['source']).parent.parts),
-            source=source,history_depth=len(Path(self.request.native['home']).parts))
+            source=source,history_depth=len(Path(self.request.native['home']).parts),platform=self.platform)
         # Same prepared/fence original walks as Execute; no Android tool Book,
         # manifest or native current-validator subprocess is acquired.
         extra=(3*len(self.root.parts)+18 if self.settlement else 2*len(self.root.parts)+12)
-        q={k:v+extra for k,v in q.items()};require(q['total']<=256)
+        if self.apple_reconcile:
+            # Initial archive traversal precedes the prepared/fence walks; final
+            # traversal follows their actual positive closes, never close credit.
+            extra=2*len(self.root.parts)+7
+            for key in ('pending','material','lane','source'):q[key]+=extra
+            q['total']=max(v for k,v in q.items() if k!='total')
+        else:q={k:v+extra for k,v in q.items()}
+        require(q['total']<=256)
         if self.quote is not None:require(q['total']<=self.quote['total'])
         self.quote=q;return q
     def _begin(self):
@@ -67,11 +79,19 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
         require(observation is self.observation and observation.calls==8 and not self._source_final)
         self._prepared_post()
         if self.settlement:fence.post(self,own_pending=True)
-        self.bundle.finish();self.prepared_scope.close()
+        if not self.apple_reconcile:self.bundle.finish()
+        self.prepared_scope.close()
         require(all(p.closed() for p in (*self.prepared_readers,*self.prior_readers))
             and (self.settlement or all(p.closed() for p in self.fence_readers)))
+        if self.apple_reconcile:self.bundle.finish()
         self._source_final=True
-    def runtime_environment(self):return self.runtime.environment()
+    def runtime_environment(self):
+        env=self.runtime.environment()
+        if self.apple_reconcile:
+            self._prepared_post();self.bundle._scan();self.bundle.reader.terminal()
+            env['MOBILE_RELEASE_IOS_IPA_PATH']=str(self.bundle.members[0].canonical)
+            env['MOBILE_RELEASE_IOS_ARCHIVE_PATH']=str(self.bundle.archive.canonical)
+        return env
     def attempt_directory(self,attempt,directory):
         self.checkpoint();require(attempt is self.record._pending_attempt and attempt.phase=='ACQUIRING' and self.fence_readers)
         out=self.fence_readers[0];out.check();directory.check()
@@ -85,7 +105,7 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
     def validate_receipt(self,raw):
         self.checkpoint();self._memory(raw,65536)
         return validate_local_execution_receipt(raw,intent_data=self.intent_bytes,authority_data=canonical(self.authority),
-            purpose='recover',expected_intent_sha256=self.request.context['intentSha256'])
+            purpose='recover',expected_intent_sha256=self.request.context['intentSha256'],platform=self.platform)
     def _settlement_payload(self,digest):
         pending=self.execution_pending;require(pending is not None)
         return dict(intentSha256=pending['intentSha256'],receiptSha256=digest,
@@ -130,10 +150,12 @@ class LocalStoreReconcileRun(LocalStoreExecuteRun):
             sourceCommit=i['operationSource']['commit'],sourceTree=i['operationSource']['tree'],applicationId=i['application']['id'],
             version={'name':i['version']['marketing'],'build':i['version']['build']},destination=i['destination'],
             observedAt=receipt['observedAt'],result=receipt['result'],limitations=list(wire.LIMITATIONS),
-            observation='current-internal-target-only',priorExecutionFinality='not-established')
-        self.report={'schemaVersion':1,'scope':'local-android-recovery-settlement' if self.settlement else 'local-android-store-reconcile',
+            observation='current-internal-build-only' if self.apple_reconcile else 'current-internal-target-only',priorExecutionFinality='not-established')
+        if self.apple_reconcile:
+            summary['bundleId']=summary.pop('applicationId');summary['appStoreAppId']=i['application']['storeAppId']
+        self.report={'schemaVersion':1,'scope':'local-android-recovery-settlement' if self.settlement else 'local-%s-store-reconcile'%self.platform,
             'headSequence':head['sequence'],'reconciliationReceipt':summary}
-        wire.validate_result(self.report,settlement=self.settlement)
+        wire.validate_result(self.report,settlement=self.settlement,platform=self.platform)
     def close(self):
         if self._close_claimed:return super().close()
         first=None

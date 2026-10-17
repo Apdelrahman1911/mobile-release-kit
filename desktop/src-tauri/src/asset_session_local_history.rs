@@ -169,7 +169,12 @@ mod tests {
         assert!(!consent.current(&context,7,&root));context.platform=None;consent.platform=None;
         context.action=wire::Action::ReviewReconcile;assert!(!consent.matches_context(&context));
         consent.action=wire::Action::ReviewReconcile;assert!(consent.matches_context(&context));
+        context.platform=Some(wire::CandidatePlatform::Ios);assert!(!consent.matches_context(&context));
+        consent.platform=context.platform;assert!(consent.matches_context(&context));assert_eq!(consent.consent(),wire::IOS_CANDIDATE_CONSENT);
+        context.action=wire::Action::ReviewRecovery;consent.action=context.action;assert!(!consent.matches_context(&context));
+        context.action=wire::Action::ReviewReconcile;consent.action=context.action;
         assert!(!consent.current(&context,7,&root)); // Read-only summary DATA grants no Document.
+        context.platform=None;consent.platform=None;
         consent.action=wire::Action::Enroll;consent.candidate_operation_id=None;
         assert!(!consent.current(&wire::Context{project_id:"registered-project".into(),execution_mode:wire::ExecutionMode::Local,action:wire::Action::Enroll,platform:None,candidate_operation_id:None},7,&root)); // No synthetic Document grant.
         let context=Arc::new(NativeContext{revision:1,project_id:"unrelated-assets".into(),project:root.clone(),registry_generation:7,

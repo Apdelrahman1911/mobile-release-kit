@@ -1460,6 +1460,29 @@ def apple_create_guard(stage, build)
   )
 end
 
+# Fresh observation only. Never call the candidate finisher: it can PATCH.
+def local_reconciled_ios_build!(app, snapshot)
+  original = nil
+  2.times do
+    build = ios_build(app)
+    require_intent_ios_build!(app, build, snapshot, readback_server_time: asc_server_time(app))
+    value = normalized_ios_build(build)
+    details = build.build_beta_detail
+    unless value.fetch("processingState") == "VALID" &&
+           value.fetch("usesNonExemptEncryption") == uses_non_exempt_encryption &&
+           value.fetch("autoNotifyEnabled") == false && details &&
+           %w[READY_FOR_BETA_TESTING IN_BETA_TESTING].include?(details.internal_build_state.to_s)
+      UI.user_error!("Local reconciliation requires the complete internal TestFlight build; no retry is authorized")
+    end
+    if original
+      UI.user_error!("Current TestFlight build identity changed") unless original.fetch("id") == value.fetch("id")
+      MobileReleaseKit::AppleStore.require_build!(original, value, expected_encryption: uses_non_exempt_encryption)
+    end
+    original = value
+  end
+  original
+end
+
 def finish_ios_candidate!(app, build, snapshot)
   original_id = build.id.to_s
   previous = nil
@@ -1997,7 +2020,9 @@ end
 
 desc "Upload one signed IPA to internal TestFlight without external distribution"
 lane :ios_testflight_internal do
-  if MobileReleaseKit::StoreLaneRuntime.local_execution_context
+  local = MobileReleaseKit::StoreLaneRuntime.local_execution_context
+  recovering = local && local.fetch(:authority).fetch("purpose") == "recover"
+  if local && !recovering
     MobileReleaseKit::StoreLaneRuntime.current_runtime!.local_ios_transport!
   end
   api_key = asc_api_key
@@ -2015,6 +2040,15 @@ lane :ios_testflight_internal do
     next
   end
   intent_snapshot = require_operation_intent!("ios_testflight_internal", "ios")
+  if recovering
+    # Same sealed Invocation, but no upload tools or mutation/retry branch.
+    current = local_reconciled_ios_build!(app, intent_snapshot)
+    write_receipt(operation: "ios_testflight_internal", platform: "ios", identity: ios_identity,
+      result: "reconciled", extra: { appStoreAppId: ios_app_store_id,
+        buildResourceId: current.fetch("id"), processingState: current.fetch("processingState"),
+        autoNotifyEnabled: false, state: "processed" })
+    next
+  end
   prior_execution = apple_prior_execution?
   existing = ios_exact_builds(app)
   build = existing.first

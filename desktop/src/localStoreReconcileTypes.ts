@@ -3,11 +3,13 @@ import type { LocalStoreIdentity, LocalStoreReason } from './localStorePreflight
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 
 // Renderer comparison DATA only. Native Document/material/tool originals own admission.
-export interface PrepareLocalStoreReconcile extends Omit<PrepareLocalStoreIntent,'platform'> {
-  intentSha256: string;
-  settlement?: 'record-current-target';
-}
-export interface LocalStoreReconcileContext extends PrepareLocalStoreReconcile { platform: 'android'; operation: 'local-store-reconcile' | 'local-store-recovery-settle' }
+export type PrepareLocalStoreReconcile = Omit<PrepareLocalStoreIntent,'platform'> & { intentSha256: string } & (
+  { platform?: never; settlement?: 'record-current-target' } | { platform: 'ios'; settlement?: never }
+);
+export type LocalStoreReconcileContext = Omit<PrepareLocalStoreIntent,'platform'> & { intentSha256: string } & (
+  { platform: 'android'; operation: 'local-store-reconcile' | 'local-store-recovery-settle'; settlement?: 'record-current-target' } |
+  { platform: 'ios'; operation: 'local-store-reconcile'; settlement?: never }
+);
 export type LocalStoreReconcileIdentity = LocalStoreIdentity;
 export interface LocalReconciliationReceipt {
   operationId: string; candidateSha256: string; intentSha256: string; receiptSha256: string; authorizationId: string;
@@ -16,8 +18,11 @@ export interface LocalReconciliationReceipt {
   observation: 'current-internal-target-only'; priorExecutionFinality: 'not-established';
   limitations: ['non-publishing', 'not-retry-permission', 'old-evidence-preserved', 'saved-inputs-not-atomic'];
 }
+export interface IOSReconciliationReceipt extends Omit<LocalReconciliationReceipt,'applicationId'|'destination'|'observation'> {
+  bundleId: string; appStoreAppId: string; destination: { channel: 'testflight-internal' }; observation: 'current-internal-build-only';
+}
 export interface LocalStoreReconcileResult {
-  schemaVersion: 1; scope: 'local-android-store-reconcile' | 'local-android-recovery-settlement'; headSequence: number; reconciliationReceipt: LocalReconciliationReceipt;
+  schemaVersion: 1; scope: 'local-android-store-reconcile' | 'local-android-recovery-settlement' | 'local-ios-store-reconcile'; headSequence: number; reconciliationReceipt: LocalReconciliationReceipt | IOSReconciliationReceipt;
 }
 export interface LocalStoreReconcileOperation extends LocalStoreReconcileIdentity {
   context: LocalStoreReconcileContext; phase: OfflinePreflightPhase; intentUsable: boolean;
@@ -28,7 +33,7 @@ export interface LocalStoreReconcileStatus {
 }
 export interface LocalStoreReconcileApi {
   prepareLocalStoreReconcile(request: PrepareLocalStoreReconcile): Promise<LocalStoreReconcileStatus>;
-  startLocalStoreReconcile(request: LocalStoreReconcileIdentity & { consentVersion: 'local-android-store-reconcile-v1' | 'local-android-recovery-settle-v1' }): Promise<LocalStoreReconcileStatus>;
+  startLocalStoreReconcile(request: LocalStoreReconcileIdentity & { consentVersion: 'local-android-store-reconcile-v1' | 'local-android-recovery-settle-v1' | 'local-ios-store-reconcile-v1' }): Promise<LocalStoreReconcileStatus>;
   localStoreReconcileStatus(): Promise<LocalStoreReconcileStatus>;
   cancelLocalStoreReconcile(operationId: string, ownerGeneration: string): Promise<LocalStoreReconcileStatus>;
   subscribeLocalStoreReconcile(listener: (status: unknown) => void): Promise<() => void>;

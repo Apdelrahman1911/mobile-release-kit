@@ -365,7 +365,7 @@ def _local_authority(value: object, *, purpose: str, platform: str = "android") 
         and _sha(value["candidateSha256"]) and _sha(value["confirmationSha256"]))
     assignment = _keys(value["assignment"], {"kind", "recordId", "expectedRevision", "contextRevision"})
     _need(type(platform) is str and platform in {"android", "ios"}
-        and (platform != "ios" or purpose in {"prepare", "execute"})
+        and (platform != "ios" or purpose in {"prepare", "execute", "recover"})
         and assignment["kind"] == ("google-service-account" if platform == "android" else "asc-p8"))
     _assignments([assignment], platform)
     _need(value["intentSha256"] is None if purpose == "prepare" else _sha(value["intentSha256"]))

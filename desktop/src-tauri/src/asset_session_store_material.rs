@@ -19,7 +19,7 @@ impl StoreCommand {
         Self::Access(c)=>c.platform==wire::AccessPlatform::Ios,
         Self::Prepare(c)=>c.platform==crate::local_store_prepare_protocol::Platform::Ios,
         Self::Execute(c)=>c.platform==crate::local_store_execute_protocol::Platform::Ios,
-        Self::Reconcile(_)=>false,
+        Self::Reconcile(c)=>c.platform==crate::local_store_reconcile_protocol::Platform::Ios,
     }}
 }
 fn refused() -> BridgeError {
@@ -244,6 +244,29 @@ mod tests {
         assert!(original.with_bytes(&state,7,&root,|_,_|Ok(())).is_err());
         #[cfg(all(target_os="macos",not(feature="macos-android-registration-helper")))]
         assert!(matches!(original.execute_census(),Some(None)));
+    }
+    #[test]
+    fn apple_reconcile_loan_is_original_asc_and_cannot_grant_android_settlement_or_document(){
+        use crate::local_store_reconcile_protocol as reconcile;
+        let mut state=apple_model();let root=state.context.as_ref().unwrap().project.clone();
+        let mut c=reconcile::tests::ios_context();c.project_id="inert-project".into();c.credential_context_revision=2;c.record_id="a".repeat(32);c.record_revision=1;
+        let original=borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Reconcile(c.clone()))).unwrap();
+        assert!(original.reconcile_matches(&c,7,&root)&&original.current(&state,7,&root));assert!(!original.reconcile_current(&c,7,&root));
+        assert!(original.reconcile_accepts_consent(reconcile::APPLE_CONSENT));
+        for token in [reconcile::CONSENT,reconcile::SETTLEMENT_CONSENT,crate::local_store_execute_protocol::APPLE_CONSENT]{assert!(!original.reconcile_accepts_consent(token));}
+        let parts=original.parts().unwrap();assert_eq!(parts.iter().map(|p|p.0).collect::<Vec<_>>(),vec!["asc-p8","asc-key-id","asc-issuer-id"]);
+        assert_eq!(parts[0].1.as_ptr(),state.records[0].payload.material.as_ref().unwrap().bytes().as_ptr());
+        assert_eq!(parts[1].1.as_ptr(),state.records[0].payload.fields.as_ref().unwrap().borrow_value("keyId").unwrap().as_ptr());
+        assert_eq!(parts[2].1.as_ptr(),state.records[0].payload.fields.as_ref().unwrap().borrow_value("issuerId").unwrap().as_ptr());
+        assert!(original.execute_tools.is_none());assert!(original.with_bytes(&state,7,&root,|_,_|Ok(())).is_err());
+        assert!(borrow_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2).is_err());
+        let mut android=c.clone();android.platform=reconcile::Platform::Android;android.confirmation="candidate:android:1.2.3:42".into();
+        assert!(!original.reconcile_matches(&android,7,&root));
+        assert!(borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Reconcile(android))).is_err());
+        let mut settlement=c.clone();settlement.operation=reconcile::Operation::LocalStoreRecoverySettle;settlement.settlement=Some(reconcile::Settlement::RecordCurrentTarget);
+        assert!(!original.reconcile_matches(&settlement,7,&root));
+        assert!(original.own_retained_heap_bytes().unwrap()>=c.intent_sha256.capacity()+c.candidate_sha256.capacity());
+        state.assignments[0].context_revision+=1;assert!(!original.current(&state,7,&root));
     }
     #[test]
     fn apple_prepare_loan_binds_original_command_and_consent_without_google_or_document_grant(){
@@ -585,7 +608,7 @@ impl SelectedStoreMaterial {
         matches!(self.command.as_ref(),Some(StoreCommand::Reconcile(c)) if c==context)
             &&self.native.registry_generation==registration&&self.native.project==*root&&self.native.project_id==context.project_id
             &&self.native.revision==context.credential_context_revision&&self.key.id.0==context.record_id&&self.key.revision==context.record_revision
-            &&self.native.execution_mode==commands::ExecutionMode::Local&&self.native.platform==Platform::Android&&self.native.stage==Stage::Candidate
+            &&self.native.execution_mode==commands::ExecutionMode::Local&&self.native.platform==if context.platform==crate::local_store_reconcile_protocol::Platform::Ios{Platform::Ios}else{Platform::Android}&&self.native.stage==Stage::Candidate
             &&matches!(self.native.purpose,Purpose::Full|Purpose::Store)
     }
     fn reconcile_document_matches(&self,document:&Arc<Inner>,state:&DocumentState,context:&crate::local_store_reconcile_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
@@ -606,9 +629,10 @@ impl DocumentBinding {
     pub(super) fn review_store_reconcile_material(&self,state:&DocumentState,context:&crate::local_store_reconcile_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->Result<Arc<SelectedStoreMaterial>,BridgeError>{
         if !cfg!(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))||!self.native_qualified()
             ||encrypted_mode(state)&&!self.persistence_qualified(){return Err(refused());}
-        let mut original=borrow_material(state,commands::RecordRef{record_id:&context.record_id,expected_revision:context.record_revision},context.credential_context_revision)?;
+        let mut original=borrow_selected_material(state,commands::RecordRef{record_id:&context.record_id,expected_revision:context.record_revision},
+            context.credential_context_revision,Some(StoreCommand::Reconcile(context.clone())))?;
         let held=Arc::get_mut(&mut original).ok_or_else(refused)?;
-        held.command=Some(StoreCommand::Reconcile(context.clone()));held.prepare_document=Some(Arc::downgrade(&self.inner));
+        held.prepare_document=Some(Arc::downgrade(&self.inner));
         if !original.reconcile_document_matches(&self.inner,state,context,registration,root){return Err(refused());}original.parts()?;Ok(original)
     }
     pub(super) fn recheck_store_reconcile_material(&self,state:&DocumentState,original:&Arc<SelectedStoreMaterial>,registration:u32,root:&asset_source::RegisteredRoot)->Result<(),BridgeError>{

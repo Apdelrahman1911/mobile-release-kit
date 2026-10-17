@@ -183,8 +183,11 @@ class LocalStorePrepareRun:
     def apple_execute(self):
         return False
     @property
+    def apple_reconcile(self):
+        return False
+    @property
     def apple_store(self):
-        return self.apple_prepare or self.apple_execute
+        return self.apple_prepare or self.apple_execute or self.apple_reconcile
     @property
     def runtime_count(self):
         return 7 if self.apple_prepare else 6

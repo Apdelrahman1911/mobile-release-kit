@@ -241,8 +241,8 @@ class LocalStorePrepareTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv,1 if apple and i==5 and fault=='bad-p8' else 0,stdout=out,stderr='')
             self.assertEqual(argv[-1],'ios_testflight_internal' if apple else 'android_internal_upload');self.assertLessEqual(kwargs['timeout'],900)
             if apple:
-                self.assertEqual(kwargs['environ']['MOBILE_RELEASE_STORE_MODE'],'execute' if _execute else 'prepare')
-                self.assertEqual(e.service.record._files_owner().mode,'execute' if _execute else 'prepare')
+                self.assertEqual(kwargs['environ']['MOBILE_RELEASE_STORE_MODE'],'execute' if _execute or _reconcile else 'prepare')
+                self.assertEqual(e.service.record._files_owner().mode,'execute' if _execute or _reconcile else 'prepare')
                 self.assertNotIn('MOBILE_RELEASE_LOCAL_EXECUTE_AUTHORITY_JSON',kwargs['environ'])
             timing=e.service.record._files_owner().timing
             self.assertEqual(timing.run,__import__('math').floor(e.input.work_end*1e9))

@@ -113,11 +113,11 @@ class IOSStorePrepareTests(unittest.TestCase):
         from mobile_release import _desktop_store_execute_protocol as execute,_desktop_store_reconcile_protocol as reconcile
         row={**c,'operation':'local-store-execute','intentSha256':'c'*64}
         self.assertEqual(execute.context(row),row)
-        with self.assertRaises(ValueError):reconcile.context({**row,'operation':'local-store-reconcile'})
+        self.assertEqual(reconcile.context({**row,'operation':'local-store-reconcile'}),{**row,'operation':'local-store-reconcile'})
         from mobile_release import _desktop_local_history_protocol as h
         row=dict(projectId='p',executionMode='local',action='review-prepared',platform='ios',candidateOperationId=OP)
         self.assertEqual(h.context(row),row)
-        for action in ('review-reconcile','review-recovery'):
+        for action in ('review-recovery',):
             with self.assertRaises(ValueError):h.context({**row,'action':action})
 
     def test_ios_tree_reservation_preserves256_and_android_original_quote(self):

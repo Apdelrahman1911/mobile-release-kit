@@ -274,4 +274,46 @@ class LocalStoreExecutionRuntimeTest < Minitest::Test
     rt,_=model(lane:'ios_testflight_internal');assert_raises(R::Error) { rt.send(:admit_local_execution!) }
   end
 
+  def test_ios_reconcile_original_admission_is_readonly_and_requires_exact_app
+    ios_transport;reconcile_transport
+    runtime,invocation=model(lane:'ios_testflight_internal');admit(runtime)
+    M::NativeProcessSpawn.stub(:monotonic_ns,1) do
+      context=R.local_execution_context
+      assert_equal [:authority,:digest,:payload],context.keys.sort
+      assert_equal 'recover',context.fetch(:authority).fetch('purpose')
+      assert_equal 'ios',context.fetch(:payload).fetch('platform')
+      assert_same context,invocation.instance_variable_get(:@local_execution)
+      [M::IosUploadValidation,M::AndroidUploadValidation].each do |adapter|
+        assert_raises(L::LifetimeError) { invocation.local_current_validation_request(adapter:adapter) }
+      end
+      assert_raises(R::Error) { runtime.local_ios_transport! }
+      ENV['MOBILE_RELEASE_ASC_APP_ID']='foreign'
+      assert_raises(R::Error) { R.local_execution_context }
+      assert invocation.unknown?
+    end
+    # Re-enter a fresh inert original: app mismatch is also refused at admission,
+    # before a current context or any protected tool acquisition is published.
+    runtime,_=model(lane:'ios_testflight_internal')
+    assert_raises(R::Error) { runtime.send(:admit_local_execution!) }
+    assert_nil runtime.instance_variable_get(:@local_execution)
+  end
+  def test_ios_reconcile_actual_initial_env_gate_and_closed_transport
+    ios_transport;reconcile_transport
+    %w[NONCE ROOT ROOT_ID CLOCK RUN_DEADLINE_NS HARD_DEADLINE_NS].each { |name| ENV['MOBILE_RELEASE_STORE_LANE_'+name]='inert' }
+    ENV['MOBILE_RELEASE_OPERATION']='ios_testflight_internal';ENV['MOBILE_RELEASE_STORE_MODE']='execute'
+    runtime,_=model(lane:'ios_testflight_internal')
+    assert_equal :nonce,assert_raises(R::Error) { runtime.send(:admit!,'ios_testflight_internal') }.reason
+    original=ENV.fetch(R::LOCAL_RECONCILE_KEY)
+    ENV[KEY]=original;runtime,_=model(lane:'ios_testflight_internal')
+    assert_equal :environment,assert_raises(R::Error) { runtime.send(:admit!,'ios_testflight_internal') }.reason
+    ENV.delete(KEY)
+    [->(v){v['signingTools']=@tool},->(v){v['transportTools']={}},->(v){v['toolchain']={}},
+     ->(v){v['authority']['purpose']='execute'},->(v){v['expectedIntentSha256']='f'*64}].each do |change|
+      value=JSON.parse(original);change.call(value);ENV[R::LOCAL_RECONCILE_KEY]=M.canonical_json(value)
+      runtime,_=model(lane:'ios_testflight_internal')
+      assert_raises(R::Error,M::ContractError) { runtime.send(:admit_local_execution!) }
+      assert_nil runtime.instance_variable_get(:@local_execution)
+    end
+  end
+
 end

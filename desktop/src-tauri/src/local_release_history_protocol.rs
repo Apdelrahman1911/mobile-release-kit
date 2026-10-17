@@ -51,7 +51,7 @@ pub(crate) struct Context {
 impl Context {
     pub(crate) fn consent(&self)->&'static str{if self.platform==Some(CandidatePlatform::Ios){IOS_CANDIDATE_CONSENT}else{self.action.consent()}}
     pub(crate) fn valid(&self)->bool{valid_id(&self.project_id)
-        &&(self.platform.is_none()||matches!(self.action,Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution))&&if self.action.candidate(){
+        &&(self.platform.is_none()||matches!(self.action,Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile))&&if self.action.candidate(){
     self.candidate_operation_id.as_deref().is_some_and(journal_uuid)
 }else{self.candidate_operation_id.is_none()}}}
 impl<'de> Deserialize<'de> for Context {
@@ -506,14 +506,14 @@ mod tests {
     }
     #[test]
     fn local_release_history_ios_platform_has_original_distinct_consent(){
-        for action in [Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared]{
+        for action in [Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared,Action::ReviewExecution,Action::ReviewReconcile]{
             let mut c=context(action);c.platform=Some(CandidatePlatform::Ios);let value=json!(c);
             assert_eq!(prepare(&value).unwrap(),c);assert_eq!(c.consent(),IOS_CANDIDATE_CONSENT);
             for token in [CONSENT,CANDIDATE_CONSENT,IOS_CANDIDATE_CONSENT]{let input=start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":token})).unwrap();
                 assert_eq!(input.consents(c.consent()),token==IOS_CANDIDATE_CONSENT);}
             for platform in [Value::Null,json!("android"),json!("macos")]{let mut v=value.clone();v["platform"]=platform;assert!(prepare(&v).is_err());}
         }
-        for action in [Action::Enroll,Action::Verify,Action::ReviewReconcile,Action::ReviewRecovery]{
+        for action in [Action::Enroll,Action::Verify,Action::ReviewRecovery]{
             let mut value=json!(context(action));value["platform"]=json!("ios");assert!(prepare(&value).is_err());}
     }
     #[test]
@@ -694,9 +694,29 @@ mod tests {
         for field in ready["preparedIntent"].as_object().unwrap().keys(){let mut bad=ready.clone();bad["preparedIntent"].as_object_mut().unwrap().remove(field);assert!(!check(&bad),"{field}");}
         for(field,value)in[("applicationId",json!("dev.example.app")),("appStoreAppId",Value::Null),("priorPrepareFinality",json!("complete"))]{
             let mut bad=ready.clone();bad["preparedIntent"][field]=value;assert!(!check(&bad));}
+        // A platform match alone does not make this earlier selected row the current last operation.
         let mut reconcile=ready.clone();reconcile["headSequence"]=json!(6);reconcile["history"][0]["phase"]=json!("execute-pending");
         for platform in [None,Some(CandidatePlatform::Ios)]{let mut other=context(Action::ReviewReconcile);other.platform=platform;
             assert!(!ResultData::deserialize(&reconcile).unwrap().matches_context(&other));}
+    }
+    #[test]
+    fn local_release_history_ios_reconcile_requires_current_last_execution_and_exact_prepared_files(){
+        let mut c=context(Action::ReviewReconcile);c.platform=Some(CandidatePlatform::Ios);assert!(prepare(&json!(c)).is_ok());
+        let mut ready=prepared_result(&c);ready["history"].as_array_mut().unwrap().truncate(1);ready["headSequence"]=json!(6);
+        ready["history"][0]["phase"]=json!("execute-pending");ready["history"][0]["recoveryRequired"]=json!(true);
+        let p=&mut ready["preparedIntent"];p.as_object_mut().unwrap().remove("applicationId");p["bundleId"]=json!("dev.example.ios-app");p["appStoreAppId"]=json!("001234");
+        p["destination"]=json!({"channel":"testflight-internal"});p["limitations"]=json!(["non-publishing","prepare-not-execute","current-asc-snapshot-may-change","current-bundle-not-historical-finality","saved-inputs-not-atomic"]);
+        assert_eq!(p.as_object().unwrap().len(),14);
+        let check=|v:&Value|ResultData::deserialize(v).is_ok_and(|r|r.matches_context(&c));assert!(check(&ready));
+        for head in [6,513]{let mut d=prefix(&c,head);let mut t=terminal(&c);t["result"]=ready.clone();t["result"]["headSequence"]=json!(head);
+            assert!(decode(&mut d,&c,3,"terminal",t).is_ok());assert!(d.finish());}
+        for phase in ["settled-success","settled-failure","reconciliation-required"]{let mut v=ready.clone();v["headSequence"]=json!(7);v["history"][0]["phase"]=json!(phase);v["history"][0]["recoveryRequired"]=json!(phase=="reconciliation-required");assert!(check(&v));}
+        let mut older=ready.clone();older["history"].as_array_mut().unwrap().push(json!({"operationId":"23456789-1234-4234-8234-123456789abc","phase":"inputs-pending","recoveryRequired":true}));assert!(!check(&older));
+        for phase in ["prepared","prepare-pending","inputs-ready","target-reconciled"]{let mut bad=ready.clone();bad["history"][0]["phase"]=json!(phase);assert!(!check(&bad));}
+        for key in ["preparedIntent","candidateInputs","executionReceipt","reconciliationReceipt"]{let mut bad=ready.clone();bad[key]=Value::Null;assert!(!check(&bad));}
+        let mut android=c.clone();android.platform=None;assert!(!ResultData::deserialize(&ready).unwrap().matches_context(&android));
+        let mut recovery=c.clone();recovery.action=Action::ReviewRecovery;assert!(prepare(&json!(recovery)).is_err());assert!(!ResultData::deserialize(&ready).unwrap().matches_context(&recovery));
+        let mut bad=ready;bad["preparedIntent"]["observation"]=json!("current-internal-build-only");assert!(!check(&bad));
     }
     #[test]
     fn local_release_history_prepared_review_requires_selected_prepared_row_not_global_latest(){
@@ -789,7 +809,8 @@ mod tests {
         receipt.remove("applicationId");receipt.insert("bundleId".into(),json!("dev.example.ios-app"));receipt.insert("appStoreAppId".into(),json!("000123"));receipt.insert("destination".into(),json!({"channel":"testflight-internal"}));
         assert_eq!(receipt.len(),16);assert!(ResultData::deserialize(&ready).unwrap().matches_context(&c));
         let mut android=c.clone();android.platform=None;assert!(!ResultData::deserialize(&ready).unwrap().matches_context(&android));
-        for action in [Action::ReviewReconcile,Action::ReviewRecovery]{let mut unsupported=c.clone();unsupported.action=action;assert!(!unsupported.valid());}
+        let mut unsupported=c.clone();unsupported.action=Action::ReviewRecovery;assert!(!unsupported.valid());
+        let mut reconcile=c.clone();reconcile.action=Action::ReviewReconcile;assert!(reconcile.valid());assert!(!ResultData::deserialize(&ready).unwrap().matches_context(&reconcile));
         for (key,value) in [("applicationId",json!("dev.example.app")),("appStoreAppId",json!(123)),("priorExecutionFinality",json!("complete")),("observation",json!("current-store-state"))]{
             let mut bad=ready.clone();bad["executionReceipt"][key]=value;assert!(!ResultData::deserialize(&bad).is_ok_and(|r|r.matches_context(&c)));
         }

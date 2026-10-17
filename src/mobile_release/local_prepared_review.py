@@ -134,7 +134,7 @@ def _prepared_files(owner, enrollment):
     from .local_release_history import LocalHistoryRun
     require(type(owner) is LocalHistoryRun and owner.request.context['action'] in {'review-prepared', 'review-execution', 'review-reconcile', 'review-recovery'})
     platform=owner.request.context.get('platform','android')
-    require(platform=='android' or platform=='ios' and owner.request.context['action'] in {'review-prepared','review-execution'})
+    require(platform=='android' or platform=='ios' and owner.request.context['action'] in {'review-prepared','review-execution','review-reconcile'})
     recovery = owner.request.context['action'] == 'review-recovery'
     execution = owner.request.context['action'] == 'review-execution'
     reconcile = owner.request.context['action'] == 'review-reconcile'
@@ -177,7 +177,7 @@ def _prepared_files(owner, enrollment):
             from .local_release_intent import decode_local_operation_intent
             # _intent already prequoted this same bounded graph. Its parsed
             # graph retired before this sequential pending-binding comparison.
-            intent=decode_local_operation_intent(raw);execution_binding(intent,rows);del intent
+            intent=decode_local_operation_intent(raw,platform=platform);execution_binding(intent,rows);del intent
         intent_raw = raw if execution or recovery else None
         del raw  # _intent's complete parsed graph has already returned/retired.
         out.check(); owner.checkpoint()

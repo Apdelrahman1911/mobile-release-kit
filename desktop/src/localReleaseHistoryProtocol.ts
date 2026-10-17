@@ -91,7 +91,7 @@ export function recoveryReceiptFields(i: unknown, operationId: unknown): boolean
 }
 function request(v:unknown):boolean{
  const candidate=object(v)&&candidateHistoryAction(v.action),ios=object(v)&&Object.hasOwn(v,'platform');
- return (!ios||v.platform==='ios'&&['review-inputs','abandon-inputs','review-prepared','review-execution'].includes(v.action as string))&&keys(v,[...contextKeys,...(candidate?['candidateOperationId']:[]),...(ios?['platform']:[])])&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&v.executionMode==='local'&&(candidate?uuid(v.candidateOperationId):member(['enroll','verify'],v.action));
+ return (!ios||v.platform==='ios'&&['review-inputs','abandon-inputs','review-prepared','review-execution','review-reconcile'].includes(v.action as string))&&keys(v,[...contextKeys,...(candidate?['candidateOperationId']:[]),...(ios?['platform']:[])])&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&v.executionMode==='local'&&(candidate?uuid(v.candidateOperationId):member(['enroll','verify'],v.action));
 }
 export function parseLocalHistoryRequest(input:unknown):PrepareLocalHistory|null{
  try{const v=copyBoundedComparisonData(input,8192);return request(v)?v as PrepareLocalHistory:null;}catch{return null;}

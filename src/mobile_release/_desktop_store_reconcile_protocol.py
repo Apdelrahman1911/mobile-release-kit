@@ -8,6 +8,7 @@ from .local_release_journal import canonical
 require,sha,ProtocolError=prepare.require,prepare.sha,prepare.ProtocolError
 PROTOCOL='mrk-local-store-reconcile/1'
 CONSENT='local-android-store-reconcile-v1'
+IOS_CONSENT='local-ios-store-reconcile-v1'
 WORK_SECONDS,FINALITY_SECONDS=1200,1210
 REQUEST_LIMIT,RESPONSE_LIMIT=16*1024,64*1024
 KEY_PREFIX,KEY_SUFFIX=prepare.KEY_PREFIX,prepare.KEY_SUFFIX
@@ -19,10 +20,10 @@ def settling(value):
     return type(value) is dict and value.get('operation')=='local-store-recovery-settle'
 def context(value):
     require(type(value) is dict and sha(value.get('intentSha256')))
-    if settling(value):require(value.get('settlement')==SETTLEMENT)
+    if settling(value):require(value.get('settlement')==SETTLEMENT and value.get('platform')=='android')
     else:require(value.get('operation')=='local-store-reconcile' and 'settlement' not in value)
     old={k:v for k,v in value.items() if k not in {'intentSha256','settlement'}};old['operation']='local-store-prepare'
-    prepare.context(old);return value
+    prepare.context(old,apple_prepare=True);return value
 @dataclass(frozen=True)
 class StoreReconcileRequest:
     operation_id:str
@@ -42,15 +43,15 @@ def phases(request):
     require(type(request) is StoreReconcileRequest);context(request.context)
     return PHASES+('recovery-settled',) if settling(request.context) else PHASES
 response,reply=prepare.response,prepare.reply
-def validate_result(value,*,settlement=False):
-    require(type(settlement) is bool)
+def validate_result(value,*,settlement=False,platform='android'):
+    require(type(settlement) is bool and platform in {'android','ios'} and not (settlement and platform=='ios'))
     require(type(value) is dict and set(value)=={'schemaVersion','scope','headSequence','reconciliationReceipt'}
         and type(value['schemaVersion']) is int and value['schemaVersion']==1
-        and value['scope']==('local-android-recovery-settlement' if settlement else 'local-android-store-reconcile') and integer(value['headSequence'],513,7 if settlement else 6))
+        and value['scope']==('local-android-recovery-settlement' if settlement else 'local-%s-store-reconcile'%platform) and integer(value['headSequence'],513,7 if settlement else 6))
     r=value['reconciliationReceipt']
-    require(type(r) is dict and r.get('observation')=='current-internal-target-only'
+    require(type(r) is dict and r.get('observation')==('current-internal-build-only' if platform=='ios' else 'current-internal-target-only')
         and r.get('priorExecutionFinality')=='not-established' and r.get('result')=='reconciled')
-    execute.receipt_summary({k:v for k,v in r.items() if k not in {'observation','priorExecutionFinality'}},LIMITATIONS)
+    execute.receipt_summary({k:v for k,v in r.items() if k not in {'observation','priorExecutionFinality'}},LIMITATIONS,platform=platform)
     require(len(canonical(value))<=16*1024);return value
 
 def execution_chain(rows,operation_id):

@@ -1,44 +1,48 @@
 // UI coordination only. The native saved-command Session owns work and cleanup.
 import type { AndroidBuildProject } from './androidBuild.ts';
 import type { AssetDisplayState } from './assetSessionTypes.ts';
-import { localStoreRequest } from './localStorePreflight.ts';
+import { localStoreRequest, type LocalStoreProject } from './localStorePreflight.ts';
 import { localHistoryOwnerReason, type LocalHistoryState } from './localReleaseHistory.ts';
-import type { LocalPreparedIntentReview } from './localReleaseHistoryTypes.ts';
+import type { LocalPreparedIntentReview, IOSPreparedIntentReview } from './localReleaseHistoryTypes.ts';
 import { parseLocalHistoryStatus } from './localReleaseHistoryProtocol.ts';
 import { sameOfflineData } from './offlinePreflightProtocol.ts';
 import { parseLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, reconcileConsent, reconcileRequestContext } from './localStoreReconcileProtocol.ts';
 import type { BridgeMode } from './types.ts';
 import type { LocalStoreReconcileIdentity, LocalStoreReconcileApi, LocalStoreReconcileStatus, PrepareLocalStoreReconcile } from './localStoreReconcileTypes.ts';
+type ReconcileProject=LocalStoreProject & {selection?:AndroidBuildProject['selection']};
+type PreparedReview=LocalPreparedIntentReview|IOSPreparedIntentReview;
+const appId=(p:PreparedReview)=>'bundleId' in p?p.bundleId:p.applicationId;
 type Port=LocalStoreReconcileApi&{mode:BridgeMode};
-export interface LocalStoreReconcileState {settlement:boolean;mode:BridgeMode;applicationId:string|null;prepared:LocalPreparedIntentReview|null;request:PrepareLocalStoreReconcile|null;status:LocalStoreReconcileStatus|null;pending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
-interface Source {project:()=>AndroidBuildProject|null;assets:()=>AssetDisplayState|null;history:()=>LocalHistoryState|null;otherOperationReason:()=>string|null;now?:()=>number}
+export interface LocalStoreReconcileState {platform:'android'|'ios';settlement:boolean;mode:BridgeMode;applicationId:string|null;prepared:PreparedReview|null;request:PrepareLocalStoreReconcile|null;status:LocalStoreReconcileStatus|null;pending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
+interface Source {project:()=>ReconcileProject|null;assets:()=>AssetDisplayState|null;history:()=>LocalHistoryState|null;otherOperationReason:()=>string|null;now?:()=>number}
 const active=(s:LocalStoreReconcileStatus|null)=>!!s?.operation&&s.operation.phase!=='terminal';
 const identity=(v:LocalStoreReconcileIdentity)=>({operationId:v.operationId,ownerGeneration:v.ownerGeneration});
 const sameId=(a:LocalStoreReconcileIdentity|null|undefined,b:LocalStoreReconcileIdentity|null|undefined)=>!!a&&!!b&&a.operationId===b.operationId&&a.ownerGeneration===b.ownerGeneration;
-const error='The original Play readback is unverified. Keep its status and files, and cancel only that original. Do not upload again or remove history to retry.';
-export function localStoreReconcileOwnerReason(s:LocalStoreReconcileState):string|null{return s.blocked||s.unconfirmed||s.pending||active(s.status)?'A local Play readback intent or operation is retained. Cancel or finish it before other work.':null;}
+const error='The original Store readback is unverified. Keep its status and files, and cancel only that original. Do not upload again or remove history to retry.';
+export function localStoreReconcileOwnerReason(s:LocalStoreReconcileState):string|null{return s.blocked||s.unconfirmed||s.pending||active(s.status)?'A local Store readback intent or operation is retained. Cancel or finish it before other work.':null;}
 // Current UI context only: the native owner independently rechecks the enrolled
-// journal, exact files/source, Google assignment and authenticated current history.
-function reconcileContext(project:AndroidBuildProject|null,assets:AssetDisplayState|null,history:LocalHistoryState|null,settlement=false) {
+// journal, exact files/source, Store assignment and authenticated current history.
+function reconcileContext(project:ReconcileProject|null,assets:AssetDisplayState|null,history:LocalHistoryState|null,settlement=false) {
  const base=localStoreRequest(project,assets);
- if(!base||base.platform!==undefined||assets?.status?.context?.stage!=='candidate'||assets.scope.stage!=='candidate'||!history||history.historical||localHistoryOwnerReason(history))return null;
+ if(!base||base.platform==='ios'&&settlement||assets?.status?.context?.stage!=='candidate'||assets.scope.stage!=='candidate'||!history||history.historical||localHistoryOwnerReason(history))return null;
  const status=parseLocalHistoryStatus(history.status),op=status?.operation;
- if(history.mode!=='native'||!op||op.phase!=='terminal'||op.outcome!=='complete'||op.context.projectId!==base.projectId||op.context.platform!==undefined||op.context.action!=='review-reconcile'||!op.result)return null;
+ if(history.mode!=='native'||!op||op.phase!=='terminal'||op.outcome!=='complete'||op.context.projectId!==base.projectId||op.context.platform!==base.platform||op.context.action!=='review-reconcile'||!op.result)return null;
  const prepared=op.result.preparedIntent,last=op.result.history.at(-1);
- if(!prepared||!('applicationId' in prepared)||!last||!['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(last.phase)||last.operationId!==prepared.operationId||op.context.candidateOperationId!==prepared.operationId||
-   prepared.version.name!==base.savedVersion.name||prepared.version.build!==base.savedVersion.build||project?.selection?.applicationId!==prepared.applicationId)return null;
+ if(!prepared||!last||!['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(last.phase)||last.operationId!==prepared.operationId||op.context.candidateOperationId!==prepared.operationId||
+   prepared.version.name!==base.savedVersion.name||prepared.version.build!==base.savedVersion.build)return null;
+ if(base.platform==='ios'?!('bundleId' in prepared):!('applicationId' in prepared)||project?.selection?.applicationId!==prepared.applicationId)return null;
  if(settlement&&(last.phase==='settled-success'||op.result.headSequence>512))return null;
  const request=parseLocalStoreReconcileRequest({...base,...(settlement?{settlement:'record-current-target'}:{}),candidateOperationId:prepared.operationId,candidateSha256:prepared.candidateSha256,
-   intentSha256:prepared.intentSha256,confirmation:`candidate:android:${base.savedVersion.name}:${base.savedVersion.build}`});
+   intentSha256:prepared.intentSha256,confirmation:`candidate:${base.platform==='ios'?'ios':'android'}:${base.savedVersion.name}:${base.savedVersion.build}`});
  return request?{request,prepared,head:op.result.headSequence}:null;
 }
-export function localStoreReconcileRequest(project:AndroidBuildProject|null,assets:AssetDisplayState|null,history:LocalHistoryState|null,settlement=false):PrepareLocalStoreReconcile|null {
+export function localStoreReconcileRequest(project:ReconcileProject|null,assets:AssetDisplayState|null,history:LocalHistoryState|null,settlement=false):PrepareLocalStoreReconcile|null {
  return reconcileContext(project,assets,history,settlement)?.request??null;
 }
 export class LocalStoreReconcileController {
- private state:LocalStoreReconcileState={settlement:false,mode:'unavailable',applicationId:null,prepared:null,request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
+ private state:LocalStoreReconcileState={platform:'android',settlement:false,mode:'unavailable',applicationId:null,prepared:null,request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
  private api:Port|null=null;private unlisten:(()=>void)|null=null;private listeners=new Set<()=>void>();private disposed=false;private epoch=0;private reading=false;
- private attempt:{request:PrepareLocalStoreReconcile;prepared:LocalPreparedIntentReview;head:number;epoch:number;after:number;previous:LocalStoreReconcileIdentity|null;id:LocalStoreReconcileIdentity|null;retired:boolean;started:boolean}|null=null;
+ private attempt:{request:PrepareLocalStoreReconcile;prepared:PreparedReview;head:number;epoch:number;after:number;previous:LocalStoreReconcileIdentity|null;id:LocalStoreReconcileIdentity|null;retired:boolean;started:boolean}|null=null;
  private cancelClaim:string|null=null;private failedCancel:string|null=null;private timer:ReturnType<typeof setTimeout>|null=null;
  private readonly source:Source;
  private selectionPending=false;private historyHead:number|null=null;
@@ -48,12 +52,14 @@ export class LocalStoreReconcileController {
  private now(){return(this.source.now??(()=>performance.now()))();}
  private update(patch:Partial<LocalStoreReconcileState>){this.state=Object.freeze({...this.state,...patch});if(!this.disposed)for(const listener of this.listeners)listener();}
  private clearTimer(){if(this.timer!==null)clearTimeout(this.timer);this.timer=null;}
- syncProject=()=>{const next=this.selectionPending?null:reconcileContext(this.source.project(),this.source.assets(),this.source.history(),this.state.settlement);
+ syncProject=()=>{const assets=this.source.assets(),platform=assets?.scope.platform==='ios'?'ios':'android';
+  const settlement=platform==='ios'&&!localStoreReconcileOwnerReason(this.state)?false:this.state.settlement;
+  const next=this.selectionPending?null:reconcileContext(this.source.project(),assets,this.source.history(),settlement);
   const request=next?.request??null,prepared=next?.prepared??null,head=next?.head??null;
-  if(head!==this.historyHead||!sameOfflineData(request,this.state.request)||!sameOfflineData(prepared,this.state.prepared)){
-   this.invalidate();this.historyHead=head;this.update({request,prepared,applicationId:prepared?.applicationId??null});
+  if(platform!==this.state.platform||settlement!==this.state.settlement||head!==this.historyHead||!sameOfflineData(request,this.state.request)||!sameOfflineData(prepared,this.state.prepared)){
+   this.invalidate();this.historyHead=head;this.update({request,prepared,platform,settlement,applicationId:prepared?appId(prepared):null});
   }};
- setSettlement(value:boolean){if(localStoreReconcileOwnerReason(this.state))return false;if(value!==this.state.settlement){this.invalidate();this.update({settlement:value});this.syncProject();}return true;}
+ setSettlement(value:boolean){if(value&&this.state.platform==='ios'||localStoreReconcileOwnerReason(this.state))return false;if(value!==this.state.settlement){this.invalidate();this.update({settlement:value});this.syncProject();}return true;}
  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
@@ -70,13 +76,16 @@ export class LocalStoreReconcileController {
   if(a&&!a.id&&next.statusRevision>a.after&&op&&!sameId(a.previous,op)&&sameOfflineData(op.context,reconcileRequestContext(a.request)))a.id=identity(op);
   const ours=!!a?.id&&sameId(a.id,op);
   if(ours&&!sameOfflineData(op!.context,reconcileRequestContext(a!.request))){this.fail();return;}
-  if(ours&&op?.result){const r=op.result.reconciliationReceipt,p=a!.prepared;if(op.result.headSequence!==a!.head+(a!.request.settlement?1:0)||r.applicationId!==p.applicationId||r.sourceCommit!==p.sourceCommit||r.sourceTree!==p.sourceTree){this.fail();return;}}
+  if(ours&&op?.result){const r=op.result.reconciliationReceipt,p=a!.prepared;if(op.result.headSequence!==a!.head+(a!.request.settlement?1:0)||('bundleId' in r?r.bundleId:r.applicationId)!==appId(p)||('appStoreAppId' in r)&&(!('appStoreAppId' in p)||r.appStoreAppId!==p.appStoreAppId)||r.sourceCommit!==p.sourceCommit||r.sourceTree!==p.sourceTree){this.fail();return;}}
   this.update({status:next,unconfirmed:a&&!a.id?this.state.unconfirmed:false,blocked:this.state.blocked||next.availability==='cleanup-unknown'||op?.phase==='unknown',historical:!!op&&(!!a?.retired||!sameOfflineData(op.context,this.state.request?reconcileRequestContext(this.state.request):null))});
   if(ours&&a!.retired&&active(next))void this.cancelOriginal(false);
   if(ours&&op?.phase==='terminal'){this.clearTimer();this.update({unconfirmed:false,pending:false,acknowledged:false,consentUntil:null});if(this.disposed){this.unlisten?.();this.unlisten=null;}}
+  // Recompute only idle display eligibility after the actual original closes.
+  // A retained Android recovery choice cannot strand a newly selected iOS view.
+  if(op?.phase==='terminal'&&!localStoreReconcileOwnerReason(this.state)&&this.state.platform==='ios'&&this.state.settlement)this.syncProject();
  }
  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading)return;this.reading=true;try{this.receive(await this.api.localStoreReconcileStatus());}catch{this.fail();}finally{this.reading=false;}}
- prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Google Play.';if(localStoreReconcileOwnerReason(this.state))return localStoreReconcileOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local Play readback.';if(!this.state.request&&this.state.settlement)return'Review the latest interrupted or failed execution for a Store check. Already successful executions and a full recovery journal cannot record another checkpoint. Keep the matching saved version and assigned Google account.';if(!this.state.request)return'In Release history, review the latest execution for a Store check, read the matching saved version, and assign the same Google service account in Credentials → This Mac → Android → Candidate → Store (or Full).';return this.source.otherOperationReason();}
+ prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Stores.';if(localStoreReconcileOwnerReason(this.state))return localStoreReconcileOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local Store readback.';if(!this.state.request&&this.state.settlement)return'Review the latest interrupted or failed execution for a Store check. Already successful executions and a full recovery journal cannot record another checkpoint. Keep the matching saved version and assigned Google account.';if(!this.state.request&&this.state.platform==='ios')return'In Release history, choose iOS and review the latest execution for a Store check. Read the matching saved version and assign the same App Store Connect P8, Key ID and Issuer ID in Credentials → This Mac → iOS → Candidate → Store (or Full).';if(!this.state.request)return'In Release history, review the latest execution for a Store check, read the matching saved version, and assign the same Google service account in Credentials → This Mac → Android → Candidate → Store (or Full).';return this.source.otherOperationReason();}
  async prepare(){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.prepared||!this.state.status||this.historyHead===null)return;const api=this.api,request=this.state.request;
   this.attempt={request,prepared:this.state.prepared,head:this.historyHead,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
   this.update({pending:true,unconfirmed:true,error:null,historical:false});

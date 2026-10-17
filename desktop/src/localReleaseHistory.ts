@@ -27,14 +27,14 @@ export class LocalReleaseHistoryController {
  private now(){return(this.source.now??(()=>performance.now()))();}
  private update(patch:Partial<LocalHistoryState>){this.state=Object.freeze({...this.state,...patch});if(!this.disposed)for(const listener of this.listeners)listener();}
  private clearTimer(){if(this.timer!==null)clearTimeout(this.timer);this.timer=null;}
- syncProject=()=>{const projectId=this.source.projectId();if(this.observedProjectId!==projectId){this.observedProjectId=projectId;this.update({inputPlatform:'android'});}if(this.candidateProjectId!==null&&this.candidateProjectId!==projectId){this.action='verify';this.candidateOperationId=undefined;this.candidateProjectId=null;this.update({inputPlatform:'android'});}const next=this.selectionPending?null:localHistoryRequest(projectId,this.action,this.candidateOperationId,(this.action==='review-inputs'||this.action==='abandon-inputs'||this.action==='review-prepared'||this.action==='review-execution')&&this.state.inputPlatform==='ios'?'ios':undefined);if(!sameOfflineData(next,this.state.request)){this.invalidate();this.update({request:next});}};
+ syncProject=()=>{const projectId=this.source.projectId();if(this.observedProjectId!==projectId){this.observedProjectId=projectId;this.update({inputPlatform:'android'});}if(this.candidateProjectId!==null&&this.candidateProjectId!==projectId){this.action='verify';this.candidateOperationId=undefined;this.candidateProjectId=null;this.update({inputPlatform:'android'});}const next=this.selectionPending?null:localHistoryRequest(projectId,this.action,this.candidateOperationId,(this.action==='review-inputs'||this.action==='abandon-inputs'||this.action==='review-prepared'||this.action==='review-execution'||this.action==='review-reconcile')&&this.state.inputPlatform==='ios'?'ios':undefined);if(!sameOfflineData(next,this.state.request)){this.invalidate();this.update({request:next});}};
  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
  setAction=(action:LocalHistoryAction)=>{if(action!==this.action||this.candidateOperationId!==undefined){this.action=action;this.candidateOperationId=undefined;this.candidateProjectId=null;this.update({inputPlatform:'android'});this.syncProject();}};
  setInputPlatform=(platform:'android'|'ios'):boolean=>{
   if(this.disposed||!['android','ios'].includes(platform)||this.state.blocked||(this.attempt?.started||this.state.status?.operation?.phase==='running'||this.state.status?.operation?.phase==='starting'||this.state.status?.operation?.phase==='stopping'||this.state.status?.operation?.phase==='unknown')&&active(this.state.status))return false;
-  if(platform!==this.state.inputPlatform){if(this.action==='review-inputs'||this.action==='abandon-inputs'||this.action==='review-prepared'||this.action==='review-execution')this.invalidate();this.update({inputPlatform:platform});this.syncProject();}
+  if(platform!==this.state.inputPlatform){if(this.action==='review-inputs'||this.action==='abandon-inputs'||this.action==='review-prepared'||this.action==='review-execution'||this.action==='review-reconcile')this.invalidate();this.update({inputPlatform:platform});this.syncProject();}
   return true;
  };
  selectCandidate=(action:'review-inputs'|'abandon-inputs'|'review-prepared'|'review-execution'|'review-reconcile'|'review-recovery',operationId:string):boolean=>{
@@ -42,7 +42,7 @@ export class LocalReleaseHistoryController {
   if(localHistoryOwnerReason(this.state)||this.state.historical||!op?.result||op.context.projectId!==this.source.projectId())return false;
   const row=op.result.history.find(row=>row.operationId===operationId);
   if(!row||(action==='review-prepared'?row.phase!=='prepared':action==='review-execution'?row.phase!=='settled-success':action==='review-recovery'?row.phase!=='target-reconciled':action==='review-reconcile'?(op.result.history.at(-1)!==row||!['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(row.phase)):!['inputs-pending','inputs-ready','settled-failure'].includes(row.phase))||action==='abandon-inputs'&&(row.phase==='settled-failure'||op.result.history.at(-1)!==row))return false;
-  if(this.state.inputPlatform==='ios'&&(action==='review-reconcile'||action==='review-recovery'))return false;
+  if(this.state.inputPlatform==='ios'&&action==='review-recovery')return false;
   this.action=action;this.candidateOperationId=operationId;this.candidateProjectId=op.context.projectId;this.syncProject();return this.state.request?.candidateOperationId===operationId&&this.state.request.action===action;
  };
  setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};

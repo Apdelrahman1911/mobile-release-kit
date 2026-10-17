@@ -1,4 +1,4 @@
-//! Closed local Android target readback DATA; only the genuine current native owner grants an action.
+//! Closed local Store target readback DATA; only the genuine current native owner grants an action.
 //! A core terminal is provisional until this operation's original native joins.
 use std::path::Path;
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error
 
 pub(crate) const PROTOCOL: &str = "mrk-local-store-reconcile/1";
 pub(crate) const CONSENT: &str = "local-android-store-reconcile-v1";
+pub(crate) const APPLE_CONSENT: &str = "local-ios-store-reconcile-v1";
 pub(crate) const SETTLEMENT_CONSENT: &str = "local-android-recovery-settle-v1";
 pub(crate) const EVENT: &str = "local-store-reconcile-state-changed";
 pub(crate) const IPC_LIMIT: usize = 16 * 1024;
@@ -29,7 +30,19 @@ fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_as
 #[serde(deny_unknown_fields)]
 pub(crate) struct Content { pub(crate) bytes: u32, pub(crate) sha256: String }
 impl Content { fn valid(&self) -> bool { (1..=524288).contains(&self.bytes) && sha(&self.sha256) } }
-pub(crate) use crate::local_store_preflight_protocol::{Platform,ExecutionMode,Profile,Outcome,Phase,Availability};
+pub(crate) use crate::local_store_preflight_protocol::{ExecutionMode,Profile,Outcome,Phase,Availability};
+// This domain alone supports Apple readback, never Apple recovery settlement.
+#[derive(Clone,Copy,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="lowercase")]
+pub(crate) enum Platform {Android,Ios}
+impl Platform {
+    fn name(self)->&'static str {match self {Self::Android=>"android",Self::Ios=>"ios"}}
+    fn commands(self)->u32 {match self {Self::Android=>14,Self::Ios=>15}}
+    fn scope(self)->&'static str {match self {Self::Android=>"local-android-store-reconcile",Self::Ios=>"local-ios-store-reconcile"}}
+}
+#[derive(Deserialize)]
+#[serde(rename_all="lowercase")]
+enum AppleSelection {Ios}
 pub(crate) use crate::local_release_history_protocol::Head;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -54,15 +67,15 @@ pub(crate) struct Context {
     pub(crate) settlement:Option<Settlement>,
 }
 impl Context {
-    pub(crate) fn settling(&self)->bool { self.operation==Operation::LocalStoreRecoverySettle && self.settlement==Some(Settlement::RecordCurrentTarget) }
-    pub(crate) fn consent(&self)->&'static str { if self.settling(){SETTLEMENT_CONSENT}else{CONSENT} }
+    pub(crate) fn settling(&self)->bool { self.platform==Platform::Android && self.operation==Operation::LocalStoreRecoverySettle && self.settlement==Some(Settlement::RecordCurrentTarget) }
+    pub(crate) fn consent(&self)->&'static str { if self.settling(){SETTLEMENT_CONSENT}else if self.platform==Platform::Ios{APPLE_CONSENT}else{CONSENT} }
     pub(crate) fn frame_limit(&self)->usize { if self.settling(){5}else{4} }
     fn valid(&self) -> bool { ((self.operation==Operation::LocalStoreReconcile&&self.settlement.is_none())||self.settling()) && valid_id(&self.project_id) && self.draft_revision < u32::MAX
         && self.baseline_generation < u32::MAX && self.saved_config.valid() && self.saved_version.valid()
         && self.credential_context_revision > 0 && self.credential_context_revision < u32::MAX
         && token(&self.record_id) && self.record_revision > 0 && self.record_revision < u32::MAX
         && uuid(&self.candidate_operation_id) && sha(&self.candidate_sha256) && sha(&self.intent_sha256)
-        && self.confirmation==format!("candidate:android:{}:{}",self.saved_version.name,self.saved_version.build) }
+        && self.confirmation==format!("candidate:{}:{}:{}",self.platform.name(),self.saved_version.name,self.saved_version.build) }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -73,6 +86,7 @@ pub(crate) struct Prepare {
     pub(crate) execution_mode: ExecutionMode,
     pub(crate) candidate_operation_id:String, pub(crate) candidate_sha256:String, pub(crate) confirmation:String,
     pub(crate) intent_sha256:String,
+    #[serde(default)] platform:Option<AppleSelection>,
     #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="settlement_field")]
     pub(crate) settlement:Option<Settlement>,
 }
@@ -81,7 +95,7 @@ impl Prepare {
         baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
         saved_version: self.saved_version.clone(), credential_context_revision: self.credential_context_revision,
         record_id: self.record_id.clone(), record_revision: self.record_revision, execution_mode: self.execution_mode,
-        platform: Platform::Android, operation: if self.settlement.is_some(){Operation::LocalStoreRecoverySettle}else{Operation::LocalStoreReconcile}, candidate_operation_id:self.candidate_operation_id.clone(),
+        platform: if self.platform.is_some(){Platform::Ios}else{Platform::Android}, operation: if self.settlement.is_some(){Operation::LocalStoreRecoverySettle}else{Operation::LocalStoreReconcile}, candidate_operation_id:self.candidate_operation_id.clone(),
         candidate_sha256:self.candidate_sha256.clone(),confirmation:self.confirmation.clone(),
         intent_sha256:self.intent_sha256.clone(),settlement:self.settlement } }
 }
@@ -94,6 +108,10 @@ pub(crate) struct Cancel { pub(crate) operation_id: String, pub(crate) owner_gen
 pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
     let mut expected=vec!["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
         "credentialContextRevision", "recordId", "recordRevision", "executionMode", "candidateOperationId", "candidateSha256", "confirmation", "intentSha256"];
+    if value.get("platform").is_some(){
+        if value.get("platform").and_then(Value::as_str)!=Some("ios")||value.get("settlement").is_some(){return Err(invalid());}
+        expected.push("platform");
+    }
     if value.get("settlement").is_some(){
         if value.get("settlement").and_then(Value::as_str)!=Some("record-current-target"){return Err(invalid());}
         expected.push("settlement");
@@ -105,7 +123,7 @@ pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|SETTLEMENT_CONSENT) { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|SETTLEMENT_CONSENT|APPLE_CONSENT) { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration"]) { return Err(invalid()); }
@@ -176,8 +194,18 @@ struct Destination {channel:String,release_status:String}
 enum ReceiptResult {Reconciled}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-pub(crate) struct ReconciliationReceipt {operation_id:String,candidate_sha256:String,intent_sha256:String,receipt_sha256:String,authorization_id:String,
+pub(crate) struct AndroidReconciliationReceipt {operation_id:String,candidate_sha256:String,intent_sha256:String,receipt_sha256:String,authorization_id:String,
     source_commit:String,source_tree:String,application_id:String,version:Version,destination:Destination,observed_at:String,result:ReceiptResult,limitations:Vec<Limitation>,observation:String,prior_execution_finality:String}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct AppleDestination {channel:String}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct IosReconciliationReceipt {operation_id:String,candidate_sha256:String,intent_sha256:String,receipt_sha256:String,authorization_id:String,
+    source_commit:String,source_tree:String,bundle_id:String,app_store_app_id:String,version:Version,destination:AppleDestination,observed_at:String,result:ReceiptResult,limitations:Vec<Limitation>,observation:String,prior_execution_finality:String}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(untagged)]
+pub(crate) enum ReconciliationReceipt {Android(AndroidReconciliationReceipt),Ios(IosReconciliationReceipt)}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct ResultData {schema_version:u32,scope:String,head_sequence:u32,reconciliation_receipt:ReconciliationReceipt}
@@ -191,30 +219,41 @@ fn utc_second(value:&str)->bool{
 // Closed summary DATA shared with read-only History. It is not a Reconcile
 // Context, original authorization comparison or native completion observation.
 impl ReconciliationReceipt {
-    pub(crate) fn valid_for(&self,operation:&str)->bool { self.valid_shape(operation)&&self.observation=="current-internal-target-only" }
-    pub(crate) fn valid_recovery_review(&self,operation:&str)->bool { self.valid_shape(operation)&&self.observation=="current-recovery-files-only" }
+    fn platform(&self)->Platform {match self {Self::Android(_)=>Platform::Android,Self::Ios(_)=>Platform::Ios}}
+    fn version(&self)->&Version {match self {Self::Android(p)=>&p.version,Self::Ios(p)=>&p.version}}
+    fn binding(&self)->(&str,&str,&str) {match self {Self::Android(p)=>(&p.candidate_sha256,&p.intent_sha256,&p.authorization_id),Self::Ios(p)=>(&p.candidate_sha256,&p.intent_sha256,&p.authorization_id)}}
+    pub(crate) fn valid_for(&self,operation:&str)->bool {
+        self.valid_shape(operation)&&match self {Self::Android(p)=>p.observation=="current-internal-target-only",Self::Ios(p)=>p.observation=="current-internal-build-only"}
+    }
+    pub(crate) fn valid_recovery_review(&self,operation:&str)->bool {
+        matches!(self,Self::Android(p) if p.observation=="current-recovery-files-only")&&self.valid_shape(operation)
+    }
     fn valid_shape(&self,operation:&str)->bool {
-        let p=self;
+        let(id,receipt,commit,tree,app,date,limits,finality)=match self {
+            Self::Android(p)=>(&p.operation_id,&p.receipt_sha256,&p.source_commit,&p.source_tree,&p.application_id,&p.observed_at,&p.limitations,&p.prior_execution_finality),
+            Self::Ios(p)=>(&p.operation_id,&p.receipt_sha256,&p.source_commit,&p.source_tree,&p.bundle_id,&p.observed_at,&p.limitations,&p.prior_execution_finality),
+        };
+        let(candidate,intent,authorization)=self.binding();let version=self.version();
         let hex=|v:&str,n|v.len()==n&&v.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b));
-        let app=p.application_id.len()<=255&&p.application_id.split('.').count()>=2&&p.application_id.split('.').all(|v|
-            v.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)&&v.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'));
-        p.operation_id==operation&&uuid(operation)&&sha(&p.candidate_sha256)&&sha(&p.intent_sha256)&&sha(&p.receipt_sha256)
-            &&uuid(&p.authorization_id)&&hex(&p.source_commit,40)&&hex(&p.source_tree,40)&&app
-            &&!p.version.name.is_empty()&&p.version.name.len()<=64
-            &&p.version.name.bytes().all(|b|b.is_ascii_alphanumeric()||b".+-".contains(&b))
-            &&(1..=2_100_000_000).contains(&p.version.build)
-            &&p.prior_execution_finality=="not-established"
-            &&p.destination.channel=="internal"&&p.destination.release_status=="completed"&&utc_second(&p.observed_at)&&p.limitations==LIMITATIONS
+        let separator=if self.platform()==Platform::Ios{b'-'}else{b'_'};
+        let app_valid=app.len()<=255&&app.split('.').count()>=2&&app.split('.').all(|v|
+            v.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)&&v.bytes().all(|b|b.is_ascii_alphanumeric()||b==separator));
+        let destination=match self {Self::Android(p)=>p.destination.channel=="internal"&&p.destination.release_status=="completed",
+            Self::Ios(p)=>p.destination.channel=="testflight-internal"&&(1..=20).contains(&p.app_store_app_id.len())&&p.app_store_app_id.bytes().all(|b|b.is_ascii_digit())};
+        id==operation&&uuid(operation)&&sha(candidate)&&sha(intent)&&sha(receipt)&&uuid(authorization)&&hex(commit,40)&&hex(tree,40)&&app_valid
+            &&!version.name.is_empty()&&version.name.len()<=64&&version.name.bytes().all(|b|b.is_ascii_alphanumeric()||b".+-".contains(&b))
+            &&(1..=2_100_000_000).contains(&version.build)&&finality=="not-established"
+            &&destination&&utc_second(date)&&*limits==LIMITATIONS
     }
 }
 impl ResultData {
     fn valid(&self,c:&Context,authorization:&str)->bool {
-        let p=&self.reconciliation_receipt;
-        self.schema_version==1&&self.scope==(if c.settling(){"local-android-recovery-settlement"}else{"local-android-store-reconcile"})
+        let p=&self.reconciliation_receipt;let(candidate,intent,observed_authorization)=p.binding();
+        self.schema_version==1&&self.scope==(if c.settling(){"local-android-recovery-settlement"}else{c.platform.scope()})
             &&(if c.settling(){7}else{6}..=513).contains(&self.head_sequence)
-            &&p.valid_for(&c.candidate_operation_id)&&p.candidate_sha256==c.candidate_sha256&&p.intent_sha256==c.intent_sha256
-            &&uuid(authorization)&&p.authorization_id==authorization
-            &&p.version.name==c.saved_version.name&&p.version.build==c.saved_version.build
+            &&p.platform()==c.platform&&p.valid_for(&c.candidate_operation_id)&&candidate==c.candidate_sha256&&intent==c.intent_sha256
+            &&uuid(authorization)&&observed_authorization==authorization
+            &&p.version().name==c.saved_version.name&&p.version().build==c.saved_version.build
     }
 }
 
@@ -240,10 +279,10 @@ pub(crate) struct Terminal {
 impl Terminal {
     fn valid(&self, context: &Context, authorization:&str) -> bool {
         if self.schema_version != 1 || &self.context != context || !self.context.valid() || self.lifetime.profile_calls != 0
-            || self.lifetime.commands > 14 { return false; }
+            || self.lifetime.commands > context.platform.commands() { return false; }
         if self.outcome == Outcome::Complete {
             return self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
-                && self.lifetime.commands==14 && self.lifetime.command_dispatched==Some(true)
+                && self.lifetime.commands==context.platform.commands() && self.lifetime.command_dispatched==Some(true)
                 && self.result.as_ref().is_some_and(|r| r.valid(context,authorization));
         }
         if self.result.is_some() || self.reason == Reason::None
@@ -445,6 +484,57 @@ pub(crate) mod tests {
         let mut failed=settle_terminal(7);failed["result"]=Value::Null;failed["outcome"]=json!("failed");failed["reason"]=json!("recovery-settle-unavailable");
         assert!(settle_read(&mut settle_prefix(6),3,"terminal",failed.clone()).is_ok());
         failed["context"]=json!(context());assert!(read(&mut prefix(6),3,"terminal",failed).is_err());
+    }
+
+    pub(crate) fn ios_context()->Context{let mut v=input();v["platform"]=json!("ios");v["confirmation"]=json!("candidate:ios:1.2.3:42");prepare(&v).unwrap().context()}
+    fn ios_terminal()->Value{let mut v=terminal();v["context"]=json!(ios_context());v["lifetime"]["commands"]=json!(15);
+        v["result"]["scope"]=json!("local-ios-store-reconcile");let p=v["result"]["reconciliationReceipt"].as_object_mut().unwrap();
+        p.remove("applicationId");p.insert("bundleId".into(),json!("dev.example.ios-app"));p.insert("appStoreAppId".into(),json!("001234"));
+        p.insert("destination".into(),json!({"channel":"testflight-internal"}));p.insert("observation".into(),json!("current-internal-build-only"));v}
+    fn ios_read(d:&mut Decoder,seq:u32,kind:&str,payload:Value)->Result<Frame,BridgeError>{
+        d.decode(&frame(seq,kind,payload),&"a".repeat(32),&"b".repeat(32),&ios_context(),&"c".repeat(32),&"d".repeat(64))}
+    fn ios_prefix(head:u32)->Decoder{let mut d=Decoder::new(AUTH).unwrap();
+        ios_read(&mut d,0,"accepted",json!({"schemaVersion":1,"context":ios_context()})).unwrap();ios_read(&mut d,1,"lease-ready",json!({})).unwrap();
+        ios_read(&mut d,2,"history-head",json!({"sequence":head,"sha256":"a".repeat(64)})).unwrap();d}
+    #[test]
+    fn local_ios_reconcile_original_context_consent_and_request_have_no_tools_or_settlement(){
+        let c=ios_context();assert!(c.valid());assert!(!c.settling());assert_eq!(c.consent(),APPLE_CONSENT);assert_eq!(c.frame_limit(),4);
+        assert_eq!(Context::deserialize(&json!(c)).unwrap(),c);
+        let mut v=input();v["platform"]=json!("ios");v["confirmation"]=json!("candidate:ios:1.2.3:42");assert!(prepare(&v).is_ok());
+        for (key,value) in [("settlement",Value::Null),("settlement",json!("record-current-target")),("platform",Value::Null),("platform",json!("android")),
+            ("platform",json!("macos")),("confirmation",json!("candidate:android:1.2.3:42")),("signingTools",json!({})),("uploadSelection",json!({})),("toolchainSelection",json!({})),("authorizationId",json!(AUTH))]{
+            let mut bad=v.clone();bad[key]=value;assert!(prepare(&bad).is_err(),"{key}");}
+        let mut settlement=c.clone();settlement.operation=Operation::LocalStoreRecoverySettle;settlement.settlement=Some(Settlement::RecordCurrentTarget);
+        assert!(!settlement.valid()&&!settlement.settling());
+        for token in [CONSENT,APPLE_CONSENT,SETTLEMENT_CONSENT]{assert!(start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":token})).is_ok());}
+        assert!(context().valid());assert!(settle_context().valid());
+        let project=RegisteredRoot{path:"/inert/project".into(),identity:crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity())};
+        let native=Native{home:"/inert/home".into(),lease_fd:3,nonce:"c".repeat(32),work_end_ns:1_200_000_000_000,hard_end_ns:1_210_000_000_000,
+            authorization_id:AUTH.into(),tooling_version:crate::runtime::CORE_VERSION,tooling_commit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"};
+        for profile in [Profile::MacosArm64,Profile::MacosX64]{let raw=request(&"a".repeat(32),&"b".repeat(32),&c,profile,&project,Path::new("/inert/runtime"),&Content{bytes:40,sha256:"a".repeat(64)},&native).unwrap();
+            let value:Value=serde_json::from_slice(&raw).unwrap();assert_eq!(value["context"]["platform"],"ios");assert_eq!(value["native"]["authorizationId"],AUTH);
+            for field in ["toolchain","signingTools","uploadSelection","transportTools"]{assert!(value["native"].get(field).is_none());}}
+    }
+    #[test]
+    fn local_ios_reconcile_four_frames_exact_receipt_and_fifteen_roles_do_not_repair_finality(){
+        let good=ios_terminal();assert_eq!(good["result"]["reconciliationReceipt"].as_object().unwrap().len(),16);
+        assert_eq!(serde_json::to_value(ResultData::deserialize(&good["result"]).unwrap()).unwrap(),good["result"]);
+        for head in [6,512,513]{let mut d=ios_prefix(head);let mut v=good.clone();v["result"]["headSequence"]=json!(head);
+            assert!(ios_read(&mut d,3,"terminal",v).is_ok());assert!(d.finish());}
+        for (field,value) in [("authorizationId",json!(UUID)),("candidateSha256",json!("a".repeat(64))),("intentSha256",json!("a".repeat(64))),
+            ("applicationId",json!("dev.example.app")),("appStoreAppId",json!(123)),("bundleId",json!("dev.bad_id")),("result",json!("accepted")),
+            ("observation",json!("current-internal-target-only")),("observation",json!("current-recovery-files-only")),("priorExecutionFinality",json!("established"))]{
+            let mut v=good.clone();v["result"]["reconciliationReceipt"][field]=value;assert!(ios_read(&mut ios_prefix(6),3,"terminal",v).is_err(),"{field}");}
+        for count in [0,14,16]{let mut v=good.clone();v["lifetime"]["commands"]=json!(count);assert!(ios_read(&mut ios_prefix(6),3,"terminal",v).is_err());}
+        for field in ["complete","contained","inputClosed","handlersRestored","invocationClosed","commandDispatched"]{let mut v=good.clone();v["lifetime"][field]=json!(false);assert!(ios_read(&mut ios_prefix(6),3,"terminal",v).is_err());}
+        let mut v=good.clone();v["result"]["headSequence"]=json!(7);assert!(ios_read(&mut ios_prefix(6),3,"terminal",v).is_err());
+        assert!(ios_read(&mut ios_prefix(6),3,"recovery-settled",json!({"head":{"sequence":7,"sha256":"a".repeat(64)},"phase":"target-reconciled"})).is_err());
+        let result=ResultData::deserialize(&good["result"]).unwrap();assert!(!result.valid(&context(),AUTH));assert!(!result.reconciliation_receipt.valid_recovery_review(UUID));
+        let mut failed=good.clone();failed["outcome"]=json!("failed");failed["reason"]=json!("reconcile-unavailable");failed["result"]=Value::Null;failed["lifetime"]["commands"]=json!(7);
+        assert!(ios_read(&mut ios_prefix(6),3,"terminal",failed.clone()).is_ok());
+        failed["reason"]=json!("recovery-settle-unavailable");assert!(ios_read(&mut ios_prefix(6),3,"terminal",failed).is_err());
+        let mut unknown=good;unknown["outcome"]=json!("unknown");unknown["reason"]=json!("cleanup-unknown");unknown["result"]=Value::Null;unknown["lifetime"]["complete"]=json!(false);
+        assert!(ios_read(&mut ios_prefix(6),3,"terminal",unknown).is_ok());
     }
 
 }

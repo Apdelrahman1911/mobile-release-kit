@@ -65,7 +65,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
     {op?.result && <>
       {!compact && <label>Candidate / Store receipt platform <select value={state.inputPlatform} disabled={!!retained} onChange={event => controller.setInputPlatform(event.target.value === 'ios' ? 'ios' : 'android')}>
         <option value="android">Android candidate inputs</option><option value="ios">iOS candidate inputs</option>
-      </select><span className="save-note">Choose the platform used to create the input operation below. History rows do not identify a platform; this choice selects which saved bundle or prepared intent to check. A wrong choice refuses review—it never converts or rebuilds files. Play receipt actions are separate.</span></label>}
+      </select><span className="save-note">Choose the platform used to create the input operation below. History rows do not identify a platform; this choice selects which saved bundle or prepared intent to check. A wrong choice refuses review—it never converts or rebuilds files. Store checks use the selected platform. Recovery checkpoint recording is currently available for Play only.</span></label>}
       <h3>Verified local history</h3><p>Checkpoint {op.result.headSequence}. {op.result.history.length === 0 ? 'No release operations recorded.' : 'Latest recorded operation states (up to 64):'}</p>
       <ul>{op.result.history.map(row => <li key={row.operationId}>
         <code>{row.operationId}</code> — {row.phase.replaceAll('-', ' ')}{row.recoveryRequired && <strong> · Review before retrying</strong>}
@@ -73,7 +73,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
           <button onClick={() => choose('review-inputs',row.operationId)}>Review inputs</button>
           {op.result!.history.at(-1) === row && ['inputs-pending','inputs-ready'].includes(row.phase) && <button onClick={() => choose('abandon-inputs',row.operationId)}>Review abandonment</button>}
         </div>}
-        {!compact && !retained && !state.historical && state.inputPlatform==='android' && op.result!.history.at(-1) === row && ['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(row.phase) && <button onClick={() => choose('review-reconcile',row.operationId)}>Review for Store check</button>}
+        {!compact && !retained && !state.historical && op.result!.history.at(-1) === row && ['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(row.phase) && <button onClick={() => choose('review-reconcile',row.operationId)}>Review for Store check</button>}
         {!compact && !retained && !state.historical && state.inputPlatform==='android' && row.phase === 'target-reconciled' && <button onClick={() => choose('review-recovery',row.operationId)}>Review recovery checkpoint</button>}
         {!compact && !retained && !state.historical && row.phase === 'prepared' && <button onClick={() => choose('review-prepared',row.operationId)}>Review prepared intent</button>}
         {!compact && !retained && !state.historical && row.phase === 'settled-success' && <button onClick={() => choose('review-execution',row.operationId)}>Review execution receipt</button>}
