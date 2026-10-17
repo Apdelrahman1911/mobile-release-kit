@@ -853,15 +853,16 @@ jobs:
           set -euo pipefail
           umask 077
           "$OWNER_PYTHON" -I -S -B - <<'PY'
-          import json, os, re, resource, subprocess, unicodedata
+          import json, os, re, resource, sys, unicodedata
           from pathlib import Path
           checkout, work = Path.cwd(), Path(os.environ["WORK_ROOT"])
+          sys.path.insert(0, str(checkout / "desktop/tools"))
+          from ci_bounded_output import run_bounded
           home = work / "resolver-home"
           home.mkdir(mode=0o700)
           capture_path = work / "resolver-output.log"
           limit = 256 * 1024
           resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-          resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
           resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
           clean = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home), "TMPDIR": str(home),
               "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "PYTHONDONTWRITEBYTECODE": "1",
@@ -875,13 +876,11 @@ jobs:
                   raise ValueError("resolver-capture-bound")
               return raw
           try:
-              with capture_path.open("xb") as capture:
-                  # Only the fixed resolver uses the original native command
-                  # owner (<=10s). Outer timeout kills+waits this original test.
-                  subprocess.run(["/usr/bin/sandbox-exec", "-D", "CHECKOUT=" + str(checkout), "-p", profile,
-                      os.environ["OWNER_PYTHON"], "-B", "-m", "unittest", "-v", test],
-                      stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
-                      env=clean, cwd=checkout, check=True, timeout=60)
+              # Bound only captured output, not Apple runtime private files.
+              # The actual resolver keeps its original <=10s command owner.
+              run_bounded(["/usr/bin/sandbox-exec", "-D", "CHECKOUT=" + str(checkout), "-p", profile,
+                  os.environ["OWNER_PYTHON"], "-B", "-m", "unittest", "-v", test],
+                  capture_path=capture_path, env=clean, cwd=checkout, timeout=60, limit=limit)
               if re.search(rb"\nRan 1 test in [0-9]+(?:\.[0-9]+)?s\n\nOK\n\Z", output()) is None:
                   raise ValueError("resolver-exact-one-pass-required")
           except Exception as error:
