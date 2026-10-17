@@ -227,4 +227,51 @@ class LocalStoreExecutionRuntimeTest < Minitest::Test
     end
   end
 
+
+  def test_ios_transport_nomination_is_exact_and_bound_before_original_admission
+    ios_transport
+    tool=@tool.fetch('security')
+    root=tool.slice('device','inode','mode','uid','gid').merge('mode'=>0040755)
+    selection={'schemaVersion'=>1,'developerDirectory'=>'/Applications/Xcode_26.app/Contents/Developer',
+      'appIdentity'=>root,'developerIdentity'=>root,'xcrun'=>tool}
+    transport={'selection'=>selection,'altoolPath'=>'/Applications/Xcode_26.app/Contents/SharedFrameworks/Delivery/Support/altool','altoolIdentity'=>tool}
+    ENV['DEVELOPER_DIR']=selection.fetch('developerDirectory')
+    ENV['MOBILE_RELEASE_ASC_KEY_ID']='KEY123'
+    ENV['MOBILE_RELEASE_ASC_ISSUER_ID']='11111111-1111-4111-8111-111111111111'
+    ENV['MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64']=Base64.strict_encode64('inert original PEM bytes')
+    value=JSON.parse(ENV.fetch(KEY));value['transportTools']=transport;ENV[KEY]=M.canonical_json(value)
+    runtime,invocation=model(lane:'ios_testflight_internal');seen=[]
+    # Only protected original acquisition is inert here. The actual Runtime
+    # context/shape/environment gate and original identity handoff are exercised.
+    runtime.resources.stub(:bind_local_transport!,->(c) { seen << c }) { admit(runtime) }
+    assert_same runtime.instance_variable_get(:@local_execution),seen.fetch(0)
+    assert_equal transport,seen[0].fetch(:transport_tools)
+    assert invocation.local_ios_context?(seen[0]);refute invocation.local_ios_context?(seen[0].dup)
+    M::NativeProcessSpawn.stub(:monotonic_ns,1) do
+      runtime.resources.stub(:check_local_transport!,true) do
+        key={key_id:'KEY123',issuer_id:ENV.fetch('MOBILE_RELEASE_ASC_ISSUER_ID'),key:'inert original PEM bytes'}
+        assert_same key,runtime.local_ios_key!(key)
+        [:key_id,:issuer_id,:key].each do |field|
+          assert_raises(R::Error) { runtime.local_ios_key!(key.merge(field=>'foreign value')) }
+        end
+      end
+      assert_equal @tool,JSON.parse(invocation.local_current_validation_request(adapter:M::IosUploadValidation)).fetch('signingTools')
+      ENV['DEVELOPER_DIR']='/Applications/Xcode_Other.app/Contents/Developer'
+      assert_raises(R::Error) { runtime.local_execution_context }
+    end
+    ENV['DEVELOPER_DIR']=selection.fetch('developerDirectory')
+    [->(v){v['transportTools']['selection']['xcrun']['uid']=501},
+     ->(v){v['transportTools']['selection']['appIdentity']['mode']=0040777},
+     ->(v){v['transportTools']['altoolPath']='/tmp/altool'},
+     ->(v){v['transportTools']['altoolPath']='/Applications/Xcode_26.app/Contents/../altool'},
+     ->(v){v['transportTools']['extra']=true}].each do |mutate|
+      bad=JSON.parse(M.canonical_json(value));mutate.call(bad);ENV[KEY]=M.canonical_json(bad)
+      rt,_=model(lane:'ios_testflight_internal');rt.resources.stub(:bind_local_transport!,->(*) { flunk 'invalid tuple reached original opens' }) do
+        assert_raises(R::Error) { rt.send(:admit_local_execution!) }
+      end
+    end
+    ENV[KEY]=M.canonical_json(value);ENV['DELIVER_ALTOOL_ADDITIONAL_UPLOAD_PARAMETERS']='--anything'
+    rt,_=model(lane:'ios_testflight_internal');assert_raises(R::Error) { rt.send(:admit_local_execution!) }
+  end
+
 end

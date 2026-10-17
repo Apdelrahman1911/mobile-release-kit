@@ -1,5 +1,5 @@
 import { iosCandidateInputs, IOS_CANDIDATE_CONSENT } from './iosArchiveProtocol.ts';
-import type { LocalExecutionReceipt } from './localStoreExecuteTypes.ts';
+import type { LocalExecutionReceipt, IOSExecutionReceipt } from './localStoreExecuteTypes.ts';
 import type { LocalPreparedIntent, IOSPreparedIntent } from './localStorePrepareTypes.ts';
 import { copyBoundedComparisonData, sameOfflineData } from './offlinePreflightProtocol.ts';
 import type { ApiError } from './types.ts';
@@ -68,6 +68,19 @@ export function executionReceiptSummary(i: unknown, operationId: unknown): i is 
     sameOfflineData(i.limitations, ['internal-testing-only', 'not-public-release', 'prior-prepare-finality-not-established', 'saved-inputs-not-atomic']) &&
     localStoreSummaryIdentity(i, operationId);
 }
+// Same-invocation TestFlight result DATA, not a Store upload/recovery grant.
+export function iosExecutionReceiptSummary(i: unknown, operationId: unknown): i is IOSExecutionReceipt {
+  if (!keys(i, ['operationId','candidateSha256','intentSha256','receiptSha256','authorizationId','sourceCommit','sourceTree','bundleId','appStoreAppId','version','destination','observedAt','result','limitations']) ||
+    !uuid(i.operationId) || i.operationId !== operationId || !uuid(i.authorizationId) ||
+    !hex(i.candidateSha256,64) || !hex(i.intentSha256,64) || !hex(i.receiptSha256,64) || !hex(i.sourceCommit,40) || !hex(i.sourceTree,40) ||
+    typeof i.bundleId !== 'string' || i.bundleId.length > 255 || !/^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/.test(i.bundleId) ||
+    typeof i.appStoreAppId !== 'string' || !/^[0-9]{1,20}$/.test(i.appStoreAppId) ||
+    !keys(i.version,['name','build']) || typeof i.version.name !== 'string' || !/^[0-9A-Za-z.+-]{1,64}$/.test(i.version.name) || !bounded(i.version.build,2100000000) ||
+    !sameOfflineData(i.destination,{channel:'testflight-internal'}) || !member(['accepted','reconciled'],i.result) ||
+    !sameOfflineData(i.limitations,['internal-testing-only','not-public-release','prior-prepare-finality-not-established','saved-inputs-not-atomic']) ||
+    typeof i.observedAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(i.observedAt) || !Number.isFinite(Date.parse(i.observedAt))) return false;
+  return new Date(i.observedAt).toISOString() === i.observedAt.replace('Z','.000Z');
+}
 // Shared exact13-field recovery receipt DATA. Each caller separately validates
 // its live/offline observation and original finality fields; no synthetic owner.
 export function recoveryReceiptFields(i: unknown, operationId: unknown): boolean {
@@ -78,7 +91,7 @@ export function recoveryReceiptFields(i: unknown, operationId: unknown): boolean
 }
 function request(v:unknown):boolean{
  const candidate=object(v)&&candidateHistoryAction(v.action),ios=object(v)&&Object.hasOwn(v,'platform');
- return (!ios||v.platform==='ios'&&['review-inputs','abandon-inputs','review-prepared'].includes(v.action as string))&&keys(v,[...contextKeys,...(candidate?['candidateOperationId']:[]),...(ios?['platform']:[])])&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&v.executionMode==='local'&&(candidate?uuid(v.candidateOperationId):member(['enroll','verify'],v.action));
+ return (!ios||v.platform==='ios'&&['review-inputs','abandon-inputs','review-prepared','review-execution'].includes(v.action as string))&&keys(v,[...contextKeys,...(candidate?['candidateOperationId']:[]),...(ios?['platform']:[])])&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&v.executionMode==='local'&&(candidate?uuid(v.candidateOperationId):member(['enroll','verify'],v.action));
 }
 export function parseLocalHistoryRequest(input:unknown):PrepareLocalHistory|null{
  try{const v=copyBoundedComparisonData(input,8192);return request(v)?v as PrepareLocalHistory:null;}catch{return null;}
@@ -119,7 +132,7 @@ export function parseLocalHistoryStatus(input:unknown):LocalHistoryStatus|null{
     const receipt=r.executionReceipt;
     if((r.headSequence as number)<7||selected.phase!=='settled-success'||!object(receipt)||receipt.observation!=='current-execution-files-only'||receipt.priorExecutionFinality!=='not-established')return null;
     const {observation:_,priorExecutionFinality:__,...summary}=receipt;
-    if(!executionReceiptSummary(summary,context.candidateOperationId))return null;
+    if(!(context.platform==='ios'?iosExecutionReceiptSummary(summary,context.candidateOperationId):executionReceiptSummary(summary,context.candidateOperationId)))return null;
    }else if(context.action==='review-recovery'){
     const receipt=r.reconciliationReceipt;
     if((r.headSequence as number)<7||selected.phase!=='target-reconciled'||!object(receipt)||receipt.observation!=='current-recovery-files-only'||receipt.priorExecutionFinality!=='not-established')return null;

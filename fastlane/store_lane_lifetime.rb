@@ -138,6 +138,37 @@ module MobileReleaseKit
           context.fetch(:payload).fetch("platform") == (@lane == "ios_testflight_internal" ? "ios" : "android") && !@local_execution
         @local_execution=context
       end
+      def local_ios?
+        origin!
+        @local_execution && @local_execution.fetch(:payload).fetch("platform")=="ios"
+      end
+      def local_ios_context?(context)
+        origin!
+        local_ios? && @local_execution.equal?(context) && @resources && @mode=="execute" && @lane=="ios_testflight_internal"
+      end
+      def local_inflight_adapter?(adapter)
+        origin!
+        local_ios? && @ios_dispatch_active && @ios_dispatch_state==:ready && adapter.equal?(@ios_dispatch_adapter)
+      end
+      def local_altool_command!(runtime,api_key:,source:)
+        origin!;require_upload_continuation!
+        raise LifetimeError unless local_ios? && runtime.equal?(StoreLaneRuntime.current_runtime!) &&
+          runtime.invocation.equal?(self) && !@local_spawn && @ios_dispatch_command.nil?
+        tools=runtime.local_ios_transport!;runtime.local_ios_key!(api_key)
+        @resources.local_altool_source!(source,api_key.fetch(:key_dir))
+        argv=[tools.fetch('altoolPath'),'--upload-app','--apiKey',api_key.fetch(:key_id),'--apiIssuer',api_key.fetch(:issuer_id),
+          '-t','ios','-f',source,'-k','100000'].map { |part| part.dup.freeze }.freeze
+        env={'API_PRIVATE_KEYS_DIR'=>api_key.fetch(:key_dir).dup.freeze,
+          'DEVELOPER_DIR'=>tools.fetch('selection').fetch('developerDirectory')}.freeze
+        # The opaque string satisfies the pinned parser interface, but only
+        # this original adapter can consume the separately retained direct argv.
+        require 'shellwords'
+        @local_spawn=[env,argv].freeze
+        @local_command=Shellwords.join(argv).freeze
+      rescue Exception=>error
+        mark_unknown!(error);raise
+      end
+
       def local_current_validation_request(adapter:)
         require_upload_continuation!
         raise LifetimeError unless @local_execution && @local_execution.fetch(:authority).fetch("purpose") == "execute" &&
@@ -266,6 +297,9 @@ module MobileReleaseKit
                !command.empty? && !command.include?("\0") && artifact.instance_of?(String)
           mark_unknown!(LifetimeError.new)
           raise_unknown!
+        end
+        if local_ios? && (!@local_spawn || !command.equal?(@local_command))
+          mark_unknown!(LifetimeError.new);raise_unknown!
         end
         @ios_dispatch_command, @ios_dispatch_artifact = command.dup.freeze, artifact.dup.freeze
         @ios_dispatch_active, @ios_dispatch_state = true, :ready
@@ -415,8 +449,27 @@ module MobileReleaseKit
           raise_unknown!
         end
         check_ios_dispatch_current!
+        if local_ios?
+          raise LifetimeError unless @local_spawn && command==@local_command
+          runtime=StoreLaneRuntime.current_runtime!;runtime.send(:local_ios_inflight!,self,adapter)
+          @resources.local_altool_source!(@local_spawn[1][9],@local_spawn[0].fetch('API_PRIVATE_KEYS_DIR'))
+        end
         @ios_dispatch_state = :attempted
         true
+      end
+
+      def local_native_spawn_request(adapter,command)
+        origin!
+        return nil unless local_ios?
+        raise LifetimeError unless @ios_dispatch_active && @ios_dispatch_state==:attempted &&
+          adapter.equal?(@ios_dispatch_adapter) && command==@local_command && @local_spawn
+        @local_spawn
+      end
+      def post_local_native_dispatch(adapter)
+        origin!
+        return true unless local_ios?
+        raise LifetimeError unless adapter.equal?(@ios_dispatch_adapter) && @ios_dispatch_state==:attempted
+        @resources.check_local_transport!
       end
 
       def original_ios_dispatch_refusal?(adapter, error)
@@ -730,9 +783,14 @@ module MobileReleaseKit
               create_pair(0, @stdin_read, @stdin_write)
               create_pair(1, @stdout_read, @stdout_write)
               @invocation.send(:require_current_ios_native_dispatch!, self, command)
+              request=@invocation.send(:local_native_spawn_request,self,command)
               @creation = :attempted
-              @pid = Process.spawn(command, in: @stdin_read.io, out: @stdout_write.io,
-                                   err: @stdout_write.io, close_others: true)
+              @pid = if request
+                       Process.spawn(request[0],*request[1],in:@stdin_read.io,out:@stdout_write.io,err:@stdout_write.io,close_others:true)
+                     else
+                       Process.spawn(command, in: @stdin_read.io, out: @stdout_write.io,
+                                     err: @stdout_write.io, close_others: true)
+                     end
               raise LifetimeError unless @pid.instance_of?(Integer) && @pid.positive?
               @creation = :returned
               # No setsid/pgroup option: the command stays in the original
@@ -747,6 +805,7 @@ module MobileReleaseKit
               @stdout_read.close_once
               @invocation.raise_unknown! if @invocation.unknown?
               wait_once(nonblocking: false)
+              @invocation.send(:post_local_native_dispatch,self)
               @body_returned = true
             end
           rescue Exception => error # rubocop:disable Lint/RescueException

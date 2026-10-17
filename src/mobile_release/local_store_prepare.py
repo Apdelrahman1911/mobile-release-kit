@@ -180,13 +180,19 @@ class LocalStorePrepareRun:
     def apple_prepare(self):
         return type(self) is LocalStorePrepareRun and self.request.context['platform']=='ios'
     @property
+    def apple_execute(self):
+        return False
+    @property
+    def apple_store(self):
+        return self.apple_prepare or self.apple_execute
+    @property
     def runtime_count(self):
         return 7 if self.apple_prepare else 6
     def _received_post(self):
         self.checkpoint()
         require(self.material_original is not None and self.source._material is self._received_material)
         self.received.require(self.material_original)
-        if self.apple_prepare:self.validate_apple_shape(self._received_material)
+        if self.apple_store:self.validate_apple_shape(self._received_material)
     apple_material_command=StorePreflightRun.apple_material_command
     _saved=StorePreflightRun._saved
     _source_post=StorePreflightRun._source_post
@@ -255,20 +261,20 @@ class LocalStorePrepareRun:
     @contextmanager
     def command(self,runtime,argv,*,capture):
         self.checkpoint();self.runtime_admitted(runtime)
-        index=len(self._runtime_rows)
+        index=len(self._runtime_rows)-(1 if self.apple_execute else 0)
         expected=tuple(_fastlane_probe_commands(runtime.tooling_root))
-        if self.apple_prepare:
+        if self.apple_store:
             # P8 is already selected by the original material validator; callers
             # cannot arm this role using a path or a fabricated material object.
             expected+=((self.apple_material_command(self._apple_material) if index==5 else ()),)
         expected+=(('bundle','exec','ruby',str(runtime.tooling_root/'fastlane/run_lane.rb'),
-                    'ios_testflight_internal' if self.apple_prepare else 'android_internal_upload'),)
-        lane=self.runtime_count-1
-        require(self._store_entered and len(self._source_rows)==6 and self._pending is None and index<self.runtime_count
+                    'ios_testflight_internal' if self.apple_store else 'android_internal_upload'),)
+        lane=self.runtime_count-1-(1 if self.apple_execute else 0)
+        require(self._store_entered and len(self._source_rows)==6 and self._pending is None and 0<=index<=lane
             and tuple(argv)==expected[index] and capture is (index<lane))
-        self._arm('lane' if index==lane else 'apple-key' if self.apple_prepare and index==5 else 'probe',
-            argv,capture,900 if index==lane else 30 if self.apple_prepare and index==5 else 60,
-            4096 if self.apple_prepare and index==5 else 2<<20,self._runtime_rows)
+        self._arm('lane' if index==lane else 'apple-key' if self.apple_store and index==5 else 'probe',
+            argv,capture,900 if index==lane else 30 if self.apple_store and index==5 else 60,
+            4096 if self.apple_store and index==5 else 2<<20,self._runtime_rows)
         try:
             yield
             # The unchanged probe caller checks nonzero. Lane's actual return
@@ -306,7 +312,7 @@ class LocalStorePrepareRun:
         return True
     def material_values(self):
         self.checkpoint();require(self._store_entered and self.source.reply_step==self.protocol.MATERIAL_STEP and self.material_original is not None)
-        if self.apple_prepare:
+        if self.apple_store:
             self._received_post()
             return {'MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH':str(self.received.require(self.material_original)),
                 'MOBILE_RELEASE_ASC_KEY_ID':self._received_material[1].decode('ascii'),

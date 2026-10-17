@@ -245,7 +245,13 @@ def _store_environment(
         if not (raw_path := source_environment.get(name)):
             continue
         artifact = _repository_path(config, raw_path, name)
-        if not artifact.is_file():
+        local=getattr(invocation.cancellation,'_local_store_source',None)
+        if name=='MOBILE_RELEASE_IOS_ARCHIVE_PATH' and local is not None:
+            from .local_store_execute import LocalStoreExecuteRun
+            owner=local.require_operation()
+            if type(owner) is not LocalStoreExecuteRun or not owner.archive_artifact(config,request,lane_evidence,invocation,artifact):
+                raise StoreOperationError("Local archive lacks its original Execute owner")
+        elif not artifact.is_file():
             raise StoreOperationError(f"{name} must identify a regular release artifact")
         env[name] = str(artifact)
     platform_config = config.section(request.platform)
@@ -822,8 +828,8 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                         stage="production" if request.stage == "production-submit" else request.stage,
                         invocation=invocation, cancellation=guard, lane_evidence=record,
                         **({} if local is None else {"scratch_parent":local.home._path})))
-                    findings = (material.validate(runtime_context=_local_prepare.runtime)
-                                if _local_prepare is not None and request.platform == "ios"
+                    findings = (material.validate(runtime_context=local.runtime)
+                                if local is not None and local.apple_store and request.platform == "ios"
                                 else material.validate())
                     if any(item.status in FAILING_STATUSES for item in findings):
                         raise StoreOperationError("Selected Store credential material is missing or invalid")

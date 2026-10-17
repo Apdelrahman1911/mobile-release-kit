@@ -1424,10 +1424,13 @@ def _validate_installed_p8(material, runtime):
         from ._desktop_store_prepare_control import StorePrepareInput
         from .local_store_prepare import LocalStorePrepareRun
         source = guard._local_store_source
-        if (type(source) is not StorePrepareInput or type(source.require_operation()) is not LocalStorePrepareRun
+        from ._desktop_store_execute_control import StoreExecuteInput
+        from .local_store_execute import LocalStoreExecuteRun
+        owners={StorePrepareInput:LocalStorePrepareRun,StoreExecuteInput:LocalStoreExecuteRun}
+        if (type(source) not in owners or type(source.require_operation()) is not owners[type(source)]
                 or source.initial.context['platform'] != 'ios'):
             raise CredentialError("Bundled Apple validation lacks its original Prepare input")
-        selected_type = StorePrepareInput
+        selected_type = type(source)
     else:
         selected_type = StorePreflightInput
     if (type(source) is not selected_type or type(runtime) is not StoreRuntimeContext

@@ -43,7 +43,7 @@ def context(value):
     extra={"candidateOperationId"} if candidate_action(value) else set()
     ios=type(value) is dict and "platform" in value
     if ios:
-        require(value["platform"]=="ios" and value.get("action") in {"review-inputs","abandon-inputs","review-prepared"})
+        require(value["platform"]=="ios" and value.get("action") in {"review-inputs","abandon-inputs","review-prepared","review-execution"})
         extra.add("platform")
     require(type(value) is dict and set(value)=={"projectId","executionMode","action"}|extra
             and token(value["projectId"]) and value["executionMode"]=="local"

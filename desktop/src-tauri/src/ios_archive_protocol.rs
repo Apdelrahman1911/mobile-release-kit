@@ -246,7 +246,7 @@ pub(crate) struct ToolIdentity {
     pub(crate) device: String, pub(crate) inode: String, pub(crate) mode: u32, pub(crate) uid: u32, pub(crate) gid: u32,
     pub(crate) links: u32, pub(crate) size: u64, pub(crate) mtime_ns: String, pub(crate) ctime_ns: String,
 }
-impl ToolIdentity { fn valid(&self) -> bool {
+impl ToolIdentity { pub(crate) fn valid(&self) -> bool {
     fn decimal(value: &str) -> bool { !value.is_empty() && (value == "0" || !value.starts_with('0'))
         && value.bytes().all(|b| b.is_ascii_digit()) && value.parse::<u64>().is_ok() }
     [&self.device, &self.inode, &self.mtime_ns, &self.ctime_ns].into_iter().all(|v| decimal(v)) && self.inode != "0"

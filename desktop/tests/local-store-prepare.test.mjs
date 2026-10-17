@@ -124,7 +124,7 @@ test('iOS prepared review never becomes Android Execute or Reconcile from matchi
  const android=copy(h);delete android.status.operation.context.platform;android.status.operation.result.preparedIntent={...complete(op(localStorePrepareRequest(project(),assets(),history()))).result.preparedIntent,observation:'current-prepared-files-only',priorPrepareFinality:'not-established'};
  assert.ok(localStoreExecuteRequest(p,assets(),android,tools));
  p.selection.applicationId=value.bundleId;
- assert.equal(localStoreExecuteRequest(p,iosAssets(),h,tools),null);assert.equal(localStoreExecuteRequest(p,assets(),h,tools),null);
+ assert.equal(localStoreExecuteRequest(p,iosAssets(),h,tools).platform,'ios');assert.equal(localStoreExecuteRequest(p,assets(),h,tools),null);
  const reconciled=copy(android);reconciled.status.operation.context.action='review-reconcile';reconciled.status.operation.result.headSequence=6;reconciled.status.operation.result.history[0].phase='execute-pending';p.selection.applicationId='dev.example.app';assert.ok(localStoreReconcileRequest(p,assets(),reconciled));
  assert.equal(localStoreReconcileRequest(p,iosAssets(),reconciled),null);assert.equal(localStoreReconcileRequest(p,iosAssets(),h),null);
 });

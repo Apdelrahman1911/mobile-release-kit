@@ -51,7 +51,7 @@ pub(crate) struct Context {
 impl Context {
     pub(crate) fn consent(&self)->&'static str{if self.platform==Some(CandidatePlatform::Ios){IOS_CANDIDATE_CONSENT}else{self.action.consent()}}
     pub(crate) fn valid(&self)->bool{valid_id(&self.project_id)
-        &&(self.platform.is_none()||matches!(self.action,Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared))&&if self.action.candidate(){
+        &&(self.platform.is_none()||matches!(self.action,Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution))&&if self.action.candidate(){
     self.candidate_operation_id.as_deref().is_some_and(journal_uuid)
 }else{self.candidate_operation_id.is_none()}}}
 impl<'de> Deserialize<'de> for Context {
@@ -199,6 +199,8 @@ impl<'de> Deserialize<'de> for ExecutionReview {
         let mut value=Value::deserialize(decoder)?;
         if !keys(&value,&["operationId","candidateSha256","intentSha256","receiptSha256","authorizationId",
             "sourceCommit","sourceTree","applicationId","version","destination","observedAt","result","limitations",
+            "observation","priorExecutionFinality"]) && !keys(&value,&["operationId","candidateSha256","intentSha256","receiptSha256","authorizationId",
+            "sourceCommit","sourceTree","bundleId","appStoreAppId","version","destination","observedAt","result","limitations",
             "observation","priorExecutionFinality"]){return Err(serde::de::Error::custom("invalid execution review"));}
         let object=value.as_object_mut().ok_or_else(||serde::de::Error::custom("invalid execution review"))?;
         let observation=String::deserialize(object.remove("observation").unwrap()).map_err(serde::de::Error::custom)?;
@@ -208,6 +210,9 @@ impl<'de> Deserialize<'de> for ExecutionReview {
     }
 }
 impl ExecutionReview {
+    fn matches_platform(&self,context:&Context)->bool{
+        (self.receipt.platform()==crate::local_store_execute_protocol::Platform::Ios)==(context.platform==Some(CandidatePlatform::Ios))
+    }
     fn valid(&self,operation:&str)->bool{self.receipt.valid_for(operation)
         &&self.observation=="current-execution-files-only"&&self.prior_execution_finality=="not-established"}
 }
@@ -321,7 +326,7 @@ impl ResultData {
         }
         if context.action==Action::ReviewExecution {
             return self.head_sequence>=7&&row.phase==HistoryPhase::SettledSuccess&&self.candidate_inputs.is_none()&&self.prepared_intent.is_none()
-                &&self.execution_receipt.as_ref().and_then(Option::as_ref).is_some_and(|p|p.valid(id));
+                &&self.execution_receipt.as_ref().and_then(Option::as_ref).is_some_and(|p|p.valid(id)&&p.matches_platform(context));
         }
         if self.prepared_intent.is_some()||self.execution_receipt.is_some(){return false;}
         match(context.action,row.phase,&self.candidate_inputs){
@@ -508,7 +513,7 @@ mod tests {
                 assert_eq!(input.consents(c.consent()),token==IOS_CANDIDATE_CONSENT);}
             for platform in [Value::Null,json!("android"),json!("macos")]{let mut v=value.clone();v["platform"]=platform;assert!(prepare(&v).is_err());}
         }
-        for action in [Action::Enroll,Action::Verify,Action::ReviewExecution,Action::ReviewReconcile,Action::ReviewRecovery]{
+        for action in [Action::Enroll,Action::Verify,Action::ReviewReconcile,Action::ReviewRecovery]{
             let mut value=json!(context(action));value["platform"]=json!("ios");assert!(prepare(&value).is_err());}
     }
     #[test]
@@ -776,6 +781,19 @@ mod tests {
         let mut summary=ready["executionReceipt"].clone();assert!(crate::local_store_execute_protocol::ExecutionReceipt::deserialize(&summary).is_err());
         summary.as_object_mut().unwrap().remove("observation");summary.as_object_mut().unwrap().remove("priorExecutionFinality");
         assert!(crate::local_store_execute_protocol::ExecutionReceipt::deserialize(&summary).unwrap().valid_for(c.candidate_operation_id.as_deref().unwrap()));
+    }
+    #[test]
+    fn local_release_history_ios_execution_has_exact_sixteen_fields_and_no_recovery(){
+        let mut c=context(Action::ReviewExecution);c.platform=Some(CandidatePlatform::Ios);assert!(prepare(&json!(c)).is_ok());
+        let mut ready=execution_result(&c);let receipt=ready["executionReceipt"].as_object_mut().unwrap();
+        receipt.remove("applicationId");receipt.insert("bundleId".into(),json!("dev.example.ios-app"));receipt.insert("appStoreAppId".into(),json!("000123"));receipt.insert("destination".into(),json!({"channel":"testflight-internal"}));
+        assert_eq!(receipt.len(),16);assert!(ResultData::deserialize(&ready).unwrap().matches_context(&c));
+        let mut android=c.clone();android.platform=None;assert!(!ResultData::deserialize(&ready).unwrap().matches_context(&android));
+        for action in [Action::ReviewReconcile,Action::ReviewRecovery]{let mut unsupported=c.clone();unsupported.action=action;assert!(!unsupported.valid());}
+        for (key,value) in [("applicationId",json!("dev.example.app")),("appStoreAppId",json!(123)),("priorExecutionFinality",json!("complete")),("observation",json!("current-store-state"))]{
+            let mut bad=ready.clone();bad["executionReceipt"][key]=value;assert!(!ResultData::deserialize(&bad).is_ok_and(|r|r.matches_context(&c)));
+        }
+        let mut earlier=ready;earlier["headSequence"]=json!(513);assert!(ResultData::deserialize(&earlier).unwrap().matches_context(&c));
     }
     #[test]
     fn local_release_history_execution_review_requires_selected_success_not_latest_operation(){

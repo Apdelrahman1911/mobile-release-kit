@@ -25,9 +25,11 @@ class IOSCandidateBundleReview(CandidateBundleReview):
     def __init__(self, owner, **binding):
         from .local_release_history import LocalHistoryRun
         from .local_store_prepare import LocalStorePrepareRun
+        from .local_store_execute import LocalStoreExecuteRun
         need(owner.request.context.get('platform') == 'ios' and
-             (type(owner) is LocalHistoryRun and owner.request.context['action'] in {'review-inputs','review-prepared'}
-              or type(owner) is LocalStorePrepareRun and owner.request.context['operation']=='local-store-prepare'))
+             (type(owner) is LocalHistoryRun and owner.request.context['action'] in {'review-inputs','review-prepared','review-execution'}
+              or type(owner) is LocalStorePrepareRun and owner.request.context['operation']=='local-store-prepare'
+              or type(owner) is LocalStoreExecuteRun and owner.apple_execute))
         super().__init__(owner, **binding)
         self.archive = self.export = None
         self.roots = {}; self.tree_slots = []; self.tree_iterators = []
@@ -95,7 +97,8 @@ class IOSCandidateBundleReview(CandidateBundleReview):
     def acquire(self):
         self.point(); root = self.owner.root
         from .local_store_prepare import LocalStorePrepareRun
-        self.base_fds = (self.owner.quote['tree_base'] if type(self.owner) is LocalStorePrepareRun else
+        from .local_store_execute import LocalStoreExecuteRun
+        self.base_fds = (self.owner.quote['tree_base'] if type(self.owner) in (LocalStorePrepareRun,LocalStoreExecuteRun) else
             len(root.parts) + 1 + len(Path(self.owner.request.native['home']).parts) + 5 + 6)
         # Root walk, manifest/archive/export/three file originals, max64
         # nested directories plus one leaf and iterator, all coexist.

@@ -36,7 +36,7 @@ impl DocumentBinding {
         let selected=self.registry_result(&mut state,self.inner.bridge.native_project(&project),None).ok();
         let current=selected.as_ref().is_some_and(|(registration,root)|
             self.recheck_store_execute_material(&state,&original,*registration,root).is_ok());
-        if !current {
+        if !current || !original.accepts_execute_consent(&args) {
             // Retire the actual intent, not a replacement loan. No private write/GO.
             self.inner.bridge.local_store_execute.context_changed();
             return Err(crate::local_store_execute_owner::unavailable());

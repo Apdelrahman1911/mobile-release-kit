@@ -256,7 +256,7 @@ function iosHistory(request,phase='inputs-ready'){const v=inputHistory(request,p
 test('iOS input History has explicit platform, distinct consent and closed archive summary without Play authority',()=>{
  const request=localHistoryRequest('p1','review-inputs',UUID,'ios');assert.equal(request.platform,'ios');
  assert.ok(encodeLocalHistoryRequest('prepare_local_release_history',request));
- for(const action of ['enroll','verify','review-execution','review-reconcile','review-recovery'])assert.equal(localHistoryRequest('p1',action,UUID,'ios'),null);
+ for(const action of ['enroll','verify','review-reconcile','review-recovery'])assert.equal(localHistoryRequest('p1',action,UUID,'ios'),null);
  for(const platform of [null,'android','macos'])assert.equal(encodeLocalHistoryRequest('prepare_local_release_history',{...request,platform}),null);
  const complete=iosHistory(request);assert.ok(parseLocalHistoryStatus(status(1,complete)));
  const foreign=copy(complete);delete foreign.context.platform;assert.equal(parseLocalHistoryStatus(status(1,foreign)),null);
@@ -305,7 +305,7 @@ test('iOS prepared History14 is current-files-only and excludes Android or hybri
   const bad=copy(good);change(bad);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
  }
  const earlier=copy(good);earlier.result.headSequence=6;earlier.result.history.push({operationId:'99999999-1234-4234-8234-123456789abc',phase:'inputs-pending',recoveryRequired:true});assert.ok(parseLocalHistoryStatus(status(1,earlier)));
- for(const action of ['review-execution','review-reconcile','review-recovery','enroll','verify'])assert.equal(localHistoryRequest('p1',action,UUID,'ios'),null);
+ for(const action of ['review-reconcile','review-recovery','enroll','verify'])assert.equal(localHistoryRequest('p1',action,UUID,'ios'),null);
 });
 test('iOS prepared History selection uses original iOS consent once and platform changes retire pending consent',async()=>{
  const h=await fixture();try{
@@ -316,4 +316,12 @@ test('iOS prepared History selection uses original iOS consent once and platform
  const late=await fixture();try{
   late.emit(status(1,preparedHistory(localHistoryRequest('p1','verify'))));late.controller.setInputPlatform('ios');assert.equal(late.controller.selectCandidate('review-prepared',UUID),true);const release=late.defer(),pending=late.controller.prepare();assert.equal(late.controller.setInputPlatform('android'),true);release();await pending;await Promise.resolve();assert.equal(late.counts().cancel,1);assert.equal(late.counts().start,0);assert.equal(late.controller.getSnapshot().consentUntil,null);
  }finally{late.controller.dispose();}
+});
+
+test('iOS execution History16 binds closed TestFlight receipt but never grants Apple recovery',async()=>{
+ const request=localHistoryRequest('p1','review-execution',UUID,'ios');assert.ok(request);
+ const good=executionHistory(request),receipt=good.result.executionReceipt;delete receipt.applicationId;receipt.bundleId='org.example.ios-app';receipt.appStoreAppId='0012345';receipt.destination={channel:'testflight-internal'};
+ assert.equal(Object.keys(receipt).length,16);assert.ok(parseLocalHistoryStatus(status(1,good)));
+ for(const mutate of [v=>delete v.context.platform,v=>v.context.action='review-recovery',v=>v.result.executionReceipt.appStoreAppId='x',v=>v.result.executionReceipt.observation='current-store-state',v=>v.result.executionReceipt.priorExecutionFinality='complete',v=>v.result.executionReceipt.destination.channel='internal',v=>v.result.executionReceipt.applicationId='org.example.app',v=>v.result.history[0].phase='execute-pending']){const bad=copy(good);mutate(bad);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);}
+ const h=await fixture();try{h.emit(status(1,executionHistory(localHistoryRequest('p1','verify'))));h.controller.setInputPlatform('ios');assert.equal(h.controller.selectCandidate('review-reconcile',UUID),false);assert.equal(h.controller.selectCandidate('review-execution',UUID),true);assert.equal(h.controller.getSnapshot().request.platform,'ios');await h.controller.prepare();h.controller.acknowledge(true);h.controller.setInputPlatform('android');await h.controller.start();assert.equal(h.counts().start,0);assert.equal(h.counts().cancel,1);}finally{h.controller.dispose();}
 });

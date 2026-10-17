@@ -1729,14 +1729,14 @@ struct IOSXcodeAlias { parent: usize, identity: Identity, target: PathBuf }
 pub(crate) struct IOSXcodeSlots {
     original: Book, alias: Option<IOSXcodeAlias>, sdk_alias: Option<IOSXcodeAlias>, developer: Option<usize>, executable: Option<usize>,
     sdk: Option<usize>, developer_path: Option<PathBuf>, sdk_path: Option<PathBuf>,
-    signing: Option<[usize; 3]>, recovery_security: Option<usize>, validation_only: bool,
+    signing: Option<[usize; 3]>, recovery_security: Option<usize>, validation_only: bool, upload: Option<(usize,usize)>,
     audit: watch::Receiver<Instant>, prepared: bool,
 }
 impl IOSXcodeSlots {
     pub(crate) fn new(audit: watch::Receiver<Instant>) -> Self {
         Self { original: Book::new(), alias: None, sdk_alias: None, developer: None, executable: None, sdk: None,
             developer_path: None, sdk_path: None, signing: None, recovery_security: None,
-            validation_only: false, audit, prepared: false }
+            validation_only: false, upload: None, audit, prepared: false }
     }
     pub(crate) fn arm_acl_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         self.original.arm_acl_once(end, stop)
@@ -1790,13 +1790,8 @@ impl IOSXcodeSlots {
         let _ = self.recovery_binding_data()?;
         self.check_current(end, stop)
     }
-    fn inspect_selected(&mut self, end: Instant, stop: &watch::Receiver<bool>, signed: bool) -> Result<()> {
-        use crate::ios_toolchain::{APPLICATIONS, SDK_COMPONENTS, STANDARD_APP, selection_alias_owner, sibling_target, sdk_sibling_target};
-        if !self.original.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
-        self.original.records.try_reserve_exact(32).map_err(native_error)?;
-        self.original.started = true;
-        checkpoint(end, stop)?;
-        let account = native::real_user().map_err(native_error)?;
+    fn inspect_developer(&mut self,end:Instant,stop:&watch::Receiver<bool>,account:u32)->Result<usize>{
+        use crate::ios_toolchain::{APPLICATIONS,STANDARD_APP,selection_alias_owner,sibling_target};
         let applications = self.original.chain(Path::new(APPLICATIONS), end, stop)?;
         checkpoint(end, stop)?;
         let named = stat::fstatat(self.original.fd(applications)?, STANDARD_APP, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
@@ -1813,12 +1808,37 @@ impl IOSXcodeSlots {
             name
         } else { STANDARD_APP.to_owned() };
         // open() refuses a second alias and every symlink below this sibling.
-        let mut parent = applications;
-        for name in [app.as_str(), "Contents", "Developer"] {
-            parent = self.original.open(Some(parent), name, true, end, stop)?;
-        }
+        let app_index=self.original.open(Some(applications),&app,true,end,stop)?;
+        let contents=self.original.open(Some(app_index),"Contents",true,end,stop)?;
+        let parent=self.original.open(Some(contents),"Developer",true,end,stop)?;
         self.developer = Some(parent);
         self.developer_path = Some(Path::new(APPLICATIONS).join(&app).join("Contents/Developer"));
+        Ok(app_index)
+    }
+    /// Same Store Session's selected upload tools, not an archive/build grant.
+    pub(crate) fn inspect_upload_once(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        if !self.original.inspection_ready(){return Err(AdmissionFailure::AlreadyUsed);}
+        self.original.records.try_reserve_exact(12).map_err(native_error)?;
+        self.original.started=true;checkpoint(end,stop)?;
+        let account=native::real_user().map_err(native_error)?;
+        let bin=self.original.chain(Path::new("/usr/bin"),end,stop)?;
+        let security=self.original.open(Some(bin),"security",false,end,stop)?;
+        let codesign=self.original.open(Some(bin),"codesign",false,end,stop)?;
+        let openssl=self.original.open(Some(bin),"openssl",false,end,stop)?;
+        self.signing=Some([security,codesign,openssl]);
+        let xcrun=self.original.open(Some(bin),"xcrun",false,end,stop)?;
+        let app=self.inspect_developer(end,stop,account)?;
+        self.upload=Some((app,xcrun));self.original.inspected=true;
+        let _=self.upload_binding_data()?;self.check_current(end,stop)
+    }
+    fn inspect_selected(&mut self, end: Instant, stop: &watch::Receiver<bool>, signed: bool) -> Result<()> {
+        use crate::ios_toolchain::{SDK_COMPONENTS,sdk_sibling_target};
+        if !self.original.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
+        self.original.records.try_reserve_exact(32).map_err(native_error)?;
+        self.original.started = true;checkpoint(end,stop)?;
+        let account=native::real_user().map_err(native_error)?;
+        self.inspect_developer(end,stop,account)?;
+        let parent=self.developer.ok_or(AdmissionFailure::Unknown)?;
         let mut tool = parent;
         for name in ["usr", "bin"] { tool = self.original.open(Some(tool), name, true, end, stop)?; }
         self.executable = Some(self.original.open(Some(tool), "xcodebuild", false, end, stop)?);
@@ -1893,7 +1913,7 @@ impl IOSXcodeSlots {
     }
     pub(crate) fn binding_data(&self) -> Result<crate::ios_archive_protocol::ToolchainBinding> {
         use crate::ios_archive_protocol::{RootIdentity, ToolchainBinding};
-        if self.validation_only { return Err(AdmissionFailure::Inventory); }
+        if self.validation_only || self.upload.is_some() { return Err(AdmissionFailure::Inventory); }
         if !self.original.inspected || !self.original.admission_custody_ready() { return Err(AdmissionFailure::Unknown); }
         let identity = |index: Option<usize>| -> Result<Identity> {
             self.original.records.get(index.ok_or(AdmissionFailure::Unknown)?).and_then(|r| r.identity).ok_or(AdmissionFailure::Identity)
@@ -1919,11 +1939,11 @@ impl IOSXcodeSlots {
             mtime_ns: nanos(tool.mtime, tool.mtime_ns)?, ctime_ns: nanos(tool.ctime, tool.ctime_ns)? })
     }
     pub(crate) fn signing_binding_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
-        if self.validation_only { return Err(AdmissionFailure::Inventory); }
+        if self.validation_only || self.upload.is_some() { return Err(AdmissionFailure::Inventory); }
         self.system_signing_data()
     }
     pub(crate) fn validation_binding_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
-        if !self.validation_only || self.alias.is_some() || self.sdk_alias.is_some()
+        if !self.validation_only || self.upload.is_some() || self.alias.is_some() || self.sdk_alias.is_some()
             || self.developer.is_some() || self.executable.is_some() || self.sdk.is_some()
             || self.developer_path.is_some() || self.sdk_path.is_some() || self.recovery_security.is_some()
             || self.signing != Some([3, 4, 5]) || self.original.records.len() != 6
@@ -1932,6 +1952,20 @@ impl IOSXcodeSlots {
         }
         self.system_signing_data()
     }
+    pub(crate) fn upload_binding_data(&self)->Result<crate::local_store_execute_protocol::NativeTools> {
+        if self.validation_only||self.sdk_alias.is_some()||self.executable.is_some()||self.sdk.is_some()
+            ||self.sdk_path.is_some()||self.recovery_security.is_some(){return Err(AdmissionFailure::Inventory);}
+        let(app,xcrun)=self.upload.ok_or(AdmissionFailure::Inventory)?;
+        let root=|index:usize|->Result<crate::ios_archive_protocol::RootIdentity>{
+            let id=self.original.records.get(index).and_then(|r|r.identity).ok_or(AdmissionFailure::Identity)?;
+            Ok(crate::ios_archive_protocol::RootIdentity{device:id.dev.to_string(),inode:id.ino.to_string(),mode:u32::from(id.mode),uid:id.uid,gid:id.gid})
+        };
+        let signing_tools=self.system_signing_data()?;
+        let upload_selection=crate::local_store_execute_protocol::UploadSelection::new_data(
+            self.developer_path.as_ref().ok_or(AdmissionFailure::Unknown)?,root(app)?,root(self.developer.ok_or(AdmissionFailure::Unknown)?)?,self.tool_data(Some(xcrun))?)
+            .map_err(|_|AdmissionFailure::Inventory)?;
+        Ok(crate::local_store_execute_protocol::NativeTools::Ios{signing_tools,upload_selection})
+    }
     fn system_signing_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
         if !self.original.inspected || !self.original.admission_custody_ready() { return Err(AdmissionFailure::Unknown); }
         let [security, codesign, openssl] = self.signing.ok_or(AdmissionFailure::Inventory)?;
@@ -1939,7 +1973,7 @@ impl IOSXcodeSlots {
             self.tool_data(Some(codesign))?, self.tool_data(Some(openssl))?).map_err(|_| AdmissionFailure::Inventory)
     }
     pub(crate) fn recovery_binding_data(&self) -> Result<crate::ios_archive_protocol::ToolIdentity> {
-        if self.validation_only || !self.original.inspected || !self.original.admission_custody_ready()
+        if self.validation_only || self.upload.is_some() || !self.original.inspected || !self.original.admission_custody_ready()
             || self.signing.is_some() || self.developer.is_some() || self.sdk.is_some() || self.executable.is_some() {
             return Err(AdmissionFailure::Inventory);
         }
@@ -2173,5 +2207,50 @@ impl ArtifactInspectionRuntimeSlots {
         })();
         if let Err(failure)=&result{if let Some(book)=self.inspection.as_ref(){book.note_acl(*failure,Instant::now());}}
         result.map_err(|_|BridgeError::unavailable("The selected artifact inspector tool source changed or could not be admitted."))
+    }
+}
+
+#[cfg(test)]
+mod ios_upload_tools_tests {
+    use super::*;
+    #[test]
+    fn ios_upload_projection_requires_actual_selected_originals_not_validation_mode(){
+        let end=Instant::now()+std::time::Duration::from_secs(30);let(_sender,audit)=watch::channel(end);
+        let mut tools=IOSXcodeSlots::new(audit);
+        assert!(tools.upload_binding_data().is_err());assert!(tools.validation_binding_data().is_err());
+        tools.validation_only=true;assert!(tools.upload_binding_data().is_err());tools.validation_only=false;
+        tools.upload=Some((0,0));assert!(tools.binding_data().is_err());assert!(tools.signing_binding_data().is_err());
+        assert!(tools.validation_binding_data().is_err()&&tools.recovery_binding_data().is_err());
+        assert!(tools.upload_binding_data().is_err());
+        assert_eq!(tools.settle_originals(&mut |_|false),CloseOutcome::Settled);
+    }
+    // Actual Mac filesystem/ACL originals only. No process, Keychain, Store,
+    // code signing, selected-tool execution or SDK lookup occurs in this test.
+    #[test]
+    fn ios_upload_actual_selected_tools_pre_post_and_positive_consume(){
+        let end=Instant::now()+std::time::Duration::from_secs(30);
+        let(_audit_sender,audit)=watch::channel(end);let(_stop_sender,stop)=watch::channel(false);
+        let mut tools=IOSXcodeSlots::new(audit);
+        let mut stage="acl-arm";
+        let observed=(||->Result<usize>{
+            tools.arm_acl_once(end,&stop)?;stage="selected-inspection";tools.inspect_upload_once(end,&stop)?;
+            stage="original-projection";
+            let count=tools.retained_original_count().ok_or(AdmissionFailure::Unknown)?;
+            if count<=6{return Err(AdmissionFailure::Inventory);}
+            if !matches!(tools.upload_binding_data()?,crate::local_store_execute_protocol::NativeTools::Ios{..}){return Err(AdmissionFailure::Inventory);}
+            if tools.binding_data().is_ok()||tools.validation_binding_data().is_ok()||tools.recovery_binding_data().is_ok(){return Err(AdmissionFailure::Inventory);}
+            stage="pre";tools.check_before_spawn(end,&stop)?;stage="post";tools.check_after_use(end)?;Ok(count)
+        })();
+        // Closed labels from this fixed original layout, never a selected path,
+        // record name, UID, identity or unbounded native diagnostic.
+        let slot=match tools.original.records.len(){
+            0=>"none",1=>"system-root",2=>"usr",3=>"bin",4=>"security",5=>"codesign",6=>"openssl",7=>"xcrun",
+            8=>"applications-root",9=>"applications",10=>"selected-app",11=>"contents",12=>"developer",_=>"unexpected-layout",
+        };
+        // Independent consume even when any inspection/PRE/POST above refused.
+        let closed=tools.settle_originals(&mut |_|Instant::now()>=end);
+        assert_eq!(closed,CloseOutcome::Settled,"stage={stage} slot={slot} cleanup=unconfirmed");
+        assert!(tools.settled(),"stage={stage} slot={slot} cleanup=unconfirmed");
+        assert!(observed.is_ok(),"stage={stage} slot={slot} cleanup=closed reason={:?}",observed.err());
     }
 }

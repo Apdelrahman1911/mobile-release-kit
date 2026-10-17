@@ -67,13 +67,18 @@ class StorePrepareInput(_SavedCommandInput):
     # Identical original OFD checks: no new root open, flock or numeric retry.
     lease_post=LocalHistoryInput.lease_post
     borrow_project=LocalHistoryInput.borrow_project
+    def _ios_tail(self,op):
+        from ._desktop_store_execute_control import StoreExecuteInput
+        from .local_store_execute import LocalStoreExecuteRun
+        from .local_store_prepare import LocalStorePrepareRun
+        return ((type(self) is StorePrepareInput and type(op) is LocalStorePrepareRun and op.apple_prepare)
+            or (type(self) is StoreExecuteInput and type(op) is LocalStoreExecuteRun and op.apple_execute))
     def _final_read_point(self):
-        # Only an already-written iOS Prepare final checkpoint may drain its
+        # Only an already-written iOS Prepare/Execute final checkpoint may drain its
         # original reply under F/H. No new forward work/material uses this cut.
         from .local_store_prepare import LocalStorePrepareRun
         op=self.require_operation()
-        self._require(type(self) is StorePrepareInput and type(op) is LocalStorePrepareRun
-            and op.apple_prepare and self._ios_final_reply and self.reply_step==4
+        self._require(self._ios_tail(op) and self._ios_final_reply and self.reply_step==4
             and self.reading and self.material_pending and self.material_receiving
             and self.initial is op.request and not op._close_claimed)
         self.guard._check_owner();self.lease_post()
@@ -119,7 +124,7 @@ class StorePrepareInput(_SavedCommandInput):
         self.material_pending=self.material_receiving=True;line=bytearray();key=None
         try:
             self.engine.local_event(event,payload)
-            self._ios_final_reply=type(self) is StorePrepareInput and op.apple_prepare and self.reply_step==4
+            self._ios_final_reply=self._ios_tail(op) and self.reply_step==4
             while not line.endswith(b'\n'):
                 self._require(len(line)<2048);line.extend(self._take(1))
             result=wire.reply(bytes(line),self.initial,'key-material' if self.reply_step==1 else 'checkpoint-settled',self.reply_step)

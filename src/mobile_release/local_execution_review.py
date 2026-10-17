@@ -20,8 +20,9 @@ def _intent_quote(raw, checkpoint):
     require(RETAINED_JOURNAL + 3 * own + (16 << 20) <= MEMORY_LIMIT)
     return own
 
-def _authority(raw, rows, *, recovery=False):
-    intent = decode_local_operation_intent(raw)
+def _authority(raw, rows, *, recovery=False,platform='android'):
+    require(platform=='android' or platform=='ios' and not recovery)
+    intent = decode_local_operation_intent(raw,platform=platform)
     pending, settled = rows[4]['payload'], rows[-1]['payload']
     prepared = intent['preparedBy']; digest = intent['integrity']['sha256']
     require(pending['intentSha256'] == settled['intentSha256'] == digest
@@ -44,10 +45,11 @@ def _review(owner, enrollment, *, recovery):
     from . import _desktop_store_reconcile_protocol as reconcile_data
     require(type(recovery) is bool and type(owner) is LocalHistoryRun
         and owner.request.context['action']==('review-recovery' if recovery else 'review-execution'))
+    platform=owner.request.context.get('platform','android');require(platform=='android' or platform=='ios' and not recovery)
     purpose,kind=('recover','recovery') if recovery else ('execute','execution')
     with _prepared_files(owner, enrollment) as (prepared, intent_raw, rows):
         intent_quote = _intent_quote(intent_raw, owner.checkpoint)
-        authority = _authority(intent_raw, rows,recovery=recovery)
+        authority = _authority(intent_raw, rows,recovery=recovery,platform=platform)
         operation_id = owner.request.context['candidateOperationId']
         leaf = UUID(operation_id).hex + '-'+purpose+'-' + UUID(authority['authorizationId']).hex
         path = owner.root / '.mobile-release/store/local' / leaf
@@ -63,9 +65,10 @@ def _review(owner, enrollment, *, recovery):
             receipt_quote = decode_quote(raw, MAX_LOCAL_RECEIPT_BYTES, checkpoint=owner.checkpoint) - RETAINED_JOURNAL
             require(RETAINED_JOURNAL + 3 * intent_quote + receipt_quote + (16 << 20) <= MEMORY_LIMIT)
             receipt = validate_local_execution_receipt(raw, intent_data=intent_raw,
-                authority_data=canonical(authority), purpose=purpose, expected_intent_sha256=prepared['intentSha256'])
+                authority_data=canonical(authority), purpose=purpose, expected_intent_sha256=prepared['intentSha256'],platform=platform)
             summary = {key: prepared[key] for key in ('operationId', 'candidateSha256', 'intentSha256',
-                'sourceCommit', 'sourceTree', 'applicationId', 'version', 'destination')}
+                'sourceCommit', 'sourceTree', 'bundleId' if platform=='ios' else 'applicationId', 'version', 'destination')}
+            if platform=='ios':summary['appStoreAppId']=prepared['appStoreAppId']
             summary.update(receiptSha256=binding['sha256'], authorizationId=authority['authorizationId'],
                 observedAt=receipt['observedAt'], result=receipt['result'], limitations=list(reconcile_data.LIMITATIONS if recovery else execute_data.LIMITATIONS))
             del raw, receipt
@@ -74,8 +77,8 @@ def _review(owner, enrollment, *, recovery):
                 require(summary['result']=='reconciled')
                 execute_data.receipt_summary(summary,reconcile_data.LIMITATIONS)
             else:
-                execute_data.validate_result(dict(schemaVersion=1, scope='local-android-store-execute',
-                    headSequence=owner.journal.head()['sequence'], executionReceipt=summary))
+                execute_data.validate_result(dict(schemaVersion=1, scope='local-%s-store-execute'%platform,
+                    headSequence=owner.journal.head()['sequence'], executionReceipt=summary),platform=platform)
             _scan(owner, out, kind=kind)
             observed = _read_file(out.fd, NAME, owner.guard, MAX_LOCAL_RECEIPT_BYTES, private=True, binding_only=True)
             require(observed == (binding, b''))

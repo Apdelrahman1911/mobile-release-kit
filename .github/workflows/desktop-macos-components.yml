@@ -422,8 +422,15 @@ jobs:
               asset_session::store_material::tests::apple_prepare_loan_binds_original_command_and_consent_without_google_or_document_grant \
               local_release_history_protocol::tests::local_ios_prepared_history_is_exact_platform_summary_not_reconcile_permission \
               installed_runtime::ios_validation_tools_data_tests::ios_validation_tools_need_original_inspector_and_never_grant_build_or_recovery \
+              local_store_execute_protocol::tests::local_ios_execute_native_selection_is_exact_data_not_android_or_renderer_paths \
+              local_store_execute_protocol::tests::local_ios_execute_exact_platform_consent_receipt_and_actual_sixteen_roles \
+              asset_session::store_material::tests::apple_execute_loan_is_original_asc_not_android_loan_or_document_authority \
+              installed_runtime::ios_upload_tools_tests::ios_upload_projection_requires_actual_selected_originals_not_validation_mode \
+              saved_command_owner::execute_native::ios_tests::local_ios_execute_independent_original_closes_never_create_android_tail \
+              local_release_history_protocol::tests::local_release_history_ios_execution_has_exact_sixteen_fields_and_no_recovery \
+              installed_runtime::ios_upload_tools_tests::ios_upload_actual_selected_tools_pre_post_and_positive_consume \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 78 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 85 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.
@@ -547,8 +554,8 @@ jobs:
           umask 077
           "$OWNER_PYTHON" -I -S -B desktop/tools/macos_store_component.py restore-selected \
             "$WORK_ROOT/component" --target "$COMPONENT_TARGET"
-      - name: Verify every Developer ID image before one offline Ruby smoke
-        timeout-minutes: 6
+      - name: Verify signed runtime and focused offline Store regressions
+        timeout-minutes: 10
         shell: bash
         env:
           OWNER_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -559,7 +566,7 @@ jobs:
           set -euo pipefail
           umask 077
           "$OWNER_PYTHON" -I -S -B - <<'PY'
-          import importlib.util, json, os, resource, subprocess, sys, time, unicodedata
+          import importlib.util, json, os, re, resource, subprocess, sys, time, unicodedata
           from pathlib import Path
           checkout, work = Path.cwd(), Path(os.environ["WORK_ROOT"])
           target, arch = os.environ["COMPONENT_TARGET"], os.environ["COMPONENT_ARCH"]
@@ -602,8 +609,10 @@ jobs:
           resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
           resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024, 256 * 1024))
           phase, index = "signature", 0
+          capture_path = work / "native-output.log"
+          test_results = {}
           try:
-              with (work / "native-output.log").open("xb") as capture:
+              with capture_path.open("xb") as capture:
                   deadline = time.monotonic() + 180
                   for index, row in enumerate(native, 1):
                       name = row["path"]
@@ -622,6 +631,31 @@ jobs:
                       str(runtime / "bin/bundle"), "exec", "ruby", str(checkout / "desktop/tools/verify_macos_store_runtime.rb"),
                       str(runtime), arch, "projected-smoke"], stdin=subprocess.DEVNULL, stdout=capture,
                       stderr=subprocess.STDOUT, env=clean, cwd=home, check=True, timeout=90)
+              # Same signed Ruby/locked gems, current project code, synthetic
+              # providers only. Each original child is killed+joined on timeout.
+              # Five finite256KiB captures avoid verbose fixtures exhausting a
+              # shared stream; successes need only their Minitest counts.
+              clean["MT_CPU"] = "1"
+              for phase, filename, expected_count in (
+                  ("apple-lanes", "test_apple_lanes.rb", 33),
+                  ("play-lanes", "test_play_lanes.rb", 58),
+                  ("local-runtime", "test_local_store_execution_runtime.rb", 11),
+                  ("lane-resources", "test_store_lane_resources.rb", 13),
+                  ("lane-lifetime", "test_store_lane_lifetime.rb", 21),
+              ):
+                  capture_path = work / (phase + ".log")
+                  with capture_path.open("xb") as capture:
+                      subprocess.run(["/usr/bin/sandbox-exec", "-D", "RUNTIME=" + str(runtime), "-p", profile,
+                          str(runtime / "bin/bundle"), "exec", "ruby",
+                          str(checkout / "tests/workflow" / filename)],
+                          stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
+                          env=clean, cwd=checkout, check=True, timeout=45)
+                  output = stager.read(capture_path, 256 * 1024)
+                  stager.need(re.search(rb"^" + str(expected_count).encode("ascii") +
+                      rb" runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$", output, re.MULTILINE) is not None,
+                      "store-tests-" + phase + "-count")
+                  test_results[phase] = expected_count
+                  capture_path.unlink()  # Only this joined test's disposable output.
               phase = "post"
               stager.need(snapshot() == original_directories, "store-smoke-directory-original-post")
               stager.need(stager.store_component_inputs(capsule, target) == original
@@ -633,7 +667,7 @@ jobs:
                   value = "".join(char for char in value if not unicodedata.category(char).startswith("C"))
                   return value.encode("utf-8")[:maximum].decode("utf-8", "ignore")
               try:
-                  tail = stager.read(work / "native-output.log", 256 * 1024)[-4096:].decode("utf-8", "replace")
+                  tail = stager.read(capture_path, 256 * 1024)[-4096:].decode("utf-8", "replace")
                   tail = diagnostic(tail, 4096)
               except Exception as capture_error:
                   tail = "capture-unavailable:" + type(capture_error).__name__
@@ -643,7 +677,7 @@ jobs:
               raise SystemExit(1)
           print(json.dumps({"nativeVerified": len(native), "filesPostChecked": len(expected),
               "projectedCrc32FastlaneSmoke": "passed", "appleP256PemDerSigning": "passed",
-              "networkDenied": True, "storeLaneRun": False}))
+              "networkDenied": True, "syntheticStoreTests": test_results, "liveStoreRun": False}))
           PY
       - name: Remove only this job's restored component and smoke scratch
         if: always() && steps.work.outputs.root != ''

@@ -138,7 +138,7 @@ jobs:
               "$MRK_TEST_RUBY" -rbundler/setup tests/workflow/test_play_lanes.rb | tee /tmp/play.log
               grep -Eq "^58 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/play.log
               "$MRK_TEST_RUBY" -rbundler/setup tests/workflow/test_local_store_execution_runtime.rb | tee /tmp/local.log
-              grep -Eq "^7 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/local.log
+              grep -Eq "^11 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/local.log
             '
       - name: Remove only this job's disposable dependencies and cache
         if: always() && steps.work.outputs.root != ''

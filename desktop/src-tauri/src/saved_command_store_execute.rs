@@ -16,6 +16,7 @@ impl SavedCommandOwner {
     pub(crate) fn start_store_execute(&self,input:execute_wire::Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,
         gate:execute_wire::Availability,material:Arc<SelectedStoreMaterial>,budget:&crate::asset_session::ExecuteMemoryAdmission<'_>)->Result<crate::local_store_execute_owner::Admitted,BridgeError>{
         self.require_domain(SavedCommandDomain::LocalStoreExecute)?;
+        if !material.accepts_execute_consent(&input){return Err(execute_wire::invalid());}
         let admitted=self.start_bound_checked(Start{operation_id:input.operation_id,owner_generation:input.owner_generation},admitted_at,registered,
             Availability::from_store(gate),Some(PrivateSigningMaterial::Store(material)),Some(budget))?;
         Ok(crate::local_store_execute_owner::Admitted::new(admitted.status.execute()?,admitted.release))

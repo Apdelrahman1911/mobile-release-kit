@@ -193,13 +193,15 @@ class LocalStorePrepareTests(unittest.TestCase):
                 else:
                     body=encode(account());data+=PREFIX+encode(dict(schemaVersion=1,files=[dict(role='google-service-account',bytes=len(body))]))+body+SUFFIX
             os.write(iw,data)
-            if kind=='prepare-settled' and fault=='ack-stop':engine.input.stop('cancelled')
-            if kind=='prepare-settled' and fault=='ack-time':engine.input.work_end=time.monotonic()-1
-            if kind=='prepare-settled' and fault=='publication-close':lost_target[0]=engine.service.publishers[-1].slots[-1].number
+            if kind==settled and fault=='ack-stop':engine.input.stop('cancelled')
+            if kind==settled and fault=='ack-time':engine.input.work_end=time.monotonic()-1
+            if kind==settled and fault=='publication-close':lost_target[0]=engine.service.publishers[-1].slots[-1].number
             if kind=='recovery-settled' and hasattr(self,'recovery_after_ack'):self.recovery_after_ack(engine)
             if kind=='recovery-settled' and fault=='recovery-marker-close':lost_target[0]=engine.service.fence_readers[0].fd
-            if kind=='prepare-settled' and fault=='publication-post':
-                Path(engine.service.record._output).with_name('operation-intent.json').write_bytes(b'changed after prepared checkpoint')
+            if kind==settled and fault=='publication-post':
+                target=Path(engine.service.record._output)
+                if not _execute:target=target.with_name('operation-intent.json')
+                target.write_bytes(b'changed after prepared checkpoint')
         def command(argv,**kwargs):
             peak();calls.append(tuple(argv));self.assertIs(kwargs['cancellation'],e.guard)
             if argv[0]=='/usr/bin/git':
@@ -219,10 +221,14 @@ class LocalStorePrepareTests(unittest.TestCase):
                         (self.root/'.mobile-release/store/local'/OP.replace('-','')/'operation-intent.json').write_bytes(b'changed at last source status')
                 e.guard.lifetime_ledger._commands+=1;e.guard.lifetime_ledger._command_dispatched=True
                 return subprocess.CompletedProcess(argv,0,stdout=out,stderr=b'')
+            if apple and _execute and e.service._pending['kind']=='tool-resolution':
+                self.assertNotIn(pending,events);self.assertFalse(e.input._material_read)
+                self.assertEqual(e.service.journals[-1]._rows[-1][0]['phase'],'prepared')
+                return self.resolve_tool(argv,kwargs,e,fault)
             self.assertIn(pending,events);self.assertEqual(self.current_phase(),initial_phase if _reconcile else pending)
             for name in ('GITHUB_ACTIONS','MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON','RUBYOPT'):self.assertNotIn(name,kwargs['environ'])
             if kwargs['capture']:
-                i=len(e.service._runtime_rows)-1
+                i=len(e.service._runtime_rows)-1-(1 if apple and _execute else 0)
                 if apple and i==5:
                     from mobile_release.credentials import APPLE_P8_CHECK
                     self.assertEqual(tuple(argv[:6]),('bundle','exec','ruby','-ropenssl','-e',APPLE_P8_CHECK))
@@ -234,8 +240,8 @@ class LocalStorePrepareTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv,1 if apple and i==5 and fault=='bad-p8' else 0,stdout=out,stderr='')
             self.assertEqual(argv[-1],'ios_testflight_internal' if apple else 'android_internal_upload');self.assertLessEqual(kwargs['timeout'],900)
             if apple:
-                self.assertEqual(kwargs['environ']['MOBILE_RELEASE_STORE_MODE'],'prepare')
-                self.assertEqual(e.service.record._files_owner().mode,'prepare')
+                self.assertEqual(kwargs['environ']['MOBILE_RELEASE_STORE_MODE'],'execute' if _execute else 'prepare')
+                self.assertEqual(e.service.record._files_owner().mode,'execute' if _execute else 'prepare')
                 self.assertNotIn('MOBILE_RELEASE_LOCAL_EXECUTE_AUTHORITY_JSON',kwargs['environ'])
             timing=e.service.record._files_owner().timing
             self.assertEqual(timing.run,__import__('math').floor(e.input.work_end*1e9))
@@ -244,8 +250,9 @@ class LocalStorePrepareTests(unittest.TestCase):
             answer=model(argv,**kwargs)
             if _reconcile and fault=='prepared-close':lost_target[0]=e.service.prepared_out.fd
             if _execute and fault=='tool-close-cancel':lost_target[0]=e.service.tool_manifest.slot.number
-            if _execute and fault=='tool-manifest-post':
+            if _execute and not apple and fault=='tool-manifest-post':
                 path=self.tools/'android-toolchain.json';path.chmod(0o600);path.write_bytes(b'changed original manifest')
+            if apple and _execute and hasattr(self,'after_lane'):self.after_lane(e,fault)
             if fault=='bundle-post':(self.bundle/('export/App.ipa' if apple else 'app-release.aab')).write_bytes(b'changed during original lane')
             return answer
         original_begin=owner_type._begin
@@ -270,7 +277,7 @@ class LocalStorePrepareTests(unittest.TestCase):
             number=native_open(*args,**kwargs);peak();return number
         def closed(number):
             target=None
-            if fault=='publication-close' and not lost and e.service is not None and e.service.publishers and 'prepare-settled' in events:
+            if fault=='publication-close' and not lost and e.service is not None and e.service.publishers and settled in events:
                 target=lost_target[0]
             if (_execute and fault=='tool-close-cancel' or _reconcile and fault in {'prepared-close','recovery-marker-close'}) and not lost:target=lost_target[0]
             native_close(number)

@@ -63,7 +63,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
     {op && <p>{state.historical ? 'Earlier project context · ' : ''}{op.phase}{op.reason !== 'none' ? ` · ${op.reason.replaceAll('-', ' ')}` : ''}</p>}
     {op && hints[op.reason] && <p className="save-note">{hints[op.reason]}</p>}
     {op?.result && <>
-      {!compact && <label>Input / prepared-intent platform <select value={state.inputPlatform} disabled={!!retained} onChange={event => controller.setInputPlatform(event.target.value === 'ios' ? 'ios' : 'android')}>
+      {!compact && <label>Candidate / Store receipt platform <select value={state.inputPlatform} disabled={!!retained} onChange={event => controller.setInputPlatform(event.target.value === 'ios' ? 'ios' : 'android')}>
         <option value="android">Android candidate inputs</option><option value="ios">iOS candidate inputs</option>
       </select><span className="save-note">Choose the platform used to create the input operation below. History rows do not identify a platform; this choice selects which saved bundle or prepared intent to check. A wrong choice refuses review—it never converts or rebuilds files. Play receipt actions are separate.</span></label>}
       <h3>Verified local history</h3><p>Checkpoint {op.result.headSequence}. {op.result.history.length === 0 ? 'No release operations recorded.' : 'Latest recorded operation states (up to 64):'}</p>
@@ -73,8 +73,8 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
           <button onClick={() => choose('review-inputs',row.operationId)}>Review inputs</button>
           {op.result!.history.at(-1) === row && ['inputs-pending','inputs-ready'].includes(row.phase) && <button onClick={() => choose('abandon-inputs',row.operationId)}>Review abandonment</button>}
         </div>}
-        {!compact && !retained && !state.historical && op.result!.history.at(-1) === row && ['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(row.phase) && <button onClick={() => choose('review-reconcile',row.operationId)}>Review for Store check</button>}
-        {!compact && !retained && !state.historical && row.phase === 'target-reconciled' && <button onClick={() => choose('review-recovery',row.operationId)}>Review recovery checkpoint</button>}
+        {!compact && !retained && !state.historical && state.inputPlatform==='android' && op.result!.history.at(-1) === row && ['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(row.phase) && <button onClick={() => choose('review-reconcile',row.operationId)}>Review for Store check</button>}
+        {!compact && !retained && !state.historical && state.inputPlatform==='android' && row.phase === 'target-reconciled' && <button onClick={() => choose('review-recovery',row.operationId)}>Review recovery checkpoint</button>}
         {!compact && !retained && !state.historical && row.phase === 'prepared' && <button onClick={() => choose('review-prepared',row.operationId)}>Review prepared intent</button>}
         {!compact && !retained && !state.historical && row.phase === 'settled-success' && <button onClick={() => choose('review-execution',row.operationId)}>Review execution receipt</button>}
       </li>)}</ul>
@@ -99,10 +99,10 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
       {execution && state.historical && <p>This receipt was reviewed for an earlier project context. Its current files have not been checked for the selected project.</p>}
       {execution && !state.historical && <div className="notice">
         <h3>Execution receipt files currently verified</h3>
-        <p>{execution.applicationId} · Version {execution.version.name} · Build {execution.version.build} · Play internal testing</p>
+        <p>{'bundleId' in execution?execution.bundleId:execution.applicationId} · Version {execution.version.name} · Build {execution.version.build} · {'bundleId' in execution?'TestFlight internal':'Play internal testing'}</p>
         <p>Operation: <code>{execution.operationId}</code> · Recorded result: {execution.result}</p>
         <p>Receipt SHA-256: <code>{execution.receiptSha256}</code></p>
-        <p>Receipt originally observed at {execution.observedAt}. This is not a current Play check or proof of public release.</p>
+        <p>Receipt originally observed at {execution.observedAt}. This is not a current Store check or proof of public release.</p>
         <p>This verifies the current retained files only. It does not establish that the earlier execution’s native cleanup finished, repair an uncertain tail, or grant retry, recovery or promotion authority. Keep all files and history intact.</p>
       </div>}
       {recovery && state.historical && <p>This recovery checkpoint belongs to an earlier project context; its files have not been checked for the selected project.</p>}

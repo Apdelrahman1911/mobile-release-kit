@@ -45,6 +45,11 @@ module MobileReleaseKit
          [[:req, :command], [:block, :block]]],
         [FastlaneCore::TransporterExecutor, :prepare, "fastlane_core/lib/fastlane_core/itunes_transporter.rb", 70,
          [[:keyreq, :original_api_key]]],
+        [FastlaneCore::ItunesTransporter, :initialize, "fastlane_core/lib/fastlane_core/itunes_transporter.rb", 759,
+         [[:opt,:user],[:opt,:password],[:opt,:use_shell_script],[:opt,:provider_short_name],[:opt,:jwt],
+          [:key,:altool_compatible_command],[:key,:api_key],[:key,:provider_public_id]]],
+        [FastlaneCore::AltoolTransporterExecutor, :execute, "fastlane_core/lib/fastlane_core/itunes_transporter.rb", 264,
+         [[:req,:command],[:req,:hide_output]]],
         [FastlaneCore::ItunesTransporter, :upload, "fastlane_core/lib/fastlane_core/itunes_transporter.rb", 832,
          [[:opt, :app_id], [:opt, :dir], [:key, :package_path], [:key, :asset_path], [:key, :platform]]],
         [FastlaneCore::IpaUploadPackageBuilder, :generate, "fastlane_core/lib/fastlane_core/ipa_upload_package_builder.rb", 15,
@@ -88,6 +93,7 @@ module MobileReleaseKit
                original_api_key[:key].instance_of?(String) && !original_api_key[:key].empty?
           StoreLaneFastlaneBridges.refuse!(runtime, :api_key_route)
         end
+        runtime.local_ios_key!(original_api_key) if runtime.invocation.local_ios?
         api_key = original_api_key.dup
         api_key[:key_dir] = runtime.resources.write_api_key!(key_id: api_key[:key_id],
           contents: api_key[:key], shell: instance_of?(FastlaneCore::ShellScriptTransporterExecutor))
@@ -96,6 +102,24 @@ module MobileReleaseKit
     end
 
     module TransporterBridge
+      # The pinned default constructor probes ambient Xcode before selecting
+      # an executor. This local-only API-key branch uses the already admitted
+      # selection instead. It creates no resources or new upload owner.
+      def initialize(user=nil,password=nil,use_shell_script=false,provider_short_name=nil,jwt=nil,
+        altool_compatible_command:false,api_key:nil,provider_public_id:nil)
+        runtime=StoreLaneFastlaneBridges.runtime!
+        unless runtime.invocation.local_ios?
+          return super
+        end
+        unless user.nil? && password.nil? && use_shell_script==false && provider_short_name.nil? && jwt.nil? &&
+          altool_compatible_command==true && provider_public_id.nil?
+          StoreLaneFastlaneBridges.refuse!(runtime,:local_constructor)
+        end
+        runtime.local_ios_key!(api_key)
+        @user=@password=@jwt=@provider_short_name=@provider_public_id=nil
+        @api_key=api_key
+        @transporter_executor=FastlaneCore::AltoolTransporterExecutor.new
+      end
       def upload(app_id = nil, dir = nil, package_path: nil, asset_path: nil, platform: nil)
         runtime = StoreLaneFastlaneBridges.runtime!
         unless app_id.nil? && dir.nil? && platform == "ios" && @api_key.instance_of?(Hash) &&
@@ -103,6 +127,11 @@ module MobileReleaseKit
                 FastlaneCore::ShellScriptTransporterExecutor].any? { |type| @transporter_executor.instance_of?(type) }
           StoreLaneFastlaneBridges.refuse!(runtime, :transporter_route)
         end
+        local=runtime.invocation.local_ios?
+        if local && !@transporter_executor.instance_of?(FastlaneCore::AltoolTransporterExecutor)
+          StoreLaneFastlaneBridges.refuse!(runtime,:local_executor)
+        end
+        runtime.local_ios_key!(@api_key) if local
         runtime.resources.require_upload_inputs!(package_path: package_path, asset_path: asset_path)
         force_itmsp = FastlaneCore::Env.truthy?("ITMSTRANSPORTER_FORCE_ITMS_PACKAGE_UPLOAD")
         actual_dir = if runtime.binding.fetch("macos") && asset_path && !force_itmsp
@@ -120,8 +149,13 @@ module MobileReleaseKit
           jwt: @jwt, platform: platform, api_key: api_key}
         upload_options_placeholder = {provider_short_name: @provider_short_name, provider_public_id: @provider_public_id,
           jwt: jwt_placeholder, platform: platform, api_key: api_key_placeholder}
-        command = @transporter_executor.build_upload_command(@user, @password, actual_dir, upload_options)
-        FastlaneCore::UI.verbose(@transporter_executor.build_upload_command(@user, password_placeholder, actual_dir, upload_options_placeholder))
+        command = if local
+                    runtime.invocation.local_altool_command!(runtime,api_key:api_key,source:actual_dir)
+                  else
+                    @transporter_executor.build_upload_command(@user, @password, actual_dir, upload_options)
+                  end
+        FastlaneCore::UI.verbose(local ? "Using the original selected local Altool candidate route" :
+          @transporter_executor.build_upload_command(@user, password_placeholder, actual_dir, upload_options_placeholder))
         runtime.require_active!
         runtime.resources.require_ready_for_executor!
         primary = nil
@@ -236,7 +270,11 @@ module MobileReleaseKit
           # An admitted current caller cannot reach generic pkg creation.
           StoreLaneFastlaneBridges.refuse!(runtime, :pilot_platform_changed)
         end
-        transporter = transporter_for_selected_team(options)
+        transporter = if runtime.invocation.local_ios?
+                        FastlaneCore::ItunesTransporter.new(nil,nil,false,nil,nil,altool_compatible_command:true,api_key:options[:api_key])
+                      else
+                        transporter_for_selected_team(options)
+                      end
         result = transporter.upload(package_path: package_path, asset_path: asset_path, platform: platform)
         runtime.require_active!
         unless result

@@ -18,7 +18,8 @@ impl StoreCommand {
     fn apple_material(&self)->bool {match self {
         Self::Access(c)=>c.platform==wire::AccessPlatform::Ios,
         Self::Prepare(c)=>c.platform==crate::local_store_prepare_protocol::Platform::Ios,
-        Self::Reconcile(_)|Self::Execute(_)=>false,
+        Self::Execute(c)=>c.platform==crate::local_store_execute_protocol::Platform::Ios,
+        Self::Reconcile(_)=>false,
     }}
 }
 fn refused() -> BridgeError {
@@ -52,7 +53,8 @@ impl SelectedStoreMaterial {
         }
         if let Some(StoreCommand::Reconcile(c))=&self.command {bytes=bytes.checked_add(c.intent_sha256.capacity())?;}
         if let Some(StoreCommand::Execute(c))=&self.command {
-            for n in [c.intent_sha256.capacity(),c.toolchain_selection.instance.capacity(),c.toolchain_selection.record_sha256.capacity(),c.toolchain_selection.inventory_sha256.capacity(),c.toolchain_selection.os_provider_sha256.capacity()] {bytes=bytes.checked_add(n)?;}
+            bytes=bytes.checked_add(c.intent_sha256.capacity())?;
+            if let Some(tools)=&c.toolchain_selection{for n in [tools.instance.capacity(),tools.record_sha256.capacity(),tools.inventory_sha256.capacity(),tools.os_provider_sha256.capacity()]{bytes=bytes.checked_add(n)?;}}
         }
         if let Some(loan)=&self.execute_tools{bytes=bytes.checked_add(loan.own_backing_bytes()?)?;}
         Some(bytes)
@@ -225,6 +227,25 @@ mod tests {
         drop(original);assert!(held.upgrade().is_none());
     }
     #[test]
+    fn apple_execute_loan_is_original_asc_not_android_loan_or_document_authority(){
+        use crate::local_store_execute_protocol as execute;
+        let state=apple_model();let root=state.context.as_ref().unwrap().project.clone();
+        let mut input=execute::tests::input();input.as_object_mut().unwrap().remove("toolchainSelection");
+        input["platform"]=serde_json::json!("ios");input["confirmation"]=serde_json::json!("candidate:ios:1.2.3:42");
+        input["projectId"]=serde_json::json!("inert-project");input["credentialContextRevision"]=serde_json::json!(2);input["recordId"]=serde_json::json!("a".repeat(32));input["recordRevision"]=serde_json::json!(1);
+        let c=execute::prepare(&input).unwrap().context();
+        let original=borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Execute(c.clone()))).unwrap();
+        assert!(original.execute_matches(&c,7,&root)&&original.current(&state,7,&root));
+        assert!(original.execute_ios()&&original.execute_tools_current()&&original.execute_selection().is_none());
+        assert!(!original.execute_current(&c,7,&root)); // Real DocumentWeak is absent.
+        let parts=original.parts().unwrap();assert_eq!(parts.iter().map(|p|p.0).collect::<Vec<_>>(),vec!["asc-p8","asc-key-id","asc-issuer-id"]);
+        assert_eq!(parts[0].1.as_ptr(),state.records[0].payload.material.as_ref().unwrap().bytes().as_ptr());
+        for token in [execute::CONSENT,execute::APPLE_CONSENT]{let start=execute::start(&serde_json::json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":token})).unwrap();assert_eq!(original.accepts_execute_consent(&start),token==execute::APPLE_CONSENT);}
+        assert!(original.with_bytes(&state,7,&root,|_,_|Ok(())).is_err());
+        #[cfg(all(target_os="macos",not(feature="macos-android-registration-helper")))]
+        assert!(matches!(original.execute_census(),Some(None)));
+    }
+    #[test]
     fn apple_prepare_loan_binds_original_command_and_consent_without_google_or_document_grant(){
         use crate::local_store_prepare_protocol as prepare;
         let mut state=apple_model();let root=state.context.as_ref().unwrap().project.clone();
@@ -360,7 +381,7 @@ mod tests {
         let mut changed_root=root.clone();changed_root.path="/inert/other".into();assert!(!original.execute_matches(&context,7,&changed_root));
         for field in 0..4{let mut changed=context.clone();match field{
             0=>changed.intent_sha256="f".repeat(64),1=>changed.candidate_sha256="e".repeat(64),
-            2=>changed.toolchain_selection.catalog_generation+=1,_=>changed.record_revision+=1,
+            2=>changed.toolchain_selection.as_mut().unwrap().catalog_generation+=1,_=>changed.record_revision+=1,
         };assert!(!original.execute_matches(&changed,7,&root));}
         assert!(!original.prepare_matches(&crate::local_store_prepare_protocol::tests::context(),7,&root));
         assert_eq!(original.parts().unwrap()[0].1.as_ptr(),state.records[0].payload.material.as_ref().unwrap().bytes().as_ptr());
@@ -470,11 +491,27 @@ impl SelectedStoreMaterial {
         matches!(self.command.as_ref(),Some(StoreCommand::Execute(c)) if c==context)
             &&self.native.registry_generation==registration&&self.native.project==*root&&self.native.project_id==context.project_id
             &&self.native.revision==context.credential_context_revision&&self.key.id.0==context.record_id&&self.key.revision==context.record_revision
-            &&self.native.execution_mode==commands::ExecutionMode::Local&&self.native.platform==Platform::Android&&self.native.stage==Stage::Candidate
+            &&self.native.execution_mode==commands::ExecutionMode::Local&&self.native.platform==if context.platform==crate::local_store_execute_protocol::Platform::Ios{Platform::Ios}else{Platform::Android}
+            &&self.native.stage==Stage::Candidate
             &&matches!(self.native.purpose,Purpose::Full|Purpose::Store)
     }
+    pub(crate) fn accepts_execute_consent(&self,input:&crate::local_store_execute_protocol::Start)->bool{
+        matches!(&self.command,Some(StoreCommand::Execute(c)) if input.matches_context(c))
+    }
+    fn execute_tools_match(&self,c:&crate::local_store_execute_protocol::Context)->bool{
+        match(c.platform,c.toolchain_selection.as_ref(),self.execute_tools.as_ref()){
+            (crate::local_store_execute_protocol::Platform::Android,Some(selection),Some(loan))=>loan.selected_data()==Some(selection),
+            (crate::local_store_execute_protocol::Platform::Ios,None,None)=>true,_=>false,
+        }
+    }
+    pub(crate) fn execute_tools_current(&self)->bool{
+        matches!(&self.command,Some(StoreCommand::Execute(c)) if self.execute_tools_match(c))
+    }
+    pub(crate) fn execute_ios(&self)->bool{
+        matches!(&self.command,Some(StoreCommand::Execute(c)) if c.platform==crate::local_store_execute_protocol::Platform::Ios&&self.execute_tools_match(c))
+    }
     fn execute_document_matches(&self,document:&Arc<Inner>,state:&DocumentState,context:&crate::local_store_execute_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
-        self.execute_matches(context,registration,root)&&self.execute_tools.as_ref().is_some_and(|v|v.selected_data()==Some(&context.toolchain_selection))&&self.prepare_document.as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|held|Arc::ptr_eq(&held,document))
+        self.execute_matches(context,registration,root)&&self.execute_tools_match(context)&&self.prepare_document.as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|held|Arc::ptr_eq(&held,document))
             &&!state.lost_observed&&!state.compatibility_picker_pending&&self.current(state,registration,root)
             &&document.bridge.registry_generation()==registration&&document.bridge.native_project(&context.project_id).is_ok_and(|(g,r)|g==registration&&r==*root)
     }
@@ -484,11 +521,12 @@ impl SelectedStoreMaterial {
     }
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
     pub(super) fn execute_census(&self)->Option<Option<(usize,[Option<Arc<OriginalWork>>;3])>>{
-        match &self.command{Some(StoreCommand::Execute(_))=>Some(Some(self.execute_tools.as_ref()?.census()?)),_=>Some(None)}
+        match &self.command{Some(StoreCommand::Execute(c))=>{if !self.execute_tools_match(c){return None;}
+            match c.platform{crate::local_store_execute_protocol::Platform::Android=>Some(Some(self.execute_tools.as_ref()?.census()?)),crate::local_store_execute_protocol::Platform::Ios=>Some(None)}},_=>Some(None)}
     }
     pub(crate) fn execute_selection(&self)->Option<&crate::android_build_protocol::MacToolchainSelection>{
         let Some(StoreCommand::Execute(context))=&self.command else{return None;};
-        self.execute_tools.as_ref()?.selected_data().filter(|v|*v==&context.toolchain_selection)
+        self.execute_tools.as_ref()?.selected_data().filter(|v|Some(*v)==context.toolchain_selection.as_ref())
     }
     pub(crate) fn execute_context_data(&self)->Result<crate::local_store_execute_protocol::Content,BridgeError>{
         if !matches!(self.command,Some(StoreCommand::Execute(_))){return Err(refused());}
@@ -499,11 +537,15 @@ impl DocumentBinding {
     pub(super) fn review_store_execute_material(&self,state:&DocumentState,context:&crate::local_store_execute_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->Result<Arc<SelectedStoreMaterial>,BridgeError>{
         if !cfg!(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))||!self.native_qualified()
             ||encrypted_mode(state)&&!self.persistence_qualified(){return Err(refused());}
-        let tools=self.inner.bridge.android_build.execute_tool_loan(&self.inner.session_identity)?.ok_or_else(refused)?;
-        if tools.selected_data()!=Some(&context.toolchain_selection){return Err(refused());}
-        let mut original=borrow_material(state,commands::RecordRef{record_id:&context.record_id,expected_revision:context.record_revision},context.credential_context_revision)?;
+        let tools=match(context.platform,context.toolchain_selection.as_ref()) {
+            (crate::local_store_execute_protocol::Platform::Android,Some(selection))=>{
+                let tools=self.inner.bridge.android_build.execute_tool_loan(&self.inner.session_identity)?.ok_or_else(refused)?;
+                if tools.selected_data()!=Some(selection){return Err(refused());}Some(tools)
+            },(crate::local_store_execute_protocol::Platform::Ios,None)=>None,_=>return Err(refused()),
+        };
+        let mut original=borrow_selected_material(state,commands::RecordRef{record_id:&context.record_id,expected_revision:context.record_revision},context.credential_context_revision,Some(StoreCommand::Execute(context.clone())))?;
         let held=Arc::get_mut(&mut original).ok_or_else(refused)?;
-        held.execute_tools=Some(tools);held.command=Some(StoreCommand::Execute(context.clone()));held.prepare_document=Some(Arc::downgrade(&self.inner));
+        held.execute_tools=tools;held.prepare_document=Some(Arc::downgrade(&self.inner));
         if !original.execute_document_matches(&self.inner,state,context,registration,root){return Err(refused());}original.parts()?;Ok(original)
     }
     pub(super) fn recheck_store_execute_material(&self,state:&DocumentState,original:&Arc<SelectedStoreMaterial>,registration:u32,root:&asset_source::RegisteredRoot)->Result<(),BridgeError>{

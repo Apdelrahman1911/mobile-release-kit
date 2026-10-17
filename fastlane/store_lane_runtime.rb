@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "base64"
 require_relative "store_document"
 require_relative "store_lane_resources"
 require_relative "native_process_spawn"
@@ -142,6 +143,27 @@ module MobileReleaseKit
         @local_execution
       end
 
+      # Only this original admitted local iOS lane can consume the native/core
+      # tool nomination. B's validation-only tuple never authorizes dispatch.
+      def local_ios_transport!
+        context=local_execution_context
+        raise Error.new(:local_transport) unless context && context.fetch(:payload).fetch("platform")=="ios" &&
+          context.fetch(:authority).fetch("purpose")=="execute" && context[:transport_tools]
+        @resources.check_local_transport!
+        context.fetch(:transport_tools)
+      end
+      def local_ios_key!(key)
+        local_ios_transport!
+        expected=Base64.strict_decode64(@environment.fetch("MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"))
+        raise Error.new(:local_key) unless key.instance_of?(Hash) &&
+          key[:key_id]==@environment.fetch("MOBILE_RELEASE_ASC_KEY_ID") &&
+          key[:issuer_id]==@environment.fetch("MOBILE_RELEASE_ASC_ISSUER_ID") &&
+          key[:key].instance_of?(String) && key[:key].b==expected && !expected.empty? && expected.bytesize<=16384
+        key
+      rescue ArgumentError,KeyError
+        raise Error.new(:local_key),cause:nil
+      end
+
       def secondary_errors
         origin!
         @secondary_errors.dup.freeze
@@ -265,6 +287,16 @@ module MobileReleaseKit
         end
       end
 
+      # Original PipeAdapter is already retained, so ordinary continuation
+      # correctly refuses here. Check this one exact active adapter, not a new
+      # continuation permission or a guessed settled adapter.
+      def local_ios_inflight!(invocation,adapter)
+        origin!
+        raise Error.new(:local_inflight) unless invocation.equal?(@invocation) &&
+          invocation.local_inflight_adapter?(adapter) && @state==:running && @bridges_installed && !@unknown
+        check_environment!;require_time!;@resources.check_local_transport!
+      end
+
       def require_time!
         raise Error.new(:deadline) unless NativeProcessSpawn.monotonic_ns < @binding.fetch("run_deadline_ns")
       end
@@ -355,6 +387,8 @@ module MobileReleaseKit
         raise Error.new(:local_size) unless raw.bytesize <= 16*1024
         value=MobileReleaseKit.strict_json(raw,label:"local execution context")
         fields=recover ? %w[authority expectedIntentSha256] : %w[authority expectedIntentSha256] + [platform == "ios" ? "signingTools" : "toolchain"]
+        transport = !recover && platform=="ios" && value.instance_of?(Hash) && value.key?("transportTools")
+        fields += ["transportTools"] if transport
         raise Error.new(:local_shape) unless value.instance_of?(Hash) && value.keys.sort == fields.sort
         path=MobileReleaseKit.safe_path(@environment.fetch("MOBILE_RELEASE_APP_ROOT"),@environment.fetch("MOBILE_RELEASE_OPERATION_INTENT_PATH"))
         raise Error.new(:local_intent) unless File.file?(path) && !File.symlink?(path) && File.size(path) <= 2*1024*1024
@@ -376,11 +410,23 @@ module MobileReleaseKit
             tools.values.all? { |tool| local_signing_tool?(tool) }
           raise Error.new(:local_binding) unless payload.fetch("application").fetch("storeAppId") == @environment.fetch("MOBILE_RELEASE_ASC_APP_ID")
           context[:signing_tools]=tools
+          if transport
+            selected=value.fetch("transportTools")
+            raise Error.new(:local_transport) unless local_transport?(selected)
+            selection=selected.fetch("selection")
+            raise Error.new(:local_transport) unless @environment["DEVELOPER_DIR"]==selection.fetch("developerDirectory") &&
+              %w[DELIVER_ALTOOL_ADDITIONAL_UPLOAD_PARAMETERS DELIVER_ITMSTRANSPORTER_ADDITIONAL_UPLOAD_PARAMETERS
+                FASTLANE_ITUNES_TRANSPORTER_USE_SHELL_SCRIPT FASTLANE_ITUNES_TRANSPORTER_PATH
+                ITMSTRANSPORTER_FORCE_ITMS_PACKAGE_UPLOAD MOBILE_RELEASE_RECOVERY_RUN_ID
+                MOBILE_RELEASE_RECOVERY_CONFIRMATION API_PRIVATE_KEYS_DIR].all? { |name| @environment[name].to_s.empty? }
+            context[:transport_tools]=selected
+          end
         elsif !recover
           context[:toolchain]=value.fetch("toolchain")
         end
         freeze_local(context);@local_execution=context
         @invocation.bind_local_execution!(self,context)
+        @resources.bind_local_transport!(context) if context[:transport_tools]
       end
       def local_signing_tool?(tool)
         tool.instance_of?(Hash) && tool.keys.sort == %w[ctimeNs device gid inode links mode mtimeNs size uid] &&
@@ -388,6 +434,26 @@ module MobileReleaseKit
           tool['inode'] != '0' && %w[mode uid gid].all? { |name| tool[name].instance_of?(Integer) && tool[name].between?(0,2**32-1) } &&
           tool['uid'] == 0 && tool['mode'] & 0170000 == 0100000 && tool['mode'] & 07022 == 0 && tool['mode'] & 0111 != 0 &&
           tool['links'].instance_of?(Integer) && tool['links'] == 1 && tool['size'].instance_of?(Integer) && tool['size'].between?(1,64*1024*1024)
+      end
+      def local_root_identity?(value)
+        value.instance_of?(Hash) && value.keys.sort==%w[device gid inode mode uid] &&
+          %w[device inode].all? { |n| value[n].instance_of?(String) && value[n].match?(/\A(?:0|[1-9][0-9]{0,19})\z/) && value[n].to_i<=MAX_ID } &&
+          value['inode']!='0' && %w[mode uid gid].all? { |n| value[n].instance_of?(Integer) && value[n].between?(0,2**32-1) } &&
+          value['uid']==0 && value['mode'] & 0170000==0040000 && value['mode'] & 07022==0
+      end
+      def local_transport?(value)
+        return false unless value.instance_of?(Hash) && value.keys.sort==%w[altoolIdentity altoolPath selection]
+        selection=value['selection']
+        return false unless selection.instance_of?(Hash) && selection.keys.sort==%w[appIdentity developerDirectory developerIdentity schemaVersion xcrun] &&
+          selection['schemaVersion'].instance_of?(Integer) && selection['schemaVersion']==1 &&
+          local_root_identity?(selection['appIdentity']) && local_root_identity?(selection['developerIdentity']) &&
+          local_signing_tool?(selection['xcrun']) && local_signing_tool?(value['altoolIdentity'])
+        developer=selection['developerDirectory'];tool=value['altoolPath']
+        return false unless developer.instance_of?(String) && developer.match?(%r{\A/Applications/Xcode[A-Za-z0-9_.+-]*\.app/Contents/Developer\z})
+        app=developer.delete_suffix('/Contents/Developer')
+        tool.instance_of?(String) && tool.bytesize<=4096 && tool.start_with?(app+'/Contents/') &&
+          tool.end_with?('/altool') && tool.split('/').length<=32 &&
+          tool.split('/').drop(1).all? { |part| !part.empty? && !%w[. ..].include?(part) && part.bytesize<=255 && !part.match?(/[\x00-\x1f\x7f\\:]/) }
       end
       def freeze_local(value)
         value.each { |k,v| freeze_local(k);freeze_local(v) } if value.instance_of?(Hash)
@@ -401,7 +467,11 @@ module MobileReleaseKit
         if @local_execution
           keys += %w[MOBILE_RELEASE_OPERATION_INTENT_PATH MOBILE_RELEASE_APP_ROOT MOBILE_RELEASE_CONFIG_PATH
             MOBILE_RELEASE_APP_IDENTITY MOBILE_RELEASE_MARKETING_VERSION MOBILE_RELEASE_BUILD_NUMBER MOBILE_RELEASE_CONFIRMATION
-            JAVA_HOME MOBILE_RELEASE_BUNDLETOOL_JAR]
+            JAVA_HOME MOBILE_RELEASE_BUNDLETOOL_JAR DEVELOPER_DIR MOBILE_RELEASE_ASC_ISSUER_ID
+            MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 MOBILE_RELEASE_IOS_ARCHIVE_PATH
+            DELIVER_ALTOOL_ADDITIONAL_UPLOAD_PARAMETERS DELIVER_ITMSTRANSPORTER_ADDITIONAL_UPLOAD_PARAMETERS
+            FASTLANE_ITUNES_TRANSPORTER_USE_SHELL_SCRIPT FASTLANE_ITUNES_TRANSPORTER_PATH
+            ITMSTRANSPORTER_FORCE_ITMS_PACKAGE_UPLOAD MOBILE_RELEASE_RECOVERY_RUN_ID MOBILE_RELEASE_RECOVERY_CONFIRMATION API_PRIVATE_KEYS_DIR]
         end
         raise Error.new(:environment_changed) unless keys.all? { |key| ENV[key] == @environment[key] }
       end

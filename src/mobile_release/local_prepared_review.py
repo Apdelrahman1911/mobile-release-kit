@@ -134,7 +134,7 @@ def _prepared_files(owner, enrollment):
     from .local_release_history import LocalHistoryRun
     require(type(owner) is LocalHistoryRun and owner.request.context['action'] in {'review-prepared', 'review-execution', 'review-reconcile', 'review-recovery'})
     platform=owner.request.context.get('platform','android')
-    require(platform=='android' or platform=='ios' and owner.request.context['action']=='review-prepared')
+    require(platform=='android' or platform=='ios' and owner.request.context['action'] in {'review-prepared','review-execution'})
     recovery = owner.request.context['action'] == 'review-recovery'
     execution = owner.request.context['action'] == 'review-execution'
     reconcile = owner.request.context['action'] == 'review-reconcile'

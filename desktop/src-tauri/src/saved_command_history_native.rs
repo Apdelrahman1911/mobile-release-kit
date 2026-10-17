@@ -872,7 +872,7 @@ pub(super) fn execute_helpers_complete(owner:&Session)->bool{
 }
 
 #[cfg(not(feature="macos-android-registration-helper"))]
-pub(super) fn execute_request(owner:&Session,runtime:&VerifiedRuntime,binding:&android_wire::ToolchainBinding)->Result<Vec<u8>,BridgeError>{
+pub(super) fn execute_request(owner:&Session,runtime:&VerifiedRuntime,binding:&execute_wire::NativeTools)->Result<Vec<u8>,BridgeError>{
     let Consent::Execute(material)=consent(owner)?else{return Err(BridgeError::protocol());};
     let(Context::LocalStoreExecute(context),Profile::LocalStoreExecute(profile))=(&owner.context,owner.profile)else{return Err(BridgeError::protocol());};
     let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
@@ -887,7 +887,7 @@ pub(super) fn execute_request(owner:&Session,runtime:&VerifiedRuntime,binding:&a
         hard_end_ns:clock.endpoint(owner.clocks.finality).ok_or_else(BridgeError::protocol)?,authorization_id:android_wire::candidate_uuid(&super::super::nonce_selected(owner.domain,true)?).ok_or_else(BridgeError::protocol)?,
         // These values were required by this actual Book's signed manifest
         // and protected-app admission, before source acquisition above.
-        toolchain:binding.clone(),tooling_version:crate::runtime::CORE_VERSION,tooling_commit:option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").ok_or_else(BridgeError::protocol)?};
+        tools:binding.clone(),tooling_version:crate::runtime::CORE_VERSION,tooling_commit:option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").ok_or_else(BridgeError::protocol)?};
     let bytes=execute_wire::request(&owner.id,&owner.generation,context,profile,&owner.project,&runtime.cwd,&material.execute_context_data()?,&native)?;
     let mut route=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
     if route.original.is_some()||route.failed{return Err(BridgeError::protocol());}

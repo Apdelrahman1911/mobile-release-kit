@@ -230,11 +230,62 @@ module MobileReleaseKit
         end
       end
 
+      def local_altool_source!(source,key_dir)
+        check_local_transport!
+        raise Error.new(:local_asset) unless @entries.fetch('upload-asset').fetch(:path)==source &&
+          @parents.fetch('key-dir').fetch(:path)==key_dir
+        verify_entry!(@entries.fetch('upload-asset'));verify_entry!(@entries.fetch('key'));true
+      rescue Exception=>error
+        unknown!(error);raise
+      end
+
+      # Fixed local Altool originals share this inventory's actual FileSlots
+      # and consuming closes, but never appear as generated/deletable entries.
+      def bind_local_transport!(context)
+        @invocation.origin!
+        raise Error.new(:local_transport_reused) unless @admitted && !@sealed && !@local_tools &&
+          @invocation.local_ios_context?(context) && context[:transport_tools]
+        @local_tools=[] # Retain partial admission; no retry or late adoption.
+        data=context.fetch(:transport_tools);selection=data.fetch('selection')
+        developer=selection.fetch('developerDirectory');app=developer.delete_suffix('/Contents/Developer')
+        expected={app=>selection.fetch('appIdentity'),developer=>selection.fetch('developerIdentity'),
+          '/usr/bin/xcrun'=>selection.fetch('xcrun'),data.fetch('altoolPath')=>data.fetch('altoolIdentity')}
+        paths=expected.keys.flat_map { |path| bits=path.split('/').drop(1); ['/']+(1..bits.length).map { |n| '/'+bits.first(n).join('/') } }.uniq
+        # Conservative existing native/capture reserve, no credit for future
+        # closes or unknown historical handles. Bound before any new File.open.
+        raise Error.new(:local_transport_quote) unless paths.length<=64 && @handles.length+paths.length+128<=256
+        guarded do
+          paths.sort_by { |path| [path.count('/'),path] }.each do |path|
+            check_local_transport_nodes!
+            require_time!
+            handle=slot;handle.acquire(path,File::RDONLY|File::NOFOLLOW|File::NONBLOCK)
+            held=handle.io.stat;named=File.lstat(path)
+            leaf=path=='/usr/bin/xcrun'||path==data.fetch('altoolPath')
+            identity=transport_identity(held,leaf)
+            raise Error.new(:local_transport_identity) unless identity==transport_identity(named,leaf) &&
+              !named.symlink? && held.uid==0 && held.mode & 07022==0 &&
+              (leaf ? held.file? && held.nlink==1 && held.executable? && held.size.between?(1,64*1024*1024) : held.directory?) &&
+              (!expected.key?(path)||identity==expected.fetch(path))
+            @local_tools << {path:path.freeze,slot:handle,identity:identity.freeze,leaf:leaf}.freeze
+            check_local_transport_nodes!
+          end
+          @local_transport_ready=true
+        end
+      end
+      def check_local_transport!
+        @invocation.origin!
+        raise Error.new(:local_transport_unavailable) unless @local_transport_ready && !@sealed && !@unknown
+        require_time!;check_local_transport_nodes!;true
+      rescue Exception=>error
+        unknown!(error);raise
+      end
+
       def require_ready_for_executor!
         @invocation.require_upload_continuation!
         raise Error.new(:resources_not_admitted) unless @admitted && !@sealed
         require_time!
         @entries.each_value { |entry| verify_entry!(entry) }
+        check_local_transport! if @local_tools
         true
       rescue Exception => error # rubocop:disable Lint/RescueException
         unknown!(error)
@@ -283,6 +334,7 @@ module MobileReleaseKit
               begin
                 Thread.handle_interrupt(Exception => :immediate) do
                   seal!
+                  check_local_transport_nodes! if @local_tools
                   @parents.each_key { |role| verify_parent!(role) }
                   @entries.each_value { |entry| verify_entry!(entry) }
                   rows = @entries.values.map do |entry|
@@ -432,6 +484,21 @@ module MobileReleaseKit
             # mask can deliver a later interruption to the resource operation.
             value.close_errors.each { |error| unknown!(error, cleanup: true) }
           end
+        end
+      end
+
+      def transport_identity(value,leaf)
+        root={"device"=>value.dev.to_s,"inode"=>value.ino.to_s,"mode"=>value.mode,"uid"=>value.uid,"gid"=>value.gid}
+        leaf ? root.merge("links"=>value.nlink,"size"=>value.size,
+          "mtimeNs"=>(value.mtime.to_i*1_000_000_000+value.mtime.nsec).to_s,
+          "ctimeNs"=>(value.ctime.to_i*1_000_000_000+value.ctime.nsec).to_s) : root
+      end
+      def check_local_transport_nodes!
+        @local_tools.each do |node|
+          handle=node.fetch(:slot);raise Error.new(:local_transport_closed) unless handle.open?
+          named=File.lstat(node.fetch(:path));held=handle.io.stat;leaf=node.fetch(:leaf)
+          raise Error.new(:local_transport_changed) unless !named.symlink? &&
+            transport_identity(named,leaf)==node.fetch(:identity) && transport_identity(held,leaf)==node.fetch(:identity)
         end
       end
 

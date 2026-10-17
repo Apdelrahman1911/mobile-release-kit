@@ -8,6 +8,7 @@ require "minitest/autorun"
 require "minitest/mock"
 require_relative "../../fastlane/store_lane_lifetime"
 require_relative "../../fastlane/ios_upload_validation"
+require_relative "../../fastlane/store_lane_runtime"
 
 class StoreLaneLifetimeTest < Minitest::Test
   Lifetime = MobileReleaseKit::StoreLaneLifetime
@@ -172,13 +173,13 @@ class StoreLaneLifetimeTest < Minitest::Test
         end
       end
     end
-    record.begin_ios_transporter_dispatch!(command: "inert-upload", artifact: artifact)
+    record.begin_ios_transporter_dispatch!(command: block_given? ? yield : "inert-upload", artifact: artifact)
   end
 
-  def modeled(model)
+  def modeled(model, spawn: nil)
     no_process_operation = ->(*) { raise "unexpected process operation in inert adapter test" }
     IO.stub(:pipe, -> { model.pipe }) do
-      Process.stub(:spawn, ->(command, **options) { model.spawn(command, **options) }) do
+      Process.stub(:spawn, spawn || ->(command, **options) { model.spawn(command, **options) }) do
         Process.stub(:waitpid2, ->(pid, flags) { model.wait(pid, flags) }) do
           Process.stub(:kill, no_process_operation) do
             Process.stub(:detach, no_process_operation) do
@@ -672,4 +673,65 @@ class StoreLaneLifetimeTest < Minitest::Test
       refute record.unknown?
     end
   end
+  def with_local_direct_dispatch(post_error: nil)
+    model,record=Model.new,invocation(upload:true)
+    tools={'selection'=>{'developerDirectory'=>'/Applications/Xcode_Test.app/Contents/Developer'},
+      'altoolPath'=>'/Applications/Xcode_Test.app/Contents/Support/altool'}
+    key={key_id:'KEY123',issuer_id:'11111111-1111-4111-8111-111111111111',key:'inert',key_dir:'/model/key'}
+    resource=Object.new;checks=[]
+    resource.define_singleton_method(:continuation_allowed?) { true }
+    resource.define_singleton_method(:local_altool_source!) { |*args| checks << [:source,*args];true }
+    resource.define_singleton_method(:check_local_transport!) { checks << [:post];raise post_error if post_error;true }
+    runtime=Object.new
+    runtime.define_singleton_method(:invocation) { record }
+    runtime.define_singleton_method(:local_ios_transport!) { tools }
+    runtime.define_singleton_method(:local_ios_key!) { |value| raise unless value.equal?(key);true }
+    runtime.define_singleton_method(:local_ios_inflight!) do |owner,adapter|
+      raise unless owner.equal?(record) && record.local_inflight_adapter?(adapter)
+      checks << [:pre];true
+    end
+    # Only native admission/tool originals are modeled here; the same real
+    # Invocation reservation, command constructor and PipeAdapter are used.
+    MobileReleaseKit::StoreLaneRuntime.stub(:current_runtime!,runtime) do
+      command=bound_ios_dispatch(record,expires:Time.utc(2099)) do
+        record.instance_variable_set(:@resources,resource)
+        record.instance_variable_set(:@local_execution,{payload:{'platform'=>'ios'}})
+        record.local_altool_command!(runtime,api_key:key,source:'/model/copied.ipa')
+      end
+      captured=[]
+      modeled(model,spawn:lambda do |*args,**options|
+        captured << [args,options];model.spawn(args,**options)
+      end) { yield record,command,model,captured,checks }
+    end
+  end
+
+  def test_local_altool_uses_original_direct_argv_and_single_original_adapter
+    with_local_direct_dispatch do |record,command,model,captured,checks|
+      assert_equal 0,record.spawn_with_pipes(command) { |stdout| stdout.each {} }
+      assert_equal 1,captured.length
+      args,options=captured.first
+      assert_equal({'API_PRIVATE_KEYS_DIR'=>'/model/key','DEVELOPER_DIR'=>'/Applications/Xcode_Test.app/Contents/Developer'},args.first)
+      assert_equal ['/Applications/Xcode_Test.app/Contents/Support/altool','--upload-app','--apiKey','KEY123','--apiIssuer',
+        '11111111-1111-4111-8111-111111111111','-t','ios','-f','/model/copied.ipa','-k','100000'],args.drop(1)
+      assert options.fetch(:close_others)
+      assert_equal 1,checks.count([:pre]);assert_equal 1,checks.count([:post])
+      assert_equal [[4141,0]],model.wait_calls
+      assert model.endpoints.all?(&:descriptor_retired);refute record.unknown?
+      assert_raises(Lifetime::LifetimeError) { record.spawn_with_pipes(command) { |stdout| stdout.each {} } }
+      assert_equal 1,captured.length;assert_equal 2,model.pipe_calls
+    end
+  end
+
+  def test_local_altool_original_post_failure_is_unknown_after_original_wait_not_retry
+    primary=IOError.new('inert changed held transport original')
+    with_local_direct_dispatch(post_error:primary) do |record,command,model,captured,_|
+      error=assert_raises(Lifetime::LifetimeError) { record.spawn_with_pipes(command) { |stdout| stdout.each {} } }
+      assert_same primary,error.primary;assert record.unknown?
+      assert_equal 1,captured.length;assert_equal [[4141,0]],model.wait_calls
+      assert model.endpoints.all?(&:descriptor_retired)
+      assert_raises(Lifetime::LifetimeError) { record.spawn_with_pipes(command) { |stdout| stdout.each {} } }
+      assert_equal 1,captured.length
+    end
+  end
+
 end

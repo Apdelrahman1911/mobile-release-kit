@@ -1,13 +1,13 @@
 import type { IOSCandidateInputs } from './iosArchiveTypes.ts';
 import type { LocalReconciliationReceipt } from './localStoreReconcileTypes.ts';
-import type { LocalExecutionReceipt } from './localStoreExecuteTypes.ts';
+import type { LocalExecutionReceipt, IOSExecutionReceipt } from './localStoreExecuteTypes.ts';
 import type { LocalPreparedIntent, IOSPreparedIntent } from './localStorePrepareTypes.ts';
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile' | 'review-recovery';
 export type PrepareLocalHistory = { projectId: string; executionMode: 'local' } & (
   { action: 'enroll' | 'verify'; candidateOperationId?: never; platform?: never } |
-  { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared'; candidateOperationId: string; platform?: 'ios' } |
-  { action: 'review-execution' | 'review-reconcile' | 'review-recovery'; candidateOperationId: string; platform?: never }
+  { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution'; candidateOperationId: string; platform?: 'ios' } |
+  { action: 'review-reconcile' | 'review-recovery'; candidateOperationId: string; platform?: never }
 );
 export interface LocalCandidateInputs {
   operationId: string; candidateSha256: string; sourceCommit: string; sourceTree: string;
@@ -24,6 +24,9 @@ export interface IOSPreparedIntentReview extends IOSPreparedIntent {
 export interface LocalExecutionReceiptReview extends LocalExecutionReceipt {
   observation: 'current-execution-files-only'; priorExecutionFinality: 'not-established';
 }
+export interface IOSExecutionReceiptReview extends IOSExecutionReceipt {
+  observation: 'current-execution-files-only'; priorExecutionFinality: 'not-established';
+}
 export interface LocalRecoveryReceiptReview extends Omit<LocalReconciliationReceipt, 'observation'> {
   observation: 'current-recovery-files-only';
 }
@@ -36,7 +39,7 @@ export interface LocalHistoryResult {
   limitations: ['no-store-authority', 'no-build-or-publishing', 'keychain-intact-rollback-boundary'];
   candidateInputs?: LocalCandidateInputs | IOSCandidateInputs | null;
   preparedIntent?: LocalPreparedIntentReview | IOSPreparedIntentReview;
-  executionReceipt?: LocalExecutionReceiptReview;
+  executionReceipt?: LocalExecutionReceiptReview | IOSExecutionReceiptReview;
   reconciliationReceipt?: LocalRecoveryReceiptReview;
 }
 export interface LocalHistoryOperation extends LocalHistoryIdentity {

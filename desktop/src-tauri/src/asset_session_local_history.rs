@@ -164,6 +164,9 @@ mod tests {
         assert!(!consent.current(&context,7,&root)); // Comparison DATA cannot mint a Document grant.
         context.action=wire::Action::ReviewExecution;assert!(!consent.matches_context(&context));
         consent.action=wire::Action::ReviewExecution;assert!(consent.matches_context(&context));
+        context.platform=Some(wire::CandidatePlatform::Ios);assert!(!consent.matches_context(&context));
+        consent.platform=context.platform;assert!(consent.matches_context(&context));assert_eq!(consent.consent(),wire::IOS_CANDIDATE_CONSENT);
+        assert!(!consent.current(&context,7,&root));context.platform=None;consent.platform=None;
         context.action=wire::Action::ReviewReconcile;assert!(!consent.matches_context(&context));
         consent.action=wire::Action::ReviewReconcile;assert!(consent.matches_context(&context));
         assert!(!consent.current(&context,7,&root)); // Read-only summary DATA grants no Document.

@@ -1,4 +1,4 @@
-//! Closed local Android execution DATA; only the genuine current native owner grants an action.
+//! Closed local Store execution DATA; only the genuine current native owner grants an action.
 //! A core terminal is provisional until this operation's original native joins.
 use std::path::Path;
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error
 
 pub(crate) const PROTOCOL: &str = "mrk-local-store-execute/1";
 pub(crate) const CONSENT: &str = "local-android-store-execute-v1";
+pub(crate) const APPLE_CONSENT: &str = "local-ios-store-execute-v1";
 pub(crate) const EVENT: &str = "local-store-execute-state-changed";
 pub(crate) const IPC_LIMIT: usize = 16 * 1024;
 pub(crate) const REQUEST_LIMIT: usize = 16 * 1024;
@@ -28,13 +29,26 @@ fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_as
 #[serde(deny_unknown_fields)]
 pub(crate) struct Content { pub(crate) bytes: u32, pub(crate) sha256: String }
 impl Content { fn valid(&self) -> bool { (1..=524288).contains(&self.bytes) && sha(&self.sha256) } }
-pub(crate) use crate::local_store_preflight_protocol::{Platform,ExecutionMode,Profile,Outcome,Phase,Availability};
+pub(crate) use crate::local_store_preflight_protocol::{ExecutionMode,Profile,Outcome,Phase,Availability};
+// Execute-only selection: no widening of other Store domains.
+#[derive(Clone,Copy,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="lowercase")]
+pub(crate) enum Platform {Android,Ios}
+impl Platform {
+    fn name(self)->&'static str {match self {Self::Android=>"android",Self::Ios=>"ios"}}
+    fn consent(self)->&'static str {match self {Self::Android=>CONSENT,Self::Ios=>APPLE_CONSENT}}
+    fn commands(self)->u32 {match self {Self::Android=>14,Self::Ios=>16}}
+    fn scope(self)->&'static str {match self {Self::Android=>"local-android-store-execute",Self::Ios=>"local-ios-store-execute"}}
+}
+#[derive(Deserialize)]
+#[serde(rename_all="lowercase")]
+enum AppleSelection {Ios}
 pub(crate) use crate::local_release_history_protocol::Head;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Operation { LocalStoreExecute }
 fn uuid(v:&str)->bool { crate::local_release_history_protocol::journal_uuid(v) }
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Context {
     pub(crate) project_id: String, pub(crate) draft_revision: u32, pub(crate) baseline_generation: u32,
@@ -42,15 +56,27 @@ pub(crate) struct Context {
     pub(crate) credential_context_revision: u32, pub(crate) record_id: String, pub(crate) record_revision: u32,
     pub(crate) execution_mode: ExecutionMode, pub(crate) platform: Platform, pub(crate) operation: Operation,
     pub(crate) candidate_operation_id:String, pub(crate) candidate_sha256:String, pub(crate) confirmation:String,
-    pub(crate) intent_sha256:String, pub(crate) toolchain_selection:crate::android_build_protocol::MacToolchainSelection,
+    pub(crate) intent_sha256:String,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub(crate) toolchain_selection:Option<crate::android_build_protocol::MacToolchainSelection>,
+}
+impl<'de> Deserialize<'de> for Context {
+    fn deserialize<D:serde::Deserializer<'de>>(decoder:D)->Result<Self,D::Error>{
+        let mut value=Value::deserialize(decoder)?;
+        if value.get("operation").and_then(Value::as_str)!=Some("local-store-execute")
+            ||!matches!(value.get("platform").and_then(Value::as_str),Some("android"|"ios")){return Err(serde::de::Error::custom("invalid execute context"));}
+        let map=value.as_object_mut().ok_or_else(||serde::de::Error::custom("invalid execute context"))?;
+        map.remove("operation");if map.get("platform").and_then(Value::as_str)==Some("android"){map.remove("platform");}
+        prepare(&value).map(|v|v.context()).map_err(|_|serde::de::Error::custom("invalid execute context"))
+    }
 }
 impl Context {
     fn valid(&self) -> bool { valid_id(&self.project_id) && self.draft_revision < u32::MAX
         && self.baseline_generation < u32::MAX && self.saved_config.valid() && self.saved_version.valid()
         && self.credential_context_revision > 0 && self.credential_context_revision < u32::MAX
         && token(&self.record_id) && self.record_revision > 0 && self.record_revision < u32::MAX
-        && uuid(&self.candidate_operation_id) && sha(&self.candidate_sha256) && sha(&self.intent_sha256) && self.toolchain_selection.valid()
-        && self.confirmation==format!("candidate:android:{}:{}",self.saved_version.name,self.saved_version.build) }
+        && uuid(&self.candidate_operation_id) && sha(&self.candidate_sha256) && sha(&self.intent_sha256) && match self.platform {Platform::Android=>self.toolchain_selection.as_ref().is_some_and(|v|v.valid()),Platform::Ios=>self.toolchain_selection.is_none()}
+        && self.confirmation==format!("candidate:{}:{}:{}",self.platform.name(),self.saved_version.name,self.saved_version.build) }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -60,14 +86,16 @@ pub(crate) struct Prepare {
     pub(crate) credential_context_revision: u32, pub(crate) record_id: String, pub(crate) record_revision: u32,
     pub(crate) execution_mode: ExecutionMode,
     pub(crate) candidate_operation_id:String, pub(crate) candidate_sha256:String, pub(crate) confirmation:String,
-    pub(crate) intent_sha256:String, pub(crate) toolchain_selection:crate::android_build_protocol::MacToolchainSelection,
+    pub(crate) intent_sha256:String,
+    #[serde(default)] platform:Option<AppleSelection>,
+    #[serde(default)] pub(crate) toolchain_selection:Option<crate::android_build_protocol::MacToolchainSelection>,
 }
 impl Prepare {
     pub(crate) fn context(&self) -> Context { Context { project_id: self.project_id.clone(), draft_revision: self.draft_revision,
         baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
         saved_version: self.saved_version.clone(), credential_context_revision: self.credential_context_revision,
         record_id: self.record_id.clone(), record_revision: self.record_revision, execution_mode: self.execution_mode,
-        platform: Platform::Android, operation: Operation::LocalStoreExecute, candidate_operation_id:self.candidate_operation_id.clone(),
+        platform: if self.platform.is_some(){Platform::Ios}else{Platform::Android}, operation: Operation::LocalStoreExecute, candidate_operation_id:self.candidate_operation_id.clone(),
         candidate_sha256:self.candidate_sha256.clone(),confirmation:self.confirmation.clone(),
         intent_sha256:self.intent_sha256.clone(),toolchain_selection:self.toolchain_selection.clone() } }
 }
@@ -78,16 +106,19 @@ pub(crate) struct Start { pub(crate) operation_id: String, pub(crate) owner_gene
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Cancel { pub(crate) operation_id: String, pub(crate) owner_generation: String }
 pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
-    if !keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
-        "credentialContextRevision", "recordId", "recordRevision", "executionMode", "candidateOperationId", "candidateSha256", "confirmation", "intentSha256", "toolchainSelection"]) { return Err(invalid()); }
+    let fields=["projectId","draftRevision","baselineGeneration","savedConfig","savedVersion",
+        "credentialContextRevision","recordId","recordRevision","executionMode","candidateOperationId","candidateSha256","confirmation","intentSha256"];
+    if !keys(value,&[fields.as_slice(), &["toolchainSelection"]].concat())
+        && !(keys(value,&[fields.as_slice(), &["platform"]].concat())&&value.get("platform").and_then(Value::as_str)==Some("ios")) {return Err(invalid());}
     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
     if !input.context().valid() { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || input.consent_version != CONSENT { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT) { return Err(invalid()); } Ok(input)
 }
+impl Start {pub(crate) fn matches_context(&self,context:&Context)->bool{self.consent_version==context.platform.consent()}}
 pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration"]) { return Err(invalid()); }
     let input = Cancel::deserialize(value).map_err(|_| invalid())?;
@@ -113,10 +144,34 @@ fn native_path(path: &Path) -> Option<&str> {
     }
     Some(text)
 }
+#[derive(Clone,Debug,Serialize)]
+#[serde(rename_all="camelCase")]
+pub(crate) struct UploadSelection {
+    schema_version:u32,developer_directory:String,
+    app_identity:crate::ios_archive_protocol::RootIdentity,developer_identity:crate::ios_archive_protocol::RootIdentity,
+    xcrun:crate::ios_archive_protocol::ToolIdentity,
+}
+impl UploadSelection {
+    pub(crate) fn new_data(path:&Path,app:crate::ios_archive_protocol::RootIdentity,developer:crate::ios_archive_protocol::RootIdentity,
+        xcrun:crate::ios_archive_protocol::ToolIdentity)->Result<Self,BridgeError>{
+        let directory=native_path(path).ok_or_else(invalid)?;
+        let name=directory.strip_prefix("/Applications/").and_then(|p|p.strip_suffix("/Contents/Developer")).ok_or_else(invalid)?;
+        if name!=crate::ios_toolchain::STANDARD_APP&&crate::ios_toolchain::sibling_target(name)!=Some(name){return Err(invalid());}
+        let root=|v:&crate::ios_archive_protocol::RootIdentity|v.valid()&&v.uid==0&&v.mode&0o022==0;
+        // Existing fixed system-tool validator; no new permissive tool grammar.
+        if !xcrun.valid()||xcrun.uid!=0||xcrun.mode&0o022!=0||!root(&app)||!root(&developer){return Err(invalid());}
+        Ok(Self{schema_version:1,developer_directory:directory.into(),app_identity:app,developer_identity:developer,xcrun})
+    }
+}
+#[derive(Clone,Debug)]
+pub(crate) enum NativeTools {
+    Android(crate::android_build_protocol::ToolchainBinding),
+    Ios{signing_tools:crate::ios_archive_protocol::SigningToolBindings,upload_selection:UploadSelection},
+}
 pub(crate) struct Native {pub(crate) home:std::path::PathBuf,pub(crate) lease_fd:u32,pub(crate) nonce:String,
     pub(crate) work_end_ns:u64,pub(crate) hard_end_ns:u64,pub(crate) authorization_id:String,
     pub(crate) tooling_version:&'static str,pub(crate) tooling_commit:&'static str,
-    pub(crate) toolchain:crate::android_build_protocol::ToolchainBinding}
+    pub(crate) tools:NativeTools}
 impl Native {fn valid(&self)->bool{(3..=255).contains(&self.lease_fd)&&self.nonce.len()==32&&token(&self.nonce)&&self.nonce!="0".repeat(32)
     &&self.work_end_ns>0&&self.hard_end_ns>self.work_end_ns&&self.hard_end_ns-self.work_end_ns<=10_000_000_000
     &&uuid(&self.authorization_id)&&self.tooling_version==crate::runtime::CORE_VERSION&&self.tooling_commit.len()==40
@@ -125,15 +180,22 @@ pub(crate) fn request(operation: &str, generation: &str, context: &Context, prof
     project: &RegisteredRoot, cwd: &Path, credential_config: &Content, native:&Native) -> Result<Vec<u8>, BridgeError> {
     if !token(operation) || !token(generation) || !context.valid() || !credential_config.valid() || !native.valid() { return Err(invalid()); }
     let tools_profile=match profile {Profile::MacosArm64=>crate::android_build_protocol::Profile::MacArm64,Profile::MacosX64=>crate::android_build_protocol::Profile::MacX64};
-    if !native.toolchain.matches_selection(tools_profile,&context.toolchain_selection){return Err(invalid());}
+    match (&native.tools,context.platform,context.toolchain_selection.as_ref()) {
+        (NativeTools::Android(binding),Platform::Android,Some(selected)) if binding.matches_selection(tools_profile,selected)=>{},
+        (NativeTools::Ios{..},Platform::Ios,None)=>{},_=>return Err(invalid()),
+    }
     let identity = project.identity.posix().map_err(|_| invalid())?.preflight_identity();
     if !decimal(&identity.device) || !decimal(&identity.inode) || identity.inode == "0" || identity.mode & 0o170000 != 0o040000 { return Err(invalid()); }
-    let value = json!({"protocol":PROTOCOL,"operationId":operation,"ownerGeneration":generation,"context":context,
+    let mut value = json!({"protocol":PROTOCOL,"operationId":operation,"ownerGeneration":generation,"context":context,
         "native":{"profile":profile,"projectRoot":native_path(&project.path).ok_or_else(invalid)?,
             "rootIdentity":identity,"cwd":native_path(cwd).ok_or_else(invalid)?,"credentialConfig":credential_config,
             "home":native_path(&native.home).ok_or_else(invalid)?,"leaseFd":native.lease_fd,"nonce":native.nonce,
             "clock":{"workEndNs":native.work_end_ns.to_string(),"hardEndNs":native.hard_end_ns.to_string()},
-            "toolchain":native.toolchain,"authorizationId":native.authorization_id,"tooling":{"version":native.tooling_version,"commit":native.tooling_commit}}});
+            "authorizationId":native.authorization_id,"tooling":{"version":native.tooling_version,"commit":native.tooling_commit}}});
+    match &native.tools {
+        NativeTools::Android(binding)=>value["native"]["toolchain"]=json!(binding),
+        NativeTools::Ios{signing_tools,upload_selection}=>{value["native"]["signingTools"]=json!(signing_tools);value["native"]["uploadSelection"]=json!(upload_selection);},
+    }
     check_value(&value).map_err(|_| invalid())?;
     let mut bytes = bounded(&value, REQUEST_LIMIT - 1).map_err(|_| invalid())?;
     bytes.push(b'\n'); Ok(bytes)
@@ -160,8 +222,18 @@ struct Destination {channel:String,release_status:String}
 enum ReceiptResult {Accepted,Reconciled}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-pub(crate) struct ExecutionReceipt {operation_id:String,candidate_sha256:String,intent_sha256:String,receipt_sha256:String,authorization_id:String,
+pub(crate) struct AndroidExecutionReceipt {operation_id:String,candidate_sha256:String,intent_sha256:String,receipt_sha256:String,authorization_id:String,
     source_commit:String,source_tree:String,application_id:String,version:Version,destination:Destination,observed_at:String,result:ReceiptResult,limitations:Vec<Limitation>}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct AppleDestination {channel:String}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct IosExecutionReceipt {operation_id:String,candidate_sha256:String,intent_sha256:String,receipt_sha256:String,authorization_id:String,
+    source_commit:String,source_tree:String,bundle_id:String,app_store_app_id:String,version:Version,destination:AppleDestination,observed_at:String,result:ReceiptResult,limitations:Vec<Limitation>}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(untagged)]
+pub(crate) enum ExecutionReceipt {Android(AndroidExecutionReceipt),Ios(IosExecutionReceipt)}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct ResultData {schema_version:u32,scope:String,head_sequence:u32,execution_receipt:ExecutionReceipt}
@@ -175,26 +247,33 @@ fn utc_second(value:&str)->bool{
 // Closed summary DATA shared with read-only History. It is not an Execute
 // Context, original authorization comparison or native completion observation.
 impl ExecutionReceipt {
+    pub(crate) fn platform(&self)->Platform {match self {Self::Android(_)=>Platform::Android,Self::Ios(_)=>Platform::Ios}}
+    fn version(&self)->&Version {match self {Self::Android(p)=>&p.version,Self::Ios(p)=>&p.version}}
+    fn binding(&self)->(&str,&str,&str) {match self {Self::Android(p)=>(&p.candidate_sha256,&p.intent_sha256,&p.authorization_id),Self::Ios(p)=>(&p.candidate_sha256,&p.intent_sha256,&p.authorization_id)}}
     pub(crate) fn valid_for(&self,operation:&str)->bool {
-        let p=self;
+        let(id,receipt,commit,tree,app,date,limits)=match self {
+            Self::Android(p)=>(&p.operation_id,&p.receipt_sha256,&p.source_commit,&p.source_tree,&p.application_id,&p.observed_at,&p.limitations),
+            Self::Ios(p)=>(&p.operation_id,&p.receipt_sha256,&p.source_commit,&p.source_tree,&p.bundle_id,&p.observed_at,&p.limitations),
+        };
+        let(candidate,intent,authorization)=self.binding();let version=self.version();
         let hex=|v:&str,n|v.len()==n&&v.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b));
-        let app=p.application_id.len()<=255&&p.application_id.split('.').count()>=2&&p.application_id.split('.').all(|v|
-            v.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)&&v.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'));
-        p.operation_id==operation&&uuid(operation)&&sha(&p.candidate_sha256)&&sha(&p.intent_sha256)&&sha(&p.receipt_sha256)
-            &&uuid(&p.authorization_id)&&hex(&p.source_commit,40)&&hex(&p.source_tree,40)&&app
-            &&!p.version.name.is_empty()&&p.version.name.len()<=64
-            &&p.version.name.bytes().all(|b|b.is_ascii_alphanumeric()||b".+-".contains(&b))
-            &&(1..=2_100_000_000).contains(&p.version.build)
-            &&p.destination.channel=="internal"&&p.destination.release_status=="completed"&&utc_second(&p.observed_at)&&p.limitations==LIMITATIONS
+        let separator=if self.platform()==Platform::Ios{b'-'}else{b'_'};
+        let app_valid=app.len()<=255&&app.split('.').count()>=2&&app.split('.').all(|v|
+            v.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)&&v.bytes().all(|b|b.is_ascii_alphanumeric()||b==separator));
+        let destination=match self {Self::Android(p)=>p.destination.channel=="internal"&&p.destination.release_status=="completed",
+            Self::Ios(p)=>p.destination.channel=="testflight-internal"&&(1..=20).contains(&p.app_store_app_id.len())&&p.app_store_app_id.bytes().all(|b|b.is_ascii_digit())};
+        id==operation&&uuid(operation)&&sha(candidate)&&sha(intent)&&sha(receipt)&&uuid(authorization)&&hex(commit,40)&&hex(tree,40)&&app_valid
+            &&!version.name.is_empty()&&version.name.len()<=64&&version.name.bytes().all(|b|b.is_ascii_alphanumeric()||b".+-".contains(&b))
+            &&(1..=2_100_000_000).contains(&version.build)&&destination&&utc_second(date)&&*limits==LIMITATIONS
     }
 }
 impl ResultData {
     fn valid(&self,c:&Context,authorization:&str)->bool {
-        let p=&self.execution_receipt;
-        self.schema_version==1&&self.scope=="local-android-store-execute"&&(7..=513).contains(&self.head_sequence)
-            &&p.valid_for(&c.candidate_operation_id)&&p.candidate_sha256==c.candidate_sha256&&p.intent_sha256==c.intent_sha256
-            &&uuid(authorization)&&p.authorization_id==authorization
-            &&p.version.name==c.saved_version.name&&p.version.build==c.saved_version.build
+        let p=&self.execution_receipt;let(candidate,intent,observed_authorization)=p.binding();
+        self.schema_version==1&&self.scope==c.platform.scope()&&(7..=513).contains(&self.head_sequence)
+            &&p.platform()==c.platform&&p.valid_for(&c.candidate_operation_id)&&candidate==c.candidate_sha256&&intent==c.intent_sha256
+            &&uuid(authorization)&&observed_authorization==authorization
+            &&p.version().name==c.saved_version.name&&p.version().build==c.saved_version.build
     }
 }
 
@@ -220,10 +299,10 @@ pub(crate) struct Terminal {
 impl Terminal {
     fn valid(&self, context: &Context, authorization:&str) -> bool {
         if self.schema_version != 1 || &self.context != context || !self.context.valid() || self.lifetime.profile_calls != 0
-            || self.lifetime.commands > 14 { return false; }
+            || self.lifetime.commands > context.platform.commands() { return false; }
         if self.outcome == Outcome::Complete {
             return self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
-                && self.lifetime.commands==14 && self.lifetime.command_dispatched==Some(true)
+                && self.lifetime.commands==context.platform.commands() && self.lifetime.command_dispatched==Some(true)
                 && self.result.as_ref().is_some_and(|r| r.valid(context,authorization));
         }
         if self.result.is_some() || self.reason == Reason::None { return false; }
@@ -310,7 +389,7 @@ pub(crate) mod tests {
     use super::*;
     const UUID:&str="12345678-1234-4234-8234-123456789abc";
     const AUTH:&str="23456789-1234-4234-8234-123456789abc";
-    fn input()->Value{
+    pub(crate) fn input()->Value{
         let mut v=crate::local_store_prepare_protocol::tests::input();
         v["intentSha256"]=json!("e".repeat(64));
         v["toolchainSelection"]=json!({"instance":"f".repeat(32),"ownerUid":501,"catalogGeneration":1,
@@ -352,7 +431,7 @@ pub(crate) mod tests {
     #[test]
     fn local_execute_native_request_binds_original_mac_selection_and_profile(){
         use crate::android_build_protocol::{Profile as ToolsProfile,RootIdentity as ToolsIdentity,ToolchainBinding};
-        let c=context();let selected=&c.toolchain_selection;
+        let c=context();let selected=c.toolchain_selection.as_ref().unwrap();
         let binding=ToolchainBinding::new_macos_data(ToolsProfile::MacArm64,&selected.root_data(),
             ToolsIdentity{device:"1".into(),inode:"2".into(),mode:0o040555,uid:0,gid:0},selected).unwrap();
         assert!(binding.matches_selection(ToolsProfile::MacArm64,selected));
@@ -364,7 +443,7 @@ pub(crate) mod tests {
         }
         let project=RegisteredRoot{path:"/inert/project".into(),identity:crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity())};
         let mut native=Native{home:"/inert/home".into(),lease_fd:3,nonce:"c".repeat(32),work_end_ns:1_200_000_000_000,hard_end_ns:1_210_000_000_000,
-            authorization_id:AUTH.into(),tooling_version:crate::runtime::CORE_VERSION,tooling_commit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",toolchain:binding};
+            authorization_id:AUTH.into(),tooling_version:crate::runtime::CORE_VERSION,tooling_commit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",tools:NativeTools::Android(binding)};
         let credentials=Content{bytes:40,sha256:"a".repeat(64)};
         let encode=|n:&Native,profile|request(&"a".repeat(32),&"b".repeat(32),&c,profile,&project,Path::new("/inert/runtime"),&credentials,n);
         let bytes=encode(&native,Profile::MacosArm64).unwrap();let v:Value=serde_json::from_slice(&bytes).unwrap();
@@ -427,4 +506,51 @@ pub(crate) mod tests {
             v["lifetime"]["complete"]=json!(false);v["lifetime"]["stopObserved"]=json!(stop);assert!(Terminal::deserialize(&v).unwrap().valid(&context(),AUTH));
         }
     }
+    #[test]
+    fn local_ios_execute_native_selection_is_exact_data_not_android_or_renderer_paths(){
+        use crate::ios_archive_protocol::{RootIdentity,ToolIdentity,SigningToolBindings};
+        let root=RootIdentity{device:"1".into(),inode:"2".into(),mode:0o040555,uid:0,gid:0};
+        let tool=ToolIdentity{device:"1".into(),inode:"3".into(),mode:0o100555,uid:0,gid:0,links:1,size:4096,mtime_ns:"1".into(),ctime_ns:"2".into()};
+        let selection=|p:&str,r:RootIdentity,t:ToolIdentity|UploadSelection::new_data(Path::new(p),r,root.clone(),t);
+        for path in ["/Applications/Xcode.app/Contents/Developer","/Applications/Xcode_26.app/Contents/Developer"]{assert!(selection(path,root.clone(),tool.clone()).is_ok());}
+        for path in ["/tmp/Xcode.app/Contents/Developer","/Library/Developer/CommandLineTools","/Applications/Xcode.app/../Contents/Developer","/Applications/Xcode.app/Contents/Developer/", "/Applications/Other.app/Contents/Developer"]{assert!(selection(path,root.clone(),tool.clone()).is_err());}
+        let path="/Applications/Xcode.app/Contents/Developer";
+        let mut writable=root.clone();writable.mode=0o040775;assert!(selection(path,writable,tool.clone()).is_err());
+        let mut linked=tool.clone();linked.links=2;assert!(selection(path,root.clone(),linked).is_err());
+        let upload_selection=selection(path,root.clone(),tool.clone()).unwrap();
+        let signing_tools=SigningToolBindings::new_data(tool.clone(),tool.clone(),tool).unwrap();
+        let native=Native{home:"/inert/home".into(),lease_fd:3,nonce:"c".repeat(32),work_end_ns:1_200_000_000_000,hard_end_ns:1_210_000_000_000,
+            authorization_id:AUTH.into(),tooling_version:crate::runtime::CORE_VERSION,tooling_commit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",tools:NativeTools::Ios{signing_tools,upload_selection}};
+        let mut v=input();v.as_object_mut().unwrap().remove("toolchainSelection");v["platform"]=json!("ios");v["confirmation"]=json!("candidate:ios:1.2.3:42");let c=prepare(&v).unwrap().context();
+        let project=RegisteredRoot{path:"/inert/project".into(),identity:crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity())};
+        let credentials=Content{bytes:40,sha256:"a".repeat(64)};
+        for profile in [Profile::MacosArm64,Profile::MacosX64]{
+            let bytes=request(&"a".repeat(32),&"b".repeat(32),&c,profile,&project,Path::new("/inert/runtime"),&credentials,&native).unwrap();
+            let value:Value=serde_json::from_slice(&bytes).unwrap();
+            assert!(keys(&value["native"]["uploadSelection"],&["schemaVersion","developerDirectory","appIdentity","developerIdentity","xcrun"]));
+            assert!(keys(&value["native"]["signingTools"],&["security","codesign","openssl"]));
+            assert!(value["native"].get("toolchain").is_none()&&value["context"].get("toolchainSelection").is_none());
+            assert!(request(&"a".repeat(32),&"b".repeat(32),&context(),profile,&project,Path::new("/inert/runtime"),&credentials,&native).is_err());
+        }
+    }
+    #[test]
+    fn local_ios_execute_exact_platform_consent_receipt_and_actual_sixteen_roles(){
+        let mut v=input();v.as_object_mut().unwrap().remove("toolchainSelection");v["platform"]=json!("ios");v["confirmation"]=json!("candidate:ios:1.2.3:42");
+        let c=prepare(&v).unwrap().context();assert_eq!(c.platform,Platform::Ios);assert!(c.toolchain_selection.is_none());
+        for (key,value) in [("toolchainSelection",Value::Null),("developerDirectory",json!("/Applications/Xcode.app/Contents/Developer")),("platform",json!("android"))] {
+            let mut bad=v.clone();bad[key]=value;assert!(prepare(&bad).is_err());
+        }
+        let mut context=json!(c);context["toolchainSelection"]=Value::Null;assert!(Context::deserialize(&context).is_err());
+        for consent in [CONSENT,APPLE_CONSENT] {let start=start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":consent})).unwrap();assert_eq!(start.matches_context(&c),consent==APPLE_CONSENT);}
+        let mut done=complete();done["context"]=json!(c);done["lifetime"]["commands"]=json!(16);done["result"]["scope"]=json!("local-ios-store-execute");
+        let receipt=done["result"]["executionReceipt"].as_object_mut().unwrap();receipt.remove("applicationId");receipt.insert("bundleId".into(),json!("dev.example.ios-app"));receipt.insert("appStoreAppId".into(),json!("0012345"));receipt.insert("destination".into(),json!({"channel":"testflight-internal"}));
+        assert!(Terminal::deserialize(&done).unwrap().valid(&c,AUTH));
+        for calls in [14,15,17] {let mut bad=done.clone();bad["lifetime"]["commands"]=json!(calls);assert!(!Terminal::deserialize(&bad).unwrap().valid(&c,AUTH));}
+        let mut bad=done.clone();bad["result"]["executionReceipt"]["applicationId"]=json!("dev.example.app");assert!(Terminal::deserialize(&bad).is_err());
+        let mut bad=done.clone();bad["result"]["executionReceipt"]["authorizationId"]=json!(UUID);assert!(!Terminal::deserialize(&bad).unwrap().valid(&c,AUTH));
+        let mut bad=done.clone();bad["result"]["executionReceipt"]["destination"]["channel"]=json!("testflight-external");assert!(!Terminal::deserialize(&bad).unwrap().valid(&c,AUTH));
+        let mut bad=done;bad["outcome"]=json!("failed");bad["reason"]=json!("execute-unavailable");bad["result"]=Value::Null;bad["lifetime"]["commands"]=json!(7);assert!(Terminal::deserialize(&bad).unwrap().valid(&c,AUTH));
+        bad["lifetime"]["stopObserved"]=json!("cancelled");assert!(!Terminal::deserialize(&bad).unwrap().valid(&c,AUTH));
+    }
+
 }
