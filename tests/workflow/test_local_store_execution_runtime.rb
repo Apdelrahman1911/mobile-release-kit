@@ -515,4 +515,78 @@ class LocalStoreExecutionRuntimeTest < Minitest::Test
     end
   end
 
+  def readiness_transport
+    previous,_,intent=stage_execute('ios','external-testing');close_metadata(previous)
+    value=JSON.parse(ENV.delete(KEY));value['executionReceiptSha256']='9'*64
+    value['authority'].merge!('purpose'=>'external-readiness','executionReceiptSha256'=>'9'*64)
+    ENV[R::LOCAL_READINESS_KEY]=M.canonical_json(value)
+    intent
+  end
+  def test_readiness_same_runtime_metadata_and_fresh_authority_never_grant_mutation
+    intent=readiness_transport;runtime=nil
+    begin
+      runtime,invocation=model(lane:'ios_testflight_external')
+      M::NativeProcessSpawn.stub(:monotonic_ns,1) do
+        admit(runtime);context=R.local_readiness_context
+        assert_same context,R.local_stage_context
+        assert_same context,invocation.instance_variable_get(:@local_execution)
+        assert_equal '9'*64,context.fetch(:execution_receipt_sha256)
+        assert_equal 'external-readiness',context.fetch(:authority).fetch('purpose')
+        assert_equal 'original snapshot only',File.read(File.join(runtime.local_metadata_root!,'testflight','what-to-test.txt'))
+        assert_raises(R::Error) { runtime.local_stage_execution_context!('external-testing') }
+        assert_raises(R::Error) { runtime.local_ios_transport! }
+        assert_raises(L::LifetimeError) { invocation.local_current_validation_request(adapter:M::IosUploadValidation) }
+        assert_raises(R::Error) { M::AppleCreateRetry.local_first_send(runtime:runtime,stage:'external-testing',
+          build_id:intent.dig('storePrecondition','snapshot','build','id'),journal:->(*) { flunk 'no create journal' }) }
+        ENV['MOBILE_RELEASE_APPLE_REVIEW_CONTACT_FIRST_NAME']='changed original'
+        assert_raises(R::Error) { R.local_readiness_context };assert invocation.unknown?
+      end
+    ensure
+      close_metadata(runtime) if runtime
+    end
+  end
+  def test_readiness_initial_prefix_and_transport_refuse_hybrid_foreign_or_upload_grants
+    readiness_transport;original=ENV.fetch(R::LOCAL_READINESS_KEY)
+    %w[NONCE ROOT ROOT_ID CLOCK RUN_DEADLINE_NS HARD_DEADLINE_NS].each { |n| ENV['MOBILE_RELEASE_STORE_LANE_'+n]='inert' }
+    ENV['MOBILE_RELEASE_OPERATION']='ios_testflight_external';ENV['MOBILE_RELEASE_STORE_MODE']='execute'
+    runtime,=model(lane:'ios_testflight_external')
+    assert_equal :nonce,assert_raises(R::Error) { runtime.send(:admit!,'ios_testflight_external') }.reason
+    [KEY,R::LOCAL_RECONCILE_KEY,R::LOCAL_STAGE_KEY,'MOBILE_RELEASE_STORE_LANE_UNKNOWN'].each do |key|
+      ENV[key]='{}';runtime,=model(lane:'ios_testflight_external')
+      assert_equal :environment,assert_raises(R::Error) { runtime.send(:admit!,'ios_testflight_external') }.reason
+      ENV.delete(key)
+    end
+    [->(v){v['toolchain']={}},->(v){v['signingTools']={}},->(v){v['transportTools']={}},
+     ->(v){v['authority']['purpose']='execute'},->(v){v['executionReceiptSha256']='8'*64}].each do |change|
+      value=JSON.parse(original);change.call(value);ENV[R::LOCAL_READINESS_KEY]=M.canonical_json(value)
+      runtime,=model(lane:'ios_testflight_external')
+      assert_raises(R::Error,M::ContractError) { runtime.send(:admit_local_execution!) }
+      assert_nil runtime.instance_variable_get(:@local_execution)
+    end
+    ENV[R::LOCAL_READINESS_KEY]=original
+    ['ios_testflight_internal','ios_app_store_submit','android_external_promote'].each do |lane|
+      runtime,=model(lane:lane)
+      assert_raises(R::Error) { runtime.send(:admit_local_execution!) }
+      assert_nil runtime.instance_variable_get(:@local_execution)
+    end
+    R.instance_variable_set(:@runtime,nil)
+    assert_raises(R::Error) { R.local_readiness_context }
+  end
+  def test_readiness_original_metadata_close_loss_remains_unknown_without_publication
+    readiness_transport;runtime=nil
+    begin
+      runtime,invocation=model(lane:'ios_testflight_external')
+      M::NativeProcessSpawn.stub(:monotonic_ns,1) do
+        admit(runtime);runtime.local_metadata_root!
+        io=runtime.resources.instance_variable_get(:@handles).last.io;original=io.method(:close);calls=0
+        io.define_singleton_method(:close) { calls+=1;original.call;raise IOError,'fixed close return loss' }
+        close_metadata(runtime);assert_equal 1,calls;assert invocation.unknown?
+        assert_raises(L::LifetimeError) { R.local_readiness_context }
+        refute File.exist?(File.join(@root,'receipt.json'))
+      end
+    ensure
+      close_metadata(runtime) if runtime
+    end
+  end
+
 end

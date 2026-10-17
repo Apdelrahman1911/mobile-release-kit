@@ -1378,7 +1378,7 @@ struct Session {
     fixture: Option<Arc<offline_tests::hosted::Permit>>,
 }
 impl Session {
-    fn recovery_settlement(&self)->bool {matches!(&self.context,Context::LocalStoreReconcile(c) if c.settling())}
+    fn reconcile_checkpointing(&self)->bool {matches!(&self.context,Context::LocalStoreReconcile(c) if c.checkpointing())}
     fn candidate_ios(&self)->bool{matches!(&self.context,Context::IOSArchive(context) if context.candidate())}
     fn candidate_android(&self)->bool{matches!(&self.context,Context::AndroidBuild(context) if context.candidate())}
 
@@ -1867,7 +1867,7 @@ fn native_final(book: &Resources, owner: &Session) -> bool {
             return book.native.is_none()&&book.ios_native.is_none()&&book.android_observations.is_none()
                 &&book.native_started&&book.native_joined&&!book.native_failed&&book.native_settlement.is_none()
                 &&matches!(book.native_return.as_ref(),Some(Ok(NativeSettlement{originals_closed:true,integrity:true})))
-                &&book.execute_native.as_ref().is_some_and(|n|n.try_lock().is_ok_and(|n|n.ios_settled()))
+                &&book.execute_native.as_ref().is_some_and(|n|n.try_lock().is_ok_and(|n|n.direct_settled()))
                 &&local_history::sources_final(owner);
         }
         if matches!(domain,SavedCommandDomain::AndroidBuild|SavedCommandDomain::LocalStoreExecute) {
@@ -2223,7 +2223,8 @@ impl SavedCommandOwner {
             observation.control.claim_slot(index)?;
         }
         let artifact_selection = match &context { Context::ArtifactInspection(c) => Some(Arc::new(r.artifact_inputs.loan(c,registration,&project)?)), _ => None };
-        let candidate=matches!(&context,Context::AndroidBuild(value) if value.candidate())||matches!(&context,Context::IOSArchive(value) if value.candidate());
+        let candidate=matches!(&context,Context::AndroidBuild(value) if value.candidate())||matches!(&context,Context::IOSArchive(value) if value.candidate())
+            ||matches!(&context,Context::LocalStorePrepare(value) if value.later.is_some());
         let id = nonce_selected(self.inner.domain,candidate)?; let generation = nonce(self.inner.domain)?;
         if r.last.as_ref().is_some_and(|last| last.operation_id == id || last.owner_generation == generation) { return Err(self.inner.domain.unavailable()); }
         let projection = RunProjection { operation_id: id, owner_generation: generation, context,
@@ -2320,7 +2321,8 @@ impl SavedCommandOwner {
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
         let execute_native=if self.inner.domain==SavedCommandDomain::LocalStoreExecute{
             match prepared.material.as_ref(){Some(PrivateSigningMaterial::Store(m))=>{
-                if m.execute_ios(){Some(ExecuteNativeBooks::new_ios(audit_cutoff.clone(),cleanup_cutoff.clone()))}
+                if m.execute_stage(){Some(ExecuteNativeBooks::new_stage(cleanup_cutoff.clone()))}
+                else if m.execute_ios(){Some(ExecuteNativeBooks::new_ios(audit_cutoff.clone(),cleanup_cutoff.clone()))}
                 else{m.execute_selection().cloned().map(|selected|ExecuteNativeBooks::new(selected,audit_cutoff.clone(),cleanup_cutoff.clone(),clocks))}
             },_=>None}
         }else{None};
@@ -2372,7 +2374,7 @@ impl SavedCommandOwner {
                     self.inner.toolchain.clone().map(|profile| Arc::new(Mutex::new(AndroidNativeBooks::new(profile, audit_cutoff))))
                 } else { None },
                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
-                android_observations: (android_native.is_some()||execute_native.as_ref().is_some_and(|n|!n.ios())).then(AndroidObservationSlot::default),
+                android_observations: (android_native.is_some()||execute_native.as_ref().is_some_and(|n|!n.direct_settlement())).then(AndroidObservationSlot::default),
                 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
                 execute_native:execute_native.map(|n|Arc::new(Mutex::new(n))),
                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
@@ -3150,7 +3152,7 @@ impl Inner {
                 if owner.history.receive_prepare(event).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
             }
             Incoming::Reconcile(event) if owner.domain==SavedCommandDomain::LocalStoreReconcile&&a.accepted&&!a.terminal&&!a.unknown&&a.first_stop.is_none()=>{
-                if owner.history.receive_reconcile(event,owner.recovery_settlement()).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
+                if owner.history.receive_reconcile(event,owner.reconcile_checkpointing()).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
             }
             Incoming::Execute(event) if owner.domain==SavedCommandDomain::LocalStoreExecute&&a.accepted&&!a.terminal&&!a.unknown&&a.first_stop.is_none()=>{
                 if owner.history.receive_execute(event).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
@@ -4235,7 +4237,7 @@ async fn settle_native(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Ses
         let selected=if owner.domain==SavedCommandDomain::IOSArchive&&book.native.is_none(){book.ios_native.clone().map(SelectedNativeSettlement::Archive)}
             else if owner.domain==SavedCommandDomain::LocalStoreExecute&&book.native.is_none()&&book.ios_native.is_none(){
                 #[cfg(not(feature="macos-android-registration-helper"))]
-                {book.execute_native.clone().filter(|n|n.try_lock().is_ok_and(|n|n.ios())).map(SelectedNativeSettlement::Execute)}
+                {book.execute_native.clone().filter(|n|n.try_lock().is_ok_and(|n|n.direct_settlement())).map(SelectedNativeSettlement::Execute)}
                 #[cfg(feature="macos-android-registration-helper")]
                 {None}
             }else{None};
@@ -4262,8 +4264,8 @@ async fn settle_native(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Ses
                 },
                 #[cfg(not(feature="macos-android-registration-helper"))]
                 SelectedNativeSettlement::Execute(native)=>match native.lock(){
-                    Ok(mut native)=>native.settle_ios(used,end,&mut |first| original_owner.native_cleanup_expired(first)),
-                    Err(error)=>{let mut native=error.into_inner();native.interrupted();native.settle_ios(used,end,&mut |first| original_owner.native_cleanup_expired(first))},
+                    Ok(mut native)=>native.settle_direct(used,end,&mut |first| original_owner.native_cleanup_expired(first)),
+                    Err(error)=>{let mut native=error.into_inner();native.interrupted();native.settle_direct(used,end,&mut |first| original_owner.native_cleanup_expired(first))},
                 },
             };
             if original_owner.candidate_ios()||original_owner.domain==SavedCommandDomain::LocalStoreExecute{let sources=local_history::finish_prepare_sources(&original_owner);

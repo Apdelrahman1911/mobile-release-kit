@@ -6,6 +6,7 @@ use crate::installed_runtime::{LeasedAndroidToolchainSlots,android_lease_admissi
 use mrk_macos_installed_native::android_catalog_query::Role;
 
 enum ExecuteTools {
+    Stage,
     Android{original:LeasedAndroidToolchainSlots,control:Arc<AndroidUseControl>},
     Ios(IOSXcodeSlots),
 }
@@ -24,22 +25,24 @@ impl ExecuteNativeBooks {
     pub(super) fn new_ios(audit:watch::Receiver<Instant>,cleanup:watch::Receiver<Instant>)->Self {
         Self::with_tools(ExecuteTools::Ios(IOSXcodeSlots::new(audit)),cleanup)
     }
+    pub(super) fn new_stage(cleanup:watch::Receiver<Instant>)->Self {Self::with_tools(ExecuteTools::Stage,cleanup)}
     fn with_tools(tools:ExecuteTools,cleanup:watch::Receiver<Instant>)->Self {
         let mut value=Self{runtime:StoreRuntimeSlots::new(),tools,selection:None,phase:NativePhase::New,failure:None,
             settlement_started:false,cleanup,pre_go_reservation:None};
         value.pre_go_reservation=value.retained_now().and_then(|n|n.checked_add(std::mem::size_of::<Session>()))
             .and_then(|n|n.checked_add(std::mem::size_of::<Resources>()))
-            .and_then(|n|if value.ios(){n.checked_add(std::mem::size_of::<NativeSettlement>())}else{
+            .and_then(|n|if value.direct_settlement(){n.checked_add(std::mem::size_of::<NativeSettlement>())}else{
                 n.checked_add(std::mem::size_of::<AndroidObservationSlot>())?.checked_add(std::mem::size_of::<AndroidObservations>())});value
     }
     pub(super) fn ios(&self)->bool {matches!(self.tools,ExecuteTools::Ios(_))}
+    pub(super) fn direct_settlement(&self)->bool {matches!(self.tools,ExecuteTools::Ios(_)|ExecuteTools::Stage)}
     pub(super) fn control(&self)->Option<Arc<AndroidUseControl>> {match &self.tools{ExecuteTools::Android{control,..}=>Some(control.clone()),_=>None}}
     fn stopped(&self)->bool{self.control().is_some_and(|c|c.stopped())}
     pub(super) fn pre_go_bytes(&self)->Option<usize>{self.pre_go_reservation}
     fn retained_now(&self)->Option<usize>{
         let selection=self.selection.as_ref().map_or(Some(0),|s|s.python.capacity().checked_add(s.bootstrap.capacity())?.checked_add(s.core.capacity())?.checked_add(s.cwd.capacity()));
         let tools=match &self.tools{ExecuteTools::Android{original,..}=>original.retained_bytes()?.checked_add(AndroidUseControl::retained_control_charge()?)?.checked_add(AndroidCloseSlot::fixed_charge()?)?,
-            ExecuteTools::Ios(original)=>original.retained_bytes()?};
+            ExecuteTools::Ios(original)=>original.retained_bytes()?,ExecuteTools::Stage=>0};
         std::mem::size_of::<Self>().checked_add(selection?)?.checked_add(self.runtime.retained_bytes()?)?.checked_add(tools)
     }
     fn retained_before_tail(&self)->Option<usize>{self.pre_go_reservation?.checked_add(self.retained_now()?)}
@@ -50,10 +53,10 @@ impl ExecuteNativeBooks {
         if self.phase!=NativePhase::Ready{return None;}self.execute_backing()?;
         let runtime=self.runtime.retained_original_count()?;
         match &self.tools{ExecuteTools::Android{..}=>Some(crate::installed_runtime::LOCAL_EXECUTE_ORIGINAL_FDS),
-            ExecuteTools::Ios(tools)=>runtime.checked_add(tools.retained_original_count()?)}
+            ExecuteTools::Ios(tools)=>runtime.checked_add(tools.retained_original_count()?),ExecuteTools::Stage=>Some(runtime)}
     }
     pub(super) fn first_failure(&self)->Option<(AdmissionFailure,Instant)>{
-        let tools=match &self.tools{ExecuteTools::Android{original,..}=>original.first_failure(),ExecuteTools::Ios(original)=>original.first_failure()};
+        let tools=match &self.tools{ExecuteTools::Android{original,..}=>original.first_failure(),ExecuteTools::Ios(original)=>original.first_failure(),ExecuteTools::Stage=>None};
         [self.failure,self.runtime.first_failure(),tools].into_iter().flatten().min_by_key(|(_,t)|*t)
     }
     fn fail(&mut self,failure:AdmissionFailure,owner:&Session){
@@ -63,12 +66,13 @@ impl ExecuteNativeBooks {
         owner.publish_native_failure(Some(first));
     }
     pub(super) fn interrupted(&mut self){self.phase=NativePhase::Unknown;self.runtime.mark_interrupted();
-        match &mut self.tools{ExecuteTools::Android{original,control}=>{original.mark_interrupted();control.mark_unknown();},ExecuteTools::Ios(original)=>original.mark_interrupted()}}
+        match &mut self.tools{ExecuteTools::Android{original,control}=>{original.mark_interrupted();control.mark_unknown();},ExecuteTools::Ios(original)=>original.mark_interrupted(),ExecuteTools::Stage=>{}}}
     pub(super) fn inspect_once(&mut self,runtime:&RuntimeConfig,owner:&Session)->Result<VerifiedRuntime,BridgeError>{
         if self.phase!=NativePhase::New{return Err(BridgeError::cleanup_unknown());}self.phase=NativePhase::Inspecting;
         let stop=owner.stop.subscribe();
         let inspected=match &mut self.tools {
             ExecuteTools::Android{original,control}=>original.inspect_execute_once(control.admitted,control.work,control.hard,control.data().local_first,&stop).map_err(android_lease_admission_issue),
+            ExecuteTools::Stage=>Ok(()), // Deliberately no candidate tool owner; real Store inspection below still required.
             ExecuteTools::Ios(original)=>original.arm_acl_once(owner.clocks.work,&stop).and_then(|()|original.inspect_upload_once(owner.clocks.work,&stop)),
         };
         if let Err(issue)=inspected{self.fail(issue,owner);return Err(owner.domain.unavailable());}
@@ -84,15 +88,15 @@ impl ExecuteNativeBooks {
     }
     pub(super) fn request_binding(&self,expected:&VerifiedRuntime)->Result<execute_wire::NativeTools,AdmissionFailure>{
         self.selected(expected)?;match &self.tools{ExecuteTools::Android{original,..}=>original.binding_data().map(execute_wire::NativeTools::Android).map_err(android_lease_admission_issue),
-            ExecuteTools::Ios(original)=>original.upload_binding_data()}
+            ExecuteTools::Ios(original)=>original.upload_binding_data(),ExecuteTools::Stage=>Ok(execute_wire::NativeTools::Stage)}
     }
     fn check_tools_before_spawn(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<(),AdmissionFailure>{match &mut self.tools {
         ExecuteTools::Android{original,..}=>original.check_before_spawn(end,stop).map_err(android_lease_admission_issue),
-        ExecuteTools::Ios(original)=>original.check_before_spawn(end,stop),
+        ExecuteTools::Ios(original)=>original.check_before_spawn(end,stop),ExecuteTools::Stage=>Ok(()),
     }}
     // Android alone owns a service SH tail; IOS must never enter this ABI.
     pub(super) fn settle_observations(&mut self,used:bool,owner:&Session)->AndroidObservations{
-        if self.ios()||self.settlement_started||self.phase==NativePhase::Claimed&&!used&&!self.runtime.no_child_effect(){return AndroidObservations::unknown();}
+        if self.direct_settlement()||self.settlement_started||self.phase==NativePhase::Claimed&&!used&&!self.runtime.no_child_effect(){return AndroidObservations::unknown();}
         self.settlement_started=true;
         if self.phase==NativePhase::New&&!used&&self.runtime.never_started()&&self.control().is_some_and(|c|c.unarmed()){
             let bytes=self.retained_before_tail();self.phase=NativePhase::Settled;
@@ -119,9 +123,9 @@ impl ExecuteNativeBooks {
     }
     // Same pre-rostered native_settlement worker as the existing IOS path.
     // No Android control, observation or tail is created/borrowed here.
-    pub(super) fn settle_ios(&mut self,used:bool,end:Instant,
+    pub(super) fn settle_direct(&mut self,used:bool,end:Instant,
         expired:&mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool)->NativeSettlement {
-        if !self.ios()||self.settlement_started||self.phase==NativePhase::Claimed&&!used&&!self.runtime.no_child_effect(){
+        if !self.direct_settlement()||self.settlement_started||self.phase==NativePhase::Claimed&&!used&&!self.runtime.no_child_effect(){
             return NativeSettlement{originals_closed:false,integrity:false};}
         self.settlement_started=true;self.phase=NativePhase::Settling;let _=expired(self.first_failure());
         let mut integrity=!used||self.first_failure().is_none();
@@ -129,19 +133,20 @@ impl ExecuteNativeBooks {
             let runtime=self.runtime.check_claimed_before_settlement(expired);
             publish_macos_returned_failure(runtime.as_ref().err().copied(),||self.runtime.first_failure(),&mut|first|{let _=expired(first);});
             if let Err(issue)=runtime{self.failure.get_or_insert((issue,Instant::now()));integrity=false;}
-            let result=match &self.tools{ExecuteTools::Ios(original)=>original.check_after_use(end),_=>unreachable!()};
+            let result=match &self.tools{ExecuteTools::Ios(original)=>original.check_after_use(end),ExecuteTools::Stage=>Ok(()),_=>unreachable!()};
             let tools_first=match &self.tools{ExecuteTools::Ios(original)=>original.first_failure(),_=>None};
             publish_macos_returned_failure(result.as_ref().err().copied(),||tools_first,&mut|first|{let _=expired(first);});
             if let Err(issue)=result{self.failure.get_or_insert((issue,Instant::now()));integrity=false;}
         }
         // Independent consuming calls, even if the first returns Unknown.
-        let tools=match &mut self.tools{ExecuteTools::Ios(original)=>original.settle_originals(expired),_=>unreachable!()};
+        let tools=match &mut self.tools{ExecuteTools::Ios(original)=>original.settle_originals(expired),ExecuteTools::Stage=>CloseOutcome::Settled,_=>unreachable!()};
         let runtime=self.runtime.settle_originals(expired);let _=expired(self.first_failure());
         let originals_closed=tools==CloseOutcome::Settled&&runtime==CloseOutcome::Settled&&self.runtime.settled()
-            &&matches!(&self.tools,ExecuteTools::Ios(original) if original.settled());
+            &&match &self.tools{ExecuteTools::Ios(original)=>original.settled(),ExecuteTools::Stage=>true,_=>false};
         self.phase=if originals_closed{NativePhase::Settled}else{NativePhase::Unknown};NativeSettlement{originals_closed,integrity}
     }
-    pub(super) fn ios_settled(&self)->bool{self.ios()&&self.phase==NativePhase::Settled&&self.runtime.settled()&&matches!(&self.tools,ExecuteTools::Ios(t) if t.settled())}
+    pub(super) fn direct_settled(&self)->bool{self.direct_settlement()&&self.phase==NativePhase::Settled&&self.runtime.settled()
+        &&match &self.tools{ExecuteTools::Ios(t)=>t.settled(),ExecuteTools::Stage=>true,_=>false}}
 }
 
 pub(super) fn spawn_original(inner:&Inner,owner:&Session,runtime:VerifiedRuntime,native:Option<Arc<Mutex<ExecuteNativeBooks>>>){
@@ -173,6 +178,19 @@ pub(super) fn spawn_original(inner:&Inner,owner:&Session,runtime:VerifiedRuntime
 #[cfg(test)]
 mod ios_tests {
     use super::*;
+    #[test]
+    fn local_stage_execute_no_tools_still_consumes_original_store_and_rejects_unknown(){
+        for failure in [false,true]{
+            let end=Instant::now()+Duration::from_secs(30);let(_,cleanup)=watch::channel(end);let mut native=ExecuteNativeBooks::new_stage(cleanup);
+            assert!(native.direct_settlement()&&!native.ios()&&native.control().is_none());assert!(matches!(native.tools,ExecuteTools::Stage));
+            assert!(native.pre_go_bytes().is_some()&&native.execute_source_quote().is_none());
+            if failure{native.runtime.mark_interrupted();}
+            let result=native.settle_direct(false,end,&mut |_|false);assert_eq!(result.originals_closed,!failure);assert_eq!(native.direct_settled(),!failure);
+            assert_eq!(native.runtime.settled(),!failure);assert!(matches!(native.tools,ExecuteTools::Stage));
+            assert!(!native.settle_direct(false,end,&mut |_|panic!("closed original cannot be re-adopted")).originals_closed);
+        }
+    }
+
     // Same production consume; no inspector/native handle is acquired here.
     #[test]
     fn local_ios_execute_independent_original_closes_never_create_android_tail(){
@@ -183,12 +201,12 @@ mod ios_tests {
             assert!(native.execute_source_quote().is_none()&&native.execute_backing().is_none());
             if failure==1{native.runtime.mark_interrupted();}
             if failure==2{if let ExecuteTools::Ios(tools)=&mut native.tools{tools.mark_interrupted();}}
-            let mut calls=0;let result=native.settle_ios(false,end,&mut |_|{calls+=1;false});
-            assert!(calls>0);assert_eq!(result.originals_closed,failure==0);assert_eq!(native.ios_settled(),failure==0);
+            let mut calls=0;let result=native.settle_direct(false,end,&mut |_|{calls+=1;false});
+            assert!(calls>0);assert_eq!(result.originals_closed,failure==0);assert_eq!(native.direct_settled(),failure==0);
             if failure!=1{assert!(native.runtime.settled());}
             if failure!=2{assert!(matches!(&native.tools,ExecuteTools::Ios(tools) if tools.settled()));}
             assert!(native.control().is_none());
-            let again=native.settle_ios(false,end,&mut |_|panic!("same originals cannot be consumed twice"));assert!(!again.originals_closed);
+            let again=native.settle_direct(false,end,&mut |_|panic!("same originals cannot be consumed twice"));assert!(!again.originals_closed);
         }
     }
 }

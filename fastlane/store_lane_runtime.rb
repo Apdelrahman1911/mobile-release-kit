@@ -18,6 +18,7 @@ module MobileReleaseKit
     LOCAL_EXECUTE_KEY = PREFIX + "LOCAL_EXECUTE"
     LOCAL_RECONCILE_KEY = PREFIX + "LOCAL_RECONCILE"
     LOCAL_STAGE_KEY = PREFIX + "LOCAL_STAGE"
+    LOCAL_READINESS_KEY = PREFIX + "LOCAL_READINESS"
     MAX_TIME = (1 << 63) - 1
     MAX_ID = (1 << 64) - 1
     RUN_NS = 3_600_000_000_000
@@ -77,7 +78,7 @@ module MobileReleaseKit
     # outside the original admitted Runtime cannot choose a local decoder.
     def self.local_execution_context
       unless @runtime
-        raise Error.new(:local_outside_runtime) if [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY].any? { |key| ENV.key?(key) }
+        raise Error.new(:local_outside_runtime) if [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY,LOCAL_READINESS_KEY].any? { |key| ENV.key?(key) }
         return nil
       end
       @runtime.local_execution_context
@@ -85,10 +86,16 @@ module MobileReleaseKit
 
     def self.local_stage_context
       unless @runtime
-        raise Error.new(:local_outside_runtime) if [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY].any? { |key| ENV.key?(key) }
+        raise Error.new(:local_outside_runtime) if [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY,LOCAL_READINESS_KEY].any? { |key| ENV.key?(key) }
         return nil
       end
       @runtime.local_stage_context
+    end
+
+    def self.local_readiness_context
+      context = local_execution_context # Same original Runtime/environment gate.
+      return nil unless context && context[:readiness]
+      current_runtime!.local_readiness_context!
     end
 
     def self.run_upload!(lane, &body)
@@ -166,6 +173,14 @@ module MobileReleaseKit
         raise Error.new(:local_stage_execution) unless context && context.equal?(@local_execution) &&
           @binding.fetch("mode") == "execute" && context.fetch(:stage) == stage &&
           context.fetch(:authority).fetch("purpose") == "execute"
+        context
+      end
+      def local_readiness_context!
+        context = local_stage_context
+        raise Error.new(:local_readiness) unless context && context.equal?(@local_execution) && context[:readiness] == true &&
+          @binding.fetch("mode") == "execute" && @binding.fetch("lane") == "ios_testflight_external" &&
+          context.fetch(:stage) == "external-testing" && context.fetch(:platform) == "ios" &&
+          context.fetch(:authority).fetch("purpose") == "external-readiness"
         context
       end
       def local_metadata_root!
@@ -352,7 +367,7 @@ module MobileReleaseKit
         raise Error.new(:lane) unless lane.instance_of?(String) && LANES.include?(lane)
         @environment = ENV.to_h.transform_values { |value| value.dup.freeze }.freeze
         env = @environment
-        local_keys = [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY].select { |key| env.key?(key) }
+        local_keys = [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY,LOCAL_READINESS_KEY].select { |key| env.key?(key) }
         raise Error.new(:environment) if local_keys.length > 1
         private_keys = PRIVATE_KEYS + local_keys
         unless env.keys.select { |key| key.start_with?(PREFIX) }.sort == private_keys.sort &&
@@ -403,7 +418,7 @@ module MobileReleaseKit
         @resources.admit!
         if env.key?(LOCAL_STAGE_KEY)
           admit_local_stage_prepare!
-        elsif env.key?(LOCAL_EXECUTE_KEY) || env.key?(LOCAL_RECONCILE_KEY)
+        elsif env.key?(LOCAL_EXECUTE_KEY) || env.key?(LOCAL_RECONCILE_KEY) || env.key?(LOCAL_READINESS_KEY)
           admit_local_execution!
         end
       end
@@ -413,17 +428,20 @@ module MobileReleaseKit
         require_relative "release_support"
         # Exact private transport, never authority selected from a decoded
         # purpose or an ambient fallback. Execute keeps its original grammar.
-        keys=[LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY].select { |key| @environment.key?(key) }
+        keys=[LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY,LOCAL_READINESS_KEY].select { |key| @environment.key?(key) }
         raise Error.new(:local_shape) unless keys.length == 1
         recover=keys.first == LOCAL_RECONCILE_KEY
+        readiness=keys.first == LOCAL_READINESS_KEY
         raise Error.new(:local_shape) if keys.first == LOCAL_STAGE_KEY
         platform,stage = local_lane_pair!
         later = stage != "candidate"
         raise Error.new(:local_shape) if later && recover
+        raise Error.new(:local_readiness) if readiness && [platform,stage] != ["ios","external-testing"]
         raw=@environment.fetch(keys.first)
         raise Error.new(:local_size) unless raw.bytesize <= 16*1024
         value=MobileReleaseKit.strict_json(raw,label:"local execution context")
         fields = %w[authority expectedIntentSha256]
+        fields += ["executionReceiptSha256"] if readiness
         fields += later ? ["metadataInputs"] : [platform == "ios" ? "signingTools" : "toolchain"] unless recover
         transport = !later && !recover && platform=="ios" && value.instance_of?(Hash) && value.key?("transportTools")
         fields += ["transportTools"] if transport
@@ -432,8 +450,13 @@ module MobileReleaseKit
         raise Error.new(:local_intent) unless File.file?(path) && !File.symlink?(path) && File.size(path) <= 2*1024*1024
         body=File.binread(path,2*1024*1024+1)
         payload,digest=MobileReleaseKit.local_operation_intent(body,expected_sha256:value.fetch("expectedIntentSha256"),platform:platform,stage:stage)
-        authority=MobileReleaseKit.local_execution_authority(MobileReleaseKit.canonical_json(value.fetch("authority")),
-          intent_content:body,expected_intent_sha256:digest,purpose:recover ? "recover" : "execute",platform:platform,stage:stage)
+        authority = if readiness
+          MobileReleaseKit.local_readiness_authority(MobileReleaseKit.canonical_json(value.fetch("authority")),
+            intent_content:body,expected_intent_sha256:digest,execution_receipt_sha256:value.fetch("executionReceiptSha256"))
+        else
+          MobileReleaseKit.local_execution_authority(MobileReleaseKit.canonical_json(value.fetch("authority")),
+            intent_content:body,expected_intent_sha256:digest,purpose:recover ? "recover" : "execute",platform:platform,stage:stage)
+        end
         raise Error.new(:local_binding) unless payload.fetch("confirmation") == @environment.fetch("MOBILE_RELEASE_CONFIRMATION") &&
           payload.fetch("application").fetch("id") == @environment.fetch("MOBILE_RELEASE_APP_IDENTITY") &&
           payload.fetch("version").fetch("marketing") == @environment.fetch("MOBILE_RELEASE_MARKETING_VERSION") &&
@@ -442,6 +465,7 @@ module MobileReleaseKit
         # owner and sealed with ALL command environment bytes. It is comparison
         # DATA, not a new provider/consent grant or a caller runtime factory.
         context={payload:payload,digest:digest,authority:authority}
+        context.merge!(readiness:true,execution_receipt_sha256:value.fetch("executionReceiptSha256")) if readiness
         if platform == "ios"
           raise Error.new(:local_binding) unless payload.fetch("application").fetch("storeAppId") == @environment.fetch("MOBILE_RELEASE_ASC_APP_ID")
         end
@@ -546,7 +570,7 @@ module MobileReleaseKit
       end
 
       def check_environment!
-        keys = PRIVATE_KEYS + [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY] + %w[MOBILE_RELEASE_OPERATION MOBILE_RELEASE_STORE_MODE MOBILE_RELEASE_STORE_RECEIPT_PATH
+        keys = PRIVATE_KEYS + [LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY,LOCAL_STAGE_KEY,LOCAL_READINESS_KEY] + %w[MOBILE_RELEASE_OPERATION MOBILE_RELEASE_STORE_MODE MOBILE_RELEASE_STORE_RECEIPT_PATH
           MOBILE_RELEASE_ASC_APP_ID MOBILE_RELEASE_ASC_KEY_ID MOBILE_RELEASE_IOS_IPA_PATH TMPDIR TMP TEMP HOME]
         if @local_execution || @local_stage
           keys += %w[MOBILE_RELEASE_OPERATION_INTENT_PATH MOBILE_RELEASE_APP_ROOT MOBILE_RELEASE_CONFIG_PATH

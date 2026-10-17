@@ -327,9 +327,9 @@ fn helper_step(action:history_wire::Action,index:usize)->Option<Step>{
     match(action,index){
         (Action::Enroll,0)=>Some(Step::KeyAbsent),(Action::Enroll,1)=>Some(Step::GenesisAbsent),
         (Action::Enroll,2)=>Some(Step::KeyAdd),(Action::Enroll,3)=>Some(Step::AnchorAdd),
-        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile|Action::ReviewRecovery,0)=>Some(Step::KeyRead),
-        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile|Action::ReviewRecovery,1)=>Some(Step::AnchorRead),
-        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile|Action::ReviewRecovery,2)=>Some(Step::NextAbsent),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile|Action::ReviewRecovery|Action::ReviewStagePrepared|Action::ReviewStageExecution|Action::ReviewExternalReadiness,0)=>Some(Step::KeyRead),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile|Action::ReviewRecovery|Action::ReviewStagePrepared|Action::ReviewStageExecution|Action::ReviewExternalReadiness,1)=>Some(Step::AnchorRead),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile|Action::ReviewRecovery|Action::ReviewStagePrepared|Action::ReviewStageExecution|Action::ReviewExternalReadiness,2)=>Some(Step::NextAbsent),
         (Action::AbandonInputs,3)=>Some(Step::AnchorAdd),_=>None,
     }
 }
@@ -344,7 +344,7 @@ async fn helper(owner:&Arc<Session>,step:Step,sequence:u32,digest:Option<[u8;32]
         let expected=match &owner.context {
             Context::LocalReleaseHistory(context)=>helper_step(context.action,n.attempts.len()),
             Context::IOSArchive(context) if context.candidate()=>candidate_helper_step(n.attempts.len()),
-            Context::AndroidBuild(context) if context.candidate()=>candidate_helper_step(n.attempts.len()),Context::LocalStoreExecute(_)=>prepare_helper_step(n.attempts.len()),Context::LocalStorePrepare(_)=>prepare_helper_step(n.attempts.len()),Context::LocalStoreReconcile(context)=>reconcile_helper_step(n.attempts.len(),context.settling()),_=>None,
+            Context::AndroidBuild(context) if context.candidate()=>candidate_helper_step(n.attempts.len()),Context::LocalStoreExecute(_)=>prepare_helper_step(n.attempts.len()),Context::LocalStorePrepare(_)=>prepare_helper_step(n.attempts.len()),Context::LocalStoreReconcile(context)=>reconcile_helper_step(n.attempts.len(),context.checkpointing()),_=>None,
         }.ok_or_else(BridgeError::protocol)?;
         if expected!=step||n.failed||n.finished||n.attempts.iter().any(|a|!a.joined.load(Ordering::SeqCst)||a.failed.load(Ordering::SeqCst)){
             return Err(BridgeError::protocol());
@@ -419,7 +419,7 @@ fn enrollment(owner:&Session)->Result<serde_json::Value,BridgeError>{
 }
 async fn write_reply(owner:&Session,writer:&mut ChildStdin,kind:&str,step:u8,payload:serde_json::Value,key:bool)->Result<(),BridgeError>{
     let final_execute=owner.domain==SavedCommandDomain::LocalStoreExecute&&step==4;
-    let final_recovery=owner.recovery_settlement()&&step==3;
+    let final_recovery=owner.reconcile_checkpointing()&&step==3;
     let final_ios=owner.candidate_ios()&&step==4;
     if final_execute||final_recovery||final_ios{
         #[cfg(not(feature="macos-android-registration-helper"))]
@@ -507,7 +507,7 @@ pub(super) async fn write_phases(_inner:&Arc<Inner>,owner:&Arc<Session>,writer:&
                 helper(owner,Step::AnchorAdd,1,Some(digest(&head.sha256)?)).await?;
                 write_reply(owner,writer,"checkpoint-settled",step,serde_json::json!({}),false).await?;
             },
-            (history_wire::Action::Verify|history_wire::Action::ReviewInputs|history_wire::Action::AbandonInputs|history_wire::Action::ReviewPrepared|history_wire::Action::ReviewExecution|history_wire::Action::ReviewReconcile|history_wire::Action::ReviewRecovery,2,history_wire::Event::HistoryHead(head))=>{
+            (history_wire::Action::Verify|history_wire::Action::ReviewInputs|history_wire::Action::AbandonInputs|history_wire::Action::ReviewPrepared|history_wire::Action::ReviewExecution|history_wire::Action::ReviewReconcile|history_wire::Action::ReviewRecovery|history_wire::Action::ReviewStagePrepared|history_wire::Action::ReviewStageExecution|history_wire::Action::ReviewExternalReadiness,2,history_wire::Event::HistoryHead(head))=>{
                 if context.action==history_wire::Action::AbandonInputs&&head.sequence==513{return Err(BridgeError::protocol());}
                 helper(owner,Step::AnchorRead,head.sequence,Some(digest(&head.sha256)?)).await?;
                 if head.sequence<513{helper(owner,Step::NextAbsent,head.sequence+1,None).await?;}
@@ -666,7 +666,7 @@ mod tests {
     #[test]
     fn local_release_history_candidate_helper_rosters_never_enroll(){
         use history_wire::Action;
-        for action in [Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared,Action::ReviewExecution,Action::ReviewReconcile,Action::ReviewRecovery]{
+        for action in [Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared,Action::ReviewExecution,Action::ReviewReconcile,Action::ReviewRecovery,Action::ReviewStagePrepared,Action::ReviewStageExecution]{
             assert_eq!(helper_step(action,0),Some(Step::KeyRead));
             assert_eq!(helper_step(action,1),Some(Step::AnchorRead));
             assert_eq!(helper_step(action,2),Some(Step::NextAbsent));
@@ -914,7 +914,7 @@ fn final_checkpoint_original(domain:SavedCommandDomain,settlement:bool,attempts:
         &&attempt.joined.load(Ordering::SeqCst)&&!attempt.failed.load(Ordering::SeqCst)&&attempt.close_ready()
 }
 fn attempt_is_last_checkpoint(owner:&Session,attempt:&Arc<Attempt>)->bool{
-    owner.history.native.try_lock().is_ok_and(|n|!n.failed&&!n.finished&&final_checkpoint_original(owner.domain,owner.recovery_settlement()||owner.candidate_ios(),&n.attempts,attempt))
+    owner.history.native.try_lock().is_ok_and(|n|!n.failed&&!n.finished&&final_checkpoint_original(owner.domain,owner.reconcile_checkpointing()||owner.candidate_ios(),&n.attempts,attempt))
 }
 
 #[cfg(not(feature="macos-android-registration-helper"))]
@@ -957,15 +957,15 @@ fn reconcile_helper_step(index:usize,settlement:bool)->Option<Step>{
 pub(super) fn reconcile_helpers_complete(owner:&Session)->bool{
     // Copy before taking the native book: Claim paths lock native then route.
     let head={let Ok(r)=owner.history.route.try_lock() else{return false;};
-        if !r.reconcile_replies_complete(owner.recovery_settlement()){return false;}r.reconcile_head.unwrap()};
-    reconcile_native_helpers_complete(owner,owner.recovery_settlement())&& (head<513||!owner.recovery_settlement())
+        if !r.reconcile_replies_complete(owner.reconcile_checkpointing()){return false;}r.reconcile_head.unwrap()};
+    reconcile_native_helpers_complete(owner,owner.reconcile_checkpointing())&& (head<513||!owner.reconcile_checkpointing())
 }
 #[cfg(not(feature="macos-android-registration-helper"))]
 fn reconcile_native_helpers_complete(owner:&Session,settlement:bool)->bool{
     // Before final ACK, completed=2. Do not use route completion as a proxy
     // for the fourth original helper actually returning and joining.
     let head={let Ok(r)=owner.history.route.try_lock()else{return false;};let Some(head)=r.reconcile_head else{return false;};head};
-    if !(6..=if settlement{512}else{513}).contains(&head)||settlement!=owner.recovery_settlement(){return false;}
+    if !matches!(&owner.context,Context::LocalStoreReconcile(c) if c.head_valid(head))||settlement!=owner.reconcile_checkpointing(){return false;}
     let count=if settlement{4}else if head==513{2}else{3};
     owner.history.native.try_lock().is_ok_and(|n|!n.failed&&!n.acquire_refused&&n.attempts.len()==count
         &&n.attempts.iter().enumerate().all(|(index,a)|reconcile_helper_step(index,settlement)==Some(a.step)
@@ -974,7 +974,7 @@ fn reconcile_native_helpers_complete(owner:&Session,settlement:bool)->bool{
 #[cfg(not(feature="macos-android-registration-helper"))]
 pub(super) async fn write_reconcile(owner:&Arc<Session>,writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<CandidateWrite,BridgeError>{
     if owner.domain!=SavedCommandDomain::LocalStoreReconcile{return Err(BridgeError::protocol());}
-    let settlement=owner.recovery_settlement();
+    let settlement=owner.reconcile_checkpointing();
     let mut stop=owner.stop.subscribe();
     for step in 1..=if settlement{3}else{2}{
         let event=loop{
@@ -998,7 +998,7 @@ pub(super) async fn write_reconcile(owner:&Arc<Session>,writer:&mut ChildStdin,m
                 let data=enrollment(owner)?;write_reply(owner,writer,"key-material",1,data,true).await?;
             },
             (2,reconcile_wire::Event::HistoryHead(head))=>{
-                if !(6..=if settlement{512}else{513}).contains(&head.sequence){return Err(BridgeError::protocol());}
+                if !matches!(&owner.context,Context::LocalStoreReconcile(c) if c.head_valid(head.sequence)){return Err(BridgeError::protocol());}
                 helper(owner,Step::AnchorRead,head.sequence,Some(digest(&head.sha256)?)).await?;
                 if head.sequence<513{helper(owner,Step::NextAbsent,head.sequence+1,None).await?;}
                 write_reply(owner,writer,"checkpoint-settled",2,serde_json::json!({}),false).await?;
@@ -1018,7 +1018,12 @@ pub(super) async fn write_reconcile(owner:&Arc<Session>,writer:&mut ChildStdin,m
                 }
                 check_source(owner)?;
             },
-            (3,reconcile_wire::Event::RecoverySettled(head)) if settlement=>{
+            (3,event) if settlement=>{
+                let head=match(event,&owner.context){
+                    (reconcile_wire::Event::RecoverySettled(h),Context::LocalStoreReconcile(c)) if c.settling()=>h,
+                    (reconcile_wire::Event::ExternalReady(h),Context::LocalStoreReconcile(c)) if c.refreshing()=>h,
+                    _=>return Err(BridgeError::protocol()),
+                };
                 let before=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?.reconcile_head.ok_or_else(BridgeError::protocol)?;
                 if before>=513||head.sequence!=before+1{return Err(BridgeError::protocol());}
                 helper(owner,Step::AnchorAdd,head.sequence,Some(digest(&head.sha256)?)).await?;
@@ -1083,6 +1088,23 @@ mod reconcile_tests {
         assert!(final_checkpoint_original(SavedCommandDomain::LocalStoreExecute,false,&rows,&foreign));
         // Actual forward helper admission remains original W/consent. Only the
         // already-joined final result chooses the existing F/H observation cut.
+    }
+
+    #[test]
+    fn local_external_readiness_final_original_join_alone_selects_cleanup_not_success(){
+        let c=reconcile_wire::tests::readiness_context();assert!(c.checkpointing()&&!c.settling());
+        let make=|step|Arc::new(Attempt{book:Mutex::new(keyring::LookupBook::new()),handle:AsyncMutex::new(None),joined:AtomicBool::new(false),failed:AtomicBool::new(false),step});
+        let rows=(0..4).map(|i|make(reconcile_helper_step(i,c.checkpointing()).unwrap())).collect::<Vec<_>>();let last=rows[3].clone();
+        assert_eq!(last.step,Step::AnchorAdd);assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,c.checkpointing(),&rows,&last));
+        last.joined.store(true,Ordering::SeqCst);assert!(final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,c.checkpointing(),&rows,&last));
+        // Tail selection is deliberately NOT whole success: first originals
+        // remain unjoined here; native completion independently checks all four.
+        assert!(rows[..3].iter().all(|r|!r.joined.load(Ordering::SeqCst)));
+        let foreign=make(Step::AnchorAdd);foreign.joined.store(true,Ordering::SeqCst);
+        assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,c.checkpointing(),&rows,&foreign));
+        last.failed.store(true,Ordering::SeqCst);assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,c.checkpointing(),&rows,&last));
+        for i in 0..5{assert_eq!(helper_step(history_wire::Action::ReviewExternalReadiness,i),reconcile_helper_step(i,false));}
+        assert_eq!(helper_step(history_wire::Action::ReviewExternalReadiness,3),None);
     }
 
 }

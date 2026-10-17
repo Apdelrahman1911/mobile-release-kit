@@ -11,10 +11,16 @@ pub(crate) struct SelectedStoreMaterial {
     native: Arc<NativeContext>, key: RecordKey, payload: Arc<Payload>,
     command: Option<StoreCommand>, prepare_document:Option<std::sync::Weak<Inner>>,
     execute_tools:Option<Arc<crate::saved_command_owner::ExecuteToolLoan>>,
+    supplemental:[Option<(RecordKey,Arc<Payload>)>;3],
 }
 #[derive(Clone,PartialEq,Eq)]
 enum StoreCommand {Access(wire::Context),Prepare(crate::local_store_prepare_protocol::Context),Reconcile(crate::local_store_reconcile_protocol::Context),Execute(crate::local_store_execute_protocol::Context)}
 impl StoreCommand {
+    fn later(&self)->Option<&crate::local_store_prepare_protocol::LaterStage>{match self {Self::Prepare(c)=>c.later.as_ref(),Self::Execute(c)=>c.later.as_ref(),_=>None}}
+    fn assignments(&self)->Option<&crate::local_store_prepare_protocol::StageAssignments>{match self {
+        Self::Reconcile(c)=>c.readiness.as_ref().map(|r|&r.supplemental_assignments),
+        _=>self.later().and_then(|s|s.supplemental_assignments.as_ref()),
+    }}
     fn apple_material(&self)->bool {match self {
         Self::Access(c)=>c.platform==wire::AccessPlatform::Ios,
         Self::Prepare(c)=>c.platform==crate::local_store_prepare_protocol::Platform::Ios,
@@ -40,6 +46,16 @@ fn apple_parts(payload:&Payload)->Option<(&[u8],&[u8],&[u8])>{
     Some((key,key_id,issuer))
 }
 impl SelectedStoreMaterial {
+    pub(super) fn supplemental_census(&self)->impl Iterator<Item=(&RecordKey,&Arc<Payload>)>{self.supplemental.iter().flatten().map(|(k,p)|(k,p))}
+    // Future extra stage-frame allocations, charged by the same Document census
+    // before Start/Go. Two simultaneous parts() vectors (writer + header); stage
+    // header rows are fixed stack DATA and serialization reserves exactly1024.
+    // Payload/Fields originals are counted separately, never copied here.
+    pub(super) fn supplemental_frame_bytes(&self)->usize {
+        if self.apple_material()&&self.command.as_ref().and_then(StoreCommand::assignments).is_some(){
+            2*11*std::mem::size_of::<(&str,&[u8])>()+1024+11*std::mem::size_of::<(&str,usize)>()
+        }else{0}
+    }
     pub(super) fn census_parts(&self) -> (&Arc<NativeContext>, &Arc<Payload>) { (&self.native, &self.payload) }
     pub(super) fn own_retained_heap_bytes(&self) -> Option<usize> {
         let mut bytes = self.key.id.0.capacity();
@@ -51,11 +67,15 @@ impl SelectedStoreMaterial {
                 StoreCommand::Execute(c)=>([c.project_id.capacity(),c.saved_config.sha256.capacity(),c.saved_version.source.capacity(),c.saved_version.sha256.capacity(),c.saved_version.name.capacity(),c.record_id.capacity()],[c.candidate_operation_id.capacity(),c.candidate_sha256.capacity(),c.confirmation.capacity()]),
             };for n in common.into_iter().chain(extra){bytes=bytes.checked_add(n)?;}
         }
-        if let Some(StoreCommand::Reconcile(c))=&self.command {bytes=bytes.checked_add(c.intent_sha256.capacity())?;}
+        if let Some(StoreCommand::Reconcile(c))=&self.command {bytes=bytes.checked_add(c.intent_sha256.capacity())?;
+            if let Some(r)=&c.readiness{bytes=bytes.checked_add(r.heap_bytes()?)?;}}
         if let Some(StoreCommand::Execute(c))=&self.command {
             bytes=bytes.checked_add(c.intent_sha256.capacity())?;
             if let Some(tools)=&c.toolchain_selection{for n in [tools.instance.capacity(),tools.record_sha256.capacity(),tools.inventory_sha256.capacity(),tools.os_provider_sha256.capacity()]{bytes=bytes.checked_add(n)?;}}
         }
+        if let Some(later)=self.command.as_ref().and_then(StoreCommand::later){bytes=bytes.checked_add(later.heap_bytes()?)?;}
+        if let Some(StoreCommand::Execute(c))=&self.command {if let Some(id)=&c.stage_operation_id{bytes=bytes.checked_add(id.capacity())?;}}
+        for (key,_) in self.supplemental.iter().flatten(){bytes=bytes.checked_add(key.id.0.capacity())?;}
         if let Some(loan)=&self.execute_tools{bytes=bytes.checked_add(loan.own_backing_bytes()?)?;}
         Some(bytes)
     }
@@ -79,18 +99,55 @@ impl SelectedStoreMaterial {
     // payload bytes; holding the Arc keeps them alive until all original joins.
     pub(crate) fn parts(&self) -> Result<Vec<(&'static str, &[u8])>, BridgeError> {
         if self.command.is_none() { return Err(refused()); }
-        let mut parts = Vec::new(); parts.try_reserve_exact(if self.apple_material(){3}else{1}).map_err(|_| refused())?;
+        let assignments=self.command.as_ref().and_then(StoreCommand::assignments);
+        let count=if self.apple_material(){if let Some(a)=assignments{if a.review_demo.is_some(){11}else{9}}else{3}}else{1};
+        let mut parts = Vec::new(); parts.try_reserve_exact(count).map_err(|_| refused())?;
         if self.apple_material(){
             let(key,key_id,issuer)=apple_parts(&self.payload).ok_or_else(refused)?;
             parts.extend([("asc-p8",key),("asc-key-id",key_id),("asc-issuer-id",issuer)]);
         }else{parts.push(("google-service-account", bytes(&self.payload).ok_or_else(refused)?));}
+        if self.apple_material()&&assignments.is_some(){
+            let field=|slot:usize,name:&str|->Result<&[u8],BridgeError>{self.supplemental[slot].as_ref().and_then(|(_,p)|p.fields.as_ref())
+                .and_then(|fields|fields.borrow_value(name)).map(str::as_bytes).filter(|v|(1..=4096).contains(&v.len())).ok_or_else(refused)};
+            for(role,name)in [("contact-first-name","contactFirstName"),("contact-last-name","contactLastName"),("contact-email","contactEmail"),("contact-phone","contactPhone")]{parts.push((role,field(0,name)?));}
+            let key=field(1,"keyBase64")?;let version=field(1,"version")?;
+            // Canonical 32-byte standard base64, no decoded secret allocation.
+            let alphabet=b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            if key.len()!=44||key[43]!=b'='||!key[..43].iter().all(|b|alphabet.contains(b))
+                ||!alphabet.iter().position(|b|*b==key[42]).is_some_and(|n|n&3==0)
+                ||version.len()>64||!version.iter().all(|b|b.is_ascii_alphanumeric()||b"_.-".contains(b)){return Err(refused());}
+            parts.extend([("commitment-key-base64",key),("commitment-version",version)]);
+            if assignments.is_some_and(|a|a.review_demo.is_some()){
+                parts.extend([("demo-username",field(2,"demoUsername")?),("demo-password",field(2,"demoPassword")?)]);
+            }
+        }
+        if parts.len()!=count||parts.iter().try_fold(0usize,|n,(_,v)|n.checked_add(v.len())).is_none_or(|n|n>41114){return Err(refused());}
         Ok(parts)
     }
     pub(crate) fn header(&self) -> Result<Vec<u8>, BridgeError> {
         let parts = self.parts()?;
+        if self.apple_material()&&self.command.as_ref().and_then(StoreCommand::assignments).is_some(){
+            // Fixed closed roster, not a per-field JSON Value/tree allocation.
+            #[derive(Clone,Copy,serde::Serialize)] struct Row<'a>{bytes:usize,role:&'a str}
+            #[derive(serde::Serialize)] struct Header<'a>{files:&'a [Row<'a>],#[serde(rename="schemaVersion")] schema_version:u8}
+            let mut rows=[Row{bytes:0,role:""};11];
+            for(row,(role,bytes))in rows.iter_mut().zip(&parts){*row=Row{bytes:bytes.len(),role};}
+            let mut header=Vec::new();header.try_reserve_exact(1024).map_err(|_|refused())?;
+            serde_json::to_writer(&mut header,&Header{files:&rows[..parts.len()],schema_version:1}).map_err(|_|refused())?;
+            header.push(b'\n');if header.len()>1024{return Err(refused());}return Ok(header);
+        }
         let mut header = serde_json::to_vec(&serde_json::json!({"schemaVersion":1,
             "files":parts.iter().map(|(role,bytes)|serde_json::json!({"role":role,"bytes":bytes.len()})).collect::<Vec<_>>()})).map_err(|_| refused())?;
         header.push(b'\n'); if header.len() > 1024 { return Err(refused()); } Ok(header)
+    }
+    fn supplemental_current(&self,state:&DocumentState)->bool {
+        let refs=self.command.as_ref().and_then(StoreCommand::assignments);
+        let Some(refs)=refs else{return self.supplemental.iter().all(Option::is_none);};
+        if !self.apple_material()||!refs.valid(&self.key.id.0){return false;}
+        let selected=[Some(&refs.review_contact),Some(&refs.commitment),refs.review_demo.as_ref()];
+        selected.into_iter().zip(self.supplemental.iter()).zip([Kind::AppleReviewContact,Kind::OperationCommitment,Kind::AppleReviewDemo])
+            .all(|((r,held),kind)|match(r,held){(None,None)=>true,(Some(r),Some((key,payload)))=>key.id.0==r.record_id&&key.revision==r.record_revision
+                &&payload.kind==kind&&payload.fields.is_some()&&github_secret::assigned(state,key,kind,&self.native).is_some_and(|p|Arc::ptr_eq(p,payload)),_=>false})
     }
     pub(super) fn current(&self, state: &DocumentState, registration: u32, root: &asset_source::RegisteredRoot) -> bool {
         let apple=self.apple_material();
@@ -100,6 +157,7 @@ impl SelectedStoreMaterial {
             && self.native.registry_generation == registration && self.native.project == *root
             && github_secret::assigned(state, &self.key, if apple{Kind::AscP8}else{Kind::GoogleServiceAccount}, &self.native)
                 .is_some_and(|current| Arc::ptr_eq(current, &self.payload))
+            && self.supplemental_current(state)
             && if apple{apple_parts(&self.payload).is_some()}else{bytes(&self.payload).is_some()}
     }
     // Only the same document's future owned ADC writer may use this callback.
@@ -124,7 +182,19 @@ fn borrow_selected_material(state:&DocumentState,record:commands::RecordRef<'_>,
     let key = RecordKey { id: Token(record.record_id.into()), revision: record.expected_revision };
     let kind=if command.as_ref().is_some_and(StoreCommand::apple_material){Kind::AscP8}else{Kind::GoogleServiceAccount};
     let payload = github_secret::assigned(state, &key, kind, &native).ok_or_else(refused)?.clone();
-    let original = Arc::new(SelectedStoreMaterial { native, key, payload, command,prepare_document:None,execute_tools:None });
+    let mut supplemental:[Option<(RecordKey,Arc<Payload>)>;3]=std::array::from_fn(|_|None);
+    if let Some(refs)=command.as_ref().and_then(StoreCommand::assignments){
+        if kind!=Kind::AscP8||!refs.valid(&key.id.0){return Err(refused());}
+        for ((slot,selected),kind) in supplemental.iter_mut().zip([Some(&refs.review_contact),Some(&refs.commitment),refs.review_demo.as_ref()])
+            .zip([Kind::AppleReviewContact,Kind::OperationCommitment,Kind::AppleReviewDemo]){
+            if let Some(selected)=selected{
+                let key=RecordKey{id:Token(selected.record_id.clone()),revision:selected.record_revision};
+                let payload=github_secret::assigned(state,&key,kind,&native).ok_or_else(refused)?.clone();
+                if payload.fields.is_none(){return Err(refused());}*slot=Some((key,payload));
+            }
+        }
+    }
+    let original = Arc::new(SelectedStoreMaterial { native, key, payload, command,prepare_document:None,execute_tools:None,supplemental });
     if !original.current(state, original.native.registry_generation, &original.native.project) { return Err(refused()); }
     Ok(original)
 }
@@ -190,6 +260,79 @@ mod tests {
         state.assignments.push(Assignment { kind:Kind::GoogleServiceAccount,record_id:key.id,record_revision:1,context_revision:2,
             availability:AssignmentAvailability::Available }); state
     }
+    #[test]
+    fn local_stage_apple_material_retains_every_original_scalar_and_assignment(){
+        use crate::local_store_prepare_protocol as prepare;
+        for demo in [false,true]{
+            let mut state=apple_model();Arc::get_mut(state.context.as_mut().unwrap()).unwrap().stage=Stage::ExternalTesting;
+            let mut input=prepare::tests::stage_input(true,false);input["projectId"]=serde_json::json!("inert-project");input["credentialContextRevision"]=serde_json::json!(2);
+            input["recordId"]=serde_json::json!("a".repeat(32));input["recordRevision"]=serde_json::json!(1);
+            if demo{input["supplementalAssignments"]["reviewDemo"]=serde_json::json!({"recordId":"b".repeat(32),"recordRevision":4});}
+            let c=prepare::prepare(&input).unwrap().context();let root=state.context.as_ref().unwrap().project.clone();
+            for(kind,id,revision,values)in [
+                (Kind::AppleReviewContact,'e',2,serde_json::json!({"contactFirstName":"Fictional","contactLastName":"Reviewer","contactEmail":"review@example.invalid","contactPhone":"+15555550100"})),
+                (Kind::OperationCommitment,'f',3,serde_json::json!({"keyBase64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":"fixture-v1"})),
+                (Kind::AppleReviewDemo,'b',4,serde_json::json!({"demoUsername":"fixture","demoPassword":"inert-password"}))]{
+                if kind==Kind::AppleReviewDemo&&!demo{continue;}
+                let key=RecordKey{id:Token(id.to_string().repeat(32)),revision};let payload=Arc::new(Payload{kind,material:None,fields:Some(commands::own_fields(kind,&values).unwrap())});
+                state.records.push(Record{key:key.clone(),payload,mutation_pending:false});
+                state.assignments.push(Assignment{kind,record_id:key.id,record_revision:revision,context_revision:2,availability:AssignmentAvailability::Available});
+            }
+            let original=borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Prepare(c.clone()))).unwrap();
+            assert!(original.current(&state,7,&root)&&original.prepare_matches(&c,7,&root));assert!(!original.prepare_current(&c,7,&root));
+            let parts=original.parts().unwrap();assert_eq!(parts.len(),if demo{11}else{9});
+            assert_eq!(parts[3].0,"contact-first-name");assert_eq!(parts[3].1.as_ptr(),state.records[1].payload.fields.as_ref().unwrap().borrow_value("contactFirstName").unwrap().as_ptr());
+            assert_eq!(parts[7].0,"commitment-key-base64");assert_eq!(parts[7].1.as_ptr(),state.records[2].payload.fields.as_ref().unwrap().borrow_value("keyBase64").unwrap().as_ptr());
+            assert_eq!(original.supplemental_census().count(),if demo{3}else{2});
+            let header=String::from_utf8(original.header().unwrap()).unwrap();assert!(!header.contains("Fictional")&&!header.contains("fixture-v1"));
+            let expected=serde_json::json!({"schemaVersion":1,"files":parts.iter().map(|(role,bytes)|serde_json::json!({"role":role,"bytes":bytes.len()})).collect::<Vec<_>>()});
+            assert_eq!(header,format!("{}\n",serde_json::to_string(&expected).unwrap()));
+            assert!(original.supplemental_frame_bytes()>=2*parts.capacity()*std::mem::size_of::<(&str,&[u8])>()+1024);
+            assert!(original.supplemental_frame_bytes()<4096);drop(parts);
+            for index in 1..state.assignments.len(){state.assignments[index].record_revision+=1;assert!(!original.current(&state,7,&root));state.assignments[index].record_revision-=1;assert!(original.current(&state,7,&root));}
+            let held:Vec<_>=original.supplemental_census().map(|(_,p)|Arc::downgrade(p)).collect();drop(state);assert!(held.iter().all(|p|p.upgrade().is_some()));
+            drop(original);assert!(held.iter().all(|p|p.upgrade().is_none()));
+        }
+    }
+
+    #[test]
+    fn local_external_readiness_material_uses_original_supplemental_assignments_not_a_new_grant(){
+        use crate::local_store_reconcile_protocol as reconcile;
+        for demo in [false,true]{
+            let mut state=apple_model();Arc::get_mut(state.context.as_mut().unwrap()).unwrap().stage=Stage::ExternalTesting;
+            let mut v=reconcile::tests::readiness_input();v["projectId"]=serde_json::json!("inert-project");v["credentialContextRevision"]=serde_json::json!(2);
+            v["recordId"]=serde_json::json!("a".repeat(32));v["recordRevision"]=serde_json::json!(1);
+            if demo{v["supplementalAssignments"]["reviewDemo"]=serde_json::json!({"recordId":"b".repeat(32),"recordRevision":4});}
+            let c=reconcile::prepare(&v).unwrap().context();let root=state.context.as_ref().unwrap().project.clone();
+            for(kind,id,revision,values)in [
+                (Kind::AppleReviewContact,'e',2,serde_json::json!({"contactFirstName":"Fictional","contactLastName":"Reviewer","contactEmail":"review@example.invalid","contactPhone":"+15555550100"})),
+                (Kind::OperationCommitment,'f',3,serde_json::json!({"keyBase64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":"fixture-v1"})),
+                (Kind::AppleReviewDemo,'b',4,serde_json::json!({"demoUsername":"fixture","demoPassword":"inert-password"}))]{
+                if kind==Kind::AppleReviewDemo&&!demo{continue;}
+                let key=RecordKey{id:Token(id.to_string().repeat(32)),revision};let payload=Arc::new(Payload{kind,material:None,fields:Some(commands::own_fields(kind,&values).unwrap())});
+                state.records.push(Record{key:key.clone(),payload,mutation_pending:false});
+                state.assignments.push(Assignment{kind,record_id:key.id,record_revision:revision,context_revision:2,availability:AssignmentAvailability::Available});
+            }
+            let original=borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Reconcile(c.clone()))).unwrap();
+            assert!(original.current(&state,7,&root)&&original.reconcile_matches(&c,7,&root));
+            // Shaped comparison DATA and all original bytes still do not mint
+            // the genuine Document weak grant used by the effect-capable owner.
+            assert!(!original.reconcile_current(&c,7,&root));
+            assert!(original.reconcile_accepts_consent(reconcile::READINESS_CONSENT));assert!(!original.reconcile_accepts_consent(reconcile::APPLE_CONSENT));
+            let parts=original.parts().unwrap();assert_eq!(parts.len(),if demo{11}else{9});
+            assert_eq!(parts[0].1.as_ptr(),state.records[0].payload.material.as_ref().unwrap().bytes().as_ptr());
+            assert_eq!(parts[3].1.as_ptr(),state.records[1].payload.fields.as_ref().unwrap().borrow_value("contactFirstName").unwrap().as_ptr());
+            assert_eq!(parts[7].1.as_ptr(),state.records[2].payload.fields.as_ref().unwrap().borrow_value("keyBase64").unwrap().as_ptr());
+            assert_eq!(original.supplemental_census().count(),if demo{3}else{2});assert!(original.supplemental_frame_bytes()>1024);
+            let expected=serde_json::json!({"schemaVersion":1,"files":parts.iter().map(|(role,bytes)|serde_json::json!({"role":role,"bytes":bytes.len()})).collect::<Vec<_>>()});
+            assert_eq!(String::from_utf8(original.header().unwrap()).unwrap(),format!("{}\n",serde_json::to_string(&expected).unwrap()));drop(parts);
+            for index in 1..state.assignments.len(){state.assignments[index].record_revision+=1;assert!(!original.current(&state,7,&root));state.assignments[index].record_revision-=1;}
+            let mut foreign=c.clone();foreign.readiness.as_mut().unwrap().execution_receipt_sha256="8".repeat(64);assert!(!original.reconcile_matches(&foreign,7,&root));
+            let held:Vec<_>=original.supplemental_census().map(|(_,p)|Arc::downgrade(p)).collect();drop(state);assert!(held.iter().all(|p|p.upgrade().is_some()));
+            drop(original);assert!(held.iter().all(|p|p.upgrade().is_none()));
+        }
+    }
+
     fn apple_model()->DocumentState {
         let mut state=model();
         Arc::get_mut(state.context.as_mut().unwrap()).unwrap().platform=Platform::Ios;
@@ -210,6 +353,7 @@ mod tests {
         assert!(borrow_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2).is_err());
         let original=borrow_preflight_material(&state,&c,7,&root).unwrap();let parts=original.parts().unwrap();
         assert_eq!(parts.iter().map(|p|p.0).collect::<Vec<_>>(),vec!["asc-p8","asc-key-id","asc-issuer-id"]);
+        assert_eq!(original.supplemental_frame_bytes(),0);
         let payload=&state.records[0].payload;
         assert_eq!(parts[0].1.as_ptr(),payload.material.as_ref().unwrap().bytes().as_ptr());
         assert_eq!(parts[1].1.as_ptr(),payload.fields.as_ref().unwrap().borrow_value("keyId").unwrap().as_ptr());
@@ -454,7 +598,7 @@ impl SelectedStoreMaterial {
             &&self.native.revision==context.credential_context_revision&&self.key.id.0==context.record_id&&self.key.revision==context.record_revision
             &&self.native.execution_mode==commands::ExecutionMode::Local
             &&self.native.platform==if context.platform==crate::local_store_prepare_protocol::Platform::Ios{Platform::Ios}else{Platform::Android}
-            &&self.native.stage==Stage::Candidate&&matches!(self.native.purpose,Purpose::Full|Purpose::Store)
+            &&self.native.stage==context.asset_stage()&&matches!(self.native.purpose,Purpose::Full|Purpose::Store)
     }
     fn prepare_document_matches(&self,document:&Arc<Inner>,state:&DocumentState,context:&crate::local_store_prepare_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
         self.prepare_matches(context,registration,root)&&self.prepare_document.as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|held|Arc::ptr_eq(&held,document))
@@ -515,13 +659,14 @@ impl SelectedStoreMaterial {
             &&self.native.registry_generation==registration&&self.native.project==*root&&self.native.project_id==context.project_id
             &&self.native.revision==context.credential_context_revision&&self.key.id.0==context.record_id&&self.key.revision==context.record_revision
             &&self.native.execution_mode==commands::ExecutionMode::Local&&self.native.platform==if context.platform==crate::local_store_execute_protocol::Platform::Ios{Platform::Ios}else{Platform::Android}
-            &&self.native.stage==Stage::Candidate
+            &&self.native.stage==context.asset_stage()
             &&matches!(self.native.purpose,Purpose::Full|Purpose::Store)
     }
     pub(crate) fn accepts_execute_consent(&self,input:&crate::local_store_execute_protocol::Start)->bool{
         matches!(&self.command,Some(StoreCommand::Execute(c)) if input.matches_context(c))
     }
     fn execute_tools_match(&self,c:&crate::local_store_execute_protocol::Context)->bool{
+        if c.later.is_some(){return c.toolchain_selection.is_none()&&self.execute_tools.is_none();}
         match(c.platform,c.toolchain_selection.as_ref(),self.execute_tools.as_ref()){
             (crate::local_store_execute_protocol::Platform::Android,Some(selection),Some(loan))=>loan.selected_data()==Some(selection),
             (crate::local_store_execute_protocol::Platform::Ios,None,None)=>true,_=>false,
@@ -530,8 +675,9 @@ impl SelectedStoreMaterial {
     pub(crate) fn execute_tools_current(&self)->bool{
         matches!(&self.command,Some(StoreCommand::Execute(c)) if self.execute_tools_match(c))
     }
+    pub(crate) fn execute_stage(&self)->bool{matches!(&self.command,Some(StoreCommand::Execute(c)) if c.later.is_some()&&self.execute_tools_match(c))}
     pub(crate) fn execute_ios(&self)->bool{
-        matches!(&self.command,Some(StoreCommand::Execute(c)) if c.platform==crate::local_store_execute_protocol::Platform::Ios&&self.execute_tools_match(c))
+        matches!(&self.command,Some(StoreCommand::Execute(c)) if c.later.is_none()&&c.platform==crate::local_store_execute_protocol::Platform::Ios&&self.execute_tools_match(c))
     }
     fn execute_document_matches(&self,document:&Arc<Inner>,state:&DocumentState,context:&crate::local_store_execute_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
         self.execute_matches(context,registration,root)&&self.execute_tools_match(context)&&self.prepare_document.as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|held|Arc::ptr_eq(&held,document))
@@ -545,7 +691,7 @@ impl SelectedStoreMaterial {
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
     pub(super) fn execute_census(&self)->Option<Option<(usize,[Option<Arc<OriginalWork>>;3])>>{
         match &self.command{Some(StoreCommand::Execute(c))=>{if !self.execute_tools_match(c){return None;}
-            match c.platform{crate::local_store_execute_protocol::Platform::Android=>Some(Some(self.execute_tools.as_ref()?.census()?)),crate::local_store_execute_protocol::Platform::Ios=>Some(None)}},_=>Some(None)}
+            if c.later.is_some(){return Some(None);}match c.platform{crate::local_store_execute_protocol::Platform::Android=>Some(Some(self.execute_tools.as_ref()?.census()?)),crate::local_store_execute_protocol::Platform::Ios=>Some(None)}},_=>Some(None)}
     }
     pub(crate) fn execute_selection(&self)->Option<&crate::android_build_protocol::MacToolchainSelection>{
         let Some(StoreCommand::Execute(context))=&self.command else{return None;};
@@ -560,12 +706,12 @@ impl DocumentBinding {
     pub(super) fn review_store_execute_material(&self,state:&DocumentState,context:&crate::local_store_execute_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->Result<Arc<SelectedStoreMaterial>,BridgeError>{
         if !cfg!(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))||!self.native_qualified()
             ||encrypted_mode(state)&&!self.persistence_qualified(){return Err(refused());}
-        let tools=match(context.platform,context.toolchain_selection.as_ref()) {
+        let tools=if context.later.is_some(){if context.toolchain_selection.is_some(){return Err(refused());}None}else{match(context.platform,context.toolchain_selection.as_ref()) {
             (crate::local_store_execute_protocol::Platform::Android,Some(selection))=>{
                 let tools=self.inner.bridge.android_build.execute_tool_loan(&self.inner.session_identity)?.ok_or_else(refused)?;
                 if tools.selected_data()!=Some(selection){return Err(refused());}Some(tools)
             },(crate::local_store_execute_protocol::Platform::Ios,None)=>None,_=>return Err(refused()),
-        };
+        }};
         let mut original=borrow_selected_material(state,commands::RecordRef{record_id:&context.record_id,expected_revision:context.record_revision},context.credential_context_revision,Some(StoreCommand::Execute(context.clone())))?;
         let held=Arc::get_mut(&mut original).ok_or_else(refused)?;
         held.execute_tools=tools;held.prepare_document=Some(Arc::downgrade(&self.inner));
@@ -608,7 +754,7 @@ impl SelectedStoreMaterial {
         matches!(self.command.as_ref(),Some(StoreCommand::Reconcile(c)) if c==context)
             &&self.native.registry_generation==registration&&self.native.project==*root&&self.native.project_id==context.project_id
             &&self.native.revision==context.credential_context_revision&&self.key.id.0==context.record_id&&self.key.revision==context.record_revision
-            &&self.native.execution_mode==commands::ExecutionMode::Local&&self.native.platform==if context.platform==crate::local_store_reconcile_protocol::Platform::Ios{Platform::Ios}else{Platform::Android}&&self.native.stage==Stage::Candidate
+            &&self.native.execution_mode==commands::ExecutionMode::Local&&self.native.platform==if context.platform==crate::local_store_reconcile_protocol::Platform::Ios{Platform::Ios}else{Platform::Android}&&self.native.stage==context.asset_stage()
             &&matches!(self.native.purpose,Purpose::Full|Purpose::Store)
     }
     fn reconcile_document_matches(&self,document:&Arc<Inner>,state:&DocumentState,context:&crate::local_store_reconcile_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {

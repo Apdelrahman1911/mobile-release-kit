@@ -1924,7 +1924,8 @@ mod lookup_memory {
             census.add(bytes)?;for picker in pickers.iter().flatten(){census.owner(picker)?;}
         }
         let(context,payload)=loan.census_parts();census.context(context)?;census.payload(payload)?;
-        census.arc_cells::<SelectedStoreMaterial>()?;census.add(loan.own_retained_heap_bytes().ok_or(Problem::Capacity)?)?;
+        for(_,payload)in loan.supplemental_census(){census.payload(payload)?;}
+        census.arc_cells::<SelectedStoreMaterial>()?;census.add(loan.own_retained_heap_bytes().ok_or(Problem::Capacity)?)?;census.add(loan.supplemental_frame_bytes())?;
         if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
         census.add(std::mem::size_of::<Census<'_>>())?;census.add(future)?;
         if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes)
@@ -1939,6 +1940,7 @@ mod lookup_memory {
         census.arc_cells::<LocalHistoryConsent>()?;
         census.add(consent.project_id.capacity())?;census.add(consent.root.path.capacity())?;
         if let Some(id)=&consent.candidate_operation_id{census.add(id.capacity())?;}
+        if let Some(id)=&consent.stage_operation_id{census.add(id.capacity())?;}
         if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
         census.add(std::mem::size_of::<Census<'_>>())?;census.add(actual)?;
         Admission::checked(census.bytes,0)
@@ -1981,7 +1983,8 @@ mod lookup_memory {
         let mut census=Census{current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
         census.artifact_document(document)?;census.document(state)?;
         let(context,payload)=material.census_parts();census.context(context)?;census.payload(payload)?;
-        census.arc_cells::<SelectedStoreMaterial>()?;census.add(material.own_retained_heap_bytes().ok_or(Problem::Capacity)?)?;
+        for(_,payload)in material.supplemental_census(){census.payload(payload)?;}
+        census.arc_cells::<SelectedStoreMaterial>()?;census.add(material.own_retained_heap_bytes().ok_or(Problem::Capacity)?)?;census.add(material.supplemental_frame_bytes())?;
         if !state.github.setup_has_material()&&!state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
         census.add(std::mem::size_of::<Census<'_>>())?;census.add(actual)?;Admission::checked(census.bytes,0)
     }
@@ -1994,7 +1997,8 @@ mod lookup_memory {
             census.add(bytes)?;for picker in pickers.iter().flatten(){census.owner(picker)?;}
         }
         let(context,payload)=material.census_parts();census.context(context)?;census.payload(payload)?;
-        census.arc_cells::<SelectedStoreMaterial>()?;census.add(material.own_retained_heap_bytes().ok_or(Problem::Capacity)?)?;
+        for(_,payload)in material.supplemental_census(){census.payload(payload)?;}
+        census.arc_cells::<SelectedStoreMaterial>()?;census.add(material.own_retained_heap_bytes().ok_or(Problem::Capacity)?)?;census.add(material.supplemental_frame_bytes())?;
         if !state.github.setup_has_material()&&!state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
         census.add(std::mem::size_of::<Census<'_>>())?;census.add(actual)?;Admission::checked(census.bytes,0)
     }

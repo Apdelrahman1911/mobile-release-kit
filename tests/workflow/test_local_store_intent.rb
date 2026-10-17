@@ -257,4 +257,44 @@ class LocalStoreIntentContractTest < Minitest::Test
     end
   end
 
+  def test_external_readiness_is_a_distinct_bound_purpose_not_later_recover
+    raw=File.binread(File.join(ROOT,'local-ios-external-testing-intent.json'));intent=JSON.parse(raw)
+    digest=intent.fetch('integrity').fetch('sha256');receipt_sha='9'*64
+    authority=intent.fetch('preparedBy').merge('purpose'=>'external-readiness',
+      'authorizationId'=>'55555555-5555-4555-8555-555555555555','intentSha256'=>digest,'executionReceiptSha256'=>receipt_sha)
+    args={intent_content:raw,expected_intent_sha256:digest,execution_receipt_sha256:receipt_sha}
+    assert_equal authority,M.local_readiness_authority(JSON.generate(authority),**args)
+    %w[execute recover external-readiness].each do |purpose|
+      assert_raises(M::ContractError) { M.local_execution_authority(JSON.generate(authority),intent_content:raw,
+        expected_intent_sha256:digest,purpose:purpose,platform:'ios',stage:'external-testing') }
+    end
+    [->(a){a['executionReceiptSha256']='8'*64},->(a){a['purpose']='recover'},
+     ->(a){a['authorizationId']=intent['preparedBy']['authorizationId']},->(a){a['candidateSha256']='8'*64},
+     ->(a){a['source']['tree']='8'*40},->(a){a['supplementalAssignments'][0]['expectedRevision']+=1},
+     ->(a){a['extra']='not permitted'}].each do |change|
+      bad=clone_value(authority);change.call(bad)
+      assert_raises(M::ContractError) { M.local_readiness_authority(JSON.generate(bad),**args) }
+    end
+    assert_raises(M::ContractError) { M.local_readiness_authority(JSON.generate(authority),**args.merge(execution_receipt_sha256:true)) }
+    assert_raises(M::ContractError) { M.local_readiness_authority(JSON.generate(authority),**args.merge(intent_content:@raw)) }
+    duplicate='{"purpose":"external-readiness",'+JSON.generate(authority).delete_prefix('{')
+    assert_raises(M::ContractError) { M.local_readiness_authority(duplicate,**args) }
+  end
+  def test_readiness_reference_is_only_an_explicit_ios_production_predecessor
+    %w[android ios].product(%w[external-testing production-submit]).each do |platform,stage|
+      value=JSON.parse(File.binread(File.join(ROOT,"local-#{platform}-#{stage}-intent.json")))
+      value['predecessors']['externalReadinessReceiptSha256']='9'*64;value=sealed(value)
+      args={expected_sha256:value['integrity']['sha256'],platform:platform,stage:stage}
+      if platform=='ios' && stage=='production-submit'
+        payload,=M.local_operation_intent(JSON.generate(value),**args)
+        assert_equal '9'*64,payload['predecessors']['externalReadinessReceiptSha256']
+        assert_equal value['predecessors']['externalReceiptSha256'],payload['predecessors']['externalReceiptSha256']
+        value['predecessors']['externalReadinessReceiptSha256']=true;value=sealed(value)
+        assert_raises(M::ContractError) { M.local_operation_intent(JSON.generate(value),**args.merge(expected_sha256:value['integrity']['sha256'])) }
+      else
+        assert_raises(M::ContractError) { M.local_operation_intent(JSON.generate(value),**args) }
+      end
+    end
+  end
+
 end

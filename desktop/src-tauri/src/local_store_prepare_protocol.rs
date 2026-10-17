@@ -30,7 +30,7 @@ fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_as
 pub(crate) struct Content { pub(crate) bytes: u32, pub(crate) sha256: String }
 impl Content { fn valid(&self) -> bool { (1..=524288).contains(&self.bytes) && sha(&self.sha256) } }
 pub(crate) use crate::local_store_preflight_protocol::{ExecutionMode,Profile,Outcome,Phase,Availability};
-// Prepare-only selection. Execute/Reconcile retain the Android-only type.
+// Prepare owns its platform type; Execute/Reconcile retain their own exact readers.
 #[derive(Clone,Copy,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="lowercase")]
 pub(crate) enum Platform { Android, Ios }
@@ -40,15 +40,71 @@ impl Platform {
     fn commands(self)->u32 { match self {Self::Android=>14,Self::Ios=>15} }
     fn scope(self)->&'static str { match self {Self::Android=>"local-android-store-prepare",Self::Ios=>"local-ios-store-prepare"} }
 }
-#[derive(Deserialize)]
-#[serde(rename_all="lowercase")]
-enum AppleSelection { Ios }
+// Explicit later-stage DATA shared with Execute/History. This is not a grant.
+#[derive(Clone,Copy,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="kebab-case")]
+pub(crate) enum StoreStage { ExternalTesting, ProductionSubmit }
+impl StoreStage {
+    pub(crate) fn name(self)->&'static str {match self {Self::ExternalTesting=>"external-testing",Self::ProductionSubmit=>"production-submit"}}
+    pub(crate) fn asset_stage(self)->crate::asset_commands::Stage {match self {Self::ExternalTesting=>crate::asset_commands::Stage::ExternalTesting,Self::ProductionSubmit=>crate::asset_commands::Stage::Production}}
+    pub(crate) fn prepared_head(self)->u32 {match self {Self::ExternalTesting=>9,Self::ProductionSubmit=>13}}
+    pub(crate) fn executed_head(self)->u32 {self.prepared_head()+2}
+}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct StageRecord {pub(crate) record_id:String,pub(crate) record_revision:u32}
+impl StageRecord {fn valid(&self)->bool {token(&self.record_id)&&self.record_revision>0&&self.record_revision<u32::MAX}}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct StageAssignments {
+    pub(crate) review_contact:StageRecord,pub(crate) commitment:StageRecord,pub(crate) review_demo:Option<StageRecord>,
+}
+impl StageAssignments {
+    pub(crate) fn valid(&self,primary:&str)->bool {
+        let refs=[Some(&self.review_contact),Some(&self.commitment),self.review_demo.as_ref()];
+        refs.iter().flatten().all(|r|r.valid()&&r.record_id!=primary)
+            &&refs.iter().enumerate().all(|(i,r)|r.is_none_or(|r|refs.iter().skip(i+1).flatten().all(|s|r.record_id!=s.record_id)))
+    }
+    pub(crate) fn heap_bytes(&self)->Option<usize>{self.review_contact.record_id.capacity().checked_add(self.commitment.record_id.capacity())?
+        .checked_add(self.review_demo.as_ref().map_or(0,|r|r.record_id.capacity()))}
+}
+// Context serialization flattens these exact keys. Context deserialization
+// reuses the explicit request reader, so null/partial/hybrid forms cannot pass.
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct LaterStage {
+    pub(crate) stage:StoreStage,pub(crate) predecessor_operation_id:String,pub(crate) predecessor_receipt_sha256:String,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub(crate) supplemental_assignments:Option<StageAssignments>,
+}
+impl LaterStage {
+    pub(crate) fn valid(&self,candidate:&str,primary:&str,ios:bool)->bool {
+        uuid(&self.predecessor_operation_id)&&sha(&self.predecessor_receipt_sha256)
+            &&(if self.stage==StoreStage::ExternalTesting{self.predecessor_operation_id==candidate}else{self.predecessor_operation_id!=candidate})
+            &&match (ios,self.supplemental_assignments.as_ref()){(true,Some(a))=>a.valid(primary),(false,None)=>true,_=>false}
+    }
+    pub(crate) fn operation_valid(&self,stage_operation:&str,candidate:&str)->bool {
+        uuid(stage_operation)&&stage_operation!=candidate&&stage_operation!=self.predecessor_operation_id
+    }
+    pub(crate) fn heap_bytes(&self)->Option<usize>{self.predecessor_operation_id.capacity().checked_add(self.predecessor_receipt_sha256.capacity())?
+        .checked_add(self.supplemental_assignments.as_ref().map_or(Some(0),StageAssignments::heap_bytes)?)}
+}
+pub(crate) fn later_request(value:&Value,fields:&[&str])->Result<Option<LaterStage>,BridgeError>{
+    if value.get("stage").is_none(){return Ok(None);}
+    let ios=value.get("platform").and_then(Value::as_str)==Some("ios");
+    let extra=if ios{&["platform","stage","predecessorOperationId","predecessorReceiptSha256","supplementalAssignments"][..]}
+        else{&["platform","stage","predecessorOperationId","predecessorReceiptSha256"][..]};
+    if !keys(value,&[fields,extra].concat())||!matches!(value.get("platform").and_then(Value::as_str),Some("android"|"ios")){return Err(invalid());}
+    if ios&&!value.get("supplementalAssignments").is_some_and(|a|keys(a,&["reviewContact","commitment","reviewDemo"])){return Err(invalid());}
+    let mut stage=json!({"stage":value["stage"],"predecessorOperationId":value["predecessorOperationId"],"predecessorReceiptSha256":value["predecessorReceiptSha256"]});
+    if ios{stage["supplementalAssignments"]=value["supplementalAssignments"].clone();}
+    LaterStage::deserialize(stage).map(Some).map_err(|_|invalid())
+}
 pub(crate) use crate::local_release_history_protocol::Head;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Operation { LocalStorePrepare }
 fn uuid(v:&str)->bool { crate::local_release_history_protocol::journal_uuid(v) }
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Context {
     pub(crate) project_id: String, pub(crate) draft_revision: u32, pub(crate) baseline_generation: u32,
@@ -56,14 +112,29 @@ pub(crate) struct Context {
     pub(crate) credential_context_revision: u32, pub(crate) record_id: String, pub(crate) record_revision: u32,
     pub(crate) execution_mode: ExecutionMode, pub(crate) platform: Platform, pub(crate) operation: Operation,
     pub(crate) candidate_operation_id:String, pub(crate) candidate_sha256:String, pub(crate) confirmation:String,
+    #[serde(flatten)] pub(crate) later:Option<LaterStage>,
+}
+impl<'de> Deserialize<'de> for Context {
+    fn deserialize<D:serde::Deserializer<'de>>(decoder:D)->Result<Self,D::Error>{
+        let mut value=Value::deserialize(decoder)?;
+        if value.get("operation").and_then(Value::as_str)!=Some("local-store-prepare")
+            ||!matches!(value.get("platform").and_then(Value::as_str),Some("android"|"ios")){return Err(serde::de::Error::custom("invalid prepare context"));}
+        let map=value.as_object_mut().ok_or_else(||serde::de::Error::custom("invalid prepare context"))?;
+        map.remove("operation");if !map.contains_key("stage")&&map.get("platform").and_then(Value::as_str)==Some("android"){map.remove("platform");}
+        prepare(&value).map(|v|v.context()).map_err(|_|serde::de::Error::custom("invalid prepare context"))
+    }
 }
 impl Context {
+    pub(crate) fn consent(&self)->&'static str {match (self.platform,self.later.is_some()){
+        (Platform::Android,true)=>"local-android-store-stage-prepare-v1",(Platform::Ios,true)=>"local-ios-store-stage-prepare-v1",_=>self.platform.consent()}}
+    pub(crate) fn asset_stage(&self)->crate::asset_commands::Stage {self.later.as_ref().map_or(crate::asset_commands::Stage::Candidate,|s|s.stage.asset_stage())}
     fn valid(&self) -> bool { valid_id(&self.project_id) && self.draft_revision < u32::MAX
         && self.baseline_generation < u32::MAX && self.saved_config.valid() && self.saved_version.valid()
         && self.credential_context_revision > 0 && self.credential_context_revision < u32::MAX
         && token(&self.record_id) && self.record_revision > 0 && self.record_revision < u32::MAX
         && uuid(&self.candidate_operation_id) && sha(&self.candidate_sha256)
-        && self.confirmation==format!("candidate:{}:{}:{}",self.platform.name(),self.saved_version.name,self.saved_version.build) }
+        && self.later.as_ref().is_none_or(|s|s.valid(&self.candidate_operation_id,&self.record_id,self.platform==Platform::Ios))
+        && self.confirmation==format!("{}:{}:{}:{}",self.later.as_ref().map_or("candidate",|s|s.stage.name()),self.platform.name(),self.saved_version.name,self.saved_version.build) }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -72,7 +143,8 @@ pub(crate) struct Prepare {
     pub(crate) saved_config: Content, pub(crate) saved_version: crate::android_build_protocol::SavedVersion,
     pub(crate) credential_context_revision: u32, pub(crate) record_id: String, pub(crate) record_revision: u32,
     pub(crate) execution_mode: ExecutionMode,
-    #[serde(default)] platform:Option<AppleSelection>,
+    #[serde(default)] platform:Option<Platform>,
+    #[serde(skip)] pub(crate) later:Option<LaterStage>,
     pub(crate) candidate_operation_id:String, pub(crate) candidate_sha256:String, pub(crate) confirmation:String,
 }
 impl Prepare {
@@ -80,8 +152,8 @@ impl Prepare {
         baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
         saved_version: self.saved_version.clone(), credential_context_revision: self.credential_context_revision,
         record_id: self.record_id.clone(), record_revision: self.record_revision, execution_mode: self.execution_mode,
-        platform: if self.platform.is_some(){Platform::Ios}else{Platform::Android}, operation: Operation::LocalStorePrepare, candidate_operation_id:self.candidate_operation_id.clone(),
-        candidate_sha256:self.candidate_sha256.clone(),confirmation:self.confirmation.clone() } }
+        platform: self.platform.unwrap_or(Platform::Android), operation: Operation::LocalStorePrepare, candidate_operation_id:self.candidate_operation_id.clone(),
+        candidate_sha256:self.candidate_sha256.clone(),confirmation:self.confirmation.clone(),later:self.later.clone() } }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -92,18 +164,21 @@ pub(crate) struct Cancel { pub(crate) operation_id: String, pub(crate) owner_gen
 pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
     let fields=["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
         "credentialContextRevision", "recordId", "recordRevision", "executionMode", "candidateOperationId", "candidateSha256", "confirmation"];
-    if !keys(value,&fields) && !(keys(value,&[fields.as_slice(), &["platform"]].concat())
+    let later=later_request(value,&fields)?;
+    if later.is_none()&&!keys(value,&fields) && !(keys(value,&[fields.as_slice(), &["platform"]].concat())
         && value.get("platform").and_then(Value::as_str)==Some("ios")) { return Err(invalid()); }
-    let input = Prepare::deserialize(value).map_err(|_| invalid())?;
+    let mut candidate=value.clone();
+    if later.is_some(){for key in ["stage","predecessorOperationId","predecessorReceiptSha256","supplementalAssignments"]{candidate.as_object_mut().ok_or_else(invalid)?.remove(key);}}
+    let mut input = Prepare::deserialize(&candidate).map_err(|_| invalid())?;input.later=later;
     if !input.context().valid() { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT) { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|"local-android-store-stage-prepare-v1"|"local-ios-store-stage-prepare-v1") { return Err(invalid()); } Ok(input)
 }
 impl Start {
-    pub(crate) fn matches_context(&self,context:&Context)->bool { self.consent_version==context.platform.consent() }
+    pub(crate) fn matches_context(&self,context:&Context)->bool { self.consent_version==context.consent() }
 }
 pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration"]) { return Err(invalid()); }
@@ -139,7 +214,7 @@ impl Native {fn valid(&self)->bool{(3..=255).contains(&self.lease_fd)&&self.nonc
     &&self.tooling_commit.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))}}
 pub(crate) fn request(operation: &str, generation: &str, context: &Context, profile: Profile,
     project: &RegisteredRoot, cwd: &Path, credential_config: &Content, native:&Native) -> Result<Vec<u8>, BridgeError> {
-    if !token(operation) || !token(generation) || !context.valid() || !credential_config.valid() || !native.valid() { return Err(invalid()); }
+    if !token(operation) || context.later.is_some()&&crate::android_build_protocol::candidate_uuid(operation).is_none() || !token(generation) || !context.valid() || !credential_config.valid() || !native.valid() { return Err(invalid()); }
     let identity = project.identity.posix().map_err(|_| invalid())?.preflight_identity();
     if !decimal(&identity.device) || !decimal(&identity.inode) || identity.inode == "0" || identity.mode & 0o170000 != 0o040000 { return Err(invalid()); }
     let value = json!({"protocol":PROTOCOL,"operationId":operation,"ownerGeneration":generation,"context":context,
@@ -183,23 +258,87 @@ pub(crate) struct IOSPreparedIntent {operation_id:String,candidate_sha256:String
     source_commit:String,source_tree:String,bundle_id:String,app_store_app_id:String,version:Version,
     destination:AppleDestination,observed_at:String,limitations:Vec<Limitation>}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct AndroidStagePrepared {
+    operation_id:String,stage:StoreStage,candidate_operation_id:String,candidate_sha256:String,
+    predecessor_operation_id:String,predecessor_receipt_sha256:String,intent_sha256:String,store_precondition_sha256:String,
+    source_commit:String,source_tree:String,application_id:String,version:Version,destination:Destination,observed_at:String,limitations:Vec<StageLimitation>,
+}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct IOSStagePrepared {
+    operation_id:String,stage:StoreStage,candidate_operation_id:String,candidate_sha256:String,
+    predecessor_operation_id:String,predecessor_receipt_sha256:String,intent_sha256:String,store_precondition_sha256:String,
+    source_commit:String,source_tree:String,bundle_id:String,app_store_app_id:String,version:Version,destination:StageAppleDestination,observed_at:String,limitations:Vec<StageLimitation>,
+}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(untagged)]
-pub(crate) enum PreparedIntent {Android(AndroidPreparedIntent),Ios(IOSPreparedIntent)}
+pub(crate) enum StageAppleDestination {External(StageAppleExternal),Production(StageAppleProduction)}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StageAppleExternal {channel:String}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct StageAppleProduction {channel:String,automatic_release:bool}
+impl StageAppleDestination {pub(crate) fn valid(&self,stage:StoreStage)->bool {match (stage,self){
+    (StoreStage::ExternalTesting,Self::External(v))=>v.channel=="testflight-external",
+    (StoreStage::ProductionSubmit,Self::Production(v))=>v.channel=="app-store-review"&&!v.automatic_release,_=>false,
+}}}
+#[derive(Clone,Copy,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="kebab-case")]
+pub(crate) enum StageLimitation {NonPublishing,PrepareNotExecute,CurrentStoreSnapshotMayChange,OriginalBinaryReused,PriorNativeFinalityNotEstablished,SavedInputsNotAtomic,NotPublicRelease}
+const STAGE_PREPARE_LIMITATIONS:[StageLimitation;6]=[StageLimitation::NonPublishing,StageLimitation::PrepareNotExecute,StageLimitation::CurrentStoreSnapshotMayChange,
+    StageLimitation::OriginalBinaryReused,StageLimitation::PriorNativeFinalityNotEstablished,StageLimitation::SavedInputsNotAtomic];
+pub(crate) const STAGE_EXECUTE_LIMITATIONS:[StageLimitation;4]=[StageLimitation::OriginalBinaryReused,StageLimitation::NotPublicRelease,
+    StageLimitation::PriorNativeFinalityNotEstablished,StageLimitation::SavedInputsNotAtomic];
+pub(crate) fn stage_lineage(stage:StoreStage,operation:&str,candidate:&str,predecessor:&str,digest:&str)->bool {
+    uuid(operation)&&uuid(candidate)&&uuid(predecessor)&&operation!=candidate&&operation!=predecessor&&sha(digest)
+        &&if stage==StoreStage::ExternalTesting{predecessor==candidate}else{predecessor!=candidate}
+}
+pub(crate) fn stage_android_destination(stage:StoreStage,channel:&str,status:&str)->bool {match stage {
+    StoreStage::ExternalTesting=>!channel.trim().is_empty()&&channel.chars().count()<=100&&!channel.contains(['\0','\r','\n'])
+        &&!matches!(channel,"internal"|"production")&&status=="completed",
+    StoreStage::ProductionSubmit=>channel=="production"&&status=="draft",
+}}
+pub(crate) fn stage_identity(candidate:&str,intent:&str,commit:&str,tree:&str,app:&str,ios:bool,name:&str,build:u32,date:&str)->bool {
+    let hex=|v:&str,n|v.len()==n&&v.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b));
+    let separator=if ios{b'-'}else{b'_'};
+    sha(candidate)&&sha(intent)&&hex(commit,40)&&hex(tree,40)&&app.len()<=255&&app.split('.').count()>=2
+        &&app.split('.').all(|v|v.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)&&v.bytes().all(|b|b.is_ascii_alphanumeric()||b==separator))
+        &&!name.is_empty()&&name.len()<=64&&name.bytes().all(|b|b.is_ascii_alphanumeric()||b".+-".contains(&b))
+        &&(1..=2_100_000_000).contains(&build)&&crate::local_store_execute_protocol::utc_second(date)
+}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(untagged)]
+pub(crate) enum PreparedIntent {Android(AndroidPreparedIntent),Ios(IOSPreparedIntent),AndroidStage(AndroidStagePrepared),IosStage(IOSStagePrepared)}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct ResultData {schema_version:u32,scope:String,head_sequence:u32,prepared_intent:PreparedIntent}
 // Shared bounded summary DATA, not a Store/runtime/Document grant. Review uses
 // this same grammar without manufacturing an earlier Prepare Context/finality.
 impl PreparedIntent {
-    pub(crate) fn platform(&self)->Platform {match self {Self::Android(_)=>Platform::Android,Self::Ios(_)=>Platform::Ios}}
-    fn version(&self)->&Version {match self {Self::Android(p)=>&p.version,Self::Ios(p)=>&p.version}}
-    fn candidate_hash(&self)->&str {match self {Self::Android(p)=>&p.candidate_sha256,Self::Ios(p)=>&p.candidate_sha256}}
+    pub(crate) fn platform(&self)->Platform {match self {Self::Android(_)|Self::AndroidStage(_)=>Platform::Android,Self::Ios(_)|Self::IosStage(_)=>Platform::Ios}}
+    fn version(&self)->&Version {match self {Self::Android(p)=>&p.version,Self::Ios(p)=>&p.version,Self::AndroidStage(p)=>&p.version,Self::IosStage(p)=>&p.version}}
+    fn candidate_hash(&self)->&str {match self {Self::Android(p)=>&p.candidate_sha256,Self::Ios(p)=>&p.candidate_sha256,Self::AndroidStage(p)=>&p.candidate_sha256,Self::IosStage(p)=>&p.candidate_sha256}}
+    pub(crate) fn stage(&self)->Option<StoreStage>{match self{Self::AndroidStage(p)=>Some(p.stage),Self::IosStage(p)=>Some(p.stage),_=>None}}
+    pub(crate) fn stage_binding(&self)->Option<(&str,&str,&str)>{match self{Self::AndroidStage(p)=>Some((&p.candidate_operation_id,&p.predecessor_operation_id,&p.predecessor_receipt_sha256)),Self::IosStage(p)=>Some((&p.candidate_operation_id,&p.predecessor_operation_id,&p.predecessor_receipt_sha256)),_=>None}}
     pub(crate) fn valid_for(&self,operation:&str)->bool {
+        match self {
+            Self::AndroidStage(p)=>return p.operation_id==operation&&stage_lineage(p.stage,operation,&p.candidate_operation_id,&p.predecessor_operation_id,&p.predecessor_receipt_sha256)
+                &&sha(&p.store_precondition_sha256)&&stage_identity(&p.candidate_sha256,&p.intent_sha256,&p.source_commit,&p.source_tree,&p.application_id,false,&p.version.name,p.version.build,&p.observed_at)
+                &&stage_android_destination(p.stage,&p.destination.channel,&p.destination.release_status)&&p.limitations==STAGE_PREPARE_LIMITATIONS,
+            Self::IosStage(p)=>return p.operation_id==operation&&stage_lineage(p.stage,operation,&p.candidate_operation_id,&p.predecessor_operation_id,&p.predecessor_receipt_sha256)
+                &&sha(&p.store_precondition_sha256)&&stage_identity(&p.candidate_sha256,&p.intent_sha256,&p.source_commit,&p.source_tree,&p.bundle_id,true,&p.version.name,p.version.build,&p.observed_at)
+                &&(1..=20).contains(&p.app_store_app_id.len())&&p.app_store_app_id.bytes().all(|b|b.is_ascii_digit())
+                &&p.destination.valid(p.stage)&&p.limitations==STAGE_PREPARE_LIMITATIONS,
+            _=>{},
+        }
         let (id,candidate,intent,precondition,commit,tree,app,date,limits)=match self {
             Self::Android(p)=>(&p.operation_id,&p.candidate_sha256,&p.intent_sha256,&p.store_precondition_sha256,
                 &p.source_commit,&p.source_tree,&p.application_id,&p.observed_at,&p.limitations),
             Self::Ios(p)=>(&p.operation_id,&p.candidate_sha256,&p.intent_sha256,&p.store_precondition_sha256,
                 &p.source_commit,&p.source_tree,&p.bundle_id,&p.observed_at,&p.limitations),
+            Self::AndroidStage(_)|Self::IosStage(_)=>return false,
         };
         let version=self.version();
         let hex=|v:&str,n|v.len()==n&&v.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b));
@@ -212,6 +351,7 @@ impl PreparedIntent {
             Self::Android(p)=>p.destination.channel=="internal"&&p.destination.release_status=="completed"&&*limits==LIMITATIONS,
             Self::Ios(p)=>p.destination.channel=="testflight-internal"&&*limits==APPLE_LIMITATIONS
                 &&(1..=20).contains(&p.app_store_app_id.len())&&p.app_store_app_id.bytes().all(|b|b.is_ascii_digit()),
+            Self::AndroidStage(_)|Self::IosStage(_)=>false,
         };
         id==operation&&uuid(operation)&&sha(candidate)&&sha(intent)&&sha(precondition)&&hex(commit,40)&&hex(tree,40)
             &&app_valid&&!version.name.is_empty()&&version.name.len()<=64
@@ -220,8 +360,16 @@ impl PreparedIntent {
     }
 }
 impl ResultData {
-    fn valid(&self,c:&Context)->bool {
+    fn valid(&self,c:&Context,operation:Option<&str>)->bool {
         let p=&self.prepared_intent;
+        if let Some(later)=&c.later {
+            let Some(id)=operation.and_then(crate::android_build_protocol::candidate_uuid)else{return false;};
+            return self.schema_version==1&&self.scope==format!("local-{}-store-stage-prepare",c.platform.name())
+                &&(later.stage.prepared_head()..=511).contains(&self.head_sequence)&&p.platform()==c.platform&&p.stage()==Some(later.stage)
+                &&p.stage_binding()==Some((c.candidate_operation_id.as_str(),later.predecessor_operation_id.as_str(),later.predecessor_receipt_sha256.as_str()))
+                &&p.valid_for(&id)&&p.candidate_hash()==c.candidate_sha256&&p.version().name==c.saved_version.name&&p.version().build==c.saved_version.build;
+        }
+        if p.stage().is_some(){return false;}
         self.schema_version==1&&self.scope==c.platform.scope()
             &&(if c.platform==Platform::Ios{5}else{1}..=513).contains(&self.head_sequence)
             &&p.platform()==c.platform&&p.valid_for(&c.candidate_operation_id)
@@ -250,13 +398,14 @@ pub(crate) struct Terminal {
     pub(crate) result: Option<ResultData>, pub(crate) lifetime: Lifetime,
 }
 impl Terminal {
-    fn valid(&self, context: &Context) -> bool {
+    fn valid(&self, context: &Context) -> bool {self.valid_owner(context,None)}
+    fn valid_owner(&self, context:&Context,operation:Option<&str>)->bool {
         if self.schema_version != 1 || &self.context != context || !self.context.valid() || self.lifetime.profile_calls != 0
             || self.lifetime.commands > context.platform.commands() { return false; }
         if self.outcome == Outcome::Complete {
             return self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
                 && self.lifetime.commands==context.platform.commands() && self.lifetime.command_dispatched==Some(true)
-                && self.result.as_ref().is_some_and(|r| r.valid(context));
+                && self.result.as_ref().is_some_and(|r| r.valid(context,operation));
         }
         if self.result.is_some() || self.reason == Reason::None { return false; }
         if self.outcome == Outcome::Unknown { return self.reason == Reason::CleanupUnknown && !self.lifetime.settled(); }
@@ -295,7 +444,7 @@ impl Decoder {
                 if self.next==0||!keys(&e.payload,&["schemaVersion","context","outcome","reason","result","lifetime"])
                     ||!e.payload.get("lifetime").is_some_and(|l|keys(l,&["complete","fatal","contained","commandDispatched","commands","profileCalls","inputClosed","handlersRestored","invocationClosed","stopObserved"])) {return Err(BridgeError::protocol());}
                 let t=Terminal::deserialize(&e.payload).map_err(|_|BridgeError::protocol())?;
-                if !t.valid(context)||t.outcome==Outcome::Complete&&(self.next!=5||!self.head.as_ref().is_some_and(|h|t.result.as_ref().is_some_and(|r|r.head_sequence==h.sequence))){return Err(BridgeError::protocol());}
+                if !t.valid_owner(context,Some(operation))||t.outcome==Outcome::Complete&&(self.next!=5||!self.head.as_ref().is_some_and(|h|t.result.as_ref().is_some_and(|r|r.head_sequence==h.sequence))){return Err(BridgeError::protocol());}
                 self.terminal=true;return Ok(Frame::Terminal(t));
             }
             if self.next==0 {
@@ -311,7 +460,8 @@ impl Decoder {
                         if !keys(&e.payload,&["head","phase"])||e.payload["phase"]!="prepared"{return Err(BridgeError::protocol());}&e.payload["head"]
                     }else{&e.payload};
                     let head=Head::deserialize(body).map_err(|_|BridgeError::protocol())?;
-                    if !head.valid()||self.next==2&&head.sequence>511||self.next>2&&!self.head.as_ref().is_some_and(|p|p.sequence<513&&head.sequence==p.sequence+1){return Err(BridgeError::protocol());}
+                    if !head.valid()||self.next==2&&(head.sequence>if context.later.is_some(){509}else{511}
+                        ||context.later.as_ref().is_some_and(|s|head.sequence<s.stage.prepared_head()-2))||self.next>2&&!self.head.as_ref().is_some_and(|p|p.sequence<513&&head.sequence==p.sequence+1){return Err(BridgeError::protocol());}
                     self.head=Some(head.clone());Ok(Frame::Event(match self.next{2=>Event::HistoryHead(head),3=>Event::PreparePending(head),_=>Event::PrepareSettled(head)}))
                 },_=>Err(BridgeError::protocol()),
             }
@@ -449,4 +599,49 @@ pub(crate) mod tests {
         }
         let mut missing=complete();missing.as_object_mut().unwrap().remove("result");let mut d=Decoder::new();read(&mut d,&rows[0]).unwrap();assert!(read(&mut d,&frame(1,"terminal",missing)).is_err());
     }
+    pub(crate) const STAGE_ID:&str="22345678-1234-4234-8234-123456789abc";
+    pub(crate) fn stage_input(ios:bool,production:bool)->Value {
+        let mut v=input();let stage=if production{"production-submit"}else{"external-testing"};let platform=if ios{"ios"}else{"android"};
+        v["platform"]=json!(platform);v["stage"]=json!(stage);v["confirmation"]=json!(format!("{stage}:{platform}:1.2.3:42"));
+        v["predecessorOperationId"]=json!(if production{"32345678-1234-4234-8234-123456789abc"}else{UUID});v["predecessorReceiptSha256"]=json!("a".repeat(64));
+        if ios{v["supplementalAssignments"]=json!({"reviewContact":{"recordId":"e".repeat(32),"recordRevision":2},"commitment":{"recordId":"f".repeat(32),"recordRevision":3},"reviewDemo":null});}v
+    }
+    pub(crate) fn stage_complete(ios:bool,production:bool)->Value {
+        let c=prepare(&stage_input(ios,production)).unwrap().context();let mut v=if ios{apple_complete()}else{complete()};
+        v["context"]=json!(c);v["result"]["scope"]=json!(format!("local-{}-store-stage-prepare",if ios{"ios"}else{"android"}));
+        v["result"]["headSequence"]=json!(if production{13}else{9});let p=&mut v["result"]["preparedIntent"];
+        p["operationId"]=json!(STAGE_ID);p["stage"]=json!(c.later.as_ref().unwrap().stage);p["candidateOperationId"]=json!(UUID);
+        p["predecessorOperationId"]=json!(c.later.as_ref().unwrap().predecessor_operation_id);p["predecessorReceiptSha256"]=json!("a".repeat(64));p["limitations"]=json!(STAGE_PREPARE_LIMITATIONS);
+        p["destination"]=if ios{if production{json!({"channel":"app-store-review","automaticRelease":false})}else{json!({"channel":"testflight-external"})}}
+            else if production{json!({"channel":"production","releaseStatus":"draft"})}else{json!({"channel":"Closed testing team","releaseStatus":"completed"})};v
+    }
+    #[test]
+    fn local_stage_prepare_explicit_lineage_and_original_uuid_never_widen_candidate(){
+        for ios in [false,true]{for production in [false,true]{
+            let input=stage_input(ios,production);let c=prepare(&input).unwrap().context();assert!(c.valid());
+            assert_eq!(Context::deserialize(json!(c)).unwrap(),c);assert!(c.later.is_some());
+            let consent=start(&json!({"operationId":STAGE_ID.replace('-',""),"ownerGeneration":"a".repeat(32),"consentVersion":c.consent()})).unwrap();assert!(consent.matches_context(&c));assert!(!consent.matches_context(&context()));
+            for key in ["stage","platform","predecessorOperationId","predecessorReceiptSha256"]{let mut bad=input.clone();bad.as_object_mut().unwrap().remove(key);assert!(prepare(&bad).is_err(),"{key}");}
+            for(key,value)in[("stage",json!("candidate")),("stageOperationId",json!(STAGE_ID)),("authorizationId",json!(STAGE_ID)),("toolchainSelection",json!({}))]{let mut bad=input.clone();bad[key]=value;assert!(prepare(&bad).is_err());}
+            let value=stage_complete(ios,production);let t=Terminal::deserialize(&value).unwrap();assert!(!t.valid(&c));
+            assert!(t.valid_owner(&c,Some(&STAGE_ID.replace('-',""))));assert!(!t.valid_owner(&c,Some(&"a".repeat(32))));
+            let mut bad=value.clone();bad["result"]["preparedIntent"]["operationId"]=json!("42345678-1234-4234-8234-123456789abc");assert!(!Terminal::deserialize(bad).unwrap().valid_owner(&c,Some(&STAGE_ID.replace('-',""))));
+        }}
+        let mut hybrid=input();hybrid["platform"]=json!("android");assert!(prepare(&hybrid).is_err());
+        let mut ios=stage_input(true,false);ios["supplementalAssignments"].as_object_mut().unwrap().remove("reviewDemo");assert!(prepare(&ios).is_err());
+    }
+    #[test]
+    fn local_stage_prepare_actual_decoder_requires_room_and_all_four_acks(){
+        let c=prepare(&stage_input(false,false)).unwrap().context();let operation=STAGE_ID.replace('-',"");
+        let data=stage_complete(false,false);let mut rows=frames();
+        for(i,raw)in rows.iter_mut().enumerate(){let mut v:Value=serde_json::from_slice(raw).unwrap();v["operationId"]=json!(operation);
+            if i==0{v["payload"]["context"]=json!(c);}if i==2{v["payload"]["sequence"]=json!(7);}if i==3{v["payload"]["sequence"]=json!(8);}if i==4{v["payload"]["head"]["sequence"]=json!(9);}if i==5{v["payload"]=data.clone();}
+            *raw=serde_json::to_vec(&v).unwrap();raw.push(b'\n');}
+        let read=|d:&mut Decoder,b:&[u8]|d.decode(b,&operation,&"b".repeat(32),&c,&"c".repeat(32),&"d".repeat(64));
+        let mut d=Decoder::new();for r in &rows{read(&mut d,r).unwrap();}assert!(d.finish());
+        for first in [6,510,511]{let mut d=Decoder::new();read(&mut d,&rows[0]).unwrap();read(&mut d,&rows[1]).unwrap();
+            let mut v:Value=serde_json::from_slice(&rows[2]).unwrap();v["payload"]["sequence"]=json!(first);let mut bytes=serde_json::to_vec(&v).unwrap();bytes.push(b'\n');assert!(read(&mut d,&bytes).is_err());}
+        let mut d=Decoder::new();for r in rows.iter().take(4){read(&mut d,r).unwrap();}assert!(read(&mut d,&rows[5]).is_err());
+    }
+
 }

@@ -306,7 +306,7 @@ jobs:
           # Exact SDK/Rust/profile/dependency key only. Source changes still
           # run Cargo, including build.rs SOURCE/release env invalidation.
           key: mac-components-v1-${{ matrix.arch }}-rust1.98.1-dev0-test0-inc0-macos26-${{ steps.cache-profile.outputs.sdk }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/build.rs', 'desktop/helpers/macos-desktop-image/Cargo.lock', 'desktop/helpers/macos-desktop-image/Cargo.toml', 'desktop/helpers/macos-desktop-image/build.rs', 'desktop/helpers/macos-vault-helper/Cargo.lock', 'desktop/helpers/macos-vault-helper/Cargo.toml', 'desktop/helpers/macos-vault-helper/build.rs', 'desktop/native/macos-installed-native/Cargo.lock', 'desktop/native/macos-installed-native/Cargo.toml', 'desktop/native/macos-installed-native/build.rs') }}
-      - name: ${{ inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test two Mac Store contracts only' || 'Compile packaged app and test Mac Store contracts' }}
+      - name: ${{ inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
         shell: bash
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
@@ -454,20 +454,102 @@ jobs:
               local_store_reconcile_protocol::tests::local_ios_reconcile_four_frames_exact_receipt_and_fifteen_roles_do_not_repair_finality \
               asset_session::store_material::tests::apple_reconcile_loan_is_original_asc_and_cannot_grant_android_settlement_or_document \
               local_release_history_protocol::tests::local_release_history_ios_reconcile_requires_current_last_execution_and_exact_prepared_files \
+              local_store_prepare_protocol::tests::local_stage_prepare_explicit_lineage_and_original_uuid_never_widen_candidate \
+              local_store_prepare_protocol::tests::local_stage_prepare_actual_decoder_requires_room_and_all_four_acks \
+              local_store_execute_protocol::tests::local_stage_execute_has_no_tool_tuple_and_checks_original_authorization \
+              asset_session::store_material::tests::local_stage_apple_material_retains_every_original_scalar_and_assignment \
+              local_release_history_protocol::tests::local_stage_history_uses_explicit_stage_id_and_never_relabels_candidate_review \
+              asset_session::local_history::tests::local_stage_history_consent_cannot_switch_stage_or_platform_or_mint_document \
+              saved_command_owner::execute_native::ios_tests::local_stage_execute_no_tools_still_consumes_original_store_and_rejects_unknown \
+              local_store_reconcile_protocol::tests::local_external_readiness_requires_explicit_original_context_and_separate_consent \
+              local_store_reconcile_protocol::tests::local_external_readiness_five_frames_bind_original_execution_and_checkpoint_closes \
+              local_release_history_protocol::tests::local_release_history_external_readiness_is_exact_offline_observation_not_old_finality \
+              asset_session::store_material::tests::local_external_readiness_material_uses_original_supplemental_assignments_not_a_new_grant \
+              saved_command_owner::local_history::reconcile_route_tests::local_external_readiness_route_needs_third_actual_ack_and_preserves_pending_failure \
+              saved_command_owner::local_history::native::reconcile_tests::local_external_readiness_final_original_join_alone_selects_cleanup_not_success \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 89 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 102 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
-          # The same Mac Store implementation is in the headless library graph.
-          # Run only these two memory-only contracts, not the shipping image ABI.
-          # Neither test inspects files, allocates native frames or starts work.
+          # Compile the real library graph once; run affected memory-only
+          # Store/History/material contracts, never the native Xcode Book fixture.
           rustup run 1.98.1 cargo test --locked --no-default-features \
-            --manifest-path desktop/src-tauri/Cargo.toml \
-            --lib -- \
+            --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
+            asset_session::local_history::tests::local_release_history_needs_registered_project_not_credential_context \
+            local_release_history_protocol::tests::local_release_history_real_decoder_requires_complete_closed_phase_sequence \
+            local_release_history_protocol::tests::local_release_history_original_nonce_replay_and_truncated_terminal_refuse \
+            local_release_history_protocol::tests::local_release_history_public_summary_cannot_hide_recovery_or_exceed_journal_bound \
+            local_release_history_protocol::tests::local_release_history_candidate_context_and_consent_are_action_specific \
+            local_release_history_protocol::tests::local_release_history_candidate_summary_cannot_create_old_finality_or_change_roster \
+            local_release_history_protocol::tests::local_release_history_candidate_phases_bind_successor_and_terminal_head \
+            local_release_history_protocol::local_release_history_cleanup_tests::local_release_history_healthy_cleanup_does_not_manufacture_failure \
+            local_release_history_protocol::tests::local_release_history_prepared_review_is_exact_read_only_summary_not_prepare_finality \
+            local_release_history_protocol::tests::local_release_history_prepared_review_requires_selected_prepared_row_not_global_latest \
+            local_release_history_protocol::tests::local_release_history_prepared_review_keeps_original_phase_and_failure_finality \
+            local_store_prepare_protocol::tests::local_prepare_requires_exact_candidate_consent_not_access_or_execute \
+            local_store_prepare_protocol::tests::local_prepare_decoder_requires_original_order_and_final_checkpoint \
+            local_store_prepare_protocol::tests::local_prepare_success_binds_candidate_version_ledger_and_known_closes \
+            local_store_prepare_protocol::tests::local_prepare_known_failed_prefix_never_requires_or_fakes_settlement_phase \
+            asset_session::store_material::tests::local_prepare_comparison_and_private_bytes_do_not_mint_document_grant \
+            asset_session::store_material::tests::store_command_loan_binds_canonical_context_and_retains_private_writer_bytes \
+            asset_session::store_material::tests::local_loan_uses_original_private_bytes_and_rejects_stale_context_or_assignment \
             installed_runtime::store_runtime::tests::store_cleanup_points_ignore_work_stop_but_keep_original_expiry_and_failures \
             installed_runtime::store_runtime::tests::store_slots_do_not_lend_uninspected_or_settled_sources \
+            local_store_execute_protocol::tests::local_execute_requires_current_intent_tools_and_separate_consent \
+            local_store_execute_protocol::tests::local_execute_native_request_binds_original_mac_selection_and_profile \
+            local_store_execute_protocol::tests::local_execute_decoder_requires_original_order_and_final_checkpoint \
+            local_store_execute_protocol::tests::local_execute_success_binds_native_authorization_receipt_and_known_closes \
+            local_store_execute_protocol::tests::local_execute_failure_keeps_actual_prefix_including_entered_final_helper \
+            asset_session::store_material::tests::local_execute_comparison_cannot_replace_current_document_catalog_or_material \
+            local_release_history_protocol::tests::local_release_history_execution_review_is_exact_receipt_not_old_finality \
+            local_release_history_protocol::tests::local_release_history_execution_review_requires_selected_success_not_latest_operation \
+            local_release_history_protocol::tests::local_release_history_execution_review_keeps_read_only_phases_and_finality \
+            local_store_reconcile_protocol::tests::local_reconcile_native_request_has_new_authorization_and_no_android_tools \
+            local_store_reconcile_protocol::tests::local_reconcile_four_frames_bind_acknowledged_head_and_readback_only \
+            local_store_reconcile_protocol::tests::local_reconcile_failure_prefixes_and_original_closes_are_not_promoted \
+            saved_command_owner::local_history::reconcile_route_tests::local_reconcile_actual_ack_head_not_terminal_count_controls_route_completion \
+            saved_command_owner::local_history::native::reconcile_tests::local_reconcile_read_helpers_never_add_or_credit_unjoined_work \
+            asset_session::store_material::tests::local_reconcile_comparison_and_private_bytes_do_not_mint_document_grant \
+            local_release_history_protocol::tests::local_release_history_review_reconcile_requires_current_last_execute_chain \
+            asset_session::store_material::tests::apple_access_loan_retains_exact_fields_and_never_lends_google_mutation_material \
+            asset_session::store_material::tests::apple_access_key_and_scalar_bounds_refuse_before_private_writer \
+            local_store_reconcile_protocol::tests::local_recovery_context_and_consent_cannot_upgrade_read_only_reconcile \
+            local_store_reconcile_protocol::tests::local_recovery_checkpoint_requires_next_head_then_five_frames_and_original_closes \
+            local_release_history_protocol::tests::local_release_history_recovery_review_is_distinct_current_files_not_live_or_old_finality \
+            local_release_history_protocol::tests::local_release_history_recovery_review_keeps_two_events_and_all_original_close_checks \
+            saved_command_owner::local_history::reconcile_route_tests::local_recovery_route_requires_actual_third_ack_without_pending_write \
+            saved_command_owner::local_history::native::reconcile_tests::local_recovery_helpers_add_exactly_one_after_three_reads_not_for_offline_review \
+            saved_command_owner::local_history::native::reconcile_tests::local_recovery_joined_final_original_uses_cleanup_tail_not_a_new_forward_grant \
+            local_release_history_protocol::tests::local_release_history_ios_platform_has_original_distinct_consent \
+            local_release_history_protocol::tests::local_release_history_ios_summary_is_current_bundle_not_android_or_create_finality \
+            saved_command_owner::local_history::native::reconcile_tests::ios_candidate_cleanup_credit_needs_fifth_original_join_not_phase_data \
+            local_store_prepare_protocol::tests::local_ios_prepare_requires_distinct_consent_and_closed_fifteen_call_result \
+            asset_session::store_material::tests::apple_prepare_loan_binds_original_command_and_consent_without_google_or_document_grant \
+            local_release_history_protocol::tests::local_ios_prepared_history_is_exact_platform_summary_not_reconcile_permission \
+            local_store_execute_protocol::tests::local_ios_execute_native_selection_is_exact_data_not_android_or_renderer_paths \
+            local_store_execute_protocol::tests::local_ios_execute_exact_platform_consent_receipt_and_actual_sixteen_roles \
+            asset_session::store_material::tests::apple_execute_loan_is_original_asc_not_android_loan_or_document_authority \
+            saved_command_owner::execute_native::ios_tests::local_ios_execute_independent_original_closes_never_create_android_tail \
+            local_release_history_protocol::tests::local_release_history_ios_execution_has_exact_sixteen_fields_and_no_recovery \
+            local_store_reconcile_protocol::tests::local_ios_reconcile_original_context_consent_and_request_have_no_tools_or_settlement \
+            local_store_reconcile_protocol::tests::local_ios_reconcile_four_frames_exact_receipt_and_fifteen_roles_do_not_repair_finality \
+            asset_session::store_material::tests::apple_reconcile_loan_is_original_asc_and_cannot_grant_android_settlement_or_document \
+            local_release_history_protocol::tests::local_release_history_ios_reconcile_requires_current_last_execution_and_exact_prepared_files \
+            local_store_prepare_protocol::tests::local_stage_prepare_explicit_lineage_and_original_uuid_never_widen_candidate \
+            local_store_prepare_protocol::tests::local_stage_prepare_actual_decoder_requires_room_and_all_four_acks \
+            local_store_execute_protocol::tests::local_stage_execute_has_no_tool_tuple_and_checks_original_authorization \
+            asset_session::store_material::tests::local_stage_apple_material_retains_every_original_scalar_and_assignment \
+            local_release_history_protocol::tests::local_stage_history_uses_explicit_stage_id_and_never_relabels_candidate_review \
+            asset_session::local_history::tests::local_stage_history_consent_cannot_switch_stage_or_platform_or_mint_document \
+            saved_command_owner::execute_native::ios_tests::local_stage_execute_no_tools_still_consumes_original_store_and_rejects_unknown \
+            local_store_reconcile_protocol::tests::local_external_readiness_requires_explicit_original_context_and_separate_consent \
+            local_store_reconcile_protocol::tests::local_external_readiness_five_frames_bind_original_execution_and_checkpoint_closes \
+            local_release_history_protocol::tests::local_release_history_external_readiness_is_exact_offline_observation_not_old_finality \
+            asset_session::store_material::tests::local_external_readiness_material_uses_original_supplemental_assignments_not_a_new_grant \
+            saved_command_owner::local_history::reconcile_route_tests::local_external_readiness_route_needs_third_actual_ack_and_preserves_pending_failure \
+            saved_command_owner::local_history::native::reconcile_tests::local_external_readiness_final_original_join_alone_selects_cleanup_not_success \
             --exact --test-threads=1 | tee "$WORK_ROOT/store-contract-tests.log"
-          grep -Eq '^test result: ok\. 2 passed; 0 failed; 0 ignored;' "$WORK_ROOT/store-contract-tests.log"
+          grep -Eq '^test result: ok\. 73 passed; 0 failed; 0 ignored;' "$WORK_ROOT/store-contract-tests.log"
       - name: Bound successful compiler cache publication
         id: cache-size
         if: success() && steps.cargo-cache.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true'
@@ -745,9 +827,9 @@ jobs:
               # shared stream; successes need only their Minitest counts.
               clean["MT_CPU"] = "1"
               for phase, filename, expected_count in (
-                  ("apple-lanes", "test_apple_lanes.rb", 38),
+                  ("apple-lanes", "test_apple_lanes.rb", 40),
                   ("play-lanes", "test_play_lanes.rb", 60),
-                  ("local-runtime", "test_local_store_execution_runtime.rb", 18),
+                  ("local-runtime", "test_local_store_execution_runtime.rb", 21),
                   ("apple-production", "test_apple_production.rb", 49),
                   ("lane-resources", "test_store_lane_resources.rb", 13),
                   ("lane-lifetime", "test_store_lane_lifetime.rb", 21),
