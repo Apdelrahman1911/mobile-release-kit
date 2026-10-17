@@ -63,6 +63,18 @@ class IOSStoreResolverMacTests(unittest.TestCase):
         returned = []
         post = []
         original_upload = execute.LocalStoreExecuteRun._upload_tools
+        original_protected = execute.LocalStoreExecuteRun._upload_protected
+        protection_failure = []
+
+        def protected(row, directory=False):
+            try:
+                original_protected(row, directory)
+            except wire.ProtocolError:
+                # Facts from the actual rejected stat, not another inspection.
+                # No path, environment, tool content, or credential is emitted.
+                protection_failure.append(dict(directory=directory, mode=row.st_mode,
+                    uid=row.st_uid, links=row.st_nlink, size=row.st_size))
+                raise
         class BeforePending(wire.ProtocolError):
             pass
         refusal = BeforePending()
@@ -107,10 +119,12 @@ class IOSStoreResolverMacTests(unittest.TestCase):
         def no_lane(*_):
             self.fail('Store lane must not be reached by resolver qualification')
         fixture.execution_receipt = no_lane
-        with patch.object(execute.LocalStoreExecuteRun, '_upload_tools', tools):
+        with patch.object(execute.LocalStoreExecuteRun, '_upload_tools', tools), \
+                patch.object(execute.LocalStoreExecuteRun, '_upload_protected', staticmethod(protected)):
             terminal, engine, events, calls, high = fixture.run_original(_execute=True)
         if engine.primary is not refusal:
-            raise AssertionError('original resolver did not reach the expected pre-pending cut') from engine.primary
+            raise AssertionError('original resolver did not reach the expected pre-pending cut; '
+                + json.dumps(dict(resolverReturns=returned, protectionFailures=protection_failure))) from engine.primary
         self.assertEqual(returned, [0])
         self.assertEqual(post, [engine.service])
         self.assertIs(engine.primary, refusal)
