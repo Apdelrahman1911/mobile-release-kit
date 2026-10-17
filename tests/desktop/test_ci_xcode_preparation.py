@@ -224,5 +224,129 @@ class ProtectedXcodeFixtureTests(unittest.TestCase):
                 os.close(source);os.close(parent)
 
 
+
+class XcodeResourceObservationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location('ci_xcode_resources', Path(__file__).resolve().parents[2] / 'desktop/tools/observe_ci_xcode_resources.py')
+        cls.reader = importlib.util.module_from_spec(spec); spec.loader.exec_module(cls.reader)
+
+    def state(self):
+        return dict(end=time.monotonic()+10, closeFailures=0)
+
+    def test_original_resource_opens_before_and_after_access_loss_or_clone(self):
+        r=self.reader
+        self.assertNotEqual(os.geteuid(),0)
+        with tempfile.TemporaryDirectory() as tmp:
+            app=Path(tmp)/'Xcode.app';resource=app/'Contents/Bundle/Resources/Defaults.properties'
+            resource.parent.mkdir(parents=True);resource.write_bytes(b'never read by observer');resource.chmod(0o600)
+            sibling=resource.with_name('private-other');sibling.write_bytes(b'not selected')
+            outside=Path(tmp)/'outside';outside.mkdir();(outside/'Defaults.properties').write_bytes(b'not followed')
+            (app/'Contents/alias').symlink_to(outside)
+            state=self.state()
+            with r.opened(str(app),None,True,state) as fd:
+                paths,census=r.scan(fd,state)
+                self.assertEqual(paths,['Contents/Bundle/Resources/Defaults.properties'])
+                self.assertTrue(census['complete'])
+                before=r.observe(fd,paths[0],state)
+                self.assertTrue(before['opened']);self.assertIsNone(before['errno'])
+                self.assertEqual(before['nodes'][-1]['mode'],stat.S_IFREG|0o600)
+                resource.chmod(0)
+                try:
+                    refused=r.observe(fd,paths[0],state)
+                    self.assertFalse(refused['opened']);self.assertEqual(refused['openErrno'],13)
+                    self.assertEqual(refused['failedOperation'],'open')
+                finally:resource.chmod(0o600)
+                resource.parent.chmod(0)
+                try:
+                    refused=r.observe(fd,paths[0],state)
+                    self.assertFalse(refused['opened']);self.assertEqual(refused['openErrno'],13)
+                    self.assertEqual(refused['failedIndex'],3)
+                finally:resource.parent.chmod(0o700)
+                replacement=resource.with_name('replacement');replacement.write_bytes(b'never read by observer')
+                os.replace(replacement,resource)
+                after=r.observe(fd,paths[0],state)
+                self.assertTrue(after['opened']);self.assertNotEqual(before['nodes'][-1]['inode'],after['nodes'][-1]['inode'])
+            self.assertEqual(state['closeFailures'],0)
+            self.assertEqual(resource.read_bytes(),b'never read by observer')
+
+    def test_incomplete_scan_does_not_report_absence_and_bounds_are_finite(self):
+        r=self.reader
+        with tempfile.TemporaryDirectory() as tmp:
+            app=Path(tmp);hidden=app/'Contents/Hidden';hidden.mkdir(parents=True)
+            (hidden/'Defaults.properties').write_bytes(b'not read')
+            hidden.chmod(0)
+            state=self.state()
+            with r.opened(str(app),None,True,state) as fd:
+                try:
+                    paths,census=r.scan(fd,state)
+                    self.assertEqual(paths,[]);self.assertFalse(census['complete'])
+                    self.assertEqual(census['errors'],[dict(depth=2,errno=13)])
+                finally:hidden.chmod(0o700)
+                for key,value in [('MAX_ENTRIES',1),('MAX_NAMES',1),('MAX_DEPTH',1),('MAX_MATCHES',0)]:
+                    with self.subTest(key=key),patch.object(r,key,value),self.assertRaises(r.Refused):r.scan(fd,state)
+                with self.assertRaises(r.Refused):r.scan(fd,dict(end=0,closeFailures=0))
+            self.assertEqual(state['closeFailures'],0)
+
+    def test_control_is_exclusive_bounded_closed_and_never_an_arbitrary_path(self):
+        r=self.reader
+        nomination=dict(schemaVersion=1,selection=dict(name='Xcode_26.app',alias=[1,2,stat.S_IFLNK],target='Xcode_26.app'),
+            app=[1,3,stat.S_IFDIR],paths=['Contents/Resources/Defaults.properties'],scanComplete=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            state=self.state()
+            with r.opened(tmp,None,True,state) as fd:
+                r.save_control(fd,nomination,state)
+                self.assertEqual(r.load_control(fd,state),nomination)
+                with self.assertRaises(FileExistsError):r.save_control(fd,nomination,state)
+                with patch.object(r,'CONTROL_LIMIT',1),self.assertRaises(r.Refused):r.load_control(fd,state)
+                (Path(tmp)/r.CONTROL).unlink();(Path(tmp)/r.CONTROL).symlink_to('/dev/null')
+                with self.assertRaises(r.Refused):r.load_control(fd,state)
+            for path in ('../Defaults.properties','Contents/../Defaults.properties','/etc/Defaults.properties','Contents/Other','Contents/\t/Defaults.properties'):
+                with self.subTest(path=path),self.assertRaises(r.Refused):r.control_data(dict(nomination,paths=[path]))
+            for value in (dict(nomination,schemaVersion=True),dict(nomination,paths=nomination['paths']*2),dict(nomination,extra=True)):
+                with self.assertRaises(r.Refused):r.control_data(value)
+            self.assertEqual(state['closeFailures'],0)
+
+    def test_actual_before_after_main_control_and_same_selection_with_inert_host_boundary(self):
+        r=self.reader
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);physical=root/'host';app=physical/'Applications/Xcode_26.app'
+            resource=app/'Contents/Resources/Defaults.properties';resource.parent.mkdir(parents=True)
+            resource.write_bytes(b'no content read');(physical/'Applications/Xcode.app').symlink_to('Xcode_26.app')
+            work=root/'work';work.mkdir(mode=0o700)
+            actual=r.opened
+            def original(name,parent,directory,state):
+                return actual(str(physical) if name=='/' and parent is None else name,parent,directory,state)
+            values=[]
+            with patch.object(r,'opened',side_effect=original):
+                for phase in ('before','after'):
+                    with patch.object(r,'profile',return_value=(phase,work)),contextlib.redirect_stdout(io.StringIO()) as stream:
+                        self.assertEqual(r.main(),0)
+                    values.append(json.loads(stream.getvalue()))
+                (physical/'Applications/Xcode.app').unlink();(physical/'Applications/Xcode.app').symlink_to('Xcode_other.app')
+                with patch.object(r,'profile',return_value=('after',work)),contextlib.redirect_stdout(io.StringIO()) as stream:
+                    self.assertEqual(r.main(),1)
+                self.assertEqual(json.loads(stream.getvalue())['outcome'],'unconfirmed')
+            for value in values:
+                self.assertTrue(value['originalClosesKnown']);self.assertFalse(value['qualification'])
+                self.assertFalse(value['altoolSyscallErrno']);self.assertTrue(value['observations'][0]['opened'])
+            self.assertEqual(values[0]['observations'],values[1]['observations'])
+            self.assertTrue(values[1]['scan']['reusedBeforeNomination'])
+
+    def test_unknown_close_is_recorded_and_foreign_entry_never_opens(self):
+        r=self.reader
+        with tempfile.TemporaryDirectory() as tmp:
+            state=self.state();actual=os.close
+            def uncertain(fd):actual(fd);raise OSError(5,'inert close uncertainty')
+            with patch.object(r.os,'close',side_effect=uncertain):
+                with r.opened(tmp,None,True,state):pass
+            self.assertEqual(state['closeFailures'],1)
+        for arguments in ([],['after','extra'],['before']):
+            with patch.object(r.sys,'argv',['observer']+arguments),patch.object(r.sys,'platform','linux'), \
+                    patch.object(r,'opened') as opened,contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(r.main(),1);opened.assert_not_called()
+                value=json.loads(output.getvalue());self.assertFalse(value['qualification']);self.assertEqual(value['outcome'],'unconfirmed')
+
+
 if __name__ == '__main__':
     unittest.main()
