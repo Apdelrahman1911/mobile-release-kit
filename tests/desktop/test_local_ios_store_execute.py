@@ -6,12 +6,63 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 from mobile_release import local_store_execute as S,_desktop_store_execute_protocol as W
 from mobile_release.local_release_journal import canonical
 from test_local_store_prepare import OP
 import test_local_ios_store_prepare as prepare_fixture
+
+
+class IOSStoreExecuteBudgetTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory(dir=Path.home());self.addCleanup(self.tmp.cleanup)
+        home=Path(self.tmp.name)/'nested'/'workspace'/'account'/'home'
+        home.mkdir(parents=True,mode=0o700)
+        env=patch.dict(os.environ,{'HOME':str(home)})
+        env.start();self.addCleanup(env.stop)
+        self.f=IOSStoreExecuteTests(methodName='runTest')
+        self.f.setUp();self.addCleanup(self.f.doCleanups)
+
+    def test_deep_project_uses_actual_source_topology_without_raising256(self):
+        self.assertGreaterEqual(len(self.f.f.root.parts),9)
+        t,e,_,calls,high=self.f.f.run_original(_execute=True)
+        self.assertEqual(t['outcome'],'complete',''.join(__import__('traceback').format_exception(e.primary)))
+        self.assertEqual(len(calls),16);self.assertEqual(self.f.f.current_phase(),'settled-success')
+        self.assertEqual(e.service.observation.descriptor_quote(),
+            S.source_descriptor_quote(self.f.f.root,'release/version.properties','main'))
+        self.assertLess(e.service.observation.descriptor_quote(),96)
+        self.assertLessEqual(high,e.service.quote['total']);self.assertLessEqual(e.service.quote['total'],256)
+        self.assertTrue(e.service.closed());self.assertTrue(e.input.material_closed())
+
+    def test_full_phase_overflow_or_bad_saved_input_never_opens_invocation(self):
+        for fault in ('full-quote','saved'):
+            with self.subTest(fault=fault), patch.object(S,'invocation_custody',side_effect=AssertionError('no invocation before full quote')):
+                with patch.object(S,'source_descriptor_quote',return_value=96):
+                    t,e,events,calls,_=self.f.f.run_original(_execute=True,fault='saved' if fault=='saved' else None)
+                self.assertEqual(t['outcome'],'refused');self.assertEqual(calls,[]);self.assertEqual(events,[])
+                self.assertIsNone(e.service.invocation);self.assertIsNone(e.service.quote)
+                self.assertFalse(e.input._material_read);self.assertTrue(e.service.closed())
+                self.assertTrue(e.input.material_closed());self.assertEqual(self.f.f.current_phase(),'prepared')
+                if fault=='full-quote':self.assertIsNotNone(e.service.config)
+
+    def test_shared_source_quote_bounds_and_validation_are_preserved(self):
+        from mobile_release.local_release_source import LocalSourceError,LocalSourceObservation,MAX_HELD
+        from types import SimpleNamespace
+        root=self.f.f.root
+        for depth in range(1,100):
+            branch='/'.join(['b']*depth)
+            try:count=S.source_descriptor_quote(root,'release/version.properties',branch)
+            except LocalSourceError:
+                self.assertEqual(previous,MAX_HELD);break
+            self.assertEqual(LocalSourceObservation.descriptor_quote(SimpleNamespace(root=root,
+                version_path='release/version.properties',branch=branch)),count)
+            previous=count
+        else:self.fail('source bound was not enforced')
+        for version,branch in [('../outside','main'),('.git/index','main'),('release/version.properties','../main')]:
+            with self.subTest(version=version,branch=branch),self.assertRaises(LocalSourceError):
+                S.source_descriptor_quote(root,version,branch)
 
 class IOSStoreExecuteTests(unittest.TestCase):
     def setUp(self):

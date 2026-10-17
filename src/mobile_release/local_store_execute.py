@@ -20,7 +20,7 @@ from .local_release_intent import decode_local_operation_intent,validate_local_e
 from .local_release_receipt import local_execution_attempt_key,validate_local_execution_receipt
 from .local_candidate_bundle import CandidateBundleReview
 from .local_release_journal import MAX_ENTRIES
-from .local_release_source import LocalSourceObservation,_retain_source
+from .local_release_source import LocalSourceObservation,_retain_source,source_descriptor_quote
 from .build_inputs import (invocation_custody,finite_scratch,_app_private_directory,_read_file,_attempt_all)
 from .checked_files import _Reader,_Policy,_Node
 from ._store_runtime import StoreRuntimeContext
@@ -82,6 +82,15 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         require(value['total']<=256)
         if self.quote is not None:require(value['total']<=self.quote['total'])
         self.quote=value;return value
+    def _saved_input_quote(self):
+        # Only checked saved reads exist in this phase. Count all three
+        # independent ancestry walks, a transient leaf, stdio/lease and cleanup.
+        # Do not publish this as the later full quote or credit any future close.
+        self.checkpoint();require(self.apple_execute and self.quote is None
+            and not self.directories and self.invocation is None)
+        p=len(self.root.parts)
+        v=len((self.root/self.request.context['savedVersion']['source']).parent.parts)
+        require(1<p<=24 and 4+p+(p+1)+v+1+4<=256)
     def _memory(self,raw,maximum,*,intent=False):
         quote=decode_quote(raw,maximum,checkpoint=self.checkpoint)
         own=quote-RETAINED_JOURNAL
@@ -315,7 +324,17 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
     def run(self):
         self.checkpoint();require(not self._ran and sys.platform=='darwin' and os.getcwd()==self.request.native['cwd']);self._ran=True
         try:
-            self._quote();self.config,self.version=self._saved()
+            if self.apple_execute:
+                self._saved_input_quote()
+                self.config,self.version=self._saved()
+                # These exact names are authenticated above. Reserve every
+                # later overlap before invocation/namespace/source acquisition;
+                # the real source owner recomputes the same bound below.
+                self._quote(source_descriptor_quote(self.root,
+                    self.config.section('version')['source'],
+                    self.config.section('source')['candidateBranch']))
+            else:
+                self._quote();self.config,self.version=self._saved()
             c=self.request.context;prepared=self.root/'.mobile-release/store/local'/UUID(c['candidateOperationId']).hex
             output=prepared.with_name(prepared.name+'-'+self.authority_purpose+'-'+UUID(self.request.native['authorizationId']).hex)
             require(not os.path.lexists(output))

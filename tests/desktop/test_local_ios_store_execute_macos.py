@@ -106,6 +106,8 @@ class IOSStoreResolverMacTests(unittest.TestCase):
         fixture.execution_receipt = no_lane
         with patch.object(execute.LocalStoreExecuteRun, '_upload_tools', tools):
             terminal, engine, events, calls, high = fixture.run_original(_execute=True)
+        if engine.primary is not refusal:
+            raise AssertionError('original resolver did not reach the expected pre-pending cut') from engine.primary
         self.assertEqual(returned, [0])
         self.assertEqual(post, [engine.service])
         self.assertIs(engine.primary, refusal)

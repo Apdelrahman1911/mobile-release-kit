@@ -100,6 +100,27 @@ def _entries(body, *, index):
     return result
 
 
+def source_descriptor_quote(root, version_path, branch):
+    """Count the fixed source topology before opening it; not an admission.
+
+    Callers must derive these names from their authenticated saved configuration.
+    The live observation uses the identical calculation and original slot charges.
+    """
+    _need(isinstance(root, Path) and root.is_absolute()
+          and ".." not in root.parts and 1 < len(root.parts) <= 24, "path")
+    version_path = _relative(version_path)
+    branch = _relative(branch)
+    _need(version_path != CONFIG_PATH, "path")
+    leaves = (CONFIG_PATH, version_path, ".git/config", ".git/HEAD", ".git/index",
+              ".git/packed-refs", ".git/refs/heads/" + branch)
+    paths = {Path("/")}
+    for relative in (*leaves, ".git/objects/info", ".git/info", ".git/refs"):
+        path = root / relative
+        paths.update((path, *path.parents))
+    _need(len(paths) <= MAX_HELD, "budget")
+    return len(paths)
+
+
 class LocalSourceObservation:
     """Live observation minted only by observe_local_source, not a capability.
 
@@ -141,14 +162,7 @@ class LocalSourceObservation:
         _need(self.version_path != CONFIG_PATH, "path")
 
     def descriptor_quote(self):
-        leaves = (CONFIG_PATH, self.version_path, ".git/config", ".git/HEAD", ".git/index",
-                  ".git/packed-refs", ".git/refs/heads/" + self.branch)
-        paths = {Path("/")}
-        for relative in (*leaves, ".git/objects/info", ".git/info", ".git/refs"):
-            path = self.root / relative
-            paths.update((path, *path.parents))
-        _need(len(paths) <= MAX_HELD, "budget")
-        return len(paths)
+        return source_descriptor_quote(self.root, self.version_path, self.branch)
 
     def _charge(self, count):
         _need(type(count) is int and count >= 0 and self.held + count <= self.descriptor_quote(), "budget")
