@@ -6,6 +6,7 @@ require "tmpdir"
 require "fileutils"
 require "time"
 require_relative "apple_fixture"
+require_relative "local_stage_runtime_fixture"
 require_relative "../../fastlane/store_lane_fastlane_bridges"
 require "fastlane_core/itunes_transporter"
 require "fastlane_core/ipa_upload_package_builder"
@@ -13,6 +14,7 @@ require "fastlane_core/fastlane_pty"
 require "pilot/build_manager"
 
 class AppleReleaseLanesTest < Minitest::Test
+  include LocalStageRuntimeFixture
   def setup
     @environment = ENV.to_h
     @old_client = Spaceship::ConnectAPI.client
@@ -1137,4 +1139,40 @@ class AppleReleaseLanesTest < Minitest::Test
       refute File.exist?(File.join(@root, "receipt.json"))
     end
   end
+  def local_external_prepare
+    @stage_tree=stage_metadata_copy(File.join(@root,'release/store'))
+    File.write(File.join(@root,'release/store/testflight/what-to-test.txt'),'ambient bytes must never reach Store')
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'prepare',output:'precondition.json') { prepare('external-testing') }
+    precondition=JSON.parse(File.read(File.join(@root,'precondition.json')))
+    value=stage_intent_for_fixture('external-testing',precondition)
+    File.binwrite(File.join(@root,'intent.json'),MobileReleaseKit.canonical_json(value));@payload=value
+    @intent_digest=value.fetch('integrity').fetch('sha256');value
+  end
+  def test_local_external_actual_runtime_uses_snapshot_bytes_and_one_original_create_grant
+    value=local_external_prepare
+    baseline=Marshal.load(Marshal.dump(@service.resources.fetch('apps')))
+    ENV.delete('MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON')
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'receipt.json',intent:value) { execute }
+    assert_equal 'accepted',receipt.fetch('result');assert_equal 'external-testing',receipt.fetch('stage')
+    assert_equal value.fetch('candidateOperationId'),receipt.fetch('candidateOperationId')
+    assert_equal baseline,@service.resources.fetch('apps');assert_equal 0,@upload_count;assert_empty @upload_validation_calls
+    assert @service.assigned
+    whats_new=@service.resources.fetch('betaBuildLocalizations').values.map { |row| row.dig('attributes','whatsNew') }
+    assert_includes whats_new,'Test the fictional workflow'
+    refute_includes whats_new,'ambient bytes must never reach Store'
+  end
+  def test_local_external_ambiguous_create_cannot_be_retried_by_fresh_invocation
+    value=local_external_prepare
+    @service.after_write=->(*) { raise Interrupt, "Synthetic cancellation after original Store write" if @service.writes.length==1 }
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'receipt.json',intent:value) do
+      assert_raises(Interrupt) { execute }
+    end
+    refute File.exist?(File.join(@root,'receipt.json'))
+    before=Marshal.load(Marshal.dump(@service.writes));@service.after_write=nil;fresh_process
+    with_original_stage_runtime(stage:'external-testing',tree:@stage_tree,mode:'execute',output:'receipt.json',intent:value) do
+      assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+    end
+    assert_equal before,@service.writes;assert_equal 0,@upload_count;assert_empty @upload_validation_calls
+  end
+
 end

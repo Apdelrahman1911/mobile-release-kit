@@ -74,7 +74,18 @@ rescue MobileReleaseKit::ContractError => e
 end
 
 def metadata_root
+  if MobileReleaseKit::StoreLaneRuntime.local_stage_context
+    return MobileReleaseKit::StoreLaneRuntime.current_runtime!.local_metadata_root!
+  end
   safe_app_path(config_value("metadata", "root"))
+end
+
+def local_stage_context(stage)
+  local = MobileReleaseKit::StoreLaneRuntime.local_stage_context
+  if local && local.fetch(:stage) != stage
+    UI.user_error!("Local Store stage differs from its original lane")
+  end
+  local
 end
 
 def store_mode
@@ -219,6 +230,10 @@ def write_receipt(operation:, platform:, identity:, result:, extra:)
     receipt.merge!(schemaVersion:1,documentType:"local-store-execution-receipt",origin:"local-desktop",
       project:payload.fetch("project"),operationId:payload.fetch("operationId"),candidateSha256:payload.fetch("candidateSha256"),
       preparedBy:payload.fetch("preparedBy"),executedBy:local.fetch(:authority))
+    if payload.fetch("stage") != "candidate"
+      UI.user_error!("Local promotion requires its original first accepted mutation") unless result == "accepted"
+      receipt.merge!(stage:payload.fetch("stage"),candidateOperationId:payload.fetch("candidateOperationId"))
+    end
   end
   MobileReleaseKit::StoreLaneLifetime.require_upload_continuation!
   atomic_store_document(receipt, label: "a Store receipt")
@@ -509,6 +524,9 @@ def play_operation_snapshot(stage)
     target_present = destination_state.fetch("releases").any? { |release| Array(release["versionCodes"]).map(&:to_i).include?(code) }
     if stage == "candidate" && (target_present || bundles.any? { |bundle| bundle["versionCode"] == code })
       UI.user_error!("Version code #{code} already exists; refusing candidate adoption")
+    end
+    if MobileReleaseKit::StoreLaneRuntime.local_stage_context && target_present
+      UI.user_error!("Local promotion cannot adopt an existing Play target")
     end
     if stage == "production-submit" && target_present
       UI.user_error!("Production draft already exists without an authenticated operation intent")
@@ -1403,7 +1421,13 @@ end
 
 def apple_prior_execution?
   if MobileReleaseKit::StoreLaneRuntime.local_execution_context
-    MobileReleaseKit::StoreLaneRuntime.current_runtime!.local_ios_transport!
+    runtime=MobileReleaseKit::StoreLaneRuntime.current_runtime!
+    context=MobileReleaseKit::StoreLaneRuntime.local_execution_context
+    if context.fetch(:payload).fetch("stage")=="candidate"
+      runtime.local_ios_transport!
+    else
+      runtime.local_stage_execution_context!(context.fetch(:payload).fetch("stage"))
+    end
     path=apple_state_journal_path
     UI.user_error!("Local first send cannot adopt an existing Apple attempt") if File.exist?(path)||File.symlink?(path)
     return false
@@ -1450,6 +1474,12 @@ def apple_current_execution_claimed?
 end
 
 def apple_create_guard(stage, build)
+  if local_stage_context(stage)
+    UI.user_error!("Local Apple promotion cannot resume an earlier attempt") if apple_prior_execution?
+    return MobileReleaseKit::AppleCreateRetry.local_first_send(
+      runtime:MobileReleaseKit::StoreLaneRuntime.current_runtime!,stage:stage,build_id:build.id.to_s,
+      journal:method(:write_apple_state_journal))
+  end
   MobileReleaseKit::AppleCreateRetry.new(
     intent_sha256: operation_intent.fetch(:digest), stage: stage,
     bundle_id: ios_identity, app_id: ios_app_store_id, version: release_version.fetch(:marketing),
@@ -1659,12 +1689,19 @@ def classify_ios_external!(intent_snapshot, current)
           localizations_final && value["autoNotifyEnabled"] == false &&
           value.fetch("usesNonExemptEncryption") == expected_encryption &&
           current.fetch("privatePhase") == :target && !final_state.nil?
-  prepared_final = before.fetch("assigned") &&
+  prepared_final = ios_external_prepared_final?(intent_snapshot, commitments:operation_intent.fetch(:payload).fetch("privateStateCommitments"))
+  { final: final, prepared_final: prepared_final, normalized_state: final_state, states: states }
+end
+
+def ios_external_prepared_final?(snapshot, commitments:snapshot.fetch("privateStateCommitments"))
+  before=snapshot.fetch("external")
+  expected_encryption=uses_non_exempt_encryption
+  before.fetch("assigned") &&
                    before.fetch("localizations").map { |item| item.slice("locale", "whatsNew") } == before.fetch("targetLocalizations") &&
                    before.fetch("usesNonExemptEncryption") == expected_encryption &&
                    before["autoNotifyEnabled"] == false &&
-                   operation_intent.fetch(:payload).dig("privateStateCommitments", "domains", "beta-review", "before") ==
-                     operation_intent.fetch(:payload).dig("privateStateCommitments", "domains", "beta-review", "target") &&
+                   commitments.dig("domains", "beta-review", "before") ==
+                     commitments.dig("domains", "beta-review", "target") &&
                    !begin
                      normalized_external_state(
                        assigned: before.fetch("assigned"),
@@ -1674,7 +1711,6 @@ def classify_ios_external!(intent_snapshot, current)
                    rescue FastlaneCore::Interface::FastlaneError
                      nil
                    end.nil?
-  { final: final, prepared_final: prepared_final, normalized_state: final_state, states: states }
 end
 
 def beta_locale_locator(value)
@@ -1907,6 +1943,9 @@ lane :android_external_promote do
   end
   intent_snapshot = require_operation_intent!("android_external_promote", "android")
   classified = classify_play_intent_state("external-testing", intent_snapshot)
+  if local_stage_context("external-testing") && (intent_snapshot.fetch("targetPresent") || classified.fetch(:phase)!=:before)
+    UI.user_error!("Local Play promotion requires the original before-state, not target adoption")
+  end
   if intent_snapshot.fetch("targetPresent")
     UI.user_error!("Pre-existing Play target changed after authorization") unless classified.fetch(:phase) == :before
     result = "already_present"
@@ -1974,6 +2013,9 @@ lane :android_production_draft do
   intent_snapshot = require_operation_intent!("android_production_draft", "android")
   notes = validated_play_release_notes(intent_snapshot)
   classified = classify_play_intent_state("production-submit", intent_snapshot)
+  if local_stage_context("production-submit") && classified.fetch(:phase)!=:before
+    UI.user_error!("Local Play production requires the original before-state, not target adoption")
+  end
   if classified.fetch(:phase) == :target
     require_play_recovery_dispatch!
     result = "reconciled"
@@ -2187,9 +2229,13 @@ lane :ios_testflight_external do
   asc_api_key
   app = verified_ios_app
   if prepare_mode?
+    snapshot=ios_external_snapshot(app)
+    if local_stage_context("external-testing") && ios_external_prepared_final?(snapshot)
+      UI.user_error!("Local TestFlight promotion cannot adopt an existing external target")
+    end
     write_precondition(
       operation: "ios_testflight_external", platform: "ios", identity: ios_identity,
-      snapshot: ios_external_snapshot(app),
+      snapshot: snapshot,
     )
     next
   end
@@ -2226,6 +2272,9 @@ lane :ios_testflight_external do
   current = read.call
   resuming = apple_prior_execution?
   initial = classify_ios_external!(intent_snapshot, current)
+  if local_stage_context("external-testing") && (resuming || initial.fetch(:prepared_final) || initial.fetch(:final))
+    UI.user_error!("Local TestFlight promotion requires a new first mutation")
+  end
   unless resuming || initial.fetch(:prepared_final)
     # Only server-driven review progress is allowed between authorization and
     # first dispatch; a newly applied public/private change is not our write.
@@ -2375,10 +2424,16 @@ lane :ios_app_store_submit do
   ios_build_state(build)
   if prepare_mode?
     snapshot = ios_production_adapter(app, build).prepare(server_time: asc_server_time(app))
+    if local_stage_context("production-submit") && snapshot["production"]
+      UI.user_error!("Local App Review cannot adopt an existing production version")
+    end
     write_precondition(operation: "ios_app_store_submit", platform: "ios", identity: ios_identity, snapshot: snapshot)
     next
   end
   snapshot = require_operation_intent!("ios_app_store_submit", "ios")
+  if local_stage_context("production-submit") && snapshot["production"]
+    UI.user_error!("Local App Review requires its original absent production version")
+  end
   result = ios_production_adapter(app, build, create_guard: apple_create_guard("production-submit", build)).execute(
     snapshot, resuming: apple_prior_execution?,
   )

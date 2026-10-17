@@ -737,6 +737,7 @@ class FiniteScratch:
         self._lane_binding = None
         self._desktop_binding = None
         self._local_metadata_owner = None
+        self._store_metadata_tree = None
         self._cleanup_complete = False
         source = getattr(guard, "_ios_archive_source", None)
         if source is not None and layout in {"signing-validation", "build"}:
@@ -873,7 +874,7 @@ class FiniteScratch:
         _need(type(content) is bytes, "selected input must be immutable bytes")
         return self._publish(role, iter((content,)))
 
-    def metadata_archive(self, root: Path, *, platform: str, _source=None) -> InputSnapshot:
+    def metadata_archive(self, root: Path, *, platform: str, _source=None, _tree=None) -> InputSnapshot:
         """Build the existing deterministic public ZIP into original private custody.
 
         ZIP assembly uses bounded memory, not a second pathname writer whose
@@ -901,6 +902,12 @@ class FiniteScratch:
             context = _source._archive(self, root, platform)
         with context as files:
             _need(len(files) <= MAX_FILE_COUNT, "metadata file count exceeds its bound")
+            if _tree is not None:
+                from .local_store_metadata import StoreMetadataTree
+                _need(type(_tree) is StoreMetadataTree and _tree is self._store_metadata_tree
+                      and _tree.platform == platform and _source is not None,
+                      "metadata tree requires its same original source and scratch")
+                _tree.begin(tuple(path.relative_to(root).as_posix() for path in files))
             with io.BytesIO() as buffer:
                 with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
                     written = 0
@@ -915,6 +922,8 @@ class FiniteScratch:
                             data = observed[1]
                         else:
                             data = _source._read(path)
+                        if _tree is not None:
+                            _tree.write(path.relative_to(root).as_posix(), data)
                         written += len(data)
                         _need(written <= MAX_ARCHIVE_SIZE, "metadata grew beyond its input bound")
                         info = zipfile.ZipInfo(path.relative_to(root).as_posix(),
@@ -927,9 +936,11 @@ class FiniteScratch:
                 try:
                     _need(len(view) <= self._spec("metadata").limit,
                           "metadata ZIP exceeds its output bound")
-                    return self._publish("metadata", (
+                    snapshot = self._publish("metadata", (
                         bytes(view[offset:offset + 1024**2]) for offset in range(0, len(view), 1024**2)
                     ))
+                    if _tree is not None: _tree.seal(snapshot)
+                    return snapshot
                 finally:
                     view.release()
 
@@ -1081,7 +1092,7 @@ class FiniteScratch:
         if self.claimed:
             return
         self.claimed, self.active = True, False
-        _attempt_all(self.cancellation, [self._dispose,
+        _attempt_all(self.cancellation, ([self._store_metadata_tree.cleanup] if self._store_metadata_tree is not None else []) + [self._dispose,
             *[slot.close for slot in reversed(self.writer_slots)], self.slot.close, self.parent.close])
         self._cleanup_complete = True
 
@@ -1095,10 +1106,12 @@ class FiniteScratch:
         slots = (*self.writer_slots, self.slot, *self.parent.slots)
         return (self.claimed and not self.active and self._cleanup_complete and not self.created
                 and self.creation["state"] in ("NEW", "NO_EFFECT", "RETIRED")
-                and all(slot.number is None and slot.close_state == "CLOSED" for slot in slots))
+                and all(slot.number is None and slot.close_state == "CLOSED" for slot in slots)
+                and (self._store_metadata_tree is None or self._store_metadata_tree.closed and self._store_metadata_tree.retired))
 
     def fork_close(self) -> None:
         self.active = False
+        if self._store_metadata_tree is not None: self._store_metadata_tree.fork_close()
         for slot in reversed(self.writer_slots):
             slot.close()
         self.slot.close()

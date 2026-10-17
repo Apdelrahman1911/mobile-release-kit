@@ -24,7 +24,7 @@ _ENROLLMENT = frozenset(("projectLocator", "projectBinding", "projectId", "keyId
 _FIELDS = _ENROLLMENT | {"documentType", "schemaVersion", "origin", "sequence", "previousSha256",
                          "operationId", "phase", "payload", "mac"}
 _NEXT = {"inputs-pending": "inputs-ready", "inputs-ready": "prepare-pending",
-         "prepare-pending": "prepared", "prepared": "execute-pending",
+         "prepare-pending": "prepared", "promotion-pending": "prepared", "prepared": "execute-pending",
          "execute-pending": "settled-success"}
 _DIGESTS = {
     "inputs-pending": {"configurationSha256", "versionSha256"},
@@ -90,6 +90,15 @@ def _payload(phase, payload):
             _need(all(_sha(payload[k], 40) for k in extra))
         if phase == "execute-pending":
             _need(_uuid(payload["authorizationId"]) and _int(payload["assignmentRevision"], (1 << 32) - 2))
+    elif phase == "promotion-pending":
+        _need(set(payload) == {"stage", "candidateOperationId", "candidateSha256",
+            "predecessorOperationId", "predecessorReceiptSha256", "sourceCommit", "sourceTree",
+            "configurationSha256", "versionSha256", "metadataSha256", "confirmationSha256"}
+            and payload["stage"] in {"external-testing", "production-submit"}
+            and all(_uuid(payload[k]) for k in ("candidateOperationId", "predecessorOperationId"))
+            and all(_sha(payload[k], 40) for k in ("sourceCommit", "sourceTree"))
+            and all(_sha(payload[k]) for k in ("candidateSha256", "predecessorReceiptSha256",
+                "configurationSha256", "versionSha256", "metadataSha256", "confirmationSha256")))
     elif phase == 'target-reconciled':
         _need(set(payload)=={'intentSha256','receiptSha256','executeAuthorizationId',
               'recoveryAuthorizationId','assignmentRevision','preservedAttempt','priorExecutionFinality'}
@@ -131,6 +140,46 @@ def recovery_chain(rows, operation):
               and rows[-1]['payload']['phase']=='execute-pending')
     _need(rows[3]['payload']['intentSha256']==rows[4]['payload']['intentSha256'])
     return rows
+
+
+def promotion_lineage(rows, *, operation_id, payload):
+    """Closed journal DATA only; raw predecessor receipt/original custody separate.
+
+    Called on the current authenticated journal prefix before appending a NEW
+    later-stage operation. No supplied receipt summary can replace its last row.
+    Returns original candidate and immediate predecessor rows, not a Store grant.
+    """
+    _payload("promotion-pending", payload)
+    _need(type(rows) is list and 1 <= len(rows) <= MAX_ENTRIES - 4 and _uuid(operation_id)
+          and all(type(row) is dict for row in rows))
+    ids = {row["operationId"] for row in rows if row["operationId"] is not None}
+    _need(operation_id not in ids and len(ids) < MAX_OPERATIONS)
+    candidate_id, predecessor_id = payload["candidateOperationId"], payload["predecessorOperationId"]
+    last = rows[-1]
+    _need(last["phase"] == "settled-success" and last["operationId"] == predecessor_id
+          and last["payload"]["receiptSha256"] == payload["predecessorReceiptSha256"])
+    candidate = [row for row in rows if row["operationId"] == candidate_id]
+    _need([row["phase"] for row in candidate] == ["inputs-pending", "inputs-ready",
+          "prepare-pending", "prepared", "execute-pending", "settled-success"]
+          and all(candidate[i]["payload"]["candidateSha256"] == payload["candidateSha256"] for i in (1, 2, 3)))
+    _need(all(not (row["phase"] == "promotion-pending"
+          and row["payload"]["candidateOperationId"] == candidate_id
+          and row["payload"]["stage"] == payload["stage"]) for row in rows))
+    if payload["stage"] == "external-testing":
+        _need(predecessor_id == candidate_id)
+        predecessor = candidate
+    else:
+        _need(predecessor_id != candidate_id)
+        predecessor = [row for row in rows if row["operationId"] == predecessor_id]
+        _need([row["phase"] for row in predecessor] == ["promotion-pending", "prepared",
+              "execute-pending", "settled-success"])
+        first = predecessor[0]["payload"]
+        _need(first["stage"] == "external-testing" and first["candidateOperationId"] == candidate_id
+              and first["candidateSha256"] == payload["candidateSha256"]
+              and first["predecessorOperationId"] == candidate_id
+              and first["predecessorReceiptSha256"] == candidate[-1]["payload"]["receiptSha256"]
+              and predecessor[1]["payload"]["candidateSha256"] == payload["candidateSha256"])
+    return candidate, predecessor
 
 
 def _pairs(pairs):
@@ -254,6 +303,9 @@ class LocalReleaseJournal(_Custodian):
                       and new['assignmentRevision']==old['assignmentRevision']
                       and new['intentSha256']==old['intentSha256']
                       and all(r['payload'].get('recoveryAuthorizationId')!=new['recoveryAuthorizationId'] for r,_ in self._rows))
+            elif phase == "promotion-pending":
+                promotion_lineage([existing for existing, _ in self._rows],
+                                  operation_id=operation, payload=row["payload"])
             elif phase == "inputs-pending":
                 _need(operation not in self._operations and len(self._operations) < MAX_OPERATIONS
                       and last["phase"] in {"genesis", "settled-success", "settled-failure", "target-reconciled"})

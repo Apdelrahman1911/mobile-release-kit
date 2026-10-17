@@ -1199,8 +1199,9 @@ def _validate_operation_intent_body(intent: dict[str, Any], *, stage: str, platf
 
     This is not authorization and never supplies repository/executor identity.
     """
-    if (type(artifact_encoding) is not str or artifact_encoding not in {"files", "local-ios-directory"}
-            or artifact_encoding == "local-ios-directory" and (stage, platform) != ("candidate", "ios")):
+    if (type(artifact_encoding) is not str or artifact_encoding not in {"files", "local-ios-directory", "local-ios-stage-directory"}
+            or artifact_encoding == "local-ios-directory" and (stage, platform) != ("candidate", "ios")
+            or artifact_encoding == "local-ios-stage-directory" and (platform != "ios" or stage not in {"external-testing", "production-submit"})):
         raise ValidationError("intent artifact encoding is invalid")
     expected_confirmation = f"{stage}:{platform}:{intent['version'].get('marketing') if isinstance(intent['version'], dict) else ''}:{intent['version'].get('build') if isinstance(intent['version'], dict) else ''}"
     if intent["confirmation"] != expected_confirmation:
@@ -1299,7 +1300,7 @@ def _validate_operation_intent_body(intent: dict[str, Any], *, stage: str, platf
     }
     artifact_names: set[str] = set()
     for artifact_value in intent["artifacts"]:
-        if (artifact_encoding == "local-ios-directory" and type(artifact_value) is dict
+        if (artifact_encoding in {"local-ios-directory", "local-ios-stage-directory"} and type(artifact_value) is dict
                 and artifact_value.get("logicalName") == "ios-archive"):
             _validate_local_ios_archive_artifact(artifact_value)
             if "ios-archive" in artifact_names:

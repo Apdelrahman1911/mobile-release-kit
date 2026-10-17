@@ -128,8 +128,10 @@ class LocalStoreIntentContractTest < Minitest::Test
     assert_raises(M::ContractError) { M.local_operation_intent(raw,expected_sha256:digest) }
     assert_raises(M::ContractError) { M.local_execution_attempt_key(**args,purpose:"execute") }
     recovered=receipt["executedBy"].merge("purpose"=>"recover")
+    assert_equal recovered,M.local_execution_authority(JSON.generate(recovered),
+      intent_content:raw,expected_intent_sha256:digest,purpose:"recover",platform:"ios")
     assert_raises(M::ContractError) { M.local_execution_authority(JSON.generate(recovered),
-      intent_content:raw,expected_intent_sha256:digest,purpose:"recover",platform:"ios") }
+      intent_content:raw,expected_intent_sha256:digest,purpose:"recover") }
     assert_raises(M::ContractError) { M.local_operation_intent(@raw,expected_sha256:@digest,platform:"ios") }
   end
   def test_ios_archive_directory_is_not_a_ci_file_or_zip_and_signing_is_complete
@@ -175,6 +177,84 @@ class LocalStoreIntentContractTest < Minitest::Test
       assert_equal "Invalid local Store receipt or attempt DATA",error.message
     end
     assert_raises(M::ContractError) { M.local_ios_execution_receipt(JSON.generate(receipt),**args.merge(expected_intent_sha256:"f"*64)) }
+  end
+
+  # Real existing shared stage body, with explicit LOCAL envelope/independent
+  # stage authority. This DATA test cannot authorize a lane or old receipt.
+  def later_data(stage, platform="android")
+    candidate=platform=="android" ? clone_value(@intent) : JSON.parse(File.binread(File.join(ROOT,"local-intent-ios-candidate-valid.json")))
+    body=JSON.parse(File.binread(File.join(ROOT,stage=="external-testing" ? "intent-external-valid.json" : "intent-production-valid.json")))
+    data=candidate.merge(body.slice("destination","storePrecondition","privateStateCommitments","predecessors"))
+    data["stage"]=stage
+    data["candidateOperationId"]=candidate["operationId"]
+    data["operationId"]="66666666-6666-4666-8666-666666666666"
+    data["predecessors"]["candidateManifestSha256"]=candidate["candidateSha256"]
+    data["confirmation"]="#{stage}:#{platform}:#{data["version"]["marketing"]}:#{data["version"]["build"]}"
+    if stage=="production-submit"
+      data["operationSource"]=candidate["operationSource"].merge("commit"=>"e"*40,"tree"=>"f"*40,"ref"=>"refs/heads/release/production")
+    end
+    data["preparedBy"]=data["preparedBy"].merge("operationId"=>data["operationId"],"source"=>data["operationSource"],
+      "confirmationSha256"=>Digest::SHA256.hexdigest(data["confirmation"]))
+    sealed(data)
+  end
+
+  def test_later_stage_requires_explicit_stage_and_keeps_original_candidate_source
+    %w[external-testing production-submit].each do |stage|
+      data=later_data(stage);raw=JSON.generate(data);digest=data["integrity"]["sha256"]
+      args={intent_content:raw,expected_intent_sha256:digest,purpose:"execute",stage:stage}
+      auth=data["preparedBy"].merge("purpose"=>"execute","authorizationId"=>"77777777-7777-4777-8777-777777777777","intentSha256"=>digest)
+      assert_equal data.reject { |k,_| k=="integrity" },M.local_operation_intent(raw,expected_sha256:digest,stage:stage)[0]
+      assert_equal auth,M.local_execution_authority(JSON.generate(auth),**args)
+      assert_raises(M::ContractError) { M.local_operation_intent(raw,expected_sha256:digest) }
+      assert_raises(M::ContractError) { M.local_operation_intent(raw,expected_sha256:digest,stage:stage=="external-testing" ? "production-submit" : "external-testing") }
+      assert_raises(M::ContractError) { M.local_execution_authority(JSON.generate(auth.merge("purpose"=>"recover")),**args.merge(purpose:"recover")) }
+      key=M.local_execution_attempt_key(**args,authority_content:JSON.generate(auth))
+      assert_match(/\A[0-9a-f]{64}\z/,key)
+      candidate_only=JSON.generate(@intent)
+      assert_raises(M::ContractError) { M.local_operation_intent(candidate_only,expected_sha256:@digest,stage:stage) }
+      [:same_candidate,:wrong_manifest,:missing_predecessor,:foreign_lane].each do |kind|
+        bad=clone_value(data)
+        case kind
+        when :same_candidate then bad["candidateOperationId"]=bad["operationId"]
+        when :wrong_manifest then bad["predecessors"]["candidateManifestSha256"]="f"*64
+        when :missing_predecessor then bad["predecessors"].delete("candidateReceiptSha256")
+        when :foreign_lane then bad["storePrecondition"]["operation"]="android_internal_upload"
+        end
+        bad=sealed(bad)
+        assert_raises(M::ContractError) { M.local_operation_intent(JSON.generate(bad),expected_sha256:bad["integrity"]["sha256"],stage:stage) }
+      end
+    end
+  end
+
+  def test_later_apple_authority_requires_same_context_fixed_supplemental_records
+    value=JSON.parse(File.binread(File.join(ROOT,"local-intent-ios-candidate-valid.json")))["preparedBy"]
+    value["supplementalAssignments"]=%w[apple-review-contact operation-commitment].each_with_index.map do |kind,i|
+      {"kind"=>kind,"recordId"=>(i+6).to_s*32,"expectedRevision"=>1,"contextRevision"=>value["assignment"]["contextRevision"]}
+    end
+    assert_equal value,M.local_authority_data(value,purpose:"prepare",platform:"ios",stage:"external-testing")
+    assert_raises(M::ContractError) { M.local_authority_data(value,purpose:"prepare",platform:"ios") }
+    [->(v){v["supplementalAssignments"].reverse!},->(v){v["supplementalAssignments"].pop},
+     ->(v){v["supplementalAssignments"][0]["contextRevision"]+=1},
+     ->(v){v["supplementalAssignments"][0]["recordId"]=v["assignment"]["recordId"]},
+     ->(v){v["supplementalAssignments"][0]["expectedRevision"]=true}].each do |change|
+      bad=clone_value(value);change.call(bad)
+      assert_raises(M::ContractError) { M.local_authority_data(bad,purpose:"prepare",platform:"ios",stage:"external-testing") }
+    end
+  end
+
+  def test_shared_later_fixtures_match_explicit_platform_stage_authority
+    %w[android ios].product(%w[external-testing production-submit]).each do |platform,stage|
+      prefix=File.join(ROOT,"local-#{platform}-#{stage}")
+      raw=File.binread(prefix+'-intent.json');value=JSON.parse(raw);digest=value.fetch('integrity').fetch('sha256')
+      auth=File.binread(prefix+'-authority.json')
+      decoded,actual=M.local_operation_intent(raw,expected_sha256:digest,platform:platform,stage:stage)
+      assert_equal digest,actual;assert_equal stage,decoded.fetch('stage')
+      assert_equal JSON.parse(auth),M.local_execution_authority(auth,intent_content:raw,expected_intent_sha256:digest,
+        purpose:'execute',platform:platform,stage:stage)
+      assert_raises(M::ContractError) { M.local_operation_intent(raw,expected_sha256:digest,platform:platform) }
+      assert_raises(M::ContractError) { M.local_execution_authority(auth,intent_content:raw,expected_intent_sha256:digest,
+        purpose:'recover',platform:platform,stage:stage) }
+    end
   end
 
 end

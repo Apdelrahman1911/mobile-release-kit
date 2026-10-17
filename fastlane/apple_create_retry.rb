@@ -28,6 +28,41 @@ module MobileReleaseKit
       @operator_retry = false
     end
 
+    # The local constructor derives every identity from the same admitted
+    # stage Runtime. It cannot borrow CI dispatch identity or recovery flags.
+    def self.local_first_send(runtime:, stage:, build_id:, journal:)
+      unless defined?(StoreLaneRuntime::Runtime) && runtime.instance_of?(StoreLaneRuntime::Runtime) &&
+             runtime.equal?(StoreLaneRuntime.current_runtime!)
+        raise Denied, "Local Apple creation requires its original Runtime"
+      end
+      context = runtime.local_stage_execution_context!(stage)
+      invocation = runtime.invocation
+      payload = context.fetch(:payload)
+      unless build_id.instance_of?(String) && !build_id.empty? && build_id.bytesize <= 255 &&
+             payload.fetch("storePrecondition").fetch("snapshot").fetch("build").fetch("id") == build_id
+        raise Denied, "Local Apple creation build differs from its original intent"
+      end
+      guard = new(intent_sha256: context.fetch(:digest), stage: stage,
+        bundle_id: payload.fetch("application").fetch("id"),
+        app_id: payload.fetch("application").fetch("storeAppId"),
+        version: payload.fetch("version").fetch("marketing"),
+        build_number: payload.fetch("version").fetch("build"), build_id: build_id,
+        authority: context.fetch(:authority), authorized_by: nil, environment: {}, journal: journal)
+      invocation.claim_local_create_guard!(runtime, context, guard)
+      guard.instance_variable_set(:@local_original, [runtime, invocation, context].freeze)
+      guard
+    end
+
+    def local_origin!
+      return unless @local_original
+      runtime, invocation, context = @local_original
+      unless runtime.equal?(StoreLaneRuntime.current_runtime!) && runtime.local_stage_execution_context!(@stage).equal?(context) &&
+             runtime.invocation.equal?(invocation) && invocation.local_create_guard?(self, context)
+        raise Denied, "Local Apple creation original is unavailable"
+      end
+    end
+    private :local_origin!
+
     def identity(type, locator = {})
       raise ContractError, "Unsupported Apple creation resource" unless TYPES.include?(type)
       { "resourceType" => type, "scope" => @scope, "locator" => locator }
@@ -90,6 +125,8 @@ module MobileReleaseKit
     end
 
     def arm!(public_state:, nodes:, resuming:)
+      local_origin!
+      raise Denied, "Local Apple creation cannot resume or retry an earlier send" if @local_original && resuming
       raise ContractError, "Apple create authorization can be armed only once" if @inventory
       @inventory = build_inventory(public_state, nodes)
       @inventory_hash = Digest::SHA256.hexdigest(MobileReleaseKit.canonical_json(@inventory))
@@ -109,12 +146,14 @@ module MobileReleaseKit
     end
 
     def fresh_recovery?
+      return false if @local_original
       @authority.fetch("attempt") == 1 && @authority.fetch("event") == "workflow_dispatch" &&
         @authority.fetch("runId") != @authorized_by.fetch("runId") &&
         @environment["MOBILE_RELEASE_RECOVERY_RUN_ID"] == @authorized_by.fetch("runId") && !@prior_claim
     end
 
     def resolve!(type, locator, id)
+      local_origin!
       key = logical_key(type, locator)
       if @resolved[key] && @resolved[key] != id && !(@replacement[key] == @resolved[key] && @used.key?(key))
         raise ContractError, "Apple created-resource identity changed during this execution"
@@ -124,6 +163,7 @@ module MobileReleaseKit
     end
 
     def permit_replacement!(node, original_id)
+      local_origin!
       key = node.fetch("logicalKeySha256")
       if @used.key?(key) || @replacement.key?(key)
         raise ContractError, "Screenshot creation budget is exhausted; retain the original reservation"
@@ -135,6 +175,7 @@ module MobileReleaseKit
     end
 
     def consume!(type, locator:, parent_id:)
+      local_origin!
       raise Denied, "Apple creation guard is not armed" unless @inventory
       key = logical_key(type, locator)
       node = @nodes[key]
@@ -156,6 +197,7 @@ module MobileReleaseKit
     end
 
     def resolve_automatic_info!(id)
+      local_origin!
       present("appInfos", id)
       if @resolved["automatic-app-info"] && @resolved["automatic-app-info"] != id
         raise ContractError, "Automatically initialized AppInfo identity changed"
@@ -170,6 +212,7 @@ module MobileReleaseKit
     end
 
     def retry_evidence
+      local_origin!
       return nil unless @operator_retry && @used.any?
       raise ContractError, "Retried Apple resource creation lacks exact readback" unless @used.values.all? { |entry| entry.fetch("resourceId") }
       authorized_keys = @inventory.fetch("creates").map { |node| node.fetch("logicalKeySha256") }

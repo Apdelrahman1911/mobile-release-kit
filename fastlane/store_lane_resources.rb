@@ -280,12 +280,52 @@ module MobileReleaseKit
         unknown!(error);raise
       end
 
+      # Python owns the private ZIP-derived tree and every leaf through the
+      # joined lane. Ruby borrows only the original fixed root/ancestry; it
+      # neither extracts a second copy nor registers these as deletable output.
+      def bind_local_metadata!(context)
+        @invocation.origin!
+        raise Error.new(:local_metadata_reused) unless @admitted && !@sealed && !@local_metadata && !@local_tools &&
+          @invocation.local_stage_context?(context)
+        @local_metadata=[]
+        data=context.fetch(:metadata);root=data.fetch("root")
+        bits=root.split('/').drop(1)
+        paths=['/']+(1..bits.length).map { |n| '/'+bits.first(n).join('/') }
+        raise Error.new(:local_metadata_quote) unless File.basename(root)=="metadata-tree" &&
+          paths.length<=64 && @handles.length+paths.length+128<=256
+        guarded do
+          paths.each do |path|
+            require_time!;check_local_metadata_nodes!
+            handle=slot;handle.acquire(path,File::RDONLY|File::NOFOLLOW|File::NONBLOCK)
+            held=handle.io.stat;named=File.lstat(path);identity=transport_identity(held,false)
+            raise Error.new(:local_metadata_identity) unless held.directory? && named.directory? && !named.symlink? &&
+              identity==transport_identity(named,false) &&
+              (path!=root || (identity==data.fetch("rootIdentity") && held.uid==Process.euid && held.mode==0040700))
+            @local_metadata << {path:path.freeze,slot:handle,identity:identity.freeze}.freeze
+            check_local_metadata_nodes!
+          end
+          @local_metadata_context=context
+          @local_metadata_root=root
+          @local_metadata_ready=true
+        end
+      end
+      def local_metadata_root!(context)
+        @invocation.require_upload_continuation!
+        raise Error.new(:local_metadata_unavailable) unless @local_metadata_ready && !@sealed && !@unknown &&
+          @local_metadata_context.equal?(context) && @invocation.local_stage_context?(context)
+        require_time!;check_local_metadata_nodes!
+        @local_metadata_root
+      rescue Exception=>error
+        unknown!(error);raise
+      end
+
       def require_ready_for_executor!
         @invocation.require_upload_continuation!
         raise Error.new(:resources_not_admitted) unless @admitted && !@sealed
         require_time!
         @entries.each_value { |entry| verify_entry!(entry) }
         check_local_transport! if @local_tools
+        check_local_metadata_nodes! if @local_metadata
         true
       rescue Exception => error # rubocop:disable Lint/RescueException
         unknown!(error)
@@ -335,6 +375,7 @@ module MobileReleaseKit
                 Thread.handle_interrupt(Exception => :immediate) do
                   seal!
                   check_local_transport_nodes! if @local_tools
+                  check_local_metadata_nodes! if @local_metadata
                   @parents.each_key { |role| verify_parent!(role) }
                   @entries.each_value { |entry| verify_entry!(entry) }
                   rows = @entries.values.map do |entry|
@@ -499,6 +540,15 @@ module MobileReleaseKit
           named=File.lstat(node.fetch(:path));held=handle.io.stat;leaf=node.fetch(:leaf)
           raise Error.new(:local_transport_changed) unless !named.symlink? &&
             transport_identity(named,leaf)==node.fetch(:identity) && transport_identity(held,leaf)==node.fetch(:identity)
+        end
+      end
+
+      def check_local_metadata_nodes!
+        @local_metadata.each do |node|
+          handle=node.fetch(:slot);raise Error.new(:local_metadata_closed) unless handle.open?
+          named=File.lstat(node.fetch(:path));held=handle.io.stat
+          raise Error.new(:local_metadata_changed) unless !named.symlink? && named.directory? && held.directory? &&
+            transport_identity(named,false)==node.fetch(:identity) && transport_identity(held,false)==node.fetch(:identity)
         end
       end
 

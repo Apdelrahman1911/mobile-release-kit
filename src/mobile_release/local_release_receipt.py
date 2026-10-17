@@ -16,6 +16,16 @@ from .provenance import (canonical_json_bytes, _validate_timestamp,
 
 MAX_LOCAL_RECEIPT_BYTES = 64 * 1024
 _LOCAL_LANES = {"android": "android_internal_upload", "ios": "ios_testflight_internal"}
+_STAGE_LANES = {
+    ("external-testing", "android"): "android_external_promote",
+    ("production-submit", "android"): "android_production_draft",
+    ("external-testing", "ios"): "ios_testflight_external",
+    ("production-submit", "ios"): "ios_app_store_submit",
+}
+
+def _lane(stage, platform):
+    return _LOCAL_LANES[platform] if stage == "candidate" else _STAGE_LANES[(stage, platform)]
+
 _ATTEMPT_DOMAIN = b"mrk-local-store-attempt-v1\0"
 _RECEIPT_FIELDS = frozenset(("documentType", "schemaVersion", "origin", "project",
     "operationId", "candidateSha256", "operationIntentSha256", "preparedBy", "executedBy",
@@ -31,17 +41,17 @@ class LocalReceiptError(ValidationError):
 
 
 def _inputs(*, intent_data: bytes, authority_data: bytes, purpose: str,
-            expected_intent_sha256: str, platform: str) -> tuple[dict, dict]:
+            expected_intent_sha256: str, platform: str, stage: str = "candidate") -> tuple[dict, dict]:
     _need(_sha(expected_intent_sha256))
-    intent = decode_local_operation_intent(intent_data, platform=platform)
+    intent = decode_local_operation_intent(intent_data, platform=platform, stage=stage)
     _need(intent["integrity"]["sha256"] == expected_intent_sha256)
     authority = validate_local_execution_authority(authority_data,
-        intent_data=intent_data, purpose=purpose, platform=platform)
+        intent_data=intent_data, purpose=purpose, platform=platform, stage=stage)
     return intent, authority
 
 
 def local_execution_attempt_key(*, intent_data: bytes, authority_data: bytes,
-                                purpose: str, expected_intent_sha256: str, platform: str = "android") -> str:
+                                purpose: str, expected_intent_sha256: str, platform: str = "android", stage: str = "candidate") -> str:
     """Prepare a fixed-domain refusal key; creates/looks up/removes no marker.
 
     Separate from CI execution_attempt_key. The closed local StoreLaneAttempt
@@ -50,10 +60,10 @@ def local_execution_attempt_key(*, intent_data: bytes, authority_data: bytes,
     """
     try:
         _, authority = _inputs(intent_data=intent_data, authority_data=authority_data,
-            purpose=purpose, expected_intent_sha256=expected_intent_sha256, platform=platform)
+            purpose=purpose, expected_intent_sha256=expected_intent_sha256, platform=platform, stage=stage)
         raw = canonical_json_bytes(authority)
         _need(len(raw) <= 8 * 1024)
-        lane = _LOCAL_LANES[platform].encode("ascii")
+        lane = _lane(stage, platform).encode("ascii")
         return hashlib.sha256(_ATTEMPT_DOMAIN + bytes.fromhex(expected_intent_sha256)
             + len(raw).to_bytes(4, "big") + raw + bytes((len(lane),)) + lane).hexdigest()
     except (ValidationError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
@@ -61,7 +71,7 @@ def local_execution_attempt_key(*, intent_data: bytes, authority_data: bytes,
 
 
 def validate_local_execution_receipt(data: bytes, *, intent_data: bytes,
-        authority_data: bytes, purpose: str, expected_intent_sha256: str, platform: str = "android") -> dict:
+        authority_data: bytes, purpose: str, expected_intent_sha256: str, platform: str = "android", stage: str = "candidate") -> dict:
     """Validate this explicit local envelope against original comparison DATA.
 
     Not a reusable receipt grant, same-invocation completion, prior dispatch proof
@@ -69,18 +79,31 @@ def validate_local_execution_receipt(data: bytes, *, intent_data: bytes,
     """
     try:
         intent, authority = _inputs(intent_data=intent_data, authority_data=authority_data,
-            purpose=purpose, expected_intent_sha256=expected_intent_sha256, platform=platform)
-        receipt = _keys(_local_json(data, MAX_LOCAL_RECEIPT_BYTES),
-            _RECEIPT_FIELDS if platform == "android" else _IOS_RECEIPT_FIELDS)
+            purpose=purpose, expected_intent_sha256=expected_intent_sha256, platform=platform, stage=stage)
+        fields = _RECEIPT_FIELDS if platform == "android" else _IOS_RECEIPT_FIELDS
+        value = _local_json(data, MAX_LOCAL_RECEIPT_BYTES)
+        if stage != "candidate":
+            fields = fields | {"stage", "candidateOperationId"}
+            if platform == "android":
+                fields = fields | {"sourceTrack"}
+                if stage == "external-testing" and "closedTesterAssignmentVerified" in value:
+                    fields = fields | {"closedTesterAssignmentVerified"}
+                    _need(value["closedTesterAssignmentVerified"] is True)
+            elif stage == "external-testing":
+                fields = fields | {"externalGroup", "betaReviewState"}
+            else:
+                fields = fields - {"autoNotifyEnabled"} | {"automaticRelease", "submissionState",
+                    "appStoreVersionId", "reviewSubmissionId", "storeStateSha256"}
+        receipt = _keys(value, fields)
         _need(receipt["documentType"] == "local-store-execution-receipt"
             and type(receipt["schemaVersion"]) is int and receipt["schemaVersion"] == 1
-            and receipt["origin"] == "local-desktop" and receipt["operation"] == _LOCAL_LANES[platform]
+            and receipt["origin"] == "local-desktop" and receipt["operation"] == _lane(stage, platform)
             and receipt["platform"] == platform)
         # Structural validation precedes equality: JSON true must not compare
         # equal to integer1 in enrolled/assignment revisions.
         _local_project(receipt["project"])
-        _local_authority(receipt["preparedBy"], purpose="prepare", platform=platform)
-        _local_authority(receipt["executedBy"], purpose=purpose, platform=platform)
+        _local_authority(receipt["preparedBy"], purpose="prepare", platform=platform, stage=stage)
+        _local_authority(receipt["executedBy"], purpose=purpose, platform=platform, stage=stage)
         _need(all(receipt[k] == intent[k] for k in ("project", "operationId", "candidateSha256", "preparedBy"))
             and receipt["operationIntentSha256"] == expected_intent_sha256
             and receipt["executedBy"] == authority)
@@ -90,19 +113,25 @@ def validate_local_execution_receipt(data: bytes, *, intent_data: bytes,
             and (platform != "android" or type(receipt["versionCode"]) is int))
         _need(type(receipt["result"]) is str and receipt["result"] in {"accepted", "reconciled"}
             and (purpose != "recover" or receipt["result"] == "reconciled"))
+        if stage != "candidate":
+            _need(purpose == "execute" and receipt["result"] == "accepted"
+                and receipt["stage"] == stage and receipt["candidateOperationId"] == intent["candidateOperationId"])
         _validate_timestamp(receipt["observedAt"], "local Store receipt observedAt")
         if platform == "android":
             _validate_android_store_receipt_body(receipt,
-                platform_config={"applicationId": intent["application"]["id"]},
+                platform_config={"applicationId": intent["application"]["id"],
+                    "externalTrack": {"name": intent["storePrecondition"]["snapshot"][
+                        "sourceTrack" if stage == "production-submit" else "destinationTrack"]}},
                 release=ReleaseVersion(name=intent["version"]["marketing"], build=intent["version"]["build"]),
-                stage="candidate", outcome="mutated" if receipt["result"] == "accepted" else "reconciled", intent=intent)
+                stage=stage, outcome="mutated" if receipt["result"] == "accepted" else "reconciled", intent=intent)
             # Readback-only recovery cannot carry a mutation-shaped receipt. Same-
             # invocation Execute may legitimately reconcile an ambiguous commit.
             _need(purpose != "recover" or receipt["storeState"]["mode"] == "recovery")
         else:
             _validate_ios_store_receipt_body(receipt,
-                platform_config={"bundleId": intent["application"]["id"], "appStoreAppId": intent["application"]["storeAppId"]},
-                stage="candidate", outcome="mutated" if receipt["result"] == "accepted" else "reconciled", intent=intent)
+                platform_config={"bundleId": intent["application"]["id"], "appStoreAppId": intent["application"]["storeAppId"],
+                    "externalTestFlightGroup": intent["storePrecondition"]["snapshot"].get("external", {}).get("groupName")},
+                stage=stage, outcome="mutated" if receipt["result"] == "accepted" else "reconciled", intent=intent)
         return receipt
     except (ValidationError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise LocalReceiptError() from None

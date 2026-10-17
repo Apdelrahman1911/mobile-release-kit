@@ -189,6 +189,14 @@ module MobileReleaseKit
     %w[origin project operationId candidateSha256 preparedBy]).freeze
   LOCAL_AUTHORITY_FIELDS = %w[schemaVersion origin purpose project operationId candidateSha256
     authorizationId source assignment confirmationSha256 intentSha256].freeze
+  LOCAL_STAGE_LANES = {
+    ["android", "candidate"] => "android_internal_upload",
+    ["android", "external-testing"] => "android_external_promote",
+    ["android", "production-submit"] => "android_production_draft",
+    ["ios", "candidate"] => "ios_testflight_internal",
+    ["ios", "external-testing"] => "ios_testflight_external",
+    ["ios", "production-submit"] => "ios_app_store_submit",
+  }.freeze
   LOCAL_PROJECT_FIELDS = %w[projectLocator projectBinding projectId keyId keyRevision].freeze
   LOCAL_BRANCH = /\A(?!\/)(?!.*(?:\.\.|\/\/|@\{|\\|[ ~^:?*\[]))(?!.*[.\/]$).+\z/
 
@@ -235,8 +243,16 @@ module MobileReleaseKit
     value
   end
 
-  def self.local_authority_data(value, purpose:, platform: "android")
-    local_keys(value, LOCAL_AUTHORITY_FIELDS)
+  def self.local_stage_lane(platform, stage)
+    local_need(platform.instance_of?(String) && stage.instance_of?(String))
+    LOCAL_STAGE_LANES.fetch([platform, stage]) { local_need(false) }
+  end
+
+  def self.local_authority_data(value, purpose:, platform: "android", stage: "candidate")
+    local_stage_lane(platform, stage)
+    local_need(stage == "candidate" || %w[prepare execute].include?(purpose))
+    extra = stage != "candidate" && platform == "ios"
+    local_keys(value, LOCAL_AUTHORITY_FIELDS + (extra ? ["supplementalAssignments"] : []))
     local_need(%w[prepare execute recover].include?(purpose) && value["purpose"] == purpose &&
       value["origin"] == "local-desktop" && value["schemaVersion"].instance_of?(Integer) && value["schemaVersion"] == 1)
     local_project(value["project"])
@@ -247,6 +263,19 @@ module MobileReleaseKit
     local_need(%w[android ios].include?(platform) && (platform != "ios" || %w[prepare execute recover].include?(purpose)) &&
       row["kind"] == (platform == "android" ? "google-service-account" : "asc-p8") && local_hex(row["recordId"], 32) &&
       %w[expectedRevision contextRevision].all? { |k| row[k].instance_of?(Integer) && row[k].between?(1, 2**32 - 2) })
+    if extra
+      additions = value["supplementalAssignments"]
+      local_need(additions.instance_of?(Array) && [2, 3].include?(additions.length))
+      kinds = %w[apple-review-contact operation-commitment] + (additions.length == 3 ? ["apple-review-demo"] : [])
+      records = [row["recordId"]]
+      additions.zip(kinds).each do |item, kind|
+        local_keys(item, %w[kind recordId expectedRevision contextRevision])
+        local_need(item["kind"] == kind && local_hex(item["recordId"], 32) && !records.include?(item["recordId"]) &&
+          item["contextRevision"] == row["contextRevision"] && item["contextRevision"].instance_of?(Integer) &&
+          item["expectedRevision"].instance_of?(Integer) && item["expectedRevision"].between?(1, 2**32 - 2))
+        records << item["recordId"]
+      end
+    end
     local_need(purpose == "prepare" ? value["intentSha256"].nil? : local_hex(value["intentSha256"], 64))
     value
   end
@@ -255,36 +284,48 @@ module MobileReleaseKit
   # the adjacent carrier. Python's shared validator owns full platform policy;
   # Ruby checks exact bytes/domain/identity before existing lane/state checks.
   # No current lane dispatches here and no ambient-origin switch exists.
-  def self.local_operation_intent(content, expected_sha256:, platform: "android")
+  def self.local_operation_intent(content, expected_sha256:, platform: "android", stage: "candidate")
     local_need(local_hex(expected_sha256, 64))
     document = local_json(content, 2 * 1024 * 1024)
     payload, digest = sealed_operation_document(document)
     local_need(secure_equal(digest, expected_sha256))
-    local_keys(payload, LOCAL_INTENT_FIELDS)
+    lane = local_stage_lane(platform, stage)
+    local_keys(payload, LOCAL_INTENT_FIELDS + (stage == "candidate" ? [] : ["candidateOperationId"]))
     local_need(payload["documentType"] == "local-store-operation-intent" && payload["schemaVersion"].instance_of?(Integer) &&
-      payload["schemaVersion"] == 1 && payload["origin"] == "local-desktop" && payload["stage"] == "candidate" && %w[android ios].include?(platform) && payload["platform"] == platform)
+      payload["schemaVersion"] == 1 && payload["origin"] == "local-desktop" && payload["stage"] == stage && %w[android ios].include?(platform) && payload["platform"] == platform)
     local_project(payload["project"])
     local_need(local_uuid(payload["operationId"]) && local_hex(payload["candidateSha256"], 64))
     %w[candidateSource operationSource].each { |k| local_source(payload[k]) }
-    local_need(payload["candidateSource"] == payload["operationSource"])
-    prepared = local_authority_data(payload["preparedBy"], purpose: "prepare", platform: platform)
+    local_need(payload["candidateSource"] == payload["operationSource"]) unless stage == "production-submit"
+    prepared = local_authority_data(payload["preparedBy"], purpose: "prepare", platform: platform, stage: stage)
     local_need(%w[project operationId candidateSha256].all? { |k| prepared[k] == payload[k] } &&
       prepared["source"] == payload["operationSource"] && payload["confirmation"].instance_of?(String) &&
       prepared["confirmationSha256"] == Digest::SHA256.hexdigest(payload["confirmation"]))
-    local_need(payload["predecessors"] == {} && payload["privateStateCommitments"] == {})
-    local_ios_intent_artifacts(payload) if platform == "ios"
+    if stage == "candidate"
+      local_need(payload["predecessors"] == {} && payload["privateStateCommitments"] == {})
+    else
+      local_need(local_uuid(payload["candidateOperationId"]) && payload["candidateOperationId"] != payload["operationId"])
+      keys = %w[candidateManifestSha256 candidateReceiptSha256] + (stage == "production-submit" ? ["externalReceiptSha256"] : [])
+      previous = local_keys(payload["predecessors"], keys)
+      local_need(previous.values.all? { |digest| local_hex(digest, 64) } && previous["candidateManifestSha256"] == payload["candidateSha256"])
+      local_need(payload["storePrecondition"].instance_of?(Hash) && payload["storePrecondition"]["operation"] == lane &&
+        payload["storePrecondition"]["platform"] == platform)
+      local_need(payload["privateStateCommitments"] == {}) if platform == "android"
+    end
+    local_ios_intent_artifacts(payload, stage: stage) if platform == "ios"
     [payload, digest]
   rescue ContractError, JSON::ParserError, EncodingError, ArgumentError, TypeError, KeyError
     raise ContractError, "Invalid local Store intent or authority DATA"
   end
 
-  def self.local_execution_authority(content, intent_content:, expected_intent_sha256:, purpose:, platform: "android")
+  def self.local_execution_authority(content, intent_content:, expected_intent_sha256:, purpose:, platform: "android", stage: "candidate")
     local_need(%w[execute recover].include?(purpose))
-    intent, digest = local_operation_intent(intent_content, expected_sha256: expected_intent_sha256, platform: platform)
-    value = local_authority_data(local_json(content, 8 * 1024), purpose: purpose, platform: platform)
+    intent, digest = local_operation_intent(intent_content, expected_sha256: expected_intent_sha256, platform: platform, stage: stage)
+    value = local_authority_data(local_json(content, 8 * 1024), purpose: purpose, platform: platform, stage: stage)
     prepared = intent.fetch("preparedBy")
     local_need(value["intentSha256"] == digest && value["authorizationId"] != prepared["authorizationId"] &&
-      %w[project operationId candidateSha256 source assignment confirmationSha256].all? { |k| value[k] == prepared[k] })
+      %w[project operationId candidateSha256 source assignment confirmationSha256].all? { |k| value[k] == prepared[k] } &&
+      value["supplementalAssignments"] == prepared["supplementalAssignments"])
     value
   rescue ContractError, JSON::ParserError, EncodingError, ArgumentError, TypeError, KeyError
     raise ContractError, "Invalid local Store intent or authority DATA"
@@ -293,12 +334,12 @@ module MobileReleaseKit
   # Fixed local DATA refusal-key preparation only. No current marker/Store
   # owner calls this; it cannot prove original custody or a previous dispatch.
   # Full platform intent/receipt policy still belongs to the shared Python body.
-  def self.local_execution_attempt_key(intent_content:, authority_content:, expected_intent_sha256:, purpose:, platform: "android")
+  def self.local_execution_attempt_key(intent_content:, authority_content:, expected_intent_sha256:, purpose:, platform: "android", stage: "candidate")
     authority = local_execution_authority(authority_content, intent_content: intent_content,
-      expected_intent_sha256: expected_intent_sha256, purpose: purpose, platform: platform)
+      expected_intent_sha256: expected_intent_sha256, purpose: purpose, platform: platform, stage: stage)
     raw = canonical_json(authority).b
     local_need(raw.bytesize <= 8 * 1024)
-    lane = (platform == "android" ? "android_internal_upload" : "ios_testflight_internal").b
+    lane = local_stage_lane(platform, stage).b
     Digest::SHA256.hexdigest("mrk-local-store-attempt-v1\0".b + [expected_intent_sha256].pack("H*") +
       [raw.bytesize].pack("N") + raw + [lane.bytesize].pack("C") + lane)
   rescue ContractError, JSON::ParserError, EncodingError, ArgumentError, TypeError, KeyError
@@ -308,7 +349,7 @@ module MobileReleaseKit
   # Closed local-only archive grammar. The hash commits to canonical inventory
   # rows under mrk-local-ios-archive-inventory/1\0, NEVER to ZIP/file bytes.
   # Full shared platform/Store precondition policy remains Python's obligation.
-  def self.local_ios_intent_artifacts(payload)
+  def self.local_ios_intent_artifacts(payload, stage: "candidate")
     artifacts = payload["artifacts"]
     local_need(artifacts.instance_of?(Array) && artifacts.length == 4)
     row = local_keys(artifacts.last, %w[logicalName platform kind directory entries bytes sha256])
@@ -336,10 +377,18 @@ module MobileReleaseKit
     local_timestamp(signing["profileExpiresAt"])
     precondition = payload["storePrecondition"]
     local_need(precondition.instance_of?(Hash) && precondition["snapshot"].instance_of?(Hash))
-    snapshot = local_keys(precondition["snapshot"], %w[canonicalization appStoreAppId serverObservedAt build])
-    local_need(snapshot["canonicalization"] == "mrk-apple-operation-v1" && snapshot["build"].nil? &&
-      payload["application"].instance_of?(Hash) && snapshot["appStoreAppId"] == payload["application"]["storeAppId"] &&
-      payload["destination"] == {"channel" => "testflight-internal"})
+    if stage == "candidate"
+      snapshot = local_keys(precondition["snapshot"], %w[canonicalization appStoreAppId serverObservedAt build])
+      local_need(snapshot["canonicalization"] == "mrk-apple-operation-v1" && snapshot["build"].nil? &&
+        payload["application"].instance_of?(Hash) && snapshot["appStoreAppId"] == payload["application"]["storeAppId"] &&
+        payload["destination"] == {"channel" => "testflight-internal"})
+    else
+      snapshot = precondition["snapshot"]
+      local_need(snapshot["canonicalization"] == "mrk-apple-operation-v1" && snapshot["build"].instance_of?(Hash) &&
+        payload["application"].instance_of?(Hash) && snapshot["appStoreAppId"] == payload["application"]["storeAppId"])
+      destination = stage == "external-testing" ? {"channel" => "testflight-external"} : {"channel" => "app-store-review", "automaticRelease" => false}
+      local_need(payload["destination"] == destination)
+    end
   end
 
   def self.local_timestamp(value)

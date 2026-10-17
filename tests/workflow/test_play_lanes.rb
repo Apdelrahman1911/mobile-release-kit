@@ -1339,6 +1339,69 @@ class PlayReleaseLanesTest < Minitest::Test
     assert_equal "Untouched French", @service.state.fetch("listings").fetch("fr-FR").fetch("title")
     refute @service.mutations.any? { |entry| entry.fetch(:path).include?("/listings/fr-FR") }
   end
+  def with_local_stage_lane(context,metadata_root,execute:)
+    # Native/Python tree creation is modeled here. Real original Runtime/tree
+    # admission/close gates run in test_local_store_execution_runtime; actual
+    # pinned Supply readers and guarded lane mutations run here.
+    runtime=Object.new;runtime.define_singleton_method(:local_metadata_root!) { metadata_root }
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_stage_context,context) do
+      MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context,execute ? context : nil) do
+        MobileReleaseKit::StoreLaneRuntime.stub(:current_runtime!,runtime) { yield }
+      end
+    end
+  end
+  def local_stage_execution_context(stage)
+    value=JSON.parse(File.binread(File.expand_path("../fixtures/local-android-#{stage}-intent.json",__dir__)))
+    value.delete('integrity');value['storePrecondition']=@payload.fetch('storePrecondition')
+    value['application']={'id'=>'test.example.release'};value['version']={'marketing'=>'2.0.0','build'=>200}
+    value['confirmation']="#{stage}:android:2.0.0:200"
+    value['preparedBy']['confirmationSha256']=Digest::SHA256.hexdigest(value.fetch('confirmation'))
+    @payload=value;save_intent
+    payload,digest=MobileReleaseKit.local_operation_intent(File.binread(File.join(@root,'intent.json')),
+      expected_sha256:@intent_digest,platform:'android',stage:stage)
+    authority=payload.fetch('preparedBy').merge('purpose'=>'execute','authorizationId'=>'55555555-5555-4555-8555-555555555555','intentSha256'=>digest)
+    {payload:payload,digest:digest,authority:authority,stage:stage,platform:'android'}
+  end
+  def test_local_later_lanes_use_snapshot_metadata_and_promote_original_without_upload
+    %w[external-testing production-submit].each do |stage|
+      reset_case
+      snapshot_root=File.join(@root,'metadata-tree');FileUtils.cp_r(File.join(@root,'release/store'),snapshot_root)
+      File.write(File.join(@root,'release/store/android/en-US/title.txt'),'ambient unselected bytes')
+      prepare_context={stage:stage,platform:'android'}
+      with_local_stage_lane(prepare_context,snapshot_root,execute:false) { prepare(stage) }
+      context=local_stage_execution_context(stage)
+      original_bundles=@service.clone(@service.state.fetch('bundles'))
+      ENV.delete('MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON')
+      with_local_stage_lane(context,snapshot_root,execute:true) { execute }
+      assert_equal 'accepted',receipt.fetch('result');assert_equal stage,receipt.fetch('stage')
+      assert_equal context.fetch(:payload).fetch('candidateOperationId'),receipt.fetch('candidateOperationId')
+      assert_equal context.fetch(:authority),receipt.fetch('executedBy')
+      assert_empty @validation_calls;assert_equal original_bundles,@service.state.fetch('bundles')
+      assert_equal 1,@service.commits.length;assert_equal 0,@service.commits.first.fetch(:retries)
+      if stage=='production-submit'
+        assert_equal 'Approved title',@service.state.fetch('listings').fetch('en-US').fetch('title')
+        assert_equal 'Untouched French',@service.state.fetch('listings').fetch('fr-FR').fetch('title')
+        assert_equal 'draft',receipt.fetch('releaseStatus')
+      end
+    end
+  end
+  def test_local_later_existing_target_refuses_without_recovery_or_second_commit
+    %w[external-testing production-submit].each do |stage|
+      reset_case;prepare(stage);context=local_stage_execution_context(stage);target_state!
+      before=@service.clone(@service.state);count=@service.commits.length
+      with_local_stage_lane(context,File.join(@root,'release/store'),execute:true) do
+        assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+      end
+      assert_no_receipt;assert_equal count,@service.commits.length;assert_equal before,@service.state
+      assert_empty @validation_calls
+      ENV['MOBILE_RELEASE_STORE_MODE']='prepare'
+      with_local_stage_lane({stage:stage,platform:'android'},File.join(@root,'release/store'),execute:false) do
+        assert_raises(FastlaneCore::Interface::FastlaneError) { lane(@lane_name) }
+      end
+      assert_equal count,@service.commits.length;assert_equal before,@service.state
+    end
+  end
+
 end
 
 class BoundedPlayImageTest < Minitest::Test
@@ -1406,4 +1469,5 @@ class BoundedPlayImageTest < Minitest::Test
     assert_raises(FastlaneCore::Interface::FastlaneError) { verify(redirects) }
     assert_equal 4, @connections.length
   end
+
 end

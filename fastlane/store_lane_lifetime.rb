@@ -134,10 +134,40 @@ module MobileReleaseKit
       def bind_local_execution!(runtime,context)
         origin!
         raise LifetimeError unless runtime.equal?(StoreLaneRuntime.current_runtime!) && runtime.invocation.equal?(self) &&
-          runtime.local_admission_context.equal?(context) && @resources && @mode == "execute" && %w[android_internal_upload ios_testflight_internal].include?(@lane) &&
-          context.fetch(:payload).fetch("platform") == (@lane == "ios_testflight_internal" ? "ios" : "android") && !@local_execution
+          runtime.local_admission_context.equal?(context) && @resources && @mode == "execute" &&
+          MobileReleaseKit.local_stage_lane(context.fetch(:payload).fetch("platform"),context.fetch(:payload).fetch("stage"))==@lane && !@local_execution
         @local_execution=context
       end
+      def bind_local_stage!(runtime,context)
+        origin!
+        raise LifetimeError unless runtime.equal?(StoreLaneRuntime.current_runtime!) && runtime.invocation.equal?(self) &&
+          runtime.local_stage_admission_context.equal?(context) && @resources && !@local_stage &&
+          %w[prepare execute].include?(@mode) && %w[external-testing production-submit].include?(context.fetch(:stage)) &&
+          MobileReleaseKit.local_stage_lane(context.fetch(:platform),context.fetch(:stage))==@lane &&
+          (@mode=="prepare" ? @local_execution.nil? : @local_execution.equal?(context))
+        @local_stage=context
+      end
+      def local_stage_context?(context)
+        origin!
+        @local_stage.equal?(context) && !@local_stage.nil? && @resources && %w[prepare execute].include?(@mode)
+      end
+
+      # One original local stage guard, not a caller Boolean or CI retry.
+      def claim_local_create_guard!(runtime, context, guard)
+        require_upload_continuation!
+        raise LifetimeError unless runtime.equal?(StoreLaneRuntime.current_runtime!) && runtime.invocation.equal?(self) &&
+          runtime.local_stage_execution_context!(context.fetch(:payload).fetch("stage")).equal?(context) &&
+          @local_execution.equal?(context) && @mode == "execute" &&
+          %w[ios_testflight_external ios_app_store_submit].include?(@lane) &&
+          defined?(AppleCreateRetry) && guard.instance_of?(AppleCreateRetry) && !@local_create_guard
+        @local_create_guard = guard
+      end
+      def local_create_guard?(guard, context)
+        origin!
+        @local_execution.equal?(context) && @local_create_guard.equal?(guard) &&
+          @mode == "execute" && %w[ios_testflight_external ios_app_store_submit].include?(@lane)
+      end
+
       def local_ios?
         origin!
         @local_execution && @local_execution.fetch(:payload).fetch("platform")=="ios"
