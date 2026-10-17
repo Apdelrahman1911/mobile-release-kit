@@ -56,8 +56,12 @@ class ProtectedXcodeFixtureTests(unittest.TestCase):
             fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 with patch.object(ci, 'protect', side_effect=AssertionError('preflight effect')):
-                    with self.assertRaises(ci.Refused):
+                    with self.assertRaises(ci.Refused) as refused:
                         ci.walk(fd, time.monotonic()+10, mutate=False, path_bytes=0)
+                    facts = ci.failure_facts(refused.exception)
+                    self.assertEqual(facts['condition'], 'tree-entry-kind-or-links')
+                    self.assertEqual(facts['links'], 2)
+                    self.assertNotIn(str(root), json.dumps(facts))
                     (root/'b').unlink()
                     with patch.object(ci, 'MAX_ENTRIES', 1), self.assertRaises(ci.Refused):
                         ci.walk(fd, time.monotonic()+10, mutate=False, path_bytes=0)

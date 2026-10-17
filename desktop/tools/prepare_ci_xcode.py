@@ -20,16 +20,34 @@ FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
 class Refused(Exception):
-    pass
+    def __init__(self, condition="precondition", **facts):
+        super().__init__(condition)
+        self.condition = condition
+        self.facts = facts
 
 
-def need(value):
+def need(value, condition="precondition", **facts):
     if not value:
-        raise Refused()
+        raise Refused(condition, **facts)
 
 
 def point(end):
-    need(time.monotonic() < end)
+    need(time.monotonic() < end, "deadline")
+
+
+def failure_facts(error):
+    # Fixed categories and numeric facts only; never paths or exception text.
+    if error is None:
+        return None
+    if isinstance(error, Refused):
+        return {"kind": "precondition", "condition": error.condition, **error.facts}
+    if isinstance(error, subprocess.TimeoutExpired):
+        return {"kind": "command-timeout"}
+    if isinstance(error, subprocess.CalledProcessError):
+        return {"kind": "command-exit", "exitCode": error.returncode}
+    if isinstance(error, OSError):
+        return {"kind": "filesystem", "errno": error.errno}
+    return {"kind": "unexpected"}
 
 
 def identity(row):
@@ -39,11 +57,12 @@ def identity(row):
 def open_original(name, parent, directory):
     before = os.stat(name, dir_fd=parent, follow_symlinks=False)
     need(stat.S_ISDIR(before.st_mode) if directory else
-         stat.S_ISREG(before.st_mode) and before.st_nlink == 1)
+         stat.S_ISREG(before.st_mode) and before.st_nlink == 1,
+         "original-kind-or-links", mode=before.st_mode, links=before.st_nlink)
     fd = os.open(name, FLAGS | (os.O_DIRECTORY if directory else 0), dir_fd=parent)
     try:
         held = os.fstat(fd)
-        need(identity(held) == identity(before))
+        need(identity(held) == identity(before), "original-open-identity")
         return fd
     except BaseException:
         os.close(fd)
@@ -67,14 +86,16 @@ def protect(fd):
 def walk(fd, end, *, mutate, path_bytes, depth=0, counts=None, device=None):
     """Physical descriptor-relative walk; one directory iterator per level."""
     point(end)
-    need(depth <= MAX_DEPTH and path_bytes <= MAX_PATH)
+    need(depth <= MAX_DEPTH and path_bytes <= MAX_PATH, "tree-depth-or-path",
+         depth=depth, pathBytes=path_bytes)
     if counts is None:
         counts = {"directories": 0, "files": 0, "symlinks": 0}
     root = os.fstat(fd)
     if device is None:
         device = root.st_dev
-    need(root.st_dev == device and stat.S_ISDIR(root.st_mode))
-    need(sum(counts.values()) < MAX_ENTRIES)
+    need(root.st_dev == device and stat.S_ISDIR(root.st_mode), "tree-root-kind-or-device",
+         sameDevice=root.st_dev == device, mode=root.st_mode)
+    need(sum(counts.values()) < MAX_ENTRIES, "tree-entry-bound", entries=sum(counts.values()))
     counts["directories"] += 1
     if mutate:
         protect(fd)  # Protect a parent before touching any descendants.
@@ -82,19 +103,23 @@ def walk(fd, end, *, mutate, path_bytes, depth=0, counts=None, device=None):
         for item in entries:
             point(end)
             name = item.name
-            need(name not in (".", "..") and "/" not in name)
+            need(name not in (".", "..") and "/" not in name, "tree-component")
             length = path_bytes + 1 + len(os.fsencode(name))
-            need(length <= MAX_PATH and sum(counts.values()) < MAX_ENTRIES)
+            need(length <= MAX_PATH and sum(counts.values()) < MAX_ENTRIES, "tree-path-or-entry-bound",
+                 pathBytes=length, entries=sum(counts.values()))
             row = os.stat(name, dir_fd=fd, follow_symlinks=False)
-            need(row.st_dev == device)
+            need(row.st_dev == device, "tree-entry-device", sameDevice=False)
             if stat.S_ISLNK(row.st_mode):
                 counts["symlinks"] += 1  # Neither follow nor modify links.
                 continue
             directory = stat.S_ISDIR(row.st_mode)
-            need(directory or stat.S_ISREG(row.st_mode) and row.st_nlink == 1)
+            need(directory or stat.S_ISREG(row.st_mode) and row.st_nlink == 1,
+                 "tree-entry-kind-or-links", mode=row.st_mode, uid=row.st_uid,
+                 gid=row.st_gid, links=row.st_nlink, depth=depth,
+                 entries=sum(counts.values()))
             child = open_original(name, fd, directory)
             try:
-                need(identity(os.fstat(child)) == identity(row))
+                need(identity(os.fstat(child)) == identity(row), "tree-entry-open-identity")
                 if directory:
                     walk(child, end, mutate=mutate, path_bytes=length, depth=depth + 1,
                          counts=counts, device=device)
@@ -102,7 +127,8 @@ def walk(fd, end, *, mutate, path_bytes, depth=0, counts=None, device=None):
                     counts["files"] += 1
                     if mutate:
                         protect(child)
-                need(identity(os.stat(name, dir_fd=fd, follow_symlinks=False)) == identity(os.fstat(child)))
+                need(identity(os.stat(name, dir_fd=fd, follow_symlinks=False)) == identity(os.fstat(child)),
+                     "tree-entry-post-identity")
             finally:
                 os.close(child)
     return counts
@@ -141,6 +167,7 @@ def main():
     end = time.monotonic() + SECONDS
     fds = []
     failure = None
+    close_failures = 0
     counts = None
     try:
         # Accident-prevention checks, not an authorization mechanism. Only the
@@ -192,11 +219,14 @@ def main():
             try:
                 os.close(fd)
             except BaseException as error:
-                failure = failure or error
-                stage = "original-close"
+                close_failures += 1
+                if failure is None:
+                    failure = error
+                    stage = "original-close"
     print(json.dumps({"profile": "disposable-github-hosted-protected-xcode", "stage": stage,
                       "outcome": "prepared" if failure is None else "refused",
-                      "counts": counts, "defaultMacQualified": False}, sort_keys=True))
+                      "counts": counts, "failure": failure_facts(failure),
+                      "closeFailures": close_failures, "defaultMacQualified": False}, sort_keys=True))
     return 0 if failure is None else 1
 
 
