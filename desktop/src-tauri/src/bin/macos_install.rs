@@ -222,6 +222,11 @@ mod installer {
         safe_macos_install_path(path) && depth==path.bytes().filter(|b|*b==b'/').count()
             && depth<=if directory{16}else{17}
     }
+    // Audits use inventory-absolute depth, unlike the separate launcher copier's
+    // local recursion depth. This fixed subtree begins three levels below app.
+    fn launcher_inventory_depth_data() -> usize {
+        mobile_release_desktop::macos_applications_launcher::BUNDLE.bytes().filter(|b| *b == b'/').count()
+    }
     // Comparison DATA only. The caller still must check the actual retained
     // gate.parent original and the independently opened named reader below.
     fn installed_root_roster_alias_data(admitted:Identity, held:Identity, reader:Identity,
@@ -6697,7 +6702,7 @@ mod installer {
                                 }Some(source)
                             }else{None};
                             let tree=partial_fresh_payload_tree(book,source_parent,applications::SOURCE_NAME,parent,applications::SOURCE_NAME,
-                                mobile_release_desktop::macos_applications_launcher::BUNDLE,&index,0,false,payload_read,None,&mut tree_work)?;
+                                mobile_release_desktop::macos_applications_launcher::BUNDLE,&index,launcher_inventory_depth_data(),false,payload_read,None,&mut tree_work)?;
                             if has_phase {check(tree.state==PartialFreshFileState::Complete,"partial-fresh-launcher-receipt-order")?;}
                             top_counts[PartialFreshTop::Stage as usize].add(tree.bytes,tree.files,tree.directories)?;
                             partial_fresh_fact_tree(&mut out,if recovered{"stage/recovered-launcher"}else{"stage/launcher-workspace/copy"},
@@ -8870,6 +8875,24 @@ mod installer {
             // processes, installer calls or fabricated positive custody.
             #[test]
             fn contextual_store_paths_keep_copy_recovery_and_removal_scoped() {
+                let bundle=mobile_release_desktop::macos_applications_launcher::BUNDLE;
+                let base_depth=launcher_inventory_depth_data();
+                assert_eq!(base_depth,3);
+                assert!(!payload_depth_data(bundle,0,true));
+                for suffix in ["","/Contents","/Contents/MacOS","/Contents/Resources","/Contents/_CodeSignature"] {
+                    let path=format!("{bundle}{suffix}");
+                    let depth=base_depth+suffix.bytes().filter(|b|*b==b'/').count();
+                    assert!(payload_depth_data(&path,depth,true));
+                    assert!(!payload_depth_data(&path,depth-1,true));
+                }
+                for mode in [PartialFreshPayloadRead::Paired,PartialFreshPayloadRead::Conserved] {
+                    let source=if mode==PartialFreshPayloadRead::Paired {Some(7)} else {None};
+                    assert!(partial_fresh_payload_source_data(mode,source,applications::SOURCE_NAME,bundle,base_depth,None));
+                    assert!(!partial_fresh_payload_source_data(mode,source,applications::SOURCE_NAME,bundle,0,None));
+                    assert!(!partial_fresh_payload_source_data(mode,source,"foreign.app",bundle,base_depth,None));
+                }
+                assert!(payload_depth_data("app",0,true));
+                assert!(payload_depth_data("runtime",0,true));
                 let suffix="bundle/ruby/3.3.0/gems/fastlane-2.235.0/fastlane/lib/fastlane/plugins/template/lib/fastlane/plugin/%plugin_name%/actions/%plugin_name%_action.rb.erb";
                 let path=format!("runtime/store/{suffix}");
                 let (parent,leaf)=path.rsplit_once('/').unwrap();
@@ -8926,6 +8949,11 @@ mod installer {
                 assert!(plan.with_directory_path(2,|_|Ok(())).is_err());
                 plan.generations[0].roots=[Some(0),None];
                 assert!(plan.with_directory_path(2,|_|Ok(())).is_err());
+                // Guard runs before touching an original: no filesystem authority
+                // is fabricated by this ordinary in-memory plan fixture.
+                let mut book=Install::new();book.removal_payload_plan=Some(plan);
+                assert_eq!(audit_launcher_tree(&mut book,usize::MAX,&index),Err("launcher-audit-payload-plan-active"));
+                assert!(book.originals.is_empty());assert!(book.removal_payload_plan.is_some());
             }
         }
         impl RemovalPayloadPlan {
@@ -9998,6 +10026,13 @@ mod installer {
         }
         pub(super) fn audit_tree(book: &mut Install, root: usize, prefix: &str, index: &installation_record::InventoryIndex<'_>, depth: usize) -> Result<()> {
             audit_tree_mode(book,root,prefix,index,depth,None)
+        }
+        pub(super) fn audit_launcher_tree(book:&mut Install,root:usize,index:&installation_record::InventoryIndex<'_>)->Result<()> {
+            // The independent convenience copy is retired before payload-removal
+            // census. Never enroll it in that plan or temporarily suppress a plan.
+            check(book.removal_payload_plan.is_none(),"launcher-audit-payload-plan-active")?;
+            audit_tree_mode(book,root,mobile_release_desktop::macos_applications_launcher::BUNDLE,
+                index,launcher_inventory_depth_data(),None)
         }
         fn audit_tree_mode(book:&mut Install,root:usize,prefix:&str,index:&installation_record::InventoryIndex<'_>,depth:usize,
             mut resume:Option<&mut RemovalRemainingPlan>)->Result<()> {
@@ -13012,7 +13047,7 @@ mod installer {
             "maintenance-stage-attributes", "maintenance-stage-close", "maintenance-stage-flags",
             "maintenance-stage-record", "maintenance-stage-stat", "maintenance-state-filesystem",
             "maintenance-state-observation", "maintenance-state-reader-close", "maintenance-state-swap",
-            "maintenance-tree-depth",
+            "maintenance-tree-depth", "launcher-audit-payload-plan-active",
             "aarch64-apple-darwin", "acl-refused", "administrator-required", "both-publications-confirmed",
             "copy-bound", "copy-hash", "copy-original-correspondence", "copy-read",
             "copy-readback", "copy-size", "created-directory-mode", "created-directory-name",

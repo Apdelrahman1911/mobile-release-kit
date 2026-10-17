@@ -200,7 +200,7 @@ impl Observation {
             let bundle = self.operation.bundle.ok_or("launcher-original-missing")?;
             check(book.originals[bundle].parent == Some(self.operation.applications)
                 && book.originals[bundle].name == launcher::APPLICATIONS_NAME,"launcher-original-binding")?;
-            maintenance::audit_tree(book,bundle,launcher::BUNDLE,&old.index(),0)?;
+            maintenance::audit_launcher_tree(book,bundle,&old.index())?;
             book.check_name(bundle,true)?;
             self.operation.parent_post(book)?;
         }
@@ -357,7 +357,7 @@ impl RemovalPreparation {
         if self.absent {check(self.operation.absent(book)?,"launcher-removal-original-absence")?;}
         else {
             let bundle = self.operation.bundle.ok_or("launcher-original-missing")?;
-            maintenance::audit_tree(book,bundle,launcher::BUNDLE,&self.material.index(),0)?;
+            maintenance::audit_launcher_tree(book,bundle,&self.material.index())?;
             book.check_name(bundle,true)?;
         }
         if let Some(workspace) = self.workspace.as_ref() {
@@ -506,7 +506,7 @@ impl Effects {
             let bundle = self.next.bundle.ok_or("launcher-original-missing")?;
             check(book.originals[bundle].parent == Some(self.next.applications)
                 && book.originals[bundle].name == launcher::APPLICATIONS_NAME,"launcher-final-original")?;
-            maintenance::audit_tree(book,bundle,launcher::BUNDLE,&self.observation.current.index(),0)?;
+            maintenance::audit_launcher_tree(book,bundle,&self.observation.current.index())?;
             book.check_name(bundle,true)?;
             self.next.parent_post(book)
         }
@@ -881,7 +881,7 @@ impl FreshRecovery {
                 Err(Errno::ENOENT)=>(),Err(_)=>return Err("launcher-recovery-placement"),Ok(_)=>{
                     let original=book.open(Some(parent),name,true)?;
                     require_enrolled(book,original,Some(phase.data.staged))?;
-                    maintenance::audit_tree(book,original,launcher::BUNDLE,&material.index(),0)?;
+                    maintenance::audit_launcher_tree(book,original,&material.index())?;
                     held[at]=Some(original);
                 },
             }
@@ -900,7 +900,7 @@ impl FreshRecovery {
             // originals. It does not masquerade as the worker's closed-R grant.
             view.post(book)?;self.phase.post(book)?;self.operation.parent_post(book)?;
             require_enrolled(book,self.bundle,Some(self.phase.data.staged))?;
-            maintenance::audit_tree(book,self.bundle,launcher::BUNDLE,&self.material.index(),0)?;
+            maintenance::audit_launcher_tree(book,self.bundle,&self.material.index())?;
             if self.location==FreshPlacement::Applications {
                 book.absent(self.phase.stage,SOURCE_NAME)?;
                 check(book.originals[self.bundle].parent==Some(self.operation.applications)
@@ -923,7 +923,7 @@ impl FreshRecovery {
             }
             check(self.operation.absent(book)?,"launcher-recovery-foreign-live")?;
             require_enrolled(book,self.bundle,Some(self.phase.data.staged))?;
-            maintenance::audit_tree(book,self.bundle,launcher::BUNDLE,&self.material.index(),0)?;
+            maintenance::audit_launcher_tree(book,self.bundle,&self.material.index())?;
             self.phase.post(book)?;view.post(book)?;
             book.forward_close(self.bundle,"launcher-recovery-bundle-close")?;
             if let Some(workspace)=self.workspace {book.check_name(workspace,true)?;
@@ -1182,7 +1182,7 @@ impl Operation {
         // Store the exact original before any fallible read can return.
         self.bundle = Some(bundle);
         require_enrolled(book,bundle,enrolled)?;
-        maintenance::audit_tree(book, bundle, launcher::BUNDLE, expected, 0)?;
+        maintenance::audit_launcher_tree(book,bundle,expected)?;
         self.parent_post(book)?;
         book.check_name(bundle, true)
     }
@@ -1228,7 +1228,7 @@ impl Operation {
         check(book.originals[staged].parent == Some(workspace.original)
             && book.originals[staged].name == SOURCE_NAME, "launcher-staged-original")?;
         launcher::LauncherInventory::from_index(expected)?.ok_or("launcher-inventory-missing")?;
-        maintenance::audit_tree(book, staged, launcher::BUNDLE, expected, 0)?;
+        maintenance::audit_launcher_tree(book,staged,expected)?;
         book.absent(self.applications, launcher::APPLICATIONS_NAME)?;
         check(book.identity(workspace.original)?.dev == book.identity(self.applications)?.dev, "launcher-filesystem")?;
         book.clock()?;
@@ -1247,7 +1247,7 @@ impl Operation {
         self.bundle = Some(staged);
         maintenance::rebind_renamed(book, staged, self.applications, launcher::APPLICATIONS_NAME)?;
         book.absent(workspace.original, SOURCE_NAME)?;
-        maintenance::audit_tree(book, staged, launcher::BUNDLE, expected, 0)?;
+        maintenance::audit_launcher_tree(book,staged,expected)?;
         book.persist(workspace.original, false)?;
         book.persist(self.applications, false)?;
         self.parent_post(book)?;
@@ -1269,7 +1269,7 @@ impl Operation {
         self.parent_post(book)?;
         check(book.originals[bundle].parent == Some(self.applications)
             && book.originals[bundle].name == launcher::APPLICATIONS_NAME, "launcher-original-binding")?;
-        maintenance::audit_tree(book, bundle, launcher::BUNDLE, expected, 0)?;
+        maintenance::audit_launcher_tree(book,bundle,expected)?;
         book.check_name(bundle, true)?;
         book.absent(workspace.original, RETAINED_NAME)?;
         check(book.identity(workspace.original)?.dev == book.identity(self.applications)?.dev, "launcher-filesystem")?;
@@ -1286,7 +1286,7 @@ impl Operation {
             }
         }
         maintenance::rebind_renamed(book, bundle, workspace.original, RETAINED_NAME)?;
-        maintenance::audit_tree(book, bundle, launcher::BUNDLE, expected, 0)?;
+        maintenance::audit_launcher_tree(book,bundle,expected)?;
         // If another user placed an entry after the move, absence refuses and
         // the caller cannot publish over it. Our retained bundle stays intact.
         book.absent(self.applications, launcher::APPLICATIONS_NAME)?;
@@ -1340,7 +1340,7 @@ impl Inverse {
             check(book.originals[new].parent == Some(published.applications)
                 && book.originals[new].name == launcher::APPLICATIONS_NAME,"launcher-inverse-new-original")?;
             launcher::LauncherInventory::from_index(expected)?.ok_or("launcher-inventory-missing")?;
-            maintenance::audit_tree(book,new,launcher::BUNDLE,expected,0)?;
+            maintenance::audit_launcher_tree(book,new,expected)?;
             book.check_name(new,true)?;
             book.absent(workspace.original,SOURCE_NAME)?;
             check(book.identity(workspace.original)?.dev == book.identity(published.applications)?.dev,
@@ -1357,7 +1357,7 @@ impl Inverse {
                 },
             }
             maintenance::rebind_renamed(book,new,workspace.original,SOURCE_NAME)?;
-            maintenance::audit_tree(book,new,launcher::BUNDLE,expected,0)?;
+            maintenance::audit_launcher_tree(book,new,expected)?;
             book.check_name(new,true)?;
             book.absent(published.applications,launcher::APPLICATIONS_NAME)?;
             book.persist(published.applications,false)?;
@@ -1384,7 +1384,7 @@ impl Inverse {
         check(book.originals[old].parent == Some(workspace.original)
             && book.originals[old].name == RETAINED_NAME, "launcher-inverse-original")?;
         launcher::LauncherInventory::from_index(previous_inventory)?.ok_or("launcher-inventory-missing")?;
-        maintenance::audit_tree(book, old, launcher::BUNDLE, previous_inventory, 0)?;
+        maintenance::audit_launcher_tree(book,old,previous_inventory)?;
         book.check_name(old, true)?;
         if let Some((published, expected)) = next {
             published.parent_post(book)?;
@@ -1395,7 +1395,7 @@ impl Inverse {
             check(book.originals[new].parent == Some(published.applications)
                 && book.originals[new].name == launcher::APPLICATIONS_NAME, "launcher-inverse-new-original")?;
             launcher::LauncherInventory::from_index(expected)?.ok_or("launcher-inventory-missing")?;
-            maintenance::audit_tree(book, new, launcher::BUNDLE, expected, 0)?;
+            maintenance::audit_launcher_tree(book,new,expected)?;
             book.check_name(new, true)?;
             book.absent(workspace.original, SOURCE_NAME)?;
             check(book.identity(workspace.original)?.dev == book.identity(published.applications)?.dev,
@@ -1413,7 +1413,7 @@ impl Inverse {
             }
             maintenance::rebind_renamed(book, new, workspace.original, SOURCE_NAME)?;
             // A shared-parent substitution is retained, never deleted as ours.
-            maintenance::audit_tree(book, new, launcher::BUNDLE, expected, 0)?;
+            maintenance::audit_launcher_tree(book,new,expected)?;
             book.check_name(new, true)?;
             book.absent(published.applications, launcher::APPLICATIONS_NAME)?;
             book.persist(published.applications, false)?;
@@ -1425,7 +1425,7 @@ impl Inverse {
         previous.parent_post(book)?;
         workspace.post(book)?;
         book.absent(previous.applications, launcher::APPLICATIONS_NAME)?;
-        maintenance::audit_tree(book, old, launcher::BUNDLE, previous_inventory, 0)?;
+        maintenance::audit_launcher_tree(book,old,previous_inventory)?;
         book.check_name(old, true)?;
         check(book.identity(workspace.original)?.dev == book.identity(previous.applications)?.dev,
             "launcher-filesystem")?;
@@ -1442,7 +1442,7 @@ impl Inverse {
         }
         maintenance::rebind_renamed(book, old, previous.applications, launcher::APPLICATIONS_NAME)?;
         book.absent(workspace.original, RETAINED_NAME)?;
-        maintenance::audit_tree(book, old, launcher::BUNDLE, previous_inventory, 0)?;
+        maintenance::audit_launcher_tree(book,old,previous_inventory)?;
         book.persist(workspace.original, false)?;
         book.persist(previous.applications, false)?;
         previous.parent_post(book)?;
@@ -1494,7 +1494,7 @@ impl Retirement {
         let external = book.removal_live_reserved + if book.worker_deadline.is_some() { worker::EXTRA_LIVE } else { 0 };
         check(book.originals.iter().filter(|r| r.fd.is_some()).count() + external + 12 <= 96
             && book.originals.len().checked_add(60).is_some_and(|n| n <= installation_record::ORIGINAL_LIMIT), "launcher-retirement-budget")?;
-        maintenance::audit_tree(book, bundle, launcher::BUNDLE, expected, 0)?;
+        maintenance::audit_launcher_tree(book,bundle,expected)?;
         let mut directories = BTreeMap::new();
         directories.insert(String::new(), bundle);
         self.nodes.push(RetiredNode { original: bundle, parent: workspace.original,
