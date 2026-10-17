@@ -270,6 +270,42 @@ class LocalStoreExecutionRuntimeTest < Minitest::Test
     shim_runtime.resources.stub(:bind_local_transport!,->(c) { shim_seen << c }) { admit(shim_runtime) }
     assert_equal shim.fetch('transportTools'),shim_seen.fetch(0).fetch(:transport_tools)
     assert shim_invocation.local_ios_context?(shim_seen.fetch(0))
+    managed='/Library/MobileReleaseKitDeveloper/Xcode.app/Contents/Developer'
+    managed_value=JSON.parse(M.canonical_json(shim))
+    managed_value['transportTools']['selection']['developerDirectory']=managed
+    managed_value['transportTools']['altoolPath']=managed.delete_suffix('/Contents/Developer')+'/Contents/SharedFrameworks/Delivery/Support/altoolShim'
+    ENV[KEY]=M.canonical_json(managed_value);ENV['DEVELOPER_DIR']=managed
+    managed_runtime,managed_invocation=model(lane:'ios_testflight_internal');managed_seen=[]
+    managed_runtime.resources.stub(:bind_local_transport!,->(c) { managed_seen << c }) { admit(managed_runtime) }
+    assert_equal managed_value.fetch('transportTools'),managed_seen.fetch(0).fetch(:transport_tools)
+    assert managed_invocation.local_ios_context?(managed_seen.fetch(0))
+    [managed.downcase,managed+'/',managed+'/extra',
+     managed.sub('MobileReleaseKitDeveloper/','MobileReleaseKitDeveloperOther/'),
+     managed.sub('Xcode.app/','Other.app/'),managed.sub('Xcode.app/','.pending/Xcode.app/'),
+     managed.sub('Xcode.app/','../Xcode.app/')].each do |bad_path|
+      bad=JSON.parse(M.canonical_json(managed_value))
+      bad['transportTools']['selection']['developerDirectory']=bad_path
+      bad['transportTools']['altoolPath']=bad_path.delete_suffix('/Contents/Developer')+'/Contents/Tools/altool'
+      ENV[KEY]=M.canonical_json(bad);ENV['DEVELOPER_DIR']=bad_path
+      rt,_=model(lane:'ios_testflight_internal')
+      rt.resources.stub(:bind_local_transport!,->(*) { flunk 'malformed managed tuple reached original opens' }) do
+        assert_raises(R::Error) { rt.send(:admit_local_execution!) }
+      end
+    end
+    [->(v){v['transportTools']['altoolPath']=transport.fetch('altoolPath')},
+     ->(v){v['transportTools']['selection']['developerIdentity']['uid']=501}].each do |mutate|
+      bad=JSON.parse(M.canonical_json(managed_value));mutate.call(bad)
+      ENV[KEY]=M.canonical_json(bad);ENV['DEVELOPER_DIR']=managed
+      rt,_=model(lane:'ios_testflight_internal')
+      rt.resources.stub(:bind_local_transport!,->(*) { flunk 'foreign managed tuple reached original opens' }) do
+        assert_raises(R::Error) { rt.send(:admit_local_execution!) }
+      end
+    end
+    M::NativeProcessSpawn.stub(:monotonic_ns,1) do
+      ENV[KEY]=M.canonical_json(managed_value);ENV['DEVELOPER_DIR']=selection.fetch('developerDirectory')
+      assert_raises(R::Error) { managed_runtime.local_execution_context }
+    end
+    ENV['DEVELOPER_DIR']=selection.fetch('developerDirectory')
     [->(v){v['transportTools']['selection']['xcrun']['uid']=501},
      ->(v){v['transportTools']['selection']['appIdentity']['mode']=0040777},
      ->(v){v['transportTools']['altoolPath']='/tmp/altool'},

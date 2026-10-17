@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from . import _desktop_store_prepare_protocol as prepare
 from . import _desktop_android_build_protocol as android
+from ._desktop_ios_archive_protocol import MANAGED_DEVELOPER
 from ._desktop_local_history_protocol import decode,token,integer
 from .local_release_journal import canonical,_uuid
 require,sha=prepare.require,prepare.sha
@@ -24,7 +25,8 @@ def upload_selection(value):
     require(type(value) is dict and set(value)=={'schemaVersion','developerDirectory','appIdentity','developerIdentity','xcrun'}
         and type(value['schemaVersion']) is int and value['schemaVersion']==1)
     directory=path(value['developerDirectory']);parts=Path(directory).parts
-    require(len(parts)==len(APPLICATIONS.parts)+3 and parts[:len(APPLICATIONS.parts)]==APPLICATIONS.parts
+    require(directory==MANAGED_DEVELOPER or len(parts)==len(APPLICATIONS.parts)+3
+        and parts[:len(APPLICATIONS.parts)]==APPLICATIONS.parts
         and parts[-3].endswith('.app') and parts[-2:]==('Contents','Developer'))
     for key in ('appIdentity','developerIdentity'):
         _identity(value[key]);require(value[key]['uid']==0 and not value[key]['mode']&0o7022)

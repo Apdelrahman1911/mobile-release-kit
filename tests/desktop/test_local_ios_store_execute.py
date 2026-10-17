@@ -231,6 +231,25 @@ class IOSStoreExecuteTests(unittest.TestCase):
     def test_exact_context_native_selection_and_receipt_grammars_remain_platform_closed(self):
         self.assertEqual(W.context(self.f.value['context']),self.f.value['context'])
         self.assertEqual(W.upload_selection(self.f.value['native']['uploadSelection']),self.f.value['native']['uploadSelection'])
+        managed='/Library/MobileReleaseKitDeveloper/Xcode.app/Contents/Developer'
+        selected=copy.deepcopy(self.f.value);selected['native']['uploadSelection']['developerDirectory']=managed
+        # Full wire DATA only: these fixed numbers never open or borrow an FD.
+        selected['native'].update(home=str(self.f.home),leaseFd=3,nonce='e'*32,
+            clock=dict(workEndNs='1200000000000',hardEndNs='1210000000000'),
+            authorizationId='55555555-5555-4555-8555-555555555555',tooling=dict(version='0.3.0',commit='c'*40))
+        parsed=W.parse_request(canonical(selected)+b'\n')
+        self.assertEqual(parsed.native['uploadSelection'],selected['native']['uploadSelection'])
+        for bad in (managed.lower(),managed+'/',managed+'/extra',
+                    managed.replace('MobileReleaseKitDeveloper/','MobileReleaseKitDeveloperOther/'),
+                    managed.replace('Xcode.app/','Other.app/'),managed.replace('Xcode.app/','.pending/Xcode.app/'),
+                    managed.replace('Xcode.app/','../Xcode.app/')):
+            n=copy.deepcopy(selected['native']['uploadSelection']);n['developerDirectory']=bad
+            with self.subTest(managed=bad),self.assertRaises(ValueError):W.upload_selection(n)
+        for change in (lambda n:n['developerIdentity'].update(uid=501),
+                       lambda n:n['appIdentity'].update(mode=stat.S_IFDIR|0o777),
+                       lambda n:n['xcrun'].update(inode='01')):
+            n=copy.deepcopy(selected['native']['uploadSelection']);change(n)
+            with self.assertRaises(ValueError):W.upload_selection(n)
         for change in (lambda c:c.update(toolchainSelection={}),lambda c:c.update(operation='local-store-reconcile'),
                        lambda c:c.update(confirmation='candidate:android:1.2.3:42'),lambda c:c.update(platform='android')):
             c=copy.deepcopy(self.f.value['context']);change(c)
@@ -287,8 +306,18 @@ class IOSStoreExecuteTests(unittest.TestCase):
 
 
 class IOSStoreAliasTests(unittest.TestCase):
-    def fixture(self):
+    def fixture(self,*,managed=False):
         case=IOSStoreExecuteTests(methodName='runTest');case.setUp();self.addCleanup(case.doCleanups)
+        if managed:
+            # Only the native root/UID nomination is modeled, as for legacy.
+            # SAME actual reader walks the extra managed ancestor; the old
+            # Applications directory is absent, so no fallback can pass here.
+            old_apps=case.apps
+            namespace=case.f.base/'Library/MobileReleaseKitDeveloper';namespace.mkdir(parents=True)
+            app=namespace/'Xcode.app';case.app.rename(app);old_apps.rmdir()
+            case.apps,case.app=namespace,app;case.dev=app/'Contents/Developer';case.altool=app/'Contents/Tools/altool'
+            case.f.value['native']['uploadSelection']['developerDirectory']=str(case.dev)
+            nomination=patch.object(W,'MANAGED_DEVELOPER',str(case.dev));nomination.start();self.addCleanup(nomination.stop)
         contents=case.app/'Contents';framework=contents/'SharedFrameworks/Upload.framework'
         physical=framework/'Versions/A/Support/altoolShim';physical.parent.mkdir(parents=True)
         case.altool.rename(physical);case.altool=physical
@@ -305,14 +334,21 @@ class IOSStoreAliasTests(unittest.TestCase):
         return case,nomination,framework
 
     def test_framework_links_produce_only_original_physical_tool_and_close(self):
-        case,nomination,_=self.fixture()
-        t,e,events,calls,high=case.f.run_original(_execute=True)
-        self.assertEqual(t['outcome'],'complete',''.join(__import__('traceback').format_exception(e.primary)))
-        self.assertEqual(len(calls),16);self.assertEqual(len(e.service.tool_reader.tool_aliases),3)
-        self.assertEqual(case.contexts[0]['transportTools']['altoolPath'],str(case.altool))
-        self.assertNotEqual(str(nomination),str(case.altool));self.assertTrue(nomination.is_symlink())
-        self.assertTrue(e.service.closed());self.assertTrue(e.input.material_closed())
-        self.assertLessEqual(high,e.service.quote['total']);self.assertLessEqual(len(e.service.tool_reader.descriptors),S.UPLOAD_TOOL_SLOTS)
+        for managed in (False,True):
+            with self.subTest(managed=managed):
+                if managed:self.doCleanups()
+                case,nomination,_=self.fixture(managed=managed)
+                t,e,events,calls,high=case.f.run_original(_execute=True)
+                self.assertEqual(t['outcome'],'complete',''.join(__import__('traceback').format_exception(e.primary)))
+                self.assertEqual(len(calls),16);self.assertEqual(len(e.service.tool_reader.tool_aliases),3)
+                self.assertEqual(case.contexts[0]['transportTools']['altoolPath'],str(case.altool))
+                self.assertEqual(case.contexts[0]['transportTools']['selection']['developerDirectory'],str(case.dev))
+                self.assertNotEqual(str(nomination),str(case.altool));self.assertTrue(nomination.is_symlink())
+                self.assertTrue(e.service.closed());self.assertTrue(e.input.material_closed())
+                self.assertLessEqual(high,e.service.quote['total']);self.assertLessEqual(len(e.service.tool_reader.descriptors),S.UPLOAD_TOOL_SLOTS)
+                if managed:
+                    self.assertFalse((case.f.base/'Applications').exists())
+                    self.assertTrue(any(n.canonical==case.apps for n in e.service.tool_reader.nodes))
 
     def test_unexpected_physical_tool_name_refuses_before_pending_or_material(self):
         case,nomination,_=self.fixture()

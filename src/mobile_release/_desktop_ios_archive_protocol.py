@@ -25,6 +25,7 @@ CANDIDATE_PROTOCOL = "mrk-ios-candidate-inputs/1"
 SIGNED_PROTOCOL = "mrk-ios-archive/2"
 SIGNED_CONSENT = "saved-ios-signed-export-v2"
 SIGNED_SCOPE = "local-signed-ios-artifact-validation"
+MANAGED_DEVELOPER = "/Library/MobileReleaseKitDeveloper/Xcode.app/Contents/Developer"
 TOOLCHAIN_PROFILE = "ios-full-xcode-macos-arm64-v1"
 X64_TOOLCHAIN_PROFILE = "ios-full-xcode-macos-x86_64-v1"
 TOOLCHAIN_PROFILES = {"macos-arm64": TOOLCHAIN_PROFILE, "macos-x86_64": X64_TOOLCHAIN_PROFILE}
@@ -174,7 +175,7 @@ def _native(value: object, *, signed: bool = False, recovery: bool = False, cand
     require(type(tool["schemaVersion"]) is int and tool["schemaVersion"] == 1
             and tool["profile"] == TOOLCHAIN_PROFILES[value["profile"]])
     developer, sdk = _path(tool["developerDir"]), _path(tool["sdk"])
-    require(developer.endswith(".app/Contents/Developer") and developer.startswith("/Applications/")
+    require((developer == MANAGED_DEVELOPER or developer.endswith(".app/Contents/Developer") and developer.startswith("/Applications/"))
             and sdk.startswith(developer + "/Platforms/iPhoneOS.platform/Developer/SDKs/")
             and sdk.endswith(".sdk") and "/" not in sdk.removeprefix(developer + "/Platforms/iPhoneOS.platform/Developer/SDKs/"))
     result = {"profile": value["profile"], "projectRoot": _path(value["projectRoot"]),

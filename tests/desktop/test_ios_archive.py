@@ -287,6 +287,29 @@ class IOSWireTests(unittest.TestCase):
                     name: copy.deepcopy(good["native"]["toolchain"]["xcodebuildIdentity"])
                     for name in ("security", "codesign", "openssl")}
                 wire.parse_request(encode(signed) + b"\n")
+                managed = "/Library/MobileReleaseKitDeveloper/Xcode.app/Contents/Developer"
+                for template in (good, signed):
+                    selected = copy.deepcopy(template)
+                    selected["native"]["toolchain"]["developerDir"] = managed
+                    selected["native"]["toolchain"]["sdk"] = managed + "/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk"
+                    parsed = wire.parse_request(encode(selected) + b"\n")
+                    self.assertEqual(parsed.native["toolchain"], selected["native"]["toolchain"])
+                    for bad in (managed.lower(), managed + "/extra", managed + "/",
+                                managed.replace("MobileReleaseKitDeveloper/", "MobileReleaseKitDeveloperOther/"),
+                                managed.replace("Xcode.app/", "Other.app/"),
+                                managed.replace("Xcode.app/", ".pending/Xcode.app/"),
+                                managed.replace("Xcode.app/", "../Xcode.app/")):
+                        changed = copy.deepcopy(selected)
+                        changed["native"]["toolchain"].update(developerDir=bad,
+                            sdk=bad + "/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk")
+                        with self.subTest(managed=bad), self.assertRaises(wire.ProtocolError):
+                            wire.parse_request(encode(changed) + b"\n")
+                    for change in (lambda tool: tool.update(sdk=good["native"]["toolchain"]["sdk"]),
+                                   lambda tool: tool["sdkIdentity"].update(mode=stat.S_IFREG | 0o444),
+                                   lambda tool: tool.update(profile=opposite)):
+                        changed = copy.deepcopy(selected); change(changed["native"]["toolchain"])
+                        with self.assertRaises(wire.ProtocolError):
+                            wire.parse_request(encode(changed) + b"\n")
                 signed["native"]["signingTools"]["security"]["uid"] = 501
                 with self.assertRaises(wire.ProtocolError):
                     wire.parse_request(encode(signed) + b"\n")

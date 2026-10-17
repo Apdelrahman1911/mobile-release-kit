@@ -557,7 +557,9 @@ module MobileReleaseKit
           local_root_identity?(selection['appIdentity']) && local_root_identity?(selection['developerIdentity']) &&
           local_signing_tool?(selection['xcrun']) && local_signing_tool?(value['altoolIdentity'])
         developer=selection['developerDirectory'];tool=value['altoolPath']
-        return false unless developer.instance_of?(String) && developer.match?(%r{\A/Applications/Xcode[A-Za-z0-9_.+-]*\.app/Contents/Developer\z})
+        return false unless developer.instance_of?(String) &&
+          (developer == '/Library/MobileReleaseKitDeveloper/Xcode.app/Contents/Developer' ||
+           developer.match?(%r{\A/Applications/Xcode[A-Za-z0-9_.+-]*\.app/Contents/Developer\z}))
         app=developer.delete_suffix('/Contents/Developer')
         tool.instance_of?(String) && tool.bytesize<=4096 && tool.start_with?(app+'/Contents/') &&
           tool.end_with?('/altool','/altoolShim') && tool.split('/').length<=32 &&
