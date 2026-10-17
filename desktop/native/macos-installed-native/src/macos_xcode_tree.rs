@@ -21,6 +21,12 @@ use std::{
 };
 
 #[derive(Clone, Copy)]
+enum SourceRole {
+    Payload,
+    Applications,
+}
+
+#[derive(Clone, Copy)]
 enum Slot {
     Vacant,
     Acquiring,
@@ -114,7 +120,23 @@ impl CopierFiles {
         expected: Identity,
         work: &Work,
     ) -> Result<usize> {
-        let result = self.open_source_inner(parent, name, expected, work);
+        let result = self.open_source_inner(parent, name, expected, work, SourceRole::Payload);
+        if result.is_err() {
+            self.note_failure();
+        }
+        result
+    }
+    /// The caller lends its already admitted root original. This closed route
+    /// cannot select another name, and grants no payload or managed authority.
+    pub(crate) fn open_applications(
+        &mut self,
+        root: BorrowedFd<'_>,
+        expected: Identity,
+        work: &Work,
+    ) -> Result<usize> {
+        let result = self.open_source_inner(
+            root, c"Applications", expected, work, SourceRole::Applications,
+        );
         if result.is_err() {
             self.note_failure();
         }
@@ -126,12 +148,22 @@ impl CopierFiles {
         name: &CStr,
         expected: Identity,
         work: &Work,
+        role: SourceRole,
     ) -> Result<usize> {
         work.point()?;
         if !profile::component(name.to_bytes()) {
             return Err(Failure::Bounds);
         }
-        let kind = expected.source_kind()?;
+        let kind = match role {
+            SourceRole::Payload => expected.source_kind()?,
+            SourceRole::Applications => {
+                if name != c"Applications" {
+                    return Err(Failure::Binding);
+                }
+                expected.applications_directory()?;
+                profile::Kind::Directory
+            }
+        };
         let flags = libc::O_RDONLY
             | libc::O_CLOEXEC
             | libc::O_NONBLOCK

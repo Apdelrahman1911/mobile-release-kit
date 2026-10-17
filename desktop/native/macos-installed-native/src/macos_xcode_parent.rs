@@ -1748,7 +1748,7 @@ mod native {
             let apps_name = c("Applications")?;
             let apps_id = copy::named(root, &apps_name, work).map_err(|_| Failure::Binding)?;
             let applications = files
-                .open_source(root, &apps_name, apps_id, work)
+                .open_applications(root, apps_id, work)
                 .map_err(|_| Failure::Binding)?;
             let raw = files
                 .fd(applications)
@@ -4142,6 +4142,10 @@ mod native {
             // only this new fixture, before supplying it to the production call.
             owner.slots[ROOT] = Slot::Owned(raw);
             let original = fs::symlink_metadata(&path).unwrap();
+            let mut sources = crate::macos_xcode_tree::CopierFiles::new(
+                now + Duration::from_secs(40), 4, // Namespace's three + actual / below.
+            ).unwrap();
+            let mut system_root: Option<libc::c_int> = None;
             let observed = catch_unwind(AssertUnwindSafe(|| {
                 assert_eq!(unsafe { libc::fchown(raw, 0, 0) }, 0);
                 owner.original[ROOT] = Some(fstat(owner.fd(ROOT).unwrap()).unwrap());
@@ -4185,13 +4189,77 @@ mod native {
                 assert_eq!(fs::symlink_metadata(path.join("existing")).unwrap().mode(), existing.mode());
                 assert_eq!(owner.mkdir(ROOT, "bad-mode", STAGED, 0o777), Err(Failure::Access));
                 assert!(!path.join("bad-mode").exists());
+                // A system source ancestor is not copied payload: admit the
+                // observed root:admin 0775/protective-flags shape without ever
+                // changing /Applications. The native fixture below has no flags.
+                fs::DirBuilder::new().mode(0o700).create(path.join("Applications")).unwrap();
+                fs::set_permissions(path.join("Applications"), fs::Permissions::from_mode(0o775)).unwrap();
+                let work = copy::Work { end: now + Duration::from_secs(30),
+                    parent: unsafe { libc::getppid() } };
+                let apps = copy::named(owner.fd(ROOT).unwrap(), c"Applications", &work).unwrap();
+                let selected = sources.open_applications(owner.fd(ROOT).unwrap(), apps, &work).unwrap();
+                copy::exact(sources.fd(selected).unwrap(), owner.fd(ROOT).unwrap(),
+                    c"Applications", apps, &work).unwrap();
+                let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+                assert_eq!(unsafe { libc::fstat(sources.fd(selected).unwrap().as_raw_fd(), metadata.as_mut_ptr()) }, 0);
+                let mut metadata = unsafe { metadata.assume_init() };
+                metadata.st_gid = 80;
+                for flags in [0, 0x00080000, 1048576, 0x00800000, 0x00980000] {
+                    metadata.st_flags = flags;
+                    let ancestor = copy::Identity::of(&metadata);
+                    assert!(ancestor.applications_directory().is_ok());
+                    assert_eq!(ancestor.source_kind().is_ok(), flags == 0);
+                    // Managed protected files retain the stricter sealed policy.
+                    let mut managed = metadata;
+                    managed.st_mode = libc::S_IFDIR | 0o555;
+                    managed.st_gid = 0;
+                    assert_eq!(copy::Identity::of(&managed).protected_kind().is_ok(), flags == 0);
+                }
+                metadata.st_flags = 1;
+                assert!(copy::Identity::of(&metadata).applications_directory().is_err());
+                metadata.st_flags = 0;
+                metadata.st_uid = 1;
+                assert!(copy::Identity::of(&metadata).applications_directory().is_err());
+                metadata.st_uid = 0;
+                metadata.st_gid = 1;
+                assert!(copy::Identity::of(&metadata).applications_directory().is_err());
+                metadata.st_gid = 80;
+                metadata.st_mode = libc::S_IFDIR | 0o777;
+                assert!(copy::Identity::of(&metadata).applications_directory().is_err());
+                // Fail fast on the real host's ancestry/ACL/mount policy too.
+                // This is READ ONLY: no chmod/chown/flags changes, no Xcode walk.
+                let system_fd = unsafe { libc::open(c"/".as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+                if system_fd >= 0 { system_root = Some(system_fd); }
+                assert!(system_fd >= 0, "actual root read-only open");
+                let system = unsafe { BorrowedFd::borrow_raw(system_fd) };
+                assert!(fstat(system).unwrap().directory(None));
+                let actual_apps = copy::named(system, c"Applications", &work).unwrap();
+                let actual_slot = sources.open_applications(system, actual_apps, &work)
+                    .expect("actual Applications ancestor/ACL/mount admission");
+                copy::exact(sources.fd(actual_slot).unwrap(), system, c"Applications",
+                    actual_apps, &work).expect("actual Applications original POST");
+                // Keep the original fd: replacing its name with an alias must
+                // invalidate POST and the fixed opener must not follow the alias.
+                fs::rename(path.join("Applications"), path.join("Applications-original")).unwrap();
+                symlink("Applications-original", path.join("Applications")).unwrap();
+                assert!(copy::exact(sources.fd(selected).unwrap(), owner.fd(ROOT).unwrap(),
+                    c"Applications", apps, &work).is_err());
+                let alias = copy::named(owner.fd(ROOT).unwrap(), c"Applications", &work).unwrap();
+                assert!(sources.open_applications(owner.fd(ROOT).unwrap(), alias, &work).is_err());
+                assert_eq!(fs::read_link(path.join("Applications")).unwrap(),
+                    std::path::Path::new("Applications-original"));
                 owner.clock.work = Instant::now();
                 assert_eq!(owner.mkdir(ROOT, "late", STAGED, 0o755), Err(Failure::Clock));
                 assert!(!path.join("late").exists());
             }));
             // Known original closes precede task-only cleanup even on assertion
             // failure. A failed/unknown close preserves this exclusive fixture.
-            let settled = owner.settle(None).is_ok() && !owner.unknown()
+            let source_closed = sources.close_all() && sources.live() == 0;
+            let system_closed = system_root.map_or(true, |fd| {
+                Instant::now() < now + Duration::from_secs(40) && unsafe { libc::close(fd) } == 0
+            });
+            let settled = owner.settle(None).is_ok() && source_closed && system_closed && !owner.unknown()
                 && owner.slots.iter().all(|s| matches!(s, Slot::Vacant | Slot::Closed));
             drop(mask);
             let current = fs::symlink_metadata(&path).unwrap();

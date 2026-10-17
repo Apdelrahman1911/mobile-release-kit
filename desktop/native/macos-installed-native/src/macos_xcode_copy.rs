@@ -145,6 +145,32 @@ impl Identity {
             .map_err(|_| Failure::Access)?;
         Ok(kind)
     }
+    /// Fixed /Applications is source ancestry, never copied payload or managed
+    /// tool authority. macOS installs it root:admin 0775 with SF_NOUNLINK.
+    /// Preserve the complete original in all held/named joins; these protective
+    /// flags are allowed only through the literal Applications opener below.
+    pub(crate) fn applications_directory(&self) -> Result<()> {
+        // Public Darwin stat.h: SF_RESTRICTED | SF_NOUNLINK | SF_FIRMLINK.
+        const ANCESTOR_PROTECTION: u32 = 0x00080000 | 0x00100000 | 0x00800000;
+        if self.dev < 0
+            || self.ino == 0
+            || self.size < 0
+            || self.links == 0
+            || !(0..1_000_000_000).contains(&self.mtime_ns)
+            || !(0..1_000_000_000).contains(&self.ctime_ns)
+        {
+            return Err(Failure::Metadata);
+        }
+        if self.mode & libc::S_IFMT != libc::S_IFDIR
+            || !matches!(self.mode & 0o7777, 0o755 | 0o775)
+            || self.uid != 0
+            || !matches!(self.gid, 0 | 80)
+            || self.flags & !ANCESTOR_PROTECTION != 0
+        {
+            return Err(Failure::Access);
+        }
+        Ok(())
+    }
     /// Only actual private output inodes qualify for fixed-stage retirement.
     /// Private unfinished 0600/0700 modes are not public source admission.
     pub(crate) fn retiring_kind(self) -> Result<profile::Kind> {

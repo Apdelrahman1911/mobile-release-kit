@@ -6928,6 +6928,73 @@ final class NormalAppUITests: XCTestCase {
         try need(app.wait(for: .notRunning, timeout: try clock.remaining(10, before: end, cleanup: true)))
     }
 
+    // One ordinary iOS diagnostics invocation before archive consent. This
+    // observes the global developer selection, not managed-Xcode admission.
+    @MainActor private func observeIOSToolDiagnostics(_ renderer: XCUIElement) throws {
+        try press(renderer, "Environment", renderer: renderer)
+        try select(renderer, label: "Release platform", value: "iOS", renderer: renderer)
+        try select(renderer, label: "Activity", value: "Build / archive", renderer: renderer)
+        let panel = try waitElement(named(renderer, "Observed build-tool checks")
+            .containing(.button, identifier: "Check build tools"), in: renderer)
+        let failures = ["Original finality or status integrity is unknown", "Diagnostics status needs attention",
+                        "Start reply unconfirmed", "Earlier / stale tool observations", "Phase: retained-unknown",
+                        "Outcome: partial", "Outcome: failed", "Outcome: cancelled", "Outcome: timed-out", "Outcome: unavailable"]
+        try require(panel.staticTexts.matching(identifier: "Tool observations from this run").count == 0
+                    && panel.staticTexts.matching(identifier: "Earlier / stale tool observations").count == 0,
+                    "a previous diagnostics report cannot supply the iOS archive journey")
+        // Availability permits only the click, never a tool or native result.
+        let start = try waitElement(panel.buttons.matching(identifier: "Check build tools"), in: panel,
+                                    enabled: true, timeout: 10, failures: failures)
+        try reveal(start, in: renderer)
+        guard let wholeDeadline = journeyDeadline, let clock = caseClock else {
+            throw Refusal.condition("iOS diagnostics requires the original archive clock")
+        }
+        journeyDeadline = min(wholeDeadline, try clock.end(within: 15))
+        defer { journeyDeadline = wholeDeadline } // SAME absolute success cutoff, not renewed work.
+        start.click() // Exactly one diagnostics Start; native work6/finality10 remain unchanged.
+        let fresh = panel.staticTexts.matching(NSPredicate(format: "title == %@", "Tool observations from this run"))
+        let phase = panel.staticTexts.matching(identifier: "Phase: settled")
+        let outcome = panel.staticTexts.matching(identifier: "Outcome: complete")
+        let finality = panel.staticTexts.matching(identifier: "Native finality: settled")
+        let context = panel.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@ AND label ENDSWITH %@",
+            "iOS / build · draft ", " · core host macos"))
+        let provenance = panel.staticTexts.matching(NSPredicate(format: "label ENDSWITH %@",
+            " · acknowledged original Start. Receipt time is not a native deadline or a fresh probe."))
+        let failed = panel.staticTexts.matching(NSPredicate(format: "label IN %@", failures))
+        let targets: NSDictionary = ["fresh": fresh.element(boundBy: 0), "phase": phase.element(boundBy: 0),
+            "outcome": outcome.element(boundBy: 0), "finality": finality.element(boundBy: 0),
+            "context": context.element(boundBy: 0), "provenance": provenance.element(boundBy: 0),
+            "failed": failed.element(boundBy: 0)]
+        let ready = NSPredicate(format: "(fresh.exists == true AND phase.exists == true AND outcome.exists == true AND finality.exists == true AND context.exists == true AND provenance.exists == true) OR failed.exists == true")
+        try require(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: ready, object: targets)],
+                                  timeout: try remaining(15)) == .completed && failed.count == 0,
+                    "original iOS diagnostics report or native settlement was not confirmed")
+        for query in [fresh, phase, outcome, finality, context, provenance] {
+            _ = try unique(query, "current acknowledged iOS diagnostics report is missing or ambiguous")
+        }
+        let originalContext = context.element(boundBy: 0).label
+        for label in ["macOS developer selection", "Git version", "Xcode version and build"] {
+            _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)),
+                           "fixed iOS diagnostics card is missing or repeated")
+        }
+        for label in ["Java runtime version", "Java compiler version"] {
+            try require(panel.staticTexts.matching(NSPredicate(format: "title == %@", label)).count == 0,
+                        "Android diagnostics cannot supply the iOS observation")
+        }
+        try expand(panel, prefix: "Core resource observations — provisional, not native finality", renderer: renderer)
+        _ = try waitElement(panel.staticTexts.matching(identifier: "Core outcome"), in: panel, failures: failures)
+        let commandsAttempted = try diagnosticsCoreReport(panel)
+        try require((1...3).contains(commandsAttempted), "iOS diagnostics command count exceeds the original roster")
+        _ = try remaining(1)
+        try require(failed.count == 0 && context.element(boundBy: 0).label == originalContext,
+                    "original iOS diagnostics context changed during readback")
+        for query in [fresh, phase, outcome, finality, provenance] {
+            _ = try unique(query, "same original iOS report did not remain current and settled")
+        }
+        // Missing/unselected/version-mismatch rows remain observations. This
+        // does not establish SDK completeness, native tool protection or signing.
+    }
+
     @MainActor func testSyntheticProjectUnsignedIOSArchive() throws {
         packagedRequireDiagnosticActive = true
         defer { packagedRequireDiagnosticActive = false }
@@ -6961,6 +7028,8 @@ final class NormalAppUITests: XCTestCase {
                                     in: renderer, failures: ["Static observation unavailable", "Only a partial static observation is available"])
                 _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "iOS selected fixture differs")
                 _ = try waitElement(renderer.staticTexts.matching(identifier: "org.example.mrk.observed"), in: renderer)
+                try fixture.assertUnchanged()
+                try observeIOSToolDiagnostics(renderer)
                 try fixture.assertUnchanged()
             }
             let failures = ["No new iOS archive outcome was confirmed", "Cleanup needs attention"]
