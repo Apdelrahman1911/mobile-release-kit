@@ -848,7 +848,7 @@ impl Reason {
     }
     fn android(self) -> Result<android_wire::Reason, BridgeError> { Ok(match self {
         Self::JournalUnavailable=>android_wire::Reason::JournalUnavailable,Self::RecoveryRequired=>android_wire::Reason::RecoveryRequired,
-        Self::CandidateInputsUnavailable=>android_wire::Reason::CandidateInputsUnavailable,Self::PrepareUnavailable|Self::EnrollmentExists=>return Err(BridgeError::protocol()),
+        Self::CandidateInputsUnavailable=>android_wire::Reason::CandidateInputsUnavailable,Self::ExecuteUnavailable|Self::PrepareUnavailable|Self::EnrollmentExists=>return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),
             Self::None => android_wire::Reason::None, Self::Cancelled => android_wire::Reason::Cancelled, Self::ContextChanged => android_wire::Reason::ContextChanged,

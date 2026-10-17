@@ -83,7 +83,7 @@ jobs:
           export GEM_PATH="$GEM_HOME" PATH="$GEM_HOME/bin:$PATH"
           export BUNDLE_PATH="$WORK_ROOT/gems" BUNDLE_USER_HOME="$WORK_ROOT/home/bundle"
           export BUNDLE_IGNORE_CONFIG=1 BUNDLE_FROZEN=true BUNDLE_DEPLOYMENT=true
-          gem --norc install bundler --version 4.0.16 --no-document --clear-sources --source https://rubygems.org
+          gem install --norc bundler --version 4.0.16 --no-document --clear-sources --source https://rubygems.org
           bundle _4.0.16_ install --jobs 2 --retry 1
       - name: Test real Supply adapters against isolated fake Store fixtures
         shell: bash
