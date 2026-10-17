@@ -12206,6 +12206,18 @@ mod installer {
             book.persist(observed.prepared.destination,false)?; held_bytes(book,reader,bytes)?;
             book.forward_close(reader,"maintenance-capsule-close")
         }
+        // Diagnostics only, AFTER the original complete/inverse/exit decisions.
+        // A successful call is not sufficient when persisted progress or state
+        // is incomplete. Never let this fallback make an inverse eligible.
+        pub(super) fn finality_reason_data(reason: Option<&'static str>, complete: bool,
+            unknown: bool, recorded: bool, published: bool, state_present: bool) -> Option<&'static str> {
+            if reason.is_some() || complete { return reason; }
+            Some(if unknown { "maintenance-finality-unknown" }
+                else if !recorded { "maintenance-progress-finality" }
+                else if !published { "maintenance-state-not-published" }
+                else if !state_present { "maintenance-state-missing" }
+                else { "maintenance-finality-incomplete" })
+        }
         pub(super) fn finish(book: &mut Install, result: Result<()>, settled: bool, timely: bool) -> FinalResult {
             let (at, uncertain) = timestamp(book);
             if uncertain { book.unknown = true; }
@@ -12237,7 +12249,10 @@ mod installer {
                 ActionData::RestoreFixedApp => "restored-app", _ => "installed" } }
                 else if inverse { "inverse-recorded" } else if published { "partial-installation-retained" }
                 else if book.unknown || progress == ProgressOutcomeData::Unknown { "unknown-retained" } else { "refused-staging-retained" };
-            FinalResult { state,reason,exit:if complete { 0 } else if published || inverse { 20 } else { 1 },deadline_met:timely }
+            let exit = if complete { 0 } else if published || inverse { 20 } else { 1 };
+            let reason = finality_reason_data(reason,complete,book.unknown,progress == ProgressOutcomeData::Recorded,
+                effects.state_published,effects.state.is_some());
+            FinalResult { state,reason,exit,deadline_met:timely }
         }
     }
 
@@ -12984,6 +12999,8 @@ mod installer {
             "maintenance-producer-generation", "maintenance-producer-name", "maintenance-producer-name-reused",
             "maintenance-producer-pair-missing", "maintenance-producer-record", "maintenance-producer-source-bytes",
             "maintenance-producer-state", "maintenance-progress-missing", "maintenance-record-attributes",
+            "maintenance-finality-unknown", "maintenance-progress-finality", "maintenance-state-not-published",
+            "maintenance-state-missing", "maintenance-finality-incomplete",
             "maintenance-record-binding", "maintenance-record-close", "maintenance-record-content",
             "maintenance-record-post", "maintenance-record-read", "maintenance-record-size",
             "maintenance-record-stat", "maintenance-release-original", "maintenance-renamed-attributes",
@@ -14030,6 +14047,21 @@ mod installer {
         #[cfg(test)]
         pub(super) fn completed_failure_diagnostic_data_checks() {
             // Pure diagnostic formatting only: no native/Installer/FD execution.
+            assert_eq!(maintenance::finality_reason_data(None,true,true,false,false,false),None);
+            assert_eq!(maintenance::finality_reason_data(Some("deadline"),false,true,false,false,false),Some("deadline"));
+            for (unknown,recorded,published,present,expected) in [
+                (true,false,false,false,"maintenance-finality-unknown"),
+                (false,false,false,false,"maintenance-progress-finality"),
+                (false,true,false,false,"maintenance-state-not-published"),
+                (false,true,true,false,"maintenance-state-missing"),
+                (false,true,true,true,"maintenance-finality-incomplete"),
+            ] {
+                let reason=maintenance::finality_reason_data(None,false,unknown,recorded,published,present);
+                assert_eq!(reason,Some(expected));
+                assert_eq!(completed_reason_data(None,reason),Some(expected));
+                assert!(completed_failure_line_data(reason,20,true,true,true,unknown,true).unwrap()
+                    .contains(&hash(expected.as_bytes())));
+            }
             assert_eq!(completed_reason_data(Some("worker-self-image"),Some("deadline")),Some("worker-self-image"));
             assert_eq!(completed_reason_data(None,Some("deadline")),Some("deadline"));
             assert_eq!(completed_reason_data(None,Some("/private/not-a-public-diagnostic")),Some("other-original-refusal"));
