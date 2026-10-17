@@ -1,5 +1,5 @@
-//! A private loan of an assigned local ADC snapshot, never a renderer path or
-//! environment map. This does not authorize Store execution or authenticate Google.
+//! A private loan of an assigned local Store snapshot, never a renderer path or
+//! environment map. This does not authorize Store execution or authenticate an account.
 use super::*;
 use crate::local_store_preflight_protocol as wire;
 use sha2::{Digest, Sha256};
@@ -15,12 +15,21 @@ pub(crate) struct SelectedStoreMaterial {
 #[derive(Clone,PartialEq,Eq)]
 enum StoreCommand {Access(wire::Context),Prepare(crate::local_store_prepare_protocol::Context),Reconcile(crate::local_store_reconcile_protocol::Context),Execute(crate::local_store_execute_protocol::Context)}
 fn refused() -> BridgeError {
-    BridgeError::new("local_store_credentials", "Select This Mac and assign the current Google Play service-account file for this release context, then review again.")
+    BridgeError::new("local_store_credentials", "Select This Mac and assign the current Store credential for this release context, then review again.")
 }
 fn bytes(payload: &Payload) -> Option<&[u8]> {
     if payload.kind != Kind::GoogleServiceAccount { return None; }
     payload.material.as_ref().filter(|m| m.observation.is_observed()).map(|m| m.bytes())
         .filter(|value| !value.is_empty() && value.len() <= 16 * 1024)
+}
+fn apple_parts(payload:&Payload)->Option<(&[u8],&[u8],&[u8])>{
+    if payload.kind!=Kind::AscP8{return None;}
+    let key=payload.material.as_ref().filter(|m|m.observation.is_observed())?.bytes();
+    let fields=payload.fields.as_ref()?;
+    let key_id=fields.borrow_value("keyId")?.as_bytes();let issuer=fields.borrow_value("issuerId")?.as_bytes();
+    if key.is_empty()||key.len()>16*1024||key_id.len()!=10||!key_id.iter().all(|b|b.is_ascii_uppercase()||b.is_ascii_digit())
+        ||issuer.len()!=36||!issuer.iter().enumerate().all(|(i,b)|if [8,13,18,23].contains(&i){*b==b'-'}else{b.is_ascii_hexdigit()}){return None;}
+    Some((key,key_id,issuer))
 }
 impl SelectedStoreMaterial {
     pub(super) fn census_parts(&self) -> (&Arc<NativeContext>, &Arc<Payload>) { (&self.native, &self.payload) }
@@ -41,11 +50,16 @@ impl SelectedStoreMaterial {
         if let Some(loan)=&self.execute_tools{bytes=bytes.checked_add(loan.own_backing_bytes()?)?;}
         Some(bytes)
     }
+    fn apple_access(&self)->bool {matches!(&self.command,Some(StoreCommand::Access(c)) if c.platform==wire::AccessPlatform::Ios)}
+    pub(crate) fn accepts_access_consent(&self,input:&wire::Start)->bool {
+        matches!(&self.command,Some(StoreCommand::Access(c)) if input.matches_context(c))
+    }
     pub(crate) fn matches(&self, context: &wire::Context, registration: u32, root: &asset_source::RegisteredRoot) -> bool {
         matches!(self.command.as_ref(),Some(StoreCommand::Access(c)) if c==context) && self.native.registry_generation == registration && self.native.project == *root
             && self.native.project_id == context.project_id && self.native.revision == context.credential_context_revision
             && self.key.id.0 == context.record_id && self.key.revision == context.record_revision
-            && self.native.execution_mode == commands::ExecutionMode::Local && self.native.platform == Platform::Android
+            && self.native.execution_mode == commands::ExecutionMode::Local
+            && self.native.platform == if context.platform==wire::AccessPlatform::Ios{Platform::Ios}else{Platform::Android}
             && matches!(self.native.purpose, Purpose::Full | Purpose::Store)
     }
     pub(crate) fn context_data(&self) -> Result<wire::Content, BridgeError> {
@@ -56,22 +70,28 @@ impl SelectedStoreMaterial {
     // payload bytes; holding the Arc keeps them alive until all original joins.
     pub(crate) fn parts(&self) -> Result<Vec<(&'static str, &[u8])>, BridgeError> {
         if self.command.is_none() { return Err(refused()); }
-        let mut parts = Vec::new(); parts.try_reserve_exact(1).map_err(|_| refused())?;
-        parts.push(("google-service-account", bytes(&self.payload).ok_or_else(refused)?));
+        let mut parts = Vec::new(); parts.try_reserve_exact(if self.apple_access(){3}else{1}).map_err(|_| refused())?;
+        if self.apple_access(){
+            let(key,key_id,issuer)=apple_parts(&self.payload).ok_or_else(refused)?;
+            parts.extend([("asc-p8",key),("asc-key-id",key_id),("asc-issuer-id",issuer)]);
+        }else{parts.push(("google-service-account", bytes(&self.payload).ok_or_else(refused)?));}
         Ok(parts)
     }
     pub(crate) fn header(&self) -> Result<Vec<u8>, BridgeError> {
         let parts = self.parts()?;
         let mut header = serde_json::to_vec(&serde_json::json!({"schemaVersion":1,
-            "files":[{"role":"google-service-account","bytes":parts[0].1.len()}]})).map_err(|_| refused())?;
+            "files":parts.iter().map(|(role,bytes)|serde_json::json!({"role":role,"bytes":bytes.len()})).collect::<Vec<_>>()})).map_err(|_| refused())?;
         header.push(b'\n'); if header.len() > 1024 { return Err(refused()); } Ok(header)
     }
     pub(super) fn current(&self, state: &DocumentState, registration: u32, root: &asset_source::RegisteredRoot) -> bool {
-        self.native.execution_mode == commands::ExecutionMode::Local && self.native.platform == Platform::Android
+        let apple=self.apple_access();
+        self.native.execution_mode == commands::ExecutionMode::Local
+            && self.native.platform == if apple{Platform::Ios}else{Platform::Android}
             && matches!(self.native.purpose, Purpose::Full | Purpose::Store)
             && self.native.registry_generation == registration && self.native.project == *root
-            && github_secret::assigned(state, &self.key, Kind::GoogleServiceAccount, &self.native)
-                .is_some_and(|current| Arc::ptr_eq(current, &self.payload)) && bytes(&self.payload).is_some()
+            && github_secret::assigned(state, &self.key, if apple{Kind::AscP8}else{Kind::GoogleServiceAccount}, &self.native)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.payload))
+            && if apple{apple_parts(&self.payload).is_some()}else{bytes(&self.payload).is_some()}
     }
     // Only the same document's future owned ADC writer may use this callback.
     // Currentness is checked while its caller retains the actual document lock;
@@ -84,21 +104,25 @@ impl SelectedStoreMaterial {
 }
 pub(super) fn borrow_material(state: &DocumentState, record: commands::RecordRef<'_>, context_revision: u32)
     -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
+    borrow_selected_material(state,record,context_revision,None)
+}
+fn borrow_selected_material(state:&DocumentState,record:commands::RecordRef<'_>,context_revision:u32,access:Option<&wire::Context>)
+    ->Result<Arc<SelectedStoreMaterial>,BridgeError>{
     if record.record_id.len() != 32 || !record.record_id.bytes().all(|b| b.is_ascii_hexdigit())
         || record.expected_revision == 0 || context_revision == 0 { return Err(refused()); }
     let native = state.context.as_ref().filter(|v| v.revision == context_revision
         && !v.project_id.is_empty() && !v.draft.is_empty() && v.draft.len() <= 512 * 1024).ok_or_else(refused)?.clone();
     let key = RecordKey { id: Token(record.record_id.into()), revision: record.expected_revision };
-    let payload = github_secret::assigned(state, &key, Kind::GoogleServiceAccount, &native).ok_or_else(refused)?.clone();
-    let original = Arc::new(SelectedStoreMaterial { native, key, payload, command: None,prepare_document:None,execute_tools:None });
+    let kind=if access.is_some_and(|c|c.platform==wire::AccessPlatform::Ios){Kind::AscP8}else{Kind::GoogleServiceAccount};
+    let payload = github_secret::assigned(state, &key, kind, &native).ok_or_else(refused)?.clone();
+    let original = Arc::new(SelectedStoreMaterial { native, key, payload, command: access.map(|c|StoreCommand::Access(c.clone())),prepare_document:None,execute_tools:None });
     if !original.current(state, original.native.registry_generation, &original.native.project) { return Err(refused()); }
     Ok(original)
 }
 pub(super) fn borrow_preflight_material(state: &DocumentState, context: &wire::Context,
     registration: u32, project: &asset_source::RegisteredRoot) -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
-    let mut original = borrow_material(state, commands::RecordRef { record_id: &context.record_id,
-        expected_revision: context.record_revision }, context.credential_context_revision)?;
-    Arc::get_mut(&mut original).ok_or_else(refused)?.command = Some(StoreCommand::Access(context.clone()));
+    let original = borrow_selected_material(state, commands::RecordRef { record_id: &context.record_id,
+        expected_revision: context.record_revision }, context.credential_context_revision,Some(context))?;
     if !original.matches(context, registration, project) || !original.current(state, registration, project) { return Err(refused()); }
     original.parts()?;
     Ok(original)
@@ -156,6 +180,63 @@ mod tests {
             fields:None,material:Some(Arc::new(Material { observation,origin:MaterialOrigin::Selected(asset_source::CapturedSource::memory_data(value)) })) }) });
         state.assignments.push(Assignment { kind:Kind::GoogleServiceAccount,record_id:key.id,record_revision:1,context_revision:2,
             availability:AssignmentAvailability::Available }); state
+    }
+    fn apple_model()->DocumentState {
+        let mut state=model();
+        Arc::get_mut(state.context.as_mut().unwrap()).unwrap().platform=Platform::Ios;
+        // Minimal canonical PKCS8 envelope with inert private octets, NOT a
+        // usable private key. The bundled validator must still prove P256.
+        let raw=b"\x30\x1b\x02\x01\x00\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x04\x01\x01".to_vec();
+        let observation=credential_format::inspect(credential_format::FileKind::AscP8,&raw,&mut||false).ok().unwrap();
+        assert!(observation.is_observed());
+        state.records[0].payload=Arc::new(Payload{kind:Kind::AscP8,
+            material:Some(Arc::new(Material{observation,origin:MaterialOrigin::Selected(asset_source::CapturedSource::memory_data(raw))})),
+            fields:Some(commands::own_fields(Kind::AscP8,&serde_json::json!({"keyId":"ABCDEFGHIJ","issuerId":"12345678-1234-1234-1234-123456789abc"})).ok().unwrap())});
+        state.assignments[0].kind=Kind::AscP8;state
+    }
+    #[test]
+    fn apple_access_loan_retains_exact_fields_and_never_lends_google_mutation_material(){
+        let mut state=apple_model();let root=state.context.as_ref().unwrap().project.clone();
+        let mut c=wire::tests::context();c.project_id="inert-project".into();c.credential_context_revision=2;c.record_id="a".repeat(32);c.record_revision=1;c.platform=wire::AccessPlatform::Ios;
+        assert!(borrow_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2).is_err());
+        let original=borrow_preflight_material(&state,&c,7,&root).unwrap();let parts=original.parts().unwrap();
+        assert_eq!(parts.iter().map(|p|p.0).collect::<Vec<_>>(),vec!["asc-p8","asc-key-id","asc-issuer-id"]);
+        let payload=&state.records[0].payload;
+        assert_eq!(parts[0].1.as_ptr(),payload.material.as_ref().unwrap().bytes().as_ptr());
+        assert_eq!(parts[1].1.as_ptr(),payload.fields.as_ref().unwrap().borrow_value("keyId").unwrap().as_ptr());
+        assert_eq!(parts[2].1.as_ptr(),payload.fields.as_ref().unwrap().borrow_value("issuerId").unwrap().as_ptr());
+        let header=String::from_utf8(original.header().unwrap()).unwrap();assert!(!header.contains("ABCDEFGHIJ")&&!header.contains("12345678"));
+        let start=wire::start(&serde_json::json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":wire::APPLE_CONSENT})).unwrap();
+        assert!(original.accepts_access_consent(&start));
+        let start=wire::start(&serde_json::json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap();
+        assert!(!original.accepts_access_consent(&start));
+        let mut google=c.clone();google.platform=wire::AccessPlatform::Android;assert!(!original.matches(&google,7,&root));
+        assert!(borrow_preflight_material(&state,&google,7,&root).is_err());
+        assert!(original.with_bytes(&state,7,&root,|_,_|Ok(())).is_err());
+        let held=Arc::downgrade(&original.payload);state.lock_pending=true;assert!(!original.current(&state,7,&root));
+        drop(parts);drop(state);assert!(held.upgrade().is_some());assert_eq!(original.parts().unwrap().len(),3);
+        drop(original);assert!(held.upgrade().is_none());
+    }
+    #[test]
+    fn apple_access_key_and_scalar_bounds_refuse_before_private_writer(){
+        let mut state=apple_model();let root=state.context.as_ref().unwrap().project.clone();
+        let mut c=wire::tests::context();c.project_id="inert-project".into();c.credential_context_revision=2;c.record_id="a".repeat(32);c.record_revision=1;c.platform=wire::AccessPlatform::Ios;
+        // Exact native capture may admit larger files, but this operation never
+        // borrows beyond its existing16KiB private material bound.
+        let payload=Arc::get_mut(&mut state.records[0].payload).unwrap();
+        payload.fields=Some(commands::own_fields(Kind::AscP8,&serde_json::json!({"keyId":"too-short","issuerId":"12345678-1234-1234-1234-123456789abc"})).ok().unwrap());
+        assert!(borrow_preflight_material(&state,&c,7,&root).is_err());
+        payload_restore(&mut state);
+        let payload=Arc::get_mut(&mut state.records[0].payload).unwrap();
+        let old=payload.material.take().unwrap();
+        // Reuse only the inert observed envelope DATA, not a native observation
+        // claim about these overlarge bytes; rejection depends on byte bound.
+        let observation=credential_format::inspect(credential_format::FileKind::AscP8,old.bytes(),&mut||false).ok().unwrap();
+        payload.material=Some(Arc::new(Material{observation,origin:MaterialOrigin::Selected(asset_source::CapturedSource::memory_data(vec![1;16*1024+1]))}));
+        assert!(borrow_preflight_material(&state,&c,7,&root).is_err());
+    }
+    fn payload_restore(state:&mut DocumentState){
+        Arc::get_mut(&mut state.records[0].payload).unwrap().fields=Some(commands::own_fields(Kind::AscP8,&serde_json::json!({"keyId":"ABCDEFGHIJ","issuerId":"12345678-1234-1234-1234-123456789abc"})).ok().unwrap());
     }
     #[test]
     fn store_command_loan_binds_canonical_context_and_retains_private_writer_bytes() {

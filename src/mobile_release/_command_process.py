@@ -779,7 +779,7 @@ class CommandCallEvidence:
         self._owner(source.guard)
         _require(type(source) is StorePreflightInput and source.guard._saved_command_input() is source
                  and not self._used and self._engine is None and not self._desktop_readback_capped
-                 and self._reservation is not None and self._reservation[1] == "android"
+                 and self._reservation is not None and self._reservation[1] == source.require_operation().request.context["platform"]
                  and self._lane_reservation is None and self._expected is not None
                  and self._expected[5] == 900 and type(timeout) is int and 1 <= timeout <= 900)
         source.require_operation().require_query_timing(timeout)

@@ -8,6 +8,10 @@ require_relative "../../desktop/tools/verify_macos_store_runtime"
 class MacOSStoreRuntimeTest < Minitest::Test
   Spec = Struct.new(:name, :version, :full_gem_path)
 
+  def test_apple_crypto_uses_real_p256_pem_der_and_signature_verification
+    assert StoreRuntimeComponent.apple_crypto_smoke
+  end
+
   def test_native_image_detection_handles_empty_gem_resources_without_hiding_read_errors
     Dir.mktmpdir("mrk-store-magic-") do |root|
       file = File.join(root, "ordinary-data")

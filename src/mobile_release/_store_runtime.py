@@ -93,7 +93,7 @@ class StoreRuntimeContext:
     @contextmanager
     def command(self, argv, *, capture: bool):
         # Existing CLI/context callers retain their original checked scope.
-        # Only the exact Desktop source additionally admits its fixed six roles.
+        # The exact Desktop source additionally admits its fixed platform roles.
         source = self._invocation.cancellation._store_preflight_source or self._invocation.cancellation._local_store_source
         if source is None:
             with self.checked():

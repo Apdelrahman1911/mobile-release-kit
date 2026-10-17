@@ -25,8 +25,28 @@ module StoreRuntimeComponent
     loaded = $LOADED_FEATURES.select { |name| name.end_with?("/digest/crc32/crc32_ext.bundle") }
     abort "CRC32 extension escaped runtime" unless loaded.length == 1 && File.realpath(loaded.first).start_with?(root + "/")
     abort "CRC32 result differs" unless Digest::CRC32.hexdigest("123456789") == "cbf43926"
+    apple_crypto_smoke
     Fastlane::FastFile.new(File.join(root, "tooling/fastlane/Fastfile"))
-    puts "Projected signed runtime: native CRC32 and Fastlane require/parse passed; no lane or Store request."
+    puts "Projected signed runtime: native CRC32, Apple P256 crypto and Fastlane require/parse passed; no lane or Store request."
+  end
+
+  # Exercise the bundled OpenSSL APIs used by Apple credential validation.
+  # Generated test material stays in memory; never read or print a user's key.
+  def self.apple_crypto_smoke
+    require "openssl"
+    key = OpenSSL::PKey::EC.generate("prime256v1")
+    public_key = OpenSSL::PKey.read(key.public_to_der)
+    raise "Apple P256 public key unexpectedly private" if public_key.private?
+    message = "Mobile Release Kit offline Apple crypto check"
+    [key.private_to_pem, key.private_to_der].each do |encoded|
+      parsed = OpenSSL::PKey.read(encoded)
+      raise "Apple P256 parsing failed" unless parsed.is_a?(OpenSSL::PKey::EC) && parsed.private? &&
+        parsed.group.curve_name == "prime256v1" && parsed.check_key
+      signature = parsed.sign("SHA256", message)
+      raise "Apple P256 signature verification failed" unless public_key.verify("SHA256", signature, message)
+      raise "Apple P256 changed-message verification passed" if public_key.verify("SHA256", signature, message + "changed")
+    end
+    true
   end
 
   def self.native_image?(path)

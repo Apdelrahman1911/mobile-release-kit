@@ -24,6 +24,9 @@ impl SavedCommandOwner {
     pub(crate) fn start_store(&self,input:store_wire::Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,
         gate:store_wire::Availability,material:Arc<SelectedStoreMaterial>)->Result<crate::local_store_preflight_owner::Admitted,BridgeError>{
         self.require_domain(SavedCommandDomain::LocalStorePreflight)?;
+        // Parsed consent is not permission: match the same prepared private loan
+        // before the existing owner may publish GO or private material.
+        if !material.accepts_access_consent(&input){return Err(self.inner.domain.invalid_owner());}
         let admitted=self.start_bound(Start{operation_id:input.operation_id,owner_generation:input.owner_generation},admitted_at,registered,
             Availability::from_store(gate),Some(PrivateSigningMaterial::Store(material)))?;
         Ok(crate::local_store_preflight_owner::Admitted::new(admitted.status.store()?,admitted.release))
@@ -195,7 +198,10 @@ pub(crate) fn document_backing_bytes()->Option<usize>{
     // public projection/status. Four context copies bound by actual IPC limit.
     for (count,size) in [(2usize,store_wire::REQUEST_LIMIT),(6,store_wire::RESPONSE_LIMIT),
         (2,store_wire::STATUS_LIMIT),(4,store_wire::IPC_LIMIT),(6,4096),(1,1024),
-        (3,4096),(32,std::mem::size_of::<usize>()*8)]{
+        (3,4096),(32,std::mem::size_of::<usize>()*8),
+        // Apple borrows two additional scalar slices, plus bounded typed header
+        // rows. Original Payload/Fields storage is already in Document census.
+        (2,std::mem::size_of::<(&str,&[u8])>()),(2,1024),(1,46)]{
         total=total.checked_add(count.checked_mul(size)?)?;
     }
     Some(total)

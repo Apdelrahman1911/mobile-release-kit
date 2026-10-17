@@ -1,4 +1,4 @@
-"""Closed local Android access-check DATA; never release authority or secrets."""
+"""Closed local Store access-check DATA; never release authority or secrets."""
 from __future__ import annotations
 import json
 import stat
@@ -10,6 +10,11 @@ from ._desktop_android_build_protocol import saved_version
 PROTOCOL = "mrk-local-store-preflight/1"
 CONSENT = "local-android-store-access-v1"
 SCOPE = "local-android-store-access-no-publishing"
+APPLE_SCOPE = "local-ios-store-access-no-publishing"
+
+def command_count(platform):
+    require(platform in ("android", "ios"))
+    return 7 if platform == "ios" else 6
 REQUEST_LIMIT, RESPONSE_LIMIT = 16 * 1024, 16 * 1024
 WORK_SECONDS, FINALITY_SECONDS = 1200, 1210
 PROFILES = {"macos-x86_64": ("macos", "x86_64"), "macos-arm64": ("macos", "arm64")}
@@ -27,7 +32,8 @@ def require(ok):
     if not ok:
         raise ProtocolError("Invalid local Store access-check protocol")
 
-def context(value):
+def context(value, *, apple_access=False):
+    require(type(apple_access) is bool)
     value = _keys(value, {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
                          "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "operation"})
     require(type(value["projectId"]) is str and _PROJECT.fullmatch(value["projectId"]) is not None
@@ -35,7 +41,7 @@ def context(value):
             and integer(value["credentialContextRevision"], 2**32-2, 1)
             and integer(value["recordRevision"], 2**32-2, 1)
             and type(value["recordId"]) is str and _TOKEN.fullmatch(value["recordId"]) is not None
-            and value["executionMode"] == "local" and value["platform"] == "android"
+            and value["executionMode"] == "local" and (value["platform"] == "android" or apple_access and value["platform"] == "ios")
             and value["operation"] == "local-store-preflight")
     return {**value, "savedConfig": content(value["savedConfig"]), "savedVersion": saved_version(value["savedVersion"])}
 
@@ -55,7 +61,7 @@ def parse_request(raw):
         value = _keys(value, {"protocol", "operationId", "ownerGeneration", "context", "native"})
         require(value["protocol"] == PROTOCOL and all(type(value[k]) is str and _TOKEN.fullmatch(value[k])
                 for k in ("operationId", "ownerGeneration")))
-        selected = context(value["context"])
+        selected = context(value["context"], apple_access=True)
         native = _keys(value["native"], {"profile", "projectRoot", "rootIdentity", "cwd", "credentialConfig"})
         require(native["profile"] in PROFILES)
         _path(native["projectRoot"]); _path(native["cwd"])
@@ -68,23 +74,28 @@ def parse_request(raw):
     except (ValueError, TypeError, UnicodeError, RecursionError):
         raise ProtocolError("Invalid local Store access-check protocol") from None
 
-def project_result(findings):
+def project_result(findings, *, platform="android"):
     from .reporting import Finding, Status
     require(type(findings) is list and len(findings) <= 16)
     names = {"credential-material.google-adc":"credential-format", "store.online.gate":"query-prerequisites",
              "store.online.tooling":"runtime-unavailable", "store.online.fastfile":"bundle-unavailable",
              "store.online.bundle":"bundle-unavailable", "store.online.android":"store-access"}
+    require(platform in ("android", "ios"))
+    if platform == "ios":
+        del names["credential-material.google-adc"]; del names["store.online.android"]
+        names.update({"credential-material.apple-p8":"credential-format", "store.online.ios":"store-access"})
     rows=[]
     for finding in findings:
         require(type(finding) is Finding and type(finding.status) is Status and finding.code in names)
         rows.append({"check":names[finding.code],"status":finding.status.value})
-    result={"schemaVersion":1,"scope":SCOPE,"findings":rows,"limitations":list(LIMITATIONS)}
-    validate_result(result)
+    result={"schemaVersion":1,"scope":APPLE_SCOPE if platform == "ios" else SCOPE,"findings":rows,"limitations":list(LIMITATIONS)}
+    validate_result(result, platform=platform)
     return result
 
-def validate_result(value):
+def validate_result(value, *, platform="android"):
+    require(platform in ("android", "ios"))
     value=_keys(value,{"schemaVersion","scope","findings","limitations"})
-    require(type(value["schemaVersion"]) is int and value["schemaVersion"]==1 and value["scope"]==SCOPE
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"]==1 and value["scope"]==(APPLE_SCOPE if platform == "ios" else SCOPE)
             and value["limitations"]==LIMITATIONS and type(value["findings"]) is list and len(value["findings"])<=16)
     for row in value["findings"]:
         row=_keys(row,{"check","status"})
@@ -92,19 +103,19 @@ def validate_result(value):
 
 def validate_terminal(value,request):
     value=_keys(value,{"schemaVersion","context","outcome","reason","result","lifetime"})
-    require(type(value["schemaVersion"]) is int and value["schemaVersion"]==1 and context(value["context"])==request.context
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"]==1 and context(value["context"], apple_access=True)==request.context
             and value["outcome"] in OUTCOMES and value["reason"] in REASONS)
     life=_keys(value["lifetime"],{"complete","fatal","contained","commandDispatched","commands","profileCalls",
                                 "inputClosed","handlersRestored","invocationClosed","stopObserved"})
     require(all(type(life[k]) is bool for k in ("complete","fatal","contained","inputClosed","handlersRestored","invocationClosed"))
             and (life["commandDispatched"] is None or type(life["commandDispatched"]) is bool)
-            and integer(life["commands"],6) and type(life["profileCalls"]) is int and life["profileCalls"]==0
+            and integer(life["commands"],command_count(request.context["platform"])) and type(life["profileCalls"]) is int and life["profileCalls"]==0
             and life["stopObserved"] in {"none","cancelled","timed-out"})
     settled=(life["complete"] and not life["fatal"] and life["contained"] and life["inputClosed"]
              and life["handlersRestored"] and life["invocationClosed"] and life["commandDispatched"] is not None)
     if value["outcome"]=="complete":
         require(settled and value["reason"]=="none" and life["stopObserved"]=="none")
-        validate_result(value["result"])
+        validate_result(value["result"], platform=request.context["platform"])
     else:
         require(value["result"] is None and value["reason"]!="none" and (settled or value["outcome"]=="unknown"))
         if value["outcome"]=="unknown": require(not settled and value["reason"]=="cleanup-unknown")

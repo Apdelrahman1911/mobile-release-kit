@@ -1408,6 +1408,35 @@ def _validate_p8(
                                  cancellation=cancellation)
 
 
+# Fixed bundled validator: no public-key dump or exception/key text escapes.
+APPLE_P8_CHECK = ("begin; k=OpenSSL::PKey.read(File.binread(ARGV.fetch(0))); "
+    "ok=k.is_a?(OpenSSL::PKey::EC) && k.private? && "
+    "k.group.curve_name=='prime256v1' && k.check_key; exit(ok ? 0 : 1); "
+    "rescue StandardError; exit 1; end")
+
+
+def _validate_installed_p8(material, runtime):
+    from ._store_runtime import StoreRuntimeContext
+    from ._desktop_store_preflight_control import StorePreflightInput
+    guard = material._scratch.cancellation
+    source = guard._store_preflight_source
+    if (type(source) is not StorePreflightInput or type(runtime) is not StoreRuntimeContext
+            or source.guard is not guard or source.require_operation().runtime is not runtime):
+        raise CredentialError("Bundled Apple validation lacks its original Store input")
+    operation = source.require_operation()
+    command = operation.apple_material_command(material)
+    runtime.require(root=material._root, invocation=material._invocation)
+    try:
+        with runtime.command(command, capture=True):
+            result = run_owned(command, environ=runtime.environment(), cwd=runtime.tooling_root,
+                               timeout=30, output_limit=4096, cancellation=guard)
+    finally:
+        material._scratch.require(material._p8)
+        operation._received_post()
+    return Finding("credential-material.apple-p8", Status.PASS if result.returncode == 0 else Status.INVALID,
+                   "Selected Apple key validation completed.", category="credentials")
+
+
 def _validate_selected_p8(
     selected_path: Callable[[], Path], *, execution_source=None,
     cancellation: _ProfileCancellation | None = None,
@@ -1877,10 +1906,12 @@ class SelectedStoreMaterial:
                 self._p8 = self._scratch.put("asc-p8", self._p8_content)
         self._state = "selected"
 
-    def validate(self, *, execution_source=None) -> tuple[Finding, ...]:
+    def validate(self, *, execution_source=None, runtime_context=None) -> tuple[Finding, ...]:
         self._owner()
         if self._state != "selected":
             raise CredentialError("Store material validation cannot be repeated")
+        if runtime_context is not None and (self._platforms != ("ios",) or execution_source is not None):
+            raise CredentialError("Bundled Apple validation requires its exact access selection")
         self._state = "validating"
         findings: list[Finding] = []
         try:
@@ -1890,10 +1921,15 @@ class SelectedStoreMaterial:
                         "App Store Connect P8 private key is missing.", category="credentials"))
                 else:
                     try:
-                        findings.append(_validate_selected_p8(
-                            lambda: self._scratch.require(self._p8), execution_source=execution_source,
-                            cancellation=self._scratch.cancellation,
-                        ))
+                        if runtime_context is not None:
+                            if execution_source is not None:
+                                raise CredentialError("Bundled Apple validation cannot borrow another execution source")
+                            findings.append(_validate_installed_p8(self, runtime_context))
+                        else:
+                            findings.append(_validate_selected_p8(
+                                lambda: self._scratch.require(self._p8), execution_source=execution_source,
+                                cancellation=self._scratch.cancellation,
+                            ))
                     except ProcessError as error:
                         if error.fatal:
                             raise

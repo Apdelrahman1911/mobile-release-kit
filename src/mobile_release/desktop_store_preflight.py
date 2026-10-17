@@ -1,4 +1,4 @@
-"""One original local Android Store-access query, never mutation authority.
+"""One original local Store-access query, never mutation authority.
 
 The native Session retains the installed runtime and selected private record.
 This child borrows its original cancellation/input, existing filesystem owners,
@@ -17,7 +17,7 @@ import threading
 import time
 
 from ._desktop_store_preflight_control import StorePreflightInput
-from ._desktop_store_preflight_protocol import StorePreflightRequest, ProtocolError, project_result, require
+from ._desktop_store_preflight_protocol import StorePreflightRequest, ProtocolError, command_count, project_result, require
 from ._store_runtime import StoreRuntimeContext
 from .build_inputs import (_Directory, _read_file, _attempt_all, FiniteScratch,
                            InvocationCustody, finite_scratch, invocation_custody)
@@ -56,6 +56,9 @@ class StorePreflightRun:
         self._pending = self._pending_argv = None
         self._pending_capture = None
         self._command_claimed = False
+        self._apple_material = None
+        self._received = None
+        self._received_material = None
         source.bind_operation(self)  # Before any fallible resource admission.
 
     def _request_data(self):
@@ -121,7 +124,7 @@ class StorePreflightRun:
                 raise _Refused("saved-source-changed")
             config = ReleaseConfig(path=self.root / "release/mobile-release.json", root=self.root, data=data)
             spec, saved = config.section("version"), self.request.context["savedVersion"]
-            if not config.platform_enabled("android") or spec["source"] != saved["source"]:
+            if not config.platform_enabled(self.request.context["platform"]) or spec["source"] != saved["source"]:
                 raise _Refused("saved-source-invalid")
             raw = self._read(saved["source"], MAX_VERSION_BYTES)
             if len(raw) != saved["bytes"] or hashlib.sha256(raw).hexdigest() != saved["sha256"]:
@@ -177,15 +180,52 @@ class StorePreflightRun:
         except (ValueError, TypeError, UnicodeError, KeyError, RecursionError):
             raise _Refused("credentials-unavailable") from None
 
+    @staticmethod
+    def validate_apple_shape(parts):
+        require(type(parts) is tuple and len(parts) == 3)
+        key, key_id, issuer = parts
+        if not (all(type(value) is bytes for value in parts) and 0 < len(key) <= 16 * 1024
+                and re.fullmatch(rb"[A-Z0-9]{10}", key_id)
+                and re.fullmatch(rb"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}", issuer)):
+            raise _Refused("credentials-unavailable")
+
+    def _received_post(self):
+        if self._received is not None:
+            scratch, snapshot = self._received
+            require(self.source._material is self._received_material)
+            scratch.require(snapshot)
+            if self.request.context["platform"] == "ios":
+                self.validate_apple_shape(self._received_material)
+
+    def apple_material_command(self, material):
+        from .credentials import SelectedStoreMaterial, APPLE_P8_CHECK
+        self.checkpoint()
+        require(self.request.context["platform"] == "ios" and type(material) is SelectedStoreMaterial
+                and material._invocation is self.invocation and material._platforms == ("ios",)
+                and len(self.scratches) >= 3 and material._scratch is self.scratches[2]
+                and material._scratch.cancellation is self.guard and material._state == "validating"
+                and self._apple_material in (None, material))
+        self._apple_material = material
+        self._received_post(); material._owner()
+        return ("bundle", "exec", "ruby", "-ropenssl", "-e", APPLE_P8_CHECK,
+                str(material._scratch.require(material._p8)))
+
+    @property
+    def _lane_index(self):
+        return command_count(self.request.context["platform"]) - 1
+
     @contextmanager
     def command(self, runtime, argv, *, capture):
         self.checkpoint()
         require(runtime is self.runtime and type(runtime) is StoreRuntimeContext and self._pending is None
-                and self._next_command < 6 and type(capture) is bool)
+                and self._next_command <= self._lane_index and type(capture) is bool)
         expected = (*_fastlane_probe_commands(runtime.tooling_root),
-                    ("bundle", "exec", "ruby", str(runtime.tooling_root / "fastlane/run_lane.rb"), "android_online_preflight"))
+                    ("bundle", "exec", "ruby", str(runtime.tooling_root / "fastlane/run_lane.rb"), self.request.context["platform"] + "_online_preflight"))
         index = self._next_command
-        require(tuple(argv) == expected[index] and capture is (index < 5))
+        if self.request.context["platform"] == "ios":
+            # Only the first command consumes the still-validating material.
+            expected = ((self.apple_material_command(self._apple_material) if index == 0 else ()), *expected)
+        require(tuple(argv) == expected[index] and capture is (index < self._lane_index))
         self._next_command += 1  # Failed/unknown calls are never replayed.
         self._pending, self._pending_argv, self._pending_capture = index, expected[index], capture
         self._command_claimed = False
@@ -202,18 +242,18 @@ class StorePreflightRun:
         self.checkpoint()
         require(self._pending is not None and not self._command_claimed
                 and tuple(argv) == self._pending_argv and capture is self._pending_capture
-                and (type(evidence) is CommandCallEvidence if self._pending == 5 else evidence is None))
+                and (type(evidence) is CommandCallEvidence if self._pending == self._lane_index else evidence is None))
         self._command_claimed = True
 
     def command_limits(self, timeout, capture, output_limit):
         self.checkpoint()
         require(self._pending is not None and capture is self._pending_capture and self._command_claimed)
-        maximum = 60 if self._pending < 5 else 900
+        maximum = 60 if self._pending < self._lane_index else 900
         return min(timeout, maximum), min(output_limit, 2 * 1024 * 1024)
 
     def require_query_timing(self, timeout):
         self.checkpoint()
-        require(self._pending == 5 and self._command_claimed and self._pending_capture is False
+        require(self._pending == self._lane_index and self._command_claimed and self._pending_capture is False
                 and type(timeout) is int and 1 <= timeout <= 900
                 and time.monotonic() + timeout <= self.source.work_end)
 
@@ -229,20 +269,29 @@ class StorePreflightRun:
                                                                invocation=invocation, private_home=home)
                     with finite_scratch(layout="store-selection", cancellation=self.guard, parent=home._path) as received:
                         original = self.source.receive_material(self, received)
-                        values = {"GOOGLE_APPLICATION_CREDENTIALS": str(received.require(original))}
-                        findings = store_material_prerequisite_findings(values=values, platforms=("android",))
-                        with _selected_store_material(config, values=values, platforms=("android",),
+                        platform = self.request.context["platform"]
+                        self._received = (received, original)
+                        self._received_material = self.source._material
+                        if platform == "android":
+                            values = {"GOOGLE_APPLICATION_CREDENTIALS": str(received.require(original))}
+                        else:
+                            self._received_post()
+                            values = {"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH": str(received.require(original)),
+                                      "MOBILE_RELEASE_ASC_KEY_ID": self.source._material[1].decode("ascii"),
+                                      "MOBILE_RELEASE_ASC_ISSUER_ID": self.source._material[2].decode("ascii")}
+                        findings = store_material_prerequisite_findings(values=values, platforms=(platform,))
+                        with _selected_store_material(config, values=values, platforms=(platform,),
                                                       invocation=invocation, scratch_parent=home._path) as material:
-                            findings.extend(material.validate())
-                            blockers = _online_query_blockers(config, ("android",), findings)
+                            findings.extend(material.validate(runtime_context=self.runtime) if platform == "ios" else material.validate())
+                            blockers = _online_query_blockers(config, (platform,), findings)
                             if blockers:
                                 findings.append(Finding("store.online.gate", Status.BLOCKED,
                                                         "Configure the required saved Store inputs.", category="store-access"))
                             elif not any(row.status in FAILING_STATUSES for row in findings):
                                 findings.extend(online_preflight_findings(config=config, release=version,
-                                    platforms=("android",), material=material, invocation=invocation, runtime_context=self.runtime))
-                            self._source_post()
-                            self.report = project_result(findings)
+                                    platforms=(platform,), material=material, invocation=invocation, runtime_context=self.runtime))
+                            self._source_post(); self._received_post()
+                            self.report = project_result(findings, platform=platform)
         except BaseException as error:
             self.remember(error)
             raise
@@ -262,6 +311,7 @@ class StorePreflightRun:
         actions.extend(directory.close for directory in reversed(self.directories))
         try:
             _attempt_all(self.guard, actions)
+            self._apple_material = self._received_material = None
         except BaseException as error:
             self.remember(error); self.guard._abort(error)
             raise
@@ -278,7 +328,7 @@ class StorePreflightRun:
 
     def terminal(self):
         verdict = self.guard.lifetime_ledger.verdict()
-        if verdict.profile_calls or verdict.commands > 6:
+        if verdict.profile_calls or verdict.commands > self._lane_index + 1:
             self.guard._abort(ProtocolError("Unexpected Store access command lifetime"))
             verdict = self.guard.lifetime_ledger.verdict()
         if time.monotonic() >= self.source.work_end:

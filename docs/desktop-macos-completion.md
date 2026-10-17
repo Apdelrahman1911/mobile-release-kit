@@ -69,7 +69,13 @@ History review, are integrated in source. Target-only Google Reconcile and its
 restart file-review route have independently reviewed core/UI implementations;
 joined native and installed qualification remain pending. Reconcile is a fresh
 current-target check, not upload retry, general recovery or promotion. Direct
-Google recovery/promotion and Apple Store operations remain unfinished. Receipt
+Google recovery/promotion and Apple Store mutations remain unfinished. Apple
+nonpublishing access now has integrated UI/core/native routing: assigned private
+P8 plus matching Key ID/Issuer ID, separate explicit consent, bundled P256
+validation (PEM or DER), and read-only app/group/build queries. Linux core/UI and
+crypto checks pass; actual native and installed access qualification remain
+pending. Access does not require Android module or Xcode project selection.
+Receipt
 review never establishes an old operation's finality or authorizes a retry.
 Candidate integration passed the actual Mac app/helper graphs and 27 focused
 native tests on each architecture in run `38969579047/1` at `18a54582`; positive

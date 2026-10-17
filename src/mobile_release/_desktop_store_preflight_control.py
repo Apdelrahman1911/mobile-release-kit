@@ -11,19 +11,24 @@ SUFFIX = b"\nMRK-STORE-MATERIAL-END\n"
 HEADER_LIMIT, MATERIAL_LIMIT = 1024, 16 * 1024
 
 
-def parse_header(raw: bytes) -> int:
-    require(type(raw) is bytes and 0 < len(raw) <= HEADER_LIMIT and raw.endswith(b"\n"))
+def parse_header(raw: bytes, *, platform="android"):
+    require(type(raw) is bytes and 0 < len(raw) <= HEADER_LIMIT and raw.endswith(b"\n")
+            and platform in ("android", "ios"))
+    roles = (("google-service-account", MATERIAL_LIMIT),) if platform == "android" else (
+        ("asc-p8", MATERIAL_LIMIT), ("asc-key-id", 10), ("asc-issuer-id", 36))
     try:
         value = json.loads(raw, object_pairs_hook=_pairs,
                            parse_constant=lambda _: require(False))
         require(type(value) is dict and set(value) == {"schemaVersion", "files"}
                 and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
-                and type(value["files"]) is list and len(value["files"]) == 1)
-        row = value["files"][0]
-        require(type(row) is dict and set(row) == {"role", "bytes"}
-                and row["role"] == "google-service-account"
-                and integer(row["bytes"], MATERIAL_LIMIT, 1))
-        return row["bytes"]
+                and type(value["files"]) is list and len(value["files"]) == len(roles))
+        lengths = []
+        for row, (role, maximum) in zip(value["files"], roles):
+            require(type(row) is dict and set(row) == {"role", "bytes"}
+                    and row["role"] == role and integer(row["bytes"], maximum, 1)
+                    and (role not in ("asc-key-id", "asc-issuer-id") or row["bytes"] == maximum))
+            lengths.append(row["bytes"])
+        return lengths[0] if platform == "android" else tuple(lengths)
     except (ValueError, TypeError, UnicodeError, RecursionError):
         require(False)
 
@@ -92,10 +97,20 @@ class StorePreflightInput(_SavedCommandInput):
             while not header.endswith(b"\n"):
                 self._require(len(header) < HEADER_LIMIT)
                 header.extend(take(1))
-            self._material = take(parse_header(bytes(header)))
-            self._require(take(len(SUFFIX)) == SUFFIX)
-            operation.validate_material_shape(self._material)
-            snapshot = scratch.put("google-adc", self._material)
+            platform = operation.request.context["platform"]
+            lengths = parse_header(bytes(header), platform=platform)
+            if platform == "android":
+                self._material = take(lengths)
+                self._require(take(len(SUFFIX)) == SUFFIX)
+                operation.validate_material_shape(self._material)
+                snapshot = scratch.put("google-adc", self._material)
+            else:
+                self._material = tuple(take(length) for length in lengths)
+                self._require(take(len(SUFFIX)) == SUFFIX)
+                operation.validate_apple_shape(self._material)
+                # Scalar fields stay on this same original private-input owner;
+                # only the key requires a file. Do not add scratch file roles.
+                snapshot = scratch.put("asc-p8", self._material[0])
             self.material_pending = False
         finally:
             self.material_receiving = False

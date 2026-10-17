@@ -6,7 +6,7 @@ import { LocalStorePrepareController, localStorePrepareOwnerReason } from './loc
 import { LocalStorePrepare } from './components/LocalStorePrepare.tsx';
 import { LocalReleaseHistoryController, localHistoryOwnerReason } from './localReleaseHistory.ts';
 import { LocalReleaseHistory } from './components/LocalReleaseHistory.tsx';
-import { LocalStorePreflightController, localStoreOwnerReason } from './localStorePreflight.ts';
+import { LocalStorePreflightController, localStoreOwnerReason, localStoreProjectObservation } from './localStorePreflight.ts';
 import { LocalStorePreflight } from './components/LocalStorePreflight.tsx';
 import { GitHubPublicationController, githubPublicationOwnerReason } from './githubPublicationController.ts';
 import { GitHubPublication } from './components/GitHubPublication.tsx';
@@ -533,7 +533,7 @@ export function App() {
   iosArchiveControllerRef.current = iosArchive;
   const iosArchiveState = useSyncExternalStore(iosArchive.subscribe, iosArchive.getSnapshot, iosArchive.getSnapshot);
   const [localStore] = useState(() => new LocalStorePreflightController({
-    project: () => androidBuild.getSnapshot().project, assets: assetSession.getSnapshot,
+    project: () => {const current=workspaceRef.current;return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?localStoreProjectObservation(current.projects[current.selectedId]!,releaseVersion.getSnapshot()):null;}, assets: assetSession.getSnapshot,
     otherOperationReason: () => storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   localStoreControllerRef.current=localStore;
@@ -766,7 +766,7 @@ export function App() {
     localStorePrepare.syncProject();return()=>{a();b();c();};
   },[assetSession,androidBuild,localHistory,localStorePrepare]);
   useEffect(() => () => localHistory.dispose(), [localHistory]);
-  useEffect(() => {const a=assetSession.subscribe(localStore.syncProject), b=androidBuild.subscribe(localStore.syncProject);localStore.syncProject(); localStorePrepare.syncProject();return()=>{a();b();};},[assetSession,androidBuild,localStore]);
+  useEffect(() => {const a=assetSession.subscribe(localStore.syncProject), b=releaseVersion.subscribe(localStore.syncProject);localStore.syncProject(); localStorePrepare.syncProject();return()=>{a();b();};},[assetSession,releaseVersion,localStore]);
   useEffect(() => () => androidBuild.dispose(), [androidBuild]);
   useEffect(() => () => projectRecovery.dispose(), [projectRecovery]);
   useEffect(() => () => iosArchive.dispose(), [iosArchive]);

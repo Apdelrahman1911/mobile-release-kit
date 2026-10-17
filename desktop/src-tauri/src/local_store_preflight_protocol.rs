@@ -1,4 +1,4 @@
-//! Closed local Android Store-access DATA; no upload/release authority.
+//! Closed local Store-access DATA; no upload/release authority.
 //! A core terminal is provisional until this operation's original native joins.
 use std::path::Path;
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error
 
 pub(crate) const PROTOCOL: &str = "mrk-local-store-preflight/1";
 pub(crate) const CONSENT: &str = "local-android-store-access-v1";
+pub(crate) const APPLE_CONSENT: &str = "local-ios-store-access-v1";
 pub(crate) const EVENT: &str = "local-store-preflight-state-changed";
 pub(crate) const IPC_LIMIT: usize = 8192;
 pub(crate) const REQUEST_LIMIT: usize = 16 * 1024;
@@ -31,6 +32,19 @@ impl Content { fn valid(&self) -> bool { (1..=524288).contains(&self.bytes) && s
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Platform { Android }
+// Access alone can select Apple. The Android-only type above is deliberately
+// retained for Prepare/Execute/Reconcile; their serde grammar never widens.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum AccessPlatform { Android, Ios }
+impl AccessPlatform {
+    pub(crate) fn consent(self)->&'static str { match self {Self::Android=>CONSENT,Self::Ios=>APPLE_CONSENT} }
+    fn commands(self)->u32 {match self {Self::Android=>6,Self::Ios=>7}}
+    fn scope(self)->&'static str {match self {Self::Android=>"local-android-store-access-no-publishing",Self::Ios=>"local-ios-store-access-no-publishing"}}
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum AppleSelection { Ios }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Operation { LocalStorePreflight }
@@ -43,7 +57,7 @@ pub(crate) struct Context {
     pub(crate) project_id: String, pub(crate) draft_revision: u32, pub(crate) baseline_generation: u32,
     pub(crate) saved_config: Content, pub(crate) saved_version: crate::android_build_protocol::SavedVersion,
     pub(crate) credential_context_revision: u32, pub(crate) record_id: String, pub(crate) record_revision: u32,
-    pub(crate) execution_mode: ExecutionMode, pub(crate) platform: Platform, pub(crate) operation: Operation,
+    pub(crate) execution_mode: ExecutionMode, pub(crate) platform: AccessPlatform, pub(crate) operation: Operation,
 }
 impl Context {
     fn valid(&self) -> bool { valid_id(&self.project_id) && self.draft_revision < u32::MAX
@@ -58,13 +72,14 @@ pub(crate) struct Prepare {
     pub(crate) saved_config: Content, pub(crate) saved_version: crate::android_build_protocol::SavedVersion,
     pub(crate) credential_context_revision: u32, pub(crate) record_id: String, pub(crate) record_revision: u32,
     pub(crate) execution_mode: ExecutionMode,
+    #[serde(default)] platform: Option<AppleSelection>,
 }
 impl Prepare {
     pub(crate) fn context(&self) -> Context { Context { project_id: self.project_id.clone(), draft_revision: self.draft_revision,
         baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
         saved_version: self.saved_version.clone(), credential_context_revision: self.credential_context_revision,
         record_id: self.record_id.clone(), record_revision: self.record_revision, execution_mode: self.execution_mode,
-        platform: Platform::Android, operation: Operation::LocalStorePreflight } }
+        platform: if self.platform.is_some(){AccessPlatform::Ios}else{AccessPlatform::Android}, operation: Operation::LocalStorePreflight } }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -74,14 +89,22 @@ pub(crate) struct Start { pub(crate) operation_id: String, pub(crate) owner_gene
 pub(crate) struct Cancel { pub(crate) operation_id: String, pub(crate) owner_generation: String }
 pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
     if !keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
-        "credentialContextRevision", "recordId", "recordRevision", "executionMode"]) { return Err(invalid()); }
+        "credentialContextRevision", "recordId", "recordRevision", "executionMode"])
+        && !(keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+            "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform"])
+            && value.get("platform").and_then(Value::as_str)==Some("ios")) { return Err(invalid()); }
     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
     if !input.context().valid() { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || input.consent_version != CONSENT { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT) { return Err(invalid()); } Ok(input)
+}
+impl Start {
+    pub(crate) fn matches_context(&self, context:&Context)->bool {
+        self.consent_version == context.platform.consent()
+    }
 }
 pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration"]) { return Err(invalid()); }
@@ -162,8 +185,8 @@ const LIMITATIONS: [Limitation; 6] = [Limitation::NonPublishing, Limitation::NoP
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ResultData { schema_version: u32, scope: String, findings: Vec<Finding>, limitations: Vec<Limitation> }
 impl ResultData {
-    fn valid(&self) -> bool {
-        self.schema_version == 1 && self.scope == "local-android-store-access-no-publishing"
+    fn valid(&self, platform:AccessPlatform) -> bool {
+        self.schema_version == 1 && self.scope == platform.scope()
             && self.limitations.as_slice() == LIMITATIONS && self.findings.len() <= 16
     }
 }
@@ -189,10 +212,10 @@ pub(crate) struct Terminal {
 impl Terminal {
     fn valid(&self, context: &Context) -> bool {
         if self.schema_version != 1 || &self.context != context || !self.context.valid() || self.lifetime.profile_calls != 0
-            || self.lifetime.commands > 6 { return false; }
+            || self.lifetime.commands > context.platform.commands() { return false; }
         if self.outcome == Outcome::Complete {
             return self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
-                && self.result.as_ref().is_some_and(|r| r.valid());
+                && self.result.as_ref().is_some_and(|r| r.valid(context.platform));
         }
         if self.result.is_some() || self.reason == Reason::None { return false; }
         if self.outcome == Outcome::Unknown { return self.reason == Reason::CleanupUnknown && !self.lifetime.settled(); }
@@ -297,4 +320,25 @@ pub(crate) mod tests {
         #[cfg(not(target_os="macos"))]
         assert_eq!(Profile::current(),None);
     }
+    #[test]
+    fn apple_access_consent_scope_and_seven_calls_do_not_widen_google_mutations(){
+        let mut value=input();value["platform"]=json!("ios");let c=prepare(&value).unwrap().context();
+        assert_eq!(c.platform,AccessPlatform::Ios);
+        for bad in [json!("android"),Value::Null,json!("macos")] {value["platform"]=bad;assert!(prepare(&value).is_err());}
+        assert!(serde_json::from_value::<Platform>(json!("ios")).is_err());
+        for consent in [CONSENT,APPLE_CONSENT] {
+            let start=start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":consent})).unwrap();
+            assert_eq!(start.matches_context(&c),consent==APPLE_CONSENT);
+            assert_eq!(start.matches_context(&context()),consent==CONSENT);
+        }
+        let mut t=complete();t["context"]=json!(c);t["result"]["scope"]=json!(c.platform.scope());t["lifetime"]["commands"]=json!(7);
+        assert!(Terminal::deserialize(&t).unwrap().valid(&c));
+        assert!(!Terminal::deserialize(&t).unwrap().valid(&context()));
+        t["lifetime"]["commands"]=json!(8);assert!(!Terminal::deserialize(&t).unwrap().valid(&c));
+        t["lifetime"]["commands"]=json!(7);t["lifetime"]["inputClosed"]=json!(false);
+        assert!(!Terminal::deserialize(&t).unwrap().valid(&c));
+        t["outcome"]=json!("unknown");t["reason"]=json!("cleanup-unknown");t["result"]=Value::Null;
+        assert!(Terminal::deserialize(&t).unwrap().valid(&c));
+    }
+
 }

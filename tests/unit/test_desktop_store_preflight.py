@@ -1,5 +1,5 @@
 """Real inert input/file owners; mocked command execution, no native or network."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import copy
 import hashlib
 import json
@@ -22,7 +22,7 @@ from mobile_release.cancellation import CleanupScope, DefaultCancellation
 from mobile_release.owned_process import ProcessCleanupError, ProcessError, run_owned
 from mobile_release.reporting import Finding, Status
 from mobile_release.tooling import REQUIRED_TOOLING_FILES
-from .helpers import android_config, write_project
+from .helpers import android_config, ios_config, write_project
 
 
 def encode(value):
@@ -34,6 +34,12 @@ def account():
             "private_key":"-----BEGIN PRIVATE KEY-----\nMBUCAQAwDQYJKoZIhvcNAQEBBQAEAQE=\n-----END PRIVATE KEY-----\n",
             "client_email":"release@example-project.iam.gserviceaccount.com", "client_id":"123456789",
             "token_uri":"https://oauth2.googleapis.com/token"}
+
+
+def apple_material():
+    # Inert PEM envelope only; P256 validity is NOT asserted by these owner tests.
+    return (b"-----BEGIN PRIVATE KEY-----\nINERT\n-----END PRIVATE KEY-----\n",
+            b"ABCDEFGHIJ", b"12345678-1234-1234-1234-123456789abc")
 
 
 def request(root, runtime):
@@ -56,13 +62,13 @@ def request(root, runtime):
 
 class DesktopStorePreflightTests(unittest.TestCase):
     @contextmanager
-    def files(self):
+    def files(self, *, platform="android"):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary).resolve()
             root, runtime = base / "project", base / "runtime with spaces"
-            config = android_config()
+            config = ios_config() if platform == "ios" else android_config()
             config["projectChecks"]["preflight"] = [["must-never-run-project-command"]]
-            write_project(root, config)
+            write_project(root, config, platform=platform)
             for name in ("ruby", "bundle"):
                 path = runtime / "store/bin" / name
                 path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b"inert\n"); path.chmod(0o755)
@@ -72,12 +78,17 @@ class DesktopStorePreflightTests(unittest.TestCase):
             yield base, root, runtime
 
     @contextmanager
-    def original(self, *, material=None, credential_config=None):
-        with self.files() as (base, root, runtime):
+    def original(self, *, material=None, credential_config=None, platform="android"):
+        with self.files(platform=platform) as (base, root, runtime):
             value = request(root, runtime)
+            value["context"]["platform"] = platform
             if credential_config is not None: value["native"]["credentialConfig"] = credential_config
-            body = encode(account()) if material is None else material
+            body = encode(account()) if material is None or platform == "ios" else material
             frame = PREFIX + encode({"schemaVersion":1,"files":[{"role":"google-service-account","bytes":len(body)}]}) + body + SUFFIX
+            if platform == "ios":
+                parts = apple_material() if material is None else material
+                frame = PREFIX + encode({"schemaVersion":1,"files":[{"role":role,"bytes":len(raw)}
+                    for role, raw in zip(("asc-p8","asc-key-id","asc-issuer-id"),parts)]}) + b"".join(parts) + SUFFIX
             old_stdin = os.dup(0); reader, writer = os.pipe()
             os.dup2(reader, 0); os.close(reader)
             os.write(writer, encode(value) + frame)  # Small bounded fixture below pipe capacity.
@@ -115,7 +126,7 @@ class DesktopStorePreflightTests(unittest.TestCase):
             value = request(root, runtime)
             parsed = wire.parse_request(encode(value))
             self.assertEqual(parsed.context, value["context"])
-            for field, bad in (("executionMode","github"),("platform","ios"),("recordRevision",True),
+            for field, bad in (("executionMode","github"),("platform","macos"),("recordRevision",True),
                                ("credentialContextRevision",0),("recordId","foreign")):
                 invalid = copy.deepcopy(value); invalid["context"][field] = bad
                 with self.assertRaises(ValueError): wire.parse_request(encode(invalid))
@@ -347,6 +358,112 @@ class DesktopStorePreflightTests(unittest.TestCase):
             bad.update(outcome="unknown",reason="cleanup-unknown",result=None)
             wire.validate_terminal(bad,parsed)
         with self.assertRaises(ValueError): wire.project_result([Finding("PRIVATE_PROVIDER_CODE",Status.FAIL,"secret")])
+
+    def test_apple_access_is_explicit_and_cannot_widen_google_mutation_contexts(self):
+        from mobile_release import _desktop_store_prepare_protocol as prepare
+        with self.files(platform="ios") as (_, root, runtime):
+            value = request(root, runtime); value["context"]["platform"] = "ios"
+            parsed = wire.parse_request(encode(value))
+            self.assertEqual(parsed.context["platform"], "ios")
+            with self.assertRaises(ValueError): wire.context(parsed.context)
+            bad = {**parsed.context, "operation":"local-store-prepare", "candidateOperationId":"12345678-1234-4234-9234-123456789abc",
+                   "candidateSha256":"a"*64,"confirmation":"candidate:android:1.2.3:42"}
+            with self.assertRaises(ValueError): prepare.context(bad)
+            result = wire.project_result([Finding("credential-material.apple-p8",Status.PASS,"PRIVATE")], platform="ios")
+            self.assertEqual(result["scope"], wire.APPLE_SCOPE)
+            with self.assertRaises(ValueError): wire.validate_result(result)
+            with self.assertRaises(ValueError): wire.project_result([Finding("store.online.android",Status.PASS,"PRIVATE")], platform="ios")
+            terminal={"schemaVersion":1,"context":parsed.context,"outcome":"complete","reason":"none","result":result,
+                "lifetime":{"complete":True,"fatal":False,"contained":True,"commandDispatched":True,"commands":7,
+                    "profileCalls":0,"inputClosed":True,"handlersRestored":True,"invocationClosed":True,"stopObserved":"none"}}
+            wire.validate_terminal(terminal, parsed)
+            terminal["lifetime"]["commands"]=8
+            with self.assertRaises(ValueError): wire.validate_terminal(terminal, parsed)
+        parts = apple_material()
+        header={"schemaVersion":1,"files":[{"role":role,"bytes":len(raw)} for role,raw in zip(
+            ("asc-p8","asc-key-id","asc-issuer-id"),parts)]}
+        self.assertEqual(parse_header(encode(header),platform="ios"),tuple(map(len,parts)))
+        with self.assertRaises(ValueError): parse_header(encode(header))
+        for bad in ([header["files"][1],header["files"][0],header["files"][2]], header["files"][:2],
+                    [*header["files"][:2],{"role":"asc-issuer-id","bytes":37}]):
+            with self.assertRaises(ValueError): parse_header(encode({"schemaVersion":1,"files":bad}),platform="ios")
+
+    def test_apple_original_material_and_seven_calls_use_bundled_tools_and_same_lane_seal(self):
+        import base64
+        from mobile_release.credentials import APPLE_P8_CHECK
+        calls=[]; paths=[]
+        with self.original(platform="ios") as (_,root,runtime,source,operation):
+            original_end=source.work_end
+            outputs=("3.3.12","4.0.16","","MRK_RUNTIME_3.3.12_FIDDLE_1.1.2","MRK_RUNTIME_3.3.12_FIDDLE_1.1.2")
+            def call(argv, **kwargs):
+                i=len(calls); calls.append(tuple(argv)); env=kwargs["environ"]
+                self.assertIs(kwargs["cancellation"],operation.guard)
+                self.assertEqual(kwargs["capture"],i<6)
+                self.assertEqual(source.work_end,original_end)
+                self.assertEqual(env["PATH"].split(":")[0],str(runtime/"store/bin"))
+                for name in ("GITHUB_ACTIONS","GOOGLE_APPLICATION_CREDENTIALS","RUBYOPT","MOBILE_RELEASE_STORE_MODE"):
+                    self.assertNotIn(name,env)
+                if i==0:
+                    self.assertEqual(tuple(argv[:6]),("bundle","exec","ruby","-ropenssl","-e",APPLE_P8_CHECK))
+                    p=Path(argv[-1]);paths.append(p)
+                    self.assertEqual(p.read_bytes(),apple_material()[0]);self.assertEqual(kwargs["output_limit"],4096)
+                    self.assertLessEqual(kwargs["timeout"],30)
+                    return subprocess.CompletedProcess(argv,0,stdout="",stderr="")
+                if i<6:return subprocess.CompletedProcess(argv,0,stdout=outputs[i-1],stderr="")
+                self.assertEqual(argv[-1],"ios_online_preflight")
+                self.assertEqual(base64.b64decode(env["MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"]),apple_material()[0])
+                self.assertEqual(env["MOBILE_RELEASE_ASC_KEY_ID"],apple_material()[1].decode())
+                self.assertEqual(env["MOBILE_RELEASE_ASC_ISSUER_ID"],apple_material()[2].decode())
+                ev=kwargs["_evidence"]; self.assertTrue(ev._desktop_readback_capped)
+                self.assertEqual(ev._reservation[1],"ios");self.assertEqual(ev._expected[5],kwargs["timeout"])
+                self.assertNotIn("-execute-",str(kwargs["cwd"]))
+                return subprocess.CompletedProcess(argv,1) # No invented successful provider/writer finality.
+            with patch("mobile_release._command_process.run_command",side_effect=call),patch.dict(os.environ,
+                    {"GITHUB_ACTIONS":"true","RUBYOPT":"foreign","MOBILE_RELEASE_STORE_MODE":"execute"}):
+                operation.run()
+            self.assertEqual(len(calls),7);self.assertEqual(operation._next_command,7)
+            self.assertEqual(operation.report["scope"],wire.APPLE_SCOPE)
+            self.assertEqual(operation.report["findings"],[{"check":"credential-format","status":"PASS"},{"check":"store-access","status":"FAIL"}])
+            self.assertTrue(operation.closed());self.assertTrue(all(not p.exists() for p in paths))
+            self.assertNotIn(apple_material()[1].decode(),json.dumps(operation.report))
+        self.assertTrue(source.material_closed())
+
+    def test_apple_invalid_validator_or_changed_key_prevents_all_provider_calls(self):
+        for mode in ("invalid","changed","source"):
+            with self.subTest(mode=mode), (self.assertRaises(Exception) if mode=="changed" else nullcontext()), self.original(platform="ios",material=(b"not a private key",*apple_material()[1:]) if mode=="invalid" else None) as (_,root,_,source,operation):
+                calls=[]
+                def call(argv,**kwargs):
+                    calls.append(tuple(argv));self.assertEqual(len(calls),1)
+                    if mode=="changed":Path(argv[-1]).write_bytes(b"changed original")
+                    if mode=="source":
+                        p=root/"release/version.properties";p.write_bytes(p.read_bytes()+b"changed")
+                    return subprocess.CompletedProcess(argv,1,stdout="PRIVATE",stderr="PRIVATE_KEY")
+                with patch("mobile_release._command_process.run_command",side_effect=call):
+                    if mode=="invalid":
+                        operation.run()
+                        self.assertEqual(operation.report["findings"],[{"check":"credential-format","status":"INVALID"},{"check":"query-prerequisites","status":"BLOCKED"}])
+                    else:
+                        with self.assertRaises(Exception):operation.run()
+                        self.assertIsNone(operation.report)
+                self.assertEqual(len(calls),1);self.assertEqual(operation._next_command,1)
+                self.assertNotIn("PRIVATE",str(operation.report))
+                self.assertEqual(operation.closed(),mode!="changed")
+                if mode=="changed":self.assertTrue(operation.guard.lifetime_ledger.verdict().fatal)
+            self.assertEqual(source.material_closed(),mode!="changed")
+
+    def test_apple_private_ids_and_readback_do_not_accept_foreign_identity(self):
+        from mobile_release.config import ReleaseConfig
+        for parts in ((apple_material()[0],b"bad",apple_material()[2]),
+                      (apple_material()[0],apple_material()[1],b"not-an-issuer"),
+                      (b"",*apple_material()[1:]), (b"x"*16385,*apple_material()[1:])):
+            with self.assertRaises((ValueError,service._Refused)):service.StorePreflightRun.validate_apple_shape(parts)
+        with self.files(platform="ios") as (_,root,_):
+            config=ReleaseConfig(path=root/"release/mobile-release.json",root=root,data=ios_config())
+            raw={"schemaVersion":1,"platform":"ios","appIdentity":"com.example.reader","buildNumber":42,
+                 "buildUnused":True,"observedAt":"2026-10-17T00:00:00Z","appStoreAppId":"1234567890","externalGroup":"External Testers"}
+            stores._validate_online_readback(raw,config=config,release=config.release_version(),platform="ios")
+            for field,value in (("appIdentity","foreign"),("appStoreAppId","1"),("externalGroup","foreign"),("buildUnused",False),("buildNumber",43)):
+                with self.assertRaises(Exception):stores._validate_online_readback({**raw,field:value},config=config,release=config.release_version(),platform="ios")
 
 
 if __name__ == "__main__": unittest.main()

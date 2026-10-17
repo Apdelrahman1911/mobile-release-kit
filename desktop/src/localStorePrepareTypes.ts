@@ -1,7 +1,7 @@
 import type { PrepareLocalStorePreflight, LocalStoreIdentity, LocalStoreReason } from './localStorePreflightTypes.ts';
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 
-export interface PrepareLocalStoreIntent extends PrepareLocalStorePreflight {
+export interface PrepareLocalStoreIntent extends Omit<PrepareLocalStorePreflight,'platform'> {
   candidateOperationId: string;
   candidateSha256: string;
   confirmation: string;

@@ -317,7 +317,7 @@ jobs:
           if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == local-keychain-contracts ]]; then
             # Contracts-only is an explicit retry scope when the unchanged app,
             # helper and wire/lease graph already passed on the same toolchain.
-            # It still compiles the actual library test graph and runs all56.
+            # It still compiles the actual library test graph and runs all59.
             if [[ "$APP_CHECKS" == local-keychain ]]; then
             # Separate Cargo invocation preserves helper-only native policy.
             # Closed DATA/DocumentState/driver contracts plus an owned temporary
@@ -400,8 +400,11 @@ jobs:
               saved_command_owner::local_history::native::reconcile_tests::local_reconcile_read_helpers_never_add_or_credit_unjoined_work \
               asset_session::store_material::tests::local_reconcile_comparison_and_private_bytes_do_not_mint_document_grant \
               local_release_history_protocol::tests::local_release_history_review_reconcile_requires_current_last_execute_chain \
+              local_store_preflight_protocol::tests::apple_access_consent_scope_and_seven_calls_do_not_widen_google_mutations \
+              asset_session::store_material::tests::apple_access_loan_retains_exact_fields_and_never_lends_google_mutation_material \
+              asset_session::store_material::tests::apple_access_key_and_scalar_bounds_refuse_before_private_writer \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 56 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 59 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.
@@ -620,7 +623,8 @@ jobs:
                   "returncode": getattr(error, "returncode", None), "reason": reason, "diagnosticTail": tail}), flush=True)
               raise SystemExit(1)
           print(json.dumps({"nativeVerified": len(native), "filesPostChecked": len(expected),
-              "projectedCrc32FastlaneSmoke": "passed", "networkDenied": True, "storeLaneRun": False}))
+              "projectedCrc32FastlaneSmoke": "passed", "appleP256PemDerSigning": "passed",
+              "networkDenied": True, "storeLaneRun": False}))
           PY
       - name: Remove only this job's restored component and smoke scratch
         if: always() && steps.work.outputs.root != ''

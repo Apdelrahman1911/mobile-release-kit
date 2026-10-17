@@ -251,6 +251,124 @@ class PlayReleaseLanesTest < Minitest::Test
     assert_empty @service.mutations;assert_no_receipt
   end
 
+  def commit_target_as(user, later_change: false)
+    original = @service.user
+    @service.user = user
+    api = @service.service
+    package = "test.example.release"
+    edit = api.insert_edit(package, Google::Apis::AndroidpublisherV3::AppEdit.new)
+    unless @service.state.fetch("bundles").any? { |b| b["versionCode"] == 200 }
+      api.upload_edit_bundle(package, edit.id, upload_source: File.join(@root, "candidate.aab"), content_type: "application/octet-stream")
+    end
+    target = @service.clone(snapshot.fetch("destinationTargetState").reject { |key, _| key == "canonicalization" })
+    target.fetch("releases").find { |r| r["versionCodes"] == ["90"] }["name"] = "Later independent actor" if later_change
+    api.update_edit_track(package, edit.id, "internal", Google::Apis::AndroidpublisherV3::Track.from_json(JSON.generate(target)))
+    options = Google::Apis::RequestOptions.new
+    options.retries = 0
+    api.commit_edit(package, edit.id, options: options)
+    @service.clone(@service.state)
+  ensure
+    @service.user = original
+  end
+
+  def test_local_delayed_initial_or_mutation_edit_rechecks_target_before_any_send
+    [1, 2].each do |delayed_insert|
+      reset_case
+      prepare("candidate")
+      context = local_execution_context
+      start = @service.requests.length
+      creates = 0
+      committed = nil
+      @service.before_request = lambda do |row|
+        next unless row[:user] == :original && row[:method] == :post && row[:path].end_with?("/edits")
+        creates += 1
+        next unless creates == delayed_insert
+        @service.before_request = nil
+        # The old process has not received this edit yet. A different principal
+        # commits target before its insert actually executes at the SDK boundary.
+        committed = commit_target_as(:other)
+      end
+      MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context, context) do
+        assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+      end
+      assert_equal delayed_insert, creates
+      assert_equal delayed_insert, @service.requests.drop(start).count { |r| r[:user] == :original && r[:method] == :post && r[:path].end_with?("/edits") }
+      assert_equal committed, @service.state
+      assert_empty @service.mutations.select { |r| r[:user] == :original }
+      assert_empty @validation_calls
+      assert_no_receipt
+    end
+  end
+
+  def test_local_invalidated_old_commit_cannot_apply_after_cross_user_target_readback
+    prepare("candidate")
+    context = local_execution_context
+    start = @service.requests.length
+    committed = nil
+    @service.before_request = lambda do |row|
+      next unless row[:user] == :original && row[:path].end_with?(":commit")
+      @service.before_request = nil
+      old_id = row.fetch(:params).fetch("editId")
+      assert @service.edits.key?(old_id)
+      committed = commit_target_as(:other)
+      refute @service.edits.key?(old_id), "a different principal's commit invalidates old edits too"
+      begin
+        @service.user = :recovery
+        assert_equal :target, @fastfile.classify_play_intent_state("candidate", snapshot).fetch(:phase)
+      ensure
+        @service.user = :original
+      end
+    end
+    MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context, context) do
+      assert_raises(Google::Apis::ClientError) { execute }
+    end
+    assert_equal committed, @service.state
+    old_commits = @service.commits.select { |r| r[:user] == :original }
+    assert_equal 1, old_commits.length
+    assert_equal 0, old_commits.first.fetch(:retries)
+    assert_equal 2, @service.requests.drop(start).count { |r| r[:user] == :original && r[:method] == :post && r[:path].end_with?("/edits") }
+    assert_equal 1, @validation_calls.length
+    assert_no_receipt
+  end
+
+  def test_local_lost_commit_reply_only_reads_and_never_overwrites_a_later_commit
+    [false, true].each do |later_change|
+      reset_case
+      prepare("candidate")
+      context = local_execution_context
+      start = @service.requests.length
+      committed = nil
+      @service.after_request = lambda do |row|
+        next unless row[:user] == :original && row[:path].end_with?(":commit")
+        @service.after_request = nil
+        begin
+          @service.user = :recovery
+          assert_equal :target, @fastfile.classify_play_intent_state("candidate", snapshot).fetch(:phase)
+        ensure
+          @service.user = :original
+        end
+        committed = later_change ? commit_target_as(:later, later_change: true) : @service.clone(@service.state)
+        raise Google::Apis::TransmissionError, "synthetic lost reply after actual commit"
+      end
+      MobileReleaseKit::StoreLaneRuntime.stub(:local_execution_context, context) do
+        if later_change
+          assert_raises(FastlaneCore::Interface::FastlaneError) { execute }
+          assert_no_receipt
+        else
+          execute
+          assert_equal "reconciled", receipt.fetch("result")
+        end
+      end
+      assert_equal committed, @service.state
+      old_commits = @service.commits.select { |r| r[:user] == :original }
+      assert_equal 1, old_commits.length
+      assert_equal 0, old_commits.first.fetch(:retries)
+      assert_equal(later_change ? 3 : 4, @service.requests.drop(start).count { |r| r[:user] == :original && r[:method] == :post && r[:path].end_with?("/edits") })
+      assert_equal 1, @service.mutations.count { |r| r[:user] == :original && r[:path].end_with?("/bundles") }
+      assert_equal 1, @validation_calls.length
+    end
+  end
+
   def local_reconcile_context
     context=local_execution_context
     context[:authority]=context.fetch(:authority).merge("purpose"=>"recover")
@@ -425,7 +543,7 @@ class PlayReleaseLanesTest < Minitest::Test
           @service.before_request = ->(row) { raise Google::Apis::RequestTimeOutError, "final reread unavailable" if row[:method] == :get }
         end
       end
-      assert_raises(KeyError, Google::Apis::RequestTimeOutError) { execute }
+      assert_raises(Google::Apis::ClientError, Google::Apis::RequestTimeOutError) { execute }
       assert_empty @service.mutations
       assert_no_receipt
       # Preparation + execution classification + one mutation edit, never a
