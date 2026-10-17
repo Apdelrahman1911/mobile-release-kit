@@ -210,7 +210,12 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
         file(&version.join("data"), b"original bytes", 0o644)?;
         fs::hard_link(version.join("data"), version.join("hardlink"))?;
         file(&version.join("tool"), b"not executed", 0o755)?;
-        symlink("A", versions.join("Current"))?;
+        symlink("A/", versions.join("Current"))?;
+        symlink("Current/", versions.join("Nested"))?;
+        symlink("A/data", versions.join("FileAlias"))?;
+        directory(&version.join("Inner"), 0o755)?;
+        // Same exact raw target as Apple's Instruments XCContentsDir alias.
+        symlink("../../../", version.join("Inner/Back"))?;
         set_attribute(&version.join("data"))?;
         let source_data = fs::symlink_metadata(version.join("data"))?;
         require(
@@ -347,10 +352,18 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
                 require(fs::read(path)? == b"original bytes", "copied bytes changed")?;
                 check_attribute(path)?;
             }
-            require(
-                fs::read_link(output.join("Versions/Current"))? == Path::new("A"),
-                "alias bytes changed",
-            )?;
+            // Path equality normalizes a trailing slash; compare actual raw
+            // bytes so copied directory intent cannot silently disappear.
+            for (path, expected) in [
+                ("Versions/Current", b"A/".as_slice()),
+                ("Versions/Nested", b"Current/".as_slice()),
+                ("Versions/A/Inner/Back", b"../../../".as_slice()),
+            ] {
+                require(
+                    fs::read_link(output.join(path))?.as_os_str().as_bytes() == expected,
+                    "alias bytes changed",
+                )?;
+            }
             check_attribute(&version.join("data"))?;
             require(
                 copy::fstat(inputs[1].as_fd(), &work).map_err(|failure| error(failure))? == source_id,
@@ -381,7 +394,35 @@ fn copier_copies_real_bytes_links_attributes_and_retires_only_its_stage() {
             files.note_failure();
         }
         tables_closed &= files.close_all();
-        body
+        body?;
+        require(tables_closed, "positive copy originals close unconfirmed")?;
+        // Same retained fixture and ORIGINAL W/F. Each refused census closes
+        // its own table before changing the private alias or starting another.
+        for (target, expected) in [
+            ("Current/data/", Failure::Kind),
+            ("FileAlias/", Failure::Kind),
+            ("Nested/../../../outside/", Failure::Links),
+        ] {
+            let alias = versions.join("BadSuffix");
+            symlink(target, &alias)?;
+            let mut rejected = CopierFiles::new(cleanup, inputs.len()).map_err(error)?;
+            let refusal = copy::fstat(inputs[1].as_fd(), &work)
+                .and_then(|id| SourceTree::original(
+                    inputs[1].as_fd(), inputs[0].as_fd(), c"Xcode.app", id, &work))
+                .and_then(|tree| tree.census(&mut rejected, 4096));
+            if refusal.is_err() {
+                rejected.note_failure();
+            }
+            let closed = rejected.close_all();
+            tables_closed &= closed;
+            require(closed, "refused suffix census originals close unconfirmed")?;
+            fs::remove_file(&alias)?;
+            require(
+                matches!(refusal, Err(actual) if actual == expected),
+                "directory-intent or ordered-escape refusal cut changed",
+            )?;
+        }
+        Ok(())
     })();
     finish(&root, &root_id, inputs, tables_closed, observed);
 }

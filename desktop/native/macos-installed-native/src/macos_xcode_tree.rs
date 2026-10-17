@@ -990,7 +990,10 @@ impl<'a> SourceTree<'a> {
                 {
                     return Err(Failure::Bounds);
                 }
-                if part == b"." {
+                // Do not filter empty suffix tokens when either the original
+                // or a nested symlink target is queued. The preceding Regular
+                // arm must see pending directory intent and refuse `file/`.
+                if part.is_empty() || part == b"." {
                     continue;
                 }
                 if part == b".." {

@@ -259,11 +259,15 @@ pub(crate) fn component(name: &[u8]) -> bool {
 /// filesystem joins MUST be performed by the actual copier; lexical reduction
 /// here would hide `alias/..` traversal and is intentionally not provided.
 pub(crate) fn relative_link_shape(target: &[u8]) -> bool {
-    !target.is_empty()
+    // A single terminal slash expresses directory intent. Inspect its body
+    // only for shape; retain the ORIGINAL bytes and empty final resolver token.
+    // Interior/repeated slash components remain outside this fixed profile.
+    let body = target.strip_suffix(b"/").unwrap_or(target);
+    !body.is_empty()
         && target.len() <= LINK_LIMIT
         && target[0] != b'/'
         && !target.contains(&0)
-        && target
+        && body
             .split(|b| *b == b'/')
             .all(|part| !part.is_empty() && part.len() <= 255)
 }
@@ -457,7 +461,10 @@ mod tests {
         assert!(!component(&vec![b'x'; 256]));
         assert!(relative_link_shape(b"../../Versions/A/Resources"));
         assert!(relative_link_shape(b"alias/../actual")); // Shape only; actual ordered resolver is required.
-        for bad in [b"".as_slice(), b"/Applications/Xcode.app", b"a//b", b"a\0b"] {
+        for target in [b"../../../".as_slice(), b"A/", b"alias/../actual/"] {
+            assert!(relative_link_shape(target));
+        }
+        for bad in [b"".as_slice(), b"/Applications/Xcode.app", b"a//b", b"a\0b", b"/", b"A//"] {
             assert!(!relative_link_shape(bad));
         }
         assert!(!relative_link_shape(&vec![b'x'; LINK_LIMIT + 1]));

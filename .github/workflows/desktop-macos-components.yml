@@ -283,15 +283,16 @@ jobs:
           print(executable)
           ' > "$WORK_ROOT/xcode-files-executable.txt"
             IFS= read -r native_test < "$WORK_ROOT/xcode-files-executable.txt"
-            # Reuse this same actual native libtest for the four changed pure
+            # Reuse this same actual native libtest for the five focused pure
             # entry/cleanup contracts, as the ordinary runner (never root).
             "$native_test" \
               macos_xcode_parent::tests::xcode_child_tail_is_one_use_and_lost_wait_never_reauthorizes_signals \
               macos_xcode_parent::tests::xcode_parent_failure_cutoff_never_renews_original_work \
               macos_xcode_entry::tests::fixed_entry_routing_never_accepts_paths_clocks_or_noncanonical_fds \
               macos_xcode_entry::tests::public_exit_requires_original_finality_and_distinguishes_cleanup \
+              macos_xcode_setup::tests::fixed_names_and_relative_link_shape_do_not_pretend_to_resolve_links \
               --exact --test-threads=1 | tee "$WORK_ROOT/xcode-entry-tail-tests.log"
-            grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;' "$WORK_ROOT/xcode-entry-tail-tests.log"
+            grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored;' "$WORK_ROOT/xcode-entry-tail-tests.log"
             # Private mutations stay in this test-only temp parent. The extra
             # selected-Xcode census is read-only and reports its first refusal;
             # it neither copies Xcode nor runs signing or Installer.
