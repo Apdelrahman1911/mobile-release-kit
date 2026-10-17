@@ -27,8 +27,12 @@ They are **not yet verified in an installed final application**.
   Both Mac diagnostics resolved the physical executable as `altoolShim`. The
   reviewed correction retains exact checked targets and uses documented
   `xcrun --no-cache --run altool`, not direct undocumented shim invocation.
-  Seven alias and four Ruby invocation/admission regressions pass locally; actual
-  native resolver/help and two pinned-SDK bridge checks remain pending.
+  Seven alias and four Ruby invocation/admission regressions pass locally.
+  Both native original resolvers and the two affected pinned-SDK bridge checks
+  passed on both Macs (`39036613968/1`, `39036617869/1`). The separate native
+  help check still fails: diagnostic ARM run `39037357899/1` reports that
+  `Defaults.properties` could not be opened. A reviewed read-only before/after
+  resource observation is running; the precise access cause is not yet proved.
   Neither a resolved path nor Environment version success alone proves
   native protection or signing readiness.
 
@@ -36,7 +40,18 @@ The updated external XCTest harness compiles on both architectures in
 run `39035744159/1` at `d87f4a2c`. This is compilation, not installed UI evidence.
 An ordinary final-DMG consumer now reuses six existing UI tests, including
 saved checks and no-credential Store navigation; its artifact nomination remains
-inactive until an actual final candidate exists.
+inactive until an actual final candidate exists. A separate final-DMG cohort now
+reuses the existing Android Environment diagnostics and unsigned-iOS archive
+journeys; it is also inactive and not installed-qualified.
+
+Candidate packaging run `39037373530/1` stopped before application build/signing:
+its nominated signed GitHub helper artifacts were no longer available. Both
+history-helper replacement jobs passed (`38012102679/2`); the seal-helper Intel
+job passed, but ARM stopped on actual CLT SDK `27.0` against a 26.x recipe
+(`38012102780/2`). Toolchain diagnosis and supplier renewal are in progress.
+Other nominated Python/Store/Android artifacts remain available as checked on
+October 17. Signed-helper retention is now 30 days, with separate original
+public receipts for enrollment; no signed binary carrier was downloaded locally.
 
 Next: finish native tool compatibility, reuse the final signed candidate for
 independent installation and real UI journeys, complete the readiness audit,
