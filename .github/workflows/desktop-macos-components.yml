@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime]
+        options: [all, integration, launcher, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, ios-tools-layout]
 
 permissions:
   contents: read
@@ -498,6 +498,95 @@ jobs:
               if path.exists():
                   assert path.is_dir() and not path.is_symlink()
                   shutil.rmtree(path)
+          PY
+
+  ios-tools-layout:
+    # Read-only host facts, not tool admission or a replacement for native tests.
+    if: github.event_name == 'workflow_dispatch' && inputs.component == 'ios-tools-layout'
+    name: Observe selected Xcode layout (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            arch: arm64
+          - runner: macos-26-intel
+            arch: x86_64
+    steps:
+      - name: Read fixed public filesystem metadata without changing the host
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 -I -B - <<'PY'
+          import json
+          import os
+          import re
+          import stat
+
+          def emit(role, **facts):
+              print(json.dumps({"role": role, **facts}, sort_keys=True, separators=(",", ":")))
+
+          def observe(role, path):
+              try:
+                  row = os.lstat(path)
+              except OSError:
+                  emit(role, state="unavailable")
+                  return None
+              kind = ("directory" if stat.S_ISDIR(row.st_mode) else
+                      "symlink" if stat.S_ISLNK(row.st_mode) else
+                      "regular" if stat.S_ISREG(row.st_mode) else "other")
+              emit(role, state="observed", kind=kind, uid=row.st_uid, gid=row.st_gid,
+                   mode=format(row.st_mode, "#07o"), flags=getattr(row, "st_flags", 0),
+                   nlink=row.st_nlink, rootOwned=row.st_uid == 0,
+                   protectedMode=(row.st_mode & 0o7022) == 0)
+              return row
+
+          def main():
+              # No contents, directory census, credentials, selected-path echo,
+              # subprocesses, writes, or ACL/finality claims from these snapshots.
+              observe("root", b"/")
+              applications = observe("applications", b"/Applications")
+              if applications is None or not stat.S_ISDIR(applications.st_mode):
+                  return
+              alias_path = b"/Applications/Xcode.app"
+              alias = observe("selection", alias_path)
+              if alias is None:
+                  return
+              app_path = alias_path
+              if stat.S_ISLNK(alias.st_mode):
+                  owner_ok = os.getuid() != 0 and alias.st_uid in (0, os.getuid())
+                  size_ok = alias.st_nlink == 1 and 1 <= alias.st_size <= 1024
+                  if not size_ok:
+                      emit("selection-rule", ownerAccepted=owner_ok, shapeAccepted=False)
+                      return
+                  try:
+                      target = os.readlink(alias_path)
+                  except OSError:
+                      emit("selection-rule", state="unavailable")
+                      return
+                  name = target.removeprefix(b"/Applications/")
+                  shape_ok = (len(target) <= 1024 and len(name) <= 255 and name != b"Xcode.app"
+                              and re.fullmatch(rb"Xcode[A-Za-z0-9._+-]*\.app", name) is not None)
+                  emit("selection-rule", ownerAccepted=owner_ok, shapeAccepted=shape_ok)
+                  if not shape_ok:
+                      return
+                  app_path = b"/Applications/" + name
+              elif not stat.S_ISDIR(alias.st_mode):
+                  return
+              app = observe("selected-app", app_path)
+              if app is None or not stat.S_ISDIR(app.st_mode):
+                  return
+              contents = observe("contents", app_path + b"/Contents")
+              if contents is None or not stat.S_ISDIR(contents.st_mode):
+                  return
+              observe("developer", app_path + b"/Contents/Developer")
+
+          main()
           PY
 
   store-runtime:
