@@ -1754,6 +1754,7 @@ _FAILURE_SETUP_REASONS = (
     'setup-fixed-tree',
     'setup-held-release-selection',
     'setup-held-source-correspondence',
+    'setup-source-purpose',
     'setup-original-ledger-bound',
     'setup-package-fixed-purpose',
     'setup-package-no-store-runtime',
@@ -5237,6 +5238,18 @@ class Operation:
         self.notary_roots.append({"entry": root, "path": path, "snapshot": self.notary_snapshot(root, path)})
         return root
 
+    def setup_source_original(self, name, role):
+        """Exact setup SOURCE hooks are executable; ordinary DATA stays unchanged."""
+        need((self.setup_package or self.setup_verify) and self.source_entry is not None
+             and name in ("CarrierInfo.plist", "Component.plist", "Distribution.xml", "InstallerReadMe.html",
+                          "preinstall", "setup/postinstall"), "setup-source-purpose")
+        relative = "desktop/macos-xcode-setup-inputs/" + name
+        if name not in ("preinstall", "setup/postinstall"):
+            return self.source_original(relative, role, 8192)
+        parts = Path(relative).parts
+        parent = self.descend(self.source_entry, parts[:-1])
+        return self.original(parent, parts[-1], role, 8192, (0o555, 0o755))
+
     def prepare_setup_component(self):
         """Four original native calls, on fresh fixed inputs, before credentials."""
         need(self.setup_package and self.setup_quoted and not self.calls, "setup-component-purpose")
@@ -5250,7 +5263,7 @@ class Operation:
         self.package_sources.append((cargo, cargo_body))
         sources = {}
         for name in ("CarrierInfo.plist", "Component.plist", "Distribution.xml", "InstallerReadMe.html", "preinstall", "setup/postinstall"):
-            entry = self.source_original("desktop/macos-xcode-setup-inputs/" + name, "setup-source-" + name, 8192)
+            entry = self.setup_source_original(name, "setup-source-" + name)
             body = self.read(entry)
             self.package_sources.append((entry, body))
             sources[name] = body
@@ -8476,7 +8489,7 @@ class Operation:
         self.setup_verify_selection = selected
         for name in ("preinstall", "setup/postinstall", "Distribution.xml", "InstallerReadMe.html",
                      "Component.plist", "CarrierInfo.plist"):
-            entry = self.source_original("desktop/macos-xcode-setup-inputs/" + name, "setup-verification-source", 8192)
+            entry = self.setup_source_original(name, "setup-verification-source")
             self.package_sources.append((entry, self.read(entry)))
         entry = self.source_original("desktop/src-tauri/Cargo.toml", "setup-verification-cargo", 128 * 1024)
         self.package_sources.append((entry, self.read(entry)))

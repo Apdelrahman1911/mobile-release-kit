@@ -4690,6 +4690,52 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         module.final_package_receipt(TOOL.canonical(record), *args, setup=True, setup_originals=originals)
                 if before is not None: self.assertEqual(len(os.listdir("/proc/self/fd")), before)
 
+    def test_setup_source_hook_modes_are_closed_and_original_bound(self):
+        module = ANDROID_HELPER
+        cases = (("readonly", "preinstall", 0o555), ("data-as-executable", "CarrierInfo.plist", 0o755),
+                 ("hook-as-data", "preinstall", 0o644), ("hook-group-write", "setup/postinstall", 0o775),
+                 ("data-group-write", "Component.plist", 0o664), ("hook-hardlink", "preinstall", None))
+        for kind, name, mode in cases:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                state = self.final_package_fixture(Path(directory), setup=True)
+                operation = state.operation
+                path = state.checkout / "desktop/macos-xcode-setup-inputs" / name
+                if mode is not None: path.chmod(mode)
+                else: os.link(path, state.checkout / "foreign-hardlink")
+                if kind == "readonly":
+                    for leaf in (state.checkout / "desktop/macos-xcode-setup-inputs").rglob("*"):
+                        if leaf.is_file(): leaf.chmod(0o555 if leaf.name in ("preinstall", "postinstall") else 0o444)
+                before = (path.stat().st_ino, path.stat().st_mode, path.stat().st_nlink, path.read_bytes())
+                with self.final_package_fixture_call(state):
+                    if kind == "readonly":
+                        operation.execute()
+                    else:
+                        with self.assertRaisesRegex(module.Refused, "helper-package-incomplete"):
+                            operation.execute()
+                self.assertEqual((path.stat().st_ino,path.stat().st_mode,path.stat().st_nlink,path.read_bytes()), before)
+                self.assertTrue(operation.receipt["originalClosesKnown"])
+                self.assertTrue(all(entry["closed"] for entry in operation.entries))
+                if kind != "readonly":
+                    self.assertEqual(operation.calls, []); self.assertEqual(operation.credential_calls, [])
+                    self.assertEqual(operation.receipt["failure"]["reason"], "file-original-shape")
+                    self.assertFalse((state.work / "xcode-setup-inputs").exists())
+        with tempfile.TemporaryDirectory() as directory:
+            state = self.final_package_fixture(Path(directory), setup=True)
+            operation = state.operation
+            # Inert non-None sentinel bypasses only the missing-root guard, so
+            # these cases prove the actual name/purpose guards before any I/O.
+            operation.source_entry = object()
+            with mock.patch.object(operation, "descend") as descend:
+                for name in ("../preinstall", "setup/other", "desktop/macos-xcode-setup-inputs/preinstall"):
+                    with self.assertRaisesRegex(module.Refused,"setup-source-purpose"):
+                        operation.setup_source_original(name,"inert-source")
+                operation.setup_package = operation.setup_verify = False
+                with self.assertRaisesRegex(module.Refused,"setup-source-purpose"):
+                    operation.setup_source_original("preinstall","inert-source")
+                descend.assert_not_called()
+            operation.source_entry = None
+            self.assertEqual(operation.entries, [])
+
     def test_xcode_setup_prefix_refusals_keep_originals_and_never_enter_credentials(self):
         module = ANDROID_HELPER
         for fault, count in (("final-package-setup-pkgbuild-nonzero", 1), ("setup-bom-owner", 2),
@@ -4755,7 +4801,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             for name in ("CarrierInfo.plist", "Component.plist", "Distribution.xml", "InstallerReadMe.html", "preinstall", "setup/postinstall"):
                 path = checkout / "desktop/macos-xcode-setup-inputs" / name
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes((source / "desktop/macos-xcode-setup-inputs" / name).read_bytes()); path.chmod(0o644)
+                path.write_bytes((source / "desktop/macos-xcode-setup-inputs" / name).read_bytes())
+                # Exact Git executable bit: only the two SOURCE hooks are100755.
+                path.chmod(0o755 if name in ("preinstall", "setup/postinstall") else 0o644)
             helper = work / "xcode-setup-target" / target / "release/mrk-macos-xcode-setup"
             helper.parent.mkdir(parents=True); helper.write_bytes(files[TOOL.XCODE_SETUP_PROGRAM][0]); helper.chmod(0o555)
             environment["MRK_MACOS_XCODE_SETUP_SHA256"] = args.expected_helper
