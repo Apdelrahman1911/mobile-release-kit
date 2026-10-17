@@ -514,3 +514,37 @@ UI, Apple Store preparation/upload/recovery, build-once promotion, corrected
 signed installation and full installed journeys. Existing signed-runtime
 evidence applies only to its checked source. Desktop remains **NOT READY**;
 no main change or public release is authorized or claimed.
+
+### Protected Xcode prerequisite and hosted qualification
+
+The current native Xcode profile requires a root-owned selected concrete app,
+Contents/Developer and every admitted tool ancestor with no group/world-write or
+special permission bits, plus the existing local APFS/empty-ACL checks. The one
+`/Applications/Xcode.app` selection alias may refer only to the admitted direct
+sibling. Full Xcode installation, first launch and a passing Environment doctor
+are not equivalent: doctor observes administratively trusted selection/version,
+not these original-tool custody guarantees. A refused ordinary installation
+requires an administrator-provisioned supported profile. There is no automatic
+permission/ACL repair, and users must not recursively chmod Applications or run
+the desktop app as root. A guided consumer preparation route remains missing.
+
+Read-only run39006573875/1 observed both hosted architectures with Applications
+root:admin0775 and the concrete Xcode app/Contents/Developer user-owned0755.
+These fail the unchanged native protection policy. The optional component
+`local-keychain`/`local-keychain-contracts` and `ios-tools` checks now explicitly
+prepare ONLY the selected Xcode tree on disposable GitHub-hosted VMs, not a
+normal Mac or a self-hosted runner. Before/after preparation, codesign must verify
+the actual Apple-vendor requirement `identifier "com.apple.dt.Xcode" and anchor
+apple` (not `anchor apple generic`), with deep/strict/all-architecture checking.
+The bounded physical walk never follows or changes symlink targets, changes no
+file contents or group, preserves normal read/execute bits, and never recursively
+changes other Applications members. No ACL erasure is performed. The only global
+ancestor touched is Applications itself. Failure leaves a disposable failed VM,
+not a claimed repaired host. The actual Book and resolver tests still must pass;
+this prepared-host evidence does not establish default consumer-Mac usability.
+
+Apple documents `anchor apple` as Apple's own code, whereas `anchor apple generic`
+also includes certificates issued to other developers:
+https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/RequirementLang/RequirementLang.html
+Apple's installation/selection guidance does not promise this MRK protection
+profile: https://developer.apple.com/library/archive/technotes/tn2339/_index.html

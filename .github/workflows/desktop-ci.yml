@@ -81,7 +81,7 @@ jobs:
             test_local_store_prepare test_local_ios_store_prepare test_local_ios_store_execute test_local_ios_store_reconcile test_local_store_execute test_local_store_reconcile test_local_recovery_settlement test_local_reconcile_review test_local_release_history test_local_candidate_inputs test_local_ios_candidate_control test_local_ios_candidate_create test_local_ios_candidate_history test_local_prepared_review test_local_execution_review \
             unit.test_android_current_tools_macos unit.test_android_upload_validation unit.test_ios_current_tools_macos \
             test_macos_store_consumer test_macos_store_paths \
-            test_macos_candidate_consumer test_macos_candidate_bootstrap test_macos_candidate_ui \
+            test_macos_candidate_consumer test_macos_candidate_bootstrap test_macos_candidate_ui test_ci_xcode_preparation \
             test_macos_notary_submit_diagnostic \
             test_macos_launcher_packaging test_macos_launcher_staging \
             test_macos_app_absence_fixture.ThinRestoreProjectionData \

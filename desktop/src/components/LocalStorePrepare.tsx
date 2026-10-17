@@ -5,7 +5,9 @@ export function LocalStorePrepare({ state, controller, compact = false, onCreden
   onCredentials: () => void; onShow: () => void;
 }) {
   const op = state.status?.operation, retained = localStorePrepareOwnerReason(state), reason = controller.prepareReason();
-  const prepared = op?.result?.preparedIntent, ios = state.request?.platform === 'ios';
+  const prepared = op?.result?.preparedIntent, displayedRequest = retained && op ? op.context : state.request;
+  const ios = displayedRequest?.platform === 'ios';
+  const displayedApplication = retained && state.historical ? 'Original retained candidate' : state.applicationId;
   if (compact && !retained) return null;
   return <section className="card" aria-label="Prepare local Store release">
     <div className="inline-heading"><h2>Prepare Store release · This Mac</h2>{compact && <button onClick={onShow}>Show preparation</button>}</div>
@@ -17,8 +19,8 @@ export function LocalStorePrepare({ state, controller, compact = false, onCreden
         <p>Get Google JSON from Google Cloud Console → IAM &amp; Admin → Service Accounts → Keys. Get the App Store Connect API key from Users and Access → Integrations → App Store Connect API. Keep these private files and identifiers out of Git and GitHub.</p>
         <p>Incorrect credentials, permissions, version or candidate files cause preparation to refuse; they never trigger an automatic release.</p>
       </details>
-      {state.request && <p><strong>{state.applicationId}</strong> · Version {state.request.savedVersion.name} · Build {state.request.savedVersion.build} · {ios ? 'TestFlight internal' : 'Play internal testing'}</p>}
-      <p><strong>What changes:</strong> {ios ? 'App Store Connect is read to capture a current snapshot; no Store write or upload is requested.' : state.request ? 'Google Play receives a temporary uncommitted edit. The app reads its state and attempts to delete that edit.' : 'Android preparation uses a temporary uncommitted Play edit; iOS preparation only reads App Store Connect.'} The app saves a local snapshot and intent. It does not rebuild, sign, upload, commit a track or publish.</p>
+      {displayedRequest && <p><strong>{displayedApplication}</strong> · Version {displayedRequest.savedVersion.name} · Build {displayedRequest.savedVersion.build} · {ios ? 'TestFlight internal' : 'Play internal testing'}</p>}
+      <p><strong>What changes:</strong> {ios ? 'App Store Connect is read to capture a current snapshot; no Store write or upload is requested.' : displayedRequest ? 'Google Play receives a temporary uncommitted edit. The app reads its state and attempts to delete that edit.' : 'Android preparation uses a temporary uncommitted Play edit; iOS preparation only reads App Store Connect.'} The app saves a local snapshot and intent. It does not rebuild, sign, upload, commit a track or publish.</p>
       {!state.request && <button onClick={onCredentials}>Configure local credentials</button>}
       <button disabled={!!reason || state.pending} onClick={() => void controller.prepare()}>Review Store preparation</button>
       {reason && <p className="save-note">{reason}</p>}
@@ -41,7 +43,7 @@ export function LocalStorePrepare({ state, controller, compact = false, onCreden
       <p>{'bundleId' in prepared ? 'App Store Connect' : 'Google Play'} state observed at {prepared.observedAt}. Local checkpoint {op?.result?.headSequence}.</p>
       <p>The application retained the snapshot and intent inside your project. No copying or command is needed. This result does not authorize execution, establish earlier build finality, or guarantee that the Store is unchanged.</p>
       {state.historical && <p>This result belongs to an earlier context. It is not a preparation of your current selection.</p>}
-      <p>Execution requires separate support, review and explicit consent. This preparation does not enable an iOS upload. Do not treat this saved intent as a completed Store release.</p>
+      <p>To upload, choose Verify history → Review prepared, then review the separate Upload action and its explicit consent. This saved plan alone never sends a build or authorizes a Store release.</p>
     </div>}
   </section>;
 }
