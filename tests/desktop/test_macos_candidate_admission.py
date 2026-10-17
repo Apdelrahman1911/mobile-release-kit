@@ -71,6 +71,64 @@ class CandidateAdmission(unittest.TestCase):
                 self.assertEqual(h.admit(old, target=target, phase='prepare'), Path(env['MRK_MACOS_WORK']))
                 with self.assertRaises(h.Refused): h.admit(old, target=target, phase='finalize-image')
 
+    def companion_environment(self, target):
+        h = HELPER
+        env = dict(self.environment(target), GITHUB_EVENT_NAME='workflow_dispatch',
+                   MRK_MACOS_XCODE_SETUP_SCOPE='companion-only', GITHUB_REF=h.XCODE_SETUP_REF)
+        env['GITHUB_WORKFLOW_REF'] = env['GITHUB_WORKFLOW_REF'].replace(h.CANDIDATE_REF,h.XCODE_SETUP_REF)
+        return env
+
+    def test_companion_dispatch_is_exact_three_phases_and_original_constructor(self):
+        h = HELPER
+        phases = ('sign-xcode-setup', 'finalize-xcode-setup-package', h.XCODE_SETUP_VERIFY)
+        for target in (h.ARM_TARGET, h.INTEL_TARGET):
+            env = self.companion_environment(target)
+            with self.host(target):
+                for phase in phases:
+                    with self.subTest(target=target, phase=phase):
+                        self.assertEqual(h.admit(env, target=target, phase=phase), Path(env['MRK_MACOS_WORK']))
+                for phase in ('prepare', 'finalize-package', 'package-install', 'finalize-image',
+                              'sign-root-installer', 'verify-after', 'unknown', None):
+                    with self.subTest(phase=phase), self.assertRaises(h.Refused):
+                        h.admit(env, target=target, phase=phase)
+                bad = [('GITHUB_EVENT_NAME','push'), ('GITHUB_EVENT_NAME','pull_request'),
+                       ('MRK_MACOS_XCODE_SETUP_SCOPE','disabled'), ('MRK_MACOS_XCODE_SETUP_SCOPE','other'),
+                       ('GITHUB_REF', h.APP_SIGNATURE_REF), ('GITHUB_REF', h.CANDIDATE_REF), ('GITHUB_REPOSITORY','foreign/repo'),
+                       ('GITHUB_WORKFLOW_SHA','b'*40), ('MRK_MACOS_INSTALL_SOURCE_COMMIT','b'*40),
+                       ('GITHUB_WORKFLOW_REF','foreign/workflow'), ('MRK_MACOS_SAME_PACKAGE_SCOPE','same-package-noop')]
+                for key, value in bad:
+                    with self.subTest(key=key, value=value), self.assertRaises(h.Refused):
+                        h.admit(dict(env, **{key:value}), target=target, phase=phases[0])
+                missing = dict(env); del missing['MRK_MACOS_XCODE_SETUP_SCOPE']
+                with self.assertRaises(h.Refused): h.admit(missing,target=target,phase=phases[0])
+                # Workflow absence alone is not authority: even a forged push
+                # with ordinary default scope on the new ref must be refused.
+                with self.assertRaises(h.Refused):
+                    h.admit(dict(env,GITHUB_EVENT_NAME='push',MRK_MACOS_XCODE_SETUP_SCOPE='disabled'),target=target,phase=phases[0])
+            # The real verification constructor opens no original until execute;
+            # its explicit route and credential-free admission is not bypassed.
+            args = (SimpleNamespace(), h.CHECKOUT, Path(env['MRK_MACOS_WORK']), h.XCODE_SETUP_VERIFY)
+            operation = h.Operation(*args, env, STAGER, target=target)
+            self.assertEqual(operation.entries, [])
+            self.assertTrue(operation.setup_verify)
+            for key, value in [('GITHUB_EVENT_NAME','push'), ('MRK_MACOS_XCODE_SETUP_SCOPE','disabled'),
+                               ('GITHUB_REF',h.APP_SIGNATURE_REF), ('MRK_MACOS_STORE_RUNTIME','signed-component'),
+                               (h.CREDENTIAL_VARIABLES[0],'inert-forbidden')]:
+                with self.subTest(constructor=key), self.assertRaises(h.Refused):
+                    h.Operation(*args, dict(env, **{key:value}), STAGER, target=target)
+
+    def test_companion_wrong_dispatch_refuses_before_stager_or_owner_load(self):
+        h = HELPER
+        env = self.companion_environment(h.ARM_TARGET)
+        with self.host(h.ARM_TARGET), patch.dict(h.os.environ,env,clear=True), \
+             patch.object(h,'entrypoint',return_value=('prepare',h.ARM_TARGET)), \
+             patch.object(h,'load_data') as loader, redirect_stderr(io.StringIO()):
+            self.assertEqual(h.main(),1)
+        loader.assert_not_called()
+        with self.host(h.ARM_TARGET), self.assertRaises(h.Refused) as caught:
+            h.admit(env,target=h.ARM_TARGET,phase='prepare')
+        self.assertEqual(h.failure_exception(caught.exception)["reason"], 'candidate-companion-event-scope')
+
     def test_unconfigured_candidate_refuses_before_loading_execution_owner(self):
         h = HELPER
         env = self.environment(h.ARM_TARGET)
@@ -80,9 +138,10 @@ class CandidateAdmission(unittest.TestCase):
             if path == h.CHECKOUT/h.PROFILE: return h.UNCONFIGURED_PROFILE
             self.fail('unexpected source read')
         stager = SimpleNamespace(read=read, packaging_signing_data=STAGER.packaging_signing_data)
-        with patch.dict(h.os.environ, env, clear=True), patch.object(h, 'entrypoint', return_value=('prepare',h.ARM_TARGET)), \
-             patch.object(h,'admit',return_value=Path(env['MRK_MACOS_WORK'])), \
-             patch.object(h,'load_data',return_value=stager) as loader, redirect_stderr(io.StringIO()):
-            self.assertEqual(h.main(), 1)
-        self.assertEqual(loader.call_count,1)
-        self.assertEqual(loader.call_args.args[1], 'stage_macos_installed.py')
+        for phase, selected in [('prepare',env), (h.XCODE_SETUP_VERIFY,self.companion_environment(h.ARM_TARGET))]:
+            with self.subTest(phase=phase), self.host(h.ARM_TARGET), patch.dict(h.os.environ, selected, clear=True), \
+                 patch.object(h, 'entrypoint', return_value=(phase,h.ARM_TARGET)), \
+                 patch.object(h,'load_data',return_value=stager) as loader, redirect_stderr(io.StringIO()):
+                self.assertEqual(h.main(), 1)
+            self.assertEqual(loader.call_count,1)
+            self.assertEqual(loader.call_args.args[1], 'stage_macos_installed.py')

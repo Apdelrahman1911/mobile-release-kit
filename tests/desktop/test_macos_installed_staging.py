@@ -4461,16 +4461,22 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         """
         import datetime, plistlib
         module = ANDROID_HELPER
-        for fault, count in ((None, 4), ("pre-first-presence", 1), ("first75", 2), ("first-unknown", 2), ("final-drift", 2), ("after-repeat-drift", 3)):
+        for fault, count in ((None, 4), ("dispatch-success", 4), ("pre-first-presence", 1), ("first75", 2), ("first-unknown", 2), ("final-drift", 2), ("after-repeat-drift", 3)):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                dispatch = fault == "dispatch-success"
+                if dispatch: fault = None
                 state = self.final_package_fixture(Path(directory), setup=True)
+                if dispatch:
+                    state.environment.update(GITHUB_EVENT_NAME="workflow_dispatch", MRK_MACOS_XCODE_SETUP_SCOPE="companion-only",
+                        GITHUB_REF=module.XCODE_SETUP_REF)
+                    state.environment["GITHUB_WORKFLOW_REF"] = state.environment["GITHUB_WORKFLOW_REF"].replace(module.CANDIDATE_REF,module.XCODE_SETUP_REF)
                 with self.final_package_fixture_call(state):
                     state.operation.execute()
                 for name in ("xcode-setup-build.status", "xcode-setup-sign.status", "xcode-setup-finalization.status"):
                     path = state.work/name; path.write_bytes(b"0\n"); path.chmod(0o600)
                 env = {k:v for k,v in state.environment.items() if k not in module.CREDENTIAL_VARIABLES
                     + module.INSTALLER_CREDENTIAL_VARIABLES + (module.NOTARY_KEY_VARIABLE, "MRK_MACOS_STORE_RUNTIME")}
-                env.update(GITHUB_REF=module.CANDIDATE_REF, GITHUB_EVENT_NAME="push")
+                env.update(GITHUB_REF=module.XCODE_SETUP_REF if dispatch else module.CANDIDATE_REF, GITHUB_EVENT_NAME="workflow_dispatch" if dispatch else "push")
                 # Keep workflow/source fields from SAME finalizer fixture. Its
                 # final receipt has the original candidate ref (not rewritten).
                 root = Path(directory)/"system"; root.mkdir(mode=0o755)

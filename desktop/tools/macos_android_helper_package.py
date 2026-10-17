@@ -1866,6 +1866,7 @@ _FAILURE_REASONS = frozenset((*_FAILURE_SETUP_REASONS, *("original-nonzero-" + r
     'helper-one-library', 'helper-package-artifact', 'helper-package-incomplete',
     'helper-release-graph', 'helper-release-profile', 'helper-separate-library-features',
     'helper-system-dyld-only', 'hosted-native-platform', 'hosted-source-bindings',
+    'candidate-companion-event-scope',
     'image-absolute-apple-system-dependency', 'image-build-version', 'image-command',
     'image-dylib-target', 'image-fixed-install-name-and-system-closure', 'image-library-command',
     'image-library-offset', 'image-library-padding', 'image-library-termination',
@@ -2598,8 +2599,8 @@ class Operation:
         self.removal = phase in REMOVE_PHASES + REMOVAL_OWNER_PHASES
         self.setup_package = phase == "finalize-xcode-setup-package"
         self.setup_verify = phase == XCODE_SETUP_VERIFY
-        need(not self.setup_verify or (environment.get("GITHUB_REF") == CANDIDATE_REF
-             and environment.get("GITHUB_EVENT_NAME") == "push"
+        need(not self.setup_verify or (environment.get("GITHUB_REF") in (CANDIDATE_REF, XCODE_SETUP_REF)
+             and xcode_setup_event(environment, phase)
              and environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image"
              and environment.get("MRK_MACOS_STORE_RUNTIME") is None
              and not any(key in environment for key in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES + (NOTARY_KEY_VARIABLE,))),
@@ -9113,7 +9114,7 @@ class Operation:
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
                 allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + STORE_SIGNING_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
-                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF))
+                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF, XCODE_SETUP_REF))
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
             if self.phase in STORE_SIGNING_PHASES:
@@ -9357,6 +9358,16 @@ def load_data(checkout, filename, name):
     return module
 
 
+def xcode_setup_event(environment, phase):
+    """Closed event choice only; all ordinary host/source admission still applies."""
+    scope = environment.get("MRK_MACOS_XCODE_SETUP_SCOPE", "disabled")
+    if environment.get("GITHUB_REF") == XCODE_SETUP_REF:
+        return (scope == "companion-only"
+                and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                and phase in ("sign-xcode-setup", "finalize-xcode-setup-package", XCODE_SETUP_VERIFY))
+    return scope == "disabled" and environment.get("GITHUB_EVENT_NAME") == "push"
+
+
 def admit(environment, *, target=ARM_TARGET, phase=None):
     machine, runner_arch, _release_input = build_profile(target)
     need(sys.platform == "darwin" and sys.maxsize == 2 ** 63 - 1, "hosted-native-platform")
@@ -9365,6 +9376,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "hosted-native-platform")
     need(Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py", "fixed-source-driver")
     ref = environment.get("GITHUB_REF")
+    need(xcode_setup_event(environment, phase), "candidate-companion-event-scope")
     scope = environment.get("MRK_MACOS_SAME_PACKAGE_SCOPE", "disabled")
     need(scope in ("disabled", SAME_PACKAGE_PHASE)
          and (scope == "disabled" or ref == "refs/heads/verify/desktop-macos-preview"), "same-package-source-scope")
@@ -9418,11 +9430,11 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     workflow = ("desktop-macos-android-support-signing.yml" if support_phase else
                 "desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase or store_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
-                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF) else None)
+                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF, XCODE_SETUP_REF) else None)
     need(workflow is not None, "closed-workflow-route")
     sha = environment.get("GITHUB_SHA", "")
     required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": runner_arch,
-                "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
+                "GITHUB_EVENT_NAME": environment["GITHUB_EVENT_NAME"], "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
                 "GITHUB_WORKSPACE": str(CHECKOUT), "GITHUB_WORKFLOW_SHA": sha,
                 "GITHUB_WORKFLOW_REF": "Apdelrahman1911/mobile-release-kit/.github/workflows/" + workflow + "@" + ref,
                 "MRK_EXPECTED_SHA": sha, "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
@@ -9451,6 +9463,7 @@ APP_SIGNATURE_PHASES = ("prepare", "sign-vault-helper", "sign-remover", "sign-ap
 APP_SIGNATURE_DATA = ("select-github-tools-signed", "project-history-provider", "project-github-seal")
 # Only produce one current carrier; no fixture, runtime re-signing or UI claim.
 CANDIDATE_REF = "refs/heads/verify/desktop-macos-candidate"
+XCODE_SETUP_REF = "refs/heads/verify/desktop-macos-xcode-setup"
 CANDIDATE_PHASES = APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer",
     "finalize-package", "package-install", "finalize-image", "sign-xcode-setup",
     "finalize-xcode-setup-package", XCODE_SETUP_VERIFY)
@@ -10189,7 +10202,7 @@ def main():
         main_stage = "profile-check"
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
                                      allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + STORE_SIGNING_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
-                                     and os.environ.get("GITHUB_REF") not in (APP_SIGNATURE_REF, CANDIDATE_REF))
+                                     and os.environ.get("GITHUB_REF") not in (APP_SIGNATURE_REF, CANDIDATE_REF, XCODE_SETUP_REF))
         if phase in FINAL_PACKAGE_PHASES or phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
         main_stage = "owner-load"
