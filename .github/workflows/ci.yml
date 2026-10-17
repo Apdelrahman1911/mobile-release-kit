@@ -67,9 +67,7 @@ jobs:
           [[ "$(id -u)" != 0 ]]
           root=$(mktemp -d "$RUNNER_TEMP/mrk-play-tests.XXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
-          # Only public test dependencies live here. The later user namespace
-          # needs directory traversal, not directory listing or write access.
-          chmod 0711 "$root"
+          umask 022
           mkdir "$root/home" "$root/bootstrap" "$root/gems"
       - name: Install only the frozen test dependencies
         shell: bash
@@ -86,6 +84,7 @@ jobs:
           export GEM_PATH="$GEM_HOME" PATH="$GEM_HOME/bin:$PATH"
           export BUNDLE_PATH="$WORK_ROOT/gems" BUNDLE_USER_HOME="$WORK_ROOT/home/bundle"
           export BUNDLE_IGNORE_CONFIG=1 BUNDLE_FROZEN=true BUNDLE_DEPLOYMENT=true
+          umask 022
           gem install --norc bundler --version 4.0.16 --no-document --clear-sources --source https://rubygems.org
           bundle _4.0.16_ install --jobs 2 --retry 1
       - name: Test real Supply adapters against isolated fake Store fixtures
@@ -100,8 +99,8 @@ jobs:
           # Install needs network; the actual tests get none, no runner HOME,
           # no secrets, and no writable source/dependencies. No native suites.
           sudo -n /usr/bin/timeout --kill-after=5 180 /usr/bin/bwrap \
-            --unshare-all --die-with-parent --new-session \
-            --uid 65534 --gid 65534 --cap-drop ALL \
+            --unshare-ipc --unshare-pid --unshare-net --unshare-uts --unshare-cgroup \
+            --die-with-parent --new-session \
             --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
             --symlink usr/bin /bin --proc /proc --dev /dev --tmpfs /tmp \
             --ro-bind "$ruby_prefix" "$ruby_prefix" \
@@ -115,10 +114,14 @@ jobs:
             --setenv BUNDLE_USER_HOME /tmp/bundle --setenv BUNDLE_IGNORE_CONFIG 1 \
             --setenv BUNDLE_FROZEN true --setenv BUNDLE_DEPLOYMENT true \
             --setenv FASTLANE_SKIP_UPDATE_CHECK 1 --setenv FASTLANE_OPT_OUT_USAGE 1 \
+            /usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups \
+            --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
             /bin/bash -c '
               set -euo pipefail; umask 077; mkdir /tmp/home
               ulimit -c 0; ulimit -n 256; ulimit -v 1572864; ulimit -t 120
-              [[ "$(id -u)" != 0 ]]
+              [[ "$(id -u)" == 65534 && "$(id -g)" == 65534 ]]
+              grep -Eq "^CapEff:[[:space:]]+0000000000000000$" /proc/self/status
+              grep -Eq "^CapBnd:[[:space:]]+0000000000000000$" /proc/self/status
               ruby -rbundler/setup tests/workflow/test_play_lanes.rb | tee /tmp/play.log
               grep -Eq "^55 runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$" /tmp/play.log
               ruby -rbundler/setup tests/workflow/test_local_store_execution_runtime.rb | tee /tmp/local.log
