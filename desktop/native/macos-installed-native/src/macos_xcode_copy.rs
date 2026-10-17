@@ -232,6 +232,10 @@ impl Identity {
             && self.gid == other.gid
             && self.flags == other.flags
     }
+    #[cfg(test)]
+    pub(crate) fn diagnostic_mode_flags(self) -> (u32, u32) {
+        (u32::from(self.mode), self.flags)
+    }
     pub(crate) fn device(self) -> libc::dev_t {
         self.dev
     }

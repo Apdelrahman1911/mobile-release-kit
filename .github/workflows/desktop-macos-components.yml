@@ -292,8 +292,9 @@ jobs:
               macos_xcode_entry::tests::public_exit_requires_original_finality_and_distinguishes_cleanup \
               --exact --test-threads=1 | tee "$WORK_ROOT/xcode-entry-tail-tests.log"
             grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;' "$WORK_ROOT/xcode-entry-tail-tests.log"
-            # Explicit test-only temp parent, not /Library or the user's Xcode.
-            # Tests normalize only their own newly-created root-owned children.
+            # Private mutations stay in this test-only temp parent. The extra
+            # selected-Xcode census is read-only and reports its first refusal;
+            # it neither copies Xcode nor runs signing or Installer.
             /bin/mkdir -m 700 "$WORK_ROOT/xcode-files-fixtures"
             /usr/bin/sudo /usr/bin/env -i \
               PATH=/usr/bin:/bin:/usr/sbin:/sbin \
@@ -302,9 +303,10 @@ jobs:
               macos_xcode_tree_tests::copier_copies_real_bytes_links_attributes_and_retires_only_its_stage \
               macos_xcode_tree_tests::retirement_checks_recorded_identity_and_never_follows_partial_or_sealed_aliases \
               macos_xcode_parent::native::namespace_tests::namespace_creation_seals_umask077_and_preserves_existing_objects \
+              macos_xcode_parent::native::namespace_tests::selected_system_xcode_initial_census_is_read_only_and_reports_first_failure \
               --exact --ignored --test-threads=1 | tee "$WORK_ROOT/xcode-files-tests.log"
-            grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/xcode-files-tests.log"
-            # Both tests consume originals and remove only their own fixture;
+            grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;' "$WORK_ROOT/xcode-files-tests.log"
+            # The tests consume originals and remove only their own fixtures;
             # this succeeds only when that parent is actually empty afterward.
             /bin/rmdir "$WORK_ROOT/xcode-files-fixtures"
             exit 0

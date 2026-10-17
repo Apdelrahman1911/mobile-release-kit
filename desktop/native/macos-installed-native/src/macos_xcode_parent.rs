@@ -4120,6 +4120,73 @@ mod native {
             panic::{catch_unwind, AssertUnwindSafe}, time::{SystemTime, UNIX_EPOCH}};
 
         #[test]
+        #[ignore = "requires explicit disposable macOS read-only system-Xcode census"]
+        fn selected_system_xcode_initial_census_is_read_only_and_reports_first_failure() {
+            assert_eq!(unsafe { libc::getuid() }, 0);
+            assert_eq!(unsafe { libc::geteuid() }, 0);
+            let start = Instant::now();
+            let finish = start + Duration::from_secs(630);
+            let work = copy::Work { end: start + Duration::from_secs(600),
+                parent: unsafe { libc::getppid() } };
+            let mut files = crate::macos_xcode_tree::CopierFiles::new(finish, 1).unwrap();
+            let mut root: Option<libc::c_int> = None;
+            let mut stage = "root-original";
+            let observed = catch_unwind(AssertUnwindSafe(|| {
+                work.point().expect("initial census original clock");
+                let raw = unsafe { libc::open(c"/".as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+                if raw >= 0 { root = Some(raw); }
+                assert!(raw >= 0, "initial census read-only root open");
+                work.point().expect("initial census root-open clock");
+                let root = unsafe { BorrowedFd::borrow_raw(raw) };
+                let root_identity = fstat(root).expect("initial census root stat");
+                assert!(root_identity.directory(None), "initial census root policy");
+                stage = "source-selection";
+                let selected = SourceSelection::selected(root, &mut files, &work)
+                    .expect("initial census fixed original selection");
+                let apps_raw = files.fd(selected.applications).unwrap().as_raw_fd();
+                let app_raw = files.fd(selected.app).unwrap().as_raw_fd();
+                let apps = unsafe { BorrowedFd::borrow_raw(apps_raw) };
+                let app = unsafe { BorrowedFd::borrow_raw(app_raw) };
+                stage = "source-tree-original";
+                let tree = crate::macos_xcode_tree::SourceTree::original(
+                    app, apps, &selected.name, selected.app_id, &work,
+                ).expect("initial census actual source tree");
+                stage = "source-allocation-unit";
+                let filesystem = statfs::fstatfs(app).expect("initial census source filesystem");
+                let unit = u64::try_from(filesystem.block_size()).expect("initial census allocation unit");
+                stage = "initial-source-census";
+                let census = tree.census(&mut files, unit).expect("initial source census refused");
+                stage = "selection-post";
+                selected.post(root, &files, &work).expect("initial census selection POST");
+                stage = "root-post";
+                assert!(fstat(root).unwrap() == root_identity, "initial census root original POST");
+                work.point().expect("initial census final original clock");
+                (census.quote.entries(), census.quote.logical_bytes())
+            }));
+            // Earliest source/copy error survives final cleanup. The root uses
+            // the SAME effective F; not another 630-second cleanup allowance.
+            if observed.is_err() { files.note_failure(); }
+            let children_closed = files.close_all();
+            let cutoff = files.first_failure()
+                .and_then(|at| at.checked_add(Duration::from_secs(120)))
+                .map_or(finish, |at| at.min(finish));
+            let root_closed = root.map_or(true, |fd| {
+                Instant::now() < cutoff && unsafe { libc::close(fd) } == 0
+            });
+            let settled = children_closed && files.live() == 0 && root_closed && Instant::now() < cutoff;
+            // No output was created and no source object may be removed.
+            assert!(settled, "initial census original closure unconfirmed");
+            match observed {
+                Ok((entries, bytes)) => eprintln!("MRK_XCODE_INITIAL_CENSUS state=passed;entries={entries};logicalBytes={bytes};copyPerformed=false;signerVerified=false"),
+                Err(error) => {
+                    eprintln!("MRK_XCODE_INITIAL_CENSUS state=failed;stage={stage};originalsClosed=true;copyPerformed=false");
+                    std::panic::resume_unwind(error);
+                }
+            }
+        }
+
+        #[test]
         #[ignore = "requires explicit disposable macOS root/APFS fixture"]
         fn namespace_creation_seals_umask077_and_preserves_existing_objects() {
             assert_eq!(unsafe { libc::getuid() }, 0);

@@ -897,8 +897,39 @@ pub(crate) struct SourceTree<'a> {
     work: &'a Work,
     copy_started: bool,
     protected: bool,
+    #[cfg(test)]
+    diagnostic_reported: std::cell::Cell<bool>,
 }
 impl<'a> SourceTree<'a> {
+    /// Test-only diagnosis for the fixed system Xcode census. Never publish
+    /// source contents/xattr values or turn an observation into admission.
+    #[cfg(test)]
+    fn report_failure(
+        &self, operation: &'static str, parts: &[Vec<u8>], child: Option<&[u8]>,
+        original: Identity, failure: Failure,
+    ) {
+        if self.diagnostic_reported.replace(true) { return; }
+        let mut path = Vec::with_capacity(profile::PATH_LIMIT);
+        let mut truncated = false;
+        for part in parts.iter().map(Vec::as_slice).chain(child) {
+            let extra = part.len() + usize::from(!path.is_empty());
+            if path.len().checked_add(extra).is_none_or(|n| n > profile::PATH_LIMIT) {
+                truncated = true;
+                break;
+            }
+            if !path.is_empty() { path.push(b'/'); }
+            path.extend_from_slice(part);
+        }
+        // escape_default emits at most four printable ASCII bytes per byte.
+        // Explicit cap includes the root '.' representation when parts is empty.
+        if path.is_empty() { path.push(b'.'); }
+        let mut escaped = String::with_capacity(path.len() * 4);
+        for byte in path { for ascii in std::ascii::escape_default(byte) {
+            escaped.push(char::from(ascii));
+        } }
+        let (mode, flags) = original.diagnostic_mode_flags();
+        eprintln!("MRK_XCODE_CENSUS_FAILURE operation={operation};failure={failure:?};relative=\"{escaped}\";truncated={truncated};mode={mode:o};type={:o};flags={flags}", mode & u32::from(libc::S_IFMT));
+    }
     pub(crate) fn original(
         root: BorrowedFd<'a>,
         parent: BorrowedFd<'a>,
@@ -919,6 +950,8 @@ impl<'a> SourceTree<'a> {
             work,
             copy_started: false,
             protected: false,
+            #[cfg(test)]
+            diagnostic_reported: std::cell::Cell::new(false),
         })
     }
     /// Same bounded physical reader, additionally enforcing exact sealed modes
@@ -1054,6 +1087,11 @@ impl<'a> SourceTree<'a> {
         }
         let original_live = files.live();
         let result = self.census_inner(files, allocation_unit, original_live);
+        #[cfg(test)]
+        if let Err(failure) = &result {
+            files.note_failure();
+            self.report_failure("census-root-or-finality", &[], None, self.root_identity, *failure);
+        }
         if result.is_err() {
             files.note_failure();
         }
@@ -1104,6 +1142,11 @@ impl<'a> SourceTree<'a> {
         digest: &mut Sha256,
     ) -> Result<()> {
         let result = self.walk_inner(fd, parent, name, id, parts, files, budget, quote, digest);
+        #[cfg(test)]
+        if let Err(failure) = &result {
+            files.note_failure();
+            self.report_failure("node-census", parts, None, id, *failure);
+        }
         if result.is_err() {
             files.note_failure();
         }
@@ -1130,7 +1173,13 @@ impl<'a> SourceTree<'a> {
         } else {
             id.source_kind()?
         };
-        let bytes = copy::quote_visible_attributes(fd, parent, name, id, self.work)?;
+        let attributes = copy::quote_visible_attributes(fd, parent, name, id, self.work);
+        #[cfg(test)]
+        if let Err(failure) = &attributes {
+            files.note_failure();
+            self.report_failure("attribute-quote", parts, None, id, *failure);
+        }
+        let bytes = attributes?;
         let path_bytes = parts.iter().map(|s| s.len() + 1).sum::<usize>().max(1);
         quote
             .add(profile::NodeSize {
@@ -1151,14 +1200,32 @@ impl<'a> SourceTree<'a> {
         match kind {
             profile::Kind::Regular => (),
             profile::Kind::Symlink => {
-                let value = link(parent, name, id, self.work)?;
+                let linked = link(parent, name, id, self.work);
+                #[cfg(test)]
+                if let Err(failure) = &linked {
+                    files.note_failure();
+                    self.report_failure("link-read", parts, None, id, *failure);
+                }
+                let value = linked?;
                 digest.update((value.len() as u16).to_be_bytes());
                 digest.update(&value);
                 let parent_parts = &parts[..parts.len().checked_sub(1).ok_or(Failure::Links)?];
-                self.confined_link(files, parent_parts, &value)?;
+                let confined = self.confined_link(files, parent_parts, &value);
+                #[cfg(test)]
+                if let Err(failure) = &confined {
+                    files.note_failure();
+                    self.report_failure("link-resolution", parts, None, id, *failure);
+                }
+                confined?;
             }
             profile::Kind::Directory => {
-                let rows = names(fd, id, budget, self.work)?;
+                let listed = names(fd, id, budget, self.work);
+                #[cfg(test)]
+                if let Err(failure) = &listed {
+                    files.note_failure();
+                    self.report_failure("directory-list", parts, None, id, *failure);
+                }
+                let rows = listed?;
                 let observed = (|| -> Result<()> {
                     for row in &rows {
                         self.work.point()?;
@@ -1168,8 +1235,20 @@ impl<'a> SourceTree<'a> {
                             return Err(Failure::Bounds);
                         }
                         let named = copy::named(fd, row.cstr()?, self.work)?;
-                        row.matches(named)?;
-                        let slot = files.open_source(fd, row.cstr()?, named, self.work)?;
+                        let matched = row.matches(named);
+                        #[cfg(test)]
+                        if let Err(failure) = &matched {
+                            files.note_failure();
+                            self.report_failure("directory-entry-binding", parts, Some(row.key()), named, *failure);
+                        }
+                        matched?;
+                        let opened = files.open_source(fd, row.cstr()?, named, self.work);
+                        #[cfg(test)]
+                        if let Err(failure) = &opened {
+                            files.note_failure();
+                            self.report_failure("source-open", parts, Some(row.key()), named, *failure);
+                        }
+                        let slot = opened?;
                         parts.push(row.key().to_vec());
                         // All originals are still present; raw borrow cannot
                         // outlive this synchronous call or its positive close.
