@@ -39,6 +39,11 @@ on:
         type: choice
         default: all
         options: [all, integration, launcher, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, ios-tools-layout, ios-tools]
+      architecture:
+        description: Architecture for Store runtime and iOS resolver checks; other components use both
+        type: choice
+        default: both
+        options: [both, arm64, x86_64]
 
 permissions:
   contents: read
@@ -622,13 +627,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include:
-          - runner: macos-26
-            arch: arm64
-            target: aarch64-apple-darwin
-          - runner: macos-26-intel
-            arch: x86_64
-            target: x86_64-apple-darwin
+        include: ${{ fromJSON(inputs.architecture == 'arm64' && '[{"runner":"macos-26","arch":"arm64","target":"aarch64-apple-darwin"}]' || inputs.architecture == 'x86_64' && '[{"runner":"macos-26-intel","arch":"x86_64","target":"x86_64-apple-darwin"}]' || '[{"runner":"macos-26","arch":"arm64","target":"aarch64-apple-darwin"},{"runner":"macos-26-intel","arch":"x86_64","target":"x86_64-apple-darwin"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -757,9 +756,12 @@ jobs:
                   with capture_path.open("xb") as capture:
                       subprocess.run(["/usr/bin/sandbox-exec", "-D", "RUNTIME=" + str(runtime), "-p", profile,
                           str(runtime / "bin/bundle"), "exec", "ruby",
-                          str(checkout / "tests/workflow" / filename)],
+                          str(checkout / "tests/workflow" / filename), "--verbose"],
                           stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
-                          env=clean, cwd=checkout, check=True, timeout=45)
+                          # The production suite exercises49 screenshot/recovery cases;
+                          # its45s blanket budget timed out on Intel, not a case assertion.
+                          # Keep a finite suite budget and print the exact slow/failing case.
+                          env=clean, cwd=checkout, check=True, timeout=180 if phase == "apple-production" else 45)
                   output = stager.read(capture_path, 256 * 1024)
                   stager.need(re.search(rb"^" + str(expected_count).encode("ascii") +
                       rb" runs, [0-9]+ assertions, 0 failures, 0 errors, 0 skips$", output, re.MULTILINE) is not None,
@@ -818,11 +820,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include:
-          - runner: macos-26
-            arch: arm64
-          - runner: macos-26-intel
-            arch: x86_64
+        include: ${{ fromJSON(inputs.architecture == 'arm64' && '[{"runner":"macos-26","arch":"arm64"}]' || inputs.architecture == 'x86_64' && '[{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

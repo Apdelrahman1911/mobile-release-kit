@@ -81,7 +81,10 @@ class IOSStoreResolverMacTests(unittest.TestCase):
             # Uses original C/A/W command owner and ledger. Never synthesize
             # its return/join/clock or increment the ledger as inert rows do.
             result = actual_command(argv, **kwargs)
-            self.assertEqual(result.returncode, 0, 'original xcrun resolver returned nonzero')
+            # This fixed nonpublishing command has no credentials and already
+            # captures <=4097 bytes. Keep its actual error, not just exit72.
+            self.assertEqual(result.returncode, 0,
+                'original xcrun resolver returned nonzero: ' + repr(result.stderr[:1024]))
             returned.append(result.returncode)
             return result
 
