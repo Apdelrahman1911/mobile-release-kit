@@ -1,4 +1,5 @@
 import { diagnosticsAvailabilityText } from '../environmentDiagnosticsController.ts';
+import { selectionDiagnosticGuidance } from '../environmentDiagnosticsGuidance.ts';
 import type { EnvironmentDiagnosticsController, EnvironmentDiagnosticsState } from '../environmentDiagnosticsController.ts';
 import type { EnvironmentCheckId, EnvironmentCheckReason, EnvironmentDiagnosticsProjection } from '../environmentDiagnosticsTypes.ts';
 import { Badge, ErrorNotice, SectionHeading } from './Common.tsx';
@@ -89,6 +90,13 @@ export function EnvironmentDiagnostics({ state, controller, compact = false, loa
       <div className="environment-requirements">{result.checks.map((row) => <article className="tool-card" key={row.id}>
         <h3>{labels[row.id]}</h3><div className="button-row"><Badge>{row.state}</Badge><Badge tone={row.assessment === 'mismatch' ? 'warning' : 'neutral'}>{row.assessment}</Badge></div>
         <p>{reasons[row.reason]}</p>
+        {row.selectionDiagnostic && (() => {
+          const guidance = selectionDiagnosticGuidance(row.selectionDiagnostic);
+          return <div className="notice notice-warning"><div>
+            <strong>{guidance.location}: {guidance.problem}</strong>
+            <p>{guidance.nextStep} <a href="#environment-xcode-prerequisites">Review Xcode prerequisites</a></p>
+          </div></div>;
+        })()}
         {row.id === 'xcode' && <p className="review-caution">{xcodePrerequisites.boundary} <a href="#environment-xcode-prerequisites">Review Xcode prerequisites</a></p>}
         <dl className="environment-baseline"><dt>Observed version</dt><dd>{row.version ?? 'Not assessed'}{row.build && ` · build ${row.build}`}</dd>
           <dt>{row.baseline.kind === 'workflow-reference' ? 'Workflow reference · not a local compatibility rule' : row.baseline.kind === 'exact-pin' ? 'Expected exact core baseline · not the observation' : 'No local version policy'}</dt>

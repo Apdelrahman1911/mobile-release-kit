@@ -5,6 +5,7 @@ import test from 'node:test';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { EnvironmentDiagnosticsController, diagnosticsOwnerReason } from '../src/environmentDiagnosticsController.ts';
+import { selectionDiagnosticGuidance } from '../src/environmentDiagnosticsGuidance.ts';
 import { diagnosticsProjectionProgress, diagnosticsStatusProgress, ENVIRONMENT_DIAGNOSTICS_EVENT,
   environmentDiagnosticsError, environmentDiagnosticsRequestFits, parseEnvironmentDiagnosticsStatus } from '../src/environmentDiagnosticsProtocol.ts';
 
@@ -146,6 +147,23 @@ test('optional selection detail is closed DATA on the original mac negative row,
   const nestedAccessor = clone(detailed);
   Object.defineProperty(nestedAccessor.checks[0].selectionDiagnostic, 'reason', { enumerable: true, get() { reads += 1; return 'directory-kind'; } });
   assert.equal(parse(nestedAccessor), null); assert.equal(reads, 0);
+});
+
+test('selection refusal guidance distinguishes missing tools, protection and a changed original without prescribing a bypass', () => {
+  const protection = selectionDiagnosticGuidance({ stage: 'contents', reason: 'directory-group-write' });
+  assert.equal(protection.location, 'Xcode Contents folder');
+  assert.match(protection.problem, /Other accounts can change/);
+  assert.match(protection.nextStep, /Do not change system-folder permissions/);
+  const missing = selectionDiagnosticGuidance({ stage: 'application', reason: 'namespace-missing' });
+  assert.match(missing.problem, /missing/);
+  assert.match(missing.nextStep, /Install full Xcode from Apple/);
+  const inaccessible = selectionDiagnosticGuidance({ stage: 'application', reason: 'namespace-inaccessible' });
+  assert.match(inaccessible.nextStep, /does not prove that Xcode is absent/);
+  const changed = selectionDiagnosticGuidance({ stage: 'alias', reason: 'identity-changed' });
+  assert.match(changed.nextStep, /After this check has settled/);
+  assert.match(changed.nextStep, /will not adopt a replacement/);
+  const unexpected = selectionDiagnosticGuidance({ stage: 'alias', reason: 'target-shape' });
+  assert.match(unexpected.problem, /outside the supported layout/);
 });
 
 test('strict row, assurance, lifetime and global scope joins reject invented observations or exit/finality facts', () => {
