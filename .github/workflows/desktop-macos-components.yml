@@ -224,7 +224,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-contracts' || inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts')
     name: ${{ inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -243,7 +243,7 @@ jobs:
       - &protected-xcode
         name: Prepare only the selected Apple Xcode on this disposable hosted runner
         if: inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts' || inputs.component == 'ios-tools'
-        timeout-minutes: 13
+        timeout-minutes: 36
         shell: bash
         run: |
           set -euo pipefail
@@ -251,6 +251,9 @@ jobs:
           [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$(/usr/bin/id -u)" != 0 ]]
           # Fixture setup only. Default Mac usability and native tool admission
           # remain separate; no signed runtime, private inputs or Store calls.
+          # Tiny real native CoW/replacement fixture, no Xcode contents or signing.
+          /usr/bin/python3 -I -B tests/desktop/test_ci_xcode_preparation.py \
+            ProtectedXcodeFixtureTests.test_independent_clone_preserves_external_alias_and_closes_collision -v
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS,GITHUB_EVENT_NAME \
             /usr/bin/python3 -I -B desktop/tools/prepare_ci_xcode.py
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -807,7 +810,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.component == 'ios-tools'
     name: Qualify original iOS resolver (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 18
+    timeout-minutes: 42
     permissions:
       contents: read
     strategy:

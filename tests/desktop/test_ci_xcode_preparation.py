@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 import stat
+import sys
 import tempfile
 import time
 import unittest
@@ -41,7 +42,7 @@ class ProtectedXcodeFixtureTests(unittest.TestCase):
             finally:
                 os.close(held)
             self.assertEqual(actual, expected)
-            self.assertEqual(actual, {'directories': 2, 'files': 1, 'symlinks': 1})
+            self.assertEqual(actual, {'directories': 2, 'files': 1, 'symlinks': 1, 'hardlinkedFiles': 0, 'cloneBytes': 0})
             self.assertEqual(executable.read_bytes(), b'unchanged')
             self.assertEqual(executable.stat().st_gid, before.st_gid)
             self.assertEqual(executable.stat().st_mtime_ns, before.st_mtime_ns)
@@ -50,18 +51,20 @@ class ProtectedXcodeFixtureTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(external.stat().st_mode), 0o777)
             self.assertEqual(os.readlink(sub/'alias'), str(external))
 
-    def test_hardlink_and_bounds_refuse_in_preflight_without_permissions_changes(self):
+    def test_hardlinks_are_quoted_and_bounds_refuse_before_permissions_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); leaf = root/'a'; leaf.write_bytes(b'data'); os.link(leaf, root/'b')
             fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 with patch.object(ci, 'protect', side_effect=AssertionError('preflight effect')):
-                    with self.assertRaises(ci.Refused) as refused:
+                    quote = ci.walk(fd, time.monotonic()+10, mutate=False, path_bytes=0)
+                    self.assertEqual(quote['hardlinkedFiles'], 2)
+                    self.assertEqual(quote['cloneBytes'], 8)
+                    with patch.object(ci, 'MAX_CLONE_BYTES', 4), self.assertRaises(ci.Refused) as refused:
                         ci.walk(fd, time.monotonic()+10, mutate=False, path_bytes=0)
-                    facts = ci.failure_facts(refused.exception)
-                    self.assertEqual(facts['condition'], 'tree-entry-kind-or-links')
-                    self.assertEqual(facts['links'], 2)
-                    self.assertNotIn(str(root), json.dumps(facts))
+                    self.assertEqual(ci.failure_facts(refused.exception)['condition'], 'clone-byte-bound')
+                    with patch.object(ci, 'MAX_QUEUED_NAME_BYTES', 1), self.assertRaises(ci.Refused):
+                        ci.walk(fd, time.monotonic()+10, mutate=False, path_bytes=0)
                     (root/'b').unlink()
                     with patch.object(ci, 'MAX_ENTRIES', 1), self.assertRaises(ci.Refused):
                         ci.walk(fd, time.monotonic()+10, mutate=False, path_bytes=0)
@@ -109,6 +112,93 @@ class ProtectedXcodeFixtureTests(unittest.TestCase):
                     self.assertEqual(name,'Xcode_26.6.app')
             finally:
                 os.close(fd)
+
+
+    def test_independent_clone_preserves_external_alias_and_closes_collision(self):
+        # Linux tests the original-bound replacement contract with an inert
+        # copying adapter. macOS runs the real fclonefileat API on tiny own files.
+        def portable_clone(source, parent, name):
+            out = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600, dir_fd=parent)
+            try:
+                data = os.pread(source, 64, 0)
+                self.assertEqual(os.write(out, data), len(data))
+                row = os.fstat(source)
+                os.fchmod(out, stat.S_IMODE(row.st_mode))
+                os.utime(out, ns=(row.st_atime_ns, row.st_mtime_ns))
+            finally:
+                os.close(out)
+        clone = ci.native_clone() if sys.platform == 'darwin' else portable_clone
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp); selected = parent/'selected'; selected.mkdir()
+            original = parent/'other-xcode-file'; original.write_bytes(b'Apple test fixture'); original.chmod(0o775)
+            os.link(original, selected/'tool')
+            outside = original.stat()
+            fd = os.open(selected, os.O_RDONLY | os.O_DIRECTORY)
+            real_fstat = os.fstat
+            def root_owned(n):
+                row=real_fstat(n)
+                values={key:getattr(row,key) for key in dir(row) if key.startswith('st_')}
+                values['st_uid']=0
+                return SimpleNamespace(**values)
+            try:
+                quoted=ci.walk(fd,time.monotonic()+10,mutate=False,path_bytes=0)
+                self.assertEqual(quoted['hardlinkedFiles'],1)
+                with patch.object(ci.os,'fstat',root_owned), patch.object(ci.os,'fchown',side_effect=AssertionError('no external permission writes')):
+                    # Only ownership comparison is inert; clone, rename, mode
+                    # changes, inode/link inspection and reads are genuine IO.
+                    source=ci.open_original('tool',fd,False,allow_links=True)
+                    # os.stat must report the same synthetic ownership at joins.
+                    real_stat=ci.os.stat
+                    def stat_root(*args,**kwargs):
+                        row=real_stat(*args,**kwargs)
+                        values={key:getattr(row,key) for key in dir(row) if key.startswith('st_')};values['st_uid']=0
+                        return SimpleNamespace(**values)
+                    try:
+                        with patch.object(ci.os,'stat',side_effect=stat_root):
+                            result=ci.split_link(source,fd,'tool',time.monotonic()+10,clone)
+                        os.close(result)
+                    finally:os.close(source)
+                self.assertNotEqual((selected/'tool').stat().st_ino,original.stat().st_ino)
+                self.assertEqual((selected/'tool').stat().st_nlink,1)
+                self.assertEqual((selected/'tool').read_bytes(),original.read_bytes())
+                self.assertEqual(stat.S_IMODE((selected/'tool').stat().st_mode),0o755)
+                self.assertEqual(stat.S_IMODE(original.stat().st_mode),0o775)
+                self.assertEqual(original.stat().st_uid,outside.st_uid)
+                self.assertEqual(original.stat().st_gid,outside.st_gid)
+                self.assertEqual(original.stat().st_mtime_ns,outside.st_mtime_ns)
+                self.assertEqual(list(selected.iterdir()),[selected/'tool'])
+                os.unlink(selected/'tool');os.link(original,selected/'tool')
+                source=ci.open_original('tool',fd,False,allow_links=True)
+                try:
+                    with self.assertRaises(FileExistsError):
+                        ci.split_link(source,fd,'tool',time.monotonic()+10,lambda *args:(_ for _ in ()).throw(FileExistsError()))
+                finally:os.close(source)
+                self.assertEqual((selected/'tool').stat().st_ino,original.stat().st_ino)
+                self.assertEqual(list(selected.iterdir()),[selected/'tool'])
+            finally:os.close(fd)
+
+    def test_created_clone_failure_retires_only_its_own_temporary_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); (root/'other').write_bytes(b'data');os.link(root/'other',root/'tool')
+            parent=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+            source=ci.open_original('tool',parent,False,allow_links=True)
+            def bad_clone(_source,fd,name):
+                out=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600,dir_fd=fd)
+                os.close(out)  # Positive creation, wrong size: no publication.
+            try:
+                with self.assertRaises(ci.Refused) as error:
+                    ci.split_link(source,parent,'tool',time.monotonic()+10,bad_clone)
+                self.assertEqual(error.exception.condition,'clone-result')
+                self.assertEqual(sorted(p.name for p in root.iterdir()),['other','tool'])
+                self.assertEqual((root/'other').stat().st_ino,(root/'tool').stat().st_ino)
+                # A failed temporary retirement must not replace the cause of
+                # rejection or cause publication of a wrong clone.
+                with patch.object(ci.os,'unlink',side_effect=PermissionError(13,'fixture')), self.assertRaises(ci.Refused) as primary:
+                    ci.split_link(source,parent,'tool',time.monotonic()+10,bad_clone)
+                self.assertEqual(ci.failure_facts(primary.exception),{'kind':'precondition','condition':'clone-result','cleanupFailures':1})
+                self.assertEqual((root/'other').stat().st_ino,(root/'tool').stat().st_ino)
+            finally:
+                os.close(source);os.close(parent)
 
 
 if __name__ == '__main__':
