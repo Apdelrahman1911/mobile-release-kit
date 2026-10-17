@@ -57,8 +57,8 @@ def diagnostics_body():
         "Test Case '"+method+"' passed (1.0 seconds).",''])).encode()
 
 
-def ios_body():
-    value=dict(schemaVersion=1,scope='one-ordinary-local-unsigned-ios-archive',sourceCommit='a'*40,
+def ios_body(source="a"*40):
+    value=dict(schemaVersion=1,scope='one-ordinary-local-unsigned-ios-archive',sourceCommit=source,
         savedVersion='1.2.3',savedBuild=7,inputFiles=9,inputBytes=7264,topLevelDirectories=4,
         archiveDescendantsObserved=False,nativeResultDisplayed=True,outputPostMatched=True,originalsClosed=True,
         normalQuitObserved=True,successBeforeCutoff=True,signed=False,ipaExported=False,releaseQualified=False,
@@ -98,11 +98,11 @@ def saved_version_recovery(target):
     return value
 
 
-def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False, saved_files=False, saved_version=False):
+def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False, saved_files=False, saved_version=False, current_ios=False):
     selected, context, install=fixture(target)
     args, req=U.phase_request(N,name,target,WORK,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version)
     mode=req['phase']; result=None if req['result'] is None else req['result'].name
-    out=(saved_version_body() if name=='saved-version-recovery-test' else saved_document_body(name) if name in ('release-evidence-test','workflow-refusal-test') else diagnostics_body() if name=='diagnostics-test' else ios_body() if name=='ios-unsigned-archive-test' else
+    out=(saved_version_body() if name=='saved-version-recovery-test' else saved_document_body(name) if name in ('release-evidence-test','workflow-refusal-test') else diagnostics_body() if name=='diagnostics-test' else ios_body(context['helperSource'] if current_ios else selected['source']) if name=='ios-unsigned-archive-test' else
          persistence_body() if name=='persistence-test' else saved_checks_body() if name=='saved-checks-test' else
          R.canonical(dict(totalTestCount=2 if name in ('project-summary','saved-checks-summary') else 1,
             passedTests=2 if name in ('project-summary','saved-checks-summary') else 1,failedTests=0,skippedTests=0,expectedFailures=0))
@@ -115,6 +115,9 @@ def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False, saved_files=Fal
     if saved_version:
         row.update(sourceCommit=context['helperSource'],applicationSourceCommit=selected['source'],currentCandidateScope=U.SAVED_VERSION_SCOPE)
         if mode=='test':row['savedVersionRecovery']=saved_version_recovery(target)
+    if current_ios:
+        assert ios_tools and not saved_version
+        row.update(sourceCommit=context['helperSource'],applicationSourceCommit=selected['source'],currentCandidateScope=U.IOS_TOOLS_SCOPE)
     row['normalPhase' if mode=='test' else 'phase']=mode
     row['originalTestReturncode' if mode=='test' else 'originalReturncode']=0
     if mode=='test':
@@ -123,7 +126,7 @@ def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False, saved_files=Fal
         if name=='applications-test':row['applicationsLaunchObservationMarker']=True
         if name=='release-evidence-test':row['savedReleaseEvidenceMarkerObserved']=True
         if name=='workflow-refusal-test':row['managedWorkflowRefusalMarkerObserved']=True
-    if name=='ios-unsigned-archive-test':row['iosUnsignedObservation']=N.ios_unsigned_marker(out,source=selected['source'])
+    if name=='ios-unsigned-archive-test':row['iosUnsignedObservation']=N.ios_unsigned_marker(out,source=context['helperSource'] if current_ios else selected['source'])
     if name=='ios-unsigned-archive-summary':row['iosUnsignedTestCounts']=N.ios_unsigned_summary(out)
     src=('normal-ui-source-roster',15,1048576)
     roles=([src,*[('normal-toolchain-'+k,15,4096) for k in ('xcode','sdkPath','sdkVersion','sdkBuild')],
@@ -195,6 +198,46 @@ class CandidateUITests(unittest.TestCase):
                 body.replace(b'originalTerminated=1',b'originalTerminated=0'),body.replace(b' passed (',b' skipped ('),
                 body+b'MRK_MACOS_UI_FAILURE_CLEANUP=1\n'):
             with self.assertRaises(R.Refused):U.diagnostics_markers(changed)
+
+    def test_current_ios_sources_receipts_roles_and_previous_status_are_exact(self):
+        for target in (N.ARM_TARGET,N.INTEL_TARGET):
+            for phase in U.IOS_TOOL_PHASES:
+                selected,context,_,_,req,row,body=phase_fixture(phase,target,ios_tools=True,current_ios=True)
+                env=U.clean_environment(N,selected,WORK,helper_source=context['helperSource'],ios_tools=True)
+                self.assertEqual(env[N.IOS_TOOLS_CURRENT_ENV],N.IOS_TOOLS_CURRENT_SCOPE)
+                self.assertNotIn(N.SAVED_VERSION_CURRENT_ENV,env)
+                self.assertEqual(env['TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE'],selected['source'])
+                self.assertEqual(env['TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE'],context['helperSource'])
+                call=lambda value, output=body:U.phase_admission_data(value,req,selected['source'],output,b'',normal=N,
+                    helper_source=context['helperSource'],ios_tools=True)
+                self.assertEqual(call(row),'f'*64)
+                self.assertEqual(len(row['commands']),7 if phase=='build' else 3 if phase.endswith('summary') else 5)
+                for key,bad in [('sourceCommit',selected['source']),('applicationSourceCommit','8'*40),
+                    ('currentCandidateScope',U.SAVED_VERSION_SCOPE),('originalCommandReturned',False)]:
+                    changed=deepcopy(row);changed[key]=bad
+                    with self.assertRaises(R.Refused):call(changed)
+                for kwargs in ({},{'helper_source':context['helperSource']},{'ios_tools':True}):
+                    with self.assertRaises(R.Refused):
+                        U.phase_admission_data(row,req,selected['source'],body,b'',normal=N,**kwargs)
+                if req['phase']=='test':
+                    changed=deepcopy(row);changed['commands'][1]['role']='saved-version-core-interrupt'
+                    changed['commands'][1]['returncode']=86
+                    with self.assertRaises(R.Refused):call(changed)
+                    changed=deepcopy(row);changed['originalClosesCompleted']=False
+                    with self.assertRaises(R.Refused):call(changed)
+                if phase=='ios-unsigned-archive-test':
+                    wrong=ios_body(selected['source']);changed=deepcopy(row)
+                    changed['iosUnsignedObservation']=N.ios_unsigned_marker(wrong,source=selected['source'])
+                    changed['commands'][-2].update(stdoutBytes=len(wrong),stdoutSha256=R.sha(wrong))
+                    with self.assertRaises(N.Refused):call(changed,wrong)
+                content={phase+'.status':b'0\n',U.admission_name(phase):R.canonical(row),phase+'.stdout':body,phase+'.stderr':b''}
+                read=lambda path,cap:content[path.name]
+                self.assertEqual(U.read_phase(read,N,phase,selected,WORK,ios_tools=True,helper_source=context['helperSource']),'f'*64)
+                content[phase+'.status']=b'1\n'
+                with self.assertRaises(R.Refused):U.read_phase(read,N,phase,selected,WORK,ios_tools=True,helper_source=context['helperSource'])
+            selected,context,_,_,req,row,body=phase_fixture('project-test',target)
+            with self.assertRaises(R.Refused):U.phase_admission_data(row,req,selected['source'],body,b'',normal=N,
+                ios_tools=True,helper_source=context['helperSource'])
 
     def test_saved_files_cohort_exact_existing_selectors_and_marker_boundaries(self):
         self.assertEqual(U.SAVED_FILE_PHASES, ('build','release-evidence-test','release-evidence-summary',
@@ -368,9 +411,13 @@ class CandidateUITests(unittest.TestCase):
 
 
 class CandidateUIMainTests(unittest.TestCase):
-    def exercise(self, name, target, unknown_close=False, *, ios_tools=False, saved_files=False, saved_version=False, native_fault=None):
+    def exercise(self, name, target, unknown_close=False, *, ios_tools=False, saved_files=False, saved_version=False, native_fault=None, same_source=False):
         import os, stat
         selected,context,install=fixture(target)
+        if same_source:
+            context['helperSource']=selected['source'];install['helperSource']=selected['source'];install['helperTree']=selected['tree']
+        current_ios=ios_tools and not same_source
+        helper_source=context['helperSource'] if saved_version or current_ios else None
         files={};directories=set();books=[];effects=[];modes={}
         root=U.consumer.HELPER_ROOT
         sources=tuple(dict.fromkeys((*U.consumer.HELPER_SOURCE_INPUTS,U.consumer.CONSUMER_PATH,
@@ -412,7 +459,7 @@ class CandidateUIMainTests(unittest.TestCase):
         previous=phases if name=='result' else phases[:phases.index(name)]
         if name!='build':directories.add(WORK/'normal-ui');directories.add(WORK/'normal-ui/tmp')
         for phase in previous:
-            _,_,_,_,_,row,out=phase_fixture(phase,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version)
+            _,_,_,_,_,row,out=phase_fixture(phase,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,current_ios=current_ios)
             for suffix,body in (('.status',b'0\n'),('.stdout',out),('.stderr',b'')):
                 files[WORK/'normal-ui'/(phase+suffix)]=body
             files[WORK/'normal-ui'/U.admission_name(phase)]=R.canonical(row)
@@ -449,12 +496,13 @@ class CandidateUIMainTests(unittest.TestCase):
                     else:
                         names=argv[argv.index('--')+1:]
                         out=b''.join(b'100644 blob '+__import__('hashlib').sha1(b'blob '+str(len(files[gitroot/p])).encode()+b'\0'+files[gitroot/p]).hexdigest().encode()+b'\t'+p.encode()+b'\0' for p in names)
+                    if native_fault=='post' and effects and 'rev-parse' in argv:out=b'changed original source\n'
                     return subprocess.CompletedProcess(argv,0,out,b'')
                 effects.append('native-cli')
-                child_root=root if saved_version else U.consumer.CANDIDATE_ROOT
+                child_root=root if helper_source is not None else U.consumer.CANDIDATE_ROOT
                 assert argv[4]==str(child_root/U.RUNNER) and kw['cwd']==child_root
-                assert kw['environ']==U.clean_environment(N,selected,WORK,helper_source=context['helperSource'] if saved_version else None)
-                _,_,_,_,_,row,out=phase_fixture(name,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version)
+                assert kw['environ']==U.clean_environment(N,selected,WORK,helper_source=helper_source,ios_tools=ios_tools)
+                _,_,_,_,_,row,out=phase_fixture(name,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,current_ios=current_ios)
                 if native_fault=='unknown':raise RuntimeError('inert unknown native original')
                 files[WORK/'normal-ui'/U.admission_name(name)]=R.canonical(row)
                 return subprocess.CompletedProcess(argv,86 if native_fault=='nonzero' else 0,out,b'')
@@ -507,6 +555,7 @@ class CandidateUIMainTests(unittest.TestCase):
             for phase in ('build','diagnostics-test','ios-unsigned-archive-test','result'):
                 value,effects,count=self.exercise(phase,target,ios_tools=True)
                 self.assertEqual(value['cohort'],'ios-tools')
+                self.assertEqual((value['applicationSource'],value['harnessSource']),('a'*40,'d'*40))
                 self.assertEqual(effects,[] if phase=='result' else ['native-cli'])
                 if phase=='result':
                     self.assertEqual(count,77);self.assertEqual(value['totalTests'],2)
@@ -516,6 +565,14 @@ class CandidateUIMainTests(unittest.TestCase):
                     self.assertNotIn('storeEntryRefusalObserved',value)
             value,effects,_=self.exercise('ios-unsigned-archive-summary',target,unknown_close=True,ios_tools=True)
             self.assertIsNone(value);self.assertEqual(effects,['native-cli'])
+
+            for phase in ('build','ios-unsigned-archive-test','result'):
+                value,effects,count=self.exercise(phase,target,ios_tools=True,same_source=True)
+                self.assertEqual((value['applicationSource'],value['harnessSource']),('a'*40,'a'*40))
+                if phase=='result':self.assertEqual(count,77)
+            for fault in ('nonzero','unknown','post'):
+                value,effects,_=self.exercise('ios-unsigned-archive-test',target,ios_tools=True,native_fault=fault)
+                self.assertIsNone(value);self.assertEqual(effects,['native-cli'])
 
     def test_actual_saved_files_main_77_originals_and_unknown_close(self):
         for target in (N.ARM_TARGET,N.INTEL_TARGET):

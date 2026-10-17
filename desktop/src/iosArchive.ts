@@ -622,7 +622,7 @@ export const iosArchiveHelp: HelpContent = {
   what: 'Uses the original installed core and full Xcode with an explicit mode: an unsigned archive with structural checks, or a separately admitted signed IPA export with exact session inputs and paired validation.',
   why: 'Keep build completion, signing and local artifact validation separate from authenticated source provenance and Store release approval.',
   where: 'Install full Xcode and complete its normal first-launch setup. Signing/build execution also requires the supported protected Xcode/SDK layout. If your release includes Prepare Xcode.pkg, open it in macOS Installer and review the administrator prompt to prepare a separate copy. Environment doctor observes selection/version, not protected build readiness. Keep setup errors and existing files if preparation fails; do not recursively change Applications permissions or run the app as root. Choose your app’s project/workspace and shared scheme in project configuration.',
-  format: 'The initial profile is Apple-silicon macOS with the separately qualified installed runtime and protected full-Xcode/SDK layout. Command Line Tools alone are insufficient; Linux and Windows cannot perform this action.',
+  format: 'Requires a supported Apple-silicon or Intel macOS runtime and protected full-Xcode/SDK layout. Command Line Tools alone are insufficient; Linux and Windows cannot perform this action.',
   failure: 'A disabled native gate is not a diagnosis that Xcode is missing. No runtime fallback, SDK download, license acceptance, provisioning download or Store mutation is attempted. Unsigned qualification cannot enable signing.',
 };
 export const iosArchiveInputHelp: HelpContent = {
@@ -658,7 +658,7 @@ export const iosArchiveCancelHelp: HelpContent = {
   failure: 'Unknown cleanup remains blocked. Reconnecting, switching projects or checking Status cannot replace the original owner, extend the deadline or rearm consent.',
 };
 export const iosSigningHelp: HelpContent = {
-  label: 'Prepare the Apple signing policy and session inputs', requiredness: 'conditional', requiredWhen: 'Before choosing Sign and export IPA for a trusted project on a separately admitted Apple-silicon Mac.',
+  label: 'Prepare the Apple signing policy and session inputs', requiredness: 'conditional', requiredWhen: 'Before choosing Sign and export IPA for a trusted project on a separately admitted Apple-silicon or Intel Mac.',
   what: 'The saved public policy identifies the Apple team and reviewed distribution certificate; private P12/password/profile records are separately selected, kept and assigned in the session.',
   why: 'A P12 container or CMS envelope alone proves neither password correctness nor Apple authenticity, expiry, identity or permission to sign this app. Core validates those facts during the owned signed operation.',
   where: 'Find the 10-character Team ID in the authorized Apple Developer membership details. Obtain the public Apple Distribution certificate SHA-256 fingerprint from the signing-key owner and review it independently. That owner exports the existing certificate and private key as P12 with a password. Obtain the matching Apple-issued App Store profile from Certificates, Identifiers & Profiles.',

@@ -453,7 +453,7 @@ export const iosArchiveAvailabilityText: Record<IOSArchiveAvailability, string> 
   shutdown: 'The application is stopping its original operations. No new archive can start.',
   'cleanup-unknown': 'Original cleanup is unconfirmed. Keep this owner; conflicting work and normal exit remain blocked.',
   'document-lost': 'The original native document is no longer available. A replacement view cannot adopt or reset its owner.',
-  'unsupported-platform': 'This archive action requires the separately supported Apple-silicon macOS profile. Linux and Windows cannot archive an iOS app.',
+  'unsupported-platform': 'This archive action requires a supported Apple-silicon or Intel macOS profile. Linux and Windows cannot archive an iOS app.',
   'runtime-unqualified': 'This iOS mode remains disabled by its native qualification gate. This does not mean Xcode is missing; unsigned, format-only or passive checks do not qualify signed execution.',
   'toolchain-unqualified': 'The protected full-Xcode selection has not been qualified. This action does not install Xcode, download an SDK or accept a license.',
 };

@@ -3,8 +3,9 @@
 Existing ordinary journeys or a separate unsigned-iOS/Android-diagnostics cohort
 or saved-document/refusal cohort are selected; none is a full-feature or Store qualification.
 Candidate source remains the real canonical checkout; helper identity is separate.
-Only the explicit saved-version cohort executes the newer helper harness against
-the unchanged candidate application and its independently checked installed core.
+The explicit saved-version cohort and different-source ios-tools cohort execute
+the newer helper harness against the unchanged candidate application. Saved-version
+also independently checks its installed core; ios-tools adds no such claim.
 No historical fixed-carrier profile, Store operation or application build is used.
 """
 import os
@@ -25,6 +26,7 @@ SAVED_FILE_PHASES = ('build', 'release-evidence-test', 'release-evidence-summary
                      'workflow-refusal-test', 'workflow-refusal-summary')
 SAVED_VERSION_PHASES = ('build', 'saved-version-recovery-test', 'saved-version-recovery-summary')
 SAVED_VERSION_SCOPE = 'current-candidate-saved-version-only-v1'
+IOS_TOOLS_SCOPE = 'current-candidate-ios-tools-only-v1'
 RUNNER = 'desktop/tools/macos_normal_ui_runner.py'
 STAGE = 'admission'
 NATIVE_STATUS = None
@@ -101,7 +103,8 @@ def phase_request(normal, name, target, work, *, ios_tools=False, saved_files=Fa
     return argv, request
 
 
-def clean_environment(normal, selected, work, *, helper_source=None):
+def clean_environment(normal, selected, work, *, helper_source=None, ios_tools=False):
+    resume.need(type(ios_tools) is bool, 'candidate-ui-cohort')
     _, hosted = normal.normal_target_data(selected['target'])
     value = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': '/Users/runner', 'USER': 'runner',
         'LOGNAME': 'runner', 'TMPDIR': str(work / 'normal-ui/tmp') + '/', 'LANG': 'en_US.UTF-8',
@@ -112,8 +115,9 @@ def clean_environment(normal, selected, work, *, helper_source=None):
     if helper_source is not None:
         resume.need(type(helper_source) is str and re.fullmatch(r'[0-9a-f]{40}', helper_source)
                     and helper_source != '0' * 40 and helper_source != selected['source'], 'candidate-ui-saved-version-source')
-        value.update(TEST_RUNNER_MRK_NORMAL_UI_CURRENT_SAVED_VERSION=SAVED_VERSION_SCOPE,
-                     TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=helper_source)
+        value['TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE'] = helper_source
+        value['TEST_RUNNER_MRK_NORMAL_UI_CURRENT_IOS_TOOLS' if ios_tools else
+              'TEST_RUNNER_MRK_NORMAL_UI_CURRENT_SAVED_VERSION'] = IOS_TOOLS_SCOPE if ios_tools else SAVED_VERSION_SCOPE
     return value
 
 
@@ -205,16 +209,19 @@ def diagnostics_markers(body):
     return True
 
 
-def phase_admission_data(row, request, source, stdout, stderr, *, normal=None, helper_source=None):
+def phase_admission_data(row, request, source, stdout, stderr, *, normal=None, helper_source=None, ios_tools=False):
     """Current normal runner's original receipt, without fixed P0 decoration."""
     mode = request['phase']; target = request['target']
     result = None if request['result'] is None else request['result'].name
+    resume.need(type(ios_tools) is bool and (not ios_tools or mode == 'build'
+        or result in ('diagnostics-test.xcresult', 'ios-unsigned-archive-test.xcresult')), 'candidate-ui-cohort')
     current = helper_source is not None
+    current_saved = current and not ios_tools
     if current:
         resume.need(type(row) is dict and type(helper_source) is str and re.fullmatch(r'[0-9a-f]{40}', helper_source)
             and helper_source != '0' * 40 and helper_source != source
-            and (mode == 'build' or result == 'saved-version-recovery-test.xcresult')
-            and row.get('currentCandidateScope') == SAVED_VERSION_SCOPE
+            and (ios_tools or mode == 'build' or result == 'saved-version-recovery-test.xcresult')
+            and row.get('currentCandidateScope') == (IOS_TOOLS_SCOPE if ios_tools else SAVED_VERSION_SCOPE)
             and row.get('applicationSourceCommit') == source, 'candidate-ui-saved-version-source')
     resume.need(type(row) is dict and row.get('sourceCommit') == (helper_source if current else source) and row.get('target') == target
         and row.get('sourcePrePostMatched') is True and row.get('originalCommandReturned') is True
@@ -246,7 +253,7 @@ def phase_admission_data(row, request, source, stdout, stderr, *, normal=None, h
              [src, ('verify-generated-runner', 30, 1048576), ('generated-runner-entitlements', 30, 1048576),
               ('one-admitted-ui-test', request['timeout'], 1048576), src] if mode == 'test' else
              [src, ('normal-ui-summary', 30, 262144), src])
-    if current and mode == 'test':
+    if current_saved and mode == 'test':
         roles[1:1] = [('saved-version-source-roster', 15, 65536), ('saved-version-core-interrupt', 20, 65536)]
     commands = row.get('commands')
     keys = {'role', 'returncode', 'timeoutSeconds', 'roleCapSeconds', 'outputLimitBytes', 'argvSha256',
@@ -271,7 +278,7 @@ def phase_admission_data(row, request, source, stdout, stderr, *, normal=None, h
     if mode == 'test':
         resume.need(all(row.get(k) is True for k in ('originalClosesCompleted', 'originalProductsPrePostMatched', 'strictCodesignOriginalZero'))
                     and row.get('reSignedOrRepaired') is False, 'candidate-ui-runner-finality')
-        if current:
+        if current_saved:
             saved_version_receipt(row.get('savedVersionRecovery'), source, helper_source, target)
             resume.need(normal is not None and normal.normal_saved_version_markers(stdout),
                         'candidate-ui-saved-version-originals')
@@ -284,8 +291,8 @@ def phase_admission_data(row, request, source, stdout, stderr, *, normal=None, h
             diagnostics_markers(stdout)
         elif result == 'ios-unsigned-archive-test.xcresult':
             resume.need(normal is not None and request.get('iosUnsigned') is True
-                and normal.ios_unsigned_facts(row.get('iosUnsignedObservation'), source=source)
-                    == normal.ios_unsigned_marker(stdout, source=source),
+                and normal.ios_unsigned_facts(row.get('iosUnsignedObservation'), source=helper_source if current else source)
+                    == normal.ios_unsigned_marker(stdout, source=helper_source if current else source),
                 'candidate-ui-ios-original-facts')
         elif result == 'release-evidence-test.xcresult':
             resume.need(normal is not None and row.get('savedReleaseEvidenceMarkerObserved') is True
@@ -340,14 +347,15 @@ def admission_name(name):
 
 
 def read_phase(read, normal, name, selected, work, *, helper_source=None, ios_tools=False, saved_files=False, saved_version=False):
-    resume.need(saved_version == (helper_source is not None), 'candidate-ui-cohort')
+    resume.need((not saved_version or helper_source is not None)
+                and (helper_source is None or saved_version or ios_tools), 'candidate-ui-cohort')
     _, request = phase_request(normal, name, selected['target'], work, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version)
     root = work / 'normal-ui'
     resume.need(read(root / (name + '.status'), 16) == b'0\n', 'candidate-ui-prior-caller-zero')
     row = resume.decode(read(root / admission_name(name), 32768))
     stdout = read(root / (name + '.stdout'), 1 << 20)
     stderr = read(root / (name + '.stderr'), 1 << 20)
-    return phase_admission_data(row, request, selected['source'], stdout, stderr, normal=normal, helper_source=helper_source)
+    return phase_admission_data(row, request, selected['source'], stdout, stderr, normal=normal, helper_source=helper_source, ios_tools=ios_tools)
 
 
 def run_phase(normal, owner, book, quota, context, selected, name, clock, verify_sources, *, ios_tools=False, saved_files=False, saved_version=False):
@@ -360,8 +368,9 @@ def run_phase(normal, owner, book, quota, context, selected, name, clock, verify
     global STAGE, NATIVE_STATUS, NATIVE_DIAGNOSTIC
     work = context['work'].parent; directory = work / 'normal-ui'
     args, request = phase_request(normal, name, selected['target'], work, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version)
-    env = clean_environment(normal, selected, work, helper_source=context['helperSource'] if saved_version else None)
-    child_root = consumer.HELPER_ROOT if saved_version else consumer.CANDIDATE_ROOT
+    helper_source = context['helperSource'] if saved_version or (ios_tools and context['helperSource'] != selected['source']) else None
+    env = clean_environment(normal, selected, work, helper_source=helper_source, ios_tools=ios_tools)
+    child_root = consumer.HELPER_ROOT if helper_source is not None else consumer.CANDIDATE_ROOT
     argv = [str(work / 'host-python/bin/python3'), '-I', '-S', '-B', str(child_root / RUNNER), *args]
     quota.check(); verify_sources()
     # Inner original phase budget is unchanged. The outer endpoint was created
@@ -393,7 +402,7 @@ def run_phase(normal, owner, book, quota, context, selected, name, clock, verify
     row_entry, body = quota.call(book, 'file', directory / admission_name(name), 32768, modes=(0o600,))
     row = resume.decode(body)
     roster = phase_admission_data(row, request, selected['source'], original.stdout, original.stderr, normal=normal,
-                                  helper_source=context['helperSource'] if saved_version else None)
+                                  helper_source=helper_source, ios_tools=ios_tools)
     verify_sources(); quota.check(); clock.check()
     return roster
 
@@ -427,6 +436,7 @@ def main():
         selected = consumer.selection_data(read(consumer.HELPER_ROOT / consumer.SELECTION_PATH, 8192,
                                                   source=True, mode=0o644), context['target'])
         install = install_admission_data(resume.decode(read(work / 'consumer-result.json', 16384)), selected, context)
+        helper_source = context['helperSource'] if saved_version or (ios_tools and context['helperSource'] != selected['source']) else None
         paths = tuple(dict.fromkeys((*consumer.HELPER_SOURCE_INPUTS, consumer.CONSUMER_PATH,
             consumer.LEGACY_PATH, consumer.PARSER_PATH, RUNNER, 'desktop/tools/macos_candidate_ui.py')))
         for path in paths:
@@ -442,7 +452,7 @@ def main():
         # never restarted on cancellation, a late result or another native call.
         clock = normal.PhaseClock(request['phaseSeconds'] + 180, started=consumer.STARTED_NS)
         owner = normal.load_normal_owner(consumer.HELPER_ROOT)
-        environment = clean_environment(normal, selected, work, helper_source=context['helperSource'] if saved_version else None)
+        environment = clean_environment(normal, selected, work, helper_source=helper_source, ios_tools=ios_tools)
         git_env = dict(environment, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
                        GIT_NO_REPLACE_OBJECTS='1', GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0')
         source_phase = normal.NormalPhase(owner, git_env, consumer.CANDIDATE_ROOT, clock)
@@ -491,7 +501,7 @@ def main():
         resume.need(held_directory['identity'][2:] == (0o40700, os.getuid(), os.getgid()), 'candidate-ui-private-root')
         STAGE = 'predecessors'
         previous = phases if name in ('result', 'cleanup') else phases[:phases.index(name)]
-        rosters = [read_phase(lambda p, n: read(p, n), normal, phase, selected, work, helper_source=context['helperSource'] if saved_version else None, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version) for phase in previous]
+        rosters = [read_phase(lambda p, n: read(p, n), normal, phase, selected, work, helper_source=helper_source, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version) for phase in previous]
         resume.need(not rosters or len(set(rosters)) == 1, 'candidate-ui-same-harness-roster')
         if name in phases:
             # All sources/host/prior result originals have been quoted before the
@@ -510,7 +520,7 @@ def main():
         resume.need(CLOSES_KNOWN, 'candidate-ui-original-final-closes')
         clock.check()
         value = {'scope': 'candidate-existing-local-ui-observation', 'phase': name,
-            'target': selected['target'], 'applicationSource': selected['source'], 'harnessSource': context['helperSource'] if saved_version else selected['source'],
+            'target': selected['target'], 'applicationSource': selected['source'], 'harnessSource': helper_source if helper_source is not None else selected['source'],
             'helperSource': context['helperSource'], 'helperTree': install['helperTree'],
             'consumerRunId': context['runId'], 'consumerRunAttempt': context['runAttempt'],
             'artifactId': selected['artifactId'], 'artifactSha256': selected['artifactSha256'],

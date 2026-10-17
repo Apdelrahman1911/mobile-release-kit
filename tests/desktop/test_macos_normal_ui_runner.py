@@ -2623,6 +2623,90 @@ class NormalPhaseDataTests(unittest.TestCase):
                     self.assertEqual(json.loads(receipt.read_bytes())["observation"]["gateFree"], "unqualified")
 
 
+    def test_current_ios_candidate_context_is_two_source_and_only_two_journeys(self):
+        root=MODULE.SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper"
+        env={MODULE.IOS_TOOLS_CURRENT_ENV:MODULE.IOS_TOOLS_CURRENT_SCOPE,
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE":"a"*40,
+            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE":"b"*40}
+        temporary="/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui/tmp/"
+        for target in (MODULE.ARM_TARGET,MODULE.INTEL_TARGET):
+            for args in (["--normal-build"],["--normal-ios-unsigned-archive-test"],["--normal-ios-unsigned-archive-summary"],
+                         ["--normal-summary","diagnostics-test.xcresult"]):
+                request=MODULE.normal_request(["--target",target,*args],temporary)
+                self.assertEqual(MODULE.ios_tools_candidate_context(request,env,root),
+                                 {MODULE.IOS_TOOLS_CURRENT_ENV:MODULE.IOS_TOOLS_CURRENT_SCOPE})
+            args=normal_arguments("diagnostics-test.xcresult")
+            args[8]="platform=macOS,arch="+MODULE.normal_target_data(target)[0]
+            request=MODULE.normal_request(["--target",target,*args],temporary)
+            self.assertEqual(MODULE.ios_tools_candidate_context(request,env,root),
+                             {MODULE.IOS_TOOLS_CURRENT_ENV:MODULE.IOS_TOOLS_CURRENT_SCOPE})
+            for change in ({MODULE.IOS_TOOLS_CURRENT_ENV:"unknown"},
+                {"TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE":"b"*40},
+                {"TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE":"0"*40},
+                {"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE":"0"*40},
+                {MODULE.SAVED_VERSION_CURRENT_ENV:MODULE.SAVED_VERSION_CURRENT_SCOPE},
+                {MODULE.FIXED_RESUME_ENV:MODULE.FIXED_NORMAL_SCOPE},{MODULE.FIXED_NORMAL_BATCH_ENV:"doctor-saved-checks"}):
+                with self.subTest(change=change),self.assertRaises(MODULE.Refused):
+                    MODULE.ios_tools_candidate_context(request,{**env,**change},root)
+            for change in (dict(result=Path(MODULE.SAVED_VERSION_RESULT)),dict(result=Path("project-test.xcresult")),
+                dict(phase="query"),dict(iosUnsigned=True),dict(androidPositive=True),dict(androidCandidate=True),
+                dict(outputData=True),dict(credentialUpdate="p1-resume"),dict(iosPending=True)):
+                with self.subTest(change=change),self.assertRaises(MODULE.Refused):
+                    MODULE.ios_tools_candidate_context({**request,**change},env,root)
+            unsigned=MODULE.normal_request(["--target",target,"--normal-ios-unsigned-archive-test"],temporary)
+            with self.assertRaises(MODULE.Refused):MODULE.ios_tools_candidate_context(dict(unsigned,iosUnsigned=False),env,root)
+            with self.assertRaises(MODULE.Refused):MODULE.ios_tools_candidate_context(request,env,MODULE.SAVED_VERSION_CANDIDATE_ROOT)
+            self.assertEqual(MODULE.ios_tools_candidate_context(request,{},root),{})
+        saved=dict(phase="test",result=Path(MODULE.SAVED_VERSION_RESULT))
+        with self.assertRaises(MODULE.Refused):MODULE.saved_version_candidate_context(saved,
+            {**env,MODULE.SAVED_VERSION_CURRENT_ENV:MODULE.SAVED_VERSION_CURRENT_SCOPE},root)
+
+    def test_current_ios_summary_receipt_keeps_original_source_and_close(self):
+        # Actual existing source readers and exclusive receipt writer; no native
+        # xcrun or app. Three original-command boundaries use an inert owner.
+        for target in (MODULE.ARM_TARGET,MODULE.INTEL_TARGET):
+            for name in ("diagnostics-test.xcresult",MODULE.IOS_UNSIGNED_RESULT):
+                with self.subTest(target=target,name=name),tempfile.TemporaryDirectory(prefix="mrk-current-ios-summary-") as temporary:
+                    root=Path(temporary);normal=root/"normal-ui";normal.mkdir(mode=0o700)
+                    (normal/name).mkdir(mode=0o700)
+                    rows=[]
+                    for relative in ("desktop/tools/macos_normal_ui_runner.py",
+                        "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift", "desktop/src/components/IOSArchive.tsx"):
+                        source=root/relative;source.parent.mkdir(parents=True,exist_ok=True)
+                        body=b"inert original source never executed\n";source.write_bytes(body)
+                        blob=hashlib.sha1(b"blob "+str(len(body)).encode()+b"\0"+body).hexdigest()
+                        rows.append(b"100644 blob "+blob.encode()+b"\t"+relative.encode()+b"\0")
+                    roster=b"".join(rows)
+                    counts=MODULE.encoded(dict(totalTestCount=1,passedTests=1,failedTests=0,skippedTests=0,expectedFailures=0))
+                    calls=[]
+                    def original(argv,**kw):
+                        calls.append((argv,kw))
+                        if argv[0]=="/usr/bin/git":
+                            self.assertIn("b"*40,argv)
+                            return subprocess.CompletedProcess(argv,0,roster,b"")
+                        self.assertEqual(argv[:5],["/usr/bin/xcrun","xcresulttool","get","test-results","summary"])
+                        return subprocess.CompletedProcess(argv,0,counts,b"")
+                    arguments=["--normal-ios-unsigned-archive-summary"] if name==MODULE.IOS_UNSIGNED_RESULT else ["--normal-summary",name]
+                    request=MODULE.normal_request(["--target",target,*arguments],str(normal/"tmp")+"/")
+                    env={MODULE.IOS_TOOLS_CURRENT_ENV:MODULE.IOS_TOOLS_CURRENT_SCOPE,
+                        "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE":"a"*40,
+                        "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE":"b"*40}
+                    phase=MODULE.NormalPhase(SimpleNamespace(run_owned=original),env,root,MODULE.PhaseClock(90))
+                    returned=MODULE.execute_normal_phase(phase,request,"b"*40,(1<<30,1<<30))
+                    self.assertEqual(returned.returncode,0)
+                    receipt=normal/(MODULE.SUMMARY_STEMS[name]+".command-admission.json")
+                    value=json.loads(receipt.read_bytes())
+                    self.assertEqual(value['sourceCommit'],"b"*40)
+                    self.assertEqual(value['applicationSourceCommit'],"a"*40)
+                    self.assertEqual(value['currentCandidateScope'],MODULE.IOS_TOOLS_CURRENT_SCOPE)
+                    self.assertEqual([r['role'] for r in value['commands']],
+                                     ['normal-ui-source-roster','normal-ui-summary','normal-ui-source-roster'])
+                    self.assertTrue(value['sourcePrePostMatched'])
+                    self.assertEqual(stat.S_IMODE(receipt.stat().st_mode),0o600)
+                    self.assertEqual(len(calls),3)
+                    self.assertTrue(all(kw['cwd']==root for _,kw in calls))
+                    if name==MODULE.IOS_UNSIGNED_RESULT:self.assertEqual(value['iosUnsignedTestCounts']['passedTests'],1)
+
     def test_current_saved_version_candidate_context_is_two_source_and_single_journey(self):
         root = MODULE.SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper"
         env = {MODULE.SAVED_VERSION_CURRENT_ENV: MODULE.SAVED_VERSION_CURRENT_SCOPE,

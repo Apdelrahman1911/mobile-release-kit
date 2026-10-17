@@ -1734,6 +1734,8 @@ SAVED_VERSION_DATA = "desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixture
 SAVED_VERSION_SOURCE = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
 # Current installed-candidate tests use a reviewed newer harness, never a
 # rewritten app-source label or a historical supplier/runtime receipt.
+IOS_TOOLS_CURRENT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_CURRENT_IOS_TOOLS"
+IOS_TOOLS_CURRENT_SCOPE = "current-candidate-ios-tools-only-v1"
 SAVED_VERSION_CURRENT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_CURRENT_SAVED_VERSION"
 SAVED_VERSION_CURRENT_SCOPE = "current-candidate-saved-version-only-v1"
 SAVED_VERSION_CANDIDATE_ROOT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
@@ -3659,8 +3661,8 @@ def execute_normal_phase(phase, request, source, file_limit):
     elif FIXED_RESUME_ENV in phase.environment:
         facts.update(fixedCarrierResumeScope=FIXED_RESUME_SCOPE, applicationSourceCommit=FIXED_RESUME_SOURCE,
                      currentProductQualified=False, p0Qualified=False, intelQualified=False)
-    if SAVED_VERSION_CURRENT_ENV in phase.environment:
-        facts.update(currentCandidateScope=SAVED_VERSION_CURRENT_SCOPE,
+    if SAVED_VERSION_CURRENT_ENV in phase.environment or IOS_TOOLS_CURRENT_ENV in phase.environment:
+        facts.update(currentCandidateScope=IOS_TOOLS_CURRENT_SCOPE if IOS_TOOLS_CURRENT_ENV in phase.environment else SAVED_VERSION_CURRENT_SCOPE,
             applicationSourceCommit=phase.environment["TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE"])
     facts.update(target=target, sourceCommit=source, sourceRosterSha256=sha(encoded(before)), sourcePrePostMatched=True,
                  originalCommandReturned=True, commands=phase.records, fileLimitBytes=list(file_limit),
@@ -4907,7 +4909,8 @@ def saved_version_candidate_context(request, environment, root):
         return {}
     app = environment.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE", "")
     harness = environment.get("TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE", "")
-    need(marker == SAVED_VERSION_CURRENT_SCOPE and re.fullmatch(r"[0-9a-f]{40}", app)
+    need(IOS_TOOLS_CURRENT_ENV not in environment
+         and marker == SAVED_VERSION_CURRENT_SCOPE and re.fullmatch(r"[0-9a-f]{40}", app)
          and re.fullmatch(r"[0-9a-f]{40}", harness) and app != harness
          and FIXED_RESUME_ENV not in environment and FIXED_NORMAL_BATCH_ENV not in environment
          and Path(root) == SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper"
@@ -4918,6 +4921,27 @@ def saved_version_candidate_context(request, environment, root):
     return {SAVED_VERSION_CURRENT_ENV: marker}
 
 
+def ios_tools_candidate_context(request, environment, root):
+    marker = environment.get(IOS_TOOLS_CURRENT_ENV)
+    if marker is None:
+        return {}
+    app = environment.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE", "")
+    harness = environment.get("TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE", "")
+    result = None if request["result"] is None else Path(request["result"]).name
+    need(marker == IOS_TOOLS_CURRENT_SCOPE and SAVED_VERSION_CURRENT_ENV not in environment
+         and re.fullmatch(r"[0-9a-f]{40}", app) and re.fullmatch(r"[0-9a-f]{40}", harness)
+         and app != "0" * 40 and harness != "0" * 40 and app != harness
+         and FIXED_RESUME_ENV not in environment and FIXED_NORMAL_BATCH_ENV not in environment
+         and Path(root) == SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper"
+         and request["phase"] in ("build", "test", "summary")
+         and ((request["phase"] == "build" and result is None and not request.get("iosUnsigned"))
+              or (request["phase"] != "build" and result == "diagnostics-test.xcresult" and not request.get("iosUnsigned"))
+              or (request["phase"] != "build" and result == IOS_UNSIGNED_RESULT and request.get("iosUnsigned") is True))
+         and not any(request.get(key) for key in ("credentialUpdate", "outputData", "androidCandidate", "androidPositive", "iosPending")),
+         "ios-tools-current-candidate-context")
+    return {IOS_TOOLS_CURRENT_ENV: marker}
+
+
 def normal_context(request, *, diagnostics=None):
     need(diagnostics is None or type(diagnostics) is dict and not diagnostics, "normal-context-diagnostic-collector")
     machine, hosted_job = normal_target_data(request["target"])
@@ -4925,8 +4949,10 @@ def normal_context(request, *, diagnostics=None):
     resume = os.environ.get(FIXED_RESUME_ENV) is not None
     root = Path(__file__).absolute().parents[2]
     current_saved = saved_version_candidate_context(request, os.environ, root)
+    current_ios = ios_tools_candidate_context(request, os.environ, root)
+    current_candidate = current_saved or current_ios
     need(re.fullmatch(r"[0-9a-f]{40}", source)
-         and (resume or current_saved or os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE") == source)
+         and (resume or current_candidate or os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE") == source)
          and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB") == hosted_job,
          "normal-same-build-only")
     normal_batch = os.environ.get(FIXED_RESUME_ENV) == FIXED_NORMAL_SCOPE
@@ -4944,7 +4970,7 @@ def normal_context(request, *, diagnostics=None):
          and account.pw_dir == "/Users/runner" and os.stat("/dev/console").st_uid == os.getuid(), "normal-console-account")
     root = Path(__file__).absolute().parents[2]
     derived = request["derived"]
-    need(root == (SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper" if current_saved else SAVED_VERSION_CANDIDATE_ROOT)
+    need(root == (SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper" if current_candidate else SAVED_VERSION_CANDIDATE_ROOT)
          and Path.cwd() == root and derived.parent.parent.parent == Path("/Users/runner/work/_temp")
          and re.fullmatch(r"mrk-macos-installed\.[A-Za-z0-9]{8}", derived.parent.parent.name)
          and os.environ.get("TMPDIR") == str(derived.parent / "tmp") + "/", "normal-fixed-work")
@@ -4955,7 +4981,7 @@ def normal_context(request, *, diagnostics=None):
          "HOME": "/Users/runner", "USER": "runner", "LOGNAME": "runner", "LANG": "en_US.UTF-8",
          "LC_ALL": "en_US.UTF-8", "TZ": "UTC"}.items()), "normal-clean-environment")
     environment.update(resume_environment)
-    environment.update(current_saved)
+    environment.update(current_candidate)
     if request.get("androidPositive") is True or request.get("iosPending") is True:
         env = os.environ
         expected_ref = ANDROID_CANDIDATE_REF if request.get("androidCandidate") is True else ANDROID_REF

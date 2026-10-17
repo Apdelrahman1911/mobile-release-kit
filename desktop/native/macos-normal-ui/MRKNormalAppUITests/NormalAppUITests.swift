@@ -1184,7 +1184,7 @@ final class NormalAppUITests: XCTestCase {
     }
     // End engineering main fixture; ordinary installed cases below are unchanged.
 
-    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap, currentCandidateSavedVersion }
+    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap, currentCandidateSavedVersion, currentCandidateIOSTools }
 
     private let fixedNormalBatches: [String: Set<String>] = [
         "launch-project": ["test.xcresult", "project-test.xcresult"],
@@ -1196,6 +1196,14 @@ final class NormalAppUITests: XCTestCase {
 
     @MainActor private func normalJourneyProfile(for result: String) throws -> SourceProfile {
         let context = ProcessInfo.processInfo.environment
+        if let candidate = context["MRK_NORMAL_UI_CURRENT_IOS_TOOLS"] {
+            try require(candidate == "current-candidate-ios-tools-only-v1"
+                        && ["diagnostics-test.xcresult", "ios-unsigned-archive-test.xcresult"].contains(result)
+                        && context["MRK_NORMAL_UI_CURRENT_SAVED_VERSION"] == nil
+                        && context["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == nil && context["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"] == nil,
+                        "current candidate iOS tools scope permits only its two original journeys")
+            return .currentCandidateIOSTools
+        }
         if let candidate = context["MRK_NORMAL_UI_CURRENT_SAVED_VERSION"] {
             try require(candidate == "current-candidate-saved-version-only-v1" && result == "saved-version-recovery-test.xcresult"
                         && context["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == nil && context["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"] == nil,
@@ -1253,9 +1261,17 @@ final class NormalAppUITests: XCTestCase {
         case .sameBuild:
             try require(applicationSource == harnessSource,
                         "this same-build scenario needs exact application and harness source bindings")
+        case .currentCandidateIOSTools:
+            try require(applicationSource != harnessSource && applicationSource != String(repeating: "0", count: 40)
+                        && harnessSource != String(repeating: "0", count: 40)
+                        && context["MRK_NORMAL_UI_CURRENT_IOS_TOOLS"] == "current-candidate-ios-tools-only-v1"
+                        && context["MRK_NORMAL_UI_CURRENT_SAVED_VERSION"] == nil
+                        && context["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == nil && context["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"] == nil,
+                        "current iOS tools requires distinct candidate and harness sources")
         case .currentCandidateSavedVersion:
             try require(applicationSource != harnessSource
                         && context["MRK_NORMAL_UI_CURRENT_SAVED_VERSION"] == "current-candidate-saved-version-only-v1"
+                        && context["MRK_NORMAL_UI_CURRENT_IOS_TOOLS"] == nil
                         && context["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"] == nil && context["MRK_NORMAL_UI_FIXED_NORMAL_BATCH"] == nil,
                         "current recovery requires distinct candidate and harness sources")
         case .fixedCarrierResume:
@@ -7017,7 +7033,15 @@ final class NormalAppUITests: XCTestCase {
                 let fixedResume = ProcessInfo.processInfo.environment["MRK_NORMAL_UI_FIXED_CARRIER_RESUME"]
                 try require(fixedResume == nil || fixedResume == "fixed-ce644-arm-carrier-ios-unsigned-only",
                             "unrecognized recovery source purpose")
-                launched = try launchForJourney(profile: fixedResume == nil ? .sameBuild : .fixedCarrierResume)
+                let profile: SourceProfile
+                if ProcessInfo.processInfo.environment["MRK_NORMAL_UI_CURRENT_IOS_TOOLS"] != nil {
+                    profile = try normalJourneyProfile(for: "ios-unsigned-archive-test.xcresult")
+                } else {
+                    try require(ProcessInfo.processInfo.environment["MRK_NORMAL_UI_CURRENT_SAVED_VERSION"] == nil,
+                                "saved-version scope cannot supply an iOS archive")
+                    profile = fixedResume == nil ? .sameBuild : .fixedCarrierResume
+                }
+                launched = try launchForJourney(profile: profile)
             }
             guard let (app, window, renderer) = launched else { throw Refusal.condition("iOS ordinary launch absent") }
             try stage("ios-unsigned-project") {

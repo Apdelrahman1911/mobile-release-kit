@@ -227,7 +227,7 @@ export function githubWorkflowEditReducer(state: GitHubWorkflowEditState, action
 
 const availabilityCopy: Record<EditAvailability, string> = {
   available: 'Native local workflow review is available. No file change happens without a new plan and explicit confirmation.',
-  unsupported_platform: 'Local workflow writes are unavailable on this platform. This slice requires the separately qualified Linux native backend; Windows writes are not supported.',
+  unsupported_platform: 'Local workflow writes require a supported Linux or macOS native runtime. This action is unavailable on Windows and in browser previews.',
   runtime_unqualified: 'This build has no qualified local-workflow writer. Its distinct production gate remains disabled; configuration saving or a passive preview cannot enable it.',
   cleanup_unknown: 'Native ownership or cleanup is unverified. No new edit or repeated Apply is allowed; retain the original operation and recovery evidence.',
   shutdown: 'The native application is stopping. No local workflow edit can be opened.',

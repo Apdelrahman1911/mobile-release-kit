@@ -360,8 +360,9 @@ jobs:
           unset GITHUB_TOKEN GH_TOKEN
           # Each existing helper keeps its original inner and outer deadlines;
           # this containing step/job does not grant a new native clock. Only the
-          # nonshipping XCTest harness builds, once, from the actual candidate
-          # checkout. Application/harness source are never relabeled as helper.
+          # nonshipping XCTest harness builds once from the current helper when
+          # its source differs; otherwise it uses the candidate checkout. The
+          # installed app keeps its genuine candidate source in both routes.
           ui() {
             local phase=$1 status saved status_path
             case "$phase" in
