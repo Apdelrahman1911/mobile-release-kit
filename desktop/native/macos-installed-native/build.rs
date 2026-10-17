@@ -89,7 +89,22 @@ fn main() {
     let desktop_image = std::env::var_os("CARGO_FEATURE_DESKTOP_IMAGE").is_some();
     let resident_image = std::env::var_os("CARGO_FEATURE_RESIDENT_IMAGE").is_some();
     let e2_fixture = std::env::var_os("CARGO_FEATURE_E2_NATIVE_FIXTURE").is_some();
+    let xcode_setup = std::env::var_os("CARGO_FEATURE_XCODE_SETUP").is_some();
     let producer_signing = std::env::var_os("CARGO_FEATURE_PACKAGE_PRODUCER_SIGNING").is_some();
+    assert!(
+        !xcode_setup
+            || !helper
+                && !android_helper
+                && !desktop_image
+                && !resident_image
+                && !observation
+                && !e2_fixture
+                && !qualification
+                && !producer_signing
+                && std::env::var_os("CARGO_FEATURE_INSTALLED_REMOVAL_ABRUPT_FIXTURE").is_none()
+                && std::env::var_os("CARGO_FEATURE_INSTALLED_RESTORE_CUT_FIXTURE").is_none(),
+        "setup requires its isolated native graph"
+    );
     assert!(!producer_signing || !helper && !android_helper && !desktop_image && !resident_image
         && !observation && !e2_fixture && !qualification,
         "package signing requires the isolated nonshipping native graph");
@@ -247,6 +262,28 @@ fn main() {
     if resident_image { build.define("MRK_ANDROID_RESIDENT_IMAGE",Some("1")); }
     let app_path = format!("{:?}", installed_paths::PAYLOAD_APP);
     build.define("MRK_ANDROID_APP_PATH", Some(app_path.as_str()));
+    if xcode_setup {
+        // SAME existing immutable reviewed team/certificate/OIDs; only the fixed
+        // code identifier changes. Never runtime input or a new signing profile.
+        let (app, _) = android_requirements()
+            .expect("setup requires configured reviewed Developer ID source profile");
+        let needle = format!("identifier \"{}\"", installed_paths::BUNDLE_ID);
+        assert_eq!(
+            app.matches(&needle).count(),
+            1,
+            "exact original app identifier in requirement"
+        );
+        let setup = app.replacen(
+            &needle,
+            "identifier \"dev.mobile-release-kit.desktop.xcode-setup\"",
+            1,
+        );
+        let literal = format!("{setup:?}");
+        build.define("MRK_XCODE_SETUP_REQUIREMENT", Some(literal.as_str()));
+        build.file("src/xcode_apple.m").file("src/xcode_self.m");
+        println!("cargo:rerun-if-changed=src/xcode_apple.m");
+        println!("cargo:rerun-if-changed=src/xcode_self.m");
+    }
     if let Some((app, helper)) = android_requirements() {
         let app = format!("{app:?}"); let helper = format!("{helper:?}");
         build.define("MRK_ANDROID_APP_REQUIREMENT", Some(app.as_str()));

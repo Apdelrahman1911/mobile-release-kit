@@ -8,6 +8,8 @@ publish = false
 
 [features]
 default = []
+# Fixed isolated setup graph, not an app/registration/package signer role.
+xcode-setup = []
 # Instrumented installed-app qualification only; never a shipping control.
 installed-observation = []
 # Only the separate fixed helper Cargo graph selects this role.

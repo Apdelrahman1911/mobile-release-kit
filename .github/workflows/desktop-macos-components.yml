@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe]
+        options: [all, integration, launcher, xcode-setup-compile, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe]
       architecture:
         description: Architecture for Store, iOS tools and package probe; other components use both
         type: choice
@@ -103,8 +103,8 @@ jobs:
         run: rm -rf -- "$WORK_ROOT"
 
   installer-check:
-    name: ${{ inputs.component == 'installer-restore-chain' && 'Test Restore chain observer' || inputs.component == 'installer-restore-fixtures' && 'Check Restore fixtures' || inputs.component == 'installer-tests' && 'Test installer contracts' || inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
-    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-tests' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames' || inputs.component == 'installer-restore-fixtures' || inputs.component == 'installer-restore-chain'
+    name: ${{ inputs.component == 'xcode-setup-compile' && 'Typecheck inert Xcode setup and Installer diagnostic' || inputs.component == 'installer-restore-chain' && 'Test Restore chain observer' || inputs.component == 'installer-restore-fixtures' && 'Check Restore fixtures' || inputs.component == 'installer-tests' && 'Test installer contracts' || inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-tests' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames' || inputs.component == 'installer-restore-fixtures' || inputs.component == 'installer-restore-chain' || inputs.component == 'xcode-setup-compile'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -142,6 +142,20 @@ jobs:
           # This is the existing reviewed native clock tuple on both Macs.
           # 1.98.0 is supported only on Intel, not Apple Silicon.
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          if [[ "$INSTALLER_CHECKS" == xcode-setup-compile ]]; then
+            # Passive compile only: provisional helper main always refuses.
+            # No signing credentials, privileged invocation or Xcode copying.
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features macos-xcode-setup --bin mrk-macos-xcode-setup
+            # Same native dependency build also validates the joined-worker
+            # diagnostic at its existing DATA-only test entry, not Installer main.
+            rustup run 1.98.1 cargo test --locked --no-default-features \
+              --features macos-installed-installer --bin mrk-macos-install -- \
+              installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error \
+              --exact --test-threads=1 | tee "$WORK_ROOT/installer-diagnostic-tests.log"
+            grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$WORK_ROOT/installer-diagnostic-tests.log"
+            exit 0
+          fi
           if [[ "$INSTALLER_CHECKS" == installer-restore-chain ]]; then
             # Fixed observer DATA only. Previously checked writer-cut graphs
             # and ordinary installer contracts are unchanged and not repeated.

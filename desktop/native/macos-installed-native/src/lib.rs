@@ -3,6 +3,16 @@
 #![cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[cfg(all(feature = "installed-observation", not(debug_assertions)))]
 compile_error!("installed observation controls require debug assertions in an explicit instrumented build");
+#[cfg(all(feature="xcode-setup",any(feature="installed-observation",feature="vault-helper",
+    feature="android-registration-helper",feature="desktop-image",feature="resident-image",
+    feature="e2-native-fixture",feature="package-producer-signing",
+    feature="installed-removal-abrupt-fixture",feature="installed-restore-cut-fixture",
+    mrk_wrapping_keychain_qualification)))]
+compile_error!("setup native graph must remain isolated");
+#[cfg(feature="xcode-setup")]
+pub mod xcode_apple;
+#[cfg(feature="xcode-setup")]
+pub mod xcode_self;
 // Fixed nonshipping removal cut only. This feature has no native image role
 // and must not unify with an observer, helper, producer or E2 image graph.
 #[cfg(all(feature = "installed-removal-abrupt-fixture", any(
