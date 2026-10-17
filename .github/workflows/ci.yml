@@ -97,7 +97,7 @@ jobs:
           run_uid=$(id -u); run_gid=$(id -g)
           [[ "$run_uid" =~ ^[1-9][0-9]*$ && "$run_gid" =~ ^[1-9][0-9]*$ ]]
           ruby_prefix=$(ruby -rrbconfig -e 'puts RbConfig::CONFIG.fetch("prefix")')
-          [[ "$ruby_prefix" == /opt/hostedtoolcache/Ruby/* && -x "$ruby_prefix/bin/ruby" ]]
+          [[ "$ruby_prefix" == /opt/hostedtoolcache/Ruby/3.3.12/x64 && -x "$ruby_prefix/bin/ruby" ]]
           # Show only public tool permissions if a hosted image changes them.
           stat -c '%a %u:%g %n' "$ruby_prefix" "$ruby_prefix/bin" "$ruby_prefix/bin/ruby"
           /usr/bin/namei -l -- "$ruby_prefix/bin/ruby"
@@ -110,16 +110,19 @@ jobs:
             --die-with-parent --new-session \
             --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
             --symlink usr/bin /bin --proc /proc --dev /dev --perms 1777 --tmpfs /tmp \
+            --perms 0755 --dir /opt --perms 0755 --dir /opt/hostedtoolcache \
+            --perms 0755 --dir /opt/hostedtoolcache/Ruby \
+            --perms 0755 --dir /opt/hostedtoolcache/Ruby/3.3.12 \
             --ro-bind "$ruby_prefix" "$ruby_prefix" \
-            --ro-bind "$WORK_ROOT/bootstrap" "$WORK_ROOT/bootstrap" \
-            --ro-bind "$WORK_ROOT/gems" "$WORK_ROOT/gems" \
+            --ro-bind "$WORK_ROOT/bootstrap" /test-bootstrap \
+            --ro-bind "$WORK_ROOT/gems" /test-gems \
             --ro-bind "$GITHUB_WORKSPACE" /work --chdir /work --clearenv \
             --setenv PATH "$ruby_prefix/bin:/usr/bin:/bin" --setenv LANG C.UTF-8 \
             --setenv MRK_TEST_RUBY "$ruby_prefix/bin/ruby" \
             --setenv MRK_TEST_UID "$run_uid" --setenv MRK_TEST_GID "$run_gid" \
             --setenv HOME /tmp/home --setenv TMPDIR /tmp --setenv CI true \
-            --setenv GEM_HOME "$WORK_ROOT/bootstrap" --setenv GEM_PATH "$WORK_ROOT/bootstrap" \
-            --setenv BUNDLE_PATH "$WORK_ROOT/gems" --setenv BUNDLE_GEMFILE /work/Gemfile \
+            --setenv GEM_HOME /test-bootstrap --setenv GEM_PATH /test-bootstrap \
+            --setenv BUNDLE_PATH /test-gems --setenv BUNDLE_GEMFILE /work/Gemfile \
             --setenv BUNDLE_USER_HOME /tmp/bundle --setenv BUNDLE_IGNORE_CONFIG 1 \
             --setenv BUNDLE_FROZEN true --setenv BUNDLE_DEPLOYMENT true \
             --setenv FASTLANE_SKIP_UPDATE_CHECK 1 --setenv FASTLANE_OPT_OUT_USAGE 1 \
