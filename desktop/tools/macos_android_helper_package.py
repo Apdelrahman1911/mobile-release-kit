@@ -1512,6 +1512,8 @@ FINAL_IMAGE_INPUT_STAGER_REASONS = frozenset((
 # Existing notary guards only. A zero log command can still carry an Invalid
 # submission or fail its strict DATA parser; neither is native success evidence.
 _FAILURE_NOTARY_REASONS = (
+    "notary-selected-tool-path", "notary-selected-tool-ancestry",
+    "notary-selected-tool-original", "notary-selected-tool-changed",
     # Final input staging is after successful Apple checks. Preserve its exact
     # finite refusal instead of misdiagnosing another Apple rejection.
     'applications-launcher-copy-role', 'applications-launcher-input-pair',
@@ -1811,6 +1813,7 @@ _FAILURE_SETUP_STAGES = ("setup-verification-input", "setup-verification-cleanup
     "sign-xcode-setup", "sign-xcode-setup-verify", "setup-carrier", "setup-scripts-original", "setup-scripts-final",
     "setup-input-root", "setup-presentation", "setup-packager-directory", "setup-original-component-audit",
     "setup-original-parts", "setup-component-directory",
+    "setup-tool-pkgbuild", "setup-tool-lsbom", "setup-tool-tar", "setup-tool-xar",
 )
 
 _FAILURE_REASONS = frozenset((*_FAILURE_SETUP_REASONS, *("original-nonzero-" + role for role in _FAILURE_SETUP_ROLES),
@@ -4103,7 +4106,12 @@ class Operation:
         need(name in ("notarytool", "stapler", "productbuild") or prefix_tool, "notary-fixed-tool")
         need(name != "productbuild" or self.phase in ("finalize-package", "finalize-xcode-setup-package") and self.install_product,
              "install-product-fixed-tool")
-        fixed = Path("/usr/bin") / name if system_tool else NOTARY_XCODE / "usr/bin" / name
+        if prefix_tool:
+            self.stage = "setup-tool-" + name
+        # Apple's tar entry is a symlink. Keep exact physical-tool admission,
+        # selecting only its fixed bsdtar executable for this existing setup role.
+        fixed_name = "bsdtar" if prefix_tool and name == "tar" else name
+        fixed = Path("/usr/bin") / fixed_name if system_tool else NOTARY_XCODE / "usr/bin" / name
         canonical = fixed.resolve(strict=True)
         applications = NOTARY_XCODE.parents[2]
         need(canonical == fixed if system_tool else
@@ -5334,7 +5342,7 @@ class Operation:
         # Do not carry the signed helper's byte copies across native work.
         del program, scripts
         self.notary_tool("tar")
-        self.final_package_call("final-package-setup-tar", ["/usr/bin/tar", "-c", "-z", "-f", str(self.setup_package_paths() / "parts/Scripts"),
+        self.final_package_call("final-package-setup-tar", ["/usr/bin/bsdtar", "-c", "-z", "-f", str(self.setup_package_paths() / "parts/Scripts"),
             "--format=odc", "--uid=0", "--gid=0", "--no-acls", "--no-xattrs", "--no-fflags", "--no-mac-metadata", "."])
         self.setup_close_tool("tar")
         def component_directory():

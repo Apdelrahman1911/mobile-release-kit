@@ -4696,6 +4696,95 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         module.final_package_receipt(TOOL.canonical(record), *args, setup=True, setup_originals=originals)
                 if before is not None: self.assertEqual(len(os.listdir("/proc/self/fd")), before)
 
+    def test_setup_tar_uses_real_fixed_tool_admission_and_original_post(self):
+        module = ANDROID_HELPER
+        # Exercise the real resolver/registry/POST, not the full-chain fixture's
+        # tool double. Only fixed system metadata is modeled; opened/closed FDs
+        # are real tiny files. No native execution or root-platform claim.
+        cases = ((None, None), ("other-path", "path"), ("link", "ancestry"),
+                 ("group-write", "ancestry"), ("nonexec", "original"),
+                 ("held-mismatch", "original"), ("post-drift", "changed"))
+        for fault, reason in cases:
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                state = self.final_package_fixture(Path(directory), setup=True)
+                operation = state.operation
+                leaf = state.work / "inert-bsdtar"
+                leaf.write_bytes(b"INERT FIXED TOOL; NEVER EXECUTE\n"); leaf.chmod(0o555)
+                alias = state.work / "inert-alias"; alias.symlink_to(leaf.name)
+                fixed = Path("/usr/bin/bsdtar")
+                parents = set(fixed.parents)
+                real_resolve, real_lstat = Path.resolve, Path.lstat
+                real_open, real_fstat = os.open, os.fstat
+                opened, resolutions, drift = [], [], [False]
+                fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+                def protected(info, **changes):
+                    row = {key: getattr(info, key) for key in fields}
+                    row.update(st_uid=0, st_gid=0); row.update(changes)
+                    return SimpleNamespace(**row)
+                parent_info = protected(real_lstat(state.work), st_mode=stat.S_IFDIR | 0o755)
+                def resolve(path, strict=False):
+                    if path in (fixed, Path("/usr/bin/tar")):
+                        self.assertTrue(strict); resolutions.append(path)
+                        # Model Apple's tar alias too: using the old spelling
+                        # must fail canonical==fixed before any native open.
+                        return Path("/usr/bin/foreign") if fault == "other-path" else fixed
+                    return real_resolve(path, strict=strict)
+                def lstat(path):
+                    if path in parents:
+                        return protected(parent_info, st_mode=stat.S_IFDIR | (0o775 if fault == "group-write" and path == fixed.parent else 0o755))
+                    if path == fixed:
+                        info = real_lstat(alias if fault == "link" else leaf)
+                        return protected(info, **({"st_ino": info.st_ino + 1} if drift[0] else {}))
+                    return real_lstat(path)
+                def open_tool(path, flags, *args, **kwargs):
+                    self.assertEqual(path, fixed)
+                    self.assertEqual((flags, args, kwargs), (module.READ_FLAGS, (), {}))
+                    fd = real_open(leaf, flags); opened.append(fd); return fd
+                def fstat(fd):
+                    info = real_fstat(fd)
+                    if fd not in opened: return info
+                    return protected(info, **({"st_mode": stat.S_IFREG | 0o444} if fault == "nonexec" else
+                        {"st_ino": info.st_ino + 1} if fault == "held-mismatch" else {}))
+                before = len(os.listdir("/proc/self/fd")) if sys.platform == "linux" else None
+                try:
+                    with mock.patch.object(Path, "resolve", resolve), mock.patch.object(Path, "lstat", lstat), \
+                            mock.patch.object(module.os, "open", side_effect=open_tool), mock.patch.object(module.os, "fstat", side_effect=fstat):
+                        if reason is None or fault == "post-drift":
+                            value = operation.notary_tool("tar")
+                            self.assertEqual(value["fixed"], fixed)
+                            self.assertEqual(value["path"], fixed)
+                            self.assertEqual(set(operation.notary_tools), {"tar"})
+                            self.assertEqual({row[0] for row in value["ancestors"]}, parents | {fixed})
+                            self.assertEqual(value["entry"]["fd"], opened[0])
+                            operation.notary_tool_post(value)
+                            if fault == "post-drift":
+                                drift[0] = True
+                                with self.assertRaisesRegex(module.Refused, "^notary-selected-tool-changed$") as caught:
+                                    operation.notary_tool_post(value)
+                        else:
+                            with self.assertRaisesRegex(module.Refused, "^notary-selected-tool-" + reason + "$") as caught:
+                                operation.notary_tool("tar")
+                        self.assertEqual(operation.stage, "setup-tool-tar")
+                        if reason is not None:
+                            self.assertEqual(module.failure_exception(caught.exception)["reason"], "notary-selected-tool-" + reason)
+                            # execute() captures this actual stage into its
+                            # failure record; direct reader tests create no receipt.
+                            self.assertIn(operation.stage, module._FAILURE_STAGES)
+                        self.assertTrue(resolutions and all(path == fixed for path in resolutions))
+                        self.assertEqual(len(opened), 0 if reason in ("path", "ancestry") else 1)
+                        self.assertEqual(operation.calls, []); self.assertEqual(operation.credential_calls, [])
+                finally:
+                    for entry in reversed(operation.entries): operation.close(entry)
+                self.assertTrue(all(entry["closed"] and entry["fd"] is None for entry in operation.entries))
+                self.assertEqual(operation.errors, [])
+                if before is not None: self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+        with tempfile.TemporaryDirectory() as directory:
+            state = self.final_package_fixture(Path(directory), setup=False)
+            with mock.patch.object(Path, "resolve", side_effect=AssertionError("must reject before selection")):
+                with self.assertRaisesRegex(module.Refused, "^notary-fixed-tool$"):
+                    state.operation.notary_tool("tar")
+            self.assertEqual(state.operation.entries, [])
+
     def test_setup_source_hook_modes_are_closed_and_original_bound(self):
         module = ANDROID_HELPER
         cases = (("readonly", "preinstall", 0o555), ("data-as-executable", "CarrierInfo.plist", 0o755),
@@ -4890,7 +4979,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         + str(len(setup_source["CarrierInfo.plist"])) + "\n").encode()
                     if failure == "setup-bom-owner": output = output.replace(b"\t0\t0\t", b"\t1\t0\t", 1)
                 elif called.endswith("-tar"):
-                    self.assertEqual(argv, ["/usr/bin/tar", "-c", "-z", "-f", str(base / "parts/Scripts"), "--format=odc", "--uid=0", "--gid=0",
+                    self.assertEqual(argv, ["/usr/bin/bsdtar", "-c", "-z", "-f", str(base / "parts/Scripts"), "--format=odc", "--uid=0", "--gid=0",
                         "--no-acls", "--no-xattrs", "--no-fflags", "--no-mac-metadata", "."])
                     self.assertEqual(options["environ"], {"PATH":"/usr/bin:/bin", "LC_ALL":"C", "TZ":"UTC", "COPYFILE_DISABLE":"1"})
                     self.assertEqual(TOOL.tree(base / "scripts-final", packager=True), TOOL.xcode_setup_scripts_with_bom(
