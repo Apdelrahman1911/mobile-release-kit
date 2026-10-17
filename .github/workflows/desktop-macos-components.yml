@@ -62,56 +62,81 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Prepare a private compiler and locked dependencies
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: '3.14.7'
+      - name: Prepare the same hosted compiler paths as packaging
         id: work
         timeout-minutes: 7
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
           root=$(mktemp -d "$RUNNER_TEMP/mrk-resident-compile.XXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
-          export CARGO_HOME="$root/cargo" RUSTUP_HOME="$root/rustup"
-          export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+          export CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup
           rustup toolchain install 1.98.0 --profile minimal --no-self-update
-          cargo="$RUSTUP_HOME/toolchains/1.98.0-x86_64-apple-darwin/bin/cargo"
-          export RUSTC="$RUSTUP_HOME/toolchains/1.98.0-x86_64-apple-darwin/bin/rustc"
-          export RUSTUP_TOOLCHAIN=1.98.0 RUSTUP_AUTO_INSTALL=0
-          "$cargo" --version
-          "$RUSTC" -vV
-          "$cargo" fetch --locked --target x86_64-apple-darwin \
-            --manifest-path desktop/helpers/macos-android-register/Cargo.toml
-          mkdir -p "$root/target/tmp"
-      - name: Compile the shipping resident graph with live diagnostics
+          toolchain="$RUSTUP_HOME/toolchains/1.98.0-x86_64-apple-darwin/bin"
+          "$toolchain/cargo" --version
+          "$toolchain/rustc" -vV
+          mkdir -p "$root/android-helper-target/tmp"
+      - name: Measure the actual compiler owner and Command Line Tools SDK
         id: compile
         timeout-minutes: 25
         shell: bash
-        working-directory: desktop/helpers/macos-android-register
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
-          SOURCE_COMMIT: ${{ github.sha }}
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           set -euo pipefail
-          toolchain="$WORK_ROOT/rustup/toolchains/1.98.0-x86_64-apple-darwin/bin"
-          started=$(date +%s)
-          set +e
-          # Same release graph/profile/jobs as prepare(), not cargo check or a
-          # feature-superset test build. No credentials, signer or app execution.
-          env -i PATH="$toolchain:/usr/bin:/bin:/usr/sbin:/sbin" HOME=/Users/runner \
-            CARGO_HOME="$WORK_ROOT/cargo" RUSTUP_HOME="$WORK_ROOT/rustup" \
-            RUSTC="$toolchain/rustc" RUSTUP_TOOLCHAIN=1.98.0 RUSTUP_AUTO_INSTALL=0 \
-            LANG=C LC_ALL=C TZ=UTC CARGO_INCREMENTAL=0 \
-            DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer MACOSX_DEPLOYMENT_TARGET=26.0 \
-            CARGO_TARGET_DIR="$WORK_ROOT/target" TMPDIR="$WORK_ROOT/target/tmp" \
-            MRK_MACOS_INSTALL_SOURCE_COMMIT="$SOURCE_COMMIT" MRK_IMAGE_RELEASE_ID=macos26-x86_64-desktop-02 \
-            "$toolchain/cargo" build --manifest-path "$PWD/Cargo.toml" --locked --offline --release \
-            --config profile.release.package.mobile-release-kit-desktop.opt-level=1 \
-            --jobs 1 --target x86_64-apple-darwin --lib --message-format=json-render-diagnostics \
-            > "$WORK_ROOT/compiler.jsonl"
-          status=$?
-          set -e
-          printf 'returned=true\n' >> "$GITHUB_OUTPUT"
-          printf 'Resident Cargo exit=%s elapsedSeconds=%s\n' "$status" "$(($(date +%s) - started))"
-          exit "$status"
+          umask 077
+          "$MRK_PYTHON" -I -S -B - <<'PY_RESIDENT'
+          import json, os, sys, time
+          from pathlib import Path
+          root, work = Path.cwd(), Path(os.environ["WORK_ROOT"])
+          assert sys.version_info[:3] == (3, 14, 7) and sys.flags.isolated and sys.flags.no_site
+          sys.path.insert(0, str(root / "desktop/tools"))
+          import macos_android_helper_package as package
+          loader = package.load_data(root, "macos_aqua_qualification.py", "_resident_diagnostic_loader")
+          owner = loader.load_owner(root)
+          target = package.INTEL_TARGET
+          release = json.loads((root / "desktop/macos-installed-inputs/build-release-intel.json").read_bytes())["release"]
+          environment = package.build_environment({"HOME": "/Users/runner",
+              "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0",
+              "GITHUB_SHA": os.environ["GITHUB_SHA"]}, work, release, target=target)
+          cargo = package.direct_rust_tools(target)[0]
+          manifest = str(root / package.WORKSPACE / "Cargo.toml")
+          commands = (("fetch", 120, [cargo, "fetch", "--manifest-path", manifest, "--locked", "--target", target]),
+              ("build", 1200, [cargo, "build", "--manifest-path", manifest, "--locked", "--offline", "--release",
+               "--config", package.RESIDENT_CARGO_OVERRIDE, "--jobs", "1", "--target", target,
+               "--lib", "--message-format=json-render-diagnostics"]))
+          # Same owner, SDK, compiler paths, graph, profile and capture bound as
+          # prepare(). Only this diagnostic's build allowance differs (1200s).
+          for role, seconds, argv in commands:
+              started = time.monotonic()
+              try:
+                  result = owner.run_owned(argv, environ=environment, cwd=root / package.WORKSPACE,
+                      timeout=seconds, capture=True, text=False, output_limit=4 * 1024 * 1024)
+              except BaseException as error:
+                  detail = package.original_failure(error, owner, root, seconds, 4 * 1024 * 1024)
+                  print(json.dumps({"role": role, "elapsedSeconds": round(time.monotonic() - started, 3),
+                      "returned": False, "diagnostic": detail}), flush=True)
+                  raise SystemExit(1) from None
+              print(json.dumps({"role": role, "returncode": result.returncode,
+                  "elapsedSeconds": round(time.monotonic() - started, 3),
+                  "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr)}), flush=True)
+              if role == "build" or result.returncode != 0:
+                  # A real returned result, not a caught timeout, permits this
+                  # disposable task's cleanup. Shared toolchains are not removed.
+                  with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                      output.write("returned=true\n")
+              sys.stderr.buffer.write(result.stderr)
+              if result.returncode != 0:
+                  raise SystemExit(result.returncode)
+              if role == "build":
+                  package.artifact(result.stdout, root, work / "android-helper-target", build_target=target)
+          PY_RESIDENT
       - name: Retire only this returned build's compiler and outputs
         if: always() && steps.compile.outputs.returned == 'true'
         shell: bash
@@ -119,6 +144,7 @@ jobs:
           WORK_ROOT: ${{ steps.work.outputs.root }}
         run: |
           set -euo pipefail
+          umask 077
           [[ "$WORK_ROOT" == "$RUNNER_TEMP"/mrk-resident-compile.* && -d "$WORK_ROOT" && ! -L "$WORK_ROOT" ]]
           # Cargo has synchronously returned. Timeout/no-return uses hosted VM
           # disposal instead; no guessed process kill or shared cache deletion.
