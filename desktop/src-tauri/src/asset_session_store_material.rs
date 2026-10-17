@@ -274,7 +274,7 @@ mod tests {
                 (Kind::OperationCommitment,'f',3,serde_json::json!({"keyBase64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":"fixture-v1"})),
                 (Kind::AppleReviewDemo,'b',4,serde_json::json!({"demoUsername":"fixture","demoPassword":"inert-password"}))]{
                 if kind==Kind::AppleReviewDemo&&!demo{continue;}
-                let key=RecordKey{id:Token(id.to_string().repeat(32)),revision};let payload=Arc::new(Payload{kind,material:None,fields:Some(commands::own_fields(kind,&values).unwrap())});
+                let key=RecordKey{id:Token(id.to_string().repeat(32)),revision};let payload=Arc::new(Payload{kind,material:None,fields:Some(commands::own_fields(kind,&values).ok().expect("fixed fixture refusal"))});
                 state.records.push(Record{key:key.clone(),payload,mutation_pending:false});
                 state.assignments.push(Assignment{kind,record_id:key.id,record_revision:revision,context_revision:2,availability:AssignmentAvailability::Available});
             }
@@ -309,7 +309,7 @@ mod tests {
                 (Kind::OperationCommitment,'f',3,serde_json::json!({"keyBase64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","version":"fixture-v1"})),
                 (Kind::AppleReviewDemo,'b',4,serde_json::json!({"demoUsername":"fixture","demoPassword":"inert-password"}))]{
                 if kind==Kind::AppleReviewDemo&&!demo{continue;}
-                let key=RecordKey{id:Token(id.to_string().repeat(32)),revision};let payload=Arc::new(Payload{kind,material:None,fields:Some(commands::own_fields(kind,&values).unwrap())});
+                let key=RecordKey{id:Token(id.to_string().repeat(32)),revision};let payload=Arc::new(Payload{kind,material:None,fields:Some(commands::own_fields(kind,&values).ok().expect("fixed fixture refusal"))});
                 state.records.push(Record{key:key.clone(),payload,mutation_pending:false});
                 state.assignments.push(Assignment{kind,record_id:key.id,record_revision:revision,context_revision:2,availability:AssignmentAvailability::Available});
             }

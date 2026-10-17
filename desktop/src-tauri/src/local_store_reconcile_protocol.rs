@@ -658,7 +658,7 @@ pub(crate) mod tests {
     #[test]
     fn local_external_readiness_requires_explicit_original_context_and_separate_consent(){
         let v=readiness_input();let c=readiness_context();assert!(c.refreshing()&&c.checkpointing()&&!c.settling());
-        assert_eq!(c.consent(),READINESS_CONSENT);assert_eq!(c.asset_stage(),crate::asset_commands::Stage::ExternalTesting);assert_eq!(c.frame_limit(),5);
+        assert_eq!(c.consent(),READINESS_CONSENT);assert!(matches!(c.asset_stage(),crate::asset_commands::Stage::ExternalTesting));assert_eq!(c.frame_limit(),5);
         assert_eq!(Context::deserialize(&json!(c)).unwrap(),c);
         for(field,value)in[("action",Value::Null),("action",json!("recover")),("platform",json!("android")),("settlement",json!("record-current-target")),
             ("stage",json!("external-testing")),("stageOperationId",json!(UUID)),("executionReceiptSha256",json!("F".repeat(64))),
