@@ -4877,7 +4877,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual(argv, ["/usr/bin/pkgbuild", "--root", str(base / "carrier"), "--scripts", str(base / "scripts-original"),
                         "--component-plist", str(work / operation.target_name / "product-input/Component.plist"),
                         "--identifier", TOOL.XCODE_SETUP_ID, "--version", selected.package_version, "--install-location", "/Library",
-                        "--ownership", "recommended", str(base / "packager/PrepareXcode-original.pkg")])
+                        "--ownership", "recommended", "--compression", "legacy", "--min-os-version", "26.0",
+                        str(base / "packager/PrepareXcode-original.pkg")])
                     self.assertEqual(TOOL.tree(base / "scripts-original", packager=True), files)
                     self.assertEqual(TOOL.tree(base / "carrier"), {TOOL.XCODE_SETUP_CARRIER+"/Contents/Info.plist": (setup_source["CarrierInfo.plist"], 0o444)})
                     (base / "packager/PrepareXcode-original.pkg").write_bytes(original)

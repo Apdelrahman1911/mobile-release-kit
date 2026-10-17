@@ -9,17 +9,26 @@ application/package/image signing, notarization, installation and readback.
 It does not repeat the unrelated fixture Installer, broad DATA suites, separate
 Remove image or broad UI suites. Existing targeted component checks remain separate.
 
-The candidate producer also builds the separate **Prepare Xcode.pkg** companion
-after retaining the main prepared-package checkpoint. Its credential-free Cargo
-build, Application signing, Installer signing/notarization, and first/repeat
-installation are distinct steps. The same finalized companion and source inputs
-are reused for both installations; a failed/unknown first install never triggers
-a repeat. Its files and bounded results are separate artifacts, not extra members
-of the main DMG. The main prepared checkpoint remains independently usable if
-a later companion check fails. Neither a signed companion nor its installation
-alone qualifies the Desktop's installed iOS workflows.
+The separate **Prepare Xcode.pkg** companion runs independently in the same
+workflow: select branch `verify/desktop-macos-xcode-setup`, operation
+`xcode-setup-companion`, and one target when manually dispatching. That branch
+has no push trigger. This job does not rebuild the main app or fetch its runtime
+suppliers. It uses the `macos-developer-id` environment for the appropriate
+signing/notarization steps only; installation verification is credential-free.
 
-Only after those package checks pass does it retain `MobileReleaseKit.dmg`,
+Its Cargo build, Application signing, Installer signing/notarization, and
+first/repeat installation are distinct steps. Both installations reuse the same
+finalized companion and source inputs; a failed/unknown first install never
+triggers a repeat. Its files and bounded results are separate artifacts, not
+extra members of the main DMG. Companion failure does not fail or restart the
+main candidate build. Neither a signed companion nor its installation alone
+qualifies the Desktop's installed iOS workflows.
+
+The default manual operation, `prepared-install`, still requires the original
+`prepared_source`, `prepared_run` and target. Use it for an unchanged prepared
+package; it cannot insert a source fix into an already-built Installer.
+
+Only after the main package checks pass does it retain `MobileReleaseKit.dmg`,
 `PREVIEW.json` and an installation guide for 14 days. Use the complete DMG:
 the package requires its authenticated sibling files on the mounted image.
 This internal candidate is **not installed-UI-qualified or production-ready**.

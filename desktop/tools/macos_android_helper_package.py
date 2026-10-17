@@ -5307,7 +5307,8 @@ class Operation:
         self.final_package_call("final-package-setup-pkgbuild", ["/usr/bin/pkgbuild", "--root", str(self.setup_package_paths() / "carrier"),
             "--scripts", str(self.work / self.scripts_name), "--component-plist", str(product_path / "Component.plist"),
             "--identifier", self.stager.XCODE_SETUP_ID, "--version", selected.package_version,
-            "--install-location", "/Library", "--ownership", "recommended", str(self.work / self.packager_filename)], maximum=60)
+            "--install-location", "/Library", "--ownership", "recommended", "--compression", "legacy",
+            "--min-os-version", "26.0", str(self.work / self.packager_filename)], maximum=60)
         self.setup_close_tool("pkgbuild")
         original = self.final_package_io("setup-original-component-audit", self.stager.xcode_setup_original_package,
             self.work / self.scripts_name, self.work / self.packager_filename, self.setup_helper_sha, selection=selected)
