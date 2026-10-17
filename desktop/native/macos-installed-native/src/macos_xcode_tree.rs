@@ -134,12 +134,13 @@ impl CopierFiles {
         let kind = expected.source_kind()?;
         let flags = libc::O_RDONLY
             | libc::O_CLOEXEC
-            | libc::O_NOFOLLOW
             | libc::O_NONBLOCK
+            // Darwin O_SYMLINK opens the link itself. Adding O_NOFOLLOW
+            // instead makes vn_authorize_open_existing reject it with ELOOP.
             | match kind {
-                profile::Kind::Directory => libc::O_DIRECTORY,
+                profile::Kind::Directory => libc::O_DIRECTORY | libc::O_NOFOLLOW,
                 profile::Kind::Symlink => libc::O_SYMLINK,
-                _ => 0,
+                profile::Kind::Regular => libc::O_NOFOLLOW,
             };
         let slot = self.reserve()?;
         let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
@@ -272,7 +273,7 @@ impl CopierFiles {
                         libc::openat(
                             parent.as_raw_fd(),
                             name.as_ptr(),
-                            libc::O_RDONLY | libc::O_SYMLINK | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                            libc::O_RDONLY | libc::O_SYMLINK | libc::O_CLOEXEC | libc::O_NONBLOCK,
                         )
                     }
                 }
@@ -318,12 +319,11 @@ impl CopierFiles {
                     name.as_ptr(),
                     libc::O_RDONLY
                         | libc::O_CLOEXEC
-                        | libc::O_NOFOLLOW
                         | libc::O_NONBLOCK
                         | match kind {
-                            profile::Kind::Directory => libc::O_DIRECTORY,
+                            profile::Kind::Directory => libc::O_DIRECTORY | libc::O_NOFOLLOW,
                             profile::Kind::Symlink => libc::O_SYMLINK,
-                            _ => 0,
+                            profile::Kind::Regular => libc::O_NOFOLLOW,
                         },
                 )
             };
@@ -421,13 +421,12 @@ impl CopierFiles {
                 parent.as_raw_fd(),
                 name.as_ptr(),
                 libc::O_RDONLY
-                    | libc::O_NOFOLLOW
                     | libc::O_CLOEXEC
                     | libc::O_NONBLOCK
                     | match kind {
-                        profile::Kind::Directory => libc::O_DIRECTORY,
+                        profile::Kind::Directory => libc::O_DIRECTORY | libc::O_NOFOLLOW,
                         profile::Kind::Symlink => libc::O_SYMLINK,
-                        profile::Kind::Regular => 0,
+                        profile::Kind::Regular => libc::O_NOFOLLOW,
                     },
             )
         };

@@ -141,7 +141,7 @@ fn probe_directory(fd: std::os::fd::BorrowedFd<'_>) -> TestResult {
 }
 fn probe_symlink(path: &Path, inputs: &mut Vec<OwnedFd>) -> TestResult {
     let path = path_c(path)?;
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_SYMLINK | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_SYMLINK | libc::O_NONBLOCK | libc::O_CLOEXEC) };
     if fd < 0 {
         return Err(std::io::Error::other(format!("symlink-open errno={:?}", std::io::Error::last_os_error().raw_os_error())).into());
     }
