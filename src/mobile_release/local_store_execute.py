@@ -104,6 +104,19 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         require(last['operationId']==c['candidateOperationId'] and last['phase']=='prepared' and head['sequence']<=MAX_ENTRIES-2)
         rows=[r for r,_ in j._rows if r['operationId']==c['candidateOperationId']]
         require([r['phase'] for r in rows]==['inputs-pending','inputs-ready','prepare-pending','prepared'])
+        self._admit_prepared(rows)
+        self._prepared_post();self._tools();self._fence_empty()
+        self.source.exchange('history-head',head);self.checkpoint();require(j.head()==head)
+        self.pending_head=j._append(expected_head=head,operation_id=c['candidateOperationId'],phase='execute-pending',
+            payload={'intentSha256':c['intentSha256'],'confirmationSha256':hashlib.sha256(c['confirmation'].encode()).hexdigest(),
+                'authorizationId':self.authority['authorizationId'],'assignmentRevision':c['recordRevision']})
+        self.source.exchange('execute-pending',self.pending_head);self.checkpoint();require(j.head()==self.pending_head)
+        self._retire_journal(j)
+    @property
+    def authority_purpose(self):
+        return 'execute'
+    def _admit_prepared(self,rows):
+        c=self.request.context
         bundle=CandidateBundleReview(self,operation_id=c['candidateOperationId'],enrollment=self.enrollment,
             pending=rows[0]['payload'],candidate_sha256=c['candidateSha256']);bundle.acquire()
         m=bundle.value;o=self.observation.observed
@@ -125,17 +138,10 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
                 require(binding['sha256']==rows[-1]['payload']['storePreconditionSha256']);_snapshot(raw,snapshot,checkpoint=self.checkpoint)
         self.intent=decode_local_operation_intent(self.intent_bytes)
         require(self.intent['integrity']['sha256']==c['intentSha256'] and self.intent['confirmation']==c['confirmation'])
-        self.authority=dict(self.intent['preparedBy'],purpose='execute',authorizationId=self.request.native['authorizationId'],intentSha256=c['intentSha256'],
+        self.authority=dict(self.intent['preparedBy'],purpose=self.authority_purpose,authorizationId=self.request.native['authorizationId'],intentSha256=c['intentSha256'],
             source={'commit':o.commit,'tree':o.tree,'ref':o.ref},assignment={'kind':'google-service-account','recordId':c['recordId'],
             'expectedRevision':c['recordRevision'],'contextRevision':c['credentialContextRevision']})
-        validate_local_execution_authority(canonical(self.authority),intent_data=self.intent_bytes,purpose='execute')
-        self._prepared_post();self._tools();self._fence_empty()
-        self.source.exchange('history-head',head);self.checkpoint();require(j.head()==head)
-        self.pending_head=j._append(expected_head=head,operation_id=c['candidateOperationId'],phase='execute-pending',
-            payload={'intentSha256':c['intentSha256'],'confirmationSha256':hashlib.sha256(c['confirmation'].encode()).hexdigest(),
-                'authorizationId':self.authority['authorizationId'],'assignmentRevision':c['recordRevision']})
-        self.source.exchange('execute-pending',self.pending_head);self.checkpoint();require(j.head()==self.pending_head)
-        self._retire_journal(j)
+        validate_local_execution_authority(canonical(self.authority),intent_data=self.intent_bytes,purpose=self.authority_purpose)
     def _prepared_post(self):
         out=self.prepared_out;require(out is not None);_scan(self,out)
         for name,binding in self.prepared_bindings.items():
@@ -159,13 +165,13 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         self.checkpoint();require(not self._store_entered and config is self.config and release is self.version and request is self.store_request
             and record is self.record and guard is self.guard and invocation is self.invocation and request.execute and not request.prepare
             and request.recovery_run_id is None and request.recovery_confirmation is None and request.stage=='candidate' and request.platform=='android'
-            and self.source.reply_step==3 and self.pending_head is not None and self.material_original is not None
+            and self.source.reply_step==self.protocol.MATERIAL_STEP and self.material_head is not None and self.material_original is not None
             and len(self._source_rows)==6 and not self._runtime_rows and self.bundle is not None and not self.bundle.closed)
         self._prepared_post();self._store_entered=True;return True
     def attempt_key(self,record,root,mode,digest,authority):
         self.checkpoint();require(record is self.record and root==self.root and mode=='execute' and self._store_entered
             and digest==bytes.fromhex(self.request.context['intentSha256']) and authority==self.authority)
-        return local_execution_attempt_key(intent_data=self.intent_bytes,authority_data=canonical(self.authority),purpose='execute',expected_intent_sha256=self.request.context['intentSha256'])
+        return local_execution_attempt_key(intent_data=self.intent_bytes,authority_data=canonical(self.authority),purpose=self.authority_purpose,expected_intent_sha256=self.request.context['intentSha256'])
     def attempt_directory(self,attempt,directory):
         self.checkpoint();require(attempt is self.record._pending_attempt and attempt.phase=='ACQUIRING' and self.fence_readers)
         out=self.fence_readers[0];out.check();directory.check()
@@ -190,13 +196,13 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         require(len(raw)<=16384);return raw.decode('utf-8')
     def validate_receipt(self,raw):
         self.checkpoint();self._memory(raw,65536)
-        return validate_local_execution_receipt(raw,intent_data=self.intent_bytes,authority_data=canonical(self.authority),purpose='execute',expected_intent_sha256=self.request.context['intentSha256'])
+        return validate_local_execution_receipt(raw,intent_data=self.intent_bytes,authority_data=canonical(self.authority),purpose=self.authority_purpose,expected_intent_sha256=self.request.context['intentSha256'])
     def run(self):
         self.checkpoint();require(not self._ran and sys.platform=='darwin' and os.getcwd()==self.request.native['cwd']);self._ran=True
         try:
             self._quote();self.config,self.version=self._saved()
             c=self.request.context;prepared=self.root/'.mobile-release/store/local'/UUID(c['candidateOperationId']).hex
-            output=prepared.with_name(prepared.name+'-execute-'+UUID(self.request.native['authorizationId']).hex)
+            output=prepared.with_name(prepared.name+'-'+self.authority_purpose+'-'+UUID(self.request.native['authorizationId']).hex)
             require(not os.path.lexists(output))
             self.store_request=StoreRequest(stage='candidate',platform='android',confirmation=c['confirmation'],execute=True,prepare=False,
                 output_dir=output,store_receipt=output/'raw-store-receipt.json',operation_intent=prepared/'operation-intent.json')
@@ -214,7 +220,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
                             with finite_scratch(layout='store-selection',cancellation=self.guard,parent=home._path) as received:
                                 self.received=received;self.material_original=self.source.receive_material(self,received)
                                 self.readback=_store_operation(config=self.config,release=self.version,request=self.store_request,operation_intent=self.intent,
-                                    lane_evidence=self.record,cancellation=self.guard,invocation=invocation,_local_execute=self)
+                                    lane_evidence=self.record,cancellation=self.guard,invocation=invocation,**({"_local_execute":self} if type(self) is LocalStoreExecuteRun else {"_local_reconcile":self}))
                                 observation.check()
             require(self._source_final and self._lane_owners_closed() and len(self._source_rows)==8 and len(self._runtime_rows)==6)
             complete_store_operation(self.readback,lane_evidence=self.record,cancellation=self.guard);self.store_completed=True

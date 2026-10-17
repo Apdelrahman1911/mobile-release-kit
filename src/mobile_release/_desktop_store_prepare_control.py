@@ -11,9 +11,12 @@ from . import _desktop_store_prepare_protocol as wire
 class StorePrepareInput(_SavedCommandInput):
     def __init__(self,started):
         from ._desktop_store_execute_control import StoreExecuteInput
-        self._require_type=type(self) in (StorePrepareInput,StoreExecuteInput)
+        from ._desktop_store_reconcile_control import StoreReconcileInput
+        domains={StorePrepareInput:SavedCommandDomain.LocalStorePrepare,StoreExecuteInput:SavedCommandDomain.LocalStoreExecute,
+                 StoreReconcileInput:SavedCommandDomain.LocalStoreReconcile}
+        self._require_type=type(self) in domains
         if not self._require_type:raise wire.ProtocolError()
-        super().__init__(started,domain=SavedCommandDomain.LocalStorePrepare if type(self) is StorePrepareInput else SavedCommandDomain.LocalStoreExecute)
+        super().__init__(started,domain=domains[type(self)])
         self.initial=self.operation=self.engine=None
         self.material_pending=self.material_receiving=self._material_read=False
         self._material=None;self.reply_step=0;self.read_remaining=0;self.reading=False
@@ -23,7 +26,9 @@ class StorePrepareInput(_SavedCommandInput):
     def _bind_engine(self,engine):
         from ._desktop_store_prepare_engine import _Engine
         from ._desktop_store_execute_engine import _Engine as ExecuteEngine
-        expected=_Engine if self.domain is SavedCommandDomain.LocalStorePrepare else ExecuteEngine
+        from ._desktop_store_reconcile_engine import _Engine as ReconcileEngine
+        expected={SavedCommandDomain.LocalStorePrepare:_Engine,SavedCommandDomain.LocalStoreExecute:ExecuteEngine,
+                  SavedCommandDomain.LocalStoreReconcile:ReconcileEngine}[self.domain]
         self._require(type(engine) is expected and engine.input is self and self.engine is None);self.engine=engine
     def request(self):
         request=super().request();self.initial=request;n=request.native
@@ -44,14 +49,18 @@ class StorePrepareInput(_SavedCommandInput):
     def bind_operation(self,operation):
         from .local_store_prepare import LocalStorePrepareRun
         from .local_store_execute import LocalStoreExecuteRun
-        expected=LocalStorePrepareRun if self.domain is SavedCommandDomain.LocalStorePrepare else LocalStoreExecuteRun
+        from .local_store_reconcile import LocalStoreReconcileRun
+        expected={SavedCommandDomain.LocalStorePrepare:LocalStorePrepareRun,SavedCommandDomain.LocalStoreExecute:LocalStoreExecuteRun,
+                  SavedCommandDomain.LocalStoreReconcile:LocalStoreReconcileRun}[self.domain]
         self._require(type(operation) is expected and self.operation is None
             and operation.source is self and operation.guard is self.guard and operation.request is self.initial)
         self.operation=operation
     def require_operation(self):
         from .local_store_prepare import LocalStorePrepareRun
         from .local_store_execute import LocalStoreExecuteRun
-        expected=LocalStorePrepareRun if self.domain is SavedCommandDomain.LocalStorePrepare else LocalStoreExecuteRun
+        from .local_store_reconcile import LocalStoreReconcileRun
+        expected={SavedCommandDomain.LocalStorePrepare:LocalStorePrepareRun,SavedCommandDomain.LocalStoreExecute:LocalStoreExecuteRun,
+                  SavedCommandDomain.LocalStoreReconcile:LocalStoreReconcileRun}[self.domain]
         self._owner();self._require(type(self.operation) is expected and self.operation.source is self
             and self.operation.guard is self.guard);return self.operation
     # Identical original OFD checks: no new root open, flock or numeric retry.
@@ -73,7 +82,7 @@ class StorePrepareInput(_SavedCommandInput):
     def exchange(self,event,payload):
         wire=_protocol(self.domain)
         op=self.require_operation();op.checkpoint()
-        self._require(self.reply_step<4 and event==wire.PHASES[self.reply_step] and not self.reading
+        self._require(self.reply_step<len(wire.PHASES) and event==wire.PHASES[self.reply_step] and not self.reading
             and not self.material_pending and not self.buffer)
         self.reply_step+=1;self.reading=True;self.read_remaining=1
         self.material_pending=self.material_receiving=True;line=bytearray();key=None
@@ -86,14 +95,14 @@ class StorePrepareInput(_SavedCommandInput):
                 self._require(self._take(len(wire.KEY_PREFIX))==wire.KEY_PREFIX)
                 key=self._take(32);self._require(any(key) and self._take(len(wire.KEY_SUFFIX))==wire.KEY_SUFFIX)
             self._require(not self.buffer)
-            self.material_pending=self.reply_step==3;self.material_receiving=False
+            self.material_pending=self.reply_step==wire.MATERIAL_STEP;self.material_receiving=False
             self.reading=False;op.checkpoint();return result,key
         except BaseException:
             if key is not None:key[:]=b'\0'*len(key)
             raise
         finally:line[:]=b'\0'*len(line);self.reading=False;self.read_remaining=0;self.material_receiving=False
     def receive_material(self,operation,scratch):
-        self._require(self.reply_step==3 and self.material_pending and not self.reading)
+        self._require(self.reply_step==_protocol(self.domain).MATERIAL_STEP and self.material_pending and not self.reading)
         return StorePreflightInput.receive_material(self,operation,scratch)
     def hard_endpoint(self):
         self._owner();return min(self.hard_end,self.first_failure+10) if self.first_failure is not None else self.hard_end

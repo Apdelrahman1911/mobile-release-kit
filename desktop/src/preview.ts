@@ -1,3 +1,4 @@
+import { localStoreReconcileError } from './localStoreReconcileProtocol.ts';
 import { localStoreExecuteError } from './localStoreExecuteProtocol.ts';
 import { localStorePrepareError } from './localStorePrepareProtocol.ts';
 import { localHistoryError } from './localReleaseHistoryProtocol.ts';
@@ -232,6 +233,11 @@ export const previewApi: DesktopApi = {
   localStoreExecuteStatus:async()=>{throw localStoreExecuteError();},
   cancelLocalStoreExecute:async()=>{throw localStoreExecuteError();},
   subscribeLocalStoreExecute:async()=>{throw localStoreExecuteError();},
+  prepareLocalStoreReconcile:async()=>{throw localStoreReconcileError();},
+  startLocalStoreReconcile:async()=>{throw localStoreReconcileError();},
+  localStoreReconcileStatus:async()=>{throw localStoreReconcileError();},
+  cancelLocalStoreReconcile:async()=>{throw localStoreReconcileError();},
+  subscribeLocalStoreReconcile:async()=>{throw localStoreReconcileError();},
   prepareLocalStorePrepare:async()=>{throw localStorePrepareError();},
   startLocalStorePrepare:async()=>{throw localStorePrepareError();},
   localStorePrepareStatus:async()=>{throw localStorePrepareError();},

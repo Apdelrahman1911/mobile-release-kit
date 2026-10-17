@@ -30,9 +30,9 @@ fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_as
 pub(crate) enum ExecutionMode { Local }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="kebab-case")]
-pub(crate) enum Action { Enroll, Verify, ReviewInputs, AbandonInputs, ReviewPrepared, ReviewExecution }
+pub(crate) enum Action { Enroll, Verify, ReviewInputs, AbandonInputs, ReviewPrepared, ReviewExecution, ReviewReconcile }
 impl Action {
-    pub(crate) fn candidate(self)->bool{matches!(self,Self::ReviewInputs|Self::AbandonInputs|Self::ReviewPrepared|Self::ReviewExecution)}
+    pub(crate) fn candidate(self)->bool{matches!(self,Self::ReviewInputs|Self::AbandonInputs|Self::ReviewPrepared|Self::ReviewExecution|Self::ReviewReconcile)}
     pub(crate) fn consent(self)->&'static str{if self.candidate(){CANDIDATE_CONSENT}else{CONSENT}}
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -281,6 +281,12 @@ impl ResultData {
             return self.head_sequence>=5&&row.phase==HistoryPhase::Prepared&&self.candidate_inputs.is_none()&&self.execution_receipt.is_none()
                 &&self.prepared_intent.as_ref().and_then(Option::as_ref).is_some_and(|p|p.valid(id));
         }
+        if context.action==Action::ReviewReconcile {
+            return self.head_sequence>=6&&self.history.last().is_some_and(|r|r.operation_id==id)
+                &&matches!(row.phase,HistoryPhase::ExecutePending|HistoryPhase::SettledSuccess|HistoryPhase::SettledFailure|HistoryPhase::ReconciliationRequired)
+                &&self.candidate_inputs.is_none()&&self.execution_receipt.is_none()
+                &&self.prepared_intent.as_ref().and_then(Option::as_ref).is_some_and(|p|p.valid(id));
+        }
         if context.action==Action::ReviewExecution {
             return self.head_sequence>=7&&row.phase==HistoryPhase::SettledSuccess&&self.candidate_inputs.is_none()&&self.prepared_intent.is_none()
                 &&self.execution_receipt.as_ref().and_then(Option::as_ref).is_some_and(|p|p.valid(id));
@@ -358,7 +364,7 @@ impl Decoder {
             let e=Envelope::deserialize(&value).map_err(|_|BridgeError::protocol())?;
             if e.protocol!=PROTOCOL||e.operation_id!=operation||e.owner_generation!=generation||e.nonce!=nonce
                 ||e.request_sha256!=digest||e.sequence!=self.next||self.next>=8{return Err(BridgeError::protocol());}
-            let expected=match (context.action,self.next){(_,0)=>"accepted",(_,1)=>"lease-ready",(Action::Enroll,2)=>"empty-journal-ready",(Action::Enroll,3)=>"durable-genesis",(Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution,2)=>"history-head",(Action::AbandonInputs,3)=>"abandoned-head",_=>"terminal"};
+            let expected=match (context.action,self.next){(_,0)=>"accepted",(_,1)=>"lease-ready",(Action::Enroll,2)=>"empty-journal-ready",(Action::Enroll,3)=>"durable-genesis",(Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile,2)=>"history-head",(Action::AbandonInputs,3)=>"abandoned-head",_=>"terminal"};
             if e.kind=="terminal" {
                 if self.next==0||!keys(&e.payload,&["schemaVersion","context","outcome","reason","result","lifetime"])
                     ||!e.payload.get("lifetime").is_some_and(|l|keys(l,&["complete","fatal","contained","commandDispatched","commands","profileCalls","inputClosed","handlersRestored","invocationClosed","stopObserved"])) {return Err(BridgeError::protocol());}
@@ -463,7 +469,7 @@ mod tests {
     }
     #[test]
     fn local_release_history_candidate_context_and_consent_are_action_specific(){
-        for action in [Action::Enroll,Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared,Action::ReviewExecution]{
+        for action in [Action::Enroll,Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared,Action::ReviewExecution,Action::ReviewReconcile]{
             let c=context(action);let value=serde_json::to_value(&c).unwrap();
             assert_eq!(prepare(&value).unwrap(),c);assert_eq!(Context::deserialize(&value).unwrap(),c);
             assert_eq!(value.as_object().unwrap().len(),if action.candidate(){4}else{3});
@@ -533,6 +539,20 @@ mod tests {
         let c=context(Action::ReviewInputs);let mut d=prefix(&c,513);let mut t=terminal(&c);t["result"]=candidate_result(&c,"inputs-pending");t["result"]["headSequence"]=json!(513);
         assert!(decode(&mut d,&c,3,"terminal",t).is_ok());
         let c=context(Action::Verify);let mut d=prefix(&c,2);assert!(decode(&mut d,&c,3,"abandoned-head",json!({"sequence":3,"sha256":"f".repeat(64)})).is_err());
+    }
+
+    #[test]
+    fn local_release_history_review_reconcile_requires_current_last_execute_chain(){
+        let c=context(Action::ReviewReconcile);let mut ready=prepared_result(&c);
+        ready["history"].as_array_mut().unwrap().truncate(1);
+        ready["headSequence"]=json!(6);ready["history"][0]["phase"]=json!("execute-pending");ready["history"][0]["recoveryRequired"]=json!(true);
+        assert!(ResultData::deserialize(&ready).unwrap().matches_context(&c));
+        assert!(!ResultData::deserialize(&ready).unwrap().matches_context(&context(Action::ReviewPrepared)));
+        for phase in ["settled-success","settled-failure","reconciliation-required"]{let mut value=ready.clone();value["headSequence"]=json!(7);value["history"][0]["phase"]=json!(phase);value["history"][0]["recoveryRequired"]=json!(phase=="reconciliation-required");assert!(ResultData::deserialize(&value).unwrap().matches_context(&c));}
+        for phase in ["prepared","prepare-pending","inputs-ready"]{let mut value=ready.clone();value["history"][0]["phase"]=json!(phase);assert!(!ResultData::deserialize(&value).unwrap().matches_context(&c));}
+        let mut older=ready.clone();older["history"].as_array_mut().unwrap().push(json!({"operationId":"23456789-1234-4234-8234-123456789abc","phase":"inputs-pending","recoveryRequired":true}));assert!(!ResultData::deserialize(&older).unwrap().matches_context(&c));
+        for head in [6,513]{let mut d=prefix(&c,head);let mut t=terminal(&c);t["result"]=ready.clone();t["result"]["headSequence"]=json!(head);assert!(decode(&mut d,&c,3,"terminal",t).is_ok());assert!(d.finish());}
+        for key in ["preparedIntent","candidateInputs","executionReceipt"]{let mut value=ready.clone();value[key]=Value::Null;assert!(!ResultData::deserialize(&value).unwrap().matches_context(&c));}
     }
     fn prepared_result(c:&Context)->Value {
         let mut r=result();r["headSequence"]=json!(7);

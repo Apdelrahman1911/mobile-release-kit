@@ -131,11 +131,16 @@ class LocalStorePrepareTests(unittest.TestCase):
         j=LocalReleaseJournal(str(self.home),end=time.monotonic()+30,enrollment=ENROLLMENT,key=KEY);j.open_existing()
         try:return j._rows[-1][0]['phase']
         finally:j.close()
-    def run_original(self,*,fault=None,_execute=False):
+    def run_original(self,*,fault=None,_execute=False,_reconcile=False):
         # One existing real Engine fixture, two explicit closed local variants.
         # Only native/provider boundaries are inert; no ordinary lifetime facts
         # or call counts are changed to simulate the new operation.
-        if _execute:
+        if _reconcile:
+            from mobile_release import local_store_execute as S,_desktop_store_reconcile_protocol as W
+            from mobile_release._desktop_store_reconcile_engine import _Engine
+            from mobile_release.local_store_reconcile import LocalStoreReconcileRun
+            owner_type=LocalStoreReconcileRun
+        elif _execute:
             from mobile_release import local_store_execute as S,_desktop_store_execute_protocol as W
             from mobile_release._desktop_store_execute_engine import _Engine
             owner_type=S.LocalStoreExecuteRun
@@ -143,14 +148,15 @@ class LocalStorePrepareTests(unittest.TestCase):
             from mobile_release import local_store_prepare as S,_desktop_store_prepare_protocol as W
             from mobile_release._desktop_store_prepare_engine import _Engine
             owner_type=S.LocalStorePrepareRun
-        pending,settled=W.PHASES[2:]
-        initial_phase='prepared' if _execute else 'inputs-ready'
+        pending,settled=("history-head",None) if _reconcile else W.PHASES[2:]
+        initial_phase=self.current_phase() if _reconcile else 'prepared' if _execute else 'inputs-ready'
         final_phase='settled-success' if _execute else 'prepared'
         parent=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC);fcntl.flock(parent,fcntl.LOCK_EX|fcntl.LOCK_NB)
         loan=os.dup(parent);os.set_inheritable(loan,True)
         value=copy.deepcopy(self.value);now=time.monotonic_ns();value['native'].update(home=str(self.home),leaseFd=loan,
             nonce='e'*32,clock=dict(workEndNs=str(now+1200_000_000_000),hardEndNs=str(now+1210_000_000_000)),
-            authorizationId='55555555-5555-4555-8555-555555555555' if _execute else '44444444-4444-4444-8444-444444444444',tooling=dict(version='0.3.0',commit='c'*40))
+            authorizationId='66666666-6666-4666-8666-666666666666' if _reconcile else '55555555-5555-4555-8555-555555555555' if _execute else '44444444-4444-4444-8444-444444444444',tooling=dict(version='0.3.0',commit='c'*40))
+        if _reconcile and fault=='same-authorization':value['native']['authorizationId']='55555555-5555-4555-8555-555555555555'
         if fault=='saved':value['native']['credentialConfig']={'bytes':2,'sha256':hashlib.sha256(b'{}').hexdigest()}
         old=[os.dup(n) for n in (0,1,2)];ir,iw=os.pipe();orr,ow=os.pipe();er,ew=os.pipe()
         os.dup2(ir,0);os.dup2(ow,1);os.dup2(ew,2)
@@ -159,17 +165,17 @@ class LocalStorePrepareTests(unittest.TestCase):
         e=_Engine(time.monotonic());events=[];calls=[];high=[0];lost_target=[None];original_event=_Engine.local_event
         fixture=json.loads((Path(access_fixture.__file__).resolve().parents[1]/'fixtures/local-intent-candidate-valid.json').read_bytes())['storePrecondition']
         fixture['appIdentity']=self.manifest['applicationId']
-        model=LocalLaneModel(self.execution_receipt if _execute else lambda argv,env:(fixture,0),terminal=fault!='nested-terminal')
+        model=LocalLaneModel(self.execution_receipt if _execute or _reconcile else lambda argv,env:(fixture,0),terminal=fault!='nested-terminal')
         self.addCleanup(model.close)
         def peak():high[0]=max(high[0],len(os.listdir('/proc/self/fd')))
         def parent_reply(engine,kind,payload):
             peak();original_event(engine,kind,payload);events.append(kind)
-            self.assertEqual(engine.service.journals[-1]._rows[-1][0]['phase'] if engine.service.journals and not engine.service.journals[-1].closed else self.current_phase(),pending if kind==pending else final_phase if kind==settled else initial_phase)
+            self.assertEqual(engine.service.journals[-1]._rows[-1][0]['phase'] if engine.service.journals and not engine.service.journals[-1].closed else self.current_phase(),initial_phase if _reconcile else pending if kind==pending else final_phase if kind==settled else initial_phase)
             reply=dict(protocol=W.PROTOCOL,operationId=engine.request.operation_id,ownerGeneration=engine.request.owner_generation,
                 nonce=engine.request.native['nonce'],requestSha256=engine.request.digest,kind='key-material' if kind=='lease-ready' else 'checkpoint-settled',
                 step=engine.input.reply_step,payload=ENROLLMENT if kind=='lease-ready' else {})
             if fault==kind:reply['nonce']='f'*32
-            if _execute and kind==pending and fault=='cancel-after-pending':engine.input.stop('cancelled')
+            if (_execute or _reconcile) and kind==pending and fault=='cancel-after-pending':engine.input.stop('cancelled')
             data=encode(reply)
             if kind=='lease-ready':data+=W.KEY_PREFIX+KEY+W.KEY_SUFFIX
             if kind==pending:
@@ -192,11 +198,11 @@ class LocalStorePrepareTests(unittest.TestCase):
                 elif 'ls-tree' in argv:out=b''.join(b'100644 blob '+sha+b'\t'+name+b'\0' for name,sha in self.rows)
                 else:
                     out=b''
-                    if _execute and fault=='last-source' and len(e.service._source_rows)==8:
+                    if (_execute or _reconcile) and fault=='last-source' and len(e.service._source_rows)==8:
                         (self.root/'.mobile-release/store/local'/OP.replace('-','')/'operation-intent.json').write_bytes(b'changed at last source status')
                 e.guard.lifetime_ledger._commands+=1;e.guard.lifetime_ledger._command_dispatched=True
                 return subprocess.CompletedProcess(argv,0,stdout=out,stderr=b'')
-            self.assertIn(pending,events);self.assertEqual(self.current_phase(),pending)
+            self.assertIn(pending,events);self.assertEqual(self.current_phase(),initial_phase if _reconcile else pending)
             for name in ('GITHUB_ACTIONS','MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON','RUBYOPT'):self.assertNotIn(name,kwargs['environ'])
             if kwargs['capture']:
                 i=len(e.service._runtime_rows)-1;out=('3.3.12','4.0.16','','MRK_RUNTIME_3.3.12_FIDDLE_1.1.2','MRK_RUNTIME_3.3.12_FIDDLE_1.1.2')[i]
@@ -208,6 +214,7 @@ class LocalStorePrepareTests(unittest.TestCase):
             self.assertEqual(timing.hard-timing.run,3_000_000_000)
             self.assertLessEqual(timing.hard,__import__('math').floor(e.input.hard_end*1e9))
             answer=model(argv,**kwargs)
+            if _reconcile and fault=='prepared-close':lost_target[0]=e.service.prepared_out.fd
             if _execute and fault=='tool-close-cancel':lost_target[0]=e.service.tool_manifest.slot.number
             if _execute and fault=='tool-manifest-post':
                 path=self.tools/'android-toolchain.json';path.chmod(0o600);path.write_bytes(b'changed original manifest')
@@ -237,7 +244,7 @@ class LocalStorePrepareTests(unittest.TestCase):
             target=None
             if fault=='publication-close' and not lost and e.service is not None and e.service.publishers and 'prepare-settled' in events:
                 target=lost_target[0]
-            if _execute and fault=='tool-close-cancel' and not lost:target=lost_target[0]
+            if (_execute and fault=='tool-close-cancel' or _reconcile and fault=='prepared-close') and not lost:target=lost_target[0]
             native_close(number)
             if number==target and fault=='tool-close-cancel':e.input.stop('cancelled')
             if number==target:lost.append(number);raise RuntimeError('inert lost original close')

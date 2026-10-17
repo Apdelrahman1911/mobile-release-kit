@@ -1,4 +1,6 @@
+import { STORE_RECONCILE_EVENT, encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, localStoreReconcileError, type StoreReconcileCommand } from './localStoreReconcileProtocol.ts';
 import { STORE_EXECUTE_EVENT, encodeLocalStoreExecuteRequest, parseLocalStoreExecuteStatus, localStoreExecuteError, type StoreExecuteCommand } from './localStoreExecuteProtocol.ts';
+import type { LocalStoreReconcileStatus } from './localStoreReconcileTypes.ts';
 import type { LocalStoreExecuteStatus } from './localStoreExecuteTypes.ts';
 import { STORE_PREPARE_EVENT, encodeLocalStorePrepareRequest, parseLocalStorePrepareStatus, localStorePrepareError, type StorePrepareCommand } from './localStorePrepareProtocol.ts';
 import type { LocalStorePrepareStatus } from './localStorePrepareTypes.ts';
@@ -80,7 +82,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -243,6 +245,12 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if(!body)throw localStoreExecuteError();const status=parseLocalStoreExecuteStatus(await invoke<unknown>(command,body));
       if(!status)throw localStoreExecuteError();return status;
     }catch(error){throw localStoreExecuteError(error);}
+  };
+  const storeReconcileCall = async (command:StoreReconcileCommand,value:unknown):Promise<LocalStoreReconcileStatus>=>{
+    try{if(mode!=='native')throw localStoreReconcileError();const body=encodeLocalStoreReconcileRequest(command,value);
+      if(!body)throw localStoreReconcileError();const status=parseLocalStoreReconcileStatus(await invoke<unknown>(command,body));
+      if(!status)throw localStoreReconcileError();return status;
+    }catch(error){throw localStoreReconcileError(error);}
   };
   const storeCall = async (command:StoreCommand,value:unknown):Promise<LocalStoreStatus>=>{
     try{if(mode!=='native')throw localStoreError();const body=encodeLocalStoreRequest(command,value);
@@ -574,6 +582,14 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     subscribeLocalStoreExecute:async onStatus=>{
       if(mode!=='native'||!listen)throw localStoreExecuteError();
       return await listen(STORE_EXECUTE_EVENT,value=>onStatus(parseLocalStoreExecuteStatus(value)));
+    },
+    prepareLocalStoreReconcile:request=>storeReconcileCall('prepare_local_store_reconcile',request),
+    startLocalStoreReconcile:request=>storeReconcileCall('start_local_store_reconcile',request),
+    localStoreReconcileStatus:()=>storeReconcileCall('local_store_reconcile_status',{}),
+    cancelLocalStoreReconcile:(operationId,ownerGeneration)=>storeReconcileCall('cancel_local_store_reconcile',{operationId,ownerGeneration}),
+    subscribeLocalStoreReconcile:async onStatus=>{
+      if(mode!=='native'||!listen)throw localStoreReconcileError();
+      return await listen(STORE_RECONCILE_EVENT,value=>onStatus(parseLocalStoreReconcileStatus(value)));
     },
     prepareLocalStorePreflight:request=>storeCall('prepare_local_store_preflight',request),
     startLocalStorePreflight:request=>storeCall('start_local_store_preflight',request),

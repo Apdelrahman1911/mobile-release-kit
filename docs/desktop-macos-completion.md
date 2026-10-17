@@ -65,10 +65,12 @@ Candidate creation does not upload to a Store or authorize a release. Local
 Store intent/authority DATA has separate closed Python/Ruby readers; parsing
 these records grants no execution permission. Durable Android Prepare and
 explicit-consent Execute, plus read-only prepared-intent and completed-receipt
-History review, are integrated in source. Native Execute qualification and
-installed usage remain pending; direct Store recovery, promotion and Apple
-operations remain unfinished. Receipt review never establishes an old
-operation's finality or authorizes a retry.
+History review, are integrated in source. Target-only Google Reconcile and its
+restart file-review route have independently reviewed core/UI implementations;
+joined native and installed qualification remain pending. Reconcile is a fresh
+current-target check, not upload retry, general recovery or promotion. Direct
+Google recovery/promotion and Apple Store operations remain unfinished. Receipt
+review never establishes an old operation's finality or authorizes a retry.
 Candidate integration passed the actual Mac app/helper graphs and 27 focused
 native tests on each architecture in run `38969579047/1` at `18a54582`; positive
 installed Create/Review/Abandon and Keychain flows remain unverified.
@@ -430,3 +432,46 @@ harness `e0671e4e` passed preparation but returned a nonzero Installer result.
 Its log diagnostic rejected the changed mount-path convention, so the actual
 Installer failure reason is not yet established. The diagnostic correction
 reuses the retained package; no successful installation is inferred.
+
+
+### Target-only Google Reconcile — 2026-10-17
+
+The reviewed Reconcile core reuses the existing Store lane and original
+source/credential/runtime owners. After restart, **Review for Store check** reads
+the current last execution's retained prepared files against local history and
+Keychain. It makes no Store call. A separate fresh consent then authorizes a
+Google check of the exact internal-testing target. The lane creates an
+uncommitted edit, reads its state and attempts to delete it; failed cleanup may
+leave that edit to expire. It never uploads, replays mapping, commits, promotes,
+rebuilds or re-signs an artifact.
+
+A successful receipt means only that the current complete target matches. It
+does not repair earlier native finality, retire old attempts, change the old
+journal or authorize another upload. Missing, partial or conflicting targets
+remain refusals; unknown original cleanup remains unknown. The earlier prepared
+and execution evidence is preserved. This is **not full release recovery**.
+
+Current verification boundaries:
+
+- Native run `38992445045/1`, source
+  `f3727c4e998e2b4caae5ddbe18e1cb99cc31c5f4`, passed app/helper compilation plus
+  7 wire/lease and 48 app tests on each architecture. Reconcile follows that
+  source and is **not covered by this native result**.
+- Reconcile source review and focused local checks passed: 65 distinct inert
+  Python methods; 43 frontend methods, TypeScript and production Vite build;
+  four packaging methods. These are not native Store or installed-app tests.
+- Focused Play run `38993479306/1` at `2102a359` stopped before tests: the
+  pinned Ruby executable returned permission denied under the test UID. No
+  Supply test pass is inferred; runner identity correction is separate work.
+- Joined Reconcile native checks and installed journeys remain pending. Existing
+  signing/component evidence is unchanged; no new installation or live Store
+  acceptance is claimed.
+
+Next direct-Store scope remains: journal-aware Google recovery that preserves
+unknown dispatches and partial success; promotion of the same authenticated
+build to external testing and a non-served production draft; and Apple local
+access/preparation, TestFlight upload, promotion, manual-release submission and
+recovery. The shared GitHub-backed lanes already implement those Store
+transitions; the missing work is their explicit local authority, original
+artifact/checkpoint ownership and UI/native lifecycle, not a replacement Store
+engine. Cross-origin evidence and public-release authority stay excluded.

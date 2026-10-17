@@ -763,8 +763,9 @@ class CommandCallEvidence:
     def _cap_local_store(self, source, *, timeout: int) -> None:
         from ._desktop_store_prepare_control import StorePrepareInput
         from ._desktop_store_execute_control import StoreExecuteInput
+        from ._desktop_store_reconcile_control import StoreReconcileInput
         self._owner(source.guard)
-        _require(type(source) in (StorePrepareInput,StoreExecuteInput) and source.guard._saved_command_input() is source
+        _require(type(source) in (StorePrepareInput,StoreExecuteInput,StoreReconcileInput) and source.guard._saved_command_input() is source
                  and self._engine is None and not self._desktop_readback_capped
                  and not self._used and self._expected is not None and self._expected[5]==3600 and self._lane_reservation is not None
                  and self._reservation is None and self._lane_timing is not None

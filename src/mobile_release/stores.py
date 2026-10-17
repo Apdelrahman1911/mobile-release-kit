@@ -278,7 +278,7 @@ def _store_environment(
         env["MOBILE_RELEASE_RECOVERY_RUN_ID"] = request.recovery_run_id
     if request.recovery_confirmation:
         env["MOBILE_RELEASE_RECOVERY_CONFIRMATION"] = request.recovery_confirmation
-    execute=invocation.cancellation._store_execute_source
+    execute=invocation.cancellation._store_execution_source
     if execute is not None:
         original=execute.require_operation()
         if authority is not original.authority or not original.local_environment(request,lane_evidence):
@@ -747,8 +747,12 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                      operation_intent: Mapping[str, object] | None,
                      lane_evidence: StoreLaneCallEvidence | None,
                      cancellation: DefaultCancellation | None,
-                     invocation: InvocationCustody | None, _local_prepare=None, _local_execute=None) -> dict[str, object] | StoreLaneReadback:
-    if _local_execute is not None:
+                     invocation: InvocationCustody | None, _local_prepare=None, _local_execute=None, _local_reconcile=None) -> dict[str, object] | StoreLaneReadback:
+    if _local_reconcile is not None:
+        from .local_store_reconcile import LocalStoreReconcileRun
+        if _local_prepare is not None or _local_execute is not None or type(_local_reconcile) is not LocalStoreReconcileRun or not _local_reconcile.admit_store(config,release,request,lane_evidence,cancellation,invocation):
+            raise StoreOperationError("Local reconciliation requires its original owner")
+    elif _local_execute is not None:
         from .local_store_execute import LocalStoreExecuteRun
         if _local_prepare is not None or type(_local_execute) is not LocalStoreExecuteRun or not _local_execute.admit_store(config,release,request,lane_evidence,cancellation,invocation):
             raise StoreOperationError("Local execution requires its original owner")
@@ -758,6 +762,7 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
             raise StoreOperationError("Local preparation requires its original owner")
     elif cancellation is not None and getattr(cancellation,"_local_store_source",None) is not None:
         raise StoreOperationError("Local preparation cannot use the CI route")
+    _local_execute = _local_execute or _local_reconcile  # Admitted closed execution/reconcile interface only.
     local=_local_execute or _local_prepare
     borrowed = lane_evidence is not None
     if invocation is not None and not borrowed:

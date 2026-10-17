@@ -13,7 +13,7 @@ pub(crate) struct SelectedStoreMaterial {
     execute_tools:Option<Arc<crate::saved_command_owner::ExecuteToolLoan>>,
 }
 #[derive(Clone,PartialEq,Eq)]
-enum StoreCommand {Access(wire::Context),Prepare(crate::local_store_prepare_protocol::Context),Execute(crate::local_store_execute_protocol::Context)}
+enum StoreCommand {Access(wire::Context),Prepare(crate::local_store_prepare_protocol::Context),Reconcile(crate::local_store_reconcile_protocol::Context),Execute(crate::local_store_execute_protocol::Context)}
 fn refused() -> BridgeError {
     BridgeError::new("local_store_credentials", "Select This Mac and assign the current Google Play service-account file for this release context, then review again.")
 }
@@ -30,9 +30,11 @@ impl SelectedStoreMaterial {
             let (common,extra)=match command {
                 StoreCommand::Access(c)=>([c.project_id.capacity(),c.saved_config.sha256.capacity(),c.saved_version.source.capacity(),c.saved_version.sha256.capacity(),c.saved_version.name.capacity(),c.record_id.capacity()],[0;3]),
                 StoreCommand::Prepare(c)=>([c.project_id.capacity(),c.saved_config.sha256.capacity(),c.saved_version.source.capacity(),c.saved_version.sha256.capacity(),c.saved_version.name.capacity(),c.record_id.capacity()],[c.candidate_operation_id.capacity(),c.candidate_sha256.capacity(),c.confirmation.capacity()]),
+                StoreCommand::Reconcile(c)=>([c.project_id.capacity(),c.saved_config.sha256.capacity(),c.saved_version.source.capacity(),c.saved_version.sha256.capacity(),c.saved_version.name.capacity(),c.record_id.capacity()],[c.candidate_operation_id.capacity(),c.candidate_sha256.capacity(),c.confirmation.capacity()]),
                 StoreCommand::Execute(c)=>([c.project_id.capacity(),c.saved_config.sha256.capacity(),c.saved_version.source.capacity(),c.saved_version.sha256.capacity(),c.saved_version.name.capacity(),c.record_id.capacity()],[c.candidate_operation_id.capacity(),c.candidate_sha256.capacity(),c.confirmation.capacity()]),
             };for n in common.into_iter().chain(extra){bytes=bytes.checked_add(n)?;}
         }
+        if let Some(StoreCommand::Reconcile(c))=&self.command {bytes=bytes.checked_add(c.intent_sha256.capacity())?;}
         if let Some(StoreCommand::Execute(c))=&self.command {
             for n in [c.intent_sha256.capacity(),c.toolchain_selection.instance.capacity(),c.toolchain_selection.record_sha256.capacity(),c.toolchain_selection.inventory_sha256.capacity(),c.toolchain_selection.os_provider_sha256.capacity()] {bytes=bytes.checked_add(n)?;}
         }
@@ -196,6 +198,24 @@ mod tests {
         Arc::get_mut(&mut original).unwrap().command=Some(StoreCommand::Prepare(context.clone()));
         assert!(original.prepare_matches(&context,7,&root));assert!(!original.prepare_current(&context,7,&root));
         let mut changed=context.clone();changed.candidate_sha256="e".repeat(64);assert!(!original.prepare_matches(&changed,7,&root));
+        assert!(!original.matches(&wire::tests::context(),7,&root));
+        assert_eq!(original.parts().unwrap()[0].1.as_ptr(),state.records[0].payload.material.as_ref().unwrap().bytes().as_ptr());
+        assert!(original.own_retained_heap_bytes().unwrap()>=context.candidate_sha256.capacity()+context.confirmation.capacity());
+    }
+
+    #[test]
+    fn local_reconcile_comparison_and_private_bytes_do_not_mint_document_grant(){
+        let state=model();let root=state.context.as_ref().unwrap().project.clone();
+        let mut input=crate::local_store_reconcile_protocol::tests::input();input["projectId"]=serde_json::json!("inert-project");
+        input["credentialContextRevision"]=serde_json::json!(2);input["recordId"]=serde_json::json!("a".repeat(32));input["recordRevision"]=serde_json::json!(1);
+        let context=crate::local_store_reconcile_protocol::prepare(&input).unwrap().context();
+        let mut original=borrow_material(&state,commands::RecordRef{record_id:&context.record_id,expected_revision:1},2).unwrap();
+        assert!(!original.reconcile_matches(&context,7,&root)&&original.reconcile_context_data().is_err());
+        // Comparison DATA may be shaped like the new command, but no native
+        // Document minted its Weak/Arc binding. It cannot admit a key helper.
+        Arc::get_mut(&mut original).unwrap().command=Some(StoreCommand::Reconcile(context.clone()));
+        assert!(original.reconcile_matches(&context,7,&root));assert!(!original.reconcile_current(&context,7,&root));
+        let mut changed=context.clone();changed.candidate_sha256="e".repeat(64);assert!(!original.reconcile_matches(&changed,7,&root));
         assert!(!original.matches(&wire::tests::context(),7,&root));
         assert_eq!(original.parts().unwrap()[0].1.as_ptr(),state.records[0].payload.material.as_ref().unwrap().bytes().as_ptr());
         assert!(original.own_retained_heap_bytes().unwrap()>=context.candidate_sha256.capacity()+context.confirmation.capacity());
@@ -383,5 +403,65 @@ impl SelectedStoreMaterial {
         let Some((material,context,g,r))=claim.execute_context()else{return Err(Problem::Protocol);};
         if !std::ptr::eq(self,material.as_ref())||!self.execute_document_matches(&document,&state,context,g,r)
             ||!document.bridge.local_store_execute.helper_matches(claim){return Err(Problem::Interrupted);}claim.claim(go)
+    }
+}
+
+impl SelectedStoreMaterial {
+    pub(crate) fn reconcile_matches(&self,context:&crate::local_store_reconcile_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
+        matches!(self.command.as_ref(),Some(StoreCommand::Reconcile(c)) if c==context)
+            &&self.native.registry_generation==registration&&self.native.project==*root&&self.native.project_id==context.project_id
+            &&self.native.revision==context.credential_context_revision&&self.key.id.0==context.record_id&&self.key.revision==context.record_revision
+            &&self.native.execution_mode==commands::ExecutionMode::Local&&self.native.platform==Platform::Android&&self.native.stage==Stage::Candidate
+            &&matches!(self.native.purpose,Purpose::Full|Purpose::Store)
+    }
+    fn reconcile_document_matches(&self,document:&Arc<Inner>,state:&DocumentState,context:&crate::local_store_reconcile_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
+        self.reconcile_matches(context,registration,root)&&self.prepare_document.as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|held|Arc::ptr_eq(&held,document))
+            &&!state.lost_observed&&!state.compatibility_picker_pending&&self.current(state,registration,root)
+            &&document.bridge.registry_generation()==registration&&document.bridge.native_project(&context.project_id).is_ok_and(|(g,r)|g==registration&&r==*root)
+    }
+    pub(crate) fn reconcile_current(&self,context:&crate::local_store_reconcile_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
+        let Some(document)=self.prepare_document.as_ref().and_then(std::sync::Weak::upgrade)else{return false;};
+        let Ok(state)=document.state.lock()else{return false;};self.reconcile_document_matches(&document,&state,context,registration,root)
+    }
+    pub(crate) fn reconcile_context_data(&self)->Result<crate::local_store_reconcile_protocol::Content,BridgeError>{
+        if !matches!(self.command,Some(StoreCommand::Reconcile(_))){return Err(refused());}
+        let c=self.context_data()?;Ok(crate::local_store_reconcile_protocol::Content{bytes:c.bytes,sha256:c.sha256})
+    }
+}
+impl DocumentBinding {
+    pub(super) fn review_store_reconcile_material(&self,state:&DocumentState,context:&crate::local_store_reconcile_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->Result<Arc<SelectedStoreMaterial>,BridgeError>{
+        if !cfg!(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))||!self.native_qualified()
+            ||encrypted_mode(state)&&!self.persistence_qualified(){return Err(refused());}
+        let mut original=borrow_material(state,commands::RecordRef{record_id:&context.record_id,expected_revision:context.record_revision},context.credential_context_revision)?;
+        let held=Arc::get_mut(&mut original).ok_or_else(refused)?;
+        held.command=Some(StoreCommand::Reconcile(context.clone()));held.prepare_document=Some(Arc::downgrade(&self.inner));
+        if !original.reconcile_document_matches(&self.inner,state,context,registration,root){return Err(refused());}original.parts()?;Ok(original)
+    }
+    pub(super) fn recheck_store_reconcile_material(&self,state:&DocumentState,original:&Arc<SelectedStoreMaterial>,registration:u32,root:&asset_source::RegisteredRoot)->Result<(),BridgeError>{
+        let Some(StoreCommand::Reconcile(context))=&original.command else{return Err(refused());};
+        if !cfg!(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))||!self.native_qualified()
+            ||encrypted_mode(state)&&!self.persistence_qualified()||!original.reconcile_document_matches(&self.inner,state,context,registration,root){return Err(refused());}
+        original.parts()?;Ok(())
+    }
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+impl SelectedStoreMaterial {
+    pub(crate) fn admit_reconcile(&self,claim:crate::saved_command_owner::LocalHistoryClaim)->Result<(crate::vault_keyring_macos::LocalInput,KeyringMemoryAdmission),BridgeError>{
+        let document=self.prepare_document.as_ref().and_then(std::sync::Weak::upgrade).ok_or_else(refused)?;
+        let state=document.state.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+        let Some((material,context,g,r))=claim.reconcile_context()else{return Err(refused());};
+        if !std::ptr::eq(self,material.as_ref())||!self.reconcile_document_matches(&document,&state,context,g,r)
+            ||!document.bridge.local_store_reconcile.claim_matches(&claim)||!claim.current(){return Err(refused());}
+        let actual=claim.own_backing().ok_or_else(BridgeError::cleanup_unknown)?;
+        let admission=lookup_memory::local_store_prepare_admission(&document,&state,self,actual).map_err(|_|BridgeError::cleanup_unknown())?;
+        Ok((crate::vault_keyring_macos::LocalInput::admitted(LocalHistoryKeyGrant{claim}),admission))
+    }
+    pub(crate) fn claim_reconcile_helper(&self,claim:&crate::saved_command_owner::LocalHistoryHelperClaim,go:bool)->Result<(),crate::vault_keyring_macos::Problem>{
+        use crate::vault_keyring_macos::Problem;
+        let document=self.prepare_document.as_ref().and_then(std::sync::Weak::upgrade).ok_or(Problem::Unavailable)?;
+        let state=document.state.lock().map_err(|_|Problem::CleanupUnknown)?;
+        let Some((material,context,g,r))=claim.reconcile_context()else{return Err(Problem::Protocol);};
+        if !std::ptr::eq(self,material.as_ref())||!self.reconcile_document_matches(&document,&state,context,g,r)
+            ||!document.bridge.local_store_reconcile.helper_matches(claim){return Err(Problem::Interrupted);}claim.claim(go)
     }
 }

@@ -382,9 +382,10 @@ class StoreLaneFiles(_Owner):
                 "TMPDIR": str(self.root_path / "tmp"), "TMP": str(self.root_path / "tmp"),
                 "TEMP": str(self.root_path / "tmp"),
             })
-            execute=self.guard._store_execute_source
+            execute=self.guard._store_execution_source
             if execute is not None:
-                result[wire.PREFIX+'LOCAL_EXECUTE']=execute.require_operation().lane_context(self)
+                key='LOCAL_RECONCILE' if self.guard._store_reconcile_source is not None else 'LOCAL_EXECUTE'
+                result[wire.PREFIX+key]=execute.require_operation().lane_context(self)
             if self.shell_home:
                 # The caller admits its concrete toolchain before this private
                 # shell-HOME selection; ambient key directories are never used.
@@ -620,7 +621,7 @@ class StoreLaneAttempt(_Owner):
         super().__init__(record, cancellation)
         wire.need(type(mode) is str and mode in ("prepare", "execute")
                   and isinstance(app_root, Path) and wire.absolute(str(app_root)))
-        local=cancellation._store_execute_source
+        local=cancellation._store_execution_source
         self.key = (local.require_operation().attempt_key(record,app_root,mode,intent_sha256,executed_by)
                     if local is not None else execution_attempt_key(intent_sha256, executed_by, record._lane)
                     if mode == "execute" else record._nonce.hex())
@@ -644,7 +645,7 @@ class StoreLaneAttempt(_Owner):
             self.guard.check()
             store = _store_directory(self, self.app_root)
             self.directory = _private_child(self, store, "lane-attempts-v1", exclusive=False)
-            local=self.guard._store_execute_source
+            local=self.guard._store_execution_source
             if local is not None:local.require_operation().attempt_directory(self,self.directory)
             number = writer.open(self.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                                  parent=self.directory.fd)

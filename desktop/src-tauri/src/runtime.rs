@@ -224,6 +224,16 @@ impl LocalStorePrepareInstalledProfile {
     }
 }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct LocalStoreReconcileInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl LocalStoreReconcileInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("local_store_reconcile_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct LocalStoreExecuteInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl LocalStoreExecuteInstalledProfile {
@@ -2016,6 +2026,12 @@ impl RuntimeConfig {
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
         { false }
     }
+    pub(crate) fn local_store_reconcile_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { false }
+    }
     pub(crate) fn local_store_execute_installed_profile_available(&self) -> bool {
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         { macos_bindings() }
@@ -2033,6 +2049,12 @@ impl RuntimeConfig {
         -> Result<VerifiedRuntime, BridgeError> {
         if !self.local_store_prepare_installed_profile_available() { return Err(unavailable()); }
         originals.inspect_prepare_once(LocalStorePrepareInstalledProfile { _private: () })
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_local_store_reconcile_installed(&self, originals: &mut crate::installed_runtime::StoreRuntimeSlots)
+        -> Result<VerifiedRuntime, BridgeError> {
+        if !self.local_store_reconcile_installed_profile_available() { return Err(unavailable()); }
+        originals.inspect_reconcile_once(LocalStoreReconcileInstalledProfile { _private: () })
     }
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     pub(crate) fn resolve_local_store_execute_installed(&self, originals: &mut crate::installed_runtime::StoreRuntimeSlots)

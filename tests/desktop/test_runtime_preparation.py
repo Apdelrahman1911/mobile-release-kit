@@ -154,7 +154,7 @@ class RuntimePreparationTests(unittest.TestCase):
         )
         self.assertEqual(preparation.CURRENT_BOOTSTRAPS, (*preparation.BOOTSTRAPS, *current_only))
         self.assertEqual(set(preparation.CURRENT_BOOTSTRAPS) | {preparation.STORE_BOOTSTRAP,
-                             preparation.STORE_PREPARE_BOOTSTRAP, preparation.STORE_EXECUTE_BOOTSTRAP},
+                             preparation.STORE_PREPARE_BOOTSTRAP, preparation.STORE_EXECUTE_BOOTSTRAP, preparation.STORE_RECONCILE_BOOTSTRAP},
                          {path.name for path in (_SOURCE / "desktop").glob("*_bootstrap.py")})
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -343,7 +343,7 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
         (package / "tooling.py").write_bytes((_SOURCE / "src/mobile_release/tooling.py").read_bytes())
         (source / "desktop").mkdir()
         for name in (*preparation.CURRENT_BOOTSTRAPS, preparation.STORE_BOOTSTRAP,
-                     preparation.STORE_PREPARE_BOOTSTRAP, preparation.STORE_EXECUTE_BOOTSTRAP, preparation.GITHUB_CA_NAME):
+                     preparation.STORE_PREPARE_BOOTSTRAP, preparation.STORE_EXECUTE_BOOTSTRAP, preparation.STORE_RECONCILE_BOOTSTRAP, preparation.GITHUB_CA_NAME):
             (source / "desktop" / name).write_bytes(b"inert first-party payload\n")
         (runtime / "python/bin").mkdir(parents=True)
         (runtime / "python/bin/python3").write_bytes(b"inert Python\n")
@@ -410,20 +410,21 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
                 self.assertIn("tools/gh", {row["path"] for row in rows})
                 self.assertIn("core.zip", {row["path"] for row in rows})
                 for name in (preparation.STORE_BOOTSTRAP, preparation.STORE_PREPARE_BOOTSTRAP,
-                             preparation.STORE_EXECUTE_BOOTSTRAP):
+                             preparation.STORE_EXECUTE_BOOTSTRAP, preparation.STORE_RECONCILE_BOOTSTRAP):
                     self.assertIn(name, {row["path"] for row in rows})
                     self.assertEqual((runtime / name).read_bytes(), (source / "desktop" / name).read_bytes())
                     # Private preparation output; final stager normalizes to0444.
                     self.assertEqual(stat.S_IMODE((runtime / name).stat().st_mode), 0o600)
 
     def test_refusals_precede_output_and_keep_unknown_inputs(self):
-        for case in ("platform", "missing", "missing-execute", "tooling", "changed-gemfile", "changed-lock", "missing-component-lock", "new-core-requirement", "invalid-core-roster", "wrapper", "entry-mode", "link", "case",
+        for case in ("platform", "missing", "missing-execute", "missing-reconcile", "tooling", "changed-gemfile", "changed-lock", "missing-component-lock", "new-core-requirement", "invalid-core-roster", "wrapper", "entry-mode", "link", "case",
                      "invalid-directory", "depth", "file-limit", "byte-limit", "existing-store", "overlap"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 source, runtime, component = self.fixture(Path(temporary))
                 target = "x86_64-unknown-linux-gnu" if case == "platform" else "aarch64-apple-darwin"
                 if case == "missing": (component / "ca.pem").unlink()
                 if case == "missing-execute": (source / "desktop" / preparation.STORE_EXECUTE_BOOTSTRAP).unlink()
+                if case == "missing-reconcile": (source / "desktop" / preparation.STORE_RECONCILE_BOOTSTRAP).unlink()
                 if case == "tooling": (source / "Gemfile").unlink()
                 if case == "changed-gemfile": (source / "Gemfile").write_bytes(b"new dependency")
                 if case == "changed-lock": (source / "Gemfile.lock").write_bytes(b"new locked version")

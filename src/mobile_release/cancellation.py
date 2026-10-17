@@ -389,8 +389,18 @@ class DefaultCancellation:
         return source if source is not None and source.domain is SavedCommandDomain.LocalStoreExecute else None
 
     @property
+    def _store_reconcile_source(self):
+        source=self._saved_command_input()
+        from ._desktop_saved_command_control import SavedCommandDomain
+        return source if source is not None and source.domain is SavedCommandDomain.LocalStoreReconcile else None
+
+    @property
+    def _store_execution_source(self):
+        return self._store_execute_source or self._store_reconcile_source
+
+    @property
     def _local_store_source(self):
-        return self._store_prepare_source or self._store_execute_source
+        return self._store_prepare_source or self._store_execution_source
 
     @property
     def _local_history_source(self) -> Any:

@@ -142,7 +142,7 @@ mod tests {
         context.candidate_operation_id=Some("12345678-1234-4234-9234-123456789abd".into());
         assert!(!consent.matches_context(&context));
         context.candidate_operation_id=consent.candidate_operation_id.clone();
-        for action in [wire::Action::AbandonInputs,wire::Action::ReviewExecution,wire::Action::ReviewPrepared]{
+        for action in [wire::Action::AbandonInputs,wire::Action::ReviewExecution,wire::Action::ReviewPrepared,wire::Action::ReviewReconcile]{
             context.action=action;assert!(!consent.matches_context(&context));
         }
         consent.action=wire::Action::ReviewPrepared;
@@ -153,6 +153,8 @@ mod tests {
         assert!(!consent.current(&context,7,&root)); // Comparison DATA cannot mint a Document grant.
         context.action=wire::Action::ReviewExecution;assert!(!consent.matches_context(&context));
         consent.action=wire::Action::ReviewExecution;assert!(consent.matches_context(&context));
+        context.action=wire::Action::ReviewReconcile;assert!(!consent.matches_context(&context));
+        consent.action=wire::Action::ReviewReconcile;assert!(consent.matches_context(&context));
         assert!(!consent.current(&context,7,&root)); // Read-only summary DATA grants no Document.
         consent.action=wire::Action::Enroll;consent.candidate_operation_id=None;
         assert!(!consent.current(&wire::Context{project_id:"registered-project".into(),execution_mode:wire::ExecutionMode::Local,action:wire::Action::Enroll,candidate_operation_id:None},7,&root)); // No synthetic Document grant.

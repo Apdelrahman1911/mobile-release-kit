@@ -411,7 +411,7 @@ def _retain_source(owner):
                 owner.acquire()
                 yield owner
                 owner.check()
-                execute=owner.guard._store_execute_source
+                execute=owner.guard._store_execution_source
                 if execute is not None:execute.require_operation().source_final(owner)
                 metadata = getattr(owner, "_metadata_owner", None)
                 if metadata is not None:

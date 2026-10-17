@@ -116,10 +116,14 @@ class LocalStorePrepareRun:
         from .local_store_execute import LocalStoreExecuteRun
         from ._desktop_store_execute_control import StoreExecuteInput
         from ._desktop_store_execute_protocol import StoreExecuteRequest
-        prepare=type(self) is LocalStorePrepareRun
-        require(type(self) in (LocalStorePrepareRun,LocalStoreExecuteRun)
-            and type(request) is (wire.StorePrepareRequest if prepare else StoreExecuteRequest) and type(guard) is DefaultCancellation
-            and type(source) is (StorePrepareInput if prepare else StoreExecuteInput) and source.guard is guard and guard._local_store_source is source
+        from .local_store_reconcile import LocalStoreReconcileRun
+        from ._desktop_store_reconcile_control import StoreReconcileInput
+        from ._desktop_store_reconcile_protocol import StoreReconcileRequest
+        kinds={LocalStorePrepareRun:(wire.StorePrepareRequest,StorePrepareInput),
+               LocalStoreExecuteRun:(StoreExecuteRequest,StoreExecuteInput),
+               LocalStoreReconcileRun:(StoreReconcileRequest,StoreReconcileInput)}
+        require(type(self) in kinds and type(request) is kinds[type(self)][0] and type(guard) is DefaultCancellation
+            and type(source) is kinds[type(self)][1] and source.guard is guard and guard._local_store_source is source
             and source.initial is request and source.active and source.request_returned
             and threading.current_thread() is threading.main_thread())
         self.request,self.guard,self.source=request,guard,source
@@ -134,6 +138,13 @@ class LocalStorePrepareRun:
         self._ran=self._close_claimed=self._store_entered=self.store_completed=False
         self._pending=None;self._command_claimed=False;self._source_rows=[];self._runtime_rows=[]
         source.bind_operation(self) # Before any fallible resource admission.
+    @property
+    def protocol(self):
+        from ._desktop_saved_command_control import _protocol
+        return _protocol(self.source.domain)
+    @property
+    def material_head(self):
+        return self.pending_head
     def checkpoint(self):
         require(not self._close_claimed and self.source.require_operation() is self
             and canonical([self.request.context,self.request.native])==self._request_bytes)
@@ -160,7 +171,7 @@ class LocalStorePrepareRun:
         layouts=('online-runner','store-selection','store-selection')
         require(type(scratch) is FiniteScratch and scratch.cancellation is self.guard
             and len(self.scratches)<3 and scratch.layout==layouts[len(self.scratches)]
-            and self.invocation is not None and self.pending_head is not None and self.source.reply_step==3
+            and self.invocation is not None and self.material_head is not None and self.source.reply_step==self.protocol.MATERIAL_STEP
             and scratch.journal is None and scratch._lane_binding is None)
         self.scratches.append(scratch)
     def runtime_admitted(self,runtime):
@@ -168,7 +179,7 @@ class LocalStorePrepareRun:
         require(type(runtime) is StoreRuntimeContext and runtime._invocation is self.invocation
             and self.invocation.mode=='store' and (self.runtime is None or self.runtime is runtime)
             and runtime.runtime_root==Path(self.request.native['cwd']) and runtime._home is self.home
-            and self.home is not None and self.scratches[0] is self.home and self.pending_head is not None)
+            and self.home is not None and self.scratches[0] is self.home and self.material_head is not None)
         return True
     def _ledger(self):
         v=self.guard.lifetime_ledger.verdict()
@@ -248,7 +259,7 @@ class LocalStorePrepareRun:
             and type(timeout) is int and 1<=timeout<=900 and time.monotonic()+timeout<=self.source.work_end)
         return True
     def material_values(self):
-        self.checkpoint();require(self._store_entered and self.source.reply_step==3 and self.material_original is not None)
+        self.checkpoint();require(self._store_entered and self.source.reply_step==self.protocol.MATERIAL_STEP and self.material_original is not None)
         return {'GOOGLE_APPLICATION_CREDENTIALS':str(self.received.require(self.material_original))}
     def admit_store(self,config,release,request,record,guard,invocation):
         self.checkpoint()
@@ -256,7 +267,7 @@ class LocalStorePrepareRun:
             and record is self.record and guard is self.guard and invocation is self.invocation
             and request.prepare and not request.execute and request.operation_intent is None
             and request.recovery_run_id is None and request.recovery_confirmation is None
-            and request.stage=='candidate' and request.platform=='android' and self.source.reply_step==3
+            and request.stage=='candidate' and request.platform=='android' and self.source.reply_step==self.protocol.MATERIAL_STEP
             and self.pending_head is not None and self.material_original is not None
             and len(self._source_rows)==6 and not self._runtime_rows and self.bundle is not None and not self.bundle.closed)
         self._store_entered=True;return True
@@ -423,7 +434,7 @@ class LocalStorePrepareRun:
         result=None
         if not settled:outcome,reason='unknown','cleanup-unknown'
         elif self.source.stop_reason!='none':outcome=reason=self.source.stop_reason
-        elif self.primary is not None or self.report is None:outcome,reason='refused',('prepare-unavailable' if type(self) is LocalStorePrepareRun else 'execute-unavailable')
-        elif not self.store_completed or v.commands!=14 or self.source.reply_step!=4:outcome,reason='failed','command-incomplete'
+        elif self.primary is not None or self.report is None:outcome,reason='refused',self.request.context['operation'].removeprefix('local-store-')+'-unavailable'
+        elif not self.store_completed or v.commands!=14 or self.source.reply_step!=len(self.protocol.PHASES):outcome,reason='failed','command-incomplete'
         else:outcome,reason,result='complete','none',self.report
         return {'schemaVersion':1,'context':self.request.context,'outcome':outcome,'reason':reason,'result':result,'lifetime':lifetime}

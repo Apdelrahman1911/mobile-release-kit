@@ -11,6 +11,7 @@ PROTOCOL = 'mrk-local-store-prepare/1'
 CONSENT = 'local-android-store-prepare-v1'
 WORK_SECONDS, FINALITY_SECONDS = 1200, 1210
 REQUEST_LIMIT, RESPONSE_LIMIT = 16*1024, 64*1024
+MATERIAL_STEP = 3
 PHASES = ('lease-ready','history-head','prepare-pending','prepare-settled')
 KEY_PREFIX, KEY_SUFFIX = history.KEY_PREFIX, history.KEY_SUFFIX
 LIMITATIONS = ['non-publishing','prepare-not-execute','temporary-edit-may-expire',
@@ -69,11 +70,13 @@ def _request_wire(request):
         from . import _desktop_store_prepare_protocol as prepare
         return prepare
     from . import _desktop_store_execute_protocol as execute
-    require(type(request) is execute.StoreExecuteRequest);return execute
+    if type(request) is execute.StoreExecuteRequest:return execute
+    from . import _desktop_store_reconcile_protocol as reconcile
+    require(type(request) is reconcile.StoreReconcileRequest);return reconcile
 
 def response(request,kind,payload,sequence):
     selected=_request_wire(request);PROTOCOL,PHASES=selected.PROTOCOL,selected.PHASES
-    require(_request_wire(request) is selected and type(sequence) is int and 0<=sequence<6
+    require(_request_wire(request) is selected and type(sequence) is int and 0<=sequence<len(PHASES)+2
         and kind in {'accepted',*PHASES,'terminal'}
         and (kind=='terminal' and sequence>=1 or kind=='accepted' and sequence==0
              or kind in PHASES and sequence==PHASES.index(kind)+1))
@@ -89,7 +92,7 @@ def reply(raw,request,kind,step):
             and value['protocol']==PROTOCOL and value['operationId']==request.operation_id
             and value['ownerGeneration']==request.owner_generation and value['nonce']==request.native['nonce']
             and value['requestSha256']==request.digest and value['kind']==kind
-            and type(value['step']) is int and value['step']==step and 1<=step<=4
+            and type(value['step']) is int and value['step']==step and 1<=step<=len(_request_wire(request).PHASES)
             and kind==('key-material' if step==1 else 'checkpoint-settled'))
         if step==1:return _enrollment(value['payload'])
         require(value['payload']=={});return None

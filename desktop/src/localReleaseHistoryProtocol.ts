@@ -21,7 +21,7 @@ const contextKeys=['projectId','executionMode','action'];
 const uuid=(v:unknown):v is string=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
 const hex=(v:unknown,n:number)=>typeof v==='string'&&new RegExp(`^[0-9a-f]{${n}}$`).test(v);
 const bounded=(v:unknown,max:number)=>typeof v==='number'&&Number.isSafeInteger(v)&&v>=1&&v<=max;
-export const candidateHistoryAction=(action:unknown)=>action==='review-inputs'||action==='abandon-inputs'||action==='review-prepared'||action==='review-execution';
+export const candidateHistoryAction=(action:unknown)=>action==='review-inputs'||action==='abandon-inputs'||action==='review-prepared'||action==='review-execution'||action==='review-reconcile';
 export function localHistoryConsent(request:PrepareLocalHistory){return candidateHistoryAction(request.action)?LOCAL_CANDIDATE_CONSENT:LOCAL_HISTORY_CONSENT;}
 // Predicate for already copied bounded DATA; both callers own descriptor-safe copying.
 export function candidateInputs(v:unknown,operationId:unknown):boolean {
@@ -80,7 +80,7 @@ export function parseLocalHistoryStatus(input:unknown):LocalHistoryStatus|null{
  else if(op.phase==='unknown'){if(op.outcome!=='unknown'||op.reason!=='cleanup-unknown'||op.intentUsable||op.result!==null)return null;}
  else if(op.outcome!==null||op.result!==null||op.intentUsable&&op.phase!=='awaiting-consent')return null;
  if(op.result!==null){const r=op.result;
-  if(op.phase!=='terminal'||op.outcome!=='complete'||op.reason!=='none'||!keys(r,['schemaVersion','scope','enrolled','headSequence','history','limitations',...(context.action==='review-prepared'?['preparedIntent']:context.action==='review-execution'?['executionReceipt']:candidate?['candidateInputs']:[])])||r.schemaVersion!==1||r.scope!=='local-release-history'||r.enrolled!==true||!counter(r.headSequence)||r.headSequence<1||r.headSequence>513||!sameOfflineData(r.limitations,limits)||!Array.isArray(r.history)||r.history.length>64||r.history.length>r.headSequence-1)return null;
+  if(op.phase!=='terminal'||op.outcome!=='complete'||op.reason!=='none'||!keys(r,['schemaVersion','scope','enrolled','headSequence','history','limitations',...((context.action==='review-prepared'||context.action==='review-reconcile')?['preparedIntent']:context.action==='review-execution'?['executionReceipt']:candidate?['candidateInputs']:[])])||r.schemaVersion!==1||r.scope!=='local-release-history'||r.enrolled!==true||!counter(r.headSequence)||r.headSequence<1||r.headSequence>513||!sameOfflineData(r.limitations,limits)||!Array.isArray(r.history)||r.history.length>64||r.history.length>r.headSequence-1)return null;
   const ids=new Set<string>();
   for(const row of r.history){
    if(!keys(row,['operationId','phase','recoveryRequired'])||typeof row.operationId!=='string'||!/^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.test(row.operationId)||ids.has(row.operationId)||!member(journalPhases,row.phase)||row.recoveryRequired!==!['settled-success','settled-failure'].includes(row.phase as string))return null;
@@ -89,9 +89,10 @@ export function parseLocalHistoryStatus(input:unknown):LocalHistoryStatus|null{
   if(candidate){
    const selected=r.history.find(row=>row.operationId===context.candidateOperationId);
    if(!selected)return null;
-   if(context.action==='review-prepared'){
+   if(context.action==='review-prepared'||context.action==='review-reconcile'){
     const prepared=r.preparedIntent;
-    if((r.headSequence as number)<5||selected.phase!=='prepared'||!object(prepared)||prepared.observation!=='current-prepared-files-only'||prepared.priorPrepareFinality!=='not-established')return null;
+    const allowed=context.action==='review-prepared'?(r.headSequence as number)>=5&&selected.phase==='prepared':(r.headSequence as number)>=6&&r.history.at(-1)===selected&&member(['execute-pending','settled-success','settled-failure','reconciliation-required'],selected.phase);
+    if(!allowed||!object(prepared)||prepared.observation!=='current-prepared-files-only'||prepared.priorPrepareFinality!=='not-established')return null;
     const {observation:_,priorPrepareFinality:__,...summary}=prepared;
     if(!preparedIntentSummary(summary,context.candidateOperationId))return null;
    }else if(context.action==='review-execution'){

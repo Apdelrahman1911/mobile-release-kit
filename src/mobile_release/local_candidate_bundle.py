@@ -66,9 +66,11 @@ class CandidateBundleReview:
         from .local_release_history import LocalHistoryRun
         from .local_store_prepare import LocalStorePrepareRun
         from .local_store_execute import LocalStoreExecuteRun
-        admitted=(type(owner) is LocalHistoryRun and owner.request.context["action"] in {"review-inputs","review-prepared","review-execution"}
+        from .local_store_reconcile import LocalStoreReconcileRun
+        admitted=(type(owner) is LocalHistoryRun and owner.request.context["action"] in {"review-inputs","review-prepared","review-execution","review-reconcile"}
                   or type(owner) is LocalStorePrepareRun and owner.request.context["operation"]=="local-store-prepare"
-                  or type(owner) is LocalStoreExecuteRun and owner.request.context["operation"]=="local-store-execute")
+                  or type(owner) is LocalStoreExecuteRun and owner.request.context["operation"]=="local-store-execute"
+                  or type(owner) is LocalStoreReconcileRun and owner.request.context["operation"]=="local-store-reconcile")
         need(admitted and owner.bundle is None and not owner._close_claimed
              and owner.request.context["candidateOperationId"]==operation_id
              and _uuid(operation_id) and _sha(candidate_sha256))

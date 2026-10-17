@@ -13,6 +13,7 @@ CONSENT='local-android-store-execute-v1'
 WORK_SECONDS,FINALITY_SECONDS=1200,1210
 REQUEST_LIMIT,RESPONSE_LIMIT=16*1024,64*1024
 KEY_PREFIX,KEY_SUFFIX=prepare.KEY_PREFIX,prepare.KEY_SUFFIX
+MATERIAL_STEP=3
 PHASES=('lease-ready','history-head','execute-pending','execute-settled')
 LIMITATIONS=['internal-testing-only','not-public-release','prior-prepare-finality-not-established','saved-inputs-not-atomic']
 def context(value):
@@ -45,7 +46,10 @@ def validate_result(value):
     require(type(value) is dict and set(value)=={'schemaVersion','scope','headSequence','executionReceipt'}
         and type(value['schemaVersion']) is int and value['schemaVersion']==1
         and value['scope']=='local-android-store-execute' and integer(value['headSequence'],513,7))
-    r=value['executionReceipt']
+    receipt_summary(value['executionReceipt'],LIMITATIONS)
+    return value
+
+def receipt_summary(r,limitations):
     require(type(r) is dict and set(r)=={'operationId','candidateSha256','intentSha256','receiptSha256','authorizationId',
         'sourceCommit','sourceTree','applicationId','version','destination','observedAt','result','limitations'}
         and _uuid(r['operationId']) and _uuid(r['authorizationId'])
@@ -56,5 +60,5 @@ def validate_result(value):
         and type(r['version']['name']) is str and android._VERSION_TEXT.fullmatch(r['version']['name'])
         and integer(r['version']['build'],2100000000,1) and r['destination']=={'channel':'internal','releaseStatus':'completed'}
         and type(r['observedAt']) is str and re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z',r['observedAt'])
-        and r['result'] in {'accepted','reconciled'} and r['limitations']==LIMITATIONS and len(canonical(value))<=16*1024)
-    return value
+        and r['result'] in {'accepted','reconciled'} and r['limitations']==limitations and len(canonical(r))<=16*1024)
+    return r

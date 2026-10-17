@@ -317,7 +317,7 @@ jobs:
           if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == local-keychain-contracts ]]; then
             # Contracts-only is an explicit retry scope when the unchanged app,
             # helper and wire/lease graph already passed on the same toolchain.
-            # It still compiles the actual library test graph and runs all48.
+            # It still compiles the actual library test graph and runs all56.
             if [[ "$APP_CHECKS" == local-keychain ]]; then
             # Separate Cargo invocation preserves helper-only native policy.
             # Closed DATA/DocumentState/driver contracts plus an owned temporary
@@ -392,8 +392,16 @@ jobs:
               local_release_history_protocol::tests::local_release_history_execution_review_is_exact_receipt_not_old_finality \
               local_release_history_protocol::tests::local_release_history_execution_review_requires_selected_success_not_latest_operation \
               local_release_history_protocol::tests::local_release_history_execution_review_keeps_read_only_phases_and_finality \
+              local_store_reconcile_protocol::tests::local_reconcile_native_request_has_new_authorization_and_no_android_tools \
+              local_store_reconcile_protocol::tests::local_reconcile_four_frames_bind_acknowledged_head_and_readback_only \
+              local_store_reconcile_protocol::tests::local_reconcile_failure_prefixes_and_original_closes_are_not_promoted \
+              saved_command_owner::store_reconcile::tests::local_reconcile_uses_original_store_clock_and_separate_frame_reason_limits \
+              saved_command_owner::local_history::reconcile_route_tests::local_reconcile_actual_ack_head_not_terminal_count_controls_route_completion \
+              saved_command_owner::local_history::native::reconcile_tests::local_reconcile_read_helpers_never_add_or_credit_unjoined_work \
+              asset_session::store_material::tests::local_reconcile_comparison_and_private_bytes_do_not_mint_document_grant \
+              local_release_history_protocol::tests::local_release_history_review_reconcile_requires_current_last_execute_chain \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 48 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 56 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.

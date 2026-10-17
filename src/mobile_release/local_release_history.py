@@ -63,7 +63,7 @@ class LocalHistoryRun:
         project=len(self.root.parts)
         home=len(Path(self.request.native["home"]).parts)
         wire.require(project+1+home+5+6 <=256)
-        if self.request.context["action"]=="review-prepared":
+        if self.request.context["action"] in {"review-prepared","review-reconcile"}:
             # Original project+journal plus independent fixed4-dir namespace,
             # one leaf/iterator, inherited input and stdio. No tool child.
             wire.require(2*project+home+18 <=256)
@@ -126,7 +126,7 @@ class LocalHistoryRun:
                     wire.require(self.journal.head()==head)
                     candidate=None
                     if wire.candidate_action(self.request.context):
-                        if self.request.context["action"]=="review-prepared":
+                        if self.request.context["action"] in {"review-prepared","review-reconcile"}:
                             from .local_prepared_review import review_prepared
                             candidate=review_prepared(self,enrollment)
                         elif self.request.context["action"]=="review-execution":
@@ -138,7 +138,7 @@ class LocalHistoryRun:
                         "headSequence":head["sequence"],"history":self.journal.history_summary(),
                         "limitations":["no-store-authority","no-build-or-publishing","keychain-intact-rollback-boundary"]}
                     if wire.candidate_action(self.request.context):
-                        key={"review-prepared":"preparedIntent","review-execution":"executionReceipt"}.get(self.request.context["action"],"candidateInputs")
+                        key={"review-prepared":"preparedIntent","review-reconcile":"preparedIntent","review-execution":"executionReceipt"}.get(self.request.context["action"],"candidateInputs")
                         result[key]=candidate
                     self.journal.close();self.checkpoint()
                     self.report=result

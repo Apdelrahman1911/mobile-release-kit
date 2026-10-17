@@ -321,6 +321,15 @@ async fn prepare_local_store_execute(webview: Webview, request: tauri::ipc::Requ
     state.document.prepare_local_store_execute(args)
 }
 #[tauri::command]
+async fn prepare_local_store_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_store_reconcile_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::local_store_reconcile_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::local_store_reconcile_protocol::invalid()); };
+    let value = crate::local_store_reconcile_protocol::raw_request(bytes)?;
+    let args = crate::local_store_reconcile_protocol::prepare(&value)?;
+    state.document.prepare_local_store_reconcile(args)
+}
+#[tauri::command]
 async fn start_local_store_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_store_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::local_store_preflight_protocol::invalid())?;
@@ -346,6 +355,15 @@ async fn start_local_store_execute(webview: Webview, request: tauri::ipc::Reques
     let value = crate::local_store_execute_protocol::raw_request(bytes)?;
     let args = crate::local_store_execute_protocol::start(&value)?;
     state.document.start_local_store_execute(args)
+}
+#[tauri::command]
+async fn start_local_store_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_store_reconcile_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::local_store_reconcile_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::local_store_reconcile_protocol::invalid()); };
+    let value = crate::local_store_reconcile_protocol::raw_request(bytes)?;
+    let args = crate::local_store_reconcile_protocol::start(&value)?;
+    state.document.start_local_store_reconcile(args)
 }
 #[tauri::command]
 async fn local_store_preflight_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_store_preflight_protocol::Status, BridgeError> {
@@ -375,6 +393,15 @@ async fn local_store_execute_status(webview: Webview, request: tauri::ipc::Reque
     state.document.local_store_execute_status()
 }
 #[tauri::command]
+async fn local_store_reconcile_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_store_reconcile_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::local_store_reconcile_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::local_store_reconcile_protocol::invalid()); };
+    let value = crate::local_store_reconcile_protocol::raw_request(bytes)?;
+    crate::local_store_reconcile_protocol::status_request(&value)?;
+    state.document.local_store_reconcile_status()
+}
+#[tauri::command]
 async fn cancel_local_store_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_store_preflight_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::local_store_preflight_protocol::invalid())?;
@@ -400,6 +427,15 @@ async fn cancel_local_store_execute(webview: Webview, request: tauri::ipc::Reque
     let value = crate::local_store_execute_protocol::raw_request(bytes)?;
     let args = crate::local_store_execute_protocol::cancel(&value)?;
     state.document.cancel_local_store_execute(args)
+}
+#[tauri::command]
+async fn cancel_local_store_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_store_reconcile_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::local_store_reconcile_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::local_store_reconcile_protocol::invalid()); };
+    let value = crate::local_store_reconcile_protocol::raw_request(bytes)?;
+    let args = crate::local_store_reconcile_protocol::cancel(&value)?;
+    state.document.cancel_local_store_reconcile(args)
 }
 #[tauri::command]
 async fn prepare_offline_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
@@ -1994,6 +2030,10 @@ struct StoreExecuteRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for StoreExecuteRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.local_store_execute_relay_lost(); } }
 }
+struct StoreReconcileRelayGuard { document: DocumentBinding, closed: bool }
+impl Drop for StoreReconcileRelayGuard {
+    fn drop(&mut self) { if !self.closed { self.document.local_store_reconcile_relay_lost(); } }
+}
 struct PreflightRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for PreflightRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.offline_preflight_relay_lost(); } }
@@ -2024,9 +2064,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let mut local_store = document.local_store_preflight_subscribe();
     let mut local_store_prepare = document.local_store_prepare_subscribe();
     let mut local_store_execute = document.local_store_execute_subscribe();
+    let mut local_store_reconcile = document.local_store_reconcile_subscribe();
     let local_store_guard = StorePreflightRelayGuard { document: document.clone(), closed: false };
     let local_store_prepare_guard = StorePrepareRelayGuard { document: document.clone(), closed: false };
     let local_store_execute_guard = StoreExecuteRelayGuard { document: document.clone(), closed: false };
+    let local_store_reconcile_guard = StoreReconcileRelayGuard { document: document.clone(), closed: false };
     let mut preflight = document.offline_preflight_subscribe();
     let preflight_guard = PreflightRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
     let mut project_recovery = document.project_recovery_subscribe();
@@ -2047,12 +2089,15 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut local_store_guard = local_store_guard;
         let mut local_store_prepare_guard = local_store_prepare_guard;
         let mut local_store_execute_guard = local_store_execute_guard;
+        let mut local_store_reconcile_guard = local_store_reconcile_guard;
         let mut local_store_revision = None;
         let mut local_store_prepare_revision = None;
         let mut local_store_execute_revision = None;
+        let mut local_store_reconcile_revision = None;
         let mut local_store_relay_failed = false;
         let mut local_store_prepare_relay_failed = false;
         let mut local_store_execute_relay_failed = false;
+        let mut local_store_reconcile_relay_failed = false;
         let mut preflight_guard = preflight_guard;
         let mut android_build_guard = android_build_guard;
         let mut project_recovery_guard = project_recovery_guard;
@@ -2087,7 +2132,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
         let mut removal_notice_open=removal_notice.is_some();
         loop {
-            if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; }
+            if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; }
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
             document.finish_macos_maintenance(app.clone());
             // status() releases its native locks before any renderer callback.
@@ -2234,6 +2279,17 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                     Err(_) => {local_store_execute_relay_failed=true;document.local_store_execute_relay_lost();},
                 }
             }
+            if !local_store_reconcile_relay_failed {
+                match document.local_store_reconcile_status() {
+                    Ok(status) => if local_store_reconcile_revision != Some(status.status_revision) {
+                        local_store_reconcile_revision = Some(status.status_revision);
+                        if app.emit_to(MAIN_WINDOW, crate::local_store_reconcile_protocol::EVENT, &status).is_err() {
+                            local_store_reconcile_relay_failed=true;document.local_store_reconcile_relay_lost();
+                        }
+                    },
+                    Err(_) => {local_store_reconcile_relay_failed=true;document.local_store_reconcile_relay_lost();},
+                }
+            }
             if !preflight_relay_failed {
                 if let Ok(status) = document.offline_preflight_status() {
                     if preflight_revision != Some(status.status_revision) {
@@ -2362,7 +2418,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             };
             tokio::select! {
                 biased;
-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; } },
+                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
                 result = assets.changed() => { if result.is_err() { return; } },
                 result = diagnostics.changed() => { if result.is_err() { return; } },
@@ -2370,6 +2426,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 result = local_store.changed() => { if result.is_err() { return; } },
                 result = local_store_prepare.changed() => { if result.is_err() { return; } },
                 result = local_store_execute.changed() => { if result.is_err() { return; } },
+                result = local_store_reconcile.changed() => { if result.is_err() { return; } },
                 result = preflight.changed() => { if result.is_err() { return; } },
                 result = android_build.changed() => { if result.is_err() { return; } },
                 result = project_recovery.changed() => { if result.is_err() { return; } },
@@ -3880,6 +3937,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             prepare_local_store_preflight, start_local_store_preflight, local_store_preflight_status, cancel_local_store_preflight,
             prepare_local_store_prepare, start_local_store_prepare, local_store_prepare_status, cancel_local_store_prepare,
             prepare_local_store_execute, start_local_store_execute, local_store_execute_status, cancel_local_store_execute,
+            prepare_local_store_reconcile, start_local_store_reconcile, local_store_reconcile_status, cancel_local_store_reconcile,
             prepare_offline_preflight, start_offline_preflight, offline_preflight_status, cancel_offline_preflight,
             prepare_android_build, start_android_build, android_build_status, cancel_android_build,
             android_toolchain_catalog_status, refresh_android_toolchain_catalog, select_android_toolchain, cancel_android_toolchain_catalog,
