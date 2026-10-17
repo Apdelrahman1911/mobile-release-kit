@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import sys
 import stat
-import time
 from uuid import UUID
 from . import _desktop_store_execute_protocol as wire
 from ._desktop_store_execute_protocol import require
@@ -252,7 +251,9 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         self._upload_post()
         argv=(str(XCRUN),'--no-cache','--find','altool')
         environment={'PATH':'/usr/bin:/bin:/usr/sbin:/sbin','LANG':'C','LC_ALL':'C','DEVELOPER_DIR':str(directory)}
-        timeout=min(10,self.source.work_end-time.monotonic());require(timeout>0)
+        # Uncached Xcode lookup can exceed10s on a cold Mac. Keep one
+        # finite role allowance, still shortened by the original work deadline.
+        timeout=self.source.remaining_timeout(30)
         self._arm('tool-resolution',argv,True,timeout,4097,self._runtime_rows)
         try:
             result=run_owned(argv,environ=environment,cwd=self.root,timeout=timeout,capture=True,text=False,

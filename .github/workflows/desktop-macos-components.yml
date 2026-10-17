@@ -653,6 +653,89 @@ jobs:
                    protectedMode=(row.st_mode & 0o7022) == 0)
               return row
 
+          def altool_layout(app_path):
+              # Metadata only: the fixed nomination is never executed or read.
+              # A diagnostic observation does not admit an executable or its owner.
+              opened = []
+              links = 0
+              def identity(row):
+                  return (row.st_dev, row.st_ino, row.st_mode, row.st_uid, row.st_gid,
+                          row.st_nlink, row.st_size, row.st_mtime_ns, row.st_ctime_ns,
+                          getattr(row, "st_flags", 0))
+              def need(condition):
+                  if not condition:
+                      raise ValueError("unsupported-layout")
+              def directory(name, parent=None):
+                  need(len(opened) < 32)
+                  before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                  need(stat.S_ISDIR(before.st_mode))
+                  fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                               dir_fd=parent)
+                  opened.append(fd)
+                  need(identity(before) == identity(os.fstat(fd)) ==
+                       identity(os.stat(name, dir_fd=parent, follow_symlinks=False)))
+                  return fd
+              try:
+                  root = directory(b"/")
+                  for name in app_path.split(b"/")[1:] + [b"Contents"]:
+                      root = directory(name, root)
+                  boundary = app_path + b"/Contents/"
+                  device = os.fstat(root).st_dev
+                  stack, names = [root], []
+                  pending = [b"Developer", b"usr", b"bin", b"altool"]
+                  seen = set()
+                  for _ in range(128):
+                      need(pending and len(pending) <= 128 and
+                           sum(len(v) + 1 for v in names + pending) <= 4096)
+                      name = pending.pop(0)
+                      if name in (b"", b"."):
+                          continue
+                      if name == b"..":
+                          need(len(stack) > 1)
+                          stack.pop(); names.pop()
+                          continue
+                      need(len(name) <= 255 and re.fullmatch(rb"[A-Za-z0-9._+@ -]+", name) is not None)
+                      row = os.stat(name, dir_fd=stack[-1], follow_symlinks=False)
+                      need(row.st_dev == device)
+                      if stat.S_ISLNK(row.st_mode):
+                          need(links < 8 and row.st_nlink == 1 and 1 <= row.st_size <= 1024)
+                          key = (row.st_dev, row.st_ino)
+                          need(key not in seen)
+                          target = os.readlink(name, dir_fd=stack[-1])
+                          need(identity(row) == identity(os.stat(name, dir_fd=stack[-1], follow_symlinks=False))
+                               and len(target) == row.st_size and re.fullmatch(rb"[A-Za-z0-9._+@ /-]+", target) is not None)
+                          seen.add(key); links += 1
+                          if target.startswith(b"/"):
+                              need(target.startswith(boundary))
+                              target = target[len(boundary):]
+                              stack, names = [root], []
+                          pending = target.split(b"/") + pending
+                          emit("altool-alias", index=links, uid=row.st_uid, gid=row.st_gid,
+                               mode=format(row.st_mode, "#07o"), nlink=row.st_nlink, targetBytes=row.st_size)
+                      elif pending:
+                          stack.append(directory(name, stack[-1])); names.append(name)
+                      else:
+                          need(stat.S_ISREG(row.st_mode) and len(name) <= 128 and
+                               re.fullmatch(rb"[A-Za-z0-9][A-Za-z0-9._+-]*", name) is not None)
+                          emit("altool-physical", state="observed", basename=name.decode("ascii"),
+                               aliases=links, uid=row.st_uid, gid=row.st_gid, mode=format(row.st_mode, "#07o"),
+                               flags=getattr(row, "st_flags", 0), nlink=row.st_nlink, size=row.st_size,
+                               executable=bool(row.st_mode & 0o111), qualification=False)
+                          return
+                  raise ValueError("unsupported-layout")
+              except (OSError, ValueError):
+                  emit("altool-physical", state="unavailable-or-unsupported", aliases=links, qualification=False)
+              finally:
+                  closed = True
+                  for fd in reversed(opened):
+                      try:
+                          os.close(fd)
+                      except OSError:
+                          closed = False
+                  emit("altool-observation-closes", known=closed, qualification=False)
+                  if not closed:
+                      raise SystemExit(1)
+
           def main():
               # No contents, directory census, credentials, selected-path echo,
               # subprocesses, writes, or ACL/finality claims from these snapshots.
@@ -692,6 +775,7 @@ jobs:
               if contents is None or not stat.S_ISDIR(contents.st_mode):
                   return
               observe("developer", app_path + b"/Contents/Developer")
+              altool_layout(app_path)
 
           main()
           PY
@@ -959,7 +1043,7 @@ jobs:
               return raw
           try:
               # Bound only captured output, not Apple runtime private files.
-              # The actual resolver keeps its original <=10s command owner.
+              # The resolver keeps its role cap and original parent deadline.
               run_bounded(["/usr/bin/sandbox-exec", "-D", "CHECKOUT=" + str(checkout), "-p", profile,
                   os.environ["OWNER_PYTHON"], "-B", "-m", "unittest", "-v", test],
                   capture_path=capture_path, env=clean, cwd=checkout, timeout=60, limit=limit)

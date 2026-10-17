@@ -2,6 +2,36 @@
 
 Updated: 2026-10-17. **NOT READY; not delivered or approved for public release.**
 
+### Latest integration checkpoint
+
+Task commit `39624bd3` integrates local Android/iOS build-once external-testing
+and production preparation, separate TestFlight Beta Review readiness refresh,
+offline history review, and conservative failed-refresh cleanup. These features
+are implemented; older chronological notes below describe their earlier gaps.
+They are **not yet verified in an installed final application**.
+
+- Actual affected Mac native contracts: 73 passed on each architecture in
+  run `39013642063/1`. The integrated native source is unchanged from that run.
+- Signed Ruby/runtime Store regressions: 204 passed on each architecture in
+  run `39013105410/1`. The integrated Ruby source is unchanged from that run.
+  Service boundaries were synthetic/network-denied; no live Store mutation.
+- Focused local Python/UI regressions and independent source reviews accepted
+  the integration, including keeping the original external receipt unchanged
+  and refusing production after unknown/foreign pending-operation state.
+- Xcode altool resolution now handles checked, in-bundle framework aliases.
+  Linux regressions passed; actual native qualification is still in progress.
+  Intel has also intermittently exceeded the original 10-second cold resolver
+  limit. The source correction uses the existing integer, original-deadline
+  clamp with a 30-second role cap; short-budget and timeout regressions pass.
+  The native physical executable's different basename is still under inspection.
+  Neither a resolved path nor Environment version success alone proves
+  native protection or signing readiness.
+
+Next: finish native tool compatibility, reuse the final signed candidate for
+independent installation and real UI journeys, complete the readiness audit,
+and obtain owner approval before main changes or public distribution. Ordinary
+consumer Xcode provisioning remains an explicit usability gap (see below).
+
 ## Agreed target
 
 Standalone macOS 26+ application for Apple Silicon **and** Intel. Preserve the

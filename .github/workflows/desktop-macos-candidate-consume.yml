@@ -1,4 +1,4 @@
-name: Same-candidate interrupted Restore observation
+name: Same-candidate ordinary UI or interrupted Restore observation
 
 on:
   push:
@@ -13,9 +13,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  restore:
+  consume:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate-consume'
-    name: candidate-restore-${{ matrix.target }}
+    name: candidate-consume-${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
@@ -33,7 +33,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:
-      # DETACHED DRAFT: replace together with the genuine SOURCE nomination.
+      # SOURCE-owned closed selector; restore preserves the prior inactive default.
+      # Change only with an independently reviewed genuine candidate nomination.
+      MRK_CANDIDATE_MODE: restore # restore | ordinary-ui
+      # Both routes stay inactive until this and candidate-carrier-selection.json
+      # name the same genuine retained candidate. No guessed/latest artifact.
       # This is checkout routing, not artifact/source admission authority.
       MRK_CANDIDATE_SOURCE: '0000000000000000000000000000000000000000'
       MRK_MACOS_TARGET: ${{ matrix.target }}
@@ -45,6 +49,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
+          case "$MRK_CANDIDATE_MODE" in restore|ordinary-ui) ;; *) exit 1 ;; esac
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$RUNNER_OS" = macOS
           test "$GITHUB_WORKSPACE" = /Users/runner/work/mobile-release-kit/mobile-release-kit
@@ -94,6 +99,7 @@ jobs:
           "$work/host-python/bin/python3" -I -S -B "$helper" bind-host
           unset MRK_HOST_BASE_CONTEXT
       - name: Prepare only the fixed source compiler and locked fixture dependencies
+        if: env.MRK_CANDIDATE_MODE == 'restore'
         timeout-minutes: 10
         shell: bash
         env:
@@ -117,6 +123,7 @@ jobs:
             RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
             "$toolbin/cargo" fetch --manifest-path "$GITHUB_WORKSPACE/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
       - name: Acquire once and materialize only verified full P and nonshipping thin inputs
+        if: env.MRK_CANDIDATE_MODE == 'restore'
         timeout-minutes: 12
         shell: bash
         env:
@@ -136,6 +143,7 @@ jobs:
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/candidate-acquisition.status"
           test "$status" = 0 || exit "$status"
       - name: Build and audit same-source nonshipping observer and three cut packages
+        if: env.MRK_CANDIDATE_MODE == 'restore'
         timeout-minutes: 56
         shell: bash
         env:
@@ -155,6 +163,7 @@ jobs:
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/app-absence-preparation.status"
           test "$status" = 0 || exit "$status"
       - name: Observe original absence before any candidate Installer
+        if: env.MRK_CANDIDATE_MODE == 'restore'
         timeout-minutes: 14
         shell: bash
         env:
@@ -174,6 +183,7 @@ jobs:
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/resume-carrier/candidate-baseline.status"
           test "$status" = 0 || exit "$status"
       - name: Reuse exact acquired candidate for fresh joined Installer and full runtime readback
+        if: env.MRK_CANDIDATE_MODE == 'restore'
         timeout-minutes: 12
         shell: bash
         env:
@@ -193,6 +203,7 @@ jobs:
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/candidate-install.status"
           test "$status" = 0 || exit "$status"
       - name: Withdraw app and observe three actual interruption cuts followed by ordinary Restore
+        if: env.MRK_CANDIDATE_MODE == 'restore'
         timeout-minutes: 14
         shell: bash
         env:
@@ -214,6 +225,7 @@ jobs:
           # Private baseline/installed controls and carriers remain on this
           # disposable runner. Never delete an unknown or active fixture.
       - name: Retain only the finite joined Restore observation, never carrier or private controls
+        if: env.MRK_CANDIDATE_MODE == 'restore'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-restore-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -221,3 +233,103 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+      - name: Install the exact final candidate once without rebuilding or signing it
+        id: ordinary_install
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui'
+        timeout-minutes: 12
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          # The existing ordinary consumer acquires the nominated final DMG,
+          # authenticates its producer, installs and fully reads back the same
+          # request, then positively detaches/closes/retires its originals.
+          # No app, Rust observer, package producer or image is rebuilt here.
+          set +e
+          "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B \
+            "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" \
+            > "$MRK_MACOS_WORK/consumer-result.json"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/consumer-install.status"
+          saved=$?
+          set -e
+          unset GITHUB_TOKEN GH_TOKEN
+          if [[ "$status" != 0 ]]; then exit "$status"; fi
+          [[ "$saved" == 0 ]] || exit "$saved"
+          # The receipt is not its own exit proof. Only this step's original0
+          # permits the next existing UI helper to admit its same-job handoff.
+      - name: Observe existing ordinary UI journeys on that same installed candidate
+        id: ordinary_ui
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' && steps.ordinary_install.outcome == 'success'
+        timeout-minutes: 100
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          unset GITHUB_TOKEN GH_TOKEN
+          # Each existing helper keeps its original inner and outer deadlines;
+          # this containing step/job does not grant a new native clock. Only the
+          # nonshipping XCTest harness builds, once, from the actual candidate
+          # checkout. Application/harness source are never relabeled as helper.
+          ui() {
+            local phase=$1 status saved status_path
+            case "$phase" in
+              build|applications-test|applications-summary|project-test|project-summary|persistence-test|persistence-summary|saved-checks-test|saved-checks-summary)
+                status_path="$MRK_MACOS_WORK/normal-ui/$phase.status" ;;
+              result|cleanup) status_path="$MRK_MACOS_WORK/candidate-ui-$phase.status" ;;
+              *) return 1 ;;
+            esac
+            set +e
+            "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B \
+              "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_ui.py" "$phase" \
+              > "$MRK_MACOS_WORK/candidate-ui-$phase.json"
+            status=$?
+            printf '%s\n' "$status" > "$status_path"
+            saved=$?
+            set -e
+            printf 'MRK_CANDIDATE_UI_PHASE=%s;originalReturncode=%s;observationOnly=true\n' "$phase" "$status"
+            if [[ "$status" != 0 ]]; then return "$status"; fi
+            [[ "$saved" == 0 ]] || return "$saved"
+          }
+          # Fixed order, never a retry or a roster supplied by a downloaded file.
+          # read_phase admits each prior actual0 + its original captures/receipt.
+          ui build
+          ui applications-test
+          ui applications-summary
+          ui project-test
+          ui project-summary
+          ui persistence-test
+          ui persistence-summary
+          ui saved-checks-test
+          ui saved-checks-summary
+          ui result
+          ui cleanup
+          # Cleanup runs only after every original succeeded. It retires known
+          # build/test outputs, not the installed app, finite phase controls or
+          # private synthetic fixtures.
+          # Unknown owners stop the sequence and remain for hosted VM disposal.
+      - name: Retain only the bounded ordinary UI observation and positive cleanup
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' && steps.ordinary_ui.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-ordinary-ui-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MRK_MACOS_WORK }}/candidate-ui-result.json
+            ${{ env.MRK_MACOS_WORK }}/candidate-ui-cleanup.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          # Six existing local tests only (including saved-checks navigation). No raw captures, xcresult,
+          # credential fixtures, signed carrier or full-feature readiness claim.

@@ -36,13 +36,26 @@ def persistence_body():
         U.PERSISTENCE_MARKER, "Test Case '"+method+"' passed (1.0 seconds).", ''])).encode()
 
 
+def saved_checks_body(reverse=False):
+    methods=[('testSyntheticProjectSavedOfflineChecks',
+        ['MRK_MACOS_NORMAL_OFFLINE_UI=ordinary-ui-observed-saved-offline-report-and-settled-projection;'
+         'missing=2;skipped=1;releaseReadiness=not-assessed;cleanExitStatus=unavailable;allWorkerFinality=unavailable']),
+        ('testSyntheticProjectEmptyBuildInputInspection',[U.RECOVERY_IDLE_MARKER,U.STORE_ENTRY_MARKER])]
+    lines=[]
+    for method,markers in reversed(methods) if reverse else methods:
+        name='-[MRKNormalAppUITests.NormalAppUITests '+method+']'
+        lines.extend(["Test Case '"+name+"' started.", N.ORIGINAL_MARKER, *markers,
+                      "Test Case '"+name+"' passed (1.0 seconds)."])
+    return ('\n'.join([*lines,''])).encode()
+
+
 def phase_fixture(name, target=R.TARGETS[0]):
     selected, context, install=fixture(target)
     args, req=U.phase_request(N,name,target,WORK)
     mode=req['phase']; result=None if req['result'] is None else req['result'].name
-    out=(persistence_body() if name=='persistence-test' else
-         R.canonical(dict(totalTestCount=2 if name=='project-summary' else 1,
-            passedTests=2 if name=='project-summary' else 1,failedTests=0,skippedTests=0,expectedFailures=0))
+    out=(persistence_body() if name=='persistence-test' else saved_checks_body() if name=='saved-checks-test' else
+         R.canonical(dict(totalTestCount=2 if name in ('project-summary','saved-checks-summary') else 1,
+            passedTests=2 if name in ('project-summary','saved-checks-summary') else 1,failedTests=0,skippedTests=0,expectedFailures=0))
          if mode=='summary' else b'inert returned native output\n')
     row=dict(scope='actual-generated-xctrunner-admission-only' if mode=='test' else 'normal-ui-original-command-admission-only',
         sourceCommit=selected['source'],target=target,sourcePrePostMatched=True,originalCommandReturned=True,
@@ -88,7 +101,7 @@ class CandidateUITests(unittest.TestCase):
                 args,req=U.phase_request(N,name,target,WORK)
                 self.assertEqual(N.normal_request(args,str(WORK/'normal-ui/tmp')+'/'),req)
                 self.assertEqual(req['phaseSeconds'],450 if name=='build' else 90 if name.endswith('summary') else
-                                 885 if name=='project-test' else 345 if name=='applications-test' else 585)
+                                 885 if name in ('project-test','saved-checks-test') else 345 if name=='applications-test' else 585)
             env=U.clean_environment(N,selected,WORK)
             self.assertEqual(env['TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE'],selected['source'])
             self.assertEqual(env['TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE'],selected['source'])
@@ -104,6 +117,18 @@ class CandidateUITests(unittest.TestCase):
             body+b'MRK_MACOS_UI_FAILURE_CLEANUP=1\n',body.replace(b' passed (',b' failed (')]
         for changed in changes:
             with self.assertRaises(R.Refused):U.persistence_markers(changed)
+
+    def test_saved_checks_require_two_originals_and_same_build_no_effect_marker(self):
+        body=saved_checks_body()
+        self.assertTrue(U.saved_checks_markers(body));self.assertTrue(U.saved_checks_markers(saved_checks_body(True)))
+        changes=[body.replace(b'missing=2',b'missing=1'),body.replace(b'missing=2',b'missing=129'),
+            body.replace(b'storeActions=not-run',b'storeActions=passed'),
+            body.replace(U.STORE_ENTRY_MARKER.encode()+b'\n',b''),body+U.STORE_ENTRY_MARKER.encode()+b'\n',
+            body.replace(b'originalTerminated=1',b'originalTerminated=0',1),
+            body.replace(b'testSyntheticProjectSavedOfflineChecks',b'testSyntheticProjectEmptyBuildInputInspection'),
+            body.replace(b' passed (',b' failed (',1),body+b'MRK_MACOS_UI_FAILURE_CLEANUP=1\n']
+        for changed in changes:
+            with self.subTest(body=changed[:32]),self.assertRaises(R.Refused):U.saved_checks_markers(changed)
 
     def test_exact_native_admission_and_counts_do_not_accept_zero_test_or_fixed_profile(self):
         for target in (N.ARM_TARGET,N.INTEL_TARGET):
@@ -309,12 +334,16 @@ class CandidateUIMainTests(unittest.TestCase):
             value,effects,_=self.exercise('build',target)
             self.assertEqual(effects,['native-cli']);self.assertTrue(value['originalClosesKnown'])
             value,effects,count=self.exercise('result',target)
-            self.assertEqual(value['totalTests'],4);self.assertEqual(effects,[])
-            self.assertGreaterEqual(count,80)
+            self.assertEqual(value['totalTests'],6);self.assertEqual(effects,[])
+            self.assertEqual(count,93)
+            self.assertTrue(value['storeEntryRefusalObserved'])
+            self.assertEqual(value['savedOfflineChecksTests'],1)
+            self.assertEqual(value['emptyBuildInputInspectionTests'],1)
 
     def test_actual_main_late_consuming_close_prevents_success_and_status(self):
-        value,effects,_=self.exercise('project-test',N.ARM_TARGET,unknown_close=True)
-        self.assertIsNone(value);self.assertEqual(effects,['native-cli'])
+        for name in ('project-test','saved-checks-summary'):
+            value,effects,_=self.exercise(name,N.ARM_TARGET,unknown_close=True)
+            self.assertIsNone(value);self.assertEqual(effects,['native-cli'])
 
 
 class CandidateUICleanupTests(unittest.TestCase):
@@ -331,7 +360,7 @@ class CandidateUICleanupTests(unittest.TestCase):
         import os,tempfile
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)/'normal-ui';root.mkdir(mode=0o700)
-            for name in ('DerivedData','tmp','applications-test.xcresult','project-test.xcresult','persistence-test.xcresult'):
+            for name in ('DerivedData','tmp','applications-test.xcresult','project-test.xcresult','persistence-test.xcresult','saved-checks-test.xcresult'):
                 (root/name).mkdir();(root/name/'inert').write_bytes(b'DATA')
             for phase in U.PHASES:
                 for suffix in ('.stdout','.stderr'):(root/(phase+suffix)).write_bytes(b'inert')

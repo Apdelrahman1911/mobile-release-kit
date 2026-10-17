@@ -1,6 +1,6 @@
 """Same-candidate installed UI handoff; detached, not activated.
 
-Only the existing Applications observation, project edits and synthetic-vault restart journeys are selected.
+Only existing Applications, project edits, synthetic-vault restart and saved-check journeys are selected.
 Candidate source remains the real canonical checkout; helper identity is separate.
 No historical fixed-carrier profile, Store operation or application build is used.
 """
@@ -15,7 +15,7 @@ from desktop.tools import macos_candidate_consumer as consumer
 from desktop.tools import macos_fixed_carrier_resume as resume
 
 PHASES = ('build', 'applications-test', 'applications-summary', 'project-test', 'project-summary',
-          'persistence-test', 'persistence-summary')
+          'persistence-test', 'persistence-summary', 'saved-checks-test', 'saved-checks-summary')
 RUNNER = 'desktop/tools/macos_normal_ui_runner.py'
 STAGE = 'admission'
 NATIVE_STATUS = None
@@ -111,6 +111,54 @@ def persistence_markers(body):
     return True
 
 
+STORE_ENTRY_MARKER = ('MRK_MACOS_NORMAL_STORE_ENTRY_UI=same-build-navigation-help-and-no-credential-refusal;'
+    'storeActions=not-run;historyVerification=not-run;liveLifecycle=not-established')
+RECOVERY_IDLE_MARKER = ('MRK_MACOS_NORMAL_RECOVERY_IDLE_UI='
+    'ordinary-ui-observed-empty-build-input-inspection-and-settled-projection;'
+    'mutationRecovery=not-run;projectCleanliness=not-established;'
+    'cleanExitStatus=unavailable;allWorkerFinality=unavailable')
+
+
+def saved_checks_markers(body):
+    """Exact original two-test observations; not Store or history authority."""
+    resume.need(type(body) is bytes and 0 < len(body) <= 1 << 20 and body.endswith(b'\n'),
+                'candidate-ui-saved-checks-output')
+    text = body.decode('utf-8', 'strict'); lines = text.splitlines()
+    normal_marker = 'MRK_MACOS_UI_ORIGINAL=' + LIFETIME_SUFFIX[1:]
+    prefix = 'MRK_MACOS_NORMAL_OFFLINE_UI='
+    offline = [line for line in lines if line.startswith(prefix)]
+    resume.need(len(offline) == 1, 'candidate-ui-saved-checks-markers')
+    match = re.fullmatch(re.escape(prefix) +
+        r'ordinary-ui-observed-saved-offline-report-and-settled-projection;missing=([1-9][0-9]{0,2});'
+        r'skipped=([1-9][0-9]{0,2});releaseReadiness=not-assessed;'
+        r'cleanExitStatus=unavailable;allWorkerFinality=unavailable', offline[0])
+    resume.need(match is not None and 2 <= int(match[1]) <= 128 and 1 <= int(match[2]) <= 128
+        and lines.count(normal_marker) == 2
+        and sum(line.startswith('MRK_MACOS_UI_ORIGINAL=') for line in lines) == 2
+        and lines.count(RECOVERY_IDLE_MARKER) == lines.count(STORE_ENTRY_MARKER) == 1
+        and sum(line.startswith('MRK_MACOS_NORMAL_RECOVERY_IDLE_UI=') for line in lines) == 1
+        and sum(line.startswith('MRK_MACOS_NORMAL_STORE_ENTRY_UI=') for line in lines) == 1
+        and 'MRK_MACOS_UI_FAILURE_CLEANUP=' not in text, 'candidate-ui-saved-checks-markers')
+    attempts = [(index, line) for index, line in enumerate(lines) if line.startswith('Test Case ')]
+    resume.need(len(attempts) == 4, 'candidate-ui-saved-checks-attempts')
+    methods = {'testSyntheticProjectSavedOfflineChecks': (offline[0],),
+               'testSyntheticProjectEmptyBuildInputInspection': (RECOVERY_IDLE_MARKER, STORE_ENTRY_MARKER)}
+    # XCTest may order methods differently from the request; each distinct
+    # method must still have its own non-overlapping original start/pass pair.
+    for offset in (0, 2):
+        start, first = attempts[offset]; end, last = attempts[offset + 1]
+        method = next((name for name in methods if first ==
+            "Test Case '-[MRKNormalAppUITests.NormalAppUITests " + name + "]' started."), None)
+        resume.need(method is not None and re.fullmatch(
+            r"Test Case '-\[MRKNormalAppUITests\.NormalAppUITests " + re.escape(method) +
+            r"\]' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", last), 'candidate-ui-saved-checks-attempts')
+        originals = [index for index in range(start + 1, end) if lines[index] == normal_marker]
+        resume.need(len(originals) == 1 and all(originals[0] < lines.index(marker) < end
+            for marker in methods.pop(method)), 'candidate-ui-saved-checks-attempts')
+    resume.need(not methods, 'candidate-ui-saved-checks-attempts')
+    return True
+
+
 def phase_admission_data(row, request, source, stdout, stderr):
     """Current normal runner's original receipt, without fixed P0 decoration."""
     mode = request['phase']; target = request['target']
@@ -172,10 +220,13 @@ def phase_admission_data(row, request, source, stdout, stderr):
                         and row.get('androidToolSourceBrowseMarkerObserved') is True, 'candidate-ui-project-markers')
         elif result == 'applications-test.xcresult':
             resume.need(row.get('applicationsLaunchObservationMarker') is True, 'candidate-ui-applications-marker')
+        elif result == 'saved-checks-test.xcresult':
+            resume.need(saved_checks_markers(stdout),
+                'candidate-ui-saved-checks-markers')
         else:
             resume.need(result == 'persistence-test.xcresult' and persistence_markers(stdout), 'candidate-ui-restart-selection')
     if mode == 'summary':
-        count = 2 if result == 'project-test.xcresult' else 1
+        count = 2 if result in ('project-test.xcresult', 'saved-checks-test.xcresult') else 1
         counts = resume.decode(stdout, allow_finite_floats=True)
         wanted = {'totalTestCount': count, 'passedTests': count, 'failedTests': 0, 'skippedTests': 0, 'expectedFailures': 0}
         resume.need(type(counts) is dict and all(type(counts.get(k)) is int and counts[k] == v for k, v in wanted.items()),
@@ -359,7 +410,8 @@ def main():
             'applicationsEntryQualified': False, 'p0Qualified': False}
         if name in ('result', 'cleanup'):
             value.update(applicationsLaunchObservations=1, projectEditingTests=2, syntheticPersistenceRestartTests=1,
-                         totalTests=4, failedTests=0, skippedTests=0, sameInstalledApplication=True,
+                         savedOfflineChecksTests=1, emptyBuildInputInspectionTests=1, storeEntryRefusalObserved=True,
+                         totalTests=6, failedTests=0, skippedTests=0, sameInstalledApplication=True,
                          sourceRosterSha256=rosters[0])
         if name == 'cleanup':
             STAGE = 'cleanup'
@@ -400,7 +452,8 @@ def cleanup_outputs(directory, expected, clock):
                 and expected[2:] == (stat.S_IFDIR | 0o700, os.getuid(), os.getgid()),
                 'candidate-ui-cleanup-root')
         post()
-        for name in ('DerivedData', 'tmp', 'applications-test.xcresult', 'project-test.xcresult', 'persistence-test.xcresult'):
+        for name in ('DerivedData', 'tmp', 'applications-test.xcresult', 'project-test.xcresult', 'persistence-test.xcresult',
+                     'saved-checks-test.xcresult'):
             info = os.stat(name, dir_fd=fd, follow_symlinks=False)
             resume.need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and info.st_dev == expected[0],
                         'candidate-ui-cleanup-directory')
@@ -435,6 +488,7 @@ PUBLIC_REASONS = frozenset((
     'candidate-ui-original-cli-nonzero', 'candidate-ui-fixed-command', 'candidate-ui-real-source-roots',
     'candidate-ui-git-owner', 'candidate-ui-checkout-identity', 'candidate-ui-source-query',
     'candidate-ui-private-root', 'candidate-ui-same-harness-roster', 'candidate-ui-original-capacity',
+    'candidate-ui-saved-checks-output', 'candidate-ui-saved-checks-markers', 'candidate-ui-saved-checks-attempts',
     'candidate-ui-original-final-closes', 'candidate-ui-cleanup-primitive', 'candidate-ui-cleanup-root',
     'candidate-ui-cleanup-directory', 'candidate-ui-cleanup-file', 'candidate-ui-cleanup-close-unknown',
 ))

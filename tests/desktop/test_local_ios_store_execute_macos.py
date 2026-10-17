@@ -88,7 +88,7 @@ class IOSStoreResolverMacTests(unittest.TestCase):
             self.assertTrue(kwargs['capture'])
             self.assertFalse(kwargs['text'])
             self.assertEqual(kwargs['output_limit'], 4097)
-            self.assertLessEqual(kwargs['timeout'], 10)
+            self.assertLessEqual(kwargs['timeout'], 30)
             self.assertFalse(actual_engine.input._material_read)
             # Uses original C/A/W command owner and ledger. Never synthesize
             # its return/join/clock or increment the ledger as inert rows do.

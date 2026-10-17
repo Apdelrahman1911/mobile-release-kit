@@ -6407,12 +6407,130 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_MACOS_NORMAL_OFFLINE_UI=ordinary-ui-observed-saved-offline-report-and-settled-projection;missing=\(missing);skipped=\(skipped);releaseReadiness=not-assessed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
 
+    // Same-build only: real UI selectors/help and refusal with the unchanged,
+    // unenrolled, credential-free project. No native Store Review/Start, history
+    // verification, credential session, synthetic receipt or eligibility is used.
+    @MainActor private func storeEntryRefused(_ panel: XCUIElement, review: String) throws {
+        let button = try waitElement(panel.buttons.matching(identifier: review), in: panel)
+        try require(!button.isEnabled && panel.checkBoxes.count == 0,
+                    "credential-free Store entry offered consent or an actionable review")
+        for label in ["Prepare local Store intent", "Upload to TestFlight internal", "Upload and commit internal release",
+                      "Execute prepared promotion", "Check external availability", "Check current TestFlight build",
+                      "Check current Play target", "Check and record recovery", "Cancel original preparation",
+                      "Cancel original execution", "Cancel original check"] {
+            try require(panel.buttons.matching(identifier: label).count == 0,
+                        "navigation created a Store operation or offered its Start control")
+        }
+        for label in ["Release intent saved · Not uploaded or published", "External TestFlight target available to testers",
+                      "Recovery checkpoint recorded", "Current processed internal build matches", "Current internal-testing target matches"] {
+            try require(panel.staticTexts.matching(identifier: label).count == 0,
+                        "credential-free navigation invented a Store result")
+        }
+    }
+    @MainActor private func storeEntryNavigation(_ renderer: XCUIElement, fixture: LocalFixture) throws {
+        try press(renderer, "Credentials", renderer: renderer)
+        var storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)
+        try select(storage, label: "Platform", value: "iOS", renderer: renderer)
+        try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
+        try select(storage, label: "Input purpose", value: "Store access only", renderer: renderer)
+        try select(storage, label: "Where will Store operations run?", value: "This Mac (local credentials)", renderer: renderer)
+        try fixture.assertUnchanged()
+        try press(renderer, "Releases", renderer: renderer)
+        var prepare = try waitElement(named(renderer, "Prepare local Store release"), in: renderer)
+        var execute = try waitElement(named(renderer, "Execute local TestFlight internal testing release"), in: renderer)
+        var check = try waitElement(named(renderer, "Check the previous TestFlight internal upload"), in: renderer)
+        try storeEntryRefused(prepare, review: "Review Store preparation")
+        try storeEntryRefused(execute, review: "Review internal upload")
+        try storeEntryRefused(check, review: "Review current TestFlight check")
+        try expand(prepare, prefix: "Help: what do I need before preparing?", renderer: renderer)
+        _ = try waitElement(prepare.staticTexts.matching(identifier:
+            "To move an uploaded build forward, review the latest successful execution receipt in Release history and select External testing or Production in Credentials. Assign credentials for that exact stage. iOS also needs an Apple review contact, an operation commitment key, and a demo login if the saved configuration requires it. These are managed in Credentials with field help; none belong in Git. Production reuses an external release available to testers and never enables public release automatically."), in: prepare)
+        try expand(execute, prefix: "Help: what do I need before uploading?", renderer: renderer)
+        _ = try waitElement(execute.staticTexts.matching(identifier:
+            "If native tool admission refuses a writable or user-owned installation, ask your administrator to provision the supported protected Xcode profile. The app does not change ownership, permissions or ACLs. Do not recursively change Applications permissions or run the app as root."), in: execute)
+        _ = try waitElement(execute.staticTexts.matching(identifier:
+            "Reviewing prepared files does not prove that the Store is unchanged or that the earlier native preparation finished. Native admission rechecks current files, source, credentials, journal and tools before any send. Pending history, old attempts or changed Store state refuse; a new click does not repair them."), in: execute)
+        let history = try waitElement(named(renderer, "Local release history"), in: renderer)
+        try expand(history, prefix: "Help: what is enrollment, and where does the key come from?", renderer: renderer)
+        _ = try waitElement(history.staticTexts.matching(identifier:
+            "Verify reads existing history without creating enrollment. Keep the project and its Keychain items together: copied, replaced or missing history may not verify. Verification can detect history rollback only while the matching Keychain state remains intact. Never delete these items to clear a failure."), in: history)
+        let action = try unique(controls(history, [.popUpButton, .comboBox], label: "History action", prefix: true),
+                                "history action is not uniquely exposed")
+        try require(action.value as? String == "Verify existing history" && history.checkBoxes.count == 0
+                    && history.staticTexts.matching(identifier: "Verified local history").count == 0,
+                    "navigation enrolled or invented verified history")
+        _ = try waitElement(history.staticTexts.matching(identifier:
+            "For an original upload choose candidate review. For External testing or Production choose stage review. A wrong choice refuses without changing files. After reviewing the latest successful receipt, select the next stage in Credentials and use Prepare Store release; every Store change needs its own confirmation."), in: history)
+        try fixture.assertUnchanged()
+
+        // Stage selection is not a fabricated prepared intent. Both later-stage
+        // scopes remain refused; no Promote heading/receipt is expected here.
+        for releaseStage in ["External testing", "Production preparation"] {
+            try press(renderer, "Credentials", renderer: renderer)
+            storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)
+            try select(storage, label: "Release stage", value: releaseStage, renderer: renderer)
+            try press(renderer, "Releases", renderer: renderer)
+            prepare = try waitElement(named(renderer, "Prepare local Store release"), in: renderer)
+            execute = try waitElement(named(renderer, "Execute local TestFlight internal testing release"), in: renderer)
+            try storeEntryRefused(prepare, review: "Review Store preparation")
+            try storeEntryRefused(execute, review: "Review internal upload")
+            if releaseStage == "External testing" {
+                check = try waitElement(named(renderer, "Check the previous TestFlight internal upload"), in: renderer)
+                let beta = try waitElement(controls(check, [.radioButton], label: "External testing after Beta Review"),
+                                          in: check, enabled: true)
+                try reveal(beta, in: renderer); beta.click()
+                check = try waitElement(named(renderer, "Refresh external TestFlight availability"), in: renderer)
+                _ = try waitElement(check.staticTexts.matching(identifier:
+                    "After Apple completes Beta App Review, read the original external TestFlight target again. A match records a separate local availability observation; the original upload and external execution receipt remain unchanged. This never notifies testers, uploads, submits or retries a release."), in: check)
+                try expand(check, prefix: "Help: when should I use this check?", renderer: renderer)
+                _ = try waitElement(check.staticTexts.matching(identifier:
+                    "Choose Verify history → iOS → Review stage-execution receipt on the latest successful external-testing operation. A pending, failed or uncertain operation cannot use this action. Keep the original project and version unchanged."), in: check)
+            } else {
+                check = try waitElement(named(renderer, "Refresh external TestFlight availability"), in: renderer)
+            }
+            try storeEntryRefused(check, review: "Review external availability check")
+            try require(controls(check, [.radioButton], label: "Check and record a recovery checkpoint").count == 0,
+                        "iOS offered the Google recovery-settlement choice")
+            try fixture.assertUnchanged()
+        }
+
+        // Select only view state, never consent: each opposite-platform action
+        // must disappear, and switching back must restore internal readback.
+        try press(renderer, "Credentials", renderer: renderer)
+        storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)
+        try select(storage, label: "Platform", value: "Android", renderer: renderer)
+        try press(renderer, "Releases", renderer: renderer)
+        check = try waitElement(named(renderer, "Check the previous Play internal release"), in: renderer)
+        try storeEntryRefused(check, review: "Review current Play check")
+        try require(controls(check, [.radioButton], label: "External testing after Beta Review").count == 0,
+                    "Beta availability choice leaked into Android")
+        let settlement = try waitElement(controls(check, [.radioButton], label: "Check and record a recovery checkpoint"),
+                                        in: check, enabled: true)
+        try reveal(settlement, in: renderer); settlement.click()
+        try storeEntryRefused(check, review: "Review recovery checkpoint")
+        try press(renderer, "Credentials", renderer: renderer)
+        storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)
+        try select(storage, label: "Platform", value: "iOS", renderer: renderer)
+        try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
+        try press(renderer, "Releases", renderer: renderer)
+        check = try waitElement(named(renderer, "Check the previous TestFlight internal upload"), in: renderer)
+        try storeEntryRefused(check, review: "Review current TestFlight check")
+        let beta = try unique(controls(check, [.radioButton], label: "External testing after Beta Review"),
+                              "iOS Beta choice is missing after platform change")
+        try require(beta.value as? String == "0"
+                    && controls(check, [.radioButton], label: "Check and record a recovery checkpoint").count == 0,
+                    "platform change retained an incompatible readiness or settlement choice")
+        try fixture.assertUnchanged()
+        try press(renderer, "Recovery", renderer: renderer)
+    }
+
     @MainActor func testSyntheticProjectEmptyBuildInputInspection() throws {
         continueAfterFailure = false
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
+        let profile = try normalJourneyProfile(for: "saved-checks-test.xcresult")
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
-        try stage("recovery-idle-launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "saved-checks-test.xcresult")) }
+        try stage("recovery-idle-launch") { launched = try launchForJourney(profile: profile) }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary empty-recovery launch returned no original") }
         let fixture = LocalFixture()
         ownedFixture = fixture
@@ -6475,6 +6593,8 @@ final class NormalAppUITests: XCTestCase {
             }
             try fixture.assertUnchanged() // Includes the closed directory roster: no new hidden recovery metadata.
             try savedOperationComplete(panel)
+            // Never relabel these new assertions onto the admitted old carrier.
+            if case .sameBuild = profile { try storeEntryNavigation(renderer, fixture: fixture) }
         }
         try stage("recovery-idle-readback-and-quit") {
             try fixture.assertUnchanged()
@@ -6495,6 +6615,9 @@ final class NormalAppUITests: XCTestCase {
         // mutation-recovery journey still needs its own genuine eligible producer.
         try acceptFinalScenario()
         print("MRK_MACOS_NORMAL_RECOVERY_IDLE_UI=ordinary-ui-observed-empty-build-input-inspection-and-settled-projection;mutationRecovery=not-run;projectCleanliness=not-established;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        if case .sameBuild = profile {
+            print("MRK_MACOS_NORMAL_STORE_ENTRY_UI=same-build-navigation-help-and-no-credential-refusal;storeActions=not-run;historyVerification=not-run;liveLifecycle=not-established")
+        }
     }
     // End ordinary saved offline and empty recovery journeys.
 

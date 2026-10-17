@@ -97,7 +97,7 @@ class IOSStoreExecuteTests(unittest.TestCase):
     def resolve(self,argv,kw,e,fault):
         self.assertEqual(tuple(argv),(str(self.xcrun),'--no-cache','--find','altool'))
         self.assertEqual(kw['environ'],dict(PATH='/usr/bin:/bin:/usr/sbin:/sbin',LANG='C',LC_ALL='C',DEVELOPER_DIR=str(self.dev)))
-        self.assertLessEqual(kw['timeout'],10);self.assertEqual(kw['output_limit'],4097)
+        self.assertLessEqual(kw['timeout'],30);self.assertEqual(kw['output_limit'],4097)
         self.resolutions.append(tuple(argv));e.guard.lifetime_ledger._commands+=1;e.guard.lifetime_ledger._command_dispatched=True
         output=(str(self.altool)+'\n').encode()
         if fault=='resolve-outside':output=(str(self.xcrun)+'\n').encode()
@@ -149,6 +149,51 @@ class IOSStoreExecuteTests(unittest.TestCase):
                 self.assertIsNone(t['result']);self.assertEqual(len(calls),7);self.assertEqual(events,['lease-ready'])
                 self.assertEqual(self.f.current_phase(),'prepared');self.assertFalse(e.input._material_read)
                 self.assertTrue(e.input.material_closed());self.assertTrue(e.service.closed(),repr(e.primary))
+    def test_uncached_resolver_budget_and_timeout_stay_before_pending_or_material(self):
+        import time
+        from mobile_release.owned_process import ProcessError
+        original=S.LocalStoreExecuteRun._upload_tools
+        for index,remaining in enumerate((60,7)):
+            with self.subTest(remaining=remaining):
+                if index:self.doCleanups();self.setUp()
+                seen=[];failure=ProcessError('owned command exceeded its original deadline')
+                before={p:p.read_bytes() for p in self.prepared.iterdir()}
+                def tools(owner):
+                    # Shorten the real original endpoint; never change the
+                    # monotonic clock or grant the child a replacement budget.
+                    owner.source.work_end=min(owner.source.work_end,time.monotonic()+remaining)
+                    return original(owner)
+                def timeout(argv,kw,engine,fault):
+                    self.assertIsNone(fault);self.assertIs(type(kw['timeout']),int)
+                    self.assertGreater(kw['timeout'],0);self.assertLessEqual(kw['timeout'],min(30,remaining))
+                    if remaining==60:self.assertEqual(kw['timeout'],30)
+                    self.assertEqual(kw['output_limit'],4097);self.assertIsNone(engine.service.pending_head)
+                    self.assertFalse(engine.input._material_read);seen.append(kw['timeout'])
+                    raise failure # Model the original command's failed return, never success/finality.
+                self.f.resolve_tool=timeout
+                with patch.object(S.LocalStoreExecuteRun,'_upload_tools',tools):
+                    t,e,events,calls,_=self.f.run_original(_execute=True)
+                self.assertEqual(len(seen),1,''.join(__import__('traceback').format_exception(e.primary)));self.assertIs(e.primary,failure)
+                self.assertIsNone(t['result']);self.assertNotEqual(t['outcome'],'complete')
+                self.assertEqual(events,['lease-ready']);self.assertEqual(len(calls),7)
+                self.assertEqual(self.f.current_phase(),'prepared');self.assertFalse(e.input._material_read)
+                self.assertTrue(e.input.material_closed());self.assertTrue(e.service.closed())
+                self.assertEqual(before,{p:p.read_bytes() for p in self.prepared.iterdir()})
+    def test_expired_resolver_budget_refuses_before_command_is_armed(self):
+        import time
+        original=S.LocalStoreExecuteRun._upload_tools
+        def tools(owner):
+            owner.source.work_end=min(owner.source.work_end,time.monotonic()+0.5)
+            return original(owner)
+        def no_command(*_):self.fail('expired resolver must not dispatch')
+        self.f.resolve_tool=no_command
+        with patch.object(S.LocalStoreExecuteRun,'_upload_tools',tools):
+            t,e,events,calls,_=self.f.run_original(_execute=True)
+        self.assertIsNone(t['result']);self.assertNotEqual(t['outcome'],'complete')
+        self.assertEqual(events,['lease-ready']);self.assertEqual(len(calls),6)
+        self.assertEqual(e.service._runtime_rows,[]);self.assertIsNone(e.service._pending)
+        self.assertEqual(self.f.current_phase(),'prepared');self.assertFalse(e.input._material_read)
+        self.assertTrue(e.input.material_closed());self.assertTrue(e.service.closed())
     def test_pending_and_bad_asc_refuse_without_lane(self):
         for index,(fault,count) in enumerate((('execute-pending',7),('bad-p8',13))):
             with self.subTest(fault=fault):
