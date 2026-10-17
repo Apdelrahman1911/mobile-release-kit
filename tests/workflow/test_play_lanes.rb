@@ -1356,6 +1356,11 @@ class PlayReleaseLanesTest < Minitest::Test
     value['application']={'id'=>'test.example.release'};value['version']={'marketing'=>'2.0.0','build'=>200}
     value['confirmation']="#{stage}:android:2.0.0:200"
     value['preparedBy']['confirmationSha256']=Digest::SHA256.hexdigest(value.fetch('confirmation'))
+    aabs=value.fetch('artifacts').select { |row| row['logicalName']=='android-aab' }
+    assert_equal 1,aabs.length
+    aabs.first.merge!('fileName'=>'candidate.aab','size'=>@aab.bytesize,'sha256'=>Digest::SHA256.hexdigest(@aab))
+    bundles=value.fetch('storePrecondition').fetch('snapshot').fetch('bundles').select { |row| row['versionCode']==200 }
+    assert_equal [aabs.first.fetch('sha256')],bundles.map { |row| row.fetch('sha256') }
     @payload=value;save_intent
     payload,digest=MobileReleaseKit.local_operation_intent(File.binread(File.join(@root,'intent.json')),
       expected_sha256:@intent_digest,platform:'android',stage:stage)
