@@ -8512,31 +8512,40 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             for target, selector in (("aarch64-apple-darwin", "macosx26.5"),
                                      ("x86_64-apple-darwin", "macosx")):
                 for case, version, sdk, refusal in (
-                        ("selected", "26.5", seal.DEVELOPER / "SDKs/MacOSX26.5.sdk", "before-compiler-stop"),
+                        ("selected", "26.5", seal.DEVELOPER / "SDKs/MacOSX26.5.sdk", "before-network-stop"),
+                        ("wrong-rust", "26.5", seal.DEVELOPER / "SDKs/MacOSX26.5.sdk", "actual-direct-Rust-version"),
                         ("wrong-version", "27.0", seal.DEVELOPER / "SDKs/MacOSX26.5.sdk", "sdk-version"),
                         ("escaped-root", "26.5", Path("/other/SDKs/MacOSX26.5.sdk"), "fixed-Apple-sdk")):
                     with self.subTest(target=target, case=case):
                         calls = []
                         protected = []
+                        rust_root = Path("/Users/runner/.rustup/toolchains") / (("1.98.1" if target == "aarch64-apple-darwin" else "stable") + "-" + target)
+                        rust_release = "1.99.0" if case == "wrong-rust" else seal.TARGETS[target][2]
                         def protect(path, **options):
                             protected.append((path, options["role"]))
                             return str(path)
                         def run(role, argv):
-                            if role == "compiler-version":
-                                raise BUILD.BuildRefused("before-compiler-stop")
+                            if role == "network-denial":
+                                raise BUILD.BuildRefused("before-network-stop")
                             calls.append((role, argv))
                             if role == "sdk-path":
                                 value = str(sdk)
                             elif role == "sdk-version":
                                 value = version
+                            elif role == "compiler-version":
+                                value = "Apple clang version 21.0.0"
+                            elif role == "rustc-version":
+                                value = "rustc " + rust_release + " (deadbeef0 2026-01-01)\nhost: " + target + "\nrelease: " + rust_release
+                            elif role == "cargo-version":
+                                value = "cargo " + rust_release + " (deadbeef0 2026-01-01)"
                             else:
                                 self.assertTrue(role.startswith("tool-path-"))
                                 value = str(seal.DEVELOPER / "usr/bin" / role.removeprefix("tool-path-"))
                             return SimpleNamespace(stdout=(value + "\n").encode("ascii"), stderr=b"")
-                        receiver = SimpleNamespace(target=target, work=Path("/fixed-work"),
+                        receiver = SimpleNamespace(target=target, profile=seal.TARGETS[target], work=Path("/fixed-work"),
                             private=Path("/fixed-work/private"), mkdir=lambda path: None,
                             protected_tool=protect, python_tools=lambda: None,
-                            rust_inputs=lambda path: 0, toolchain={}, run=run)
+                            rust_inputs=lambda path: self.assertEqual(path, rust_root) or 0, toolchain={}, run=run)
                         receiver.line = lambda result: seal.SealBuild.line(receiver, result)
                         with patch.object(seal.Path, "resolve", lambda path, **options: path):
                             with self.assertRaisesRegex(BUILD.BuildRefused, "^" + refusal + "$"):
@@ -8545,12 +8554,19 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                                    ("sdk-version", ["--show-sdk-version"])]
                         queries += [("tool-path-" + leaf, ["--find", leaf])
                                     for leaf in ("clang", "ar", "ranlib", "ld", "nm")]
-                        count = 7 if case == "selected" else 2 if case == "wrong-version" else 1
-                        self.assertEqual(calls, [(role, ["/usr/bin/xcrun", "--sdk", selector, *suffix])
-                            for role, suffix in queries[:count]])
+                        count = 7 if case in ("selected", "wrong-rust") else 2 if case == "wrong-version" else 1
+                        expected = [(role, ["/usr/bin/xcrun", "--sdk", selector, *suffix])
+                            for role, suffix in queries[:count]]
+                        if count == 7:
+                            expected.extend([("compiler-version", [str(seal.DEVELOPER / "usr/bin/clang"), "--version"]),
+                                ("rustc-version", [str(rust_root / "bin/rustc"), "-vV"]),
+                                ("cargo-version", [str(rust_root / "bin/cargo"), "--version"])])
+                        self.assertEqual(calls, expected)
+                        self.assertIn((rust_root / "bin/rustc", "rustc"), protected)
+                        self.assertIn((rust_root / "bin/cargo", "cargo"), protected)
                         settings = (sdk / "SDKSettings.json", "sdk-settings")
                         self.assertEqual(settings in protected, case != "escaped-root")
-                        if case == "selected":
+                        if case in ("selected", "wrong-rust"):
                             for leaf in BUILD.SDK_INTERFACE_PATHS:
                                 self.assertIn((sdk / leaf, "sdk-interface"), protected)
         finally:
