@@ -10218,76 +10218,32 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         expected = {"sha256Compared": True, "errorCount": 0, "warningCount": 0,
                     "ticketRowCount": 31, "logSha256": module.digest(encoded)}
         self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64), expected)
-        for archive in (module.NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg"):
-            for arch in ("arm64", "x86_64", "i386"):
-                for algorithm in ("SHA-1", "SHA-256"):
-                    row = dict(ticket(arch), digestAlgorithm=algorithm)
-                    current = dict(log, archiveFilename=archive, ticketContents=[row])
-                    encoded = body(current)
-                    self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive),
-                                     dict(expected, ticketRowCount=1, logSha256=module.digest(encoded)))
-            carrier = dict(ticket(None), path=archive)
-            omitted = dict(carrier); del omitted["arch"]
-            # Signed containers may omit arch rather than explicitly use null.
-            # This is the same exact top-level carrier exception, never ZIP/code.
-            for annotation in (carrier, omitted):
-                current = dict(log, archiveFilename=archive, ticketContents=[annotation])
-                encoded = body(current)
-                if archive == module.NOTARY_ZIP_NAME:
-                    with self.assertRaises(module.Refused):
-                        module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive)
-                else:
-                    self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive),
-                                     dict(expected, ticketRowCount=1, logSha256=module.digest(encoded)))
-                with self.assertRaises(module.Refused):
-                    module.notary_log_data(body(dict(current, ticketContents=[dict(annotation, path=archive + "/nested")])),
-                                           submission, "d" * 64, archive_name=archive)
-                invalid_carriers = [dict(annotation, extra=True)]
-                for required_key in ("path", "digestAlgorithm", "cdhash"):
-                    missing_required = dict(annotation); del missing_required[required_key]
-                    invalid_carriers.append(missing_required)
-                for invalid_carrier in invalid_carriers:
-                    with self.assertRaises(module.Refused):
-                        module.notary_log_data(body(dict(current, ticketContents=[invalid_carrier])),
-                                               submission, "d" * 64, archive_name=archive)
-        # The authenticated final-DMG log has a second architecture-less
-        # signed container at exactly Install.pkg, not an executable slice.
-        nested = dict(ticket(None), path="MobileReleaseKit.dmg/Install.pkg")
-        absent = dict(nested); del absent["arch"]
-        for annotation in (nested, absent):
-            current = dict(log, archiveFilename="MobileReleaseKit.dmg", ticketContents=[annotation])
-            encoded = body(current)
-            self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64, archive_name="MobileReleaseKit.dmg"),
-                             dict(expected, ticketRowCount=1, logSha256=module.digest(encoded)))
-            for archive in (module.NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "Remove.pkg", "MobileReleaseKit-Remove.dmg"):
-                with self.subTest(archive=archive), self.assertRaises(module.Refused):
-                    module.notary_log_data(body(dict(current, archiveFilename=archive)), submission, "d" * 64,
-                                           archive_name=archive)
-            invalid = [dict(annotation, path=path) for path in
-                       ("MobileReleaseKit.dmg/Install.pkg/nested", "MobileReleaseKit.dmg/Install.pkg/",
-                        "MobileReleaseKit.dmg/Other.pkg", "MobileReleaseKit.dmg/install.pkg")]
-            invalid += [dict(annotation, arch=value) for value in ("arm64e", True, 386, [], "null")]
-            invalid += [dict(annotation, extra=True), dict(annotation, digestAlgorithm="MD5"),
-                        dict(annotation, cdhash="z" * 40)]
-            for key in ("path", "digestAlgorithm", "cdhash"):
-                missing_required = dict(annotation); del missing_required[key]
-                invalid.append(missing_required)
-            for bad in invalid:
-                with self.subTest(nestedKeys=tuple(bad)), self.assertRaises(module.Refused):
-                    module.notary_log_data(body(dict(current, ticketContents=[bad])), submission, "d" * 64,
-                                           archive_name="MobileReleaseKit.dmg")
-            for bad in (dict(current, sha256="e" * 64), dict(current, status="Invalid"),
-                        dict(current, jobId="11111111-2222-3333-4444-555555555555")):
-                with self.assertRaises(module.Refused):
-                    module.notary_log_data(body(bad), submission, "d" * 64, archive_name="MobileReleaseKit.dmg")
+        for archive in (module.NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg",
+                        "MobileReleaseKit-Remove.dmg", "Prepare Xcode.pkg"):
+            # Ticket paths are informational for both executable slices and
+            # nested containers, including containers inside a ZIP submission.
+            for path in (archive, archive + "/PrepareXcode.pkg", archive + "/nested/code"):
+                for arch in ("arm64", "x86_64", "i386", None, "omitted"):
+                    for algorithm in ("SHA-1", "SHA-256"):
+                        row = dict(ticket(arch), path=path, digestAlgorithm=algorithm)
+                        if arch == "omitted": del row["arch"]
+                        current = dict(log, archiveFilename=archive, ticketContents=[row])
+                        encoded = body(current)
+                        self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive),
+                                         dict(expected, ticketRowCount=1, logSha256=module.digest(encoded)))
+                        # No ticket fields escape into an execution/provenance input.
+                        self.assertEqual(set(expected), {"sha256Compared", "errorCount", "warningCount", "ticketRowCount", "logSha256"})
         row = ticket("i386")
-        missing = dict(row); del missing["arch"]
-        bad_rows = [dict(row, arch=value) for value in ("arm64e", "x86_64h", "ppc", "", "null", True, 386, [], None)]
-        bad_rows += [missing, dict(row, extra=True), dict(row, path=""), dict(row, path="bad\npath"),
-                     dict(row, path="p" * 4097), dict(row, digestAlgorithm="MD5"), dict(row, cdhash="c" * 39),
-                     dict(row, cdhash="c" * 64), dict(row, cdhash="z" * 40)]
-        for changed in bad_rows:
-            with self.subTest(ticket=changed), self.assertRaises(module.Refused):
+        bad_rows = [(dict(row, arch=value), "architecture") for value in
+                    ("arm64e", "x86_64h", "ppc", "", "null", True, 386, [], {})]
+        bad_rows += [(dict(row, path=value), "path") for value in ("", "bad\npath", "p" * 4097, None, 1)]
+        bad_rows += [(dict(row, digestAlgorithm=value), "digest-algorithm") for value in ("MD5", None, [])]
+        bad_rows += [(dict(row, cdhash=value), "digest") for value in ("c" * 39, "c" * 64, "z" * 40, None, [])]
+        bad_rows += [(dict(row, extra=True), "shape"), (None, "shape"), ([], "shape")]
+        for key in ("path", "digestAlgorithm", "cdhash"):
+            changed = dict(row); del changed[key]; bad_rows.append((changed, "shape"))
+        for changed, reason in bad_rows:
+            with self.subTest(ticket=changed), self.assertRaisesRegex(module.Refused, "^notary-log-ticket-" + reason + "$"):
                 module.notary_log_data(body(dict(log, ticketContents=[changed])), submission, "d" * 64)
         for changed in (dict(log, ticketContents=[row] * 2049), dict(log, ticketContents={}),
                         dict(log, issues=[{}] * 2049), dict(log, extra=True), dict(log, logFormatVersion=True),
@@ -10431,7 +10387,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
         self.assertEqual(module.PYTHON_SUPPLIERS, TOOL.SIGNED_ORIGINAL_SUPPLIERS)
         self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove",
-                                       "same-package-noop", "update-baseline", "prepare-app-absence", "app-absence-restore"))
+                                       "same-package-noop", "update-baseline", "verify-xcode-setup-package",
+                                       "prepare-app-absence", "app-absence-restore"))
         for phase in module.PYTHON_PHASES:
             self.assertEqual(module.entrypoint(["inert", phase, "--target", module.INTEL_TARGET]), (phase, module.INTEL_TARGET))
         for phase in ("python-auto", "python-shipping ", "python-engineering-fallback"):
@@ -10627,9 +10584,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         for value in (display + b"CDHash=malformed\n", display + display, display + b"Signature=other\n", b"\xff",
                       display.replace(b"adhoc", b"configured"), display.replace(b"c" * 40, b"c" * 39), b"x" * 16385):
             with self.subTest(displayBytes=len(value)), self.assertRaises(module.Refused): module.credential_cdhash(value)
-        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove",
-                                       "same-package-noop", "update-baseline", "prepare-app-absence", "app-absence-restore"))
-        self.assertEqual(module.SIGNING_PHASES, ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover", "sign-applications-launcher"))
+        # Exercise each current signing entrypoint instead of duplicating its
+        # implementation enum; scope/credential refusal is checked separately.
         for phase in module.SIGNING_PHASES:
             for target in (module.ARM_TARGET, module.INTEL_TARGET):
                 self.assertEqual(module.entrypoint(["tool", phase, "--target", target]), (phase, target))
@@ -10805,9 +10761,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             with self.assertRaises(module.Refused):
                 module.package_signature_data(body, selection, certificates, removal_path)
 
-        # Only these five fixed archive purposes are accepted. The default ZIP
-        # parser behavior remains unchanged; null arch is NONAUTHORITY metadata
-        # for the exact selected PKG/DMG root, never a nested/null-field bypass.
+        # Fixed archive purposes remain bound; individual ticket annotations
+        # (including null architecture) never grant authority to nested content.
         submission = {"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "status": "Accepted"}
         for archive in (module.NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg"):
             body = TOOL.canonical(dict(submission, name=archive))
@@ -10822,15 +10777,14 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             facts = module.notary_log_data(TOOL.canonical(log), submission, "d" * 64, archive_name=archive)
             self.assertEqual((facts["sha256Compared"], facts["ticketRowCount"], facts["errorCount"]), (True, 1, 0))
             for changed in (dict(row, arch=True), dict(row, arch="null"), dict(row, digestAlgorithm="MD5"),
-                            dict(row, cdhash="c" * 64), dict(row, extra="unobserved"),
-                            dict(row, path=archive + "/nested", arch=None)):
+                            dict(row, cdhash="c" * 64), dict(row, extra="unobserved")):
                 with self.assertRaises(module.Refused):
                     module.notary_log_data(TOOL.canonical(dict(log, ticketContents=[changed])), submission, "d" * 64, archive_name=archive)
             if archive == module.NOTARY_ZIP_NAME:
                 self.assertEqual(module.notary_submit_data(body), submission)
                 self.assertEqual(module.notary_log_data(TOOL.canonical(log), submission, "d" * 64), facts)
-                with self.assertRaises(module.Refused):
-                    module.notary_log_data(TOOL.canonical(dict(log, ticketContents=[dict(row, arch=None)])), submission, "d" * 64)
+                nullable = module.notary_log_data(TOOL.canonical(dict(log, ticketContents=[dict(row, arch=None)])), submission, "d" * 64)
+                self.assertEqual(nullable["ticketRowCount"], 1)
         with self.assertRaises(module.Refused):
             module.notary_submit_data(TOOL.canonical(dict(submission, name="MobileReleaseKit.pkg")))
         for archive in ("OtherRelease.dmg", "../MobileReleaseKit.pkg", "MobileReleaseKit.pkg ", None):

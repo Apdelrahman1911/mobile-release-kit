@@ -575,18 +575,19 @@ def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP
     need(tickets is None or type(tickets) is list and len(tickets) <= 2048, "notary-log-tickets-bound")
     # Finite Apple ticket annotations include nested signed i386 slices;
     # they never grant native execution, target or provenance authority.
-    # An absent or null root/embedded Install.pkg container architecture is
-    # diagnostic metadata only,
-    # not a native slice, certificate, ticket or current-package authority.
+    # Apple creates tickets for nested containers as well as executable slices.
+    # An absent/null architecture is informational, regardless of container path.
+    # No ticket path/architecture grants IO, native eligibility or provenance;
+    # the exact original still requires independent signature/staple validation.
     for row in tickets or ():
         need(type(row) is dict and {"path", "digestAlgorithm", "cdhash"} <= set(row)
-             <= {"path", "digestAlgorithm", "cdhash", "arch"}
-             and notary_text(row["path"], 4096) and row["digestAlgorithm"] in ("SHA-1", "SHA-256")
-             and type(row["cdhash"]) is str and re.fullmatch(r"[0-9a-fA-F]{40}", row["cdhash"])
-             and (row.get("arch") in ("arm64", "x86_64", "i386") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg", "Prepare Xcode.pkg")
-                  and (row["path"] == archive_name
-                       or archive_name == "MobileReleaseKit.dmg" and row["path"] == "MobileReleaseKit.dmg/Install.pkg")
-                  and row.get("arch") is None), "notary-log-ticket-shape")
+             <= {"path", "digestAlgorithm", "cdhash", "arch"}, "notary-log-ticket-shape")
+        need(notary_text(row["path"], 4096), "notary-log-ticket-path")
+        need(row["digestAlgorithm"] in ("SHA-1", "SHA-256"), "notary-log-ticket-digest-algorithm")
+        need(type(row["cdhash"]) is str and re.fullmatch(r"[0-9a-fA-F]{40}", row["cdhash"]),
+             "notary-log-ticket-digest")
+        need(row.get("arch") is None or row.get("arch") in ("arm64", "x86_64", "i386"),
+             "notary-log-ticket-architecture")
     need(submission["status"] != "Accepted" or errors == 0, "notary-log-success-with-errors")
     return {"sha256Compared": "sha256" in value, "errorCount": errors, "warningCount": warnings,
             "ticketRowCount": len(tickets or ()), "logSha256": digest(body)}
@@ -1528,6 +1529,8 @@ _FAILURE_NOTARY_REASONS = (
     'notary-log-binding', 'notary-log-metadata', 'notary-log-status-code', 'notary-log-upload-sha256',
     'notary-log-issues-bound', 'notary-log-issue-shape', 'notary-log-issue-metadata', 'notary-log-issue-code',
     'notary-log-tickets-bound', 'notary-log-ticket-shape', 'notary-log-success-with-errors',
+    'notary-log-ticket-path', 'notary-log-ticket-digest-algorithm',
+    'notary-log-ticket-digest', 'notary-log-ticket-architecture',
     'notary-monotonic-clock', 'notary-group-deadline', 'notary-io-unknown', 'notary-fixed-role-order',
     'notary-child-timeout', 'notary-child-settlement-reserve', 'notary-key-role',
     'notary-authentication-not-retired', 'notary-final-stdout-short-write',
