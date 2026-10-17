@@ -86,12 +86,77 @@ class XcodeSetupProbeDiagnostics(unittest.TestCase):
                 self.assertEqual((work / "Failure.json").read_bytes(), raw)
 
 
+    def test_library_acl_wiring_uses_full_original_snapshot_and_preserves_absence_kind(self):
+        # Reuse the actual filesec implementation and existing inert ABI library;
+        # real held local FD conversion only, not a Darwin/native observation.
+        from types import SimpleNamespace
+        path = Path(__file__).resolve().with_name("test_macos_xcode_host_preparation.py")
+        spec = importlib.util.spec_from_file_location("probe_existing_acl_fixture", path)
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        host = fixture.M
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chmod(tmp, 0o755)
+            fd = os.open(tmp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                results = []
+                for options in ({}, {"present": 32}, {"changed_snapshot": True}, {"present": 32, "free_result": -1}):
+                    with self.subTest(options=options):
+                        library = fixture.ACLLibraryData(**options)
+                        library.expected = host.full9(os.fstat(fd))
+                        checks = []
+                        api = SimpleNamespace(library=library, deadline=SimpleNamespace(check=lambda: checks.append(True)))
+                        scope = {"api": api, "host": host, "os": os, "stat": stat}
+                        exec(_LIBRARY_FACTS, scope)
+                        if "changed_snapshot" in options or "free_result" in options:
+                            with self.assertRaises(AssertionError):
+                                scope["library_facts"](fd)
+                        else:
+                            result = scope["library_facts"](fd)
+                            self.assertEqual(result["inode"], os.fstat(fd).st_ino)
+                            self.assertEqual(result["acl"], {"kind": "empty-valid-acl" if options else "absent",
+                                                            "present": 32 if options else 0})
+                            self.assertEqual(checks, [True, True])
+                            results.append(result)
+                        self.assertIn(("fstatx_np", fd, 0x1000), library.calls)
+                        self.assertEqual(library.calls.count(("filesec_free", 0x1000)), 1)
+                self.assertNotEqual(results[0], results[1])  # Empty is not rewritten as absent.
+            finally:
+                os.close(fd)
+
+
+# The same short function is exercised by the inert wiring test and root observer.
+_LIBRARY_FACTS = r'''
+def library_facts(fd):
+    api.deadline.check()
+    info=os.fstat(fd)
+    assert stat.S_IMODE(info.st_mode)==0o755
+    # A NULL acl_get_fd_np/ENOENT is not proof of absence. Reuse the complete
+    # same-FD filesec snapshot/property/presence and consuming-free checks.
+    acl=host._acl_snapshot(api.library,fd,host.full9(info))
+    assert acl['empty'] and acl['filesecFreeReturned'], ('library-acl-snapshot',acl['phase'],acl['kind'])
+    assert acl['kind'] in ('absent','empty-valid-acl')
+    assert host.full9(os.fstat(fd))==host.full9(info)
+    api.deadline.check()
+    return {'device':info.st_dev,'inode':info.st_ino,'mode':stat.S_IMODE(info.st_mode),
+            'uid':info.st_uid,'gid':info.st_gid,'acl':{'kind':acl['kind'],'present':acl['present']}}
+'''
+
+
 # Fixed observer only, used on the disposable hosted machine. No source/dest
 # path parameter, root recursive deletion, or production preflight dispatch.
 _OBSERVER = r'''
-import base64,ctypes,hashlib,json,os,plistlib,stat,sys
+import base64,hashlib,importlib.util,json,os,plistlib,stat,sys,time
 assert os.getuid()==os.geteuid()==0
 assert len(sys.argv)==2 and sys.argv[1] in ('absent','inspect','remove-marker','finish')
+# Fixed checked source, never the preparation main/permission-changing route.
+spec=importlib.util.spec_from_file_location('probe_filesec',ACL_SOURCE)
+host=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(host)
+class OriginalDeadline:
+    def check(self):
+        assert time.monotonic()<DEADLINE, 'original probe deadline'
+api=host.DarwinAPI(OriginalDeadline(),TARGET)
 flags=os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK
 held=[]
 def identity(info):
@@ -106,29 +171,7 @@ def directory(parent,name,mode=None):
     named=os.stat(name,dir_fd=parent,follow_symlinks=False)
     assert identity(info)==identity(named)
     return fd,info
-def library_facts(fd):
-    info=os.fstat(fd)
-    assert stat.S_IMODE(info.st_mode)==0o755
-    libc=ctypes.CDLL('/usr/lib/libSystem.B.dylib',use_errno=True)
-    libc.acl_get_fd_np.argtypes=[ctypes.c_int,ctypes.c_int];libc.acl_get_fd_np.restype=ctypes.c_void_p
-    libc.acl_to_text.argtypes=[ctypes.c_void_p,ctypes.POINTER(ctypes.c_ssize_t)];libc.acl_to_text.restype=ctypes.c_void_p
-    libc.acl_free.argtypes=[ctypes.c_void_p];libc.acl_free.restype=ctypes.c_int
-    acl=libc.acl_get_fd_np(fd,0x100)
-    if not acl:raise OSError(ctypes.get_errno(),'library-acl-read')
-    text=None
-    try:
-        size=ctypes.c_ssize_t()
-        text=libc.acl_to_text(acl,ctypes.byref(size))
-        if not text:raise OSError(ctypes.get_errno(),'library-acl-text')
-        assert 0<=size.value<=16384
-        body=ctypes.string_at(text,size.value)
-        return {'device':info.st_dev,'inode':info.st_ino,'mode':stat.S_IMODE(info.st_mode),
-                'uid':info.st_uid,'gid':info.st_gid,'aclSha256':hashlib.sha256(body).hexdigest()}
-    finally:
-        failed=False
-        if text and libc.acl_free(text)!=0:failed=True
-        if libc.acl_free(acl)!=0:failed=True
-        assert not failed
+''' + _LIBRARY_FACTS + r'''
 
 def absent(parent,name):
     try: os.stat(name,dir_fd=parent,follow_symlinks=False)
@@ -292,13 +335,16 @@ class XcodeSetupPackageNative(unittest.TestCase):
         info = plistlib.dumps({"CFBundleIdentifier": PROBE_ID, "CFBundleName": "MRK Package Callback Probe",
                                "CFBundlePackageType": "BNDL", "CFBundleVersion": selection.package_version},
                               fmt=plistlib.FMT_XML, sort_keys=True)
-        observer = "ID="+repr(PROBE_ID)+"\nBUNDLE="+repr(PROBE_BUNDLE)+"\nINFO="+repr(info)+"\nMARKER="+repr(CALLBACK)+"\n"+_OBSERVER
+        observer = ("ID="+repr(PROBE_ID)+"\nBUNDLE="+repr(PROBE_BUNDLE)+"\nINFO="+repr(info)+"\nMARKER="+repr(CALLBACK)
+                    +"\nACL_SOURCE="+repr(str(repo / "desktop/tools/macos_xcode_host_preparation.py"))
+                    +"\nTARGET="+repr(target)+"\nDEADLINE="+repr(deadline)+"\n"+_OBSERVER)
         def observe(action):
             return json.loads(run(["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-B", "-c", observer, action], seconds=20))
         try:
             self.assertEqual(run(["/usr/bin/git", "-C", str(repo), "rev-parse", "HEAD"]).decode().strip(), source)
             run(["/usr/bin/git", "-C", str(repo), "diff", "--exit-code", "HEAD", "--",
-                 "desktop/macos-xcode-setup-inputs", "desktop/tools/stage_macos_installed.py", str(Path(__file__).relative_to(repo))])
+                 "desktop/macos-xcode-setup-inputs", "desktop/tools/stage_macos_installed.py",
+                 "desktop/tools/macos_xcode_host_preparation.py", str(Path(__file__).relative_to(repo))])
             initial = observe("absent")
             self.assertEqual(initial["state"], "absent")
             payload, scripts = work / "payload", work / "Scripts"
