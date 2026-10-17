@@ -8501,6 +8501,61 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             self.assertEqual(BUILD.digest((root / "supplier.tar").read_bytes()), result["sha256"])
             self.assertEqual(list(BUILD.tree_rows(supplier, maximum=1024, max_files=3).values()), rows)
 
+    def test_canonical_seal_sdk_selection_preserves_clt_version_and_path_guards(self):
+        # Actual prepare control flow; filesystem/tool/process admission is inert.
+        # This proves exact argv/refusal, not native protection or SDK usability.
+        name = "_mrk_canonical_seal_sdk_contract"
+        self.assertNotIn(name, sys.modules)
+        seal = load(name, "macos_github_seal_build.py")
+        try:
+            seal.B = BUILD
+            for target, selector in (("aarch64-apple-darwin", "macosx26.5"),
+                                     ("x86_64-apple-darwin", "macosx")):
+                for case, version, sdk, refusal in (
+                        ("selected", "26.5", seal.DEVELOPER / "SDKs/MacOSX26.5.sdk", "before-compiler-stop"),
+                        ("wrong-version", "27.0", seal.DEVELOPER / "SDKs/MacOSX26.5.sdk", "sdk-version"),
+                        ("escaped-root", "26.5", Path("/other/SDKs/MacOSX26.5.sdk"), "fixed-Apple-sdk")):
+                    with self.subTest(target=target, case=case):
+                        calls = []
+                        protected = []
+                        def protect(path, **options):
+                            protected.append((path, options["role"]))
+                            return str(path)
+                        def run(role, argv):
+                            if role == "compiler-version":
+                                raise BUILD.BuildRefused("before-compiler-stop")
+                            calls.append((role, argv))
+                            if role == "sdk-path":
+                                value = str(sdk)
+                            elif role == "sdk-version":
+                                value = version
+                            else:
+                                self.assertTrue(role.startswith("tool-path-"))
+                                value = str(seal.DEVELOPER / "usr/bin" / role.removeprefix("tool-path-"))
+                            return SimpleNamespace(stdout=(value + "\n").encode("ascii"), stderr=b"")
+                        receiver = SimpleNamespace(target=target, work=Path("/fixed-work"),
+                            private=Path("/fixed-work/private"), mkdir=lambda path: None,
+                            protected_tool=protect, python_tools=lambda: None,
+                            rust_inputs=lambda path: 0, toolchain={}, run=run)
+                        receiver.line = lambda result: seal.SealBuild.line(receiver, result)
+                        with patch.object(seal.Path, "resolve", lambda path, **options: path):
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "^" + refusal + "$"):
+                                seal.SealBuild.prepare(receiver)
+                        queries = [("sdk-path", ["--show-sdk-path"]),
+                                   ("sdk-version", ["--show-sdk-version"])]
+                        queries += [("tool-path-" + leaf, ["--find", leaf])
+                                    for leaf in ("clang", "ar", "ranlib", "ld", "nm")]
+                        count = 7 if case == "selected" else 2 if case == "wrong-version" else 1
+                        self.assertEqual(calls, [(role, ["/usr/bin/xcrun", "--sdk", selector, *suffix])
+                            for role, suffix in queries[:count]])
+                        settings = (sdk / "SDKSettings.json", "sdk-settings")
+                        self.assertEqual(settings in protected, case != "escaped-root")
+                        if case == "selected":
+                            for leaf in BUILD.SDK_INTERFACE_PATHS:
+                                self.assertIn((sdk / leaf, "sdk-interface"), protected)
+        finally:
+            self.assertIs(sys.modules.pop(name), seal)
+
     def test_canonical_seal_generated_alias_is_exact_and_never_source_authority(self):
         # Only a tiny generated-work alias is exercised. No source archive,
         # compiler, crypto, native child or complete build owner is entered.

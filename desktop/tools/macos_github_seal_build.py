@@ -1342,14 +1342,16 @@ class SealBuild:
         self.rustc = self.protected_tool(rust / "bin/rustc", role="rustc", system=False)
         self.cargo = self.protected_tool(rust / "bin/cargo", role="cargo", system=False)
         self.toolchain["rustInputBytes"] = self.rust_inputs(rust)
-        sdk = self.line(self.run("sdk-path", [self.xcrun, "--sdk", "macosx", "--show-sdk-path"]))
+        # ARM CLT27 retains this SDK26 original; never follow its newer default.
+        sdk_name = "macosx26.5" if self.target == "aarch64-apple-darwin" else "macosx"
+        sdk = self.line(self.run("sdk-path", [self.xcrun, "--sdk", sdk_name, "--show-sdk-path"]))
         self.sdk = Path(sdk).resolve(strict=True)
         B.need(self.sdk.is_relative_to(DEVELOPER / "SDKs") and " " not in str(self.sdk), "fixed-Apple-sdk")
         self.protected_tool(self.sdk / "SDKSettings.json", role="sdk-settings", executable=False)
-        sdk_version = self.line(self.run("sdk-version", [self.xcrun, "--sdk", "macosx", "--show-sdk-version"]))
+        sdk_version = self.line(self.run("sdk-version", [self.xcrun, "--sdk", sdk_name, "--show-sdk-version"]))
         B.need(re.fullmatch(r"26\.[0-9]+(?:\.[0-9]+)?", sdk_version), "sdk-version")
         for name in ("clang", "ar", "ranlib", "ld", "nm"):
-            path = self.line(self.run("tool-path-" + name, [self.xcrun, "--sdk", "macosx", "--find", name]))
+            path = self.line(self.run("tool-path-" + name, [self.xcrun, "--sdk", sdk_name, "--find", name]))
             setattr(self, name, self.protected_tool(Path(path), role=name))
         for name in B.SDK_INTERFACE_PATHS:
             self.protected_tool(self.sdk / name, role="sdk-interface", executable=False)
