@@ -71,6 +71,17 @@ jobs:
           /usr/bin/sudo -n -- "$MRK_SEAL_PYTHON" -I -S -B \
             desktop/tools/macos_github_seal_build.py --prepare-hosted-python "$MRK_SEAL_PYTHON"
 
+      - name: Prepare the pinned ARM Rust toolchain without moving stable
+        if: matrix.target == 'aarch64-apple-darwin' && github.ref == 'refs/heads/verify/desktop-macos-github-seal'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+            CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
+            /Users/runner/.cargo/bin/rustup toolchain install 1.98.1 \
+            --profile minimal --no-self-update
+
       - name: Fixed canonical static build and native tests
         id: build
         timeout-minutes: 18

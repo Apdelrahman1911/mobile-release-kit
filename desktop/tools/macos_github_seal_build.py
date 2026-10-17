@@ -1333,7 +1333,9 @@ class SealBuild:
         self.make = self.protected_tool(Path("/usr/bin/make"), role="make")
         self.sysctl = self.protected_tool(Path("/usr/sbin/sysctl"), role="sysctl")
         self.python = self.python_tools()
-        rust = Path("/Users/runner/.rustup/toolchains") / ("stable-" + self.target)
+        # Keep the reviewed ARM compiler when the hosted stable alias advances.
+        rust_channel = self.profile[2] if self.target == "aarch64-apple-darwin" else "stable"
+        rust = Path("/Users/runner/.rustup/toolchains") / (rust_channel + "-" + self.target)
         B.need(rust.resolve(strict=True) == rust, "direct-rust-root")
         self.rustc = self.protected_tool(rust / "bin/rustc", role="rustc", system=False)
         self.cargo = self.protected_tool(rust / "bin/cargo", role="cargo", system=False)
