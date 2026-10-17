@@ -102,7 +102,7 @@ jobs:
             --unshare-ipc --unshare-pid --unshare-net --unshare-uts --unshare-cgroup \
             --die-with-parent --new-session \
             --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
-            --symlink usr/bin /bin --proc /proc --dev /dev --tmpfs /tmp \
+            --symlink usr/bin /bin --proc /proc --dev /dev --perms 1777 --tmpfs /tmp \
             --ro-bind "$ruby_prefix" "$ruby_prefix" \
             --ro-bind "$WORK_ROOT/bootstrap" "$WORK_ROOT/bootstrap" \
             --ro-bind "$WORK_ROOT/gems" "$WORK_ROOT/gems" \
