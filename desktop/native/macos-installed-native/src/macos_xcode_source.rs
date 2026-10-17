@@ -103,15 +103,15 @@ impl Clock {
 ))]
 mod native {
     use super::*;
-    use mrk_macos_installed_native as abi;
+    use crate as abi;
     use nix::{libc, mount::MntFlags, sys::statfs};
     use sha2::{Digest, Sha256};
     use std::{
         ffi::{CStr, CString},
         os::fd::{AsRawFd, BorrowedFd},
     };
-    const PRE: &[u8] = include_bytes!("../../macos-xcode-setup-inputs/preinstall");
-    const POST: &[u8] = include_bytes!("../../macos-xcode-setup-inputs/setup/postinstall");
+    const PRE: &[u8] = include_bytes!("../../../macos-xcode-setup-inputs/preinstall");
+    const POST: &[u8] = include_bytes!("../../../macos-xcode-setup-inputs/setup/postinstall");
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct Identity {
         dev: libc::dev_t,
@@ -699,6 +699,19 @@ mod native {
         }
         pub(crate) fn image(&self) -> Result<BorrowedFd<'_>> {
             self.loan(self.image)
+        }
+        /// DATA from this admitted original image, not signer/package authority.
+        /// The caller still owes genuine SELF verification and final source POST.
+        pub(crate) fn image_sha256(&mut self) -> Result<[u8; 32]> {
+            if self.unknown {
+                return Err(Failure::Used);
+            }
+            self.loan(self.image)?;
+            self.point(false)?;
+            self.originals[self.image.ok_or(Failure::Changed)?]
+                .as_ref()
+                .and_then(|o| o.digest)
+                .ok_or(Failure::Changed)
         }
         pub(crate) fn executable(&self) -> Result<&str> {
             self.loan(self.image)?;

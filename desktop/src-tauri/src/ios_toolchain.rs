@@ -2,7 +2,9 @@
 //! Darwin Book; no PATH discovery, download, xcode-select or renderer tool path.
 pub(crate) const APPLICATIONS: &str = "/Applications";
 pub(crate) const STANDARD_APP: &str = "Xcode.app";
-pub(crate) const SDK_COMPONENTS: [&str; 5] = ["Platforms", "iPhoneOS.platform", "Developer", "SDKs", "iPhoneOS.sdk"];
+#[path = "../../native/macos-installed-native/src/ios_sdk_selection.rs"]
+mod sdk_selection;
+pub(crate) use sdk_selection::{SDK_COMPONENTS, sdk_sibling_target};
 
 /// The exact alias is only selection data. Concrete originals still require
 /// root ownership and independent native custody; an alias lends no authority.
@@ -17,21 +19,6 @@ pub(crate) fn sibling_target(value: &str) -> Option<&str> {
     (name != STANDARD_APP && name.len() <= 255 && name.starts_with("Xcode") && name.ends_with(".app")
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b)))
         .then_some(name)
-}
-
-/// Only a concrete decimal-version sibling of the fixed iPhoneOS.sdk alias.
-/// This is link DATA, not path following or SDK/tool execution authority.
-pub(crate) fn sdk_sibling_target(value: &str) -> Option<&str> {
-    if value.len() > 255 { return None; }
-    let version = value.strip_prefix("iPhoneOS")?.strip_suffix(".sdk")?;
-    for (index, part) in version.split('.').enumerate() {
-        if index >= 3 || part.is_empty() || part.len() > 3
-            || !part.bytes().all(|byte| byte.is_ascii_digit())
-            || (part.len() > 1 && part.starts_with('0')) || (index == 0 && part == "0") {
-            return None;
-        }
-    }
-    Some(value)
 }
 
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]

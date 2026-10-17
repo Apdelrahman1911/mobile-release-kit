@@ -152,7 +152,7 @@ fn receipt_identity(
 ))]
 mod native {
     use super::*;
-    use mrk_macos_installed_native as abi;
+    use crate as abi;
     use nix::{libc, mount::MntFlags, sys::statfs};
     use std::{
         ffi::CStr,
@@ -667,13 +667,21 @@ mod native {
                 if let Some(original) = self.originals[slot].as_mut() {
                     match original.owner {
                         Owner::Held(fd) => {
-                            original.owner = Owner::Unknown;
-                            let before = Instant::now() < self.finish;
-                            let closed = unsafe { libc::close(fd) } == 0;
-                            if closed {
-                                original.owner = Owner::Closed;
+                            // Never start another native call beyond the original
+                            // cleanup cutoff. Keep this known-held slot charged;
+                            // the supervising Parent owns eventual process exit.
+                            if Instant::now() >= self.finish {
+                                close_failed = true;
+                            } else {
+                                original.owner = Owner::Unknown;
+                                let closed = unsafe { libc::close(fd) } == 0;
+                                if closed {
+                                    original.owner = Owner::Closed;
+                                }
+                                // A late positive close is known, but cannot buy
+                                // timely finality or permit another close call.
+                                close_failed = !closed || Instant::now() >= self.finish;
                             }
-                            close_failed = !before || !closed || Instant::now() >= self.finish;
                         }
                         Owner::Closed => (),
                         _ => close_failed = true,

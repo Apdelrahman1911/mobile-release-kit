@@ -305,7 +305,7 @@ impl Lifecycle {
 mod native {
     use super::*;
     use crate::{macos_xcode_copy as copy, macos_xcode_setup as profile};
-    use mrk_macos_installed_native as abi;
+    use crate as abi;
     use nix::{libc, mount::MntFlags, sys::statfs};
     use std::{
         ffi::{CStr, CString},

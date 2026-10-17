@@ -10,7 +10,7 @@ use super::{
     macos_xcode_copy::{self as copy, Failure, Identity, Result, Work},
     macos_xcode_setup as profile,
 };
-use mrk_macos_installed_native as native;
+use crate as native;
 use nix::{libc, mount::MntFlags, sys::statfs};
 use sha2::{Digest, Sha256};
 use std::{

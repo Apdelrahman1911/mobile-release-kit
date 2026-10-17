@@ -1,3 +1,6 @@
+#[cfg(feature="xcode-setup")]
+#[path = "../../src-tauri/src/macos_build_release.rs"]
+mod macos_build_release;
 #[path = "../../src-tauri/src/macos_install_fixed_paths.rs"]
 mod installed_paths;
 #[path = "build_support/producer_selection.rs"]
@@ -262,7 +265,23 @@ fn main() {
     if resident_image { build.define("MRK_ANDROID_RESIDENT_IMAGE",Some("1")); }
     let app_path = format!("{:?}", installed_paths::PAYLOAD_APP);
     build.define("MRK_ANDROID_APP_PATH", Some(app_path.as_str()));
+    #[cfg(feature="xcode-setup")]
     if xcode_setup {
+        // Native crate version is not the product version. Reuse the SAME
+        // target-selected release DATA parser as the app build script; that
+        // script separately checks its actual Cargo package version.
+        let target = std::env::var("TARGET").expect("Cargo target");
+        let release = macos_build_release::BuildRelease::from_source(&target, "macos")
+            .expect("fixed setup build-release DATA");
+        release.check_projections(&release.package_version,
+            include_bytes!("../../src-tauri/tauri.conf.json"))
+            .expect("setup release and Tauri version differ");
+        println!("cargo:rustc-env=MRK_XCODE_SETUP_PACKAGE_VERSION={}",release.package_version);
+        for source in ["../../src-tauri/src/macos_build_release.rs", "../../src-tauri/src/macos_build_profile.rs",
+            "../../src-tauri/tauri.conf.json", "../../macos-installed-inputs/platforms-v1.json",
+            "../../macos-installed-inputs/build-release.json", "../../macos-installed-inputs/build-release-intel.json"] {
+            println!("cargo:rerun-if-changed={source}");
+        }
         // SAME existing immutable reviewed team/certificate/OIDs; only the fixed
         // code identifier changes. Never runtime input or a new signing profile.
         let (app, _) = android_requirements()

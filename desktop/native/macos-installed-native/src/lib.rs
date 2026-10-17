@@ -13,6 +13,32 @@ compile_error!("setup native graph must remain isolated");
 pub mod xcode_apple;
 #[cfg(feature="xcode-setup")]
 pub mod xcode_self;
+// Isolated setup owners: all FFI and descriptor custody stay behind this
+// native boundary; no setup entry is exposed until full lifecycle acceptance.
+#[cfg(feature="xcode-setup")]
+#[allow(dead_code)]
+mod macos_xcode_source;
+#[cfg(feature="xcode-setup")]
+#[allow(dead_code)]
+mod macos_xcode_carrier;
+#[cfg(feature="xcode-setup")]
+#[allow(dead_code)]
+mod macos_xcode_copy;
+#[cfg(feature="xcode-setup")]
+#[allow(dead_code)]
+mod macos_xcode_tree;
+#[cfg(feature="xcode-setup")]
+#[allow(dead_code)]
+mod macos_xcode_parent;
+#[cfg(feature="xcode-setup")]
+#[allow(dead_code)]
+mod macos_xcode_setup;
+#[cfg(feature="xcode-setup")]
+#[allow(dead_code)]
+mod macos_xcode_apple;
+#[cfg(feature="xcode-setup")]
+#[allow(dead_code)]
+mod macos_xcode_self;
 // Fixed nonshipping removal cut only. This feature has no native image role
 // and must not unify with an observer, helper, producer or E2 image graph.
 #[cfg(all(feature = "installed-removal-abrupt-fixture", any(
@@ -2987,3 +3013,11 @@ mod tests {
         assert!(panel_response(3).is_err());
     }
 }
+
+#[cfg(feature="xcode-setup")]
+#[allow(dead_code)]
+mod ios_sdk_selection;
+
+#[cfg(feature="xcode-setup")]
+#[allow(dead_code)]
+mod macos_xcode_facts;

@@ -11,7 +11,7 @@
 ))]
 
 use super::macos_xcode_setup as profile;
-use mrk_macos_installed_native as native;
+use crate as native;
 use nix::libc;
 use std::{
     ffi::CStr,
