@@ -72,13 +72,13 @@ jobs:
             test_metadata_images test_metadata_images_protocol test_release_version \
             test_workflow_edit_protocol test_workflow_recovery_engine \
             test_offline_preflight test_project_recovery test_macos_workflow_admission \
-            test_macos_android_ui_result test_local_release_intent test_local_store_intent test_local_store_receipt test_local_release_source test_local_release_candidate \
-            test_local_candidate_composition test_local_candidate_create test_local_output_freshness test_local_release_metadata test_local_release_journal
+            test_macos_android_ui_result test_local_release_intent test_local_store_intent test_local_ios_store_data test_local_ios_prepared_intent_data test_local_store_receipt test_local_release_source test_local_release_candidate \
+            test_local_candidate_composition test_local_candidate_create test_local_ios_candidate test_local_ios_candidate_protocol test_local_ios_candidate_facts test_local_output_freshness test_local_release_metadata test_local_release_journal
           # Own process for the finite private-input/stdio failure fixtures;
           # explicit module names avoid the historical native/package suite.
           python -B -m unittest \
             unit.test_desktop_store_preflight \
-            test_local_store_prepare test_local_store_execute test_local_store_reconcile test_local_recovery_settlement test_local_reconcile_review test_local_release_history test_local_candidate_inputs test_local_prepared_review test_local_execution_review \
+            test_local_store_prepare test_local_store_execute test_local_store_reconcile test_local_recovery_settlement test_local_reconcile_review test_local_release_history test_local_candidate_inputs test_local_ios_candidate_control test_local_ios_candidate_create test_local_ios_candidate_history test_local_prepared_review test_local_execution_review \
             unit.test_android_current_tools_macos unit.test_android_upload_validation \
             test_macos_store_consumer test_macos_store_paths \
             test_macos_candidate_consumer test_macos_candidate_bootstrap test_macos_candidate_ui \

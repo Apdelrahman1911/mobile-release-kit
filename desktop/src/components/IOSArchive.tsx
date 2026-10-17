@@ -49,11 +49,20 @@ function UnsignedArchiveDetails({ state, review = false }: { state: IOSArchiveSt
 export function IOSArchiveResultView({ state, operationProjectName = null }: { state: IOSArchiveState; operationProjectName?: string | null }) {
   const op = state.status?.operation;
   if (state.mode !== 'native' || !op || isIOSRecoveryOperation(op) || op.phase !== 'terminal' || op.outcome !== 'complete' || !op.result || !op.activity) return null;
-  const result = op.result, historical = state.historical || state.integrityFailed || state.nativeBlocked;
+  const candidate = op.result.scope === 'local-ios-candidate-inputs' ? op.result : null;
+  const result = op.result.scope === 'local-ios-candidate-inputs' ? op.result.build : op.result, historical = state.historical || state.integrityFailed || state.nativeBlocked;
   const signed = result.scope === 'local-signed-ios-artifact-validation';
   return <section className="offline-report" aria-label={signed ? 'Completed local signed iOS artifact validation' : 'Completed local unsigned iOS archive observation'}>
     <div className="inline-heading"><h3>{signed ? 'Local signed iOS IPA' : 'Unsigned iOS archive'} · {operationProjectName ?? op.context.projectId}</h3><Badge tone={historical ? 'warning' : 'info'}>{historical ? 'Historical / retained context' : 'This local artifact only'}</Badge></div>
     {signed ? <p><strong>Signed IPA exported and validated against this retained archive.</strong> Review the core identity, signer, profile, entitlements and correspondence findings below. This is not Store readiness, authenticated source provenance or permission to publish.</p> : <p><strong>Archive created and structurally checked — not a signed release.</strong> Signing/profile authenticity, IPA export, Store readiness and authenticated source provenance were not assessed.</p>}
+    {candidate && <div className="session-review"><h4>Retained local iOS candidate inputs</h4>
+      <p>Journal head {candidate.headSequence} · candidate <code>{candidate.candidateInputs.operationId}</code>.</p>
+      <p>Candidate manifest SHA-256 <code>{candidate.candidateInputs.candidateSha256}</code>.</p>
+      <p>Captured source commit <code>{candidate.candidateInputs.sourceCommit}</code> · tree <code>{candidate.candidateInputs.sourceTree}</code>.</p>
+      <ul>{candidate.candidateInputs.files.map((file) => <li key={file.fileName}><code>{file.fileName}</code> · {file.bytes} bytes · SHA-256 <code>{file.sha256}</code></li>)}</ul>
+      <p>Original archive inventory SHA-256 <code>{candidate.candidateInputs.archive.sha256}</code>. The archive and IPA were not copied into a second candidate tree.</p>
+      <p>This original Create completed its required owner and checkpoint closes. The retained summary does not prove files remain unchanged or establish prior Create finality on restart. Review current inputs in Local release history before any later action. No Store readiness, symbol upload or publication is granted.</p>
+    </div>}
     <UnsignedArchiveDetails state={state} />
     <p>Saved version {result.usedVersion.name} · build {result.usedVersion.build}. {result.entries} observed entries · {result.bytes} observed bytes.</p>
     <p>Retained location, relative to this run’s source project: <code>{result.archive}</code>.</p>
@@ -99,8 +108,12 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
     <fieldset className="session-context" disabled={state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}><legend>Choose this local operation</legend>
       <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={!signed} onChange={() => controller.setArchiveMode('unsigned')} /><span>Unsigned archive · no signing or IPA export</span></label>
       <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={signed} onChange={() => controller.setArchiveMode('signed')} /><span>Sign and export IPA · separately admitted local signing</span></label>
-      <p>Changing modes retires any unstarted review. Neither mode publishes or authenticates source provenance.</p>
+      <p>Changing modes or candidate retention retires any unstarted review. Ordinary archive/export does not authenticate source; candidate retention adds its separately verified source and local journal binding. None publishes.</p>
     </fieldset>
+    {signed && <label className="offline-ack"><input type="checkbox" checked={state.keepCandidate}
+      disabled={state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}
+      onChange={(event) => controller.setKeepCandidate(event.target.checked)} /><span>Keep local candidate inputs · bind the original archive/IPA to clean configured source, metadata and enrolled local history. No Store operation.</span></label>}
+    {signed && state.keepCandidate && <p className="save-note">Requires local release opt-in, the configured candidate branch and an intact enrolled Local release history. Create records pending intent before signing and retains evidence on interruption. It does not enroll, repair, delete or retry another operation.</p>}
     <h3 id={label}>Review the current saved inputs</h3>
     <p><strong>Selected source project:</strong> {projectName ?? 'No project selected'}. {onHelp && <HelpButton content={iosArchiveInputHelp} onHelp={onHelp} />}</p>
     <div className="notice notice-warning"><Icon name="shield" /><p>Only archive a project you trust. Xcode build phases and saved preparation code can run programs, modify files, read account files and use the network. This is not a sandbox. {signed ? 'Signed export borrows the assigned P12/password/profile and the admitted account signing state. No toolkit Store upload, provisioning download or symbol uploader is requested.' : 'The toolkit requests an unsigned archive and no credentials or Store operation; that does not constrain arbitrary project code.'} Cancel does not undo prior effects.</p></div>
@@ -130,7 +143,7 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
     <p className="save-note">{state.status ? iosArchiveAvailabilityText[iosArchiveModeAvailability(state.status, signed ? 'ios-signed-export' : 'ios-unsigned-archive')] : 'The separate native iOS archive capability has not been observed. Passive checks do not enable it.'}</p>
     {!consent && <><button type="button" className="button" data-mrk-ios-archive-action="review" disabled={prepareReason !== null} onClick={() => void controller.prepare()}>Review saved iOS inputs</button>{prepareReason && <p className="review-caution">{prepareReason}</p>}</>}
     {consent && consent.binding.selection && consent.binding.context.operation !== 'ios-local-recovery' && <div className="session-review" role="group" aria-label={signed ? 'Confirm this saved signed iOS export intent' : 'Confirm this saved unsigned iOS archive intent'}>
-      <h3>{signed ? 'Sign and export this saved app once?' : 'Create this unsigned archive once?'}</h3>
+      <h3>{state.keepCandidate ? 'Create and retain these local iOS candidate inputs once?' : signed ? 'Sign and export this saved app once?' : 'Create this unsigned archive once?'}</h3>
       <UnsignedArchiveDetails state={state} review />
       <p>Project <strong>{consent.binding.context.projectId}</strong> · <code>{consent.binding.selection.container}</code> · scheme <code>{consent.binding.selection.scheme}</code> · configuration <code>{consent.binding.selection.configuration}</code>.</p>
       <p>Bundle ID <code>{consent.binding.selection.bundleId}</code> · saved version <strong>{consent.binding.context.savedVersion.name}</strong> · build <strong>{consent.binding.context.savedVersion.build}</strong>.</p>
@@ -138,8 +151,8 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
       {consent.binding.context.signing && <p>Team <code>{consent.binding.context.signing.teamId}</code> · certificate <code>{consent.binding.context.signing.distributionCertificateSha256}</code> · {consent.binding.context.signing.assignments.length} exact session input revisions.</p>}
       <p>This review expires within five minutes of original preparation. Status does not renew it. Saving, refreshing, reading another version, changing mode, policy, assignments or selection, or leaving an unstarted review retires consent.</p>
       <label className="offline-ack"><input type="checkbox" data-mrk-ios-archive-action="acknowledge" checked={consent.acknowledged} onChange={(event) => controller.setAcknowledged(consent.operationId, consent.ownerGeneration, event.target.checked)} />
-        <span>{signed ? 'I trust this project and authorize one local signed archive, IPA export and paired validation with these exact saved inputs and assigned private records. Project code runs with my account access; signing state is borrowed. Cancellation is not rollback. Do not upload symbols, publish or promote this result.' : 'I trust this project and authorize one unsigned archive of these saved inputs. I understand that project code runs with my account access, my unsaved draft is not used, and cancellation is not rollback. Do not sign, export an IPA or publish a release.'}</span></label>
-      <div className="button-row"><button type="button" className="button" data-mrk-ios-archive-action="start" disabled={startReason !== null} onClick={() => void controller.start(consent.operationId, consent.ownerGeneration)}>{signed ? 'Sign and export local IPA' : 'Create unsigned archive'}</button></div>
+        <span>{state.keepCandidate ? 'I trust this project and authorize one local signed archive and IPA export, original source and metadata capture, and pending/ready local journal checkpoints for this candidate. Keep the original artifact namespace and evidence. Do not enroll, repair, upload symbols, call a Store, publish, or automatically retry after interruption.' : signed ? 'I trust this project and authorize one local signed archive, IPA export and paired validation with these exact saved inputs and assigned private records. Project code runs with my account access; signing state is borrowed. Cancellation is not rollback. Do not upload symbols, publish or promote this result.' : 'I trust this project and authorize one unsigned archive of these saved inputs. I understand that project code runs with my account access, my unsaved draft is not used, and cancellation is not rollback. Do not sign, export an IPA or publish a release.'}</span></label>
+      <div className="button-row"><button type="button" className="button" data-mrk-ios-archive-action="start" disabled={startReason !== null} onClick={() => void controller.start(consent.operationId, consent.ownerGeneration)}>{state.keepCandidate ? 'Create local iOS candidate inputs' : signed ? 'Sign and export local IPA' : 'Create unsigned archive'}</button></div>
       {startReason && <p className="review-caution">{startReason}</p>}
     </div>}
     {state.error && <ErrorNotice error={state.error} title="No new iOS archive outcome was confirmed" />}

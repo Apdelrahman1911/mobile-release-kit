@@ -29,7 +29,7 @@ impl SavedCommandOwner {
         ->Result<crate::local_release_history_owner::Admitted,BridgeError>{
         self.require_domain(SavedCommandDomain::LocalReleaseHistory)?;
         let consent=self.prepared_history_consent(&input.operation_id,&input.owner_generation)?;
-        if !input.consents(consent.action()){return Err(history_wire::invalid());}
+        if !input.consents(consent.consent()){return Err(history_wire::invalid());}
         let a=self.start(Start{operation_id:input.operation_id,owner_generation:input.owner_generation},admitted_at,registered,Availability::from_history(gate))?;
         Ok(crate::local_release_history_owner::Admitted::new(a.status.history()?,a.release))
     }
@@ -195,7 +195,7 @@ pub(super) struct State {route:Mutex<Route>,changed:Notify,
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     native:Mutex<native::State>,
 }
-enum PhaseEvent {Reconcile(reconcile_wire::Event),Execute(execute_wire::Event),Prepare(prepare_wire::Event),History(history_wire::Event),Candidate(android_wire::CandidateEvent)}
+enum PhaseEvent {IOSCandidate(ios_wire::CandidateEvent),Reconcile(reconcile_wire::Event),Execute(execute_wire::Event),Prepare(prepare_wire::Event),History(history_wire::Event),Candidate(android_wire::CandidateEvent)}
 struct Route {reconcile_head:Option<u32>,authorization:Option<String>,original:Option<(String,String)>,received:u8,completed:u8,pending:Option<PhaseEvent>,reply_writing:bool,failed:bool}
 impl Route {
     fn candidate_replies_complete(&self)->bool{
@@ -213,6 +213,7 @@ impl State {
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         native:Mutex::new(native::State::new()),}}
     pub(super) fn receive(&self,event:history_wire::Event)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::History(event),3)}
+    pub(super) fn receive_ios_candidate(&self,event:ios_wire::CandidateEvent)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::IOSCandidate(event),4)}
     pub(super) fn receive_candidate(&self,event:android_wire::CandidateEvent)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::Candidate(event),4)}
     pub(super) fn receive_prepare(&self,event:prepare_wire::Event)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::Prepare(event),4)}
     pub(super) fn receive_reconcile(&self,event:reconcile_wire::Event,settlement:bool)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::Reconcile(event),if settlement{3}else{2})}
@@ -266,13 +267,30 @@ pub(super) fn acquire_candidate_sources(owner:&Session,runtime:&Arc<Mutex<Androi
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
 pub(super) fn candidate_request(owner:&Session,context:&android_wire::Context,profile:android_wire::Profile,runtime:&VerifiedRuntime,
     binding:&android_wire::ToolchainBinding,signing:&android_wire::Content)->Result<Vec<u8>,BridgeError>{native::candidate_request(owner,context,profile,runtime,binding,signing)}
-#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 pub(super) fn candidate_child(owner:&Session,command:&mut Command)->Result<(),BridgeError>{native::child_command(owner,command)?;native::check_source(owner)}
 pub(super) fn candidate_complete(owner:&Session)->bool{
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
     {owner.history.route.try_lock().is_ok_and(|r|r.candidate_replies_complete())&&native::candidate_helpers_complete(owner)}
     #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
     {let _=owner;false}
+}
+pub(super) fn ios_candidate_decoder(owner:&Session,context:&ios_wire::Context)->Result<ios_wire::FrameDecoder,BridgeError>{
+    let route=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    let(nonce,digest)=route.original.as_ref().ok_or_else(BridgeError::protocol)?;
+    if route.failed||!owner.candidate_ios(){return Err(BridgeError::protocol());}
+    ios_wire::FrameDecoder::new_candidate(&owner.id,&owner.generation,context,nonce,digest)
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn acquire_ios_candidate_sources(owner:&Session,runtime:&Arc<Mutex<IOSNativeBooks>>)->Result<(),BridgeError>{
+    #[cfg(not(feature="macos-android-registration-helper"))]{native::acquire_ios_candidate_sources(owner,runtime)}
+    #[cfg(feature="macos-android-registration-helper")]{let _=(owner,runtime);Err(BridgeError::protocol())}
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn ios_candidate_request(owner:&Session,context:&ios_wire::Context,profile:ios_wire::Profile,runtime:&VerifiedRuntime,
+    binding:&ios_wire::ToolchainBinding,tools:&ios_wire::SigningToolBindings,signing:&ios_wire::Content)->Result<Vec<u8>,BridgeError>{
+    #[cfg(not(feature="macos-android-registration-helper"))]{native::ios_candidate_request(owner,context,profile,runtime,binding,tools,signing)}
+    #[cfg(feature="macos-android-registration-helper")]{let _=(owner,context,profile,runtime,binding,tools,signing);Err(BridgeError::protocol())}
 }
 pub(super) fn candidate_decoder(owner:&Session,context:&android_wire::Context,profile:android_wire::Profile,selected:&android_wire::MacToolchainSelection)->Result<android_wire::FrameDecoder,BridgeError>{
     let route=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
@@ -287,6 +305,12 @@ pub(super) enum CandidateWrite {Complete,Stopped}
 pub(super) async fn write_candidate(owner:&Arc<Session>,writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<CandidateWrite,BridgeError>{
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
     {native::write_candidate(owner,writer,material,header).await}
+    #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
+    {let _=(owner,writer,material,header);Err(BridgeError::protocol())}
+}
+pub(super) async fn write_ios_candidate(owner:&Arc<Session>,writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<CandidateWrite,BridgeError>{
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    {native::write_ios_candidate(owner,writer,material,header).await}
     #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
     {let _=(owner,writer,material,header);Err(BridgeError::protocol())}
 }
@@ -310,6 +334,14 @@ pub(super) async fn finish_candidate(inner:&Arc<Inner>,owner:&Arc<Session>)->boo
 #[cfg(test)]
 mod candidate_route_tests {
     use super::*;
+    #[test]
+    fn ios_candidate_phase_data_cannot_complete_four_original_replies(){
+        let mut route=Route{reconcile_head:None,authorization:None,original:Some(("a".repeat(32),"b".repeat(64))),received:4,completed:3,
+            pending:Some(PhaseEvent::IOSCandidate(ios_wire::CandidateEvent::InputsReady(ios_wire::CandidateHead{sequence:3,sha256:"c".repeat(64)}))),reply_writing:false,failed:false};
+        assert!(!route.candidate_replies_complete());route.pending=None;assert!(!route.candidate_replies_complete());
+        route.completed=4;route.reply_writing=true;assert!(!route.candidate_replies_complete());
+        route.reply_writing=false;assert!(route.candidate_replies_complete());route.failed=true;assert!(!route.candidate_replies_complete());
+    }
     #[test]
     fn local_candidate_create_phase_events_are_not_acknowledged_native_completion(){
         // DATA state predicate only: no owner/IO/helper/native receipt is minted.

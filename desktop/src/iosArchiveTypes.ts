@@ -9,16 +9,16 @@ export type IOSSigningKind = 'apple-p12' | 'apple-profile' | 'ios-firebase' | 'p
 export interface IOSSigningAssignment { kind: IOSSigningKind; recordId: string; recordRevision: number; contextRevision: number }
 export interface IOSSigningPolicy { teamId: string; distributionCertificateSha256: string; assignments: IOSSigningAssignment[] }
 export interface PrepareIOSBuild extends IOSArchiveSavedPair {
-  projectId: string; draftRevision: number; baselineGeneration: number; signing?: IOSSigningPolicy;
+  projectId: string; draftRevision: number; baselineGeneration: number; signing?: IOSSigningPolicy; action?: 'create';
 }
 export type IOSRecoveryIntent = { action: 'inspect'; session?: never } | { action: 'account' | 'project'; session: string };
 export interface PrepareIOSRecovery { projectId: string; recovery: IOSRecoveryIntent }
 export type PrepareIOSArchive = PrepareIOSBuild | PrepareIOSRecovery;
 export interface IOSArchiveIdentity { operationId: string; ownerGeneration: string }
 export type StartIOSArchive = IOSArchiveIdentity & (
-  { consentVersion: 'saved-ios-unsigned-archive-v1' | 'saved-ios-signed-export-v2'; confirmation?: never } |
+  { consentVersion: 'saved-ios-unsigned-archive-v1' | 'saved-ios-signed-export-v2' | 'local-ios-candidate-inputs-v1'; confirmation?: never } |
   { consentVersion: 'local-ios-recovery-v1'; confirmation?: 'account-signing-is-idle-and-restore-owned-state' | 'project-build-inputs-are-idle-and-restore-owned-state' });
-export interface IOSArchiveBuildContext extends PrepareIOSBuild { platform: 'ios'; operation: 'ios-unsigned-archive' | 'ios-signed-export' }
+export interface IOSArchiveBuildContext extends PrepareIOSBuild { platform: 'ios'; operation: 'ios-unsigned-archive' | 'ios-signed-export' | 'ios-candidate-inputs' }
 export interface IOSRecoveryContext extends PrepareIOSRecovery { platform: 'ios'; operation: 'ios-local-recovery' }
 export type IOSArchiveContext = IOSArchiveBuildContext | IOSRecoveryContext;
 export type IOSArchiveAvailability = 'available' | 'busy' | 'shutdown' | 'cleanup-unknown' | 'document-lost' |
@@ -32,7 +32,8 @@ export type IOSArchiveReason = 'none' | 'cancelled' | 'context-changed' | 'docum
   'toolchain-mismatch' | 'project-admission-refused' | 'command-failed' | 'command-incomplete' | 'artifact-missing' |
   'artifact-unsafe' | 'artifact-changed' | 'archive-validation-failed' | 'input-limit' | 'result-limit' | 'work-retained' | 'cleanup-unknown' |
   'signing-policy-required' | 'signing-input-missing' | 'signing-input-invalid' | 'signing-validation-failed' |
-  'account-admission-refused' | 'artifact-validation-failed' | 'symbols-upload-not-requested' | 'recovery-attention';
+  'account-admission-refused' | 'artifact-validation-failed' | 'symbols-upload-not-requested' | 'recovery-attention' |
+  'candidate-inputs-unavailable' | 'journal-unavailable' | 'recovery-required';
 export type IOSRecoveryStage = 'accepted' | 'recovering-account' | 'recovering-project' | 'disposing-work';
 export type IOSArchiveStage = 'accepted' | 'inputs-bound' | 'checking-xcode' | 'preparing' | 'archiving' | 'inspecting' |
   'disposing-snapshot' | 'disposing-work' | 'validating-signing' | 'materializing-signing' | 'exporting' | 'restoring-signing' | IOSRecoveryStage;
@@ -65,6 +66,18 @@ interface IOSArchiveResultBase {
 export type IOSArchiveResult = (IOSArchiveResultBase & { scope: 'local-unsigned-ios-archive-observation' }) |
   (IOSArchiveResultBase & { scope: 'local-signed-ios-artifact-validation'; ipa: string; ipaBytes: number;
     pairing: { nativePaths: number; nativeIdentities: number; presentSymbolSlices: number } });
+export interface IOSCandidateInputs {
+  operationId: string; candidateSha256: string; sourceCommit: string; sourceTree: string; bundleId: string;
+  version: { name: string; build: number };
+  files: { fileName: string; bytes: number; sha256: string }[];
+  archive: { directory: 'archive.xcarchive'; entries: number; bytes: number; sha256: string };
+  observation: 'current-bundle-only'; priorCreateFinality: 'not-established';
+}
+export interface IOSCandidateInputsResult {
+  schemaVersion: 1; scope: 'local-ios-candidate-inputs'; headSequence: number; candidateInputs: IOSCandidateInputs;
+  build: Extract<IOSArchiveResult, { scope: 'local-signed-ios-artifact-validation' }>;
+}
+export type IOSArchivePublishedResult = IOSArchiveResult | IOSCandidateInputsResult;
 export interface IOSArchiveDisposition {
   snapshot: 'not-created' | 'removed' | 'unknown'; work: 'not-created' | 'removed' | 'retained-work' | 'unknown';
   output: 'not-created' | 'retained-incomplete' | 'retained-local-result' | 'unknown'; relativeDirectory: string | null;
@@ -80,7 +93,7 @@ interface IOSArchiveOperationBase extends IOSArchiveIdentity {
 }
 export interface IOSArchiveBuildOperation extends IOSArchiveOperationBase {
   context: IOSArchiveBuildContext; activity: IOSArchiveActivity | null; disposition: IOSArchiveDisposition | null;
-  result: IOSArchiveResult | null; report?: never;
+  result: IOSArchivePublishedResult | null; report?: never;
 }
 export interface IOSRecoveryOperation extends IOSArchiveOperationBase {
   context: IOSRecoveryContext; activity: IOSRecoveryActivity | null; report: IOSRecoveryReport | null; disposition?: never; result?: never;

@@ -354,7 +354,7 @@ def _local_source(value: object) -> None:
     _need(_text(ref, 266) and ref.startswith("refs/heads/") and BRANCH_RE.fullmatch(ref[11:]) is not None)
 
 
-def _local_authority(value: object, *, purpose: str) -> dict:
+def _local_authority(value: object, *, purpose: str, platform: str = "android") -> dict:
     _keys(value, _LOCAL_AUTHORITY)
     _need(type(purpose) is str and purpose in {"prepare", "execute", "recover"}
         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
@@ -364,21 +364,23 @@ def _local_authority(value: object, *, purpose: str) -> dict:
     _need(_uuid(value["operationId"]) and _uuid(value["authorizationId"])
         and _sha(value["candidateSha256"]) and _sha(value["confirmationSha256"]))
     assignment = _keys(value["assignment"], {"kind", "recordId", "expectedRevision", "contextRevision"})
-    _need(assignment["kind"] == "google-service-account")
-    _assignments([assignment], "android")
+    _need(type(platform) is str and platform in {"android", "ios"}
+        and (platform != "ios" or purpose in {"prepare", "execute"})
+        and assignment["kind"] == ("google-service-account" if platform == "android" else "asc-p8"))
+    _assignments([assignment], platform)
     _need(value["intentSha256"] is None if purpose == "prepare" else _sha(value["intentSha256"]))
     return value
 
 
-def decode_local_authority(data: bytes, *, purpose: str) -> dict:
+def decode_local_authority(data: bytes, *, purpose: str, platform: str = "android") -> dict:
     """Decode a fixed-purpose identity record, NEVER a native authorization grant."""
     try:
-        return _local_authority(_local_json(data, MAX_LOCAL_AUTHORITY_BYTES), purpose=purpose)
+        return _local_authority(_local_json(data, MAX_LOCAL_AUTHORITY_BYTES), purpose=purpose, platform=platform)
     except (ValidationError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise LocalIntentError() from None
 
 
-def decode_local_operation_intent(data: bytes) -> dict:
+def decode_local_operation_intent(data: bytes, *, platform: str = "android") -> dict:
     """Return checked sealed local DATA. No IO, authentication or release consent."""
     from .provenance import verify_sealed, _validate_operation_intent_body
     try:
@@ -386,7 +388,8 @@ def decode_local_operation_intent(data: bytes) -> dict:
         intent = _keys(verify_sealed(document), _LOCAL_INTENT)
         _need(intent["documentType"] == "local-store-operation-intent"
             and type(intent["schemaVersion"]) is int and intent["schemaVersion"] == 1
-            and intent["origin"] == ORIGIN and intent["stage"] == "candidate" and intent["platform"] == "android")
+            and intent["origin"] == ORIGIN and intent["stage"] == "candidate"
+            and type(platform) is str and platform in {"android", "ios"} and intent["platform"] == platform)
         _local_project(intent["project"])
         _need(_uuid(intent["operationId"]) and _sha(intent["candidateSha256"]))
         for name in ("candidateSource", "operationSource"):
@@ -396,13 +399,27 @@ def decode_local_operation_intent(data: bytes) -> dict:
         _need(type(tooling["version"]) is str and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", tooling["version"])
             and type(tooling["commit"]) is str and re.fullmatch(r"[0-9a-f]{40}", tooling["commit"]))
         # The exact original shared platform/Store body, never a fake CI envelope.
-        _validate_operation_intent_body(intent, stage="candidate", platform="android")
-        _need(ANDROID_ID_RE.fullmatch(intent["application"]["id"]) is not None)
-        _need(len(intent["artifacts"]) == len(_LOCAL_FILES))
-        for row, (logical, filename, maximum) in zip(intent["artifacts"], _LOCAL_FILES):
+        _validate_operation_intent_body(intent, stage="candidate", platform=platform,
+            artifact_encoding="files" if platform == "android" else "local-ios-directory")
+        _need((ANDROID_ID_RE if platform == "android" else IOS_ID_RE).fullmatch(intent["application"]["id"]) is not None)
+        files = _LOCAL_FILES
+        if platform == "ios":
+            app = intent["application"]["storeAppId"]
+            _need(type(app) is str and re.fullmatch(r"[1-9][0-9]{0,19}", app) is not None
+                and intent["storePrecondition"]["snapshot"]["build"] is None)
+            _need(len(intent["artifacts"]) == 4)
+            ipa = intent["artifacts"][0]["fileName"]
+            _need(_path(ipa, basename=True) and len(ipa.encode("utf-8")) <= 255 and ipa.endswith(".ipa"))
+            files = (("ios-ipa", ipa, 4 << 30), *_LOCAL_FILES[1:])
+            archive = intent["artifacts"][-1]
+            from .provenance import _validate_local_ios_archive_artifact
+            _validate_local_ios_archive_artifact(archive)
+        else:
+            _need(len(intent["artifacts"]) == len(files))
+        for row, (logical, filename, maximum) in zip(intent["artifacts"], files):
             _need(row["logicalName"] == logical and row["fileName"] == filename
                 and _integer(row["size"], maximum))
-        prepared = _local_authority(intent["preparedBy"], purpose="prepare")
+        prepared = _local_authority(intent["preparedBy"], purpose="prepare", platform=platform)
         _need(all(prepared[k] == intent[k] for k in ("project", "operationId", "candidateSha256"))
             and prepared["source"] == intent["operationSource"]
             and prepared["confirmationSha256"] == hashlib.sha256(intent["confirmation"].encode("utf-8")).hexdigest())
@@ -411,7 +428,8 @@ def decode_local_operation_intent(data: bytes) -> dict:
         raise LocalIntentError() from None
 
 
-def validate_local_execution_authority(data: bytes, *, intent_data: bytes, purpose: str) -> dict:
+def validate_local_execution_authority(data: bytes, *, intent_data: bytes, purpose: str,
+                                       platform: str = "android") -> dict:
     """Compare local DATA with exact intent bytes; not one-use/dispatch permission.
 
     Fresh native consent, credential originals and journal/checkpoint custody are
@@ -419,8 +437,8 @@ def validate_local_execution_authority(data: bytes, *, intent_data: bytes, purpo
     """
     try:
         _need(type(purpose) is str and purpose in {"execute", "recover"})
-        intent = decode_local_operation_intent(intent_data)
-        value = decode_local_authority(data, purpose=purpose)
+        intent = decode_local_operation_intent(intent_data, platform=platform)
+        value = decode_local_authority(data, purpose=purpose, platform=platform)
         prepared = intent["preparedBy"]
         _need(value["intentSha256"] == intent["integrity"]["sha256"]
             and value["authorizationId"] != prepared["authorizationId"]

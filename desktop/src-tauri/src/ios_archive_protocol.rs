@@ -13,6 +13,9 @@ pub(crate) const PROTOCOL: &str = "mrk-ios-archive/1";
 pub(crate) const CONSENT: &str = "saved-ios-unsigned-archive-v1";
 pub(crate) const SIGNED_PROTOCOL: &str = "mrk-ios-archive/2";
 pub(crate) const SIGNED_CONSENT: &str = "saved-ios-signed-export-v2";
+pub(crate) const CANDIDATE_PROTOCOL: &str = "mrk-ios-candidate-inputs/1";
+pub(crate) const CANDIDATE_CONSENT: &str = "local-ios-candidate-inputs-v1";
+pub(crate) const CANDIDATE_MAX_FRAMES: usize = 17;
 pub(crate) const RECOVERY_PROTOCOL: &str = "mrk-ios-archive/3";
 pub(crate) const RECOVERY_CONSENT: &str = "local-ios-recovery-v1";
 pub(crate) const ACCOUNT_CONFIRMATION: &str = "account-signing-is-idle-and-restore-owned-state";
@@ -66,7 +69,11 @@ pub(crate) enum Operation {
     #[serde(rename = "ios-unsigned-archive")] IOSUnsignedArchive,
     #[serde(rename = "ios-signed-export")] IOSSignedExport,
     #[serde(rename = "ios-local-recovery")] IOSLocalRecovery,
+    #[serde(rename = "ios-candidate-inputs")] IOSCandidateInputs,
 }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CreateAction { Create }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum RecoveryAction { Inspect, Account, Project }
@@ -126,23 +133,36 @@ pub(crate) struct Context {
     pub(crate) signing: Option<SigningPolicy>,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub(crate) recovery: Option<RecoveryIntent>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub(crate) action: Option<CreateAction>,
 }
 impl Context { fn valid(&self) -> bool {
         if !valid_id(&self.project_id) { return false; }
         if self.recovery() { return self.draft_revision.is_none() && self.baseline_generation.is_none()
-            && self.saved_config.is_none() && self.saved_version.is_none() && self.signing.is_none()
+            && self.saved_config.is_none() && self.saved_version.is_none() && self.signing.is_none() && self.action.is_none()
             && self.recovery.as_ref().is_some_and(RecoveryIntent::valid); }
-        self.recovery.is_none() && self.draft_revision.is_some_and(|v| v < u32::MAX)
+        self.candidate() == (self.action == Some(CreateAction::Create)) && self.recovery.is_none() && self.draft_revision.is_some_and(|v| v < u32::MAX)
             && self.baseline_generation.is_some_and(|v| v < u32::MAX)
             && self.saved_config.as_ref().is_some_and(|v| v.valid(512 * 1024))
             && self.saved_version.as_ref().is_some_and(SavedVersion::valid)
             && self.signed() == self.signing.is_some() && self.signing.as_ref().is_none_or(SigningPolicy::valid)
     }
-    pub(crate) fn signed(&self) -> bool { self.operation == Operation::IOSSignedExport }
+    pub(crate) fn retained_heap_bytes(&self)->Option<usize>{
+        let mut bytes=self.project_id.capacity();
+        if let Some(c)=&self.saved_config{bytes=bytes.checked_add(c.sha256.capacity())?;}
+        if let Some(v)=&self.saved_version{bytes=bytes.checked_add(v.source.capacity())?.checked_add(v.sha256.capacity())?.checked_add(v.name.capacity())?;}
+        if let Some(policy)=&self.signing{bytes=bytes.checked_add(policy.team_id.capacity())?.checked_add(policy.distribution_certificate_sha256.capacity())?
+            .checked_add(policy.assignments.capacity().checked_mul(std::mem::size_of::<SigningAssignment>())?)?;
+            for a in &policy.assignments{bytes=bytes.checked_add(a.kind.capacity())?.checked_add(a.record_id.capacity())?;}}
+        if let Some(r)=&self.recovery{if let Some(session)=&r.session{bytes=bytes.checked_add(session.capacity())?;}}
+        Some(bytes)
+    }
+    pub(crate) fn candidate(&self) -> bool { self.operation == Operation::IOSCandidateInputs }
+    pub(crate) fn signed(&self) -> bool { matches!(self.operation, Operation::IOSSignedExport | Operation::IOSCandidateInputs) }
     pub(crate) fn recovery(&self) -> bool { self.operation == Operation::IOSLocalRecovery }
     pub(crate) fn account_lifecycle(&self) -> bool { self.signed() || self.recovery() }
-    pub(crate) fn frame_limit(&self) -> usize { if self.recovery() { RECOVERY_MAX_FRAMES } else if self.signed() { SIGNED_MAX_FRAMES } else { MAX_FRAMES } }
-    fn protocol(&self) -> &'static str { if self.recovery() { RECOVERY_PROTOCOL } else if self.signed() { SIGNED_PROTOCOL } else { PROTOCOL } }
+    pub(crate) fn frame_limit(&self) -> usize { if self.candidate() { CANDIDATE_MAX_FRAMES } else if self.recovery() { RECOVERY_MAX_FRAMES } else if self.signed() { SIGNED_MAX_FRAMES } else { MAX_FRAMES } }
+    fn protocol(&self) -> &'static str { if self.candidate() { CANDIDATE_PROTOCOL } else if self.recovery() { RECOVERY_PROTOCOL } else if self.signed() { SIGNED_PROTOCOL } else { PROTOCOL } }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -160,12 +180,14 @@ pub(crate) struct Prepare {
     pub(crate) signing: Option<SigningPolicy>,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub(crate) recovery: Option<RecoveryIntent>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub(crate) action: Option<CreateAction>,
 }
 impl Prepare { pub(crate) fn context(&self) -> Context { Context { project_id: self.project_id.clone(),
     draft_revision: self.draft_revision, baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
     saved_version: self.saved_version.clone(), platform: Platform::Ios,
-    operation: if self.recovery.is_some() { Operation::IOSLocalRecovery } else if self.signing.is_some() { Operation::IOSSignedExport } else { Operation::IOSUnsignedArchive },
-    signing: self.signing.clone(), recovery: self.recovery.clone() } } }
+    operation: if self.action.is_some() { Operation::IOSCandidateInputs } else if self.recovery.is_some() { Operation::IOSLocalRecovery } else if self.signing.is_some() { Operation::IOSSignedExport } else { Operation::IOSUnsignedArchive },
+    signing: self.signing.clone(), recovery: self.recovery.clone(), action:self.action } } }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Start { pub(crate) operation_id: String, pub(crate) owner_generation: String, consent_version: String,
@@ -177,7 +199,7 @@ impl Start { pub(crate) fn consent_matches(&self, context: &Context) -> bool {
     if let Some(recovery) = &context.recovery { return self.consent_version == RECOVERY_CONSENT && self.confirmation.as_deref() == match recovery.action {
         RecoveryAction::Inspect => None, RecoveryAction::Account => Some(ACCOUNT_CONFIRMATION), RecoveryAction::Project => Some(PROJECT_CONFIRMATION),
     }; }
-    self.confirmation.is_none() && self.consent_version == (if context.signed() { SIGNED_CONSENT } else { CONSENT })
+    self.confirmation.is_none() && self.consent_version == (if context.candidate() { CANDIDATE_CONSENT } else if context.signed() { SIGNED_CONSENT } else { CONSENT })
 } }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -191,7 +213,7 @@ pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     let input = Start::deserialize(value).map_err(|_| invalid())?;
     if !token(&input.operation_id) || !token(&input.owner_generation)
-        || ![CONSENT, SIGNED_CONSENT, RECOVERY_CONSENT].contains(&input.consent_version.as_str())
+        || ![CONSENT, SIGNED_CONSENT, CANDIDATE_CONSENT, RECOVERY_CONSENT].contains(&input.consent_version.as_str())
         || input.confirmation.as_deref().is_some_and(|confirmation| input.consent_version != RECOVERY_CONSENT
             || ![ACCOUNT_CONFIRMATION, PROJECT_CONFIRMATION].contains(&confirmation)) { return Err(invalid()); }
     Ok(input)
@@ -274,18 +296,36 @@ impl ToolchainBinding {
 pub(crate) fn request(operation: &str, generation: &str, context: &Context, profile: Profile,
     project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding) -> Result<Vec<u8>, BridgeError> {
     if context.account_lifecycle() { return Err(invalid()); }
-    request_data(operation, generation, context, profile, project, cwd, toolchain, None)
+    request_data(operation, generation, context, profile, project, cwd, toolchain, None, None)
 }
 pub(crate) fn request_signed(operation: &str, generation: &str, context: &Context, profile: Profile,
     project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding, signing_tools: &SigningToolBindings,
     signing_context: &Content) -> Result<Vec<u8>, BridgeError> {
-    if !context.signed() { return Err(invalid()); }
-    request_data(operation, generation, context, profile, project, cwd, toolchain, Some((signing_tools, signing_context)))
+    if !context.signed() || context.candidate() { return Err(invalid()); }
+    request_data(operation, generation, context, profile, project, cwd, toolchain, Some((signing_tools, signing_context)), None)
+}
+#[derive(Clone,Debug,Serialize)]
+#[serde(rename_all="camelCase")]
+pub(crate) struct CandidateNative {pub(crate) home:String,pub(crate) lease_fd:u32,pub(crate) nonce:String,pub(crate) clock:CandidateClock}
+#[derive(Clone,Debug,Serialize)]
+#[serde(rename_all="camelCase")]
+pub(crate) struct CandidateClock {pub(crate) work_end_ns:String,pub(crate) cleanup_end_ns:String,pub(crate) hard_end_ns:String}
+impl CandidateNative {fn valid(&self)->bool {
+    let endpoint=|v:&str|->Option<u64>{if v.is_empty()||v.len()>20||v.starts_with('0')||!v.bytes().all(|b|b.is_ascii_digit()){None}else{v.parse().ok()}};
+    let(Some(w),Some(f),Some(h))=(endpoint(&self.clock.work_end_ns),endpoint(&self.clock.cleanup_end_ns),endpoint(&self.clock.hard_end_ns))else{return false;};
+    native_path(Path::new(&self.home)).is_some()&&(3..=255).contains(&self.lease_fd)&&token(&self.nonce)&&self.nonce!="0".repeat(32)
+        &&w<=f&&f<=h&&f-w<=120_000_000_000&&h-f<=10_000_000_000
+}}
+pub(crate) fn request_candidate(operation:&str,generation:&str,context:&Context,profile:Profile,project:&RegisteredRoot,cwd:&Path,
+    toolchain:&ToolchainBinding,signing_tools:&SigningToolBindings,signing_context:&Content,candidate:&CandidateNative)->Result<Vec<u8>,BridgeError>{
+    if !context.candidate(){return Err(invalid());}
+    request_data(operation,generation,context,profile,project,cwd,toolchain,Some((signing_tools,signing_context)),Some(candidate))
 }
 fn request_data(operation: &str, generation: &str, context: &Context, profile: Profile,
     project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding,
-    signing: Option<(&SigningToolBindings, &Content)>) -> Result<Vec<u8>, BridgeError> {
+    signing: Option<(&SigningToolBindings, &Content)>,candidate:Option<&CandidateNative>) -> Result<Vec<u8>, BridgeError> {
     if !token(operation) || !token(generation) || !context.valid() || context.recovery() || !toolchain.matches_profile(profile)
+        || context.candidate()!=candidate.is_some()||candidate.is_some_and(|c|!c.valid())||context.candidate()&&!crate::android_build_protocol::candidate_id(operation)
         || context.signed() != signing.is_some()
         || signing.is_some_and(|(tools, comparison)| !tools.valid() || !comparison.valid(512 * 1024)) { return Err(invalid()); }
     let observed = project.identity.posix().map_err(|_| invalid())?.preflight_identity();
@@ -298,6 +338,7 @@ fn request_data(operation: &str, generation: &str, context: &Context, profile: P
         data["native"]["signingTools"] = json!(tools);
         data["native"]["signingContext"] = json!(comparison);
     }
+    if let Some(candidate)=candidate {data["native"]["candidateHistory"]=json!(candidate);}
     if !structure(&data) { return Err(invalid()); }
     let mut bytes = bounded(&data, REQUEST_LIMIT - 1).map_err(|_| invalid())?; bytes.push(b'\n'); Ok(bytes)
 }
@@ -327,6 +368,7 @@ pub(crate) enum Reason {
     PlatformDisabled, ContainerRequired, SchemeRequired, ContainerMissing, ToolchainUnavailable, ToolchainMismatch,
     ProjectAdmissionRefused, CommandFailed, CommandIncomplete, ArtifactMissing, ArtifactUnsafe, ArtifactChanged,
     ArchiveValidationFailed, InputLimit, ResultLimit, WorkRetained, CleanupUnknown,
+    CandidateInputsUnavailable, JournalUnavailable, RecoveryRequired,
     SigningPolicyRequired, SigningInputMissing, SigningInputInvalid, SigningValidationFailed,
     AccountAdmissionRefused, ArtifactValidationFailed, SymbolsUploadNotRequested, RecoveryAttention,
 }
@@ -498,6 +540,69 @@ impl ResultData { fn valid(&self, context: &Context, operation: &str) -> bool {
                 && self.pairing.as_ref().is_some_and(Pairing::valid)
         } else { self.limitations == LIMITATIONS && self.ipa.is_none() && self.ipa_bytes.is_none() && self.pairing.is_none() }
 } }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct CandidateFile { pub(crate) file_name:String,pub(crate) bytes:u64,pub(crate) sha256:String }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CandidateArchive {pub(crate) directory:String,pub(crate) entries:u32,pub(crate) bytes:u64,pub(crate) sha256:String}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CandidateVersion {pub(crate) name:String,pub(crate) build:u32}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct CandidateInputs {
+    pub(crate) operation_id:String,pub(crate) candidate_sha256:String,pub(crate) source_commit:String,pub(crate) source_tree:String,
+    pub(crate) bundle_id:String,pub(crate) version:CandidateVersion,pub(crate) files:Vec<CandidateFile>,pub(crate) archive:CandidateArchive,
+    pub(crate) observation:String,pub(crate) prior_create_finality:String,
+}
+fn hex(value:&str,len:usize)->bool {value.len()==len&&value.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))}
+impl CandidateInputs {
+    pub(crate) fn valid(&self,operation:&str)->bool {
+        crate::android_build_protocol::candidate_uuid(operation).as_deref()==Some(self.operation_id.as_str())
+            &&hex(&self.candidate_sha256,64)&&hex(&self.source_commit,40)&&hex(&self.source_tree,40)
+            &&self.bundle_id.len()<=255&&self.bundle_id.split('.').count()>=2
+            &&self.bundle_id.split('.').all(|part|part.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                &&part.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'))
+            &&!self.version.name.is_empty()&&self.version.name.len()<=64
+            &&self.version.name.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'.'|b'+'|b'-'))
+            &&(1..=2_100_000_000).contains(&self.version.build)
+            &&self.files.len()==3&&self.files.iter().all(|f|hex(&f.sha256,64)&&f.bytes>0)
+            &&self.files[0].file_name.strip_prefix("export/").is_some_and(|name| !name.is_empty()&&name.len()<=255&&name.ends_with(".ipa")
+                &&!name.chars().any(|c|c<'\u{20}'||c=='\u{7f}'||matches!(c,'/'|'\\'|':')))
+            &&self.files[0].bytes<=4*1024u64.pow(3)
+            &&self.files[1].file_name=="store-metadata.zip"&&self.files[1].bytes<=512*1024u64.pow(2)
+            &&self.files[2].file_name=="validation-report.json"&&self.files[2].bytes<=65536
+            &&self.archive.directory=="archive.xcarchive"&&(1..=100_000).contains(&self.archive.entries)
+            &&(1..=8*1024u64.pow(3)).contains(&self.archive.bytes)&&hex(&self.archive.sha256,64)
+            &&self.observation=="current-bundle-only"&&self.prior_create_finality=="not-established"
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct CandidateResult {schema_version:u32,scope:String,pub(crate) head_sequence:u32,
+    pub(crate) candidate_inputs:CandidateInputs,build:ResultData}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum ResultValue { Candidate(CandidateResult),Build(ResultData) }
+impl ResultValue {
+    pub(crate) fn ordinary_build(&self)->Option<&ResultData>{match self{Self::Build(v)=>Some(v),Self::Candidate(_)=>None}}
+    fn valid(&self,context:&Context,operation:&str)->bool {
+        match self {
+            Self::Build(build)=>!context.candidate()&&build.valid(context,operation),
+            Self::Candidate(v)=>context.candidate()&&v.schema_version==1&&v.scope=="local-ios-candidate-inputs"
+                &&(3..=513).contains(&v.head_sequence)&&v.candidate_inputs.valid(operation)&&v.build.valid(context,operation)
+                &&v.candidate_inputs.version.name==v.build.used_version.name&&v.candidate_inputs.version.build==v.build.used_version.build
+                &&v.candidate_inputs.archive.entries==v.build.entries&&v.candidate_inputs.archive.bytes==v.build.bytes
+                &&v.build.ipa.as_deref()==Some(format!(".mobile-release/desktop-ios-archive/{operation}/{}",v.candidate_inputs.files[0].file_name).as_str())
+                &&v.build.ipa_bytes==Some(v.candidate_inputs.files[0].bytes),
+        }
+    }
+    fn matches_activity(&self,activity:&Activity)->bool{match self{
+        Self::Build(_)=>true,Self::Candidate(v)=>activity.build.as_ref().and_then(|b|b.selection.as_ref())
+            .is_some_and(|s|s.bundle_id==v.candidate_inputs.bundle_id),
+    }}
+}
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum RecoveryState { Idle, Pending, Busy, Conflict, ManualRequired, Recovered, RecoveredWithConflict, Absent, CleanupOnly, NotInspected }
@@ -563,15 +668,28 @@ pub(crate) struct Lifetime {
     pub(crate) build_inputs_closed: Option<bool>,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     pub(crate) material_retired: Option<bool>,
+    #[serde(default, deserialize_with="present", skip_serializing_if="Option::is_none")]
+    pub(crate) source_commands:Option<u32>,
+    #[serde(default, deserialize_with="present", skip_serializing_if="Option::is_none")]
+    pub(crate) candidate_inputs_closed:Option<bool>,
+    #[serde(default, deserialize_with="present", skip_serializing_if="Option::is_none")]
+    pub(crate) journal_closed:Option<bool>,
+    #[serde(default, deserialize_with="present", skip_serializing_if="Option::is_none")]
+    pub(crate) lease_closed:Option<bool>,
 }
 impl Lifetime { fn valid(&self, context: &Context) -> bool {
-        self.commands <= (if context.recovery() { RECOVERY_COMMAND_LIMIT } else if context.signed() { SIGNED_COMMAND_LIMIT } else { 4 })
+        self.source_commands.is_some()==context.candidate()
+            &&[self.candidate_inputs_closed,self.journal_closed,self.lease_closed].iter().all(|f|f.is_some()==context.candidate())
+            &&self.source_commands.is_none_or(|n|n<=8&&n<=self.commands&&self.commands-n<=SIGNED_COMMAND_LIMIT)
+            &&self.commands <= (if context.candidate(){SIGNED_COMMAND_LIMIT+8}else if context.recovery() { RECOVERY_COMMAND_LIMIT } else if context.signed() { SIGNED_COMMAND_LIMIT } else { 4 })
             && self.profile_calls <= (if context.signed() { SIGNED_PROFILE_LIMIT } else { 0 })
             && [self.signing_closed, self.build_inputs_closed, self.material_retired].iter().all(|flag| flag.is_some() == context.account_lifecycle())
     }
     pub(crate) fn settled(&self) -> bool {
         let account = self.signing_closed.is_some();
-        self.commands <= (if account { SIGNED_COMMAND_LIMIT } else { 4 }) && self.profile_calls <= (if account { SIGNED_PROFILE_LIMIT } else { 0 })
+        (if let Some(source)=self.source_commands {source<=8&&source<=self.commands&&self.commands-source<=SIGNED_COMMAND_LIMIT}
+            else {self.commands <= (if account { SIGNED_COMMAND_LIMIT } else { 4 })})
+        &&[self.candidate_inputs_closed,self.journal_closed,self.lease_closed].iter().all(|f|if self.source_commands.is_some(){*f==Some(true)}else{f.is_none()}) && self.profile_calls <= (if account { SIGNED_PROFILE_LIMIT } else { 0 })
         && self.complete && !self.fatal && self.contained && self.command_dispatched.is_some()
         && self.input_closed && self.handlers_restored && self.invocation_closed && self.snapshot_closed && self.files_closed && self.namespace_closed
         && [self.signing_closed, self.build_inputs_closed, self.material_retired].iter().all(|flag| if account { *flag == Some(true) } else { flag.is_none() }) }
@@ -579,7 +697,7 @@ impl Lifetime { fn valid(&self, context: &Context) -> bool {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "TerminalWire")]
 pub(crate) struct Terminal { schema_version: u32, pub(crate) context: Context, pub(crate) outcome: Outcome, pub(crate) reason: Reason,
-    pub(crate) activity: Activity, pub(crate) disposition: Option<Disposition>, pub(crate) result: Option<ResultData>,
+    pub(crate) activity: Activity, pub(crate) disposition: Option<Disposition>, pub(crate) result: Option<ResultValue>,
     pub(crate) report: Option<RecoveryReport>, pub(crate) lifetime: Lifetime }
 #[derive(Deserialize, Serialize)]
 #[serde(untagged)]
@@ -587,7 +705,7 @@ enum TerminalWire { Archive(ArchiveTerminalWire), Recovery(RecoveryTerminalWire)
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ArchiveTerminalWire { schema_version: u32, context: Context, outcome: Outcome, reason: Reason,
-    activity: Activity, disposition: Disposition, #[serde(deserialize_with = "nullable")] result: Option<ResultData>, lifetime: Lifetime }
+    activity: Activity, disposition: Disposition, #[serde(deserialize_with = "nullable")] result: Option<ResultValue>, lifetime: Lifetime }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RecoveryTerminalWire { schema_version: u32, context: Context, outcome: Outcome, reason: Reason,
@@ -620,14 +738,14 @@ impl Terminal {
             else { self.report.is_none() && self.disposition.as_ref().is_some_and(Disposition::known) }) }
     fn valid(&self, context: &Context, operation: &str) -> bool {
         if self.schema_version != 1 || &self.context != context || !context.valid() || !self.activity.valid(context)
-            || !self.lifetime.valid(context) { return false; }
+            || !self.lifetime.valid(context) || !context.candidate()&&matches!(self.reason,Reason::JournalUnavailable|Reason::RecoveryRequired|Reason::CandidateInputsUnavailable) { return false; }
         if context.recovery() {
             if self.disposition.is_some() || self.result.is_some()
                 || self.report.as_ref().is_some_and(|report| !self.settled() || !report.valid(context)) { return false; }
         } else if self.report.is_some() || !self.disposition.as_ref().is_some_and(|d| d.valid(operation)) { return false; }
         let life = &self.lifetime;
         let commands = self.activity.build.as_ref().map_or_else(Vec::new, |build| build.commands.all());
-        if commands.iter().filter(|c| c.outcome == CommandOutcome::Exited).count() > life.commands as usize { return false; }
+        if commands.iter().filter(|c| c.outcome == CommandOutcome::Exited).count() > (life.commands-life.source_commands.unwrap_or(0)) as usize { return false; }
         match life.command_dispatched {
             Some(false) if life.commands > 1 || commands.iter().any(|c| !matches!(c.outcome, CommandOutcome::NotDispatched | CommandOutcome::NotConfigured)) => return false,
             Some(true) if life.commands == 0 => return false, _ => {},
@@ -637,8 +755,9 @@ impl Terminal {
             if context.recovery() { return self.report.is_some(); }
             let roles = if self.activity.build.as_ref().and_then(|b| b.selection.as_ref()).is_some_and(|s| s.preparation_configured) { 4 } else { 3 };
             return self.disposition.as_ref().is_some_and(Disposition::complete)
-                && (if context.signed() { life.commands >= roles + 1 && life.profile_calls >= 3 } else { life.commands == roles })
-                && self.result.as_ref().is_some_and(|r| r.valid(context, operation));
+                && (if context.candidate(){life.source_commands==Some(8)&&life.commands>=8+roles+1&&life.profile_calls>=3}
+                    else if context.signed() { life.commands >= roles + 1 && life.profile_calls >= 3 } else { life.commands == roles })
+                && self.result.as_ref().is_some_and(|r| r.valid(context, operation)&&r.matches_activity(&self.activity));
         }
         if self.result.is_some() || self.reason == Reason::None || self.disposition.as_ref().is_some_and(|d| d.output == OutputDisposition::RetainedLocalResult)
             || (self.outcome == Outcome::Unknown) != (self.reason == Reason::CleanupUnknown)
@@ -653,7 +772,7 @@ impl Terminal {
 pub(crate) fn terminal(value: &Value, context: &Context, operation: &str) -> Result<Terminal, BridgeError> {
     if !structure(value) { return Err(protocol_error()); }
     let result = Terminal::deserialize(value).map_err(|_| protocol_error())?;
-    if !token(operation) || !result.valid(context, operation) { return Err(protocol_error()); }
+    if !token(operation) || context.candidate()&&!crate::android_build_protocol::candidate_id(operation) || !result.valid(context, operation) { return Err(protocol_error()); }
     bounded(value, RESPONSE_LIMIT).map_err(|_| protocol_error())?; Ok(result)
 }
 
@@ -665,16 +784,30 @@ struct Accepted { schema_version: u32, context: Context }
 struct Progress { schema_version: u32, stage: Stage }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Envelope { protocol: String, operation_id: String, owner_generation: String, sequence: u32, kind: String, payload: Value }
+struct Envelope { protocol: String, operation_id: String, owner_generation: String, sequence: u32, kind: String, payload: Value,
+    #[serde(default,deserialize_with="present")]nonce:Option<String>,
+    #[serde(default,deserialize_with="present")]request_sha256:Option<String> }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Frame { Accepted, Progress(Stage), Terminal(Terminal) }
+pub(crate) enum Frame { Accepted, Progress(Stage), Candidate(CandidateEvent), Terminal(Terminal) }
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CandidateHead {pub(crate) sequence:u32,pub(crate) sha256:String}
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub(crate) enum CandidateEvent {LeaseReady,HistoryHead(CandidateHead),InputsPending(CandidateHead),InputsReady(CandidateHead)}
+struct CandidateDecode {nonce:String,digest:String,phase:u8,head:Option<CandidateHead>}
 pub(crate) struct FrameDecoder { operation: String, generation: String, context: Context, frames: usize, bytes: usize,
-    stage: Stage, terminal: bool, failed: bool }
+    stage: Stage, terminal: bool, failed: bool,candidate:Option<CandidateDecode> }
 impl FrameDecoder {
     pub(crate) fn new(operation: &str, generation: &str, context: &Context) -> Result<Self, BridgeError> {
-        if !token(operation) || !token(generation) || !context.valid() { return Err(protocol_error()); }
+        if !token(operation) || !token(generation) || !context.valid() || context.candidate() { return Err(protocol_error()); }
         Ok(Self { operation: operation.into(), generation: generation.into(), context: context.clone(), frames: 0, bytes: 0,
-            stage: Stage::Accepted, terminal: false, failed: false })
+            stage: Stage::Accepted, terminal: false, failed: false,candidate:None })
+    }
+    pub(crate) fn new_candidate(operation:&str,generation:&str,context:&Context,nonce:&str,digest:&str)->Result<Self,BridgeError>{
+        if !context.valid()||!context.candidate()||!crate::android_build_protocol::candidate_id(operation)
+            ||!token(generation)||!token(nonce)||nonce=="0".repeat(32)||!hex(digest,64){return Err(protocol_error());}
+        Ok(Self{operation:operation.into(),generation:generation.into(),context:context.clone(),frames:0,bytes:0,
+            stage:Stage::Accepted,terminal:false,failed:false,candidate:Some(CandidateDecode{nonce:nonce.into(),digest:digest.into(),phase:0,head:None})})
     }
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Frame, BridgeError> {
         let result = self.push_one(bytes); if result.is_err() { self.failed = true; } result
@@ -687,6 +820,10 @@ impl FrameDecoder {
         let envelope = Envelope::deserialize(&value).map_err(|_| protocol_error())?;
         if envelope.protocol != self.context.protocol() || envelope.operation_id != self.operation || envelope.owner_generation != self.generation
             || envelope.sequence as usize != self.frames { return Err(protocol_error()); }
+        if let Some(c)=&self.candidate {
+            if envelope.nonce.as_deref()!=Some(c.nonce.as_str())||envelope.request_sha256.as_deref()!=Some(c.digest.as_str())
+                || bytes.len()>if envelope.kind=="terminal"{RESPONSE_LIMIT}else{4096}{return Err(protocol_error());}
+        }else if envelope.nonce.is_some()||envelope.request_sha256.is_some(){return Err(protocol_error());}
         let frame = match envelope.kind.as_str() {
             "accepted" if self.frames == 0 => {
                 let accepted = Accepted::deserialize(&envelope.payload).map_err(|_| protocol_error())?;
@@ -694,16 +831,30 @@ impl FrameDecoder {
             },
             "progress" if self.frames > 0 => {
                 let progress = Progress::deserialize(&envelope.payload).map_err(|_| protocol_error())?;
-                if progress.schema_version != 1 || !progress.stage.valid(&self.context) || progress.stage <= self.stage { return Err(protocol_error()); }
+                if progress.schema_version != 1 || !progress.stage.valid(&self.context) || progress.stage <= self.stage
+                    ||self.candidate.as_ref().is_some_and(|c|progress.stage>Stage::InputsBound&&c.phase<3) { return Err(protocol_error()); }
                 Frame::Progress(progress.stage)
+            },
+            kind @ ("lease-ready"|"history-head"|"inputs-pending"|"inputs-ready") if self.frames>0=>{
+                let c=self.candidate.as_mut().ok_or_else(protocol_error)?;
+                if c.phase>=4||kind!=["lease-ready","history-head","inputs-pending","inputs-ready"][c.phase as usize]
+                    ||self.stage<Stage::InputsBound{return Err(protocol_error());}
+                let event=if c.phase==0 {if !keys(&envelope.payload,&[]){return Err(protocol_error());}CandidateEvent::LeaseReady}
+                else {let head=CandidateHead::deserialize(&envelope.payload).map_err(|_|protocol_error())?;
+                    if !(1..=513).contains(&head.sequence)||!hex(&head.sha256,64)||c.phase==1&&head.sequence>511
+                        ||c.phase>1&&c.head.as_ref().is_none_or(|last|head.sequence!=last.sequence+1)
+                        ||c.phase==3&&self.stage!=Stage::DisposingWork{return Err(protocol_error());}
+                    c.head=Some(head.clone());match c.phase{1=>CandidateEvent::HistoryHead(head),2=>CandidateEvent::InputsPending(head),_=>CandidateEvent::InputsReady(head)}};
+                c.phase+=1;Frame::Candidate(event)
             },
             "terminal" if self.frames > 0 => {
                 let t = terminal(&envelope.payload, &self.context, &self.operation)?;
-                if t.activity.stage < self.stage { return Err(protocol_error()); } Frame::Terminal(t)
+                if t.activity.stage < self.stage || t.outcome==Outcome::Complete&&self.candidate.as_ref().is_some_and(|c|
+                    c.phase!=4||!matches!(t.result.as_ref(),Some(ResultValue::Candidate(v)) if c.head.as_ref().is_some_and(|h|h.sequence==v.head_sequence))) { return Err(protocol_error()); } Frame::Terminal(t)
             }, _ => return Err(protocol_error()),
         };
         self.frames += 1;
-        match &frame { Frame::Progress(stage) => self.stage = *stage, Frame::Terminal(_) => self.terminal = true, Frame::Accepted => {} }
+        match &frame { Frame::Progress(stage) => self.stage = *stage, Frame::Terminal(_) => self.terminal = true, Frame::Accepted | Frame::Candidate(_) => {} }
         Ok(frame)
     }
     pub(crate) fn finish(&mut self) -> Result<(), BridgeError> { if self.settled() { Ok(()) } else { self.failed = true; Err(protocol_error()) } }
@@ -724,7 +875,7 @@ pub(crate) struct ModeCapabilities { pub(crate) unsigned: bool, pub(crate) signe
 impl ModeCapabilities {
     pub(crate) const NONE: Self = Self { unsigned: false, signed: false, recovery: false };
     pub(crate) fn supports(self, operation: Operation) -> bool { match operation {
-        Operation::IOSUnsignedArchive => self.unsigned, Operation::IOSSignedExport => self.signed,
+        Operation::IOSUnsignedArchive => self.unsigned, Operation::IOSSignedExport | Operation::IOSCandidateInputs => self.signed,
         Operation::IOSLocalRecovery => self.recovery,
     } }
 }
@@ -734,7 +885,7 @@ pub(crate) struct Projection {
     pub(crate) operation_id: String, pub(crate) owner_generation: String, pub(crate) context: Context,
     pub(crate) phase: Phase, pub(crate) intent_usable: bool, pub(crate) outcome: Option<Outcome>, pub(crate) reason: Reason,
     pub(crate) stage: Option<Stage>, pub(crate) activity: Option<Activity>,
-    pub(crate) disposition: Option<Disposition>, pub(crate) result: Option<ResultData>, pub(crate) report: Option<RecoveryReport>,
+    pub(crate) disposition: Option<Disposition>, pub(crate) result: Option<ResultValue>, pub(crate) report: Option<RecoveryReport>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(untagged)]
@@ -745,7 +896,7 @@ struct ArchiveProjectionWire {
     operation_id: String, owner_generation: String, context: Context, phase: Phase, intent_usable: bool,
     #[serde(deserialize_with = "nullable")] outcome: Option<Outcome>, reason: Reason,
     #[serde(deserialize_with = "nullable")] stage: Option<Stage>, #[serde(deserialize_with = "nullable")] activity: Option<Activity>,
-    #[serde(deserialize_with = "nullable")] disposition: Option<Disposition>, #[serde(deserialize_with = "nullable")] result: Option<ResultData>,
+    #[serde(deserialize_with = "nullable")] disposition: Option<Disposition>, #[serde(deserialize_with = "nullable")] result: Option<ResultValue>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -782,6 +933,7 @@ impl Serialize for Projection { fn serialize<S: serde::Serializer>(&self, serial
 } }
 impl Projection { fn valid(&self) -> bool {
     if !token(&self.operation_id) || !token(&self.owner_generation) || !self.context.valid()
+        ||self.context.candidate()&&!crate::android_build_protocol::candidate_id(&self.operation_id)
         || self.stage.is_some_and(|stage| !stage.valid(&self.context))
         || self.context.recovery() && (self.disposition.is_some() || self.result.is_some()) || !self.context.recovery() && self.report.is_some() { return false; }
     let empty = self.activity.is_none() && self.disposition.is_none() && self.result.is_none() && self.report.is_none();
@@ -798,7 +950,7 @@ impl Projection { fn valid(&self) -> bool {
                 if self.stage != Some(Stage::DisposingWork) || !self.activity.as_ref().is_some_and(|a| a.complete(&self.context)) { return false; }
                 return if self.context.recovery() { self.report.as_ref().is_some_and(|r| r.valid(&self.context)) }
                     else { self.disposition.as_ref().is_some_and(|d| d.complete() && d.valid(&self.operation_id))
-                        && self.result.as_ref().is_some_and(|r| r.valid(&self.context, &self.operation_id)) };
+                        && self.result.as_ref().is_some_and(|r| r.valid(&self.context, &self.operation_id)&&r.matches_activity(self.activity.as_ref().expect("checked activity"))) };
             }
             if self.result.is_some() || outcome == Outcome::Cancelled && !matches!(self.reason,
                     Reason::Cancelled | Reason::ContextChanged | Reason::DocumentLost | Reason::Shutdown)
@@ -945,7 +1097,8 @@ pub(crate) mod tests {
         for phase in [Phase::AwaitingConsent,Phase::Starting,Phase::Running,Phase::Stopping,Phase::Unknown] {
             let mut provisional = projection.clone(); provisional.phase = phase; assert!(!provisional.valid());
         }
-        projection.result.as_mut().unwrap().archive = "/inert/another.xcarchive".into(); assert!(!projection.valid());
+        let Some(ResultValue::Build(build))=projection.result.as_mut() else{panic!("ordinary fixture")};
+        build.archive = "/inert/another.xcarchive".into(); assert!(!projection.valid());
     }
     pub(crate) fn signed_context() -> Context {
         let mut value = serde_json::to_value(context()).unwrap();
@@ -968,6 +1121,90 @@ pub(crate) mod tests {
         value["result"]["ipaBytes"] = json!(512);
         value["result"]["pairing"] = json!({"nativePaths":1,"nativeIdentities":1,"presentSymbolSlices":0});
         value
+    }
+    pub(crate) fn candidate_context()->Context{let mut value=json!(signed_context());value["operation"]=json!("ios-candidate-inputs");value["action"]=json!("create");Context::deserialize(value).unwrap()}
+    const CANDIDATE_ID:&str="12345678123442349234123456789abc";
+    fn candidate_complete()->Value{
+        let mut value=signed_complete();value["context"]=json!(candidate_context());
+        let base=format!(".mobile-release/desktop-ios-archive/{CANDIDATE_ID}");
+        value["disposition"]["relativeDirectory"]=json!(base);
+        let mut build=value["result"].take();build["archive"]=json!(format!("{base}/archive.xcarchive"));build["ipa"]=json!(format!("{base}/export/Inert.ipa"));
+        value["result"]=json!({"schemaVersion":1,"scope":"local-ios-candidate-inputs","headSequence":3,"build":build,
+            "candidateInputs":{"operationId":"12345678-1234-4234-9234-123456789abc","candidateSha256":"a".repeat(64),
+                "sourceCommit":"b".repeat(40),"sourceTree":"c".repeat(40),"bundleId":"org.example.inert",
+                "version":{"name":candidate_context().saved_version.as_ref().unwrap().name,"build":candidate_context().saved_version.as_ref().unwrap().build},
+                "files":[{"fileName":"export/Inert.ipa","bytes":512,"sha256":"d".repeat(64)},
+                    {"fileName":"store-metadata.zip","bytes":200,"sha256":"e".repeat(64)},
+                    {"fileName":"validation-report.json","bytes":100,"sha256":"f".repeat(64)}],
+                "archive":{"directory":"archive.xcarchive","entries":10,"bytes":1000,"sha256":"9".repeat(64)},
+                "observation":"current-bundle-only","priorCreateFinality":"not-established"}});
+        value["lifetime"]["commands"]=json!(12);value["lifetime"]["sourceCommands"]=json!(8);
+        for field in ["candidateInputsClosed","journalClosed","leaseClosed"]{value["lifetime"][field]=json!(true);}value
+    }
+    fn candidate_frame(seq:u32,kind:&str,payload:Value)->Vec<u8>{let mut raw=serde_json::to_vec(&json!({"protocol":CANDIDATE_PROTOCOL,
+        "operationId":CANDIDATE_ID,"ownerGeneration":"b".repeat(32),"nonce":"c".repeat(32),"requestSha256":"d".repeat(64),
+        "sequence":seq,"kind":kind,"payload":payload})).unwrap();raw.push(b'\n');raw}
+    #[test]
+    fn ios_candidate_context_requires_signed_action_and_original_consent(){
+        let c=candidate_context();assert!(c.valid());assert!(c.signed());assert_eq!(c.frame_limit(),17);
+        let mut data=json!(c);data.as_object_mut().unwrap().remove("platform");data.as_object_mut().unwrap().remove("operation");
+        assert!(prepare(&data).unwrap().context().candidate());
+        for fault in ["unsigned","null","foreign","recovery"]{let mut v=data.clone();match fault{
+            "unsigned"=>{v.as_object_mut().unwrap().remove("signing");},"null"=>v["action"]=Value::Null,
+            "foreign"=>v["action"]=json!("prepare"),_=>v["recovery"]=json!({"action":"inspect"}),}
+            assert!(prepare(&v).is_err(),"{fault}");}
+        for consent in [CONSENT,SIGNED_CONSENT,RECOVERY_CONSENT,CANDIDATE_CONSENT]{
+            let input=start(&json!({"operationId":CANDIDATE_ID,"ownerGeneration":"b".repeat(32),"consentVersion":consent})).unwrap();
+            assert_eq!(input.consent_matches(&c),consent==CANDIDATE_CONSENT);
+        }
+        let mut native=CandidateNative{home:"/inert/home".into(),lease_fd:9,nonce:"a".repeat(32),clock:CandidateClock{
+            work_end_ns:"5400000000000".into(),cleanup_end_ns:"5520000000000".into(),hard_end_ns:"5530000000000".into()}};
+        assert!(native.valid());native.clock.hard_end_ns="5530000000001".into();assert!(!native.valid());
+        native.clock.hard_end_ns="5530000000000".into();native.clock.work_end_ns="05400000000000".into();assert!(!native.valid());
+        assert!(FrameDecoder::new(CANDIDATE_ID,&"b".repeat(32),&c).is_err());
+        assert!(FrameDecoder::new_candidate(&"a".repeat(32),&"b".repeat(32),&c,&"c".repeat(32),&"d".repeat(64)).is_err());
+    }
+    #[test]
+    fn ios_candidate_terminal_keeps_actual_source_and_signing_ledgers_separate(){
+        let c=candidate_context();let original=candidate_complete();assert!(terminal(&original,&c,CANDIDATE_ID).is_ok());
+        for field in ["candidateInputsClosed","journalClosed","leaseClosed","signingClosed","inputClosed"]{
+            let mut v=original.clone();v["lifetime"][field]=json!(false);assert!(terminal(&v,&c,CANDIDATE_ID).is_err(),"{field}");}
+        for (total,source,ok) in [(12,8,true),(8,8,false),(4104,8,true),(4105,8,false),(12,7,false),(12,9,false)]{
+            let mut v=original.clone();v["lifetime"]["commands"]=json!(total);v["lifetime"]["sourceCommands"]=json!(source);
+            assert_eq!(terminal(&v,&c,CANDIDATE_ID).is_ok(),ok,"{total}/{source}");}
+        for fault in ["archive","ipa","bundle","uuid","legacy"]{let mut v=original.clone();match fault{
+            "archive"=>v["result"]["candidateInputs"]["archive"]["bytes"]=json!(999),
+            "ipa"=>v["result"]["candidateInputs"]["files"][0]["bytes"]=json!(513),
+            "bundle"=>v["result"]["candidateInputs"]["bundleId"]=json!("org.foreign.app"),
+            "uuid"=>v["result"]["candidateInputs"]["operationId"]=json!("12345678-1234-4234-9234-123456789abd"),
+            _=>v["result"]=v["result"]["build"].clone(),}
+            assert!(terminal(&v,&c,CANDIDATE_ID).is_err(),"{fault}");}
+        let mut old=signed_complete();old["lifetime"]["sourceCommands"]=json!(0);assert!(signed_check(&old).is_err());
+        let mut failed=original;failed["outcome"]=json!("failed");failed["reason"]=json!("journal-unavailable");failed["result"]=Value::Null;
+        failed["disposition"]["output"]=json!("retained-incomplete");
+        // Failure reports the actual source count, not an assumed subtraction of eight.
+        failed["lifetime"]["commands"]=json!(5);failed["lifetime"]["sourceCommands"]=json!(1);
+        assert!(terminal(&failed,&c,CANDIDATE_ID).is_ok());failed["lifetime"]["sourceCommands"]=json!(2);
+        assert!(terminal(&failed,&c,CANDIDATE_ID).is_err());
+    }
+    #[test]
+    fn ios_candidate_frame_sequence_binds_four_phases_and_original_nonce(){
+        let c=candidate_context();let mut d=FrameDecoder::new_candidate(CANDIDATE_ID,&"b".repeat(32),&c,&"c".repeat(32),&"d".repeat(64)).unwrap();
+        let mut seq=0;let mut push=|kind:&str,payload:Value|{let result=d.push(&candidate_frame(seq,kind,payload));seq+=1;result.unwrap()};
+        push("accepted",json!({"schemaVersion":1,"context":c}));push("progress",json!({"schemaVersion":1,"stage":"inputs-bound"}));
+        push("lease-ready",json!({}));push("history-head",json!({"sequence":1,"sha256":"e".repeat(64)}));push("inputs-pending",json!({"sequence":2,"sha256":"f".repeat(64)}));
+        for stage in ["checking-xcode","validating-signing","materializing-signing","preparing","archiving","exporting","restoring-signing","inspecting","disposing-snapshot","disposing-work"]{
+            push("progress",json!({"schemaVersion":1,"stage":stage}));}
+        push("inputs-ready",json!({"sequence":3,"sha256":"9".repeat(64)}));push("terminal",candidate_complete());drop(push);
+        assert_eq!(seq,17);assert!(d.finish().is_ok());
+        for fault in ["early","nonce","head"]{let mut d=FrameDecoder::new_candidate(CANDIDATE_ID,&"b".repeat(32),&c,&"c".repeat(32),&"d".repeat(64)).unwrap();
+            d.push(&candidate_frame(0,"accepted",json!({"schemaVersion":1,"context":c}))).unwrap();
+            d.push(&candidate_frame(1,"progress",json!({"schemaVersion":1,"stage":"inputs-bound"}))).unwrap();
+            if fault=="early"{assert!(d.push(&candidate_frame(2,"progress",json!({"schemaVersion":1,"stage":"checking-xcode"}))).is_err());}
+            else if fault=="nonce"{let raw=String::from_utf8(candidate_frame(2,"lease-ready",json!({}))).unwrap().replace(&"c".repeat(32),&"f".repeat(32));assert!(d.push(raw.as_bytes()).is_err());}
+            else{d.push(&candidate_frame(2,"lease-ready",json!({}))).unwrap();assert!(d.push(&candidate_frame(3,"history-head",json!({"sequence":512,"sha256":"e".repeat(64)}))).is_err());}
+            assert!(d.finish().is_err());
+        }
     }
     fn signed_check(value: &Value) -> Result<Terminal, BridgeError> { terminal(value, &signed_context(), &"a".repeat(32)) }
     #[test]

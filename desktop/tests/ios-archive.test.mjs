@@ -11,7 +11,7 @@ import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
 import { IOS_ARCHIVE_CONSENT, IOS_ARCHIVE_COUNTER_MAX, IOS_ARCHIVE_EVENT, IOS_ARCHIVE_LIMITATIONS, IOS_ARCHIVE_SCOPE,
-  IOS_SIGNED_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_SCOPE, IOS_SIGNED_ARCHIVE_LIMITATIONS, IOS_RECOVERY_CONSENT,
+  IOS_SIGNED_ARCHIVE_CONSENT, IOS_CANDIDATE_CONSENT, IOS_SIGNED_ARCHIVE_SCOPE, IOS_SIGNED_ARCHIVE_LIMITATIONS, IOS_RECOVERY_CONSENT,
   IOS_ACCOUNT_RECOVERY_CONFIRMATION, IOS_PROJECT_RECOVERY_CONFIRMATION, IOS_RECOVERY_LIMITATIONS,
   copyIOSArchiveRequest, encodeIOSArchiveRequest, parseIOSArchiveStatus, parseIOSSigningPolicy, iosArchiveOperationProgress,
   iosArchiveError, iosArchiveModeAvailability, IOS_ARCHIVE_STATUS_VERSION } from '../src/iosArchiveProtocol.ts';
@@ -50,7 +50,7 @@ function observation(project, patch = {}) {
 }
 const request = () => ({ projectId: 'p1', draftRevision: 2, baselineGeneration: 3, savedConfig: clone(CONFIG),
   savedVersion: { ...VERSION, source: 'release/version.properties', name: '1.2.3', build: 42 } });
-const context = (input) => ({ ...clone(input), platform: 'ios', operation: input.recovery ? 'ios-local-recovery' : input.signing ? 'ios-signed-export' : 'ios-unsigned-archive' });
+const context = (input) => ({ ...clone(input), platform: 'ios', operation: input.recovery ? 'ios-local-recovery' : input.action === 'create' ? 'ios-candidate-inputs' : input.signing ? 'ios-signed-export' : 'ios-unsigned-archive' });
 const operation = (input = request(), patch = {}) => ({ operationId: OP, ownerGeneration: OWNER, context: context(input), phase: 'awaiting-consent',
   intentUsable: true, outcome: null, reason: 'none', stage: null, activity: null,
   ...(input.recovery ? { report: null } : { disposition: null, result: null }), ...patch });
@@ -890,4 +890,90 @@ test('actual app shares status/cancel and retirement; each important archive cho
   const signedStart = start(signed, signedOp);
   signed.reply(signedStart.call, status(2, signedCompleted(signedOp))); await signedStart.done;
   assert.equal(signed.state.status.operation.result.scope, IOS_SIGNED_ARCHIVE_SCOPE);
+});
+
+
+// Candidate statuses below are inert public DATA; they do not stand in for the
+// source/journal/publisher/original joins tested by the Python/native owners.
+const CANDIDATE_OP = '12345678123442348234123456789abc';
+const candidateRequest = () => ({ ...request(), signing: signingPolicy(), action: 'create' });
+function candidateCompleted(op) {
+  const value = signedCompleted(op), build = value.result;
+  value.result = { schemaVersion: 1, scope: 'local-ios-candidate-inputs', headSequence: 3,
+    candidateInputs: {
+      operationId: '12345678-1234-4234-8234-123456789abc', candidateSha256: '1'.repeat(64),
+      sourceCommit: '2'.repeat(40), sourceTree: '3'.repeat(40), bundleId: 'org.example.inert',
+      version: { name: op.context.savedVersion.name, build: op.context.savedVersion.build },
+      files: [{ fileName: 'export/Inert.ipa', bytes: build.ipaBytes, sha256: '4'.repeat(64) },
+        { fileName: 'store-metadata.zip', bytes: 256, sha256: '5'.repeat(64) },
+        { fileName: 'validation-report.json', bytes: 512, sha256: '6'.repeat(64) }],
+      archive: { directory: 'archive.xcarchive', entries: build.entries, bytes: build.bytes, sha256: '7'.repeat(64) },
+      observation: 'current-bundle-only', priorCreateFinality: 'not-established',
+    }, build };
+  return value;
+}
+test('iOS candidate is an explicit signed-only request and distinct consent, not an ordinary export upgrade', () => {
+  const input = candidateRequest();
+  assert.deepEqual(clone(copyIOSArchiveRequest('prepare_ios_archive', input)), input);
+  assert.ok(parseIOSArchiveStatus(status(1, operation(input, { operationId: CANDIDATE_OP }))));
+  for (const bad of [{ ...request(), action: 'create' }, { ...input, action: null }, { ...input, action: 'publish' },
+    { ...recoveryRequest(), action: 'create' }, { ...input, candidateHistory: {} }])
+    assert.equal(copyIOSArchiveRequest('prepare_ios_archive', bad), null);
+  const start = { operationId: CANDIDATE_OP, ownerGeneration: OWNER, consentVersion: IOS_CANDIDATE_CONSENT };
+  assert.deepEqual(clone(copyIOSArchiveRequest('start_ios_archive', start)), start);
+  assert.equal(copyIOSArchiveRequest('start_ios_archive', { ...start, confirmation: 'yes' }), null);
+  const mismatched = operation(input, { operationId: CANDIDATE_OP }); mismatched.context.operation = 'ios-signed-export';
+  assert.equal(parseIOSArchiveStatus(status(1, mismatched)), null);
+});
+test('iOS candidate result binds the original signed report, UUID, exact archive and ordered IPA/control roster', () => {
+  const op = operation(candidateRequest(), { operationId: CANDIDATE_OP }), good = candidateCompleted(op);
+  assert.ok(parseIOSArchiveStatus(status(2, good)));
+  for (const change of [
+    x => { x.result.headSequence = 2; }, x => { x.result.headSequence = 514; },
+    x => { x.result.candidateInputs.operationId = 'a'.repeat(32); },
+    x => { x.result.candidateInputs.version.build++; }, x => { x.result.candidateInputs.bundleId = 'org.example.other'; },
+    x => { x.result.candidateInputs.sourceCommit = 'f'.repeat(39); },
+    x => { x.result.candidateInputs.files.reverse(); }, x => { x.result.candidateInputs.files[0].bytes++; },
+    x => { x.result.candidateInputs.files[0].fileName = 'export/other.ipa'; },
+    x => { x.result.candidateInputs.archive.entries++; }, x => { x.result.candidateInputs.archive.bytes++; },
+    x => { x.result.candidateInputs.archive.directory = '../archive.xcarchive'; },
+    x => { x.result.candidateInputs.archive.sha256 = 'raw-private-sentinel'; },
+    x => { x.result.candidateInputs.priorCreateFinality = 'established'; },
+    x => { x.result.build.usedConfig.sha256 = '0'.repeat(64); },
+    x => { x.result.build.pairing.nativePaths = 0; }, x => { x.activity.selection.symbolsPolicy = 'required'; },
+    x => { x.result = x.result.build; },
+  ]) { const bad = clone(good); change(bad); assert.equal(parseIOSArchiveStatus(status(2, bad)), null); }
+  const ordinary = signedCompleted(operation({ ...request(), signing: signingPolicy() }, { operationId: CANDIDATE_OP }));
+  ordinary.result = clone(good.result); assert.equal(parseIOSArchiveStatus(status(2, ordinary)), null);
+});
+test('same iOS controller keeps candidate consent one-use and blocks toggles until original settlement', async t => {
+  const h = harness(t, { savedSnapshot: signedSnapshot(), assets: assetState() }); await h.ready;
+  assert.equal(h.controller.setKeepCandidate(true), false);
+  assert.equal(h.controller.setArchiveMode('signed'), true); assert.equal(h.controller.setKeepCandidate(true), true);
+  const op = await reviewed(h, { operationId: CANDIDATE_OP });
+  assert.equal(h.calls[0].input.action, 'create'); assert.equal(op.context.operation, 'ios-candidate-inputs');
+  const sent = start(h, op);
+  assert.equal(sent.call.input.consentVersion, IOS_CANDIDATE_CONSENT);
+  assert.equal(h.controller.setKeepCandidate(false), false);
+  await h.controller.start(op.operationId, op.ownerGeneration);
+  assert.equal(h.calls.filter(x => x.kind === 'start').length, 1);
+  h.reply(sent.call, status(2, candidateCompleted(op))); await sent.done;
+  assert.equal(h.state.status.operation.result.scope, 'local-ios-candidate-inputs');
+  assert.equal(iosArchiveOwnerReason(h.state), null);
+});
+test('changing candidate choice retires pending review; unknown start keeps same original owner blocked', async t => {
+  const h = harness(t, { savedSnapshot: signedSnapshot(), assets: assetState() }); await h.ready;
+  h.controller.setArchiveMode('signed'); h.controller.setKeepCandidate(true);
+  const preparing = h.controller.prepare(), call = h.calls.at(-1);
+  h.controller.setKeepCandidate(false);
+  const op = operation(call.input, { operationId: CANDIDATE_OP }); h.reply(call, status(1, op)); await preparing;
+  assert.equal(h.state.consent, null); assert.equal(h.calls.at(-1).kind, 'cancel');
+  await h.controller.start(CANDIDATE_OP, OWNER); assert.equal(h.calls.filter(x => x.kind === 'start').length, 0);
+  h.reply(h.calls.at(-1), status(2, terminal(op, 'cancelled', 'context-changed'))); await flush();
+  const h2 = harness(t, { savedSnapshot: signedSnapshot(), assets: assetState() }); await h2.ready;
+  h2.controller.setArchiveMode('signed'); h2.controller.setKeepCandidate(true);
+  const second = await reviewed(h2, { operationId: CANDIDATE_OP });
+  const sent = start(h2, second); sent.call.reject(new Error('private transport sentinel')); await sent.done;
+  assert.ok(iosArchiveOwnerReason(h2.state)); assert.equal(h2.controller.setKeepCandidate(false), false);
+  assert.doesNotMatch(JSON.stringify(h2.state), /private transport sentinel/);
 });

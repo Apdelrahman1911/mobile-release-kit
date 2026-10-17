@@ -92,7 +92,11 @@ class LocalHistoryRun:
             return None
         wire.require(last["phase"]=="inputs-ready" and len(rows)==2 and rows[0]["phase"]=="inputs-pending")
         from .local_candidate_bundle import CandidateBundleReview
-        bundle=CandidateBundleReview(self,operation_id=operation_id,enrollment=enrollment,
+        reader=CandidateBundleReview
+        if self.request.context.get("platform")=="ios":
+            from .local_ios_candidate_review import IOSCandidateBundleReview
+            reader=IOSCandidateBundleReview
+        bundle=reader(self,operation_id=operation_id,enrollment=enrollment,
             pending=rows[0]["payload"],candidate_sha256=last["payload"]["candidateSha256"])
         bundle.acquire()
         return bundle.finish()
@@ -168,6 +172,9 @@ class LocalHistoryRun:
                                                for slot in (*p.directory.slots,p.meta)))
         bundle=(self.bundle is None or self.bundle.closed and self.bundle.iterator is None and self.bundle.scan_state in {"new","closed"}
                 and all(slot.state in {"UNACQUIRED","CLOSED"} for slot in self.bundle.reader.descriptors))
+        if self.bundle is not None and self.request.context.get("platform")=="ios":
+            from .local_ios_candidate_review import IOSCandidateBundleReview
+            bundle=bundle and type(self.bundle) is IOSCandidateBundleReview and self.bundle.tree_closed()
         prepared=(self.prepared_iterator is None and self.prepared_scan_state in {"new","closed"}
                   and all(p.closed() for p in self.prepared_readers))
         return self._close_claimed and journal and invocation and project and bundle and prepared

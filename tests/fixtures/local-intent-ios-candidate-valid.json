@@ -1,0 +1,148 @@
+{
+  "documentType": "local-store-operation-intent",
+  "schemaVersion": 1,
+  "stage": "candidate",
+  "platform": "ios",
+  "tooling": {
+    "version": "0.2.0",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "candidateSource": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333",
+    "ref": "refs/heads/main"
+  },
+  "operationSource": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333",
+    "ref": "refs/heads/main"
+  },
+  "confirmation": "candidate:ios:1.2.3:42",
+  "application": {
+    "id": "com.example.reader",
+    "storeAppId": "1234567890"
+  },
+  "version": {
+    "marketing": "1.2.3",
+    "build": 42
+  },
+  "destination": {
+    "channel": "testflight-internal"
+  },
+  "configuration": {
+    "path": "release/mobile-release.json",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "artifacts": [
+    {
+      "logicalName": "ios-ipa",
+      "platform": "ios",
+      "kind": "ipa",
+      "fileName": "Reader日本語.ipa",
+      "size": 12345678,
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "architectures": [
+        "arm64"
+      ]
+    },
+    {
+      "logicalName": "store-metadata",
+      "platform": "shared",
+      "kind": "metadata",
+      "fileName": "store-metadata.zip",
+      "size": 34567,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "architectures": []
+    },
+    {
+      "logicalName": "validation-report",
+      "platform": "shared",
+      "kind": "validation-report",
+      "fileName": "validation-report.json",
+      "size": 2345,
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "architectures": []
+    },
+    {
+      "logicalName": "ios-archive",
+      "platform": "ios",
+      "kind": "xcarchive",
+      "directory": "archive.xcarchive",
+      "entries": 17,
+      "bytes": 23456789,
+      "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+    }
+  ],
+  "signing": [
+    {
+      "platform": "ios",
+      "kind": "apple-distribution",
+      "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "teamId": "ABCDE12345",
+      "profileUuid": "12345678-1234-1234-1234-123456789ABC",
+      "profileExpiresAt": "2027-01-01T00:00:00Z"
+    }
+  ],
+  "predecessors": {},
+  "storePrecondition": {
+    "schemaVersion": 1,
+    "documentType": "store-precondition",
+    "operation": "ios_testflight_internal",
+    "platform": "ios",
+    "appIdentity": "com.example.reader",
+    "marketingVersion": "1.2.3",
+    "buildNumber": 42,
+    "observedAt": "2026-01-01T00:00:00Z",
+    "snapshot": {
+      "canonicalization": "mrk-apple-operation-v1",
+      "appStoreAppId": "1234567890",
+      "serverObservedAt": "2026-01-01T00:00:00Z",
+      "build": null
+    }
+  },
+  "privateStateCommitments": {},
+  "createdAt": "2026-01-01T00:00:00Z",
+  "origin": "local-desktop",
+  "operationId": "33333333-3333-4333-8333-333333333333",
+  "candidateSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "project": {
+    "projectLocator": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "projectBinding": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "projectId": "11111111-1111-4111-8111-111111111111",
+    "keyId": "22222222-2222-4222-8222-222222222222",
+    "keyRevision": 1
+  },
+  "preparedBy": {
+    "schemaVersion": 1,
+    "origin": "local-desktop",
+    "purpose": "prepare",
+    "project": {
+      "projectLocator": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "projectBinding": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "projectId": "11111111-1111-4111-8111-111111111111",
+      "keyId": "22222222-2222-4222-8222-222222222222",
+      "keyRevision": 1
+    },
+    "operationId": "33333333-3333-4333-8333-333333333333",
+    "candidateSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "authorizationId": "44444444-4444-4444-8444-444444444444",
+    "source": {
+      "commit": "2222222222222222222222222222222222222222",
+      "tree": "3333333333333333333333333333333333333333",
+      "ref": "refs/heads/main"
+    },
+    "assignment": {
+      "kind": "asc-p8",
+      "recordId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "expectedRevision": 1,
+      "contextRevision": 2
+    },
+    "confirmationSha256": "4201ea985bd7ead553ea734f3fedc85fb432b25adaf2982bf0c0cae71b9501d8",
+    "intentSha256": null
+  },
+  "integrity": {
+    "algorithm": "sha256",
+    "sha256": "d6c740b6d92abc16baf7a410092b0083942c35ebc05cff209c24b82295019ee7"
+  }
+}

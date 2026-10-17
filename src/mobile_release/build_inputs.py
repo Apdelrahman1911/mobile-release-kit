@@ -352,6 +352,14 @@ class _FD:
             # Recovery retains the actual object before acquisition so a lost
             # scope/constructor return cannot become a fabricated close fact.
             source.register_descriptor(self)
+        ios = getattr(guard, "_ios_archive_source", None)
+        candidate = getattr(getattr(ios, "_engine", None), "candidate", None)
+        self._ios_candidate = candidate
+        if candidate is not None:
+            from .local_ios_candidate_create import IOSCandidateCreateRun
+            _need(type(candidate) is IOSCandidateCreateRun and candidate.source is ios,
+                  "iOS candidate descriptor requires its original owner")
+            candidate.register_descriptor(self)
         _FORK_RESOURCES.add(self)
 
     def open(self, name: str | Path, flags: int, mode: int = 0o600,
@@ -359,6 +367,11 @@ class _FD:
         _desktop_recovery_checkpoint(self.guard)
         _need(self.number is None and self.open_state == "NEW" and self.close_state == "NOT_ATTEMPTED"
               and self.pid == os.getpid(), "invalid descriptor acquisition")
+        ios = getattr(self.guard, "_ios_archive_source", None)
+        candidate = getattr(getattr(ios, "_engine", None), "candidate", None)
+        _need(candidate is self._ios_candidate, "iOS candidate descriptor registration changed")
+        if candidate is not None:
+            candidate.preopen(self)
         operation = os.open
         with self.guard.deferred(check_on_exit=False):
             try:
@@ -2192,7 +2205,7 @@ class _Project:
     def check(self) -> None:
         prepare=getattr(self.guard,"_local_store_source",None)
         if prepare is not None:prepare.borrow_project(self)
-        android=getattr(self.guard,"_android_build_source",None)
+        android=getattr(self.guard,"_android_build_source",None) or getattr(self.guard,"_ios_archive_source",None)
         candidate=getattr(android,"candidate_input",None) if android is not None else None
         if candidate is not None:
             from ._desktop_candidate_input_control import CandidateCreateInput
@@ -2231,7 +2244,7 @@ class _Project:
         try:
             with self.guard.deferred(check_on_exit=False):
                 local = getattr(self.guard, "_local_history_source", None) or getattr(self.guard,"_local_store_source",None)
-                android=getattr(self.guard,"_android_build_source",None)
+                android=getattr(self.guard,"_android_build_source",None) or getattr(self.guard,"_ios_archive_source",None)
                 candidate=getattr(android,"candidate_input",None) if android is not None else None
                 if candidate is not None:
                     from ._desktop_candidate_input_control import CandidateCreateInput

@@ -18,6 +18,11 @@ impl Admitted {
     }
 }
 impl IOSArchiveOwner {
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn candidate_claim_matches(&self,claim:&crate::saved_command_owner::LocalHistoryClaim)->bool{claim.matches_owner(&self.saved)}
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn candidate_helper_matches(&self,claim:&crate::saved_command_owner::LocalHistoryHelperClaim)->bool{claim.matches_owner(&self.saved)}
+
     pub(crate) fn new(runtime: RuntimeConfig) -> Self { Self { saved: SavedCommandOwner::ios_archive(runtime) } }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }

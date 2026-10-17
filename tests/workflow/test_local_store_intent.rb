@@ -109,4 +109,72 @@ class LocalStoreIntentContractTest < Minitest::Test
     end
   end
 
+  def ios_data
+    raw=File.binread(File.join(ROOT,"local-intent-ios-candidate-valid.json"))
+    receipt=JSON.parse(File.binread(File.join(ROOT,"local-ios-execution-receipt-valid.json")))
+    value=JSON.parse(raw)
+    [raw,value,receipt,{intent_content:raw,authority_content:JSON.generate(receipt.fetch("executedBy")),
+      expected_intent_sha256:value.fetch("integrity").fetch("sha256")}]
+  end
+  def test_explicit_ios_fixture_and_attempt_key_keep_default_android_route_closed
+    raw,value,receipt,args=ios_data
+    payload,digest=M.local_operation_intent(raw,expected_sha256:args[:expected_intent_sha256],platform:"ios")
+    assert_equal value.reject { |k,_| k=="integrity" },payload
+    assert_equal args[:expected_intent_sha256],digest
+    assert_equal receipt["executedBy"],M.local_execution_authority(args[:authority_content],
+      intent_content:raw,expected_intent_sha256:digest,purpose:"execute",platform:"ios")
+    assert_equal "1e926ffd3eeff5f02b6460c52266d0ff44db38e01ee73318a651cf9d0314a3c9",
+      M.local_execution_attempt_key(**args,purpose:"execute",platform:"ios")
+    assert_raises(M::ContractError) { M.local_operation_intent(raw,expected_sha256:digest) }
+    assert_raises(M::ContractError) { M.local_execution_attempt_key(**args,purpose:"execute") }
+    recovered=receipt["executedBy"].merge("purpose"=>"recover")
+    assert_raises(M::ContractError) { M.local_execution_authority(JSON.generate(recovered),
+      intent_content:raw,expected_intent_sha256:digest,purpose:"recover",platform:"ios") }
+    assert_raises(M::ContractError) { M.local_operation_intent(@raw,expected_sha256:@digest,platform:"ios") }
+  end
+  def test_ios_archive_directory_is_not_a_ci_file_or_zip_and_signing_is_complete
+    _,value,_,_=ios_data
+    changes=[->(d){d["artifacts"].last["fileName"]="archive.zip"},->(d){d["artifacts"].last["size"]=12},
+      ->(d){d["artifacts"].last["entries"]=true},->(d){d["artifacts"].last["entries"]=100001},
+      ->(d){d["artifacts"].last["bytes"]=(8<<30)+1},->(d){d["artifacts"].first["size"]=(4<<30)+1},
+      ->(d){d["artifacts"].first["fileName"]="export/Reader.ipa"},->(d){d["artifacts"].reverse!},
+      ->(d){d["signing"].first.delete("profileUuid")},->(d){d["signing"].first["teamId"]=1234567890},
+      ->(d){d["signing"].first["profileExpiresAt"]="2027-02-30T00:00:00Z"},
+      ->(d){d["storePrecondition"]["snapshot"].delete("build")},
+      ->(d){d["storePrecondition"]["snapshot"]["build"]={}},
+      ->(d){d["preparedBy"]["assignment"]["kind"]="google-service-account"}]
+    changes.each do |change|
+      bad=clone_value(value);change.call(bad);bad=sealed(bad)
+      assert_raises(M::ContractError) { M.local_operation_intent(JSON.generate(bad),
+        expected_sha256:bad["integrity"]["sha256"],platform:"ios") }
+    end
+    maximum=clone_value(value);maximum["artifacts"].last.merge!("entries"=>100000,"bytes"=>8<<30)
+    maximum["artifacts"].first["size"]=4<<30;maximum=sealed(maximum)
+    assert_equal maximum["integrity"]["sha256"],M.local_operation_intent(JSON.generate(maximum),
+      expected_sha256:maximum["integrity"]["sha256"],platform:"ios")[1]
+    Dir.mktmpdir do |root|
+      path=File.join(root,"intent.json");File.write(path,JSON.generate(value))
+      assert_raises(M::ContractError) { M.operation_intent(root,path) }
+    end
+  end
+  def test_ios_receipt_body_and_independent_authority_are_required_data_only
+    _,_,receipt,args=ios_data
+    assert_equal receipt,M.local_ios_execution_receipt(JSON.generate(receipt),**args)
+    changed=receipt.merge("result"=>"reconciled","state"=>"available-to-testers")
+    assert_equal changed,M.local_ios_execution_receipt(JSON.generate(changed),**args)
+    receipt.keys.each do |key|
+      bad=clone_value(receipt);bad.delete(key)
+      assert_raises(M::ContractError) { M.local_ios_execution_receipt(JSON.generate(bad),**args) }
+    end
+    {"appStoreAppId"=>"foreign","buildResourceId"=>"","processingState"=>"PROCESSING",
+      "autoNotifyEnabled"=>0,"state"=>"submitted-for-review","buildNumber"=>42.0,
+      "result"=>"operator_authorized_retry","observedAt"=>"yesterday","versionCode"=>42,
+      "executedBy"=>receipt["executedBy"].merge("authorizationId"=>"66666666-6666-4666-8666-666666666666"),
+      "authorizedBy"=>receipt["executedBy"]}.each do |key,bad|
+      error=assert_raises(M::ContractError) { M.local_ios_execution_receipt(JSON.generate(receipt.merge(key=>bad)),**args) }
+      assert_equal "Invalid local Store receipt or attempt DATA",error.message
+    end
+    assert_raises(M::ContractError) { M.local_ios_execution_receipt(JSON.generate(receipt),**args.merge(expected_intent_sha256:"f"*64)) }
+  end
+
 end

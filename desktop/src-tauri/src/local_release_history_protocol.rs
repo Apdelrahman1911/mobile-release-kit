@@ -9,6 +9,7 @@ use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error
 pub(crate) const PROTOCOL: &str = "mrk-local-release-history/1";
 pub(crate) const CONSENT: &str = "local-release-history-v1";
 pub(crate) const CANDIDATE_CONSENT: &str = "local-android-candidate-inputs-v1";
+pub(crate) const IOS_CANDIDATE_CONSENT:&str="local-ios-candidate-inputs-v1";
 pub(crate) const EVENT: &str = "local-release-history-state-changed";
 pub(crate) const IPC_LIMIT: usize = 8192;
 pub(crate) const REQUEST_LIMIT: usize = 16 * 1024;
@@ -35,14 +36,22 @@ impl Action {
     pub(crate) fn candidate(self)->bool{matches!(self,Self::ReviewInputs|Self::AbandonInputs|Self::ReviewPrepared|Self::ReviewExecution|Self::ReviewReconcile|Self::ReviewRecovery)}
     pub(crate) fn consent(self)->&'static str{if self.candidate(){CANDIDATE_CONSENT}else{CONSENT}}
 }
+#[derive(Clone,Copy,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="lowercase")]
+pub(crate) enum CandidatePlatform{Ios}
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase")]
 pub(crate) struct Context {
     pub(crate) project_id:String,pub(crate) execution_mode:ExecutionMode,pub(crate) action:Action,
     #[serde(skip_serializing_if="Option::is_none")]
     pub(crate) candidate_operation_id:Option<String>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub(crate) platform:Option<CandidatePlatform>,
 }
-impl Context {pub(crate) fn valid(&self)->bool{valid_id(&self.project_id)&&if self.action.candidate(){
+impl Context {
+    pub(crate) fn consent(&self)->&'static str{if self.platform==Some(CandidatePlatform::Ios){IOS_CANDIDATE_CONSENT}else{self.action.consent()}}
+    pub(crate) fn valid(&self)->bool{valid_id(&self.project_id)
+        &&(self.platform.is_none()||matches!(self.action,Action::ReviewInputs|Action::AbandonInputs))&&if self.action.candidate(){
     self.candidate_operation_id.as_deref().is_some_and(journal_uuid)
 }else{self.candidate_operation_id.is_none()}}}
 impl<'de> Deserialize<'de> for Context {
@@ -50,11 +59,11 @@ impl<'de> Deserialize<'de> for Context {
         let value=Value::deserialize(decoder)?;
         #[derive(Deserialize)]
         #[serde(rename_all="camelCase",deny_unknown_fields)]
-        struct Data{project_id:String,execution_mode:ExecutionMode,action:Action,candidate_operation_id:Option<String>}
+        struct Data{project_id:String,execution_mode:ExecutionMode,action:Action,candidate_operation_id:Option<String>,platform:Option<CandidatePlatform>}
         let data=Data::deserialize(&value).map_err(serde::de::Error::custom)?;
-        let expected=if data.action.candidate(){&["projectId","executionMode","action","candidateOperationId"][..]}
+        let expected=if data.platform.is_some(){&["projectId","executionMode","action","candidateOperationId","platform"][..]}else if data.action.candidate(){&["projectId","executionMode","action","candidateOperationId"][..]}
             else{&["projectId","executionMode","action"][..]};
-        let result=Self{project_id:data.project_id,execution_mode:data.execution_mode,action:data.action,candidate_operation_id:data.candidate_operation_id};
+        let result=Self{project_id:data.project_id,execution_mode:data.execution_mode,action:data.action,candidate_operation_id:data.candidate_operation_id,platform:data.platform};
         if !keys(&value,expected)||!result.valid(){return Err(serde::de::Error::custom("invalid local history context"));}Ok(result)
     }
 }
@@ -75,9 +84,9 @@ pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|CANDIDATE_CONSENT) { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|CANDIDATE_CONSENT|IOS_CANDIDATE_CONSENT) { return Err(invalid()); } Ok(input)
 }
-impl Start {pub(crate) fn consents(&self,action:Action)->bool{self.consent_version==action.consent()}}
+impl Start {pub(crate) fn consents(&self,expected:&str)->bool{self.consent_version==expected}}
 pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration"]) { return Err(invalid()); }
     let input = Cancel::deserialize(value).map_err(|_| invalid())?;
@@ -158,7 +167,7 @@ pub(crate) struct ResultData {schema_version:u32,scope:String,enrolled:bool,head
     // None=old grammar absent; Some(None)=new grammar explicit null. Bare
     // Option cannot preserve that boundary through Deserialize/Serialize.
     #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="candidate_field")]
-    candidate_inputs:Option<Option<CandidateInputs>>,
+    candidate_inputs:Option<Option<ReviewedInputs>>,
     #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="prepared_field")]
     prepared_intent:Option<Option<PreparedReview>>,
     #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="execution_field")]
@@ -166,8 +175,8 @@ pub(crate) struct ResultData {schema_version:u32,scope:String,enrolled:bool,head
     #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="recovery_field")]
     reconciliation_receipt:Option<Option<crate::local_store_reconcile_protocol::ReconciliationReceipt>>,
 }
-fn candidate_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Option<CandidateInputs>>,D::Error>{
-    Ok(Some(Option::<CandidateInputs>::deserialize(decoder)?))
+fn candidate_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Option<ReviewedInputs>>,D::Error>{
+    Ok(Some(Option::<ReviewedInputs>::deserialize(decoder)?))
 }
 fn prepared_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Option<PreparedReview>>,D::Error>{
     Ok(Some(Option::<PreparedReview>::deserialize(decoder)?))
@@ -228,6 +237,14 @@ impl PreparedReview {
     fn valid(&self,operation:&str)->bool{self.intent.valid_for(operation)
         &&self.observation=="current-prepared-files-only"&&self.prior_prepare_finality=="not-established"}
 }
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(untagged)]
+enum ReviewedInputs{Android(CandidateInputs),Ios(crate::ios_archive_protocol::CandidateInputs)}
+impl ReviewedInputs{fn valid(&self,context:&Context,id:&str)->bool{match(self,context.platform){
+    (Self::Android(v),None)=>v.valid(id),
+    (Self::Ios(v),Some(CandidatePlatform::Ios))=>journal_uuid(id)&&v.valid(&id.replace('-',"")),
+    _=>false,
+}}}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct CandidateInputs {operation_id:String,candidate_sha256:String,source_commit:String,source_tree:String,
@@ -302,7 +319,7 @@ impl ResultData {
         }
         if self.prepared_intent.is_some()||self.execution_receipt.is_some(){return false;}
         match(context.action,row.phase,&self.candidate_inputs){
-            (Action::ReviewInputs,HistoryPhase::InputsReady,Some(Some(bundle)))=>bundle.valid(id),
+            (Action::ReviewInputs,HistoryPhase::InputsReady,Some(Some(bundle)))=>bundle.valid(context,id),
             (Action::ReviewInputs,HistoryPhase::InputsPending|HistoryPhase::SettledFailure,Some(None))=>true,
             (Action::AbandonInputs,HistoryPhase::SettledFailure,Some(None))=>self.history.last().is_some_and(|row|row.operation_id==id),
             _=>false,
@@ -431,7 +448,7 @@ pub(crate) struct Status {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn context(action:Action)->Context {Context{project_id:"registered-project".into(),execution_mode:ExecutionMode::Local,action,candidate_operation_id:action.candidate().then(||"12345678-1234-4234-9234-123456789abc".into())}}
+    fn context(action:Action)->Context {Context{project_id:"registered-project".into(),execution_mode:ExecutionMode::Local,action,platform:None,candidate_operation_id:action.candidate().then(||"12345678-1234-4234-9234-123456789abc".into())}}
     fn frame(c:&Context,sequence:u32,kind:&str,payload:Value)->Vec<u8>{let mut v=serde_json::to_vec(&json!({"protocol":PROTOCOL,
         "operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"nonce":"c".repeat(32),"requestSha256":"d".repeat(64),
         "sequence":sequence,"kind":kind,"payload":payload})).unwrap();v.push(b'\n');let _=c;v}
@@ -477,6 +494,41 @@ mod tests {
             "observation":"current-bundle-only","priorCreateFinality":"not-established"})}else{Value::Null};r
     }
     #[test]
+    fn local_release_history_ios_platform_has_original_distinct_consent(){
+        for action in [Action::ReviewInputs,Action::AbandonInputs]{
+            let mut c=context(action);c.platform=Some(CandidatePlatform::Ios);let value=json!(c);
+            assert_eq!(prepare(&value).unwrap(),c);assert_eq!(c.consent(),IOS_CANDIDATE_CONSENT);
+            for token in [CONSENT,CANDIDATE_CONSENT,IOS_CANDIDATE_CONSENT]{let input=start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":token})).unwrap();
+                assert_eq!(input.consents(c.consent()),token==IOS_CANDIDATE_CONSENT);}
+            for platform in [Value::Null,json!("android"),json!("macos")]{let mut v=value.clone();v["platform"]=platform;assert!(prepare(&v).is_err());}
+        }
+        for action in [Action::Enroll,Action::Verify,Action::ReviewPrepared,Action::ReviewExecution,Action::ReviewReconcile,Action::ReviewRecovery]{
+            let mut value=json!(context(action));value["platform"]=json!("ios");assert!(prepare(&value).is_err());}
+    }
+    #[test]
+    fn local_release_history_ios_summary_is_current_bundle_not_android_or_create_finality(){
+        let mut c=context(Action::ReviewInputs);c.platform=Some(CandidatePlatform::Ios);
+        let android=candidate_result(&c,"inputs-ready");assert!(!ResultData::deserialize(&android).unwrap().matches_context(&c));
+        let mut v=android.clone();v["candidateInputs"].as_object_mut().unwrap().remove("applicationId");
+        v["candidateInputs"]["bundleId"]=json!("dev.example.app");
+        v["candidateInputs"]["files"][0]["fileName"]=json!("export/App.ipa");
+        v["candidateInputs"]["archive"]=json!({"directory":"archive.xcarchive","entries":2,"bytes":200,"sha256":"a".repeat(64)});
+        assert!(ResultData::deserialize(&v).unwrap().matches_context(&c));
+        let mut other=c.clone();other.platform=None;assert!(!ResultData::deserialize(&v).unwrap().matches_context(&other));
+        for fault in ["hybrid","roster","path","prior","identity"]{let mut x=v.clone();match fault{
+            "hybrid"=>x["candidateInputs"]["applicationId"]=json!("dev.example.app"),
+            "roster"=>x["candidateInputs"]["files"][0]["fileName"]=json!("app-release.aab"),
+            "path"=>x["candidateInputs"]["archive"]["directory"]=json!("elsewhere.xcarchive"),
+            "prior"=>x["candidateInputs"]["priorCreateFinality"]=json!("complete"),
+            _=>x["candidateInputs"]["operationId"]=json!("12345678-1234-4234-9234-123456789abd"),}
+            assert!(!ResultData::deserialize(&x).is_ok_and(|r|r.matches_context(&c)),"{fault}");}
+        let mut d=Decoder::new();decode(&mut d,&c,0,"accepted",json!({"schemaVersion":1,"context":c})).unwrap();
+        decode(&mut d,&c,1,"lease-ready",json!({})).unwrap();decode(&mut d,&c,2,"history-head",json!({"sequence":3,"sha256":"e".repeat(64)})).unwrap();
+        let mut t=terminal(&c);t["result"]=v;assert!(decode(&mut d,&c,3,"terminal",t).is_ok());assert!(d.finish());
+        assert!(ResultData::deserialize(candidate_result(&c,"inputs-pending")).unwrap().matches_context(&c));
+        c.action=Action::AbandonInputs;assert!(ResultData::deserialize(candidate_result(&c,"settled-failure")).unwrap().matches_context(&c));
+    }
+    #[test]
     fn local_release_history_candidate_context_and_consent_are_action_specific(){
         for action in [Action::Enroll,Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared,Action::ReviewExecution,Action::ReviewReconcile,Action::ReviewRecovery]{
             let c=context(action);let value=serde_json::to_value(&c).unwrap();
@@ -484,7 +536,7 @@ mod tests {
             assert_eq!(value.as_object().unwrap().len(),if action.candidate(){4}else{3});
             for token in [CONSENT,CANDIDATE_CONSENT]{
                 let input=start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":token})).unwrap();
-                assert_eq!(input.consents(action),token==action.consent());
+                assert_eq!(input.consents(context(action).consent()),token==action.consent());
             }
             let mut bad=value.clone();bad["candidateOperationId"]=Value::Null;
             assert!(prepare(&bad).is_err()&&Context::deserialize(&bad).is_err());

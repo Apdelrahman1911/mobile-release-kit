@@ -72,3 +72,14 @@ test('failed cancellation is retained and only explicit retry sends another canc
   await h.controller.cancel();assert.equal(calls,2);assert.equal(h.controller.getSnapshot().status.operation.phase,'terminal');assert.equal(h.controller.getSnapshot().blocked,true);
  }finally{h.controller.dispose();}
 });
+
+test('a valid iOS input review never becomes a Play preparation from matching common fields',async()=>{
+ const {parseLocalHistoryStatus}=await import('../src/localReleaseHistoryProtocol.ts');
+ const h=history(),value=h.status.operation.result.candidateInputs;
+ delete value.applicationId;value.bundleId='org.example.app';value.files[0].fileName='export/App.ipa';
+ value.archive={directory:'archive.xcarchive',entries:4,bytes:500,sha256:'e'.repeat(64)};
+ h.status.operation.context.platform='ios';assert.ok(parseLocalHistoryStatus(h.status));
+ assert.equal(localStorePrepareRequest(project(),assets(),h),null);
+ const controller=new LocalStorePrepareController({project,assets,history:()=>h,otherOperationReason:()=>null});
+ try{controller.syncProject();assert.equal(controller.getSnapshot().request,null);assert.equal(controller.getSnapshot().applicationId,null);}finally{controller.dispose();}
+});

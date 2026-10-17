@@ -30,6 +30,8 @@ class IOSArchiveRun:
         self.request, self.guard, self.source = request, guard, source
         self.primary = None
         self._candidate = None
+        self._candidate_inputs = None
+        self._local_handoff = None
         self.findings = []
         self.pairing = None
         self.recovery_report = None
@@ -37,9 +39,13 @@ class IOSArchiveRun:
         self.operation = IOSArchiveOperation(request, guard, source)
 
     def remember(self, error: BaseException) -> None:
+        if getattr(self, "_local_handoff", None) is not None:
+            self._local_handoff._fail()
         if self.primary is None:
             self.primary = error
         self.operation.remember(error)
+        if getattr(self, "_candidate_inputs", None) is not None:
+            self._candidate_inputs.remember(error)
         if self.guard.cancelled and self.source.stop_reason == "none":
             self.source.stop("cancelled")
 
@@ -60,56 +66,18 @@ class IOSArchiveRun:
                 lease_context = nullcontext(None) if operation.signing is None else local_signing_lease(cancellation=self.guard)
                 with lease_context as lease, invocation.project(signing_lease=lease):
                     try:
-                        if operation.signing is not None:
-                            self.source.receive_material(operation)
-                        bound = operation.bind_inputs()
-                        operation.advance("inputs-bound")
-                        operation.prepare()
-                        if operation.signing is None:
-                            run_ios_build(bound.config, signed=False, cancellation=self.guard, operation=operation)
-                            operation.advance("inspecting")
-                            artifact = operation.artifact()
-                            self.findings = validate_xcarchive(artifact.path,
-                                expected_bundle_id=bound.saved.configuration.bundle_id, release=bound.saved.release,
-                                symbols_policy=bound.saved.configuration.symbols_policy,
-                                cancellation=self.guard, operation=operation)
+                        if getattr(self, "_candidate_inputs", None) is not None:
+                            bound = operation.bind_inputs()
+                            operation.advance("inputs-bound")
+                            with self._candidate_inputs.composition.source_scope(bound):
+                                self.source.receive_material(operation)
+                                self._build_bound(bound)
                         else:
-                            self._signed_body(bound)
-                            artifact = operation.artifact()
-                        if any(finding.status in FAILING_STATUSES for finding in self.findings):
-                            operation.fail("archive-validation-failed")
-                        operation.check_inputs()
-                        operation.files.check_tools()
-                        artifact.check()
-                        if operation.signing is not None:
-                            operation.ipa().check()
-                        require(artifact.inventory is not None and operation.snapshot_closed())
-                        operation.advance("disposing-work")
-                        operation.files.finish_work()
-                        operation.check_inputs()
-                        operation.files.check_tools()
-                        artifact.check()
-                        if operation.signing is not None:
-                            operation.ipa().check()
-                        expected_names = {"archive.xcarchive"} if operation.signing is None else {"archive.xcarchive", "export"}
-                        require(operation.files.work_disposition() == "removed"
-                                and operation.files.names(operation.files.namespace.fd) == expected_names)
-                        size = sum(entry.size for entry in artifact.inventory.values() if entry is not None)
-                        self._candidate = {"schemaVersion": 1, "scope": SCOPE,
-                            "usedConfig": {"bytes": len(bound.saved.configuration.raw),
-                                "sha256": hashlib.sha256(bound.saved.configuration.raw).hexdigest()},
-                            "usedVersion": {"source": bound.saved.configuration.source,
-                                "bytes": len(bound.saved.version_raw),
-                                "sha256": hashlib.sha256(bound.saved.version_raw).hexdigest(),
-                                "name": bound.saved.release.name, "build": bound.saved.release.build},
-                            "archive": f".mobile-release/desktop-ios-archive/{operation.operation_id}/archive.xcarchive",
-                            "entries": len(artifact.inventory), "bytes": size, "limitations": list(LIMITATIONS)}
-                        if operation.signing is not None:
-                            require(self.pairing is not None and operation.ipa().inventory is not None)
-                            self._candidate.update(scope=SIGNED_SCOPE, limitations=list(SIGNED_LIMITATIONS),
-                                ipa=f".mobile-release/desktop-ios-archive/{operation.operation_id}/export/{operation.ipa().original.name}",
-                                ipaBytes=operation.ipa().inventory.size, pairing=self.pairing)
-                        operation.checkpoint()
+                            if operation.signing is not None:
+                                self.source.receive_material(operation)
+                            bound = operation.bind_inputs()
+                            operation.advance("inputs-bound")
+                            self._build_bound(bound)
                     except BaseException as error:
                         self.remember(error)  # First failure before independent closes.
                         raise
@@ -122,6 +90,59 @@ class IOSArchiveRun:
             except BaseException as error:
                 self.remember(error)
                 raise
+
+    def _build_bound(self, bound):
+        operation, guard = self.operation, self.guard
+        operation.prepare()
+        if operation.signing is None:
+            run_ios_build(bound.config, signed=False, cancellation=self.guard, operation=operation)
+            operation.advance("inspecting")
+            artifact = operation.artifact()
+            self.findings = validate_xcarchive(artifact.path,
+                expected_bundle_id=bound.saved.configuration.bundle_id, release=bound.saved.release,
+                symbols_policy=bound.saved.configuration.symbols_policy,
+                cancellation=self.guard, operation=operation)
+        else:
+            self._signed_body(bound)
+            artifact = operation.artifact()
+        if any(finding.status in FAILING_STATUSES for finding in self.findings):
+            operation.fail("archive-validation-failed")
+        operation.check_inputs()
+        operation.files.check_tools()
+        artifact.check()
+        if operation.signing is not None:
+            operation.ipa().check()
+        require(artifact.inventory is not None and operation.snapshot_closed())
+        operation.advance("disposing-work")
+        operation.files.finish_work()
+        operation.check_inputs()
+        operation.files.check_tools()
+        artifact.check()
+        if operation.signing is not None:
+            operation.ipa().check()
+        expected_names = {"archive.xcarchive"} if operation.signing is None else {"archive.xcarchive", "export"}
+        require(operation.files.work_disposition() == "removed"
+                and operation.files.names(operation.files.namespace.fd) == expected_names)
+        size = sum(entry.size for entry in artifact.inventory.values() if entry is not None)
+        self._candidate = {"schemaVersion": 1, "scope": SCOPE,
+            "usedConfig": {"bytes": len(bound.saved.configuration.raw),
+                "sha256": hashlib.sha256(bound.saved.configuration.raw).hexdigest()},
+            "usedVersion": {"source": bound.saved.configuration.source,
+                "bytes": len(bound.saved.version_raw),
+                "sha256": hashlib.sha256(bound.saved.version_raw).hexdigest(),
+                "name": bound.saved.release.name, "build": bound.saved.release.build},
+            "archive": f".mobile-release/desktop-ios-archive/{operation.operation_id}/archive.xcarchive",
+            "entries": len(artifact.inventory), "bytes": size, "limitations": list(LIMITATIONS)}
+        if operation.signing is not None:
+            require(self.pairing is not None and operation.ipa().inventory is not None)
+            self._candidate.update(scope=SIGNED_SCOPE, limitations=list(SIGNED_LIMITATIONS),
+                ipa=f".mobile-release/desktop-ios-archive/{operation.operation_id}/export/{operation.ipa().original.name}",
+                ipaBytes=operation.ipa().inventory.size, pairing=self.pairing)
+        operation.checkpoint()
+        if getattr(self, "_candidate_inputs", None) is not None:
+            self._candidate_inputs.composition.before_capture()
+        if self._local_handoff is not None:
+            self._local_handoff._capture(self)
 
     def _recovery_run(self) -> None:
         operation = self.operation
@@ -249,6 +270,8 @@ class IOSArchiveRun:
                     release=bound.saved.release, symbols_policy=selected.symbols_policy)
                 self.findings.append(Finding("ios.artifacts.correspondence", Status.PASS,
                     "The retained archive and IPA match under the complete shared pairing policy.", category="ios-artifact"))
+                if operation._local_candidate is not None:
+                    operation._candidate_begin_ipa_validation(snapshot)
                 self.findings.extend(validate_ipa(snapshot.paths["ios-ipa"], expected_bundle_id=selected.bundle_id,
                     expected_team_id=self.request.context["signing"]["teamId"],
                     expected_fingerprint=self.request.context["signing"]["distributionCertificateSha256"],
@@ -311,13 +334,15 @@ class IOSArchiveRun:
         verdict = self.guard.lifetime_ledger.verdict()
         signed = self.source.signed
         from ._desktop_ios_recovery_protocol import COMMAND_LIMIT as RECOVERY_COMMAND_LIMIT
-        command_limit = RECOVERY_COMMAND_LIMIT if self.source.recovery else SIGNED_COMMAND_LIMIT if signed else 4
+        command_limit = RECOVERY_COMMAND_LIMIT if self.source.recovery else SIGNED_COMMAND_LIMIT + 8 if getattr(self, "_candidate_inputs", None) is not None else SIGNED_COMMAND_LIMIT if signed else 4
         if (verdict.profile_calls > (SIGNED_PROFILE_LIMIT if signed else 0)
                 or verdict.commands > command_limit):
             self.guard._abort(ProtocolError("Unexpected iOS archive command domain"))
             verdict = self.guard.lifetime_ledger.verdict()
         files = operation.files
         commands_settled = operation.commands_settled()
+        if getattr(self, "_candidate_inputs", None) is not None:
+            commands_settled = commands_settled and self._candidate_inputs.composition.source_settled()
         dispatched = operation.command_dispatch()
         lifetime = {"complete": verdict.complete and commands_settled, "fatal": verdict.fatal, "contained": verdict.contained,
             "commandDispatched": dispatched, "commands": verdict.commands,
@@ -364,5 +389,9 @@ class IOSArchiveRun:
             "activity": {"stage": operation.stage, "selection": operation.selection(),
                          "commands": operation.command_outcomes(), "findings": rows},
             "disposition": disposition, "result": result, "lifetime": lifetime}
+        if getattr(self, "_candidate_inputs", None) is not None:
+            return self._candidate_inputs.terminal(value)
         validate_terminal(value, self.request)
+        if getattr(self, "_local_handoff", None) is not None:
+            self._local_handoff._terminal(self, value)
         return value

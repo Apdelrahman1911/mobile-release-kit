@@ -1,3 +1,4 @@
+import { iosCandidateInputs, IOS_CANDIDATE_CONSENT } from './iosArchiveProtocol.ts';
 import type { LocalExecutionReceipt } from './localStoreExecuteTypes.ts';
 import type { LocalPreparedIntent } from './localStorePrepareTypes.ts';
 import { copyBoundedComparisonData, sameOfflineData } from './offlinePreflightProtocol.ts';
@@ -22,7 +23,7 @@ const uuid=(v:unknown):v is string=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{
 const hex=(v:unknown,n:number)=>typeof v==='string'&&new RegExp(`^[0-9a-f]{${n}}$`).test(v);
 const bounded=(v:unknown,max:number)=>typeof v==='number'&&Number.isSafeInteger(v)&&v>=1&&v<=max;
 export const candidateHistoryAction=(action:unknown)=>action==='review-inputs'||action==='abandon-inputs'||action==='review-prepared'||action==='review-execution'||action==='review-reconcile'||action==='review-recovery';
-export function localHistoryConsent(request:PrepareLocalHistory){return candidateHistoryAction(request.action)?LOCAL_CANDIDATE_CONSENT:LOCAL_HISTORY_CONSENT;}
+export function localHistoryConsent(request:PrepareLocalHistory){return request.platform==='ios'?IOS_CANDIDATE_CONSENT:candidateHistoryAction(request.action)?LOCAL_CANDIDATE_CONSENT:LOCAL_HISTORY_CONSENT;}
 // Predicate for already copied bounded DATA; both callers own descriptor-safe copying.
 export function candidateInputs(v:unknown,operationId:unknown):boolean {
  if(!keys(v,['operationId','candidateSha256','sourceCommit','sourceTree','applicationId','version','files','observation','priorCreateFinality'])||!uuid(v.operationId)||v.operationId!==operationId||!hex(v.candidateSha256,64)||!hex(v.sourceCommit,40)||!hex(v.sourceTree,40)||v.observation!=='current-bundle-only'||v.priorCreateFinality!=='not-established')return false;
@@ -65,15 +66,15 @@ export function recoveryReceiptFields(i: unknown, operationId: unknown): boolean
     localStoreSummaryIdentity(i, operationId);
 }
 function request(v:unknown):boolean{
- const candidate=object(v)&&candidateHistoryAction(v.action);
- return keys(v,[...contextKeys,...(candidate?['candidateOperationId']:[])])&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&v.executionMode==='local'&&(candidate?uuid(v.candidateOperationId):member(['enroll','verify'],v.action));
+ const candidate=object(v)&&candidateHistoryAction(v.action),ios=object(v)&&Object.hasOwn(v,'platform');
+ return (!ios||v.platform==='ios'&&['review-inputs','abandon-inputs'].includes(v.action as string))&&keys(v,[...contextKeys,...(candidate?['candidateOperationId']:[]),...(ios?['platform']:[])])&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&v.executionMode==='local'&&(candidate?uuid(v.candidateOperationId):member(['enroll','verify'],v.action));
 }
 export function parseLocalHistoryRequest(input:unknown):PrepareLocalHistory|null{
  try{const v=copyBoundedComparisonData(input,8192);return request(v)?v as PrepareLocalHistory:null;}catch{return null;}
 }
 export function encodeLocalHistoryRequest(command:LocalHistoryCommand,input:unknown):Uint8Array|null{
  try{const v=copyBoundedComparisonData(input,8192);
- const valid=command==='prepare_local_release_history'?request(v):command==='local_release_history_status'?keys(v,[]):keys(v,command==='start_local_release_history'?['operationId','ownerGeneration','consentVersion']:['operationId','ownerGeneration'])&&token(v.operationId)&&token(v.ownerGeneration)&&(command!=='start_local_release_history'||member([LOCAL_HISTORY_CONSENT,LOCAL_CANDIDATE_CONSENT],v.consentVersion));
+ const valid=command==='prepare_local_release_history'?request(v):command==='local_release_history_status'?keys(v,[]):keys(v,command==='start_local_release_history'?['operationId','ownerGeneration','consentVersion']:['operationId','ownerGeneration'])&&token(v.operationId)&&token(v.ownerGeneration)&&(command!=='start_local_release_history'||member([LOCAL_HISTORY_CONSENT,LOCAL_CANDIDATE_CONSENT,IOS_CANDIDATE_CONSENT],v.consentVersion));
  if(!valid)return null;const bytes=new TextEncoder().encode(JSON.stringify(v));return bytes.length<=8192?bytes:null;
  }catch{return null;}
 }
@@ -116,7 +117,7 @@ export function parseLocalHistoryStatus(input:unknown):LocalHistoryStatus|null{
    }else if(context.action==='abandon-inputs'){
     if(selected.phase!=='settled-failure'||r.history.at(-1)!==selected||r.candidateInputs!==null)return null;
    }else if(selected.phase==='inputs-ready'){
-    if(!candidateInputs(r.candidateInputs,context.candidateOperationId))return null;
+    if(!(context.platform==='ios'?iosCandidateInputs(r.candidateInputs,context.candidateOperationId):candidateInputs(r.candidateInputs,context.candidateOperationId)))return null;
    }else if(!['inputs-pending','settled-failure'].includes(selected.phase as string)||r.candidateInputs!==null)return null;
   }
  }else if(op.outcome==='complete')return null;

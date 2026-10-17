@@ -52,6 +52,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
     </>}
     {state.consentUntil !== null && <div className="notice">
       <p>{consent[selectedAction]}</p>
+      {(selectedAction==='review-inputs'||selectedAction==='abandon-inputs') && <p>Input platform: {op?.context.platform==='ios'?'iOS':'Android'}. No cross-platform conversion or Store action.</p>}
       {op?.context.candidateOperationId && <p>Operation: <code>{op.context.candidateOperationId}</code></p>}
       <label><input type="checkbox" checked={state.acknowledged} onChange={event => controller.acknowledge(event.target.checked)} /> I authorize this specific local action.</label>
       <button disabled={!state.acknowledged || state.pending} onClick={() => void controller.start()}>{labels[selectedAction]}</button>
@@ -62,6 +63,9 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
     {op && <p>{state.historical ? 'Earlier project context · ' : ''}{op.phase}{op.reason !== 'none' ? ` · ${op.reason.replaceAll('-', ' ')}` : ''}</p>}
     {op && hints[op.reason] && <p className="save-note">{hints[op.reason]}</p>}
     {op?.result && <>
+      {!compact && <label>Input platform <select value={state.inputPlatform} disabled={!!retained} onChange={event => controller.setInputPlatform(event.target.value === 'ios' ? 'ios' : 'android')}>
+        <option value="android">Android candidate inputs</option><option value="ios">iOS candidate inputs</option>
+      </select><span className="save-note">Choose the platform used to create the input operation below. History rows do not identify a platform; this choice selects which saved bundle to check. A wrong choice refuses review—it never converts or rebuilds files. Play receipt actions are separate.</span></label>}
       <h3>Verified local history</h3><p>Checkpoint {op.result.headSequence}. {op.result.history.length === 0 ? 'No release operations recorded.' : 'Latest recorded operation states (up to 64):'}</p>
       <ul>{op.result.history.map(row => <li key={row.operationId}>
         <code>{row.operationId}</code> — {row.phase.replaceAll('-', ' ')}{row.recoveryRequired && <strong> · Review before retrying</strong>}
@@ -77,9 +81,10 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
       {candidate && state.historical && <p>This bundle was reviewed for an earlier project context. Its current files have not been checked for the selected project.</p>}
       {candidate && !state.historical && <div className="notice">
         <h3>Inputs currently verified · Not submitted</h3>
-        <p>{candidate.applicationId} · Version {candidate.version.name} · Build {candidate.version.build}</p>
+        <p>{'bundleId' in candidate?candidate.bundleId:candidate.applicationId} · Version {candidate.version.name} · Build {candidate.version.build}</p>
         <ul>{candidate.files.map(file=><li key={file.fileName}>{file.fileName} — {file.bytes.toLocaleString()} bytes</li>)}</ul>
-        <p>Saved inside your project at <code>.mobile-release/desktop-android-build/{candidate.operationId.replaceAll('-','')}/artifacts</code>. No copying or registration is needed.</p>
+        <p>Saved inside your project at <code>{'archive' in candidate?`.mobile-release/desktop-ios-archive/${candidate.operationId.replaceAll('-','')}`:`.mobile-release/desktop-android-build/${candidate.operationId.replaceAll('-','')}/artifacts`}</code>. No copying or registration is needed.</p>
+        {'archive' in candidate && <p>Original signed archive: <code>{candidate.archive.directory}</code> · {candidate.archive.entries.toLocaleString()} entries · {candidate.archive.bytes.toLocaleString()} bytes. The IPA and archive inventory were checked without copying them.</p>}
         <p>This review verifies the current bundle only. It does not establish that the earlier creation finished cleanly, authorize Store submission, or confirm any Store state.</p>
       </div>}
       {prepared && state.historical && <p>This intent was reviewed for an earlier project context. Its current prepared files have not been checked for the selected project.</p>}
@@ -109,7 +114,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
         <p>The checkpoint recorded the matching internal target and preserved the original evidence. It does not establish the earlier operation’s cleanup or authorize resending, mapping replay or promotion. A new, distinct release still requires its own checks and consent. Keep the original files and history intact.</p>
       </div>}
       {op.result.candidateInputs === null && <p>{op.context.action === 'abandon-inputs' ? 'The input operation was abandoned. Its files were preserved; no Store action was performed.' : 'No verified ready input bundle was returned. The operation is pending or abandoned; keep its files intact.'}</p>}
-      {!compact && <details><summary>Help: review or abandon an input operation?</summary><p>Review checks the saved Android bundle without rebuilding or contacting a Store. If you no longer need a pending or ready input operation, review abandonment and confirm it. Abandonment records cancellation but keeps the files. Only the current pending or ready input operation can be abandoned; uncertain or changed history must be reconciled instead.</p></details>}
+      {!compact && <details><summary>Help: review or abandon an input operation?</summary><p>Choose Android or iOS, then Review checks that saved bundle without rebuilding or contacting a Store. iOS review includes the retained archive and IPA; it does not repair signing state. If you no longer need a pending or ready input operation, review abandonment and confirm it. Abandonment records cancellation but keeps the files. Only the current pending or ready input operation can be abandoned; uncertain or changed history must be reconciled instead.</p></details>}
       {!compact && <p>After restarting, Verify history and select a prepared or completed execution row to inspect its retained intent or receipt without Store credentials or network access. For the latest execution, Review for Store check also reads the retained prepared files. Then use Check previous Play upload for a separate network check. Neither action repairs old cleanup or authorizes a retry. A target-reconciled row can be reviewed offline with Review recovery checkpoint, even after a later release.</p>}
       <p>This is a point-in-time local record, not Store access, publication proof, or permission to retry a release.</p>
     </>}

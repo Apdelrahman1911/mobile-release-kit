@@ -82,7 +82,7 @@ class SignedIOSOperation:
     def __init__(self, operation) -> None:
         from .ios_archive_operation import IOSArchiveOperation
         require(type(operation) is IOSArchiveOperation and operation.source.account_lifecycle
-                and operation.request.context["operation"] in {"ios-signed-export", "ios-local-recovery"})
+                and operation.request.context["operation"] in {"ios-signed-export", "ios-local-recovery", "ios-candidate-inputs"})
         self.operation, self.guard = operation, operation.guard
         self.lease = self.session = self.materialization = None
         self.lease_close_claimed = self.lease_close_returned = False

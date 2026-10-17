@@ -63,34 +63,48 @@ def prepared_intent_data(*,request,enrollment,manifest,observed,config,precondit
     """Closed body construction only; original caller must finish Store custody."""
     from .local_release_intent import decode_local_operation_intent
     from .provenance import seal,timestamp,_intent_destination,_signing_identity
-    c=request.context
+    c=request.context; platform=c['platform']
+    require(platform in {'android','ios'})
+    identity='applicationId' if platform=='android' else 'bundleId'
+    section=config.section(platform)
     source={'commit':observed.commit,'tree':observed.tree,'ref':observed.ref}
     require(source=={'commit':manifest['sourceCommit'],'tree':manifest['sourceTree'],
         'ref':'refs/heads/'+config.section('source')['candidateBranch']}
         and manifest['operationId']==c['candidateOperationId'] and manifest['enrollment']==enrollment
         and manifest['savedConfig']==c['savedConfig'] and manifest['savedVersion']==c['savedVersion']
-        and manifest['applicationId']==config.section('android')['applicationId'])
-    signing=_signing_identity(config,'android',None)
-    require(signing['certificateSha256']==manifest['signerSha256'])
-    assignment={'kind':'google-service-account','recordId':c['recordId'],
+        and manifest[identity]==section[identity])
+    if platform=='ios':
+        from .local_ios_candidate_bundle import file_rows, archive_data, signing_data
+        file_rows(manifest['files']); archive_data(manifest['archive'])
+        signing=_signing_identity(config,platform,signing_data(manifest['signing']))
+    else:
+        signing=_signing_identity(config,platform,None)
+        require(signing['certificateSha256']==manifest['signerSha256'])
+    assignment={'kind':'google-service-account' if platform=='android' else 'asc-p8','recordId':c['recordId'],
         'expectedRevision':c['recordRevision'],'contextRevision':c['credentialContextRevision']}
     common=dict(project=enrollment,operationId=c['candidateOperationId'],candidateSha256=c['candidateSha256'])
     prepared=dict(schemaVersion=1,origin='local-desktop',purpose='prepare',**common,
         authorizationId=request.native['authorizationId'],source=source,assignment=assignment,
         confirmationSha256=hashlib.sha256(c['confirmation'].encode()).hexdigest(),intentSha256=None)
-    kinds=(('android-aab','android','aab'),('store-metadata','shared','metadata'),
+    kinds=(('android-aab','android','aab') if platform=='android' else ('ios-ipa','ios','ipa'),('store-metadata','shared','metadata'),
            ('validation-report','shared','validation-report'))
     artifacts=[dict(logicalName=a,platform=b,kind=k,fileName=row['fileName'],size=row['bytes'],
                     sha256=row['sha256'],architectures=[]) for row,(a,b,k) in zip(manifest['files'],kinds)]
+    application={'id':manifest[identity]}
+    if platform=='ios':
+        # file_rows already proved the fixed export prefix and one IPA leaf.
+        artifacts[0]['fileName']=artifacts[0]['fileName'][7:]
+        artifacts.append(dict(logicalName='ios-archive',platform='ios',kind='xcarchive',**manifest['archive']))
+        application['storeAppId']=str(section['appStoreAppId'])
     value=seal(dict(documentType='local-store-operation-intent',schemaVersion=1,origin='local-desktop',
-        **common,platform='android',stage='candidate',tooling=request.native['tooling'],
+        **common,platform=platform,stage='candidate',tooling=request.native['tooling'],
         candidateSource=source,operationSource=source,preparedBy=prepared,confirmation=c['confirmation'],
-        application={'id':manifest['applicationId']},version={'marketing':c['savedVersion']['name'],'build':c['savedVersion']['build']},
-        destination=_intent_destination(config,'candidate','android'),
+        application=application,version={'marketing':c['savedVersion']['name'],'build':c['savedVersion']['build']},
+        destination=_intent_destination(config,'candidate',platform),
         configuration={'path':'release/mobile-release.json','sha256':c['savedConfig']['sha256'],
             'metadataSha256':manifest['files'][1]['sha256']},artifacts=artifacts,signing=[signing],
         predecessors={},storePrecondition=precondition,privateStateCommitments={},createdAt=timestamp()))
-    raw=canonical(value)+b'\n';decode_local_operation_intent(raw)
+    raw=canonical(value)+b'\n';decode_local_operation_intent(raw,platform=platform)
     return raw,value
 
 

@@ -1181,11 +1181,27 @@ def validate_operation_intent(value: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _validate_operation_intent_body(intent: dict[str, Any], *, stage: str, platform: str) -> None:
+def _validate_local_ios_archive_artifact(value: object) -> None:
+    """Local directory inventory DATA, never a ZIP/file hash or custody proof."""
+    row = _exact_keys(value, {"logicalName", "platform", "kind", "directory", "entries", "bytes", "sha256"},
+                      "local iOS archive artifact")
+    if (row["logicalName"] != "ios-archive" or row["platform"] != "ios" or row["kind"] != "xcarchive"
+            or row["directory"] != "archive.xcarchive"
+            or type(row["entries"]) is not int or not 1 <= row["entries"] <= 100_000
+            or type(row["bytes"]) is not int or not 1 <= row["bytes"] <= 8 << 30
+            or type(row["sha256"]) is not str or not HEX_SHA256_RE.fullmatch(row["sha256"])):
+        raise ValidationError("local iOS archive inventory is invalid")
+
+
+def _validate_operation_intent_body(intent: dict[str, Any], *, stage: str, platform: str,
+                                    artifact_encoding: str = "files") -> None:
     """Shared operation DATA policy; caller must first validate its closed origin.
 
     This is not authorization and never supplies repository/executor identity.
     """
+    if (type(artifact_encoding) is not str or artifact_encoding not in {"files", "local-ios-directory"}
+            or artifact_encoding == "local-ios-directory" and (stage, platform) != ("candidate", "ios")):
+        raise ValidationError("intent artifact encoding is invalid")
     expected_confirmation = f"{stage}:{platform}:{intent['version'].get('marketing') if isinstance(intent['version'], dict) else ''}:{intent['version'].get('build') if isinstance(intent['version'], dict) else ''}"
     if intent["confirmation"] != expected_confirmation:
         raise ValidationError("intent textual confirmation is invalid")
@@ -1283,6 +1299,13 @@ def _validate_operation_intent_body(intent: dict[str, Any], *, stage: str, platf
     }
     artifact_names: set[str] = set()
     for artifact_value in intent["artifacts"]:
+        if (artifact_encoding == "local-ios-directory" and type(artifact_value) is dict
+                and artifact_value.get("logicalName") == "ios-archive"):
+            _validate_local_ios_archive_artifact(artifact_value)
+            if "ios-archive" in artifact_names:
+                raise ValidationError("duplicate local iOS archive artifact")
+            artifact_names.add("ios-archive")
+            continue
         artifact = _exact_keys(
             artifact_value,
             {
@@ -2428,6 +2451,74 @@ def _validate_android_store_receipt_body(
         raise ValidationError("Play testing readback must prove availability to testers")
 
 
+def _validate_ios_store_receipt_body(receipt: Mapping[str, Any], *, platform_config: Mapping[str, Any],
+        stage: str, outcome: str, intent: Mapping[str, Any],
+        operation_intent: Mapping[str, Any] | None = None, executed=None) -> None:
+    """Shared Apple receipt body; closed CI/local callers own authority validation."""
+    for field in ("appStoreAppId", "buildResourceId", "processingState"):
+        if (
+            not isinstance(receipt.get(field), str)
+            or not receipt[field].strip()
+            or len(receipt[field]) > 255
+        ):
+            raise ValidationError(f"Apple Store receipt is missing {field}")
+    if str(receipt["appStoreAppId"]) != str(platform_config.get("appStoreAppId")):
+        raise ValidationError("App Store app ID does not match configuration")
+    if receipt["processingState"] != "VALID":
+        raise ValidationError("Apple Store receipt must prove VALID processing")
+    if stage != "candidate" and receipt["buildResourceId"] != intent["storePrecondition"]["snapshot"]["build"]["id"]:
+        raise ValidationError("Apple Store receipt substituted a different candidate build")
+    if stage != "production-submit" and receipt.get("autoNotifyEnabled") is not False:
+        raise ValidationError("Apple Store receipt must prove automatic tester notification is disabled")
+    if outcome == "operator-authorized-create-retry":
+        _validate_create_retry(receipt.get("createRetry"), operation_intent=operation_intent, executed_by=executed)
+    if stage == "external-testing":
+        if receipt.get("externalGroup") != platform_config.get("externalTestFlightGroup"):
+            raise ValidationError("TestFlight external group does not match configuration")
+        if (
+            not isinstance(receipt.get("betaReviewState"), str)
+            or not receipt["betaReviewState"].strip()
+            or len(receipt["betaReviewState"]) > 255
+        ):
+            raise ValidationError("External TestFlight receipt lacks Beta Review readback")
+    if stage == "production-submit":
+        if receipt.get("automaticRelease") is not False:
+            raise ValidationError("App Store production must set automaticRelease=false")
+        if (
+            not isinstance(receipt.get("submissionState"), str)
+            or not receipt["submissionState"].strip()
+            or len(receipt["submissionState"]) > 255
+        ):
+            raise ValidationError("App Store receipt lacks submission-state readback")
+        if not isinstance(receipt["state"], str) or receipt["state"] not in {
+            "submitted-for-review",
+            "in-review",
+            "approved",
+            "pending-developer-release",
+        }:
+            raise ValidationError("App Store production readback state is not submission evidence")
+        for field in ("appStoreVersionId", "reviewSubmissionId"):
+            if not isinstance(receipt.get(field), str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", receipt[field]):
+                raise ValidationError(f"App Store production receipt lacks exact {field}")
+        if not isinstance(receipt.get("storeStateSha256"), str) or not HEX_SHA256_RE.fullmatch(receipt["storeStateSha256"]):
+            raise ValidationError("App Store production receipt lacks its final complete public state digest")
+        production_before = intent["storePrecondition"]["snapshot"]["production"]
+        if production_before is not None and receipt["appStoreVersionId"] != production_before["id"]:
+            raise ValidationError("App Store production receipt substituted its version resource")
+    elif stage == "external-testing":
+        if not isinstance(receipt["state"], str) or receipt["state"] not in {
+            "available-to-testers",
+            "submitted-for-review",
+            "in-review",
+            "approved",
+        }:
+            raise ValidationError(
+                "External TestFlight receipt lacks an allowed explicit review/testing state"
+            )
+    elif not isinstance(receipt["state"], str) or receipt["state"] not in {"processed", "available-to-testers"}:
+        raise ValidationError("Internal TestFlight receipt lacks explicit processing state")
+
+
 def _validate_store_receipt_document(
     receipt: Mapping[str, Any], *, platform_config: Mapping[str, Any],
     release: ReleaseVersion, stage: str, platform: str,
@@ -2558,68 +2649,8 @@ def _validate_store_receipt_document(
         _validate_android_store_receipt_body(receipt, platform_config=platform_config,
             release=release, stage=stage, outcome=outcome, intent=intent)
     else:
-        for field in ("appStoreAppId", "buildResourceId", "processingState"):
-            if (
-                not isinstance(receipt.get(field), str)
-                or not receipt[field].strip()
-                or len(receipt[field]) > 255
-            ):
-                raise ValidationError(f"Apple Store receipt is missing {field}")
-        if str(receipt["appStoreAppId"]) != str(platform_config.get("appStoreAppId")):
-            raise ValidationError("App Store app ID does not match configuration")
-        if receipt["processingState"] != "VALID":
-            raise ValidationError("Apple Store receipt must prove VALID processing")
-        if stage != "candidate" and receipt["buildResourceId"] != intent["storePrecondition"]["snapshot"]["build"]["id"]:
-            raise ValidationError("Apple Store receipt substituted a different candidate build")
-        if stage != "production-submit" and receipt.get("autoNotifyEnabled") is not False:
-            raise ValidationError("Apple Store receipt must prove automatic tester notification is disabled")
-        if outcome == "operator-authorized-create-retry":
-            _validate_create_retry(receipt.get("createRetry"), operation_intent=operation_intent, executed_by=executed)
-        if stage == "external-testing":
-            if receipt.get("externalGroup") != platform_config.get("externalTestFlightGroup"):
-                raise ValidationError("TestFlight external group does not match configuration")
-            if (
-                not isinstance(receipt.get("betaReviewState"), str)
-                or not receipt["betaReviewState"].strip()
-                or len(receipt["betaReviewState"]) > 255
-            ):
-                raise ValidationError("External TestFlight receipt lacks Beta Review readback")
-        if stage == "production-submit":
-            if receipt.get("automaticRelease") is not False:
-                raise ValidationError("App Store production must set automaticRelease=false")
-            if (
-                not isinstance(receipt.get("submissionState"), str)
-                or not receipt["submissionState"].strip()
-                or len(receipt["submissionState"]) > 255
-            ):
-                raise ValidationError("App Store receipt lacks submission-state readback")
-            if not isinstance(receipt["state"], str) or receipt["state"] not in {
-                "submitted-for-review",
-                "in-review",
-                "approved",
-                "pending-developer-release",
-            }:
-                raise ValidationError("App Store production readback state is not submission evidence")
-            for field in ("appStoreVersionId", "reviewSubmissionId"):
-                if not isinstance(receipt.get(field), str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", receipt[field]):
-                    raise ValidationError(f"App Store production receipt lacks exact {field}")
-            if not isinstance(receipt.get("storeStateSha256"), str) or not HEX_SHA256_RE.fullmatch(receipt["storeStateSha256"]):
-                raise ValidationError("App Store production receipt lacks its final complete public state digest")
-            production_before = intent["storePrecondition"]["snapshot"]["production"]
-            if production_before is not None and receipt["appStoreVersionId"] != production_before["id"]:
-                raise ValidationError("App Store production receipt substituted its version resource")
-        elif stage == "external-testing":
-            if not isinstance(receipt["state"], str) or receipt["state"] not in {
-                "available-to-testers",
-                "submitted-for-review",
-                "in-review",
-                "approved",
-            }:
-                raise ValidationError(
-                    "External TestFlight receipt lacks an allowed explicit review/testing state"
-                )
-        elif not isinstance(receipt["state"], str) or receipt["state"] not in {"processed", "available-to-testers"}:
-            raise ValidationError("Internal TestFlight receipt lacks explicit processing state")
+        _validate_ios_store_receipt_body(receipt, platform_config=platform_config, stage=stage,
+            outcome=outcome, intent=intent, operation_intent=operation_intent, executed=executed)
     return dict(receipt)
 
 

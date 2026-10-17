@@ -4,7 +4,7 @@
 import type { ApiError } from './types.ts';
 import type { IOSArchiveActivity, IOSArchiveAvailability, IOSArchiveCheckId, IOSArchiveCommandObservation,
   IOSArchiveBuildContext, IOSArchiveBuildOperation, IOSArchiveContext, IOSArchiveCoreStatus, IOSArchiveDisposition, IOSArchiveIdentity, IOSArchiveLimitation,
-  IOSArchiveMode, IOSArchiveOperation, IOSArchiveOutcome, IOSArchivePhase, IOSArchiveReason, IOSArchiveResult,
+  IOSArchiveMode, IOSArchiveOperation, IOSArchiveOutcome, IOSArchivePhase, IOSArchiveReason, IOSArchiveResult, IOSArchivePublishedResult, IOSCandidateInputsResult, IOSCandidateInputs,
   IOSArchiveSavedConfig, IOSArchiveSavedPair, IOSArchiveSavedVersion, IOSArchiveSelection, IOSArchiveStage,
   IOSArchiveStatus, IOSRecoveryContext, IOSRecoveryIntent, IOSRecoveryOperation, IOSRecoveryReport, IOSRecoveryRow, IOSRecoveryStage,
   IOSSigningPolicy, PrepareIOSArchive, StartIOSArchive } from './iosArchiveTypes.ts';
@@ -12,6 +12,7 @@ import type { IOSArchiveActivity, IOSArchiveAvailability, IOSArchiveCheckId, IOS
 export const IOS_ARCHIVE_EVENT = 'ios-archive-state-changed';
 export const IOS_ARCHIVE_CONSENT = 'saved-ios-unsigned-archive-v1';
 export const IOS_SIGNED_ARCHIVE_CONSENT = 'saved-ios-signed-export-v2';
+export const IOS_CANDIDATE_CONSENT = 'local-ios-candidate-inputs-v1';
 export const IOS_RECOVERY_CONSENT = 'local-ios-recovery-v1';
 export const IOS_ACCOUNT_RECOVERY_CONFIRMATION = 'account-signing-is-idle-and-restore-owned-state';
 export const IOS_PROJECT_RECOVERY_CONFIRMATION = 'project-build-inputs-are-idle-and-restore-owned-state';
@@ -46,9 +47,10 @@ export const IOS_RECOVERY_LIMITATIONS: readonly IOSRecoveryReport['limitations']
   'local-recovery-only', 'manual-recovery-not-supported', 'user-confirmation-is-not-worker-finality', 'no-store-operation',
 ]);
 export const isIOSRecoveryOperation = (op: IOSArchiveOperation): op is IOSRecoveryOperation => op.context.operation === 'ios-local-recovery';
-export const iosArchiveRoles = (ctx: IOSArchiveBuildContext) => ctx.operation === 'ios-signed-export' ? IOS_SIGNED_ARCHIVE_ROLES : IOS_ARCHIVE_ROLES;
+export const iosArchiveSigned = (ctx: IOSArchiveContext): boolean => ctx.operation === 'ios-signed-export' || ctx.operation === 'ios-candidate-inputs';
+export const iosArchiveRoles = (ctx: IOSArchiveBuildContext) => iosArchiveSigned(ctx) ? IOS_SIGNED_ARCHIVE_ROLES : IOS_ARCHIVE_ROLES;
 export const iosArchiveStages = (ctx: IOSArchiveContext): readonly IOSArchiveStage[] =>
-  ctx.operation === 'ios-local-recovery' ? IOS_RECOVERY_STAGES : ctx.operation === 'ios-signed-export' ? IOS_SIGNED_ARCHIVE_STAGES : IOS_ARCHIVE_STAGES;
+  ctx.operation === 'ios-local-recovery' ? IOS_RECOVERY_STAGES : iosArchiveSigned(ctx) ? IOS_SIGNED_ARCHIVE_STAGES : IOS_ARCHIVE_STAGES;
 export const IOS_ARCHIVE_LIMITATIONS: readonly IOSArchiveLimitation[] = Object.freeze([
   'saved-inputs-not-atomic', 'project-build-code-is-trusted', 'not-network-isolated', 'unsigned-archive-not-an-ipa',
   'signing-and-profile-not-validated', 'ipa-correspondence-not-validated', 'source-provenance-not-authenticated',
@@ -191,7 +193,8 @@ function prepare(value: unknown): value is PrepareIOSArchive {
   if (record(value) && Object.hasOwn(value, 'recovery')) return keys(value, ['projectId', 'recovery']) &&
     projectId(value.projectId) && recoveryIntent(value.recovery);
   const signed = record(value) && Object.hasOwn(value, 'signing');
-  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', ...(signed ? ['signing'] : [])]) && projectId(value.projectId) &&
+  const candidate = record(value) && Object.hasOwn(value, 'action');
+  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', ...(signed ? ['signing'] : []), ...(candidate ? ['action'] : [])]) && (!candidate || signed && value.action === 'create') && projectId(value.projectId) &&
     iosArchiveCounter(value.draftRevision) && iosArchiveCounter(value.baselineGeneration) && content(value.savedConfig) && savedVersion(value.savedVersion) &&
     (!signed || signingPolicy(value.signing));
 }
@@ -202,10 +205,11 @@ function context(value: unknown): value is IOSArchiveContext {
   if (record(value) && Object.hasOwn(value, 'recovery')) return keys(value, ['projectId', 'recovery', 'platform', 'operation']) &&
     projectId(value.projectId) && recoveryIntent(value.recovery) && value.platform === 'ios' && value.operation === 'ios-local-recovery';
   const signed = record(value) && Object.hasOwn(value, 'signing');
-  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'platform', 'operation', ...(signed ? ['signing'] : [])]) &&
-    value.platform === 'ios' && value.operation === (signed ? 'ios-signed-export' : 'ios-unsigned-archive') && prepare({ projectId: value.projectId,
+  const candidate = record(value) && Object.hasOwn(value, 'action');
+  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'platform', 'operation', ...(signed ? ['signing'] : []), ...(candidate ? ['action'] : [])]) &&
+    value.platform === 'ios' && value.operation === (candidate ? 'ios-candidate-inputs' : signed ? 'ios-signed-export' : 'ios-unsigned-archive') && prepare({ projectId: value.projectId,
       draftRevision: value.draftRevision, baselineGeneration: value.baselineGeneration, savedConfig: value.savedConfig, savedVersion: value.savedVersion,
-      ...(signed ? { signing: value.signing } : {}) });
+      ...(signed ? { signing: value.signing } : {}), ...(candidate ? { action: value.action } : {}) });
 }
 export function copyIOSArchiveRequest(command: IOSArchiveCommand, value: unknown): PrepareIOSArchive | StartIOSArchive | IOSArchiveIdentity | Record<string, never> | null {
   try {
@@ -216,7 +220,7 @@ export function copyIOSArchiveRequest(command: IOSArchiveCommand, value: unknown
     if (command === 'start_ios_archive' && record(safe)) {
       const confirmation = Object.hasOwn(safe, 'confirmation');
       if (keys(safe, ['operationId', 'ownerGeneration', 'consentVersion', ...(confirmation ? ['confirmation'] : [])]) && identity(safe) &&
-          oneOf(safe.consentVersion, [IOS_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_CONSENT, IOS_RECOVERY_CONSENT]) &&
+          oneOf(safe.consentVersion, [IOS_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_CONSENT, IOS_CANDIDATE_CONSENT, IOS_RECOVERY_CONSENT]) &&
           (!confirmation || safe.consentVersion === IOS_RECOVERY_CONSENT && oneOf(safe.confirmation, [IOS_ACCOUNT_RECOVERY_CONFIRMATION, IOS_PROJECT_RECOVERY_CONFIRMATION])))
         return safe as unknown as StartIOSArchive;
     }
@@ -248,7 +252,7 @@ function commandObservation(value: unknown): value is IOSArchiveCommandObservati
 }
 const exitedZero = (value: IOSArchiveCommandObservation | undefined): boolean => value?.outcome === 'exited' && value.exitCode === 0;
 function activity(value: unknown, ctx: IOSArchiveBuildContext): value is IOSArchiveActivity {
-  const signed = ctx.operation === 'ios-signed-export', stages = iosArchiveStages(ctx), roles = iosArchiveRoles(ctx);
+  const signed = iosArchiveSigned(ctx), stages = iosArchiveStages(ctx), roles = iosArchiveRoles(ctx);
   if (!keys(value, ['stage', 'selection', 'commands', 'findings']) || !oneOf(value.stage, stages) ||
       !(value.selection === null || selection(value.selection)) || value.stage !== 'accepted' && value.selection === null ||
       !keys(value.commands, roles) ||
@@ -265,7 +269,7 @@ function completedActivity(value: IOSArchiveActivity, ctx: IOSArchiveBuildContex
   const selected = value.selection, commands = value.commands, findings = value.findings;
   if (selected === null || value.stage !== 'disposing-work' || !exitedZero(commands['xcode-version']) || !exitedZero(commands['ios-sdk']) ||
       !exitedZero(commands.archive) || !(selected.preparationConfigured ? exitedZero(commands.prepare) : commands.prepare.outcome === 'not-configured')) return false;
-  if (ctx.operation === 'ios-signed-export') {
+  if (iosArchiveSigned(ctx)) {
     const expected = ['signing-material', 'profile-material', 'artifact-correspondence', 'ipa-structure', 'ipa-profile', 'ipa-entitlements', 'ipa-signer'];
     if (ctx.signing?.assignments.some((row) => row.kind === 'ios-firebase')) expected.push('firebase-material');
     return selected.symbolsPolicy !== 'required' && exitedZero(commands.export) && findings.length === expected.length &&
@@ -274,8 +278,41 @@ function completedActivity(value: IOSArchiveActivity, ctx: IOSArchiveBuildContex
   return findings.length === 2 && findings[0]?.check === 'archive-identity' && findings[0].status === 'PASS' && findings[1]?.check === 'archive-dsym' &&
     (findings[1].status === 'PASS' || selected.symbolsPolicy === 'disabled' && findings[1].status === 'NOT_APPLICABLE');
 }
+export function iosArchiveBuildObservation(value: IOSArchivePublishedResult): IOSArchiveResult {
+  return value.scope === 'local-ios-candidate-inputs' ? value.build : value;
+}
+// Already copied bounded DATA only. History owns its own UUID/context and does
+// not manufacture a signed build result merely to reuse this summary grammar.
+export function iosCandidateInputs(c: unknown, operationId: unknown): c is IOSCandidateInputs {
+  if (!keys(c, ['operationId','candidateSha256','sourceCommit','sourceTree','bundleId','version','files','archive','observation','priorCreateFinality']) ||
+      typeof operationId !== 'string' || c.operationId !== operationId || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId) || !sha(c.candidateSha256) ||
+      typeof c.sourceCommit !== 'string' || !/^[0-9a-f]{40}$/.test(c.sourceCommit) || typeof c.sourceTree !== 'string' || !/^[0-9a-f]{40}$/.test(c.sourceTree) ||
+      typeof c.bundleId !== 'string' || c.bundleId.length > 255 || !/^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/.test(c.bundleId) ||
+      !keys(c.version, ['name','build']) || typeof c.version.name !== 'string' || !/^[0-9A-Za-z.+-]{1,64}$/.test(c.version.name) || !integer(c.version.build, 2_100_000_000, 1) ||
+      c.observation !== 'current-bundle-only' || c.priorCreateFinality !== 'not-established' || !Array.isArray(c.files) || c.files.length !== 3 ||
+      !keys(c.archive, ['directory','entries','bytes','sha256']) || c.archive.directory !== 'archive.xcarchive' ||
+      !integer(c.archive.entries, 100_000, 1) || !integer(c.archive.bytes, 8 * 1024 ** 3, 1) || !sha(c.archive.sha256)) return false;
+  const first = c.files[0];
+  if (!record(first) || typeof first.fileName !== 'string' || !first.fileName.startsWith('export/') || !first.fileName.endsWith('.ipa')) return false;
+  const leaf = first.fileName.slice('export/'.length);
+  if (encoder.encode(leaf).byteLength < 1 || encoder.encode(leaf).byteLength > 255 || /[\u0000-\u001f\u007f/\\:]/u.test(leaf)) return false;
+  const names = [first.fileName, 'store-metadata.zip', 'validation-report.json'];
+  const maxima = [4 * 1024 ** 3, 536870912, 65536];
+  return c.files.every((file, index) => keys(file, ['fileName','bytes','sha256']) && file.fileName === names[index] &&
+    integer(file.bytes, maxima[index]!, 1) && sha(file.sha256));
+}
+function candidateResult(value: unknown, ctx: IOSArchiveBuildContext, operationId: string): value is IOSCandidateInputsResult {
+  if (!keys(value, ['schemaVersion', 'scope', 'headSequence', 'candidateInputs', 'build']) || value.schemaVersion !== 1 ||
+      value.scope !== 'local-ios-candidate-inputs' || !integer(value.headSequence, 513, 3) ||
+      !result(value.build, ctx, operationId) || value.build.scope !== IOS_SIGNED_ARCHIVE_SCOPE) return false;
+  const c = value.candidateInputs, build = value.build;
+  const uuid = operationId.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
+  return iosCandidateInputs(c, uuid) && c.version.name === ctx.savedVersion.name && c.version.build === ctx.savedVersion.build &&
+    c.archive.entries === build.entries && c.archive.bytes === build.bytes && c.files[0]!.bytes === build.ipaBytes &&
+    build.ipa === `.mobile-release/desktop-ios-archive/${operationId}/${c.files[0]!.fileName}`;
+}
 function result(value: unknown, ctx: IOSArchiveBuildContext, operationId: string): value is IOSArchiveResult {
-  const signed = ctx.operation === 'ios-signed-export';
+  const signed = iosArchiveSigned(ctx);
   if (!keys(value, ['schemaVersion', 'scope', 'usedConfig', 'usedVersion', 'archive', 'entries', 'bytes', 'limitations', ...(signed ? ['ipa', 'ipaBytes', 'pairing'] : [])]) ||
       value.schemaVersion !== 1 || value.scope !== (signed ? IOS_SIGNED_ARCHIVE_SCOPE : IOS_ARCHIVE_SCOPE) || !content(value.usedConfig) || !savedVersion(value.usedVersion) ||
       !sameIOSArchiveSavedPair(ctx, { savedConfig: value.usedConfig, savedVersion: value.usedVersion }) ||
@@ -348,7 +385,7 @@ function operation(value: unknown): value is IOSArchiveOperation {
   if (!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result']) ||
       !(value.activity === null || activity(value.activity, value.context)) ||
       !(value.disposition === null || disposition(value.disposition, value.operationId)) ||
-      !(value.result === null || result(value.result, value.context, value.operationId))) return false;
+      !(value.result === null || (value.context.operation === 'ios-candidate-inputs' ? candidateResult(value.result, value.context, value.operationId) : result(value.result, value.context, value.operationId)))) return false;
   const op = value as unknown as IOSArchiveBuildOperation;
   if ((op.activity === null) !== (op.disposition === null) || op.activity !== null && op.stage !== op.activity.stage) return false;
   const empty = op.activity === null && op.disposition === null && op.result === null;
@@ -358,7 +395,8 @@ function operation(value: unknown): value is IOSArchiveOperation {
   if (op.phase !== 'terminal') return op.outcome === null && empty && (op.phase !== 'starting' || op.stage === null);
   if (op.outcome === null || op.outcome === 'unknown' || op.reason === 'cleanup-unknown' || (op.reason === 'none') !== (op.outcome === 'complete')) return false;
   if (op.outcome === 'complete') return op.stage === 'disposing-work' && op.activity !== null && completedActivity(op.activity, op.context) &&
-    op.disposition?.snapshot === 'removed' && op.disposition.work === 'removed' && op.disposition.output === 'retained-local-result' && op.result !== null;
+    op.disposition?.snapshot === 'removed' && op.disposition.work === 'removed' && op.disposition.output === 'retained-local-result' && op.result !== null &&
+    (op.result.scope !== 'local-ios-candidate-inputs' || op.result.candidateInputs.bundleId === op.activity.selection?.bundleId);
   // Native retirement preserves first context/document/shutdown reason; a
   // provisional Python terminal alone cannot publish these observations.
   if (op.result !== null || op.outcome === 'cancelled' && !['cancelled', 'context-changed', 'document-lost', 'shutdown'].includes(op.reason) ||
@@ -400,7 +438,7 @@ export function iosArchiveOperationProgress(a: IOSArchiveOperation, b: IOSArchiv
 }
 
 const iosArchiveModeByOperation: Record<IOSArchiveContext['operation'], IOSArchiveMode> = {
-  'ios-unsigned-archive': 'unsigned', 'ios-signed-export': 'signed', 'ios-local-recovery': 'recovery',
+  'ios-unsigned-archive': 'unsigned', 'ios-signed-export': 'signed', 'ios-candidate-inputs': 'signed', 'ios-local-recovery': 'recovery',
 };
 // Only validated Status DATA reaches this projection. Status/Cancel never use
 // it as permission to observe or settle an already-owned operation.
@@ -460,6 +498,9 @@ export const iosArchiveReasonText: Record<IOSArchiveReason, string> = {
   'account-admission-refused': 'The original account signing state could not be admitted. Inspect its recovery status after all original operations settle; do not reset keychains or remove unrelated profiles.',
   'artifact-validation-failed': 'The exported IPA and retained archive did not pass the required identity, signer, profile, entitlements or native/symbol correspondence checks. Retained output is incomplete, not release-ready.',
   'symbols-upload-not-requested': 'The saved symbols policy requires an upload. This local operation never runs an uploader and cannot satisfy that release obligation; inspect the BLOCKED finding.',
+  'candidate-inputs-unavailable': 'The local candidate bundle or its source/journal checkpoint could not be completed. Preserve retained output; do not infer a release or retry permission.',
+  'journal-unavailable': 'The enrolled project history or Mac Keychain checkpoint is unavailable. Review Local release history; this action does not enroll or repair it.',
+  'recovery-required': 'Local history has pending or conflicting work. Inspect the original history and retained output before another candidate.',
   'recovery-attention': 'Recovery found busy, conflicting or manual-recheck state. Read the exact account/project status. Do not remove state, retry signing or treat confirmation as original worker finality.',
 };
 export const iosArchiveFindingText: Record<IOSArchiveCheckId, string> = {

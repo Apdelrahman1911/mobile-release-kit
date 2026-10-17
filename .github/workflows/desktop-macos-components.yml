@@ -410,8 +410,16 @@ jobs:
               saved_command_owner::local_history::reconcile_route_tests::local_recovery_route_requires_actual_third_ack_without_pending_write \
               saved_command_owner::local_history::native::reconcile_tests::local_recovery_helpers_add_exactly_one_after_three_reads_not_for_offline_review \
               saved_command_owner::local_history::native::reconcile_tests::local_recovery_joined_final_original_uses_cleanup_tail_not_a_new_forward_grant \
+              asset_session::ios_signing::candidate_tests::ios_candidate_comparison_material_cannot_mint_document_grant \
+              ios_archive_protocol::tests::ios_candidate_context_requires_signed_action_and_original_consent \
+              ios_archive_protocol::tests::ios_candidate_terminal_keeps_actual_source_and_signing_ledgers_separate \
+              ios_archive_protocol::tests::ios_candidate_frame_sequence_binds_four_phases_and_original_nonce \
+              local_release_history_protocol::tests::local_release_history_ios_platform_has_original_distinct_consent \
+              local_release_history_protocol::tests::local_release_history_ios_summary_is_current_bundle_not_android_or_create_finality \
+              saved_command_owner::local_history::native::reconcile_tests::ios_candidate_cleanup_credit_needs_fifth_original_join_not_phase_data \
+              saved_command_owner::local_history::candidate_route_tests::ios_candidate_phase_data_cannot_complete_four_original_replies \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 66 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 74 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.

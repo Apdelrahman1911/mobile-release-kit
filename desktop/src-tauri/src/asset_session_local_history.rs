@@ -5,13 +5,14 @@ use crate::local_release_history_protocol as wire;
 /// A private current-context loan. Its weak Document edge does not keep a lost
 /// window alive or make a cycle through the retained Saved Session.
 pub(crate) struct LocalHistoryConsent {
-    document:std::sync::Weak<Inner>,pub(super) context:Option<Arc<NativeContext>>,action:wire::Action,
+    document:std::sync::Weak<Inner>,pub(super) context:Option<Arc<NativeContext>>,action:wire::Action,platform:Option<wire::CandidatePlatform>,
     pub(super) project_id:String,pub(super) candidate_operation_id:Option<String>,registration:u32,pub(super) root:asset_source::RegisteredRoot,
 }
 impl LocalHistoryConsent {
     pub(crate) fn action(&self)->wire::Action{self.action}
+    pub(crate) fn consent(&self)->&'static str{if self.platform==Some(wire::CandidatePlatform::Ios){wire::IOS_CANDIDATE_CONSENT}else{self.action.consent()}}
     fn matches_context(&self,context:&wire::Context)->bool{
-        context.valid()&&self.action==context.action&&self.project_id==context.project_id&&self.candidate_operation_id==context.candidate_operation_id
+        context.valid()&&self.platform==context.platform&&self.action==context.action&&self.project_id==context.project_id&&self.candidate_operation_id==context.candidate_operation_id
     }
     fn matches(&self,document:&Arc<Inner>,state:&DocumentState,registration:u32,root:&asset_source::RegisteredRoot)->bool{
         self.document.upgrade().is_some_and(|original|Arc::ptr_eq(&original,document))
@@ -49,7 +50,7 @@ impl DocumentBinding {
         // Enrollment has no asset draft/credential prerequisite. An optional
         // existing asset context is only a change snapshot, never local authority.
         let consent=Arc::new(LocalHistoryConsent{document:Arc::downgrade(&self.inner),context:state.context.clone(),
-            action:args.action,project_id:args.project_id.clone(),candidate_operation_id:args.candidate_operation_id.clone(),registration,root:root.clone()});
+            action:args.action,platform:args.platform,project_id:args.project_id.clone(),candidate_operation_id:args.candidate_operation_id.clone(),registration,root:root.clone()});
         self.inner.bridge.local_history.prepare(args,registration,root,gate,consent)
     }
     pub(crate) fn start_local_release_history(&self,args:wire::Start)->Result<wire::Status,BridgeError>{
@@ -131,14 +132,18 @@ mod tests {
         let root=asset_source::RegisteredRoot{path:"/inert/project".into(),identity:asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity())};
         let mut state=super::super::tests::empty_state();
         state.lifetime.crash_hook_installed();state.lifetime.started(true);state.lifetime.finished(true);
-        let mut consent=LocalHistoryConsent{document:std::sync::Weak::new(),context:None,action:wire::Action::Enroll,
+        let mut consent=LocalHistoryConsent{document:std::sync::Weak::new(),context:None,action:wire::Action::Enroll,platform:None,
             project_id:"registered-project".into(),candidate_operation_id:None,registration:7,root:root.clone()};
         assert!(consent.selection_matches(&state,7,&root));
         let mut context=wire::Context{project_id:consent.project_id.clone(),execution_mode:wire::ExecutionMode::Local,
-            action:wire::Action::ReviewInputs,candidate_operation_id:Some("12345678-1234-4234-9234-123456789abc".into())};
+            action:wire::Action::ReviewInputs,platform:None,candidate_operation_id:Some("12345678-1234-4234-9234-123456789abc".into())};
         assert!(!consent.matches_context(&context));
         consent.action=wire::Action::ReviewInputs;consent.candidate_operation_id=context.candidate_operation_id.clone();
         assert!(consent.matches_context(&context));
+        context.platform=Some(wire::CandidatePlatform::Ios);assert!(!consent.matches_context(&context));
+        consent.platform=context.platform;assert!(consent.matches_context(&context));assert_eq!(consent.consent(),wire::IOS_CANDIDATE_CONSENT);
+        assert!(!consent.current(&context,7,&root)); // Same DATA platform still lacks a Document owner.
+        context.platform=None;assert!(!consent.matches_context(&context));consent.platform=None;
         context.candidate_operation_id=Some("12345678-1234-4234-9234-123456789abd".into());
         assert!(!consent.matches_context(&context));
         context.candidate_operation_id=consent.candidate_operation_id.clone();
@@ -149,6 +154,10 @@ mod tests {
         context.action=wire::Action::ReviewPrepared;
         consent.action=wire::Action::ReviewPrepared;
         assert!(consent.matches_context(&context));
+        context.platform=Some(wire::CandidatePlatform::Ios);assert!(!consent.matches_context(&context));
+        consent.platform=context.platform;assert!(!consent.matches_context(&context));assert_eq!(consent.consent(),wire::IOS_CANDIDATE_CONSENT);
+        assert!(!consent.current(&context,7,&root)); // Same DATA platform still lacks a Document owner.
+        context.platform=None;assert!(!consent.matches_context(&context));consent.platform=None;
         context.candidate_operation_id=Some("12345678-1234-4234-9234-123456789abd".into());
         assert!(!consent.matches_context(&context));
         context.candidate_operation_id=consent.candidate_operation_id.clone();
@@ -159,7 +168,7 @@ mod tests {
         consent.action=wire::Action::ReviewReconcile;assert!(consent.matches_context(&context));
         assert!(!consent.current(&context,7,&root)); // Read-only summary DATA grants no Document.
         consent.action=wire::Action::Enroll;consent.candidate_operation_id=None;
-        assert!(!consent.current(&wire::Context{project_id:"registered-project".into(),execution_mode:wire::ExecutionMode::Local,action:wire::Action::Enroll,candidate_operation_id:None},7,&root)); // No synthetic Document grant.
+        assert!(!consent.current(&wire::Context{project_id:"registered-project".into(),execution_mode:wire::ExecutionMode::Local,action:wire::Action::Enroll,platform:None,candidate_operation_id:None},7,&root)); // No synthetic Document grant.
         let context=Arc::new(NativeContext{revision:1,project_id:"unrelated-assets".into(),project:root.clone(),registry_generation:7,
             draft:Vec::new(),platform:Platform::Android,stage:Stage::Candidate,purpose:Purpose::Signing,execution_mode:commands::ExecutionMode::Github});
         state.context=Some(context.clone());

@@ -889,6 +889,8 @@ class IOSArchiveOperation:
         self._command_slots = {role: None for role in self.roles}
         self._returned: dict[str, int] = {}
         self._pending = None
+        self._local_candidate = None
+        self._candidate_ipa_validation = None
         self._command_before = 0
         self.stage = "accepted"
         self.prepared = self.close_claimed = self.resources_closed = False
@@ -1049,6 +1051,9 @@ class IOSArchiveOperation:
         """Root only the original pending role's slot; never poll or dispatch."""
         from ._command_process import CommandOutcomeSlot, _Outer
         self.owner()
+        if self._local_candidate is not None and self._local_candidate._source_pending is not None:
+            self._local_candidate.bind_slot(engine, slot)
+            return
         if self.signing is not None:
             self.signing.bind_command_slot(engine, slot)
             return
@@ -1290,6 +1295,43 @@ class IOSArchiveOperation:
         self.inspection_deadline = _IOSInspectionDeadline(self, InspectionDeadline())
         return self.inspection_deadline
 
+    def _candidate_begin_ipa_validation(self, snapshot) -> None:
+        from .ios_artifacts import IOSArtifactSnapshot
+        from .local_ios_candidate_source import IOSCandidateComposition
+        self.checkpoint()
+        comp = self._local_candidate
+        require(type(comp) is IOSCandidateComposition and comp.run.operation is self
+                and self._candidate_ipa_validation is None and comp.signing_record is None
+                and type(snapshot) is IOSArtifactSnapshot and snapshot._owner is self.snapshot_binding.owner
+                and snapshot.deadline is self.inspection_deadline and snapshot.cancellation is self.guard
+                and self.snapshot_binding.consumer_active and self.signing.phase == 'inspecting')
+        original = self.ipa()
+        require(original.inventory is None)
+        self._candidate_ipa_validation = (snapshot, original)
+
+    def _candidate_validated_ipa(self, path, cancellation, deadline, facts) -> None:
+        from .local_ios_candidate_bundle import signing_data
+        from .local_release_journal import canonical
+        from .local_ios_candidate_source import IOSCandidateComposition
+        self.checkpoint()
+        comp = self._local_candidate
+        require(type(comp) is IOSCandidateComposition and comp.run.operation is self
+                and cancellation is self.guard and cancellation._ios_archive_source is self.source
+                and deadline is self.inspection_deadline and self._candidate_ipa_validation is not None
+                and comp.signing_record is None and self.signing.phase == 'inspecting')
+        snapshot, original = self._candidate_ipa_validation
+        require(snapshot._owner is deadline.snapshot_owner() and self.snapshot_binding.consumer_active
+                and snapshot.paths['ios-ipa'] == path and original is self.ipa()
+                and original.inventory is None)
+        signing_data(facts)
+        expected = self.request.context['signing']
+        require(facts['teamId'] == expected['teamId']
+                and facts['certificateSha256'] == expected['distributionCertificateSha256'])
+        # The actual validated snapshot binding and SAME retained output inode
+        # are joined by inspection_observed's existing final snapshot POST.
+        comp.signing_record = (original, dict(original.original.identity),
+                               snapshot.bindings['ios-ipa'], canonical(facts))
+
     def inspection_observed(self, snapshot) -> None:
         from .ios_artifacts import IOSArtifactSnapshot
         self.checkpoint()
@@ -1301,6 +1343,13 @@ class IOSArchiveOperation:
                 and type(snapshot.bindings["ios-archive"]) is dict)
         self._artifact.inventory = snapshot.bindings["ios-archive"]
         if self.signing is not None:
+            if self._local_candidate is not None:
+                record = self._local_candidate.signing_record
+                require(self._candidate_ipa_validation is not None
+                        and self._candidate_ipa_validation[0] is snapshot
+                        and record is not None and record[0] is self._ipa
+                        and record[1] == self._ipa.original.identity
+                        and record[2] == snapshot.bindings['ios-ipa'])
             self._ipa.inventory = snapshot.bindings["ios-ipa"]
 
     def snapshot_closed(self) -> bool:

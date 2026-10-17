@@ -8,6 +8,7 @@ class IOSArchiveInput(_SavedCommandInput):
     def __init__(self, started: float) -> None:
         super().__init__(started, domain=SavedCommandDomain.IOSArchive)
         self.operation = None
+        self.candidate_input = None
         self._engine = None
         self.material = None
         self.material_receiving = False
@@ -36,6 +37,11 @@ class IOSArchiveInput(_SavedCommandInput):
             self.cleanup_end = started + CLEANUP_SECONDS
             self.hard_end = started + FINALITY_SECONDS
 
+        from ._desktop_ios_archive_protocol import candidate_create
+        if candidate_create(request.context):
+            from ._desktop_candidate_input_control import CandidateCreateInput
+            CandidateCreateInput(self, request).acquire()
+
     @property
     def account_lifecycle(self) -> bool:
         return self.signed or self.recovery
@@ -49,6 +55,13 @@ class IOSArchiveInput(_SavedCommandInput):
                       and operation.signing.lease.locked and operation.invocation is not None
                       and operation.invocation.signing_lease is operation.signing.lease
                       and operation.invocation.project_owner is not None)
+        if self.candidate_input is not None:
+            from .local_ios_candidate_create import IOSCandidateCreateRun
+            candidate = getattr(self._engine, "candidate", None)
+            self._require(type(candidate) is IOSCandidateCreateRun and candidate.run.operation is operation
+                          and candidate.input is self.candidate_input and self.candidate_input.reply_step == 3
+                          and candidate.pending_head is not None and not self.candidate_input.reading)
+            self.candidate_input.post()
         operation.checkpoint()
         from ._desktop_ios_signing_material import read_material
         self.material_receiving = True
@@ -68,11 +81,24 @@ class IOSArchiveInput(_SavedCommandInput):
         return min(self.hard_end, self.first_failure + (130 if self.account_lifecycle else 10)) if self.first_failure is not None else self.hard_end
 
     def close(self) -> None:
-        super().close()
-        if self.account_lifecycle:
-            self.buffer.clear()
-        if self.material is not None:
-            self.material.retire()
+        if self.candidate_input is None:
+            super().close()
+            if self.account_lifecycle:
+                self.buffer.clear()
+            if self.material is not None:
+                self.material.retire()
+            return
+        # Independent original closure even when the input or material close
+        # is uncertain. No retry or discarded failure grants a new read.
+        try:
+            super().close()
+        finally:
+            try:
+                self.buffer.clear()
+                if self.material is not None:
+                    self.material.retire()
+            finally:
+                self.candidate_input.close()
 
     def material_closed(self) -> bool:
         self._owner()

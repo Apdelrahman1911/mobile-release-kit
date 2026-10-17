@@ -4,19 +4,19 @@ import { parseLocalHistoryRequest, parseLocalHistoryStatus, localHistoryConsent,
 import type { BridgeMode } from './types.ts';
 import type { LocalHistoryIdentity, LocalHistoryApi, LocalHistoryStatus, PrepareLocalHistory, LocalHistoryAction } from './localReleaseHistoryTypes.ts';
 type Port=LocalHistoryApi&{mode:BridgeMode};
-export interface LocalHistoryState {mode:BridgeMode;request:PrepareLocalHistory|null;status:LocalHistoryStatus|null;pending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
+export interface LocalHistoryState {mode:BridgeMode;inputPlatform:'android'|'ios';request:PrepareLocalHistory|null;status:LocalHistoryStatus|null;pending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
 interface Source {projectId:()=>string|null;otherOperationReason:()=>string|null;now?:()=>number}
 const active=(s:LocalHistoryStatus|null)=>!!s?.operation&&s.operation.phase!=='terminal';
 const identity=(v:LocalHistoryIdentity)=>({operationId:v.operationId,ownerGeneration:v.ownerGeneration});
 const sameId=(a:LocalHistoryIdentity|null|undefined,b:LocalHistoryIdentity|null|undefined)=>!!a&&!!b&&a.operationId===b.operationId&&a.ownerGeneration===b.ownerGeneration;
 const error='The original local history operation is unverified. Keep its status and cancel; another run is not safe until native cleanup is confirmed.';
 export function localHistoryOwnerReason(s:LocalHistoryState):string|null{return s.blocked||s.unconfirmed||s.pending||active(s.status)?'A local release-history intent or operation is retained. Cancel or finish it before other work.':null;}
-export function localHistoryRequest(projectId:string|null, action:LocalHistoryAction,candidateOperationId?:string):PrepareLocalHistory|null{
- return parseLocalHistoryRequest({projectId,executionMode:'local',action,...(candidateHistoryAction(action)?{candidateOperationId}:{})});
+export function localHistoryRequest(projectId:string|null, action:LocalHistoryAction,candidateOperationId?:string,platform?:'ios'):PrepareLocalHistory|null{
+ return parseLocalHistoryRequest({projectId,executionMode:'local',action,...(candidateHistoryAction(action)?{candidateOperationId}:{}),...(platform===undefined?{}:{platform})});
 }
 export class LocalReleaseHistoryController {
- private state:LocalHistoryState={mode:'unavailable',request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
- private action:LocalHistoryAction='verify'; private candidateOperationId:string|undefined; private candidateProjectId:string|null=null; private selectionPending=false;
+ private state:LocalHistoryState={mode:'unavailable',inputPlatform:'android',request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
+ private action:LocalHistoryAction='verify'; private candidateOperationId:string|undefined; private candidateProjectId:string|null=null; private selectionPending=false; private observedProjectId:string|null=null;
  private api:Port|null=null;private unlisten:(()=>void)|null=null;private listeners=new Set<()=>void>();private disposed=false;private epoch=0;private reading=false;
  private attempt:{request:PrepareLocalHistory;epoch:number;after:number;previous:LocalHistoryIdentity|null;id:LocalHistoryIdentity|null;retired:boolean;started:boolean}|null=null;
  private cancelClaim:string|null=null;private failedCancel:string|null=null;private timer:ReturnType<typeof setTimeout>|null=null;
@@ -27,11 +27,16 @@ export class LocalReleaseHistoryController {
  private now(){return(this.source.now??(()=>performance.now()))();}
  private update(patch:Partial<LocalHistoryState>){this.state=Object.freeze({...this.state,...patch});if(!this.disposed)for(const listener of this.listeners)listener();}
  private clearTimer(){if(this.timer!==null)clearTimeout(this.timer);this.timer=null;}
- syncProject=()=>{const projectId=this.source.projectId();if(this.candidateProjectId!==null&&this.candidateProjectId!==projectId){this.action='verify';this.candidateOperationId=undefined;this.candidateProjectId=null;}const next=this.selectionPending?null:localHistoryRequest(projectId,this.action,this.candidateOperationId);if(!sameOfflineData(next,this.state.request)){this.invalidate();this.update({request:next});}};
+ syncProject=()=>{const projectId=this.source.projectId();if(this.observedProjectId!==projectId){this.observedProjectId=projectId;this.update({inputPlatform:'android'});}if(this.candidateProjectId!==null&&this.candidateProjectId!==projectId){this.action='verify';this.candidateOperationId=undefined;this.candidateProjectId=null;this.update({inputPlatform:'android'});}const next=this.selectionPending?null:localHistoryRequest(projectId,this.action,this.candidateOperationId,(this.action==='review-inputs'||this.action==='abandon-inputs')&&this.state.inputPlatform==='ios'?'ios':undefined);if(!sameOfflineData(next,this.state.request)){this.invalidate();this.update({request:next});}};
  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
- setAction=(action:LocalHistoryAction)=>{if(action!==this.action||this.candidateOperationId!==undefined){this.action=action;this.candidateOperationId=undefined;this.candidateProjectId=null;this.syncProject();}};
+ setAction=(action:LocalHistoryAction)=>{if(action!==this.action||this.candidateOperationId!==undefined){this.action=action;this.candidateOperationId=undefined;this.candidateProjectId=null;this.update({inputPlatform:'android'});this.syncProject();}};
+ setInputPlatform=(platform:'android'|'ios'):boolean=>{
+  if(this.disposed||!['android','ios'].includes(platform)||this.state.blocked||(this.attempt?.started||this.state.status?.operation?.phase==='running'||this.state.status?.operation?.phase==='starting'||this.state.status?.operation?.phase==='stopping'||this.state.status?.operation?.phase==='unknown')&&active(this.state.status))return false;
+  if(platform!==this.state.inputPlatform){if(this.action==='review-inputs'||this.action==='abandon-inputs')this.invalidate();this.update({inputPlatform:platform});this.syncProject();}
+  return true;
+ };
  selectCandidate=(action:'review-inputs'|'abandon-inputs'|'review-prepared'|'review-execution'|'review-reconcile'|'review-recovery',operationId:string):boolean=>{
   const op=this.state.status?.operation;
   if(localHistoryOwnerReason(this.state)||this.state.historical||!op?.result||op.context.projectId!==this.source.projectId())return false;

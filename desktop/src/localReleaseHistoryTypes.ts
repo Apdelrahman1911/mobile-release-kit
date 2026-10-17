@@ -1,11 +1,13 @@
+import type { IOSCandidateInputs } from './iosArchiveTypes.ts';
 import type { LocalReconciliationReceipt } from './localStoreReconcileTypes.ts';
 import type { LocalExecutionReceipt } from './localStoreExecuteTypes.ts';
 import type { LocalPreparedIntent } from './localStorePrepareTypes.ts';
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile' | 'review-recovery';
 export type PrepareLocalHistory = { projectId: string; executionMode: 'local' } & (
-  { action: 'enroll' | 'verify'; candidateOperationId?: never } |
-  { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile' | 'review-recovery'; candidateOperationId: string }
+  { action: 'enroll' | 'verify'; candidateOperationId?: never; platform?: never } |
+  { action: 'review-inputs' | 'abandon-inputs'; candidateOperationId: string; platform?: 'ios' } |
+  { action: 'review-prepared' | 'review-execution' | 'review-reconcile' | 'review-recovery'; candidateOperationId: string; platform?: never }
 );
 export interface LocalCandidateInputs {
   operationId: string; candidateSha256: string; sourceCommit: string; sourceTree: string;
@@ -29,7 +31,7 @@ export interface LocalHistoryResult {
   schemaVersion: 1; scope: 'local-release-history'; enrolled: true; headSequence: number;
   history: { operationId: string; phase: LocalJournalPhase; recoveryRequired: boolean }[];
   limitations: ['no-store-authority', 'no-build-or-publishing', 'keychain-intact-rollback-boundary'];
-  candidateInputs?: LocalCandidateInputs | null;
+  candidateInputs?: LocalCandidateInputs | IOSCandidateInputs | null;
   preparedIntent?: LocalPreparedIntentReview;
   executionReceipt?: LocalExecutionReceiptReview;
   reconciliationReceipt?: LocalRecoveryReceiptReview;
@@ -43,7 +45,7 @@ export interface LocalHistoryStatus {
 }
 export interface LocalHistoryApi {
   prepareLocalReleaseHistory(request: PrepareLocalHistory): Promise<LocalHistoryStatus>;
-  startLocalReleaseHistory(request: LocalHistoryIdentity & {consentVersion:'local-release-history-v1'|'local-android-candidate-inputs-v1'}): Promise<LocalHistoryStatus>;
+  startLocalReleaseHistory(request: LocalHistoryIdentity & {consentVersion:'local-release-history-v1'|'local-android-candidate-inputs-v1'|'local-ios-candidate-inputs-v1'}): Promise<LocalHistoryStatus>;
   localReleaseHistoryStatus(): Promise<LocalHistoryStatus>;
   cancelLocalReleaseHistory(operationId:string, ownerGeneration:string): Promise<LocalHistoryStatus>;
   subscribeLocalReleaseHistory(listener:(status:unknown)=>void): Promise<()=>void>;

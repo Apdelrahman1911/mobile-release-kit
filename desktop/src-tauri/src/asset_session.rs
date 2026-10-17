@@ -1961,6 +1961,22 @@ mod lookup_memory {
     }
 
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(super) fn local_ios_candidate_admission(document:&Arc<Inner>,state:&DocumentState,material:&IOSSigningMaterial,actual:usize)->Result<Admission,Problem>{
+        let mut census=Census{current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),sources:Seen::new(),owners:Seen::new(),
+            assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        let(context,keys,payloads,comparison)=material.candidate_census();
+        census.context(context)?;census.arc_cells::<IOSSigningMaterial>()?;
+        census.cells::<RecordKey>(keys.capacity())?;for key in keys{census.key(key)?;}
+        census.cells::<Arc<Payload>>(payloads.capacity())?;for payload in payloads{census.payload(payload)?;}
+        census.add(comparison.retained_heap_bytes().ok_or(Problem::Capacity)?)?;
+        // Weak<Document> is inline in the SAME material; payload/context Arcs
+        // use the existing Seen sets, not a copied private material buffer.
+        if !state.github.setup_has_material()&&!state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
+        census.add(std::mem::size_of::<Census<'_>>())?;census.add(actual)?;Admission::checked(census.bytes,0)
+    }
+
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
     pub(super) fn local_store_prepare_admission(document:&Arc<Inner>,state:&DocumentState,material:&SelectedStoreMaterial,actual:usize)->Result<Admission,Problem>{
         let mut census=Census{current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
         census.artifact_document(document)?;census.document(state)?;

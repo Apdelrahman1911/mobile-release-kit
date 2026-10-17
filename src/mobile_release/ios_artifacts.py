@@ -946,6 +946,12 @@ _LaneSnapshotOwner = _IOSSnapshotOwner
 
 @contextmanager
 def _source_entries(number: int, *, owner=None, deadline=None):
+    from .local_ios_candidate import LocalIOSBuildHandoff
+    from .local_ios_candidate_review import IOSCandidateBundleReview
+    if type(owner) in (LocalIOSBuildHandoff, IOSCandidateBundleReview):
+        with owner.entries(number) as iterator:
+            yield iterator
+        return
     artifact = _artifact_operation(deadline)
     if artifact is not None:
         with artifact.files.entries(number) as iterator:
@@ -965,6 +971,12 @@ def _source_entries(number: int, *, owner=None, deadline=None):
 
 @contextmanager
 def _source_descriptor(path, flags, *, parent=None, owner=None, deadline=None):
+    from .local_ios_candidate import LocalIOSBuildHandoff
+    from .local_ios_candidate_review import IOSCandidateBundleReview
+    if type(owner) in (LocalIOSBuildHandoff, IOSCandidateBundleReview):
+        with owner.descriptor(path, flags, parent=parent) as number:
+            yield number
+        return
     artifact = _artifact_operation(deadline if deadline is not None else getattr(owner, "deadline", None))
     if artifact is not None:
         with artifact.descriptor(path, flags, parent=parent) as number:

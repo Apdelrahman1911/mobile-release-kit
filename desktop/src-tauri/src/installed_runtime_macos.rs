@@ -1740,6 +1740,7 @@ impl IOSXcodeSlots {
         self.original.arm_acl_once(end, stop)
     }
     pub(crate) fn first_failure(&self) -> Option<(AdmissionFailure, Instant)> { self.original.first_failure() }
+    pub(crate) fn retained_original_count(&self)->Option<usize>{self.original.retained_original_count()}
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
         let mut bytes = std::mem::size_of::<Self>().checked_add(self.original.retained_heap_bytes()?)?;
         if let Some(alias) = &self.alias { bytes = bytes.checked_add(alias.target.capacity())?; }

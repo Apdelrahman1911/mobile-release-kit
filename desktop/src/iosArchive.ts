@@ -12,9 +12,9 @@ import type { ApiError, BridgeMode, HelpContent } from './types.ts';
 import type { IOSArchiveApi, IOSArchiveContext, IOSArchiveIdentity, IOSArchiveOperation, IOSArchiveSavedConfig,
   IOSArchiveSavedVersion, IOSArchiveSelection, IOSArchiveStatus, IOSRecoveryIntent, IOSRecoveryOperation,
   IOSSigningAssignment, IOSSigningPolicy, PrepareIOSArchive, StartIOSArchive } from './iosArchiveTypes.ts';
-import { IOS_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_CONSENT, IOS_RECOVERY_CONSENT, IOS_ACCOUNT_RECOVERY_CONFIRMATION,
+import { IOS_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_CONSENT, IOS_CANDIDATE_CONSENT, IOS_RECOVERY_CONSENT, IOS_ACCOUNT_RECOVERY_CONFIRMATION,
   IOS_PROJECT_RECOVERY_CONFIRMATION, IOS_ARCHIVE_CONSENT_MS, IOS_ARCHIVE_COUNTER_MAX, iosArchiveAvailabilityText, iosArchiveModeAvailability, isIOSRecoveryOperation,
-  iosArchiveCounter, iosArchiveError, iosArchiveOperationProgress, copyIOSArchiveRequest, parseIOSArchiveSavedConfig,
+  iosArchiveSigned, iosArchiveCounter, iosArchiveError, iosArchiveOperationProgress, copyIOSArchiveRequest, parseIOSArchiveSavedConfig,
   parseIOSArchiveSavedVersion, parseIOSArchiveSelection, parseIOSArchiveStatus, parseIOSSigningPolicy,
   sameIOSArchiveData, sameIOSArchiveIdentity, sameIOSArchiveSavedPair } from './iosArchiveProtocol.ts';
 
@@ -36,7 +36,7 @@ export interface IOSArchiveBinding {
 export interface IOSArchiveConsent extends IOSArchiveIdentity { binding: IOSArchiveBinding; acknowledged: boolean; deadline: number }
 export interface IOSSigningObservation { policy: IOSSigningPolicy | null; issue: string | null }
 export interface IOSArchiveState {
-  mode: BridgeMode; archiveMode: 'unsigned' | 'signed'; project: IOSArchiveProject | null; signing: IOSSigningObservation;
+  mode: BridgeMode; archiveMode: 'unsigned' | 'signed'; keepCandidate: boolean; project: IOSArchiveProject | null; signing: IOSSigningObservation;
   visible: boolean; recoveryVisible: boolean; selectionPending: boolean;
   connectionGeneration: number; selectionGeneration: number; contextGeneration: number; requestGeneration: number;
   listening: boolean; initialized: boolean; readPending: boolean; status: IOSArchiveStatus | null;
@@ -181,7 +181,7 @@ export function iosArchiveOwnerReason(state: IOSArchiveState): string | null {
 }
 
 export class IOSArchiveController {
-  private state: IOSArchiveState = freeze<IOSArchiveState>({ mode: 'unavailable', archiveMode: 'unsigned', project: null,
+  private state: IOSArchiveState = freeze<IOSArchiveState>({ mode: 'unavailable', archiveMode: 'unsigned', keepCandidate: false, project: null,
     signing: { policy: null, issue: 'Review the saved signing policy and current credential assignments.' }, visible: false, recoveryVisible: false, selectionPending: false,
     connectionGeneration: 0, selectionGeneration: 0, contextGeneration: 0, requestGeneration: 0, listening: false, initialized: false, readPending: false,
     status: null, consent: null, pending: null, originalUnconfirmed: false, historical: false, cancelClaimed: null, error: null,
@@ -254,7 +254,7 @@ export class IOSArchiveController {
     const projectChanged = !sameIOSArchiveData(next, this.state.project) || this.draftReference !== draft || this.snapshotReference !== snapshot ||
       this.versionReference !== result || this.versionBindingReference !== binding;
     if (!projectChanged && sameIOSArchiveData(signing, this.state.signing)) return;
-    const signingRelevant = this.attempt && !this.attempt.settled ? this.attempt.binding.context.operation === 'ios-signed-export' : this.state.archiveMode === 'signed';
+    const signingRelevant = this.attempt && !this.attempt.settled ? iosArchiveSigned(this.attempt.binding.context) : this.state.archiveMode === 'signed';
     if (!projectChanged && !signingRelevant) {
       this.update({ signing }); return;
     }
@@ -276,7 +276,12 @@ export class IOSArchiveController {
   }
   setArchiveMode(archiveMode: 'unsigned' | 'signed'): boolean {
     if (this.disposed || !['unsigned', 'signed'].includes(archiveMode) || this.attempt?.startSent && !this.attempt.settled) return false;
-    if (archiveMode !== this.state.archiveMode) this.retire({ ...this.advance('contextGeneration'), archiveMode });
+    if (archiveMode !== this.state.archiveMode) this.retire({ ...this.advance('contextGeneration'), archiveMode, keepCandidate: false });
+    return true;
+  }
+  setKeepCandidate(keepCandidate: boolean): boolean {
+    if (this.disposed || typeof keepCandidate !== 'boolean' || this.state.archiveMode !== 'signed' || this.attempt?.startSent && !this.attempt.settled) return false;
+    if (keepCandidate !== this.state.keepCandidate) this.retire({ ...this.advance('contextGeneration'), keepCandidate });
     return true;
   }
   private needsOriginal(observer: Observer): boolean {
@@ -320,8 +325,9 @@ export class IOSArchiveController {
       b.contextGeneration === this.state.contextGeneration && b.requestGeneration === this.state.requestGeneration && p !== null && b.context.projectId === p.projectId;
     if (!common || !p) return false;
     if (b.context.operation === 'ios-local-recovery') return true;
-    return p.inputIssue === null && this.state.archiveMode === (b.context.operation === 'ios-signed-export' ? 'signed' : 'unsigned') &&
-      (b.context.operation !== 'ios-signed-export' || this.state.signing.issue === null && sameIOSArchiveData(b.context.signing, this.state.signing.policy)) &&
+    return p.inputIssue === null && this.state.archiveMode === (iosArchiveSigned(b.context) ? 'signed' : 'unsigned') &&
+      this.state.keepCandidate === (b.context.operation === 'ios-candidate-inputs') &&
+      (!iosArchiveSigned(b.context) || this.state.signing.issue === null && sameIOSArchiveData(b.context.signing, this.state.signing.policy)) &&
       b.observationGeneration === p.observationGeneration && sameIOSArchiveData(b.versionObservation, p.versionObservation) &&
       sameIOSArchiveData(b.selection, p.selection) && b.context.projectId === p.projectId && b.context.draftRevision === p.draftRevision &&
       b.context.baselineGeneration === p.baselineGeneration && p.savedConfig !== null && p.savedVersion !== null &&
@@ -412,7 +418,7 @@ export class IOSArchiveController {
       if (observer.reading === work) { observer.reading = null; if (this.observer === observer) this.update({ readPending: false }); }
     }
   }
-  private commonReason(operation: IOSArchiveContext['operation'] = this.state.archiveMode === 'signed' ? 'ios-signed-export' : 'ios-unsigned-archive'): string | null {
+  private commonReason(operation: IOSArchiveContext['operation'] = this.state.keepCandidate ? 'ios-candidate-inputs' : this.state.archiveMode === 'signed' ? 'ios-signed-export' : 'ios-unsigned-archive'): string | null {
     if (this.disposed || this.state.mode !== 'native') return 'Open the native application. Browser preview cannot prepare or run an iOS archive, signed export or recovery.';
     if (this.state.nativeBlocked || this.state.integrityFailed || this.state.generationLost) return iosArchiveOwnerReason(this.state);
     if (!this.observer?.active || this.observer.generation !== this.state.connectionGeneration || !this.state.listening || !this.state.initialized || !this.state.status || this.state.observationIssue)
@@ -429,7 +435,7 @@ export class IOSArchiveController {
     if (project.saveRecoveryRequired) return 'Finish original configuration-save recovery before reviewing a build.';
     if (project.snapshotPending) return 'Wait for the current saved-configuration refresh to settle.';
     if (project.versionPending) return 'Wait for the original saved-version read to settle; an earlier result cannot stand in.';
-    return project.inputIssue ?? (operation === 'ios-signed-export' ? this.state.signing.issue : null) ?? this.context.otherOperationReason();
+    return project.inputIssue ?? (operation === 'ios-signed-export' || operation === 'ios-candidate-inputs' ? this.state.signing.issue : null) ?? this.context.otherOperationReason();
   }
   prepareReason = (): string | null => this.commonReason() ?? iosArchiveOwnerReason(this.state) ??
     (this.state.status?.availability === 'busy' ? iosArchiveAvailabilityText.busy : null);
@@ -480,7 +486,8 @@ export class IOSArchiveController {
     if (this.prepareReason() || !this.observer || !project?.savedConfig || !project.savedVersion || !project.selection || !project.versionObservation) return;
     const request = copyIOSArchiveRequest('prepare_ios_archive', { projectId: project.projectId, draftRevision: project.draftRevision,
       baselineGeneration: project.baselineGeneration, savedConfig: project.savedConfig, savedVersion: project.savedVersion,
-      ...(this.state.archiveMode === 'signed' ? { signing: this.state.signing.policy } : {}) }) as PrepareIOSArchive | null;
+      ...(this.state.archiveMode === 'signed' ? { signing: this.state.signing.policy } : {}),
+      ...(this.state.keepCandidate ? { action: 'create' } : {}) }) as PrepareIOSArchive | null;
     if (!request) { this.fail({ code: 'ios_archive_invalid' }, true); return; }
     await this.prepareRequest(request);
   }
@@ -496,7 +503,7 @@ export class IOSArchiveController {
     const project = this.state.project;
     if (!this.observer || !project) return;
     const context: IOSArchiveContext = 'recovery' in request ? { ...request, platform: 'ios', operation: 'ios-local-recovery' } :
-      { ...request, platform: 'ios', operation: request.signing ? 'ios-signed-export' : 'ios-unsigned-archive' };
+      { ...request, platform: 'ios', operation: request.action === 'create' ? 'ios-candidate-inputs' : request.signing ? 'ios-signed-export' : 'ios-unsigned-archive' };
     const now = this.now();
     if (!Number.isFinite(now) || now < 0 || !Number.isFinite(now + IOS_ARCHIVE_CONSENT_MS)) { this.fail({ code: 'ios_archive_invalid' }, true); return; }
     const counters = this.advance('requestGeneration'); if (counters.generationLost) { this.retire(counters); return; }
@@ -558,7 +565,7 @@ export class IOSArchiveController {
       const context = attempt.binding.context;
       const request: StartIOSArchive = context.operation === 'ios-local-recovery' ? { operationId, ownerGeneration, consentVersion: IOS_RECOVERY_CONSENT,
         ...(context.recovery.action === 'inspect' ? {} : { confirmation: context.recovery.action === 'account' ? IOS_ACCOUNT_RECOVERY_CONFIRMATION : IOS_PROJECT_RECOVERY_CONFIRMATION }) } :
-        { operationId, ownerGeneration, consentVersion: context.operation === 'ios-signed-export' ? IOS_SIGNED_ARCHIVE_CONSENT : IOS_ARCHIVE_CONSENT };
+        { operationId, ownerGeneration, consentVersion: context.operation === 'ios-candidate-inputs' ? IOS_CANDIDATE_CONSENT : context.operation === 'ios-signed-export' ? IOS_SIGNED_ARCHIVE_CONSENT : IOS_ARCHIVE_CONSENT };
       const value = await attempt.observer.api.startIOSArchive(request);
       if (!attempt.observer.active || this.attempt !== attempt) return;
       const status = parseIOSArchiveStatus(value);

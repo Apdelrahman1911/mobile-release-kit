@@ -21,9 +21,9 @@ export function localStorePrepareRequest(project:AndroidBuildProject|null,assets
  const base=localStoreRequest(project,assets);
  if(!base||assets?.status?.context?.stage!=='candidate'||assets.scope.stage!=='candidate'||!history||history.historical||localHistoryOwnerReason(history))return null;
  const status=parseLocalHistoryStatus(history.status),op=status?.operation;
- if(history.mode!=='native'||!op||op.phase!=='terminal'||op.outcome!=='complete'||op.context.projectId!==base.projectId||op.context.action!=='review-inputs'||!op.result)return null;
+ if(history.mode!=='native'||!op||op.phase!=='terminal'||op.outcome!=='complete'||op.context.projectId!==base.projectId||op.context.action!=='review-inputs'||op.context.platform!==undefined||!op.result)return null;
  const candidate=op.result.candidateInputs,last=op.result.history.at(-1);
- if(!candidate||!last||last.phase!=='inputs-ready'||last.operationId!==candidate.operationId||op.context.candidateOperationId!==candidate.operationId||candidate.version.name!==base.savedVersion.name||candidate.version.build!==base.savedVersion.build)return null;
+ if(!candidate||!('applicationId' in candidate)||!last||last.phase!=='inputs-ready'||last.operationId!==candidate.operationId||op.context.candidateOperationId!==candidate.operationId||candidate.version.name!==base.savedVersion.name||candidate.version.build!==base.savedVersion.build)return null;
  return parseLocalStorePrepareRequest({...base,candidateOperationId:candidate.operationId,candidateSha256:candidate.candidateSha256,confirmation:`candidate:android:${base.savedVersion.name}:${base.savedVersion.build}`});
 }
 export class LocalStorePrepareController {
@@ -39,7 +39,7 @@ export class LocalStorePrepareController {
  private now(){return(this.source.now??(()=>performance.now()))();}
  private update(patch:Partial<LocalStorePrepareState>){this.state=Object.freeze({...this.state,...patch});if(!this.disposed)for(const listener of this.listeners)listener();}
  private clearTimer(){if(this.timer!==null)clearTimeout(this.timer);this.timer=null;}
- syncProject=()=>{const history=this.source.history(),next=this.selectionPending?null:localStorePrepareRequest(this.source.project(),this.source.assets(),history);const applicationId=next?history?.status?.operation?.result?.candidateInputs?.applicationId??null:null;const head=next?history?.status?.operation?.result?.headSequence??null:null;if(applicationId!==this.state.applicationId||head!==this.historyHead||!sameOfflineData(next,this.state.request)){this.invalidate();this.historyHead=head;this.update({request:next,applicationId});}};
+ syncProject=()=>{const history=this.source.history(),next=this.selectionPending?null:localStorePrepareRequest(this.source.project(),this.source.assets(),history);const candidate=history?.status?.operation?.result?.candidateInputs;const applicationId=next&&candidate&&'applicationId' in candidate?candidate.applicationId:null;const head=next?history?.status?.operation?.result?.headSequence??null:null;if(applicationId!==this.state.applicationId||head!==this.historyHead||!sameOfflineData(next,this.state.request)){this.invalidate();this.historyHead=head;this.update({request:next,applicationId});}};
  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};

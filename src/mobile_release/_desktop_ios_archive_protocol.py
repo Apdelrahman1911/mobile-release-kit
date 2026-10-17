@@ -7,6 +7,7 @@ provisional until the original native/document owners have joined.
 from __future__ import annotations
 
 import re
+import hashlib
 import stat
 from dataclasses import dataclass
 
@@ -20,6 +21,7 @@ from ._desktop_android_build_protocol import (
 PROTOCOL = "mrk-ios-archive/1"
 CONSENT = "saved-ios-unsigned-archive-v1"
 SCOPE = "local-unsigned-ios-archive-observation"
+CANDIDATE_PROTOCOL = "mrk-ios-candidate-inputs/1"
 SIGNED_PROTOCOL = "mrk-ios-archive/2"
 SIGNED_CONSENT = "saved-ios-signed-export-v2"
 SIGNED_SCOPE = "local-signed-ios-artifact-validation"
@@ -74,7 +76,9 @@ def prepare(value: object) -> dict:
         from ._desktop_ios_recovery_protocol import prepare as recovery_prepare
         return recovery_prepare(value)
     signed = type(value) is dict and "signing" in value
-    value = _keys(value, _PREPARE | ({"signing"} if signed else set()))
+    candidate = type(value) is dict and "action" in value
+    value = _keys(value, _PREPARE | ({"signing"} if signed else set()) | ({"action"} if candidate else set()))
+    require(not candidate or signed and value["action"] == "create")
     require(_text(value["projectId"], _PROJECT) and integer(value["draftRevision"], 2**32 - 2)
             and integer(value["baselineGeneration"], 2**32 - 2))
     result = {**value, "savedConfig": content(value["savedConfig"]), "savedVersion": saved_version(value["savedVersion"])}
@@ -93,9 +97,10 @@ def context(value: object) -> dict:
         from ._desktop_ios_recovery_protocol import context as recovery_context
         return recovery_context(value)
     signed = type(value) is dict and "signing" in value
-    fields = _PREPARE | ({"signing"} if signed else set())
+    candidate = type(value) is dict and "action" in value
+    fields = _PREPARE | ({"signing"} if signed else set()) | ({"action"} if candidate else set())
     value = _keys(value, fields | {"platform", "operation"})
-    operation = "ios-signed-export" if signed else "ios-unsigned-archive"
+    operation = "ios-candidate-inputs" if candidate else "ios-signed-export" if signed else "ios-unsigned-archive"
     require(value["platform"] == "ios" and value["operation"] == operation)
     return {**prepare({key: value[key] for key in fields}), "platform": "ios", "operation": operation}
 
@@ -119,8 +124,12 @@ def signing_context(value: object) -> dict:
     return {**value, "assignments": [dict(row) for row in rows]}
 
 
+def candidate_create(value: dict) -> bool:
+    return value.get("operation") == "ios-candidate-inputs"
+
+
 def is_signed(value: dict) -> bool:
-    return value.get("operation") == "ios-signed-export"
+    return value.get("operation") in {"ios-signed-export", "ios-candidate-inputs"}
 
 
 def is_recovery(value: dict) -> bool:
@@ -135,6 +144,8 @@ def stages(value: dict) -> tuple[str, ...]:
 
 
 def protocol(value: dict) -> str:
+    if candidate_create(value):
+        return CANDIDATE_PROTOCOL
     if is_recovery(value):
         from ._desktop_ios_recovery_protocol import PROTOCOL as recovery_protocol
         return recovery_protocol
@@ -151,12 +162,12 @@ def _tool_identity(value: object) -> dict:
     return dict(value)
 
 
-def _native(value: object, *, signed: bool = False, recovery: bool = False) -> dict:
+def _native(value: object, *, signed: bool = False, recovery: bool = False, candidate: bool = False) -> dict:
     if recovery:
         require(not signed)
         from ._desktop_ios_recovery_protocol import native as recovery_native
         return recovery_native(value)
-    value = _keys(value, {"profile", "projectRoot", "rootIdentity", "cwd", "toolchain"} | ({"signingTools", "signingContext"} if signed else set()))
+    value = _keys(value, {"profile", "projectRoot", "rootIdentity", "cwd", "toolchain"} | ({"signingTools", "signingContext"} if signed else set()) | ({"candidateHistory"} if candidate else set()))
     require(_enum(value["profile"], PROFILES))
     tool = _keys(value["toolchain"], {"schemaVersion", "profile", "developerDir", "developerIdentity",
                                      "xcodebuildIdentity", "sdk", "sdkIdentity"})
@@ -176,6 +187,10 @@ def _native(value: object, *, signed: bool = False, recovery: bool = False) -> d
         result["signingTools"] = {name: _tool_identity(identity) for name, identity in tools.items()}
         require(all(identity["uid"] == 0 and identity["mode"] & 0o022 == 0 for identity in result["signingTools"].values()))
         result["signingContext"] = content(value["signingContext"], maximum=512 * 1024)
+    if candidate:
+        require(signed and not recovery)
+        from .local_ios_candidate_protocol import native_history
+        result["candidateHistory"] = native_history(value["candidateHistory"])
     return result
 
 
@@ -185,20 +200,26 @@ class IOSArchiveRequest:
     owner_generation: str
     context: dict
     native: dict
+    digest: str = ""
 
 
 def parse_request(raw: bytes) -> IOSArchiveRequest:
     value = _keys(_decode(raw, REQUEST_LIMIT, framed=True), {"protocol", "operationId", "ownerGeneration", "context", "native"})
     selected = context(value["context"])
     require(value["protocol"] == protocol(selected) and _text(value["operationId"], _TOKEN) and _text(value["ownerGeneration"], _TOKEN))
+    if candidate_create(selected):
+        from .local_release_journal import _uuid
+        from uuid import UUID
+        require(_uuid(str(UUID(hex=value["operationId"]))))
     return IOSArchiveRequest(value["operationId"], value["ownerGeneration"], selected,
-        _native(value["native"], signed=is_signed(selected), recovery=is_recovery(selected)))
+        _native(value["native"], signed=is_signed(selected), recovery=is_recovery(selected), candidate=candidate_create(selected)),
+        hashlib.sha256(raw).hexdigest() if candidate_create(selected) else "")
 
 
 def _request_binding(request: IOSArchiveRequest) -> dict:
     require(type(request) is IOSArchiveRequest and _text(request.operation_id, _TOKEN) and _text(request.owner_generation, _TOKEN))
     return {"operationId": request.operation_id, "ownerGeneration": request.owner_generation,
-            "context": context(request.context), "native": _native(request.native, signed=is_signed(request.context), recovery=is_recovery(request.context))}
+            "context": context(request.context), "native": _native(request.native, signed=is_signed(request.context), recovery=is_recovery(request.context), candidate=candidate_create(request.context))}
 
 
 def _selection(value: object) -> dict:
@@ -239,6 +260,14 @@ def activity(value: object, *, signed: bool = False) -> dict:
 
 
 def validate_terminal(value: object, request: IOSArchiveRequest) -> None:
+    if candidate_create(request.context):
+        from .local_ios_candidate_protocol import terminal
+        return terminal(value, request)
+    _validate_terminal(value, request)
+
+
+def _validate_terminal(value: object, request: IOSArchiveRequest, *, candidate: bool = False) -> None:
+    require(candidate is candidate_create(request.context))
     _request_binding(request)
     if is_recovery(request.context):
         from ._desktop_ios_recovery_protocol import validate_terminal as recovery_terminal
@@ -247,19 +276,25 @@ def validate_terminal(value: object, request: IOSArchiveRequest) -> None:
     value = _keys(value, {"schemaVersion", "context", "outcome", "reason", "activity", "disposition", "result", "lifetime"})
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
             and context(value["context"]) == request.context and _enum(value["outcome"], OUTCOMES)
-            and _enum(value["reason"], REASONS))
+            and _enum(value["reason"], REASONS | ({"journal-unavailable", "recovery-required", "candidate-inputs-unavailable"} if candidate else set())))
     signed = is_signed(request.context)
     closes = SIGNED_CLOSE_FIELDS if signed else CLOSE_FIELDS
+    if candidate:
+        closes = (*closes, "candidateInputsClosed", "journalClosed", "leaseClosed")
     roles = SIGNED_ROLES if signed else ROLES
     observed = activity(value["activity"], signed=signed)
-    life = _keys(value["lifetime"], {"complete", "fatal", "contained", "commandDispatched", "commands", "profileCalls", "stopObserved", *closes})
+    life = _keys(value["lifetime"], {"complete", "fatal", "contained", "commandDispatched", "commands", "profileCalls", "stopObserved", *closes} | ({"sourceCommands"} if candidate else set()))
     require(all(type(life[key]) is bool for key in ("complete", "fatal", "contained", *closes))
             and (life["commandDispatched"] is None or type(life["commandDispatched"]) is bool)
-            and integer(life["commands"], SIGNED_COMMAND_LIMIT if signed else 4)
+            and integer(life["commands"], SIGNED_COMMAND_LIMIT + 8 if candidate else SIGNED_COMMAND_LIMIT if signed else 4)
             and integer(life["profileCalls"], SIGNED_PROFILE_LIMIT if signed else 0)
             and _enum(life["stopObserved"], ("none", "cancelled", "timed-out")))
+    if candidate:
+        require(integer(life["sourceCommands"], 8) and life["commands"] >= life["sourceCommands"]
+                and life["commands"] - life["sourceCommands"] <= SIGNED_COMMAND_LIMIT
+                and (value["outcome"] != "complete" or life["sourceCommands"] == 8))
     exited = sum(command["outcome"] == "exited" for command in observed["commands"].values())
-    require(exited <= life["commands"])
+    require(exited <= life["commands"] - (life["sourceCommands"] if candidate else 0))
     if life["commandDispatched"] is False:
         require(life["commands"] <= 1 and all(command["outcome"] in {"not-dispatched", "not-configured"}
                 for command in observed["commands"].values()))
@@ -283,7 +318,7 @@ def validate_terminal(value: object, request: IOSArchiveRequest) -> None:
         roles = roles if selected["preparationConfigured"] else tuple(role for role in roles if role != "prepare")
         if not selected["preparationConfigured"]:
             require(observed["commands"]["prepare"] == {"outcome": "not-configured", "exitCode": None})
-        require((life["commands"] >= len(roles) if signed else life["commands"] == len(roles))
+        require(((life["commands"] - (life["sourceCommands"] if candidate else 0)) >= len(roles) if signed else life["commands"] == len(roles))
                 and all(observed["commands"][role] == {"outcome": "exited", "exitCode": 0} for role in roles))
         rows = observed["findings"]
         if signed:
@@ -297,7 +332,10 @@ def validate_terminal(value: object, request: IOSArchiveRequest) -> None:
             require(len(rows) == 2 and rows[0] == {"check": "archive-identity", "status": "PASS"}
                     and rows[1]["check"] == "archive-dsym" and rows[1]["status"] in
                     (("PASS", "NOT_APPLICABLE") if selected["symbolsPolicy"] == "disabled" else ("PASS",)))
-        result = _keys(value["result"], {"schemaVersion", "scope", "usedConfig", "usedVersion", "archive", "entries", "bytes", "limitations"}
+        if candidate:
+            from .local_ios_candidate_protocol import result_data
+            result_data(value["result"], request)
+        result = _keys(value["result"]["build"] if candidate else value["result"], {"schemaVersion", "scope", "usedConfig", "usedVersion", "archive", "entries", "bytes", "limitations"}
                        | ({"ipa", "ipaBytes", "pairing"} if signed else set()))
         require(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1 and result["scope"] == (SIGNED_SCOPE if signed else SCOPE)
                 and content(result["usedConfig"]) == request.context["savedConfig"]
@@ -333,8 +371,14 @@ class IOSArchiveFrames:
         self.frames = self.bytes = 0
         self.stage = -1
         self.terminal = self.failed = False
+        self._candidate = None
+        if candidate_create(request.context):
+            from .local_ios_candidate_protocol import IOSCandidateFrames
+            self._candidate = IOSCandidateFrames(request)
 
     def response(self, kind: str, payload: dict) -> bytes:
+        if self._candidate is not None:
+            return self._candidate.response(kind, payload)
         try:
             order = stages(self.request.context)
             require(not self.terminal and not self.failed and self.frames < len(order) + 2

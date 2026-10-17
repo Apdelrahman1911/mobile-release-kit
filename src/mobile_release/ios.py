@@ -1138,6 +1138,17 @@ def _validate_ipa(
 ) -> list[Finding]:
     from .ios_entitlements import MAX_PLIST_BYTES, load_plist_dictionary, validate_profile_entitlements
 
+    # Preserve the original guard before shared scratch/first-primary wrappers.
+    # Only the exact private candidate operation may retain these facts.
+    original_cancellation = cancellation
+    candidate_operation = None
+    source = getattr(cancellation, '_ios_archive_source', None)
+    if source is not None:
+        from .ios_archive_operation import IOSArchiveOperation
+        operation = source.require_operation()
+        if type(operation) is IOSArchiveOperation and operation._local_candidate is not None:
+            candidate_operation = operation
+
     findings: list[Finding] = []
     deadline = deadline if deadline is not None else InspectionDeadline()
     try:
@@ -1292,6 +1303,16 @@ def _validate_ipa(
                             category="ios-artifact",
                         )
                     )
+                if candidate_operation is not None and all(
+                        item.status in {Status.PASS, Status.NOT_APPLICABLE} for item in findings):
+                    uuid = profile.get('UUID') if profile is not None else None
+                    if not isinstance(uuid, str) or not PROFILE_UUID_RE.fullmatch(uuid):
+                        raise ValidationError('validated IPA profile UUID is unavailable')
+                    candidate_operation._candidate_validated_ipa(path, original_cancellation, deadline, {
+                        'platform': 'ios', 'kind': 'apple-distribution',
+                        'certificateSha256': fingerprint, 'teamId': expected_team_id,
+                        'profileUuid': uuid, 'profileExpiresAt': interval.upper_bound.replace(
+                            microsecond=0).isoformat().replace('+00:00', 'Z')})
             deadline.check()
         except ValidationError as error:
             if isinstance(error, ProcessError) and error.fatal:

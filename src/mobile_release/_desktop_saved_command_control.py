@@ -273,7 +273,7 @@ class _SavedCommandInput:
             if material_phase and self.domain in (SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile) and self.reading:
                 self._require(type(self.read_remaining) is int and 1<=self.read_remaining<=2048)
                 limit=min(limit,self.read_remaining)
-            if material_phase and self.domain is SavedCommandDomain.AndroidBuild:
+            if material_phase and self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):
                 candidate=getattr(self,"candidate_input",None)
                 if candidate is not None and candidate.reading:
                     from ._desktop_candidate_input_control import CandidateCreateInput

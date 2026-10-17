@@ -770,6 +770,8 @@ impl Reason {
             android_wire::Reason::BuildInputsUnrestored => Self::BuildInputsUnrestored,
     } }
     fn from_ios(value: ios_wire::Reason) -> Self { match value {
+        ios_wire::Reason::CandidateInputsUnavailable=>Self::CandidateInputsUnavailable,
+        ios_wire::Reason::JournalUnavailable=>Self::JournalUnavailable,ios_wire::Reason::RecoveryRequired=>Self::RecoveryRequired,
         ios_wire::Reason::None => Self::None,
         ios_wire::Reason::Cancelled => Self::Cancelled,
         ios_wire::Reason::ContextChanged => Self::ContextChanged,
@@ -819,7 +821,8 @@ impl Reason {
         ios_wire::Reason::CleanupUnknown => Self::CleanupUnknown,
     } }
     fn ios(self) -> Result<ios_wire::Reason, BridgeError> { Ok(match self {
-        Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
+        Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::EnrollmentExists=>return Err(BridgeError::protocol()),
+        Self::JournalUnavailable=>ios_wire::Reason::JournalUnavailable,Self::RecoveryRequired=>ios_wire::Reason::RecoveryRequired,Self::CandidateInputsUnavailable=>ios_wire::Reason::CandidateInputsUnavailable,
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),
         Self::None => ios_wire::Reason::None,
@@ -1376,6 +1379,7 @@ struct Session {
 }
 impl Session {
     fn recovery_settlement(&self)->bool {matches!(&self.context,Context::LocalStoreReconcile(c) if c.settling())}
+    fn candidate_ios(&self)->bool{matches!(&self.context,Context::IOSArchive(context) if context.candidate())}
     fn candidate_android(&self)->bool{matches!(&self.context,Context::AndroidBuild(context) if context.candidate())}
 
     // Bounded DATA publication only: no Registry/Document acquisition while
@@ -1646,6 +1650,16 @@ impl IOSNativeBooks {
         Self { runtime: IOSArchiveRuntimeSlots::new(), tools: IOSXcodeSlots::new(audit.clone()), selection: None,
             phase: NativePhase::New, failure: None, settlement_started: false, audit, signed, recovery }
     }
+    fn candidate_source_quote(&self)->Option<usize>{
+        if self.phase!=NativePhase::Ready||!self.signed||self.recovery||self.settlement_started||self.first_failure().is_some(){return None;}
+        self.runtime.retained_original_count()?.checked_add(self.tools.retained_original_count()?)
+    }
+    fn candidate_backing(&self)->Option<usize>{
+        if !matches!(self.phase,NativePhase::Ready|NativePhase::Claimed)||!self.signed||self.recovery||self.settlement_started||self.first_failure().is_some(){return None;}
+        let mut bytes=std::mem::size_of::<Self>().checked_add(self.runtime.retained_bytes()?)?.checked_add(self.tools.retained_bytes()?)?;
+        if let Some(v)=&self.selection{for n in [v.python.capacity(),v.bootstrap.capacity(),v.core.capacity(),v.cwd.capacity()]{bytes=bytes.checked_add(n)?;}}
+        Some(bytes)
+    }
     fn first_failure(&self) -> Option<(AdmissionFailure, Instant)> {
         match (self.runtime.first_failure(), self.tools.first_failure()) {
             (Some(a), Some(b)) => Some(if a.1 <= b.1 { a } else { b }), (a, b) => a.or(b),
@@ -1861,6 +1875,7 @@ fn native_final(book: &Resources, owner: &Session) -> bool {
             && book.native_started && book.native_joined && !book.native_failed && book.native_settlement.is_none()
             && matches!(book.native_return.as_ref(), Some(Ok(NativeSettlement { originals_closed: true, integrity: true })))
             && book.ios_native.as_ref().is_some_and(|native|native.try_lock().is_ok_and(|native|native.settled()))
+            &&(!owner.candidate_ios()||local_history::sources_final(owner))
     }
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { let _ = book; false }
@@ -2200,7 +2215,7 @@ impl SavedCommandOwner {
             observation.control.claim_slot(index)?;
         }
         let artifact_selection = match &context { Context::ArtifactInspection(c) => Some(Arc::new(r.artifact_inputs.loan(c,registration,&project)?)), _ => None };
-        let candidate=matches!(&context,Context::AndroidBuild(value) if value.candidate());
+        let candidate=matches!(&context,Context::AndroidBuild(value) if value.candidate())||matches!(&context,Context::IOSArchive(value) if value.candidate());
         let id = nonce_selected(self.inner.domain,candidate)?; let generation = nonce(self.inner.domain)?;
         if r.last.as_ref().is_some_and(|last| last.operation_id == id || last.owner_generation == generation) { return Err(self.inner.domain.unavailable()); }
         let projection = RunProjection { operation_id: id, owner_generation: generation, context,
@@ -3082,7 +3097,7 @@ impl Inner {
         }
         // Only these two typed streams exist; crossing domains is a protocol
         // failure, never a reinterpretation of an Offline terminal as Android.
-        enum Incoming { Accepted(Option<Stage>), Progress(Stage), History(history_wire::Event), Candidate(android_wire::CandidateEvent), Prepare(prepare_wire::Event), Reconcile(reconcile_wire::Event), Execute(execute_wire::Event), Terminal(Terminal) }
+        enum Incoming { IOSCandidate(ios_wire::CandidateEvent), Accepted(Option<Stage>), Progress(Stage), History(history_wire::Event), Candidate(android_wire::CandidateEvent), Prepare(prepare_wire::Event), Reconcile(reconcile_wire::Event), Execute(execute_wire::Event), Terminal(Terminal) }
         let incoming = match (owner.domain, frame) {
             (SavedCommandDomain::LocalReleaseHistory,Frame::LocalReleaseHistory(history_wire::Frame::Accepted))=>Incoming::Accepted(None),
             (SavedCommandDomain::LocalReleaseHistory,Frame::LocalReleaseHistory(history_wire::Frame::Event(e)))=>Incoming::History(e),
@@ -3110,6 +3125,7 @@ impl Inner {
             (SavedCommandDomain::ProjectRecovery, Frame::ProjectRecovery(recovery_wire::Frame::Terminal(t))) => Incoming::Terminal(Terminal::ProjectRecovery(t)),
             (SavedCommandDomain::IOSArchive, Frame::IOSArchive(ios_wire::Frame::Accepted)) => Incoming::Accepted(Some(Stage::IOSArchive(ios_wire::Stage::Accepted))),
             (SavedCommandDomain::IOSArchive, Frame::IOSArchive(ios_wire::Frame::Progress(stage))) => Incoming::Progress(Stage::IOSArchive(stage)),
+            (SavedCommandDomain::IOSArchive,Frame::IOSArchive(ios_wire::Frame::Candidate(e)))=>Incoming::IOSCandidate(e),
             (SavedCommandDomain::IOSArchive, Frame::IOSArchive(ios_wire::Frame::Terminal(t))) => Incoming::Terminal(Terminal::IOSArchive(t)),
             _ => {
                 owner.resource_unknown.store(true, Ordering::SeqCst);
@@ -3128,6 +3144,9 @@ impl Inner {
             }
             Incoming::Execute(event) if owner.domain==SavedCommandDomain::LocalStoreExecute&&a.accepted&&!a.terminal&&!a.unknown&&a.first_stop.is_none()=>{
                 if owner.history.receive_execute(event).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
+            },
+            Incoming::IOSCandidate(event) if owner.candidate_ios()&&a.accepted&&!a.terminal&&!a.unknown&&a.first_stop.is_none()=>{
+                if owner.history.receive_ios_candidate(event).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
             },
             Incoming::Candidate(event) if owner.candidate_android()&&a.accepted&&!a.terminal&&!a.unknown&&a.first_stop.is_none()=>{
                 if owner.history.receive_candidate(event).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
@@ -3245,7 +3264,7 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                     _ = stop.changed() => None,
                     result = async {
                         writer.write_all(bytes).await?;
-                        if let Some(material) = material.as_ref().filter(|_|!owner.candidate_android()&&!matches!(owner.domain,SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile|SavedCommandDomain::LocalStoreExecute)) {
+                        if let Some(material) = material.as_ref().filter(|_|!owner.candidate_android()&&!owner.candidate_ios()&&!matches!(owner.domain,SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile|SavedCommandDomain::LocalStoreExecute)) {
                             let header = header.as_ref().ok().and_then(Option::as_ref)
                                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
                             write_material(writer,material,header).await?;
@@ -3260,6 +3279,11 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
     }
     request.take(); drop(request); // Retire only this original bounded input.
     if failed { inner.stop(&owner, Reason::ProtocolError); }
+    if sent&&!failed&&owner.candidate_ios(){
+        failed=match(input.io.as_mut(),material.as_ref(),header.as_ref().ok().and_then(Option::as_ref)){
+            (Some(writer),Some(material),Some(header))=>local_history::write_ios_candidate(&owner,writer,material,header).await.is_err(),_=>true};
+        if failed{inner.stop(&owner,Reason::CommandIncomplete);}
+    }
     if sent && !failed && owner.candidate_android() {
         // Only the bounded request was sent above. Never let the broad STOP
         // select cancel a phase future that owns an original helper join.
@@ -3336,8 +3360,9 @@ impl OutputDecoder {
                     _=>Err(BridgeError::protocol()),
                 }
             },
-            (SavedCommandDomain::IOSArchive, Context::IOSArchive(context)) =>
-                ios_wire::FrameDecoder::new(&owner.id, &owner.generation, context).map(Self::IOSArchive),
+            (SavedCommandDomain::IOSArchive,Context::IOSArchive(context))=>
+                if context.candidate(){local_history::ios_candidate_decoder(owner,context).map(Self::IOSArchive)}
+                else{ios_wire::FrameDecoder::new(&owner.id,&owner.generation,context).map(Self::IOSArchive)},
             _ => Err(BridgeError::protocol()),
         }
     }
@@ -4116,7 +4141,7 @@ fn spawn_ios_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime, 
         || Profile::current(owner.domain) != Some(owner.profile) { inner.stop(owner, Reason::ToolchainUnavailable); return; }
     if !owner.recovery_matches() { inner.stop(owner, Reason::StaleIntent); return; }
     let Some(native) = native else { inner.stop(owner, Reason::ToolchainUnavailable); return; };
-    let mut native = match native.lock() { Ok(native) => native, Err(_) => { inner.unknown(owner); return; } };
+
     // Fixed reviewed bootstrap only. Xcode selection travels as owner DATA in
     // the bounded request, not ambient PATH/DEVELOPER_DIR or arbitrary argv.
     let mut command = Command::new(&runtime.python);
@@ -4128,6 +4153,8 @@ fn spawn_ios_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime, 
         owner.observe_failure_at(Reason::ToolchainMismatch, at, false);
         inner.stop(owner, Reason::ToolchainMismatch); return;
     }
+    if owner.candidate_ios()&&local_history::candidate_child(owner,&mut command).is_err(){inner.stop(owner,Reason::ContextChanged);return;}
+    let mut native=match native.lock(){Ok(native)=>native,Err(_)=>{inner.unknown(owner);return;}};
     if let Err(failure) = native.check_before_spawn(&runtime, owner.clocks.work, &owner.stop.subscribe(),
         &mut |first| owner.publish_native_failure(first)) {
         let at = Instant::now();
@@ -4208,11 +4235,14 @@ async fn settle_native(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Ses
                 Err(error) => { let mut native = error.into_inner(); native.interrupted(); native.settle(used, end) },
             }}
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-            {match native.lock(){
+            {let mut result=match native.lock(){
                 Ok(mut native)=>native.settle(used,end,&mut |first| original_owner.native_cleanup_expired(first)),
                 Err(error)=>{let mut native=error.into_inner();native.interrupted();
                     native.settle(used,end,&mut |first| original_owner.native_cleanup_expired(first))},
-            }}
+            };
+            if original_owner.candidate_ios(){let sources=local_history::finish_prepare_sources(&original_owner);
+                result.originals_closed &= sources;result.integrity &= sources;}
+            result}
         }));
         let _ = release.send(());
     }
@@ -4434,9 +4464,11 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 {
                     let native = ios_native.ok_or_else(|| domain.unavailable())?;
-                    let mut native = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    native.arm_acl_once(end, &stop, &mut |first| inspection_owner.publish_native_failure(first))?;
-                    native.inspect_once(&runtime, end, &stop, &mut |first| inspection_owner.publish_native_failure(first))
+                    let selected={let mut slots=native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                        slots.arm_acl_once(end,&stop,&mut|first|inspection_owner.publish_native_failure(first))?;
+                        slots.inspect_once(&runtime,end,&stop,&mut|first|inspection_owner.publish_native_failure(first))?};
+                    if inspection_owner.candidate_ios(){local_history::acquire_ios_candidate_sources(&inspection_owner,&native)?;}
+                    Ok(selected)
                 }
                 #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 { let _ = stop; Err(domain.unavailable()) }
@@ -4529,11 +4561,12 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     let binding = native.request_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
                     if context.signed() {
                         let tools = native.signing_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
-                        let material = owner.material.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                        let Some(PrivateSigningMaterial::IOS(original)) = material.as_ref() else { return Err(owner.domain.invalid_owner()); };
-                        if !original.matches(context, owner.registration, &owner.project) { return Err(owner.domain.invalid_owner()); }
-                        ios_wire::request_signed(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd,
-                            &binding, &tools, &original.context_data())
+                        let original={let material=owner.material.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                            let Some(PrivateSigningMaterial::IOS(original))=material.as_ref()else{return Err(owner.domain.invalid_owner());};original.clone()};
+                        drop(native);
+                        if !original.matches(context,owner.registration,&owner.project){return Err(owner.domain.invalid_owner());}
+                        if context.candidate(){local_history::ios_candidate_request(owner,context,profile,&runtime,&binding,&tools,&original.context_data())}
+                        else{ios_wire::request_signed(&owner.id,&owner.generation,context,profile,&owner.project,&runtime.cwd,&binding,&tools,&original.context_data())}
                     } else {
                         ios_wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, &binding)
                     }
@@ -4824,7 +4857,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
             let r = inner.lock();
             r.active.as_ref().is_some_and(|a| a.owner.id == owner.id && a.accepted && a.terminal
                 && a.projection.result.as_ref().is_some_and(|terminal|terminal.settled()
-                    &&(!owner.candidate_android()||terminal.outcome()!=Outcome::Complete||local_history::candidate_complete(&owner))
+                    &&(!(owner.candidate_android()||owner.candidate_ios())||terminal.outcome()!=Outcome::Complete||local_history::candidate_complete(&owner))
                     &&(owner.domain!=SavedCommandDomain::LocalStorePrepare||terminal.outcome()!=Outcome::Complete||local_history::prepare_complete(&owner))
                     &&(owner.domain!=SavedCommandDomain::LocalStoreReconcile||terminal.outcome()!=Outcome::Complete||local_history::reconcile_complete(&owner))
                     &&(owner.domain!=SavedCommandDomain::LocalStoreExecute||terminal.outcome()!=Outcome::Complete||local_history::execute_complete(&owner))))

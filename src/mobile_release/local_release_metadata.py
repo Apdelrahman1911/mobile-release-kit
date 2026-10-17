@@ -42,18 +42,22 @@ def _need(value):
 class LocalMetadataSource:
     """One optional same-source selection; no arbitrary reader/roster callback."""
 
-    def __init__(self, source):
+    def __init__(self, source, *, platform="android"):
         from .local_release_source import LocalSourceObservation, _relative
         _need(type(source) is LocalSourceObservation and not source.active
               and not source.closed and source.calls == 0 and not source.readers
               and getattr(source, "_metadata_owner", None) is None)
         source._owner()
+        _need(platform in {"android", "ios"})
+        if platform == "ios":
+            from .local_ios_candidate_source import IOSCandidateComposition
+            _need(type(source._composition) is IOSCandidateComposition and source._composition.source is source)
+        self.platform = platform
         self.source, self.guard = source, source.guard
         self.pid, self.thread = os.getpid(), threading.current_thread()
         self.relative = _relative(source.config.section("metadata").get("root", "release/store"))
         self.root = source.root / self.relative
-        _need(PLATFORM_METADATA_ROOTS["android"] == ("android",))
-        self.selected = tuple(self.root / part for part in PLATFORM_METADATA_ROOTS["android"])
+        self.selected = tuple(self.root / part for part in PLATFORM_METADATA_ROOTS[self.platform])
         self.rows = None
         self.directories, self.children, self.bindings = {}, {}, {}
         self.absent = []
@@ -85,7 +89,7 @@ class LocalMetadataSource:
         _need(source is self.source and self.rows is None and not source.active
               and source.observed is None and source.calls == 6)
         prefixes = tuple((self.relative + "/" + part + "/").encode("utf-8")
-                         for part in PLATFORM_METADATA_ROOTS["android"])
+                         for part in PLATFORM_METADATA_ROOTS[self.platform])
         rows = {}
         for index, (name, (mode, blob)) in enumerate(tracked.items()):
             if index % 64 == 0:
@@ -152,7 +156,7 @@ class LocalMetadataSource:
     def reserve(self, scratch):
         """Standalone original source phase; ordinary scratch APIs unchanged."""
         self._scratch_new(scratch)
-        _need(getattr(self.source, "_composition", None) is None
+        _need(self.platform == "android" and getattr(self.source, "_composition", None) is None
               and getattr(self.guard, "_android_build_source", None) is None)
         project = self.source.project
         _need(scratch.parent.path == self.source.root / ".mobile-release"
@@ -182,12 +186,27 @@ class LocalMetadataSource:
         composition.quote = quote
         return reservation
 
+    def _reserve_ios(self, composition, scratch):
+        from .local_ios_candidate_source import IOSCandidateComposition
+        self._scratch_new(scratch)
+        _need(type(composition) is IOSCandidateComposition and self.platform == "ios"
+              and self.source._composition is composition and composition.source is self.source
+              and composition.metadata is self and composition.metadata_scratch is scratch
+              and scratch.parent.path == self.source.root / ".mobile-release")
+        composition._owner()
+        directories = sum(path not in self.source.directories for path in self.planned)
+        self.composition = composition
+        quote = composition.metadata_quote(directories, scratch)
+        return self._reserve(scratch, quote, directories)
+
     def _scratch_parent(self, scratch):
         """After original parent acquire, BEFORE any scratch mkdir/publication."""
         self.check()
         _need(scratch is self.scratch and scratch._local_metadata_owner is self
               and self.source.active and self.reservation is not None)
-        if self.composition is None:
+        if self.composition is None or self.platform == "ios":
+            if self.composition is not None:
+                self.composition._metadata_cut()
             number = self.source.project.meta.number
         else:
             composition = self.composition
@@ -407,7 +426,7 @@ class LocalMetadataSource:
         self.check()
         _need(scratch is self.scratch and self.reservation is not None and not self.used
               and type(scratch) is FiniteScratch and scratch.layout == "store-metadata"
-              and scratch.cancellation is self.guard and root == self.root and platform == "android"
+              and scratch.cancellation is self.guard and root == self.root and platform == self.platform
               and self.source.active and scratch.active and not scratch.claimed)
         self._scratch_parent(scratch)
         self.used = True

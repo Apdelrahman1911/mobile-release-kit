@@ -248,3 +248,52 @@ test('recovery selection refuses foreign history and retires delayed Prepare on 
   }finally{h.controller.dispose();}
  }
 });
+
+const iosInputs=()=>{const {applicationId,...value}=candidate();return {...value,bundleId:'org.example.ios-app',
+ files:[{fileName:'export/App.ipa',bytes:4096,sha256:'d'.repeat(64)},...value.files.slice(1)],
+ archive:{directory:'archive.xcarchive',entries:7,bytes:8000,sha256:'e'.repeat(64)}};};
+function iosHistory(request,phase='inputs-ready'){const v=inputHistory(request,phase);if(v.result.candidateInputs)v.result.candidateInputs=iosInputs();return v;}
+test('iOS input History has explicit platform, distinct consent and closed archive summary without Play authority',()=>{
+ const request=localHistoryRequest('p1','review-inputs',UUID,'ios');assert.equal(request.platform,'ios');
+ assert.ok(encodeLocalHistoryRequest('prepare_local_release_history',request));
+ for(const action of ['enroll','verify','review-prepared','review-execution','review-reconcile','review-recovery'])assert.equal(localHistoryRequest('p1',action,UUID,'ios'),null);
+ for(const platform of [null,'android','macos'])assert.equal(encodeLocalHistoryRequest('prepare_local_release_history',{...request,platform}),null);
+ const complete=iosHistory(request);assert.ok(parseLocalHistoryStatus(status(1,complete)));
+ const foreign=copy(complete);delete foreign.context.platform;assert.equal(parseLocalHistoryStatus(status(1,foreign)),null);
+ const mixed=copy(complete);mixed.result.candidateInputs=candidate();assert.equal(parseLocalHistoryStatus(status(1,mixed)),null);
+ for(const mutate of [v=>v.archive.directory='../archive.xcarchive',v=>v.archive.entries=100001,v=>v.archive.bytes=8589934593,
+  v=>v.files[0].fileName='export/nested/App.ipa',v=>v.files[0].bytes=4294967297,v=>v.files.reverse(),v=>v.bundleId='org..invalid',
+  v=>v.version.build=2100000001,v=>v.operationId='99999999-1234-4234-8234-123456789abc',v=>v.priorCreateFinality='established']){
+  const bad=copy(complete);mutate(bad.result.candidateInputs);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ let getters=0;const unsafe=copy(complete);Object.defineProperty(unsafe.result.candidateInputs.archive,'sha256',{enumerable:true,get(){getters++;return'e'.repeat(64);}});
+ assert.equal(parseLocalHistoryStatus(status(1,unsafe)),null);assert.equal(getters,0);
+ for(const phase of ['inputs-pending','settled-failure'])assert.ok(parseLocalHistoryStatus(status(1,iosHistory(request,phase))));
+ const abandon=localHistoryRequest('p1','abandon-inputs',UUID,'ios');assert.ok(parseLocalHistoryStatus(status(1,iosHistory(abandon,'settled-failure'))));
+ assert.equal(parseLocalHistoryStatus(status(1,iosHistory(abandon,'inputs-ready'))),null);
+});
+test('iOS History selector keeps original one-use consent and refuses changes during running or unknown owner',async()=>{
+ for(const action of ['review-inputs','abandon-inputs']){
+  const h=await fixture();try{
+   h.emit(status(1,inputHistory(localHistoryRequest('p1','verify'))));
+   assert.equal(h.controller.setInputPlatform('ios'),true);assert.equal(h.controller.getSnapshot().historical,false);
+   assert.equal(h.controller.selectCandidate(action,UUID),true);await h.controller.prepare();
+   assert.equal(h.latest().operation.context.platform,'ios');let calls=0;
+   h.api.startLocalReleaseHistory=async request=>{calls++;assert.equal(request.consentVersion,'local-ios-candidate-inputs-v1');return status(3,{...h.latest().operation,phase:'running',intentUsable:false});};
+   h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(calls,1);
+   assert.equal(h.controller.setInputPlatform('android'),false);assert.equal(h.counts().cancel,0);
+   h.emit(status(4,{...h.latest().operation,phase:'unknown',outcome:'unknown',reason:'cleanup-unknown',intentUsable:false,result:null}));
+   assert.equal(h.controller.setInputPlatform('android'),false);assert.ok(localHistoryOwnerReason(h.controller.getSnapshot()));
+  }finally{h.controller.dispose();}
+ }
+});
+test('platform changes retire late candidate review and project changes reset the explicit selection',async()=>{
+ const h=await fixture();try{
+  h.emit(status(1,inputHistory(localHistoryRequest('p1','verify'))));h.controller.setInputPlatform('ios');
+  assert.equal(h.controller.selectCandidate('review-inputs',UUID),true);
+  const release=h.defer(),pending=h.controller.prepare();assert.equal(h.controller.setInputPlatform('android'),true);release();await pending;await Promise.resolve();
+  assert.equal(h.controller.getSnapshot().consentUntil,null);assert.equal(h.counts().cancel,1);assert.equal(h.counts().start,0);
+  assert.equal(h.controller.getSnapshot().request.platform,undefined);
+ }finally{h.controller.dispose();}
+ const h2=await fixture();try{h2.controller.setInputPlatform('ios');h2.project('p2');assert.equal(h2.controller.getSnapshot().inputPlatform,'android');assert.equal(h2.controller.getSnapshot().request.action,'verify');}finally{h2.controller.dispose();}
+});

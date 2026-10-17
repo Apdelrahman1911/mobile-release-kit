@@ -174,7 +174,7 @@ class _SavedCommandEngine:
         elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):
             # Preserve a slot for the one terminal. Each original build DATA
             # encoder separately enforces accepted/stage/terminal sequencing.
-            maximum = (len(wire.stages(self.request.context)) + 2
+            maximum = (len(wire.stages(self.request.context)) + (6 if wire.candidate_create(self.request.context) else 2)
                        if self.domain is SavedCommandDomain.IOSArchive and self.request is not None else
                        wire.maximum_frames(self.request.context) if self.domain is SavedCommandDomain.AndroidBuild and self.request is not None
                        else wire.MAX_FRAMES)
@@ -278,6 +278,10 @@ class _SavedCommandEngine:
             self._require(self._ios_frames is None)
             self._ios_frames = IOSArchiveFrames(self.request)
             self.service = IOSArchiveRun(self.request, self.guard, self.input)
+            from ._desktop_ios_archive_protocol import candidate_create
+            if candidate_create(self.request.context):
+                from .local_ios_candidate_create import IOSCandidateCreateRun
+                IOSCandidateCreateRun(self)
         elif self.domain is SavedCommandDomain.ArtifactInspection:
             from .desktop_artifact_inspection import ArtifactInspectionRun
             self.service = ArtifactInspectionRun(self.request, self.guard, self.input)

@@ -171,6 +171,19 @@ def run_owned(
             from ._desktop_ios_signed_operation import SignedIOSOperation
             if type(operation.signing) is not SignedIOSOperation or _evidence is not None or on_start is not None:
                 raise ValueError("Signed iOS command lacks its original operation")
+            candidate = getattr(operation, "_local_candidate", None)
+            if candidate is not None and candidate._source_pending is not None:
+                from .local_ios_candidate_source import IOSCandidateComposition
+                if type(candidate) is not IOSCandidateComposition or candidate.run.operation is not operation:
+                    raise ValueError("Local iOS source lacks its original composition")
+                timeout, selected_limit = candidate.source_command(argv, environ=environ, cwd=cwd,
+                    timeout=timeout, capture=capture, text=text, cleanup=cleanup, scope=execution_scope,
+                    binding=journal_binding, evidence=_evidence, on_start=on_start)
+                if output_limit != selected_limit:
+                    raise ValueError("Local iOS source capture differs")
+                return run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture, text=text,
+                    output_limit=selected_limit, cancellation=cancellation, on_start=None,
+                    cleanup=False, execution_scope=None, journal_binding=None)
             with operation.signing.command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture,
                     text=text, output_limit=output_limit, cleanup=cleanup, scope=execution_scope,
                     binding=journal_binding) as (selected, environment, timeout, output_limit):

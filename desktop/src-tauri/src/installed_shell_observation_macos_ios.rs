@@ -1474,7 +1474,7 @@ impl Record {
                     wire::CommandOutcome::NotDispatched => format!("{label}: not dispatched."),
                     wire::CommandOutcome::Unknown => format!("{label}: no usable original outcome."),
                 };
-                let archive = snapshot.terminal.result.as_ref().map(|result| result.archive.clone());
+                let archive = snapshot.terminal.result.as_ref().and_then(wire::ResultValue::ordinary_build).map(|result| result.archive.clone());
                 let mut lines = vec![words("Xcode version",&commands.xcode_version),words("iOS SDK selection",&commands.ios_sdk),
                     words("Saved preparation",&commands.prepare),words("Archive",&commands.archive)];
                 if let Some(export) = &commands.export { lines.push(words("Local IPA export",export)); }

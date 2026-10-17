@@ -253,6 +253,9 @@ class LocalSourceObservation:
         candidate = self._composition
         if candidate is not None:
             candidate._arm_source(self, arguments, timeout, limit)
+            from .local_ios_candidate_source import IOSCandidateComposition
+            if type(candidate) is IOSCandidateComposition:
+                candidate._bind_source_command(self, argv, environment)
         try:
             result = run_owned(argv, cwd=self.root, environ=environment, capture=True, text=False,
                 timeout=timeout, output_limit=limit, cancellation=self.guard,
