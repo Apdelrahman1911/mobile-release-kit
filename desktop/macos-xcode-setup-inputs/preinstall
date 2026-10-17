@@ -2,11 +2,21 @@
 # Fixed read-only carrier admission BEFORE PackageKit writes its tiny payload.
 set -eu
 umask 077
-[ "${3:-}" = / ] || exit 1
+printf '%s\n' 'MRK_XCODE_HOOK=hook=preinstall;stage=entry' >&2 || :
+[ "${3:-}" = / ] || {
+    printf '%s\n' 'MRK_XCODE_HOOK=hook=preinstall;stage=target-refused' >&2 || :
+    exit 1
+}
 case "$0" in
     ./preinstall) scripts=. ;;
     /*/preinstall) scripts=${0%/*} ;;
-    *) exit 1 ;;
+    *)
+        printf '%s\n' 'MRK_XCODE_HOOK=hook=preinstall;stage=path-refused' >&2 || :
+        exit 1 ;;
 esac
-cd -P "$scripts" 2>/dev/null || exit 1
+cd -P "$scripts" 2>/dev/null || {
+    printf '%s\n' 'MRK_XCODE_HOOK=hook=preinstall;stage=cwd-refused' >&2 || :
+    exit 1
+}
+printf '%s\n' 'MRK_XCODE_HOOK=hook=preinstall;stage=pre-exec' >&2 || :
 exec ./setup/mrk-macos-xcode-setup --carrier-preflight

@@ -58,6 +58,34 @@ def _command_failure(work, repo, argv, sequence, *, returncode=None, timed_out=F
 
 
 class XcodeSetupProbeDiagnostics(unittest.TestCase):
+    def test_setup_hook_diagnostics_preserve_refusal_and_helper_exit(self):
+        # Ordinary shell with a task-local inert helper, never PackageKit/root.
+        source = Path(__file__).resolve().parents[2] / "desktop/macos-xcode-setup-inputs"
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts = Path(tmp)
+            (scripts / "setup").mkdir()
+            helper = scripts / "setup/mrk-macos-xcode-setup"
+            helper.write_text("#!/bin/sh\nprintf 'synthetic-helper\\n'\nexit 23\n")
+            helper.chmod(0o700)
+            for hook, relative in (("preinstall", "preinstall"), ("postinstall", "setup/postinstall")):
+                body = (source / relative).read_bytes()
+                (scripts / relative).write_bytes(body)
+                prefix = ("MRK_XCODE_HOOK=hook=" + hook + ";stage=").encode()
+                for target, code, marker in (("/", 23, b"pre-exec"), ("/unrelated", 1, b"target-refused")):
+                    with self.subTest(hook=hook, target=target):
+                        result = subprocess.run(["/bin/sh", "./" + relative, "synthetic.pkg", "/", target],
+                            cwd=scripts, env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=5)
+                        self.assertEqual(result.returncode, code)
+                        self.assertEqual(result.stderr.splitlines(), [prefix + b"entry", prefix + marker])
+                        self.assertEqual(result.stdout, b"synthetic-helper\n" if target == "/" else b"")
+                # An unrecognized callback path still refuses before helper entry.
+                result = subprocess.run(["/bin/sh", "-c", body.decode(), "unrecognized",
+                    "synthetic.pkg", "/", "/"], cwd=scripts, env={"PATH": "/usr/bin:/bin"},
+                    capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stderr.splitlines(), [prefix + b"entry", prefix + b"path-refused"])
+                self.assertEqual(result.stdout, b"")
+
     def test_failed_and_timed_out_commands_keep_bounded_public_diagnostics(self):
         # Real task-file IO and exact helper used by run(); no native/process call.
         for timed_out in (False, True):

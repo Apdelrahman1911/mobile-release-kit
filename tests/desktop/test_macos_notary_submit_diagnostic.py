@@ -25,6 +25,37 @@ PUBLIC = load("notary_submit_public_data", "macos_public_verification_evidence.p
 PRIVATE = b"PRIVATE_SENTINEL_/secret/key.p8-password-no-export"
 
 
+class StagerFailureLocationTests(unittest.TestCase):
+    def test_actual_stager_location_is_private_and_not_filename_only(self):
+        stager = load("failure_location_stager", "stage_macos_installed.py")
+        # Actual first readback guard; no filesystem/native operations entered.
+        try:
+            stager.observation_command(SimpleNamespace(), expected_previous={"private": PRIVATE})
+        except stager.Refused as error:
+            location = HELPER.failure_stager_line(error, stager)
+            trace = error.__traceback__
+            while trace.tb_frame.f_code is not stager.observation_command.__code__:
+                trace = trace.tb_next
+            self.assertEqual(location, trace.tb_lineno)
+            self.assertIsNone(HELPER.failure_stager_line(error, None))
+        else:
+            self.fail("original readback refusal was not raised")
+        # A matching co_filename alone must not attribute outside code to stager.
+        outside = {"Refused": stager.Refused, "private": PRIVATE.decode()}
+        try:
+            exec(compile("raise Refused(private)", stager.__file__, "exec"), outside)
+        except stager.Refused as error:
+            self.assertIsNone(HELPER.failure_stager_line(error, stager))
+        self.assertIsNone(HELPER.failure_stager_line(ValueError(PRIVATE.decode()), stager))
+        op = object.__new__(HELPER.Operation)
+        op.__dict__.update(stager_failure_line=location)
+        for value in (location, True, 0, 100001, PRIVATE.decode()):
+            op.stager_failure_line = value
+            projected = HELPER.failure_diagnostic(HELPER.Refused("helper-package-incomplete"), operation=op)
+            self.assertEqual(projected["originalFailure"]["stagerLine"], location if value == location else None)
+            self.assertNotIn(PRIVATE.decode(), json.dumps(projected))
+
+
 class NotarySubmitDiagnosticTests(unittest.TestCase):
     def test_final_input_refusals_are_distinct_without_exporting_private_values(self):
         stager = load("notary_final_stager_data", "stage_macos_installed.py")
@@ -646,3 +677,163 @@ class PreparedInstallerLogTests(unittest.TestCase):
                     {'domain':'NSPOSIXErrorDomain','code':13,'message':PRIVATE.decode()},
                     {'domain':PRIVATE.decode(),'code':13}):
             self.assertIsNone(HELPER.installer_errors_data({'rows':[row], 'omitted':False}))
+
+
+class SetupInstallerDiagnosticTests(unittest.TestCase):
+    def test_hook_and_native_observations_are_distinct_closed_data(self):
+        rows = [{"hook": hook, "stage": stage} for hook in HELPER._SETUP_HOOKS
+                for stage in HELPER._SETUP_HOOK_STAGES]
+        body = b"".join(("installer: MRK_XCODE_HOOK=hook=" + r["hook"] + ";stage=" + r["stage"] + "\r\n").encode()
+                        for r in rows)
+        value = HELPER.setup_hook_diagnostics(body + body, PRIVATE + b"\n")
+        self.assertEqual(value, {"available": True, "observations": rows})
+        native_line = b"installer: MRK_XCODE_SETUP_REFUSED=scope=child;stage=source;reason=binding\n"
+        native = HELPER.setup_installer_diagnostics(native_line, b"")
+        self.assertEqual(HELPER.setup_installer_diagnostics_data(native), native)
+        self.assertFalse(HELPER.setup_hook_diagnostics(native_line, b"")["available"])
+        self.assertFalse(HELPER.setup_installer_diagnostics(body, b"")["available"])
+        good = b"MRK_XCODE_HOOK=hook=preinstall;stage=pre-exec\n"
+        self.assertEqual(HELPER.setup_hook_diagnostics(b"\t" + good, b"")["observations"],
+                         [{"hook": "preinstall", "stage": "pre-exec"}])
+        for bad in (b"X" + good, good.rstrip(b"\n"), good.replace(b"preinstall", b"foreign"),
+                    good.replace(b"pre-exec", b"helper-admitted"), good[:-1] + PRIVATE + b"\n",
+                    good.replace(b"hook=", b"private="), b"x" * 4096 + b" " + good):
+            with self.subTest(length=len(bad)):
+                self.assertEqual(HELPER.setup_hook_diagnostics(bad, b""), {"available": False, "observations": []})
+        self.assertIsNone(HELPER.setup_hook_diagnostics(b"x" * (256*1024 + 1), b""))
+        self.assertIsNone(HELPER.setup_hook_diagnostics("not bytes", b""))
+        for parser, original in ((HELPER.setup_hook_diagnostics_data, value),
+                                 (HELPER.setup_installer_diagnostics_data, native)):
+            before = copy.deepcopy(original)
+            parsed = parser(original)
+            parsed["observations"][0]["stage"] = "changed-copy"
+            self.assertEqual(original, before)
+            bad_rows = (original["observations"] + original["observations"],
+                        [dict(original["observations"][0], extra=PRIVATE.decode())],
+                        [dict(original["observations"][0], stage=PRIVATE.decode())], [None])
+            for changed in (None, dict(original, available=1), dict(original, available=False),
+                            dict(original, extra=PRIVATE.decode()),
+                            *[dict(original, observations=r) for r in bad_rows]):
+                self.assertIsNone(parser(changed))
+            self.assertEqual(parser({"available": False, "observations": []}),
+                             {"available": False, "observations": []})
+
+    def test_actual_setup_call_only_classifies_settled_nonzero_capture(self):
+        from unittest import mock
+        parsers = (("setupDiagnostic", "setup_installer_diagnostics"),
+                   ("setupHooks", "setup_hook_diagnostics"), ("installerErrors", "installer_errors"))
+        stdout = b"installer: MRK_XCODE_HOOK=hook=preinstall;stage=pre-exec\n"
+        stderr = (b"installer: MRK_XCODE_SETUP_REFUSED=scope=public;stage=source;reason=binding\n"
+                  b'Error Domain=PKInstallErrorDomain Code=112 "' + PRIVATE + b'"\n')
+        for index in (1, 2):
+            role = HELPER.XCODE_SETUP_VERIFY_ROLES[index]
+            for fault in (None, "zero", "owner", "publication", *[name for _, name in parsers]):
+                with self.subTest(role=role, fault=fault):
+                    published, invoked, observed = [], [], []
+                    argv = ["inert-original-installer"]
+                    def owned(actual, **kwargs):
+                        invoked.append(tuple(actual))
+                        if fault == "owner": raise RuntimeError("inert unknown original")
+                        return subprocess.CompletedProcess(actual, 0 if fault == "zero" else 1, stdout, stderr)
+                    def publish(name, body, *, parent=None):
+                        self.assertIsNone(parent)
+                        if fault == "publication": raise RuntimeError("inert unknown publication")
+                        published.append(name)
+                    op = SimpleNamespace(phase=HELPER.XCODE_SETUP_VERIFY,
+                        credential_known=lambda: True, credential_failed=False, credential_active=None,
+                        removal_final_active=lambda: False, android_support=None, store_signing=None,
+                        app_absence=None, update=None, removal=False, setup_package=False, setup_verify=True,
+                        prepared_staging=False,
+                        removal_recorded_role=lambda r:r, setup_verification_post=lambda:None,
+                        setup_verification_absent=lambda:None, errors=[], stager_io_pending=None,
+                        calls=[dict(role=r, entered=True, returned=True, capturesSettled=True, returncode=0)
+                               for r in HELPER.XCODE_SETUP_VERIFY_ROLES[:index]],
+                        owner=SimpleNamespace(run_owned=owned), work=Path("/inert-unopened-work"),
+                        checkout=Path("/inert-unopened-checkout"), publish=publish)
+                    def guarded(name, actual_parser):
+                        def invoke(out, err):
+                            self.assertEqual((out, err), (stdout, stderr))
+                            self.assertEqual(len(published), 3)
+                            self.assertTrue(op.calls[-1]["returned"] and op.calls[-1]["capturesSettled"])
+                            self.assertEqual(op.calls[-1]["returncode"], 1)
+                            observed.append(name)
+                            if fault == name: raise RuntimeError(PRIVATE.decode())
+                            return actual_parser(out, err)
+                        return invoke
+                    with contextlib.ExitStack() as stack:
+                        for _, name in parsers:
+                            stack.enter_context(mock.patch.object(HELPER, name, side_effect=guarded(name, getattr(HELPER, name))))
+                        if fault == "zero":
+                            HELPER.Operation.call(op, role, argv, {}, cwd=op.work, timeout=20, limit=256*1024)
+                        else:
+                            exception = RuntimeError if fault in ("owner", "publication") else HELPER.Refused
+                            with self.assertRaises(exception) as captured:
+                                HELPER.Operation.call(op, role, argv, {}, cwd=op.work, timeout=20, limit=256*1024)
+                            if exception is HELPER.Refused:
+                                self.assertEqual(str(captured.exception), "original-nonzero-" + role)
+                    self.assertEqual(invoked, [tuple(argv)])
+                    row = op.calls[-1]
+                    available = fault not in ("zero", "owner", "publication")
+                    self.assertEqual(observed, [name for _, name in parsers] if available else [])
+                    for key, name in parsers:
+                        self.assertEqual(key in row, available and fault != name)
+                    if available:
+                        if fault != "installer_errors":
+                            self.assertEqual(row["installerErrors"]["rows"], [{"domain":"PKInstallErrorDomain", "code":112}])
+                        self.assertNotIn(PRIVATE.decode(), json.dumps(row))
+                    if fault == "publication": self.assertFalse(row["capturesSettled"])
+                    if fault == "owner": self.assertFalse(row["returned"])
+
+    def test_setup_failure_projection_is_original_bound_private_and_finite(self):
+        hooks = {"available": True, "observations": [{"hook":h,"stage":s}
+            for h in HELPER._SETUP_HOOKS for s in HELPER._SETUP_HOOK_STAGES]}
+        native = {"available": True, "observations": [{"scope":"child","stage":s,"reason":"binding"}
+            for s in ("source", "self", "carrier", "finality")]}
+        errors = {"rows":[{"domain":domain,"code":112} for domain in HELPER._INSTALLER_ERROR_DOMAINS], "omitted":False}
+        def operation(index):
+            op = object.__new__(HELPER.Operation)
+            op.__dict__.update(phase=HELPER.XCODE_SETUP_VERIFY, receipt={"passed":False},
+                credential_calls=[], credential_contexts=[], errors=[],
+                calls=[dict(role=r, entered=True, returned=True, capturesSettled=True, returncode=0,
+                            stdout=PRIVATE, argv=[PRIVATE.decode()]) for r in HELPER.XCODE_SETUP_VERIFY_ROLES[:index+1]])
+            op.calls[-1].update(returncode=1, setupHooks=copy.deepcopy(hooks),
+                                setupDiagnostic=copy.deepcopy(native), installerErrors=copy.deepcopy(errors))
+            return op
+        for index in (1,2):
+            op = operation(index); before=copy.deepcopy(op.__dict__)
+            output=io.StringIO()
+            with contextlib.redirect_stderr(output):
+                HELPER.emit_failure_diagnostic(HELPER.Refused("helper-package-incomplete"),
+                    phase=HELPER.XCODE_SETUP_VERIFY, target=HELPER.ARM_TARGET, operation=op)
+            encoded=output.getvalue(); value=json.loads(encoded)
+            self.assertLessEqual(len(encoded),4096)
+            self.assertEqual(value["setupInstall"], {"role":HELPER.XCODE_SETUP_VERIFY_ROLES[index], "index":index+1,
+                "returncode":1, "hooks":hooks, "native":native, "errors":errors, "systemServiceExitClaimed":False})
+            self.assertFalse(value["productReady"])
+            self.assertTrue(value["diagnosticOnly"])
+            self.assertIsNone(value["packageInstall"])
+            self.assertNotIn(PRIVATE.decode(),encoded)
+            self.assertEqual(op.__dict__,before)
+            # Corrupt saved diagnostic fields are refused independently, not
+            # converted into missing native observations or success evidence.
+            for key, projected in (("setupHooks","hooks"),("setupDiagnostic","native"),("installerErrors","errors")):
+                changed=operation(index); changed.calls[-1][key]={"private":PRIVATE.decode()}
+                data=HELPER.failure_diagnostic(HELPER.Refused("helper-package-incomplete"),operation=changed)["setupInstall"]
+                self.assertIsNone(data[projected]); self.assertNotIn(PRIVATE.decode(),json.dumps(data))
+        for fault in ("phase","zero","bool-status","unentered","unreturned","unsettled","prior-failed",
+                      "prior-unsettled","wrong-role","duplicate","extra-call","status-bound"):
+            op=operation(1)
+            if fault=="phase": op.phase="package-install"
+            elif fault=="zero": op.calls[-1]["returncode"]=0
+            elif fault=="bool-status": op.calls[-1]["returncode"]=True
+            elif fault=="unentered": op.calls[-1]["entered"]=False
+            elif fault=="unreturned": op.calls[-1]["returned"]=False
+            elif fault=="unsettled": op.calls[-1]["capturesSettled"]=False
+            elif fault=="prior-failed": op.calls[0]["returncode"]=1
+            elif fault=="prior-unsettled": op.calls[0]["capturesSettled"]=False
+            elif fault=="wrong-role": op.calls[-1]["role"]="installer"
+            elif fault=="duplicate": op.calls.insert(0,copy.deepcopy(op.calls[0]))
+            elif fault=="extra-call": op.calls.append(copy.deepcopy(op.calls[-1]))
+            elif fault=="status-bound": op.calls[-1]["returncode"]=65536
+            with self.subTest(fault=fault):
+                self.assertIsNone(HELPER.failure_diagnostic(HELPER.Refused("helper-package-incomplete"),operation=op)["setupInstall"])

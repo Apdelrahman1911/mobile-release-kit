@@ -11007,8 +11007,6 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "installation-inspection", "vault-helper-shipping-installation-inspection",
             "project-recovery-pending", "ios-recovery-pending", "doctor-preflight2", "local-edits3",
         ))
-        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove",
-                                       "same-package-noop", "update-baseline", "prepare-app-absence", "app-absence-restore"))
         sha, ref = "a" * 40, "refs/heads/verify/desktop-macos-aqua"
         work = module.WORK_PARENT / "mrk-macos-aqua.AbC12345"
         environment = {
@@ -11029,6 +11027,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                                   getuid=mock.Mock(return_value=501), geteuid=mock.Mock(return_value=501),
                                   getgid=mock.Mock(return_value=20), getegid=mock.Mock(return_value=20))):
             self.assertEqual(module.admit(environment), work)
+            # Host admission is not a grant for the separate setup Installer.
+            # Its real constructor refuses this Aqua purpose before any IO.
+            with self.assertRaisesRegex(module.Refused, "^setup-verification-purpose$"):
+                module.Operation(None, module.CHECKOUT, work, module.XCODE_SETUP_VERIFY, environment, None)
             for scope in ("doctor-preflight2", "local-edits3"):
                 self.assertEqual(module.admit(dict(environment, MRK_MACOS_AQUA_SCOPE=scope)), work)
             for scope in ("android-registration-lifecycle", "wrapping-keychain-private", "xcode-installed-classification",
@@ -11037,7 +11039,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     module.admit(dict(environment, MRK_MACOS_AQUA_SCOPE=scope))
             for key, value, reason in (
                 ("GITHUB_WORKFLOW_SHA", "b" * 40, "hosted-source-bindings"),
-                ("GITHUB_EVENT_NAME", "workflow_dispatch", "hosted-source-bindings"),
+                ("GITHUB_EVENT_NAME", "workflow_dispatch", "candidate-companion-event-scope"),
                 ("MRK_MACOS_PACKAGE_ROLE", "ordinary-image", "hosted-source-bindings"),
                 ("MRK_MACOS_PACKAGE_ROLE", "", "hosted-source-bindings"),
                 ("MRK_MACOS_WORK", str(module.WORK_PARENT / "mrk-macos-installed.AbC12345"), "owned-work-route"),

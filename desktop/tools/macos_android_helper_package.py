@@ -719,6 +719,63 @@ _SETUP_DIAGNOSTIC_REASONS = frozenset(("clock", "access", "bounds", "state", "bi
     "read", "write", "sync", "close", "child", "unknown"))
 
 
+def setup_installer_diagnostics_data(value):
+    """Revalidate only closed A observations, never a helper-admission claim."""
+    if (type(value) is not dict or set(value) != {"available", "observations"}
+            or type(value["available"]) is not bool or type(value["observations"]) is not list
+            or len(value["observations"]) > 4 or value["available"] != bool(value["observations"])):
+        return None
+    rows = []
+    for row in value["observations"]:
+        if (type(row) is not dict or set(row) != {"scope", "stage", "reason"}
+                or type(row["scope"]) is not str or row["scope"] not in ("public", "child")
+                or type(row["stage"]) is not str or row["stage"] not in _SETUP_DIAGNOSTIC_STAGES
+                or type(row["reason"]) is not str or row["reason"] not in _SETUP_DIAGNOSTIC_REASONS
+                or row in rows):
+            return None
+        rows.append(dict(row))
+    return {"available": value["available"], "observations": rows}
+
+
+_SETUP_HOOKS = ("preinstall", "postinstall")
+_SETUP_HOOK_STAGES = ("entry", "target-refused", "path-refused", "cwd-refused", "pre-exec")
+
+
+def setup_hook_diagnostics_data(value):
+    if (type(value) is not dict or set(value) != {"available", "observations"}
+            or type(value["available"]) is not bool or type(value["observations"]) is not list
+            or len(value["observations"]) > 10 or value["available"] != bool(value["observations"])):
+        return None
+    rows = []
+    for row in value["observations"]:
+        if (type(row) is not dict or set(row) != {"hook", "stage"}
+                or type(row["hook"]) is not str or row["hook"] not in _SETUP_HOOKS
+                or type(row["stage"]) is not str or row["stage"] not in _SETUP_HOOK_STAGES
+                or row in rows):
+            return None
+        rows.append(dict(row))
+    return {"available": value["available"], "observations": rows}
+
+
+def setup_hook_diagnostics(stdout, stderr):
+    """Hook text only: pre-exec is not evidence that the helper was admitted."""
+    if type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > 256 * 1024:
+        return None
+    pattern = re.compile(rb"(?:^|[ \t])MRK_XCODE_HOOK=hook=(preinstall|postinstall);stage="
+                         rb"(entry|target-refused|path-refused|cwd-refused|pre-exec)\r?\n$")
+    rows = []
+    for body in (stdout, stderr):
+        for line in body.splitlines(keepends=True):
+            if len(line) > 4096:
+                continue
+            match = pattern.search(line)
+            if match is not None:
+                row = {"hook": match[1].decode("ascii"), "stage": match[2].decode("ascii")}
+                if row not in rows and len(rows) < 10:
+                    rows.append(row)
+    return setup_hook_diagnostics_data({"available": bool(rows), "observations": rows})
+
+
 def setup_installer_diagnostics(stdout, stderr):
     """Only A's compiled public tokens; surrounding Installer text is discarded."""
     need(type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= 256 * 1024,
@@ -2158,6 +2215,25 @@ def compiler_diagnostic_data(value):
             **{key: value[key] for key in ("rowsOmitted", "scanComplete", "rustMessages", "clangErrors", "buildScriptPanics")}}
 
 
+def failure_stager_line(error, stager):
+    """Original stager location only; never exception text, locals or paths."""
+    if type(stager) is not type(sys) or type(error) is not stager.__dict__.get("Refused"):
+        return None
+    namespace = stager.__dict__
+    filename = namespace.get("__file__")
+    need_code = namespace["need"].__code__
+    current, selected = BaseException.__traceback__.__get__(error), None
+    for _ in range(32):
+        if current is None:
+            return selected
+        frame = current.tb_frame
+        if (frame.f_globals is namespace and frame.f_code.co_filename == filename
+                and frame.f_code is not need_code and 0 < current.tb_lineno <= 100000):
+            selected = current.tb_lineno
+        current = current.tb_next
+    return None  # Truncated trace is unavailable, not an invented location.
+
+
 def failure_exception(error, stager=None):
     """Classify the original object without rendering it or trusting its name."""
     selected = type(error)
@@ -2259,16 +2335,33 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
             "installerZeroLatched": flag(state.get("installer_zero")),
             "installationReadback": flag(state.get("installation_readback")),
             "systemServiceExitClaimed": False}
+    setup = None
+    calls = state.get("calls")
+    if (state.get("phase") == XCODE_SETUP_VERIFY and type(calls) is list and len(calls) in (2, 3)
+            and all(type(r) is dict and r.get("role") == XCODE_SETUP_VERIFY_ROLES[i]
+                    for i, r in enumerate(calls))
+            and all(r.get("entered") is True and r.get("returned") is True
+                    and r.get("capturesSettled") is True for r in calls)
+            and all(type(r.get("returncode")) is int and r["returncode"] == 0 for r in calls[:-1])
+            and type(calls[-1].get("returncode")) is int and calls[-1]["returncode"] != 0
+            and -65536 <= calls[-1]["returncode"] <= 65535):
+        current = calls[-1]
+        setup = {"role": current["role"], "index": len(calls), "returncode": current["returncode"],
+            "hooks": setup_hook_diagnostics_data(current.get("setupHooks")),
+            "native": setup_installer_diagnostics_data(current.get("setupDiagnostic")),
+            "errors": installer_errors_data(current.get("installerErrors")),
+            "systemServiceExitClaimed": False}
     return {
         "schemaVersion": 1, "kind": "android-helper-failure", "outcome": "failure",
         "diagnosticOnly": True, "productReady": False,
         "phase": token(phase, phases), "target": token(target, (ARM_TARGET, INTEL_TARGET)),
         "mainStage": token(main_stage, _FAILURE_MAIN_STAGES), "terminal": failure_exception(error, stager),
-        "packageInstall": package,
+        "packageInstall": package, "setupInstall": setup,
         "compiler": compiler_diagnostic_data(state.get("compiler_failure")),
         "notaryIssues": notary_failure_summary_data(state.get("notary_issue_diagnostic")),
         "originalFailure": {
             "recorded": type(receipt.get("failure")) is dict if state else None,
+            "stagerLine": integer(state.get("stager_failure_line"), 1, 100000),
             "stage": token(original.get("stage"), _FAILURE_STAGES),
             "type": token(captured.get("type"), _FAILURE_TYPES),
             "reason": token(captured.get("reason", original.get("reason")), _FAILURE_REASONS),
@@ -3149,8 +3242,15 @@ class Operation:
         if self.phase == "package-install" and role == "installer":
             self.publish("installer-output.txt", result.stdout + result.stderr)
         record["capturesSettled"] = True  # All original output/readback/closes returned.
-        if self.setup_verify and role in XCODE_SETUP_VERIFY_ROLES[1:3]:
-            record["setupDiagnostic"] = setup_installer_diagnostics(result.stdout, result.stderr)
+        if self.setup_verify and role in XCODE_SETUP_VERIFY_ROLES[1:3] and result.returncode != 0:
+            # All three consume only this returned original after its captures
+            # positively settled. A diagnostic failure cannot replace its exit.
+            for key, parser in (("setupDiagnostic", setup_installer_diagnostics),
+                                ("setupHooks", setup_hook_diagnostics), ("installerErrors", installer_errors)):
+                try:
+                    record[key] = parser(result.stdout, result.stderr)
+                except BaseException:
+                    pass
         if self.phase == "package-install" and role == "installer" and result.returncode != 0:
             try:
                 record["installerMarkers"] = installer_markers(result.stdout, result.stderr)
@@ -9218,6 +9318,10 @@ class Operation:
                 self.diagnostic_failure = failure_exception(error, self.stager)
             except BaseException:
                 pass  # Do not replace the same original failure or its cleanup.
+            try:
+                self.stager_failure_line = failure_stager_line(error, self.stager)
+            except BaseException:
+                pass  # Location is optional and never changes original finality.
             self.receipt["failure"] = {"stage": self.stage, "type": type(error).__name__,
                                        "reason": str(error) if type(error) is Refused else "original-operation-refused"}
             captured = self.diagnostic_failure

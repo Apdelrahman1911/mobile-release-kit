@@ -3,12 +3,22 @@
 # Native admission authenticates these originals; Installer arguments are not paths.
 set -eu
 umask 077
-[ "${3:-}" = / ] || exit 1
+printf '%s\n' 'MRK_XCODE_HOOK=hook=postinstall;stage=entry' >&2 || :
+[ "${3:-}" = / ] || {
+    printf '%s\n' 'MRK_XCODE_HOOK=hook=postinstall;stage=target-refused' >&2 || :
+    exit 1
+}
 case "$0" in
     ./setup/postinstall|setup/postinstall) scripts=setup ;;
     ./postinstall) scripts=. ;;
     /*/postinstall) scripts=${0%/*} ;;
-    *) exit 1 ;;
+    *)
+        printf '%s\n' 'MRK_XCODE_HOOK=hook=postinstall;stage=path-refused' >&2 || :
+        exit 1 ;;
 esac
-cd -P "$scripts" 2>/dev/null || exit 1
+cd -P "$scripts" 2>/dev/null || {
+    printf '%s\n' 'MRK_XCODE_HOOK=hook=postinstall;stage=cwd-refused' >&2 || :
+    exit 1
+}
+printf '%s\n' 'MRK_XCODE_HOOK=hook=postinstall;stage=pre-exec' >&2 || :
 exec ./mrk-macos-xcode-setup
