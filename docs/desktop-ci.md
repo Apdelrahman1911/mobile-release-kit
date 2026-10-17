@@ -9,6 +9,16 @@ application/package/image signing, notarization, installation and readback.
 It does not repeat the unrelated fixture Installer, broad DATA suites, separate
 Remove image or broad UI suites. Existing targeted component checks remain separate.
 
+The candidate producer also builds the separate **Prepare Xcode.pkg** companion
+after retaining the main prepared-package checkpoint. Its credential-free Cargo
+build, Application signing, Installer signing/notarization, and first/repeat
+installation are distinct steps. The same finalized companion and source inputs
+are reused for both installations; a failed/unknown first install never triggers
+a repeat. Its files and bounded results are separate artifacts, not extra members
+of the main DMG. The main prepared checkpoint remains independently usable if
+a later companion check fails. Neither a signed companion nor its installation
+alone qualifies the Desktop's installed iOS workflows.
+
 Only after those package checks pass does it retain `MobileReleaseKit.dmg`,
 `PREVIEW.json` and an installation guide for 14 days. Use the complete DMG:
 the package requires its authenticated sibling files on the mounted image.
@@ -35,9 +45,10 @@ archive and preserves the preview's unqualified status. ZIP metadata allocation
 is bounded before parsing, including rejection of ZIP64 limit overrides.
 Seven focused local methods passed, followed by the targeted ZIP64 regression;
 independent implementation review accepted the slice. The existing old ARM
-origin and execution route are unchanged. **Fresh candidate acquisition,
-installation and retained-carrier UI workflow integration are still unfinished.**
-No signed carrier was downloaded locally or native operation run for this slice.
+origin and execution route are unchanged. Fresh candidate acquisition, installation and reuse of the existing
+UI harness are integrated, but their nomination remains inactive until a genuine
+final candidate exists. They are not installed-qualified by source review.
+No signed carrier was downloaded locally for this preparation.
 
 Installed/Aqua builds install the exact numbered Rust toolchain with standard
 Rustup (ARM 1.98.1, Intel 1.98.0), then verify the existing compiler identity and

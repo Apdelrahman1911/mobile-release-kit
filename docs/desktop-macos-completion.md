@@ -596,7 +596,14 @@ are not equivalent: doctor observes administratively trusted selection/version,
 not these original-tool custody guarantees. A refused ordinary installation
 requires an administrator-provisioned supported profile. There is no automatic
 permission/ACL repair, and users must not recursively chmod Applications or run
-the desktop app as root. A guided consumer preparation route remains missing.
+the desktop app as root. A separate consumer **Prepare Xcode.pkg** route is now
+implemented and integrated, with contextual UI guidance. It validates the Apple
+source and prepares a separate protected copy rather than changing the source
+installation. Six focused native entry/cleanup/copy tests passed per architecture
+in `39057955509/1`; that is not full signed setup or installed-app qualification.
+The integrated package run `39059076506/1` at `883ff26a` is pending. Until its
+actual setup and installed flows pass, ordinary consumer usability remains
+unverified.
 
 Read-only run39006573875/1 observed both hosted architectures with Applications
 root:admin0775 and the concrete Xcode app/Contents/Developer user-owned0755.

@@ -36,10 +36,23 @@ archive slice does not claim to qualify new pickers or configuration editing.
 
 The installed core performs its existing archive command and structural
 identity/version/dSYM checks. Toolkit code requests **unsigned archive only**.
-Full Xcode is required; the fixed selection uses `/Applications/Xcode.app`,
-allows only the reviewed one-direct-sibling app alias, retains original
-descriptors and refuses unqualified or changed tool/SDK layouts. No ambient
-Python, `xcode-select` fallback, tool installation or license acceptance occurs.
+Full Xcode is required. When present, the prepared copy at
+`/Library/MobileReleaseKitDeveloper/Xcode.app` is selected. Only when that
+namespace is absent does selection use `/Applications/Xcode.app`, allowing
+the reviewed one-direct-sibling app alias. A damaged or unfinished prepared
+copy is refused, not bypassed. Selection retains original descriptors and
+refuses unqualified or changed tool/SDK layouts. No ambient Python,
+`xcode-select` fallback, tool installation or license acceptance occurs.
+
+If the downloaded release includes **Prepare Xcode.pkg**, first install full
+Xcode from Apple and complete its first-launch setup and required iOS platform
+installation. Open the companion in macOS Installer, review it and approve the
+administrator prompt. It prepares a separate protected copy without changing
+the original Xcode; allow disk space for that copy. It does not download Xcode
+or accept Apple's licenses. On failure/interruption, preserve its message and
+existing files; do not delete the managed namespace or recursively change
+Applications permissions. Never run the desktop app as root. This companion's
+signed installation and the complete installed iOS flow remain under verification.
 
 Only native terminal finality can publish the bounded result. The output is
 retained at `.mobile-release/desktop-ios-archive/<operation>/archive.xcarchive`
