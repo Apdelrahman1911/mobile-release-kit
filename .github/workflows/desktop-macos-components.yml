@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, xcode-setup-compile, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe]
+        options: [all, integration, launcher, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe]
       architecture:
         description: Architecture for Store, iOS tools and package probe; other components use both
         type: choice
@@ -103,8 +103,8 @@ jobs:
         run: rm -rf -- "$WORK_ROOT"
 
   installer-check:
-    name: ${{ inputs.component == 'xcode-setup-compile' && 'Typecheck inert Xcode setup and Installer diagnostic' || inputs.component == 'installer-restore-chain' && 'Test Restore chain observer' || inputs.component == 'installer-restore-fixtures' && 'Check Restore fixtures' || inputs.component == 'installer-tests' && 'Test installer contracts' || inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
-    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-tests' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames' || inputs.component == 'installer-restore-fixtures' || inputs.component == 'installer-restore-chain' || inputs.component == 'xcode-setup-compile'
+    name: ${{ inputs.component == 'xcode-setup-files' && 'Test native Xcode copy and retirement on private files' || inputs.component == 'xcode-setup-compile' && 'Typecheck inert Xcode setup and Installer diagnostic' || inputs.component == 'installer-restore-chain' && 'Test Restore chain observer' || inputs.component == 'installer-restore-fixtures' && 'Check Restore fixtures' || inputs.component == 'installer-tests' && 'Test installer contracts' || inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-tests' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames' || inputs.component == 'installer-restore-fixtures' || inputs.component == 'installer-restore-chain' || inputs.component == 'xcode-setup-compile' || (github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -128,12 +128,14 @@ jobs:
           root=$(mktemp -d "$RUNNER_TEMP/mrk-installer-check.XXXXXX")
           printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
       - name: Check exclusive native roles and test pure launcher logic
+        id: native_checks
         shell: bash
         working-directory: desktop/src-tauri
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
           MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
           INSTALLER_CHECKS: ${{ inputs.component }}
+          COMPONENT_EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           export CARGO_HOME="$WORK_ROOT/cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
@@ -142,6 +144,73 @@ jobs:
           # This is the existing reviewed native clock tuple on both Macs.
           # 1.98.0 is supported only on Intel, not Apple Silicon.
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          if [[ "$INSTALLER_CHECKS" == xcode-setup-files ]]; then
+            [[ "$COMPONENT_EVENT" == workflow_dispatch ]] || exit 1
+            # Normal runner compiles ONLY the native libtest. No root Cargo,
+            # setup binary, Installer, Apple verifier or signing invocation.
+            [[ ! -e "$CARGO_TARGET_DIR" && ! -L "$CARGO_TARGET_DIR" ]] || exit 1
+            rustup run 1.98.1 cargo test --locked --no-default-features \
+              --manifest-path "$GITHUB_WORKSPACE/desktop/native/macos-installed-native/Cargo.toml" \
+              --features xcode-setup --lib --no-run --message-format=json-render-diagnostics |
+              /usr/bin/python3 -I -S -c '
+          import os, pathlib, re, stat, sys
+          checkout = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          sys.path.insert(0, str(checkout / "desktop/tools"))
+          import stage_macos_installed as stage
+          limit = 8 * 1024 * 1024
+          data = sys.stdin.buffer.read(limit + 1)
+          if len(data) > limit:
+              # Drain only, with fixed memory, so the original Cargo process
+              # still returns before the failed pipeline permits any cleanup.
+              while sys.stdin.buffer.read(65536):
+                  pass
+              raise SystemExit("native libtest compiler metadata exceeded limit")
+          rows = stage.cargo_records(data)
+          selected = [row for row in rows if row.get("executable") is not None]
+          assert len(selected) == 1, "expected one native libtest executable"
+          row = selected[0]
+          directory = checkout / "desktop/native/macos-installed-native"
+          target = row["target"]
+          assert row.get("manifest_path") == str(directory / "Cargo.toml")
+          assert target.get("name") == "mrk_macos_installed_native"
+          assert target.get("kind") == ["lib"] and target.get("crate_types") == ["lib"]
+          assert target.get("src_path") == str(directory / "src/lib.rs")
+          stage.cargo_profile(row, test=True)
+          stage.cargo_features(row, ["xcode-setup"])
+          executable = pathlib.Path(row["executable"])
+          assert executable.is_absolute() and executable.parent == pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "debug/deps"
+          assert re.fullmatch(r"mrk_macos_installed_native-[0-9a-f]+", executable.name)
+          assert row.get("filenames") == [str(executable)] and executable.resolve(strict=True) == executable
+          identity = executable.lstat()
+          assert stat.S_ISREG(identity.st_mode) and identity.st_uid == os.geteuid() and identity.st_mode & 0o111
+          print(executable)
+          ' > "$WORK_ROOT/xcode-files-executable.txt"
+            IFS= read -r native_test < "$WORK_ROOT/xcode-files-executable.txt"
+            # Reuse this same actual native libtest for the four changed pure
+            # entry/cleanup contracts, as the ordinary runner (never root).
+            "$native_test" \
+              macos_xcode_parent::tests::xcode_child_tail_is_one_use_and_lost_wait_never_reauthorizes_signals \
+              macos_xcode_parent::tests::xcode_parent_failure_cutoff_never_renews_original_work \
+              macos_xcode_entry::tests::fixed_entry_routing_never_accepts_paths_clocks_or_noncanonical_fds \
+              macos_xcode_entry::tests::public_exit_requires_original_finality_and_distinguishes_cleanup \
+              --exact --test-threads=1 | tee "$WORK_ROOT/xcode-entry-tail-tests.log"
+            grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;' "$WORK_ROOT/xcode-entry-tail-tests.log"
+            # Explicit test-only temp parent, not /Library or the user's Xcode.
+            # Tests normalize only their own newly-created root-owned children.
+            /bin/mkdir -m 700 "$WORK_ROOT/xcode-files-fixtures"
+            /usr/bin/sudo /usr/bin/env -i \
+              PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+              HOME="$WORK_ROOT/xcode-files-fixtures" TMPDIR="$WORK_ROOT/xcode-files-fixtures" \
+              "$native_test" \
+              macos_xcode_tree_tests::copier_copies_real_bytes_links_attributes_and_retires_only_its_stage \
+              macos_xcode_tree_tests::retirement_checks_recorded_identity_and_never_follows_partial_or_sealed_aliases \
+              --exact --ignored --test-threads=1 | tee "$WORK_ROOT/xcode-files-tests.log"
+            grep -Eq '^test result: ok\. 2 passed; 0 failed; 0 ignored;' "$WORK_ROOT/xcode-files-tests.log"
+            # Both tests consume originals and remove only their own fixture;
+            # this succeeds only when that parent is actually empty afterward.
+            /bin/rmdir "$WORK_ROOT/xcode-files-fixtures"
+            exit 0
+          fi
           if [[ "$INSTALLER_CHECKS" == xcode-setup-compile ]]; then
             # Passive compile only: provisional helper main always refuses.
             # No signing credentials, privileged invocation or Xcode copying.
@@ -243,7 +312,15 @@ jobs:
         shell: bash
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
-        run: rm -rf -- "$WORK_ROOT"
+          INSTALLER_CHECKS: ${{ inputs.component }}
+          NATIVE_OUTCOME: ${{ steps.native_checks.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "$INSTALLER_CHECKS" == xcode-setup-files && "$NATIVE_OUTCOME" != success ]]; then
+            printf 'Native filesystem test incomplete; retain its task root for disposable-host teardown.\n'
+            exit 0
+          fi
+          rm -rf -- "$WORK_ROOT"
 
   app-check:
     # This targeted path checks the real packaged Tauri graph without producing

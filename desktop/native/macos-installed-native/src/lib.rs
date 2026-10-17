@@ -27,6 +27,8 @@ mod macos_xcode_copy;
 #[cfg(feature="xcode-setup")]
 #[allow(dead_code)]
 mod macos_xcode_tree;
+#[cfg(all(test, feature="xcode-setup"))]
+mod macos_xcode_tree_tests;
 #[cfg(feature="xcode-setup")]
 #[allow(dead_code)]
 mod macos_xcode_parent;
@@ -39,6 +41,11 @@ mod macos_xcode_apple;
 #[cfg(feature="xcode-setup")]
 #[allow(dead_code)]
 mod macos_xcode_self;
+#[cfg(feature="xcode-setup")]
+mod macos_xcode_entry;
+/// Fixed Installer entry only; no caller-selected paths or execution options.
+#[cfg(feature="xcode-setup")]
+pub fn xcode_setup_entry() -> i32 { macos_xcode_entry::entry() }
 // Fixed nonshipping removal cut only. This feature has no native image role
 // and must not unify with an observer, helper, producer or E2 image graph.
 #[cfg(all(feature = "installed-removal-abrupt-fixture", any(

@@ -36,6 +36,17 @@ const FINISH: u64 = 3720 * SECOND;
 const HARD: u64 = 3730 * SECOND;
 const FAILURE_CLEANUP: u64 = 120 * SECOND;
 
+/// Public entry captures this Instant before inspecting arguments or source.
+/// The top-level carrier hook has PackageKit's default 600-second ceiling;
+/// the component copy hook has its separately configured 3800-second ceiling.
+pub(crate) fn entry_endpoints(start: std::time::Instant, carrier: bool)
+    -> Result<(std::time::Instant, std::time::Instant, std::time::Instant)> {
+    let limits = if carrier { [450 * SECOND, 570 * SECOND, 580 * SECOND] }
+        else { [WORK, FINISH, HARD] };
+    let endpoint = |n| start.checked_add(std::time::Duration::from_nanos(n)).ok_or(Refusal::Clock);
+    Ok((endpoint(limits[0])?,endpoint(limits[1])?,endpoint(limits[2])?))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     Kind,

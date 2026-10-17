@@ -865,6 +865,7 @@ pub(crate) struct SourceTree<'a> {
     root_name: &'a CStr,
     work: &'a Work,
     copy_started: bool,
+    protected: bool,
 }
 impl<'a> SourceTree<'a> {
     pub(crate) fn original(
@@ -886,7 +887,15 @@ impl<'a> SourceTree<'a> {
             root_name: name,
             work,
             copy_started: false,
+            protected: false,
         })
+    }
+    /// Same bounded physical reader, additionally enforcing exact sealed modes
+    /// on EVERY actual node. No copy or normalization is available on this view.
+    pub(crate) fn protected(mut self) -> Result<Self> {
+        self.root_identity.protected_kind()?;
+        self.protected = true;
+        Ok(self)
     }
     fn root_post(&self) -> Result<()> {
         copy::exact(
@@ -1085,7 +1094,11 @@ impl<'a> SourceTree<'a> {
         if id.device() != self.root_identity.device() {
             return Err(Failure::Binding);
         }
-        let kind = id.source_kind()?;
+        let kind = if self.protected {
+            id.protected_kind()?
+        } else {
+            id.source_kind()?
+        };
         let bytes = copy::quote_visible_attributes(fd, parent, name, id, self.work)?;
         let path_bytes = parts.iter().map(|s| s.len() + 1).sum::<usize>().max(1);
         quote
@@ -1169,7 +1182,7 @@ impl<'a> SourceTree<'a> {
         recorded_inode: u64,
         admitted: &Census,
     ) -> Result<SealedCopy> {
-        if self.copy_started {
+        if self.copy_started || self.protected {
             return Err(Failure::Binding);
         }
         self.copy_started = true;

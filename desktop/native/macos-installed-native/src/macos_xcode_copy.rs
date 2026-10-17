@@ -184,6 +184,17 @@ impl Identity {
             _ => Err(Failure::Kind),
         }
     }
+    /// Current managed payload must match actual sealed-output metadata;
+    /// unfinished private modes are never admitted as a prepared toolchain.
+    pub(crate) fn protected_kind(self) -> Result<profile::Kind> {
+        let kind = self.retiring_kind()?;
+        let expected = profile::copied_mode(kind, u32::from(self.mode), u64::from(self.links))
+            .map_err(|_| Failure::Access)?;
+        if expected.is_some_and(|mode| mode != u32::from(self.mode & 0o7777)) {
+            return Err(Failure::Access);
+        }
+        Ok(kind)
+    }
     pub(crate) fn same_owned_directory(self, other: Self) -> bool {
         self.mode & libc::S_IFMT == libc::S_IFDIR && self.same_retired_inode(other)
     }

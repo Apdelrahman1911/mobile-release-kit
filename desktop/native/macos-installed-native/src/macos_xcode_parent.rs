@@ -25,6 +25,50 @@ pub(crate) enum Failure {
 }
 type Result<T> = std::result::Result<T, Failure>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SetupOutcome {
+    Prepared,
+    NeedsRerun,
+    CarrierChecked,
+}
+pub(crate) struct CallResult {
+    pub(crate) outcome: Option<SetupOutcome>,
+    pub(crate) first_failure: Option<Instant>,
+    pub(crate) unknown: bool,
+    pub(crate) settled: bool,
+    pub(crate) safe_to_settle_source: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Current {
+    Fresh,
+    Pending,
+    Attempt,
+    Final,
+    FinalAttempt,
+    FinalPending,
+}
+impl Current {
+    fn observed(final_present: bool, pending: bool, attempt: bool) -> Result<Self> {
+        match (final_present, pending, attempt) {
+            (false, false, false) => Ok(Self::Fresh),
+            (false, true, true) => Ok(Self::Pending),
+            (false, false, true) => Ok(Self::Attempt),
+            (true, false, false) => Ok(Self::Final),
+            (true, false, true) => Ok(Self::FinalAttempt),
+            (true, true, true) => Ok(Self::FinalPending),
+            _ => Err(Failure::Binding),
+        }
+    }
+    fn has_final(self) -> bool {
+        matches!(self, Self::Final | Self::FinalAttempt | Self::FinalPending)
+    }
+    fn has_pending(self) -> bool {
+        matches!(self, Self::Pending | Self::FinalPending)
+    }
+    fn has_attempt(self) -> bool {
+        !matches!(self, Self::Fresh | Self::Final)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Node {
@@ -164,6 +208,19 @@ impl Record {
             && self.reserved.pending == pending
             && self.reserved.source_sha256 == source_sha256
     }
+    fn binds_current(
+        &self,
+        namespace: Node,
+        source_sha256: &str,
+        final_node: Option<Node>,
+        pending: Option<Node>,
+    ) -> bool {
+        self.validate().is_ok()
+            && self.reserved.namespace == namespace
+            && self.reserved.source_sha256 == source_sha256
+            && final_node.is_none_or(|node| self.copied.is_some() && node == self.reserved.staged)
+            && pending.is_none_or(|node| node == self.reserved.pending)
+    }
     fn add_copied(&mut self, staged: Node, tree_sha256: String) -> Result<()> {
         if self.copied.is_some() {
             return Err(Failure::State);
@@ -183,6 +240,55 @@ impl Record {
     }
 }
 
+/// The actual child tail is entered once. Losing wait custody is sticky;
+/// a numeric PID is not a grant to signal again during later finalizers.
+struct ChildTail {
+    entered: bool,
+    result: Option<Result<()>>,
+    custody: bool,
+    term: bool,
+    kill: bool,
+}
+impl ChildTail {
+    fn new() -> Self {
+        Self {
+            entered: false,
+            result: None,
+            custody: true,
+            term: false,
+            kill: false,
+        }
+    }
+    fn begin(&mut self) -> bool {
+        if self.entered {
+            false
+        } else {
+            self.entered = true;
+            true
+        }
+    }
+    fn cached(&self) -> Result<()> {
+        self.result.unwrap_or(Err(Failure::Unknown))
+    }
+    fn lose_wait(&mut self) {
+        self.custody = false;
+    }
+    fn signal(&mut self, now: Instant, hard: Instant, kill: bool) -> bool {
+        if !self.entered || self.result.is_some() || !self.custody || now >= hard {
+            return false;
+        }
+        let attempted = if kill { &mut self.kill } else { &mut self.term };
+        if *attempted {
+            return false;
+        }
+        *attempted = true;
+        true
+    }
+    fn finish(&mut self, result: Result<()>) -> Result<()> {
+        self.result = Some(result);
+        result
+    }
+}
 #[derive(Clone, Copy)]
 struct Clock {
     work: Instant,
@@ -215,6 +321,12 @@ impl Clock {
         self.first = Some(at);
         if let Some(cut) = at.checked_add(Duration::from_secs(120)) {
             self.finish = self.finish.min(cut);
+        }
+        // Failure contraction also bounds the final process-reap tail. Keeping
+        // original H here could otherwise wait almost the whole setup window
+        // after the original first-failure cleanup interval had expired.
+        if let Some(tail) = self.finish.checked_add(Duration::from_secs(10)) {
+            self.hard = self.hard.min(tail);
         }
     }
     /// Merge a subordinate's ORIGINAL first failure before starting any
@@ -451,6 +563,8 @@ mod native {
         Carrier,
         Copy,
         RetirePending,
+        ObserveFinal,
+        ObserveAttempt,
     }
     #[derive(Serialize, Deserialize)]
     #[serde(tag = "purpose", deny_unknown_fields)]
@@ -470,25 +584,48 @@ mod native {
             record: Record,
             attempt: Node,
         },
+        #[serde(rename = "observe-final")]
+        ObserveFinal {
+            fds: [i32; 7],
+            nodes: [Node; 7],
+            record: Option<Record>,
+            attempt: Option<Node>,
+            pending: Option<Node>,
+        },
+        #[serde(rename = "observe-attempt")]
+        ObserveAttempt {
+            fds: [i32; 6],
+            nodes: [Node; 6],
+            record: Record,
+            attempt: Node,
+        },
     }
     impl Loans {
         fn fds(&self) -> &[i32] {
             match self {
                 Self::Carrier { fds, .. } => fds,
-                Self::Copy { fds, .. } | Self::RetirePending { fds, .. } => fds,
+                Self::Copy { fds, .. }
+                | Self::RetirePending { fds, .. }
+                | Self::ObserveFinal { fds, .. } => fds,
+                Self::ObserveAttempt { fds, .. } => fds,
             }
         }
         fn nodes(&self) -> &[Node] {
             match self {
                 Self::Carrier { nodes, .. } => nodes,
-                Self::Copy { nodes, .. } | Self::RetirePending { nodes, .. } => nodes,
+                Self::Copy { nodes, .. }
+                | Self::RetirePending { nodes, .. }
+                | Self::ObserveFinal { nodes, .. } => nodes,
+                Self::ObserveAttempt { nodes, .. } => nodes,
             }
         }
         fn staged(&self) -> Option<Node> {
             match self {
                 Self::Copy { staged, .. } => Some(*staged),
                 Self::RetirePending { record, .. } => Some(record.reserved.staged),
-                Self::Carrier { .. } => None,
+                Self::Carrier { .. } | Self::ObserveFinal { .. } | Self::ObserveAttempt { .. } => {
+                    None
+                }
             }
         }
         fn purpose(&self) -> Purpose {
@@ -496,6 +633,8 @@ mod native {
                 Self::Carrier { .. } => Purpose::Carrier,
                 Self::Copy { .. } => Purpose::Copy,
                 Self::RetirePending { .. } => Purpose::RetirePending,
+                Self::ObserveFinal { .. } => Purpose::ObserveFinal,
+                Self::ObserveAttempt { .. } => Purpose::ObserveAttempt,
             }
         }
         fn copy(fds: [i32; 7], staged: Node) -> Result<Self> {
@@ -537,6 +676,66 @@ mod native {
                 attempt,
             })
         }
+        fn current(&self) -> Option<(Option<Record>, Option<Node>, Option<Node>)> {
+            match self {
+                Self::ObserveFinal {
+                    record,
+                    attempt,
+                    pending,
+                    ..
+                } => Some((record.clone(), *attempt, *pending)),
+                Self::ObserveAttempt {
+                    record, attempt, ..
+                } => Some((Some(record.clone()), Some(*attempt), None)),
+                _ => None,
+            }
+        }
+        fn observe(
+            fds: [i32; 7],
+            record: Option<Record>,
+            attempt: Option<Node>,
+            pending: Option<Node>,
+        ) -> Result<Self> {
+            if record.is_some() != attempt.is_some() || pending.is_some() && record.is_none() {
+                return Err(Failure::Binding);
+            }
+            if let Some(r) = record.as_ref() {
+                r.validate()?;
+            }
+            let mut nodes = [Node {
+                device: 0,
+                inode: 0,
+            }; 7];
+            for (at, fd) in fds.iter().enumerate() {
+                nodes[at] = fstat(unsafe { BorrowedFd::borrow_raw(*fd) })?.node;
+            }
+            Ok(Self::ObserveFinal {
+                fds,
+                nodes,
+                record,
+                attempt,
+                pending,
+            })
+        }
+        fn observe_attempt(fds: [i32; 6], record: Record, attempt: Node) -> Result<Self> {
+            record.validate()?;
+            if !attempt.valid() {
+                return Err(Failure::Binding);
+            }
+            let mut nodes = [Node {
+                device: 0,
+                inode: 0,
+            }; 6];
+            for (at, fd) in fds.iter().enumerate() {
+                nodes[at] = fstat(unsafe { BorrowedFd::borrow_raw(*fd) })?.node;
+            }
+            Ok(Self::ObserveAttempt {
+                fds,
+                nodes,
+                record,
+                attempt,
+            })
+        }
         fn carrier(fds: [i32; 2]) -> Result<Self> {
             let mut nodes = [Node {
                 device: 0,
@@ -566,6 +765,10 @@ mod native {
         Carrier,
         #[serde(rename = "pending-empty-needs-rerun")]
         PendingEmpty,
+        #[serde(rename = "current-final")]
+        CurrentFinal,
+        #[serde(rename = "attempt-only-needs-rerun")]
+        AttemptOnly,
         #[serde(rename = "copied")]
         Copied { staged: Node, tree_sha256: String },
     }
@@ -637,6 +840,7 @@ mod native {
         purpose: Purpose,
         report: Option<Report>,
         unknown: bool,
+        tail: ChildTail,
     }
     impl Copier {
         fn spawn(executable: &str, loans: Loans, clock: Clock, nonce: String) -> Result<Self> {
@@ -754,6 +958,7 @@ mod native {
                     purpose,
                     report: None,
                     unknown: !closed,
+                    tail: ChildTail::new(),
                 })
             })();
             // All fallible allocation/setup precedes successful fork. After
@@ -786,12 +991,16 @@ mod native {
             if self.reaped {
                 return Ok(());
             }
+            if !self.tail.custody {
+                return Err(Failure::Unknown);
+            }
             let mut status = 0;
             let n = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
             if n == 0 {
                 return Ok(());
             }
             if n != self.pid {
+                self.tail.lose_wait();
                 self.unknown = true;
                 return Err(Failure::Unknown);
             }
@@ -882,6 +1091,8 @@ mod native {
                 || !match (&report.proof, self.purpose) {
                     (Proof::Carrier, Purpose::Carrier) => true,
                     (Proof::PendingEmpty, Purpose::RetirePending) => true,
+                    (Proof::CurrentFinal, Purpose::ObserveFinal) => true,
+                    (Proof::AttemptOnly, Purpose::ObserveAttempt) => true,
                     (
                         Proof::Copied {
                             staged,
@@ -918,42 +1129,69 @@ mod native {
             }
         }
         fn settle(&mut self) -> Result<()> {
-            // Never wait() without original hard bound. Once forwardwork
-            // fails, stop child before any reservation cleanup/publication.
-            let mut result = None;
+            if !self.tail.begin() {
+                return self.tail.cached();
+            }
+            let mut failure = None;
             if !self.reaped {
-                if unsafe { libc::kill(self.pid, libc::SIGTERM) } != 0 {
-                    result = Some(Failure::Unknown);
+                let now = Instant::now();
+                if now < self.clock.last {
+                    self.clock.regressed = true;
                 }
-                let kill_at = Instant::now()
+                self.clock.last = self.clock.last.max(now);
+                if !self.clock.regressed && self.tail.signal(now, self.clock.hard, false) {
+                    if unsafe { libc::kill(self.pid, libc::SIGTERM) } != 0 {
+                        self.clock.fail();
+                        failure = Some(Failure::Unknown);
+                    }
+                } else {
+                    failure = Some(Failure::Unknown);
+                }
+                let kill_at = now
                     .checked_add(Duration::from_secs(1))
                     .map_or(self.clock.finish, |v| v.min(self.clock.finish));
-                let mut killed = false;
-                while !self.reaped && Instant::now() < self.clock.hard {
-                    if !killed && Instant::now() >= kill_at {
-                        killed = true;
-                        if unsafe { libc::kill(self.pid, libc::SIGKILL) } != 0 {
-                            result.get_or_insert(Failure::Unknown);
+                while !self.reaped && self.tail.custody && !self.clock.regressed {
+                    let now = Instant::now();
+                    if now < self.clock.last {
+                        self.clock.regressed = true;
+                        break;
+                    }
+                    self.clock.last = now;
+                    if now >= self.clock.hard {
+                        break;
+                    }
+                    if now >= kill_at && !self.tail.kill {
+                        if self.tail.signal(now, self.clock.hard, true) {
+                            if unsafe { libc::kill(self.pid, libc::SIGKILL) } != 0 {
+                                self.clock.fail();
+                                failure.get_or_insert(Failure::Unknown);
+                            }
+                        } else {
+                            failure.get_or_insert(Failure::Unknown);
+                            break;
                         }
                     }
                     if let Err(e) = self.child_status() {
-                        result.get_or_insert(e);
+                        failure.get_or_insert(e);
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(2));
                 }
                 if !self.reaped {
                     self.unknown = true;
-                    result.get_or_insert(Failure::Unknown);
+                    self.clock.fail();
+                    failure.get_or_insert(Failure::Unknown);
                 }
             }
+            // Independent endpoint consumption remains original-F bounded. A
+            // failed wait never permits another signal/close on a later call.
             if let Err(e) = self.close_endpoint() {
-                result.get_or_insert(e);
+                failure.get_or_insert(e);
             }
             if self.unknown {
-                result.get_or_insert(Failure::Unknown);
+                failure.get_or_insert(Failure::Unknown);
             }
-            result.map_or(Ok(()), Err)
+            self.tail.finish(failure.map_or(Ok(()), Err))
         }
     }
 
@@ -970,6 +1208,7 @@ mod native {
         purpose: Purpose,
         staged: Option<Node>,
         retirement: Option<(Record, Node)>,
+        current: Option<(Option<Record>, Option<Node>, Option<Node>)>,
         actual_loans: usize,
         unknown: bool,
         admitted: bool,
@@ -1085,6 +1324,7 @@ mod native {
                 purpose,
                 staged: start.loans.staged(),
                 retirement: start.loans.retirement(),
+                current: start.loans.current(),
                 actual_loans,
                 unknown: false,
                 admitted: false,
@@ -1133,7 +1373,18 @@ mod native {
                     Some((0, "Library")),
                     Some((1, "MobileReleaseKitDeveloper")),
                     Some((2, profile::LOCK)),
-                    Some((2, profile::PENDING)),
+                    if self.purpose == Purpose::ObserveAttempt {
+                        None
+                    } else {
+                        Some((
+                            2,
+                            if self.purpose == Purpose::ObserveFinal {
+                                profile::APP
+                            } else {
+                                profile::PENDING
+                            },
+                        ))
+                    },
                     None,
                     None,
                 ]
@@ -1177,7 +1428,14 @@ mod native {
                 {
                     return Err(Failure::Access);
                 }
-                if self.purpose != Purpose::Carrier && index == 4 && !held.directory(Some(0o700)) {
+                if !matches!(self.purpose, Purpose::Carrier | Purpose::ObserveAttempt)
+                    && index == 4
+                    && !held.directory(Some(if self.purpose == Purpose::ObserveFinal {
+                        0o555
+                    } else {
+                        0o700
+                    }))
+                {
                     return Err(Failure::Access);
                 }
                 let acl = abi::empty_acl_observed(self.loan(index)?);
@@ -1208,10 +1466,10 @@ mod native {
         ) -> Result<()> {
             self.post()?;
             source.post().map_err(|_| Failure::Binding)?;
-            let setup = if self.purpose != Purpose::Carrier {
-                5
-            } else {
-                0
+            let setup = match self.purpose {
+                Purpose::Carrier => 0,
+                Purpose::ObserveAttempt => 4,
+                _ => 5,
             };
             if fstat(source.setup().map_err(|_| Failure::Binding)?)?
                 != self.original[setup].ok_or(Failure::Binding)?
@@ -1238,6 +1496,7 @@ mod native {
                         *cell = Slot::Closed;
                     } else {
                         self.unknown = true;
+                        self.clock.fail();
                         failed = true;
                     }
                 } else if !matches!(cell, Slot::Closed | Slot::Vacant) {
@@ -1261,6 +1520,8 @@ mod native {
                 || !match (&proof, self.purpose) {
                     (Proof::Carrier, Purpose::Carrier) => true,
                     (Proof::PendingEmpty, Purpose::RetirePending) => true,
+                    (Proof::CurrentFinal, Purpose::ObserveFinal) => true,
+                    (Proof::AttemptOnly, Purpose::ObserveAttempt) => true,
                     (
                         Proof::Copied {
                             staged,
@@ -1873,51 +2134,400 @@ mod native {
         })
     }
 
-    /// Read-only public purpose uses the SAME one-child owner. No Namespace
-    /// allocation, lock, source tree, receipt modification or publication here.
-    pub(crate) fn carrier_preflight(
+    /// Fixed namespace roster on an already-held original. Only a bounded set
+    /// of known names is admitted; no tree/path nomination or directory reopen.
+    fn fixed_roster(
+        fd: BorrowedFd<'_>,
+        expected: &[&str],
+        clock: &mut Clock,
+        cleanup: bool,
+    ) -> Result<()> {
+        clock.point(cleanup)?;
+        let before = fstat(fd)?;
+        if expected.len() > 4 || unsafe { libc::lseek(fd.as_raw_fd(), 0, libc::SEEK_SET) } != 0 {
+            return Err(Failure::Bounds);
+        }
+        let mut seen = [false; 4];
+        let mut block = [0u8; 65536];
+        loop {
+            clock.point(cleanup)?;
+            let used = abi::directory_block(fd, &mut block).map_err(|_| Failure::Read)?;
+            clock.point(cleanup)?;
+            if used == 0 {
+                break;
+            }
+            let mut at = 0;
+            while at < used {
+                if used - at < 11 {
+                    return Err(Failure::Binding);
+                }
+                let n = usize::from(u16::from_ne_bytes([block[at + 9], block[at + 10]]));
+                let end = at
+                    .checked_add(11 + n)
+                    .filter(|v| *v <= used)
+                    .ok_or(Failure::Bounds)?;
+                let name = &block[at + 11..end];
+                at = end;
+                if matches!(name, b"." | b"..") {
+                    continue;
+                }
+                let pos = expected
+                    .iter()
+                    .position(|v| v.as_bytes() == name)
+                    .ok_or(Failure::Present)?;
+                if seen[pos] {
+                    return Err(Failure::Binding);
+                }
+                seen[pos] = true;
+            }
+        }
+        if seen[..expected.len()].iter().any(|v| !*v) || fstat(fd)? != before {
+            return Err(Failure::Binding);
+        }
+        clock.point(cleanup)
+    }
+    fn observe_child(owner: &mut ChildAdmission) -> Result<Proof> {
+        let final_view = owner.purpose == Purpose::ObserveFinal;
+        if !matches!(
+            owner.purpose,
+            Purpose::ObserveFinal | Purpose::ObserveAttempt
+        ) || owner.actual_loans != if final_view { 7 } else { 6 }
+        {
+            return Err(Failure::State);
+        }
+        let (record, attempt, pending) = owner.current.clone().ok_or(Failure::Binding)?;
+        if record.is_some() != attempt.is_some()
+            || !final_view && (record.is_none() || pending.is_some())
+        {
+            return Err(Failure::Binding);
+        }
+        let mut source =
+            crate::macos_xcode_source::SetupSource::new(owner.clock.work, owner.clock.finish)
+                .map_err(|_| Failure::Binding)?;
+        let mut files = None;
+        let result = (|| -> Result<Proof> {
+            source.admit().map_err(|_| Failure::Binding)?;
+            source_signed(&mut source, owner)?;
+            let inherited = owner
+                .actual_loans
+                .checked_add(1 + 3 + source.held_count())
+                .and_then(|n| n.checked_add(crate::macos_xcode_facts::OWNED_FDS))
+                .ok_or(Failure::Bounds)?;
+            if crate::macos_xcode_facts::OWNED_BYTES
+                + crate::macos_xcode_self::OWNED_BYTES
+                + crate::macos_xcode_apple::OWNED_BYTES
+                + profile::NAME_CONTROL_LIMIT as usize
+                + 24 * 1024 * 1024
+                + 1024 * 1024
+                > profile::OWNED_MEMORY_LIMIT
+            {
+                return Err(Failure::Bounds);
+            }
+            files = Some(
+                crate::macos_xcode_tree::CopierFiles::new(owner.clock.finish, inherited)
+                    .map_err(|_| Failure::Bounds)?,
+            );
+            let files = files.as_mut().ok_or(Failure::State)?;
+            let work = copy::Work {
+                end: owner.clock.work,
+                parent: owner.parent,
+            };
+            let ns_raw = owner.loan(2)?.as_raw_fd();
+            let ns = unsafe { BorrowedFd::borrow_raw(ns_raw) };
+            let source_sha: String = source
+                .image_sha256()
+                .map_err(|_| Failure::Binding)?
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            if let Some(r) = record.as_ref() {
+                r.validate()?;
+                if r.reserved.id != owner.nonce
+                    || !r.binds_current(
+                        fstat(ns)?.node,
+                        &source_sha,
+                        if final_view {
+                            Some(owner.original[4].ok_or(Failure::Binding)?.node)
+                        } else {
+                            None
+                        },
+                        pending,
+                    )
+                {
+                    return Err(Failure::Binding);
+                }
+                let control = named(ns, c"attempt.json")?.ok_or(Failure::Binding)?;
+                if !control.control() || control.node != attempt.ok_or(Failure::Binding)? {
+                    return Err(Failure::Binding);
+                }
+                let id = copy::named(ns, c"attempt.json", &work).map_err(|_| Failure::Binding)?;
+                let raw = files
+                    .read_attempt(ns, id, r.encode()?.len(), &work)
+                    .map_err(|_| Failure::Binding)?;
+                if Record::decode(&raw)? != *r {
+                    return Err(Failure::Binding);
+                }
+            } else if named(ns, c"attempt.json")?.is_some() {
+                return Err(Failure::Present);
+            }
+            let present_pending = named(ns, c".pending")?;
+            match (pending, present_pending) {
+                (None, None) => (),
+                (Some(node), Some(id)) if id.node == node && id.directory(Some(0o700)) => (),
+                _ => return Err(Failure::Binding),
+            }
+            let mut names = vec![profile::LOCK];
+            if final_view {
+                names.push(profile::APP);
+            }
+            if pending.is_some() {
+                names.push(profile::PENDING);
+            }
+            if record.is_some() {
+                names.push(profile::ATTEMPT);
+            }
+            fixed_roster(ns, &names, &mut owner.clock, false)?;
+            if final_view {
+                let final_raw = owner.loan(4)?.as_raw_fd();
+                let app = unsafe { BorrowedFd::borrow_raw(final_raw) };
+                let id = copy::fstat(app, &work).map_err(|_| Failure::Binding)?;
+                let tree =
+                    crate::macos_xcode_tree::SourceTree::original(app, ns, c"Xcode.app", id, &work)
+                        .and_then(|v| v.protected())
+                        .map_err(|_| Failure::Binding)?;
+                let unit = u64::try_from(
+                    statfs::fstatfs(app)
+                        .map_err(|_| Failure::Read)?
+                        .block_size(),
+                )
+                .map_err(|_| Failure::Bounds)?;
+                let before = tree.census(files, unit).map_err(|_| Failure::Binding)?;
+                apple_checked(
+                    crate::macos_xcode_apple::Role::Final,
+                    std::path::Path::new("/Library/MobileReleaseKitDeveloper/Xcode.app"),
+                    ns,
+                    app,
+                    owner,
+                )?;
+                let _facts = observed_facts(app, owner)?;
+                let after = tree.census(files, unit).map_err(|_| Failure::Binding)?;
+                if before != after {
+                    return Err(Failure::Binding);
+                }
+            } else if named(ns, c"Xcode.app")?.is_some() {
+                return Err(Failure::Present);
+            }
+            // Re-read exactly this control after final Apple/tree checks. This
+            // does not grant old completion; it binds only current retirement.
+            if let Some(r) = record.as_ref() {
+                let control = named(ns, c"attempt.json")?.ok_or(Failure::Binding)?;
+                if control.node != attempt.ok_or(Failure::Binding)? || !control.control() {
+                    return Err(Failure::Binding);
+                }
+                let id = copy::named(ns, c"attempt.json", &work).map_err(|_| Failure::Binding)?;
+                let raw = files
+                    .read_attempt(ns, id, r.encode()?.len(), &work)
+                    .map_err(|_| Failure::Binding)?;
+                if Record::decode(&raw)? != *r {
+                    return Err(Failure::Binding);
+                }
+            }
+            fixed_roster(ns, &names, &mut owner.clock, false)?;
+            if named(ns, c".pending")? != present_pending {
+                return Err(Failure::Binding);
+            }
+            owner.bind_source(&mut source)?;
+            Ok(if final_view {
+                Proof::CurrentFinal
+            } else {
+                Proof::AttemptOnly
+            })
+        })();
+        owner.clock.absorb(source.first_failure(), result.is_err());
+        let mut known = true;
+        if let Some(files) = files.as_mut() {
+            owner.clock.absorb(files.first_failure(), result.is_err());
+            if let Some(first) = owner.clock.first {
+                files.fail_at(first);
+            }
+            let closed = files.close_all();
+            owner.clock.absorb(files.first_failure(), !closed);
+            if !closed {
+                known = false;
+                owner.unknown = true;
+            }
+        }
+        let closed = source.settle(owner.clock.first);
+        owner.clock.absorb(source.first_failure(), closed.is_err());
+        if !source.settled() {
+            known = false;
+            owner.unknown = true;
+        }
+        result.and_then(|proof| {
+            if closed.is_err() || !known || !source.accepted() || owner.unknown {
+                return Err(Failure::Unknown);
+            }
+            owner.point()?;
+            Ok(proof)
+        })
+    }
+
+    pub(crate) fn carrier_once(
         source: &mut crate::macos_xcode_source::SetupSource,
         work: Instant,
         finish: Instant,
         hard: Instant,
-    ) -> Result<()> {
-        source.post().map_err(|_| Failure::Binding)?;
-        let clock = Clock::new(work, finish, hard)?;
-        let mut bytes = [0u8; 16];
-        getrandom::fill(&mut bytes).map_err(|_| Failure::Read)?;
-        let nonce = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-        let loans = Loans::carrier([
-            source.setup().map_err(|_| Failure::Binding)?.as_raw_fd(),
-            source.image().map_err(|_| Failure::Binding)?.as_raw_fd(),
-        ])?;
-        let mut child = Copier::spawn(
-            source.executable().map_err(|_| Failure::Binding)?,
-            loans,
-            clock,
-            nonce,
-        )?;
-        let observed = child.pump();
-        if observed.is_err() {
-            child.clock.fail();
+    ) -> CallResult {
+        let mut child = None;
+        let mut attempted = false;
+        let mut first = source.first_failure();
+        let result = (|| -> Result<()> {
+            source.post().map_err(|_| Failure::Binding)?;
+            let clock = Clock::new(work, finish, hard)?;
+            let mut bytes = [0u8; 16];
+            getrandom::fill(&mut bytes).map_err(|_| Failure::Read)?;
+            let nonce = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let loans = Loans::carrier([
+                source.setup().map_err(|_| Failure::Binding)?.as_raw_fd(),
+                source.image().map_err(|_| Failure::Binding)?.as_raw_fd(),
+            ])?;
+            let executable = source.executable().map_err(|_| Failure::Binding)?;
+            attempted = true;
+            child = Some(Copier::spawn(executable, loans, clock, nonce)?);
+            let owner = child.as_mut().ok_or(Failure::State)?;
+            let observed = owner.pump();
+            owner.clock.absorb(None, observed.is_err());
+            let closed = owner.settle();
+            owner.clock.absorb(None, closed.is_err());
+            observed?;
+            closed?;
+            if !owner.reaped
+                || !owner.exit_zero
+                || !owner.eof
+                || !matches!(owner.endpoint, Slot::Closed)
+                || owner.unknown
+                || !matches!(
+                    owner.report.as_ref().map(|r| &r.proof),
+                    Some(Proof::Carrier)
+                )
+            {
+                return Err(Failure::Unknown);
+            }
+            source.post().map_err(|_| Failure::Binding)?;
+            owner.clock.point(false)
+        })();
+        let mut settled = true;
+        let mut unknown = false;
+        if let Some(owner) = child.as_mut() {
+            owner.clock.absorb(source.first_failure(), result.is_err());
+            let closed = owner.settle();
+            owner.clock.absorb(None, closed.is_err());
+            first = earliest(first, owner.clock.first);
+            settled = closed.is_ok();
+            unknown = owner.unknown || !owner.reaped;
+        } else if attempted {
+            settled = false;
+            unknown = true;
         }
-        let closed = child.settle();
-        observed?;
-        closed?;
-        if !child.reaped
-            || !child.exit_zero
-            || !child.eof
-            || !matches!(child.endpoint, Slot::Closed)
-            || child.unknown
-            || !matches!(
-                child.report.as_ref().map(|r| &r.proof),
-                Some(Proof::Carrier)
-            )
-        {
-            return Err(Failure::Unknown);
+        first = earliest(first, source.first_failure());
+        if result.is_err() {
+            first = earliest(first, Some(Instant::now()));
         }
-        source.post().map_err(|_| Failure::Binding)?;
-        child.clock.point(false)
+        let safe = child.as_ref().map_or(!attempted, |v| {
+            v.reaped && matches!(v.endpoint, Slot::Closed)
+        });
+        CallResult {
+            outcome: if result.is_ok() && settled && !unknown && safe && first.is_none() {
+                Some(SetupOutcome::CarrierChecked)
+            } else {
+                None
+            },
+            first_failure: first,
+            unknown,
+            settled,
+            safe_to_settle_source: safe,
+        }
     }
+    fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, None) => a,
+            (None, b) => b,
+        }
+    }
+    pub(crate) fn setup_once(
+        source: &mut crate::macos_xcode_source::SetupSource,
+        work: Instant,
+        finish: Instant,
+        hard: Instant,
+    ) -> CallResult {
+        let mut namespace = match Namespace::new(work, finish, hard, source.held_count()) {
+            Ok(v) => v,
+            Err(_) => {
+                return CallResult {
+                    outcome: None,
+                    first_failure: earliest(source.first_failure(), Some(Instant::now())),
+                    unknown: false,
+                    settled: true,
+                    safe_to_settle_source: true,
+                }
+            }
+        };
+        let result = (|| -> Result<SetupOutcome> {
+            source.post().map_err(|_| Failure::Binding)?;
+            namespace.admit_namespace(false)?;
+            match namespace.current.ok_or(Failure::State)? {
+                Current::Fresh => {
+                    let mut random = [0u8; 16];
+                    getrandom::fill(&mut random).map_err(|_| Failure::Read)?;
+                    let id = random.iter().map(|b| format!("{b:02x}")).collect();
+                    let source_hash = source
+                        .image_sha256()
+                        .map_err(|_| Failure::Binding)?
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
+                    namespace.reserve(id, source_hash)?;
+                    namespace.copy_child(source)?;
+                    namespace.publish()?;
+                    Ok(SetupOutcome::Prepared)
+                }
+                Current::Pending => {
+                    namespace.retire_interrupted(source)?;
+                    Ok(SetupOutcome::NeedsRerun)
+                }
+                _ => namespace.observe_current(source),
+            }
+        })();
+        namespace
+            .clock
+            .absorb(source.first_failure(), result.is_err());
+        if result.is_err() && namespace.life.may_remove_empty_reservation() {
+            let cleanup = namespace.retire_empty_refusal();
+            namespace.clock.absorb(None, cleanup.is_err());
+        }
+        let closed = namespace.settle(namespace.clock.first);
+        namespace.clock.absorb(None, closed.is_err());
+        let safe = namespace.users_joined();
+        let settled = closed.is_ok()
+            && namespace
+                .slots
+                .iter()
+                .all(|s| matches!(s, Slot::Vacant | Slot::Closed));
+        let unknown = namespace.unknown();
+        CallResult {
+            outcome: if settled && safe && !unknown && namespace.clock.first.is_none() {
+                result.ok()
+            } else {
+                None
+            },
+            first_failure: namespace.clock.first,
+            unknown,
+            settled,
+            safe_to_settle_source: safe,
+        }
+    }
+
     /// Private carrier branch is callable only after actual Source/currentimage
     /// and fixed peer/fd/clock admission. Public bin remains inert until Copy and
     /// recovery are fully joined and reviewed; this is not feature activation.
@@ -1930,6 +2540,7 @@ mod native {
             Purpose::Carrier => carrier_child(&mut owner),
             Purpose::Copy => copy_child_work(&mut owner),
             Purpose::RetirePending => retire_child(&mut owner),
+            Purpose::ObserveFinal | Purpose::ObserveAttempt => observe_child(&mut owner),
         };
         if result.is_err() {
             owner.clock.fail();
@@ -1974,6 +2585,8 @@ mod native {
         new_lock: bool,
         own_pending: bool,
         own_attempt: bool,
+        current: Option<Current>,
+        spawn_attempted: bool,
     }
     impl Namespace {
         pub(crate) fn new(
@@ -2005,6 +2618,8 @@ mod native {
                 new_lock: false,
                 own_pending: false,
                 own_attempt: false,
+                current: None,
+                spawn_attempted: false,
             })
         }
         fn fd(&self, index: usize) -> Result<BorrowedFd<'_>> {
@@ -2274,29 +2889,16 @@ mod native {
                     return Err(Failure::Access);
                 }
             }
-            if recovery {
-                self.absent(NAMESPACE, profile::APP)?;
-                self.roster(
-                    NAMESPACE,
-                    &[profile::LOCK, profile::PENDING, profile::ATTEMPT],
-                    false,
-                )?;
-            } else {
-                for name in [profile::PENDING, profile::ATTEMPT, profile::APP] {
-                    self.absent(NAMESPACE, name)?;
-                }
-            }
+            let current = self.observe_namespace()?;
             if named(self.fd(NAMESPACE)?, &c(profile::LOCK)?)?.is_none() {
-                if recovery {
+                if current != Current::Fresh || recovery {
                     return Err(Failure::Present);
                 }
                 self.roster(NAMESPACE, &[], false)?;
                 self.create_control(LOCK, profile::LOCK)?;
                 self.new_lock = true;
             } else {
-                if !recovery {
-                    self.roster(NAMESPACE, &[profile::LOCK], false)?;
-                }
+                self.roster_current(current)?;
                 self.open(LOCK, NAMESPACE, profile::LOCK, libc::O_RDWR)?;
                 if !self.original[LOCK].is_some_and(|s| s.control() && s.size == 0) {
                     return Err(Failure::Access);
@@ -2311,27 +2913,47 @@ mod native {
             self.locked = true;
             // Re-admit after EX: first observation was not the exclusion cut.
             self.roots(false)?;
-            if recovery {
-                self.roster(
-                    NAMESPACE,
-                    &[profile::LOCK, profile::PENDING, profile::ATTEMPT],
-                    false,
-                )?;
-                self.absent(NAMESPACE, profile::APP)?;
-            } else {
-                self.roster(NAMESPACE, &[profile::LOCK], false)?;
-                for name in [profile::PENDING, profile::ATTEMPT, profile::APP] {
-                    self.absent(NAMESPACE, name)?;
-                }
+            if self.observe_namespace()? != current {
+                return Err(Failure::Binding);
             }
+            self.roster_current(current)?;
+            self.current = Some(current);
             Ok(())
+        }
+        fn observe_namespace(&mut self) -> Result<Current> {
+            self.point(false)?;
+            let kind = Current::observed(
+                named(self.fd(NAMESPACE)?, &c(profile::APP)?)?.is_some(),
+                named(self.fd(NAMESPACE)?, &c(profile::PENDING)?)?.is_some(),
+                named(self.fd(NAMESPACE)?, &c(profile::ATTEMPT)?)?.is_some(),
+            )?;
+            self.point(false)?;
+            Ok(kind)
+        }
+        fn roster_current(&mut self, kind: Current) -> Result<()> {
+            let mut names = vec![profile::LOCK];
+            if kind.has_final() {
+                names.push(profile::APP);
+            }
+            if kind.has_pending() {
+                names.push(profile::PENDING);
+            }
+            if kind.has_attempt() {
+                names.push(profile::ATTEMPT);
+            }
+            self.roster(NAMESPACE, &names, false)
         }
         pub(crate) fn reserve(&mut self, id: String, source_sha256: String) -> Result<()> {
             let result = (|| -> Result<()> {
                 if self.life.phase != Phase::New || !hex(&id, 32) || !hex(&source_sha256, 64) {
                     return Err(Failure::State);
                 }
-                self.admit_namespace(false)?;
+                if !self.locked {
+                    self.admit_namespace(false)?;
+                }
+                if self.current != Some(Current::Fresh) {
+                    return Err(Failure::Present);
+                }
                 self.mkdir(NAMESPACE, profile::PENDING, PENDING, 0o700)?;
                 self.own_pending = true;
                 self.roster(PENDING, &[], false)?;
@@ -2440,6 +3062,7 @@ mod native {
                     .reserved
                     .id
                     .clone();
+                self.spawn_attempted = true;
                 let child = Copier::spawn(
                     executable,
                     Loans::copy(
@@ -2538,7 +3161,12 @@ mod native {
                     .iter()
                     .map(|b| format!("{b:02x}"))
                     .collect();
-                self.admit_namespace(true)?;
+                if !self.locked {
+                    self.admit_namespace(true)?;
+                }
+                if self.current != Some(Current::Pending) {
+                    return Err(Failure::Present);
+                }
                 self.open(
                     PENDING,
                     NAMESPACE,
@@ -2607,6 +3235,7 @@ mod native {
                     source.image().map_err(|_| Failure::Binding)?.as_raw_fd(),
                 ];
                 let loans = Loans::retire(fds, record.clone(), original.node)?;
+                self.spawn_attempted = true;
                 self.child = Some(Copier::spawn(
                     source.executable().map_err(|_| Failure::Binding)?,
                     loans,
@@ -2652,6 +3281,271 @@ mod native {
                 }
             }
             result
+        }
+
+        fn read_record(&mut self, source_hash: &str) -> Result<Record> {
+            self.open(ATTEMPT, NAMESPACE, profile::ATTEMPT, libc::O_RDONLY)?;
+            let original = self.original[ATTEMPT].ok_or(Failure::Binding)?;
+            if !original.control() || original.size <= 0 {
+                return Err(Failure::Binding);
+            }
+            let mut bytes = [0u8; RECORD_LIMIT + 1];
+            self.point(false)?;
+            let n = unsafe {
+                libc::pread(
+                    self.fd(ATTEMPT)?.as_raw_fd(),
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len(),
+                    0,
+                )
+            };
+            self.point(false)?;
+            if n != original.size as isize || n <= 0 || n as usize > RECORD_LIMIT {
+                return Err(Failure::Bounds);
+            }
+            self.join(ATTEMPT, NAMESPACE, profile::ATTEMPT, false)?;
+            let record = Record::decode(&bytes[..n as usize])?;
+            if record.reserved.namespace != self.original[NAMESPACE].ok_or(Failure::Binding)?.node
+                || record.reserved.source_sha256 != source_hash
+            {
+                return Err(Failure::Binding);
+            }
+            self.record_bytes = bytes[..n as usize].to_vec();
+            self.record = Some(record.clone());
+            Ok(record)
+        }
+        fn record_post(&mut self) -> Result<()> {
+            self.join(ATTEMPT, NAMESPACE, profile::ATTEMPT, false)?;
+            let expected = self.record.as_ref().ok_or(Failure::Binding)?.clone();
+            let mut bytes = [0u8; RECORD_LIMIT + 1];
+            self.point(false)?;
+            let n = unsafe {
+                libc::pread(
+                    self.fd(ATTEMPT)?.as_raw_fd(),
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len(),
+                    0,
+                )
+            };
+            self.point(false)?;
+            if n != self.record_bytes.len() as isize
+                || bytes[..n.max(0) as usize] != self.record_bytes
+                || Record::decode(&self.record_bytes)? != expected
+            {
+                return Err(Failure::Binding);
+            }
+            self.join(ATTEMPT, NAMESPACE, profile::ATTEMPT, false)
+        }
+        /// Fresh current admission, not recovery of the prior invocation's
+        /// unknown success. Child observes only; Parent retires exact originals.
+        fn observe_current(
+            &mut self,
+            source: &mut crate::macos_xcode_source::SetupSource,
+        ) -> Result<SetupOutcome> {
+            let result = (|| -> Result<SetupOutcome> {
+                if !self.locked || self.life.phase != Phase::New || self.child.is_some() {
+                    return Err(Failure::State);
+                }
+                let current = self.current.ok_or(Failure::State)?;
+                if current == Current::Fresh || current == Current::Pending {
+                    return Err(Failure::State);
+                }
+                source.post().map_err(|_| Failure::Binding)?;
+                let source_hash: String = source
+                    .image_sha256()
+                    .map_err(|_| Failure::Binding)?
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                if current.has_final() {
+                    self.open(
+                        STAGED,
+                        NAMESPACE,
+                        profile::APP,
+                        libc::O_RDONLY | libc::O_DIRECTORY,
+                    )?;
+                    if !self.original[STAGED].is_some_and(|s| s.directory(Some(0o555))) {
+                        return Err(Failure::Access);
+                    }
+                }
+                if current.has_pending() {
+                    self.open(
+                        PENDING,
+                        NAMESPACE,
+                        profile::PENDING,
+                        libc::O_RDONLY | libc::O_DIRECTORY,
+                    )?;
+                    if !self.original[PENDING].is_some_and(|s| s.directory(Some(0o700))) {
+                        return Err(Failure::Access);
+                    }
+                    self.roster(PENDING, &[], false)?;
+                }
+                let record = if current.has_attempt() {
+                    Some(self.read_record(&source_hash)?)
+                } else {
+                    None
+                };
+                if let Some(r) = record.as_ref() {
+                    if !r.binds_current(
+                        self.original[NAMESPACE].ok_or(Failure::Binding)?.node,
+                        &source_hash,
+                        if current.has_final() {
+                            Some(self.original[STAGED].ok_or(Failure::Binding)?.node)
+                        } else {
+                            None
+                        },
+                        if current.has_pending() {
+                            Some(self.original[PENDING].ok_or(Failure::Binding)?.node)
+                        } else {
+                            None
+                        },
+                    ) {
+                        return Err(Failure::Binding);
+                    }
+                }
+                let mut nonce = [0u8; 16];
+                getrandom::fill(&mut nonce).map_err(|_| Failure::Read)?;
+                let nonce = record
+                    .as_ref()
+                    .map(|r| r.reserved.id.clone())
+                    .unwrap_or_else(|| nonce.iter().map(|b| format!("{b:02x}")).collect());
+                let common = [
+                    self.fd(ROOT)?.as_raw_fd(),
+                    self.fd(LIBRARY)?.as_raw_fd(),
+                    self.fd(NAMESPACE)?.as_raw_fd(),
+                    self.fd(LOCK)?.as_raw_fd(),
+                ];
+                let setup = source.setup().map_err(|_| Failure::Binding)?.as_raw_fd();
+                let image = source.image().map_err(|_| Failure::Binding)?.as_raw_fd();
+                let loans = if current.has_final() {
+                    Loans::observe(
+                        [
+                            common[0],
+                            common[1],
+                            common[2],
+                            common[3],
+                            self.fd(STAGED)?.as_raw_fd(),
+                            setup,
+                            image,
+                        ],
+                        record.clone(),
+                        self.original[ATTEMPT].map(|s| s.node),
+                        self.original[PENDING].map(|s| s.node),
+                    )?
+                } else {
+                    Loans::observe_attempt(
+                        [common[0], common[1], common[2], common[3], setup, image],
+                        record.clone().ok_or(Failure::Binding)?,
+                        self.original[ATTEMPT].ok_or(Failure::Binding)?.node,
+                    )?
+                };
+                self.life.reserve()?;
+                self.spawn_attempted = true;
+                self.child = Some(Copier::spawn(
+                    source.executable().map_err(|_| Failure::Binding)?,
+                    loans,
+                    self.clock,
+                    nonce,
+                )?);
+                self.life.spawned()?;
+                let child = self.child.as_mut().ok_or(Failure::State)?;
+                let observed = child.pump();
+                child.clock.absorb(None, observed.is_err());
+                self.clock.absorb(child.clock.first, observed.is_err());
+                let closed = child.settle();
+                self.clock.absorb(child.clock.first, closed.is_err());
+                observed?;
+                closed?;
+                self.life.output_complete = matches!(
+                    (
+                        &child.report.as_ref().map(|r| &r.proof),
+                        current.has_final()
+                    ),
+                    (Some(Proof::CurrentFinal), true) | (Some(Proof::AttemptOnly), false)
+                );
+                self.life.eof = child.eof;
+                self.life.exit_zero = child.reaped && child.exit_zero;
+                self.life.controls_closed =
+                    matches!(child.endpoint, Slot::Closed) && !child.unknown;
+                self.life.joined()?;
+                source.post().map_err(|_| Failure::Binding)?;
+                self.roots(false)?;
+                self.roster_current(current)?;
+                if current.has_final() {
+                    self.join(STAGED, NAMESPACE, profile::APP, false)?;
+                } else {
+                    self.absent(NAMESPACE, profile::APP)?;
+                }
+                if current.has_pending() {
+                    self.join(PENDING, NAMESPACE, profile::PENDING, false)?;
+                    self.roster(PENDING, &[], false)?;
+                    self.record_post()?;
+                    self.point(false)?;
+                    if unsafe {
+                        libc::unlinkat(
+                            self.fd(NAMESPACE)?.as_raw_fd(),
+                            c(profile::PENDING)?.as_ptr(),
+                            libc::AT_REMOVEDIR,
+                        )
+                    } != 0
+                    {
+                        return Err(Failure::Write);
+                    }
+                    self.sync(NAMESPACE, false)?;
+                    self.close(PENDING)?;
+                    self.absent(NAMESPACE, profile::PENDING)?;
+                } else {
+                    self.absent(NAMESPACE, profile::PENDING)?;
+                }
+                if current.has_attempt() {
+                    // The original record is re-read after childjoin and after
+                    // any wrapper removal immediately before its own unlink.
+                    self.record_post()?;
+                    self.roots(false)?;
+                    self.absent(NAMESPACE, profile::PENDING)?;
+                    if current.has_final() {
+                        self.join(STAGED, NAMESPACE, profile::APP, false)?;
+                    } else {
+                        self.absent(NAMESPACE, profile::APP)?;
+                    }
+                    self.point(false)?;
+                    if unsafe {
+                        libc::unlinkat(
+                            self.fd(NAMESPACE)?.as_raw_fd(),
+                            c(profile::ATTEMPT)?.as_ptr(),
+                            0,
+                        )
+                    } != 0
+                    {
+                        return Err(Failure::Write);
+                    }
+                    self.sync(NAMESPACE, false)?;
+                    self.close(ATTEMPT)?;
+                    self.absent(NAMESPACE, profile::ATTEMPT)?;
+                }
+                self.roster_current(if current.has_final() {
+                    Current::Final
+                } else {
+                    Current::Fresh
+                })?;
+                if current.has_final() {
+                    self.join(STAGED, NAMESPACE, profile::APP, false)?;
+                }
+                self.life.phase = Phase::Retired;
+                Ok(if current.has_final() {
+                    SetupOutcome::Prepared
+                } else {
+                    SetupOutcome::NeedsRerun
+                })
+            })();
+            self.clock.absorb(source.first_failure(), result.is_err());
+            result
+        }
+        fn users_joined(&self) -> bool {
+            match self.child.as_ref() {
+                Some(child) => child.reaped && matches!(child.endpoint, Slot::Closed),
+                None => !self.spawn_attempted,
+            }
         }
 
         /// Parent sole publication. Neither child report nor record alone can
@@ -2924,7 +3818,7 @@ mod native {
     target_pointer_width = "64",
     any(target_arch = "aarch64", target_arch = "x86_64")
 ))]
-pub(crate) use native::{carrier_preflight, copier_entry, Namespace};
+pub(crate) use native::{carrier_once, copier_entry, setup_once};
 
 #[cfg(test)]
 mod tests {
@@ -2947,6 +3841,93 @@ mod tests {
             "a".repeat(64),
         )
         .unwrap()
+    }
+    #[test]
+    fn xcode_child_tail_is_one_use_and_lost_wait_never_reauthorizes_signals() {
+        let now = Instant::now();
+        let hard = now + Duration::from_secs(10);
+        let mut tail = ChildTail::new();
+        assert!(
+            !tail.signal(now, hard, false),
+            "signal before cleanup entry"
+        );
+        assert!(tail.begin());
+        assert!(tail.signal(now, hard, false));
+        assert!(!tail.signal(now, hard, false), "TERM once");
+        assert!(tail.signal(now, hard, true));
+        assert!(!tail.signal(now, hard, true), "KILL once");
+        tail.lose_wait();
+        assert_eq!(tail.finish(Err(Failure::Unknown)), Err(Failure::Unknown));
+        assert!(!tail.begin());
+        assert_eq!(tail.cached(), Err(Failure::Unknown));
+        assert!(!tail.signal(now, hard, false));
+        assert!(!tail.signal(now, hard, true));
+        let mut lost = ChildTail::new();
+        lost.lose_wait();
+        assert!(lost.begin());
+        assert!(!lost.signal(now, hard, false));
+        assert!(!lost.signal(now, hard, true));
+        let mut expired = ChildTail::new();
+        assert!(expired.begin());
+        assert!(!expired.signal(hard, hard, false));
+        assert!(!expired.signal(hard, hard, true));
+        let mut closed = ChildTail::new();
+        assert!(closed.begin());
+        assert_eq!(closed.finish(Ok(())), Ok(()));
+        assert!(!closed.begin());
+        assert_eq!(closed.cached(), Ok(()));
+        assert!(!closed.signal(now, hard, false));
+    }
+    #[test]
+    fn xcode_current_crash_cuts_are_closed_and_never_infer_old_finality() {
+        for (bits, expected) in [
+            ((false, false, false), Some(Current::Fresh)),
+            ((false, true, true), Some(Current::Pending)),
+            ((false, false, true), Some(Current::Attempt)),
+            ((true, false, false), Some(Current::Final)),
+            ((true, false, true), Some(Current::FinalAttempt)),
+            ((true, true, true), Some(Current::FinalPending)),
+            ((false, true, false), None),
+            ((true, true, false), None),
+        ] {
+            assert_eq!(Current::observed(bits.0, bits.1, bits.2).ok(), expected);
+        }
+        assert!(!Current::Attempt.has_final());
+        assert!(!Current::Attempt.has_pending());
+        assert!(Current::Attempt.has_attempt());
+        assert!(Current::FinalPending.has_final());
+        assert!(Current::FinalPending.has_pending());
+        assert!(Current::FinalPending.has_attempt());
+    }
+    #[test]
+    fn xcode_current_retirement_binds_helper_namespace_final_and_optional_wrapper() {
+        let mut r = record();
+        let ns = r.reserved.namespace;
+        let stage = r.reserved.staged;
+        let pending = r.reserved.pending;
+        let hash = "a".repeat(64);
+        assert!(
+            r.binds_current(ns, &hash, None, None),
+            "attempt-only current cleanup uses no invented pending original"
+        );
+        assert!(
+            !r.binds_current(ns, &hash, Some(stage), None),
+            "Reserved never authorizes final cleanup"
+        );
+        r.add_copied(stage, "b".repeat(64)).unwrap();
+        assert!(r.binds_current(ns, &hash, Some(stage), Some(pending)));
+        assert!(
+            r.binds_current(ns, &hash, Some(stage), None),
+            "post-rmdir crash cut"
+        );
+        let foreign = Node {
+            device: ns.device,
+            inode: 99,
+        };
+        assert!(!r.binds_current(foreign, &hash, Some(stage), None));
+        assert!(!r.binds_current(ns, &"c".repeat(64), Some(stage), None));
+        assert!(!r.binds_current(ns, &hash, Some(foreign), None));
+        assert!(!r.binds_current(ns, &hash, Some(stage), Some(foreign)));
     }
     #[test]
     fn xcode_attempt_is_exact_reserved_then_one_copied_not_finality() {
@@ -3072,11 +4053,13 @@ mod tests {
         .unwrap();
         combined.absorb(Some(now - Duration::from_secs(100)), true);
         assert_eq!(combined.finish, now + Duration::from_secs(20));
+        assert_eq!(combined.hard, now + Duration::from_secs(30));
         // A subordinate that spent time closing may return much later; both
         // its original failure and the next owner's cutoff stay the earliest.
         combined.absorb(Some(now - Duration::from_secs(90)), true);
         combined.absorb(None, true);
         assert_eq!(combined.first, Some(now - Duration::from_secs(100)));
         assert_eq!(combined.finish, now + Duration::from_secs(20));
+        assert_eq!(combined.hard, now + Duration::from_secs(30));
     }
 }
