@@ -205,10 +205,11 @@ jobs:
           if [[ "$INSTALLER_CHECKS" != installer-recovery && "$INSTALLER_CHECKS" != installer-frames ]]; then
             # Same dependency/target owner, separate pure transaction DATA target.
             # Neither this test filter nor the bin tests execute Installer main.
-            rustup run 1.98.1 cargo test --locked --no-default-features --lib \
-              macos_install_transaction::tests::restore_ -- --test-threads=1 \
-              | tee "$WORK_ROOT/installer-restore-transaction-tests.log"
-            grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/installer-restore-transaction-tests.log"
+            rustup run 1.98.1 cargo test --locked --no-default-features --lib -- \
+              macos_install_transaction::tests::restore_ \
+              macos_install_transaction::tests::retained_storage_and_original_budget_arithmetic_refuse_before_effects \
+              --test-threads=1 | tee "$WORK_ROOT/installer-restore-transaction-tests.log"
+            grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;' "$WORK_ROOT/installer-restore-transaction-tests.log"
           fi
       - name: Remove only this job's disposable compiler and dependencies
         if: always() && steps.work.outputs.root != ''
