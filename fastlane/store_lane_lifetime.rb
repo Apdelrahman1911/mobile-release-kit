@@ -134,16 +134,23 @@ module MobileReleaseKit
       def bind_local_execution!(runtime,context)
         origin!
         raise LifetimeError unless runtime.equal?(StoreLaneRuntime.current_runtime!) && runtime.invocation.equal?(self) &&
-          runtime.local_admission_context.equal?(context) && @resources && @mode == "execute" && @lane == "android_internal_upload" && !@local_execution
+          runtime.local_admission_context.equal?(context) && @resources && @mode == "execute" && %w[android_internal_upload ios_testflight_internal].include?(@lane) &&
+          context.fetch(:payload).fetch("platform") == (@lane == "ios_testflight_internal" ? "ios" : "android") && !@local_execution
         @local_execution=context
       end
       def local_current_validation_request(adapter:)
         require_upload_continuation!
         raise LifetimeError unless @local_execution && @local_execution.fetch(:authority).fetch("purpose") == "execute" &&
-          defined?(AndroidUploadValidation) && adapter.equal?(AndroidUploadValidation) &&
           StoreLaneRuntime.current_runtime!.local_execution_context.equal?(@local_execution) && @nested.nil? &&
           @run_deadline_ns && NativeProcessSpawn.monotonic_ns < @run_deadline_ns-NESTED_CLEANUP_NS
-        raw=MobileReleaseKit.canonical_json({"schemaVersion"=>1,"toolchain"=>@local_execution.fetch(:toolchain),
+        key,tools = if @lane == "android_internal_upload" && defined?(AndroidUploadValidation) && adapter.equal?(AndroidUploadValidation)
+                      ["toolchain",@local_execution.fetch(:toolchain)]
+                    elsif @lane == "ios_testflight_internal" && defined?(IosUploadValidation) && adapter.equal?(IosUploadValidation)
+                      ["signingTools",@local_execution.fetch(:signing_tools)]
+                    else
+                      raise LifetimeError
+                    end
+        raw=MobileReleaseKit.canonical_json({"schemaVersion"=>1,key=>tools,
           "runDeadlineNs"=>(@run_deadline_ns-NESTED_CLEANUP_NS).to_s,"hardDeadlineNs"=>@run_deadline_ns.to_s})
         raise LifetimeError unless raw.bytesize <= 16*1024
         raw.freeze
@@ -218,7 +225,7 @@ module MobileReleaseKit
         end
         # A local registered-tools nomination comes only from this same admitted
         # Invocation. Shape/argv DATA alone cannot grant a local upload.
-        if role == "current-android" && @local_execution
+        if @local_execution
           raw = local_current_validation_request(adapter: adapter)
           unless intent_sha256 == @local_execution.fetch(:digest) &&
                  argv.count("--intent-sha256") == 1 && argv[argv.index("--intent-sha256") + 1] == intent_sha256 &&

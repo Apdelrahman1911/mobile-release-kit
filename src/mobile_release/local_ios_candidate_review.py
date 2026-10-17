@@ -24,8 +24,10 @@ def identity(value):
 class IOSCandidateBundleReview(CandidateBundleReview):
     def __init__(self, owner, **binding):
         from .local_release_history import LocalHistoryRun
-        need(type(owner) is LocalHistoryRun and owner.request.context.get('platform') == 'ios'
-             and owner.request.context['action'] == 'review-inputs')
+        from .local_store_prepare import LocalStorePrepareRun
+        need(owner.request.context.get('platform') == 'ios' and
+             (type(owner) is LocalHistoryRun and owner.request.context['action'] in {'review-inputs','review-prepared'}
+              or type(owner) is LocalStorePrepareRun and owner.request.context['operation']=='local-store-prepare'))
         super().__init__(owner, **binding)
         self.archive = self.export = None
         self.roots = {}; self.tree_slots = []; self.tree_iterators = []
@@ -92,7 +94,9 @@ class IOSCandidateBundleReview(CandidateBundleReview):
 
     def acquire(self):
         self.point(); root = self.owner.root
-        self.base_fds = len(root.parts) + 1 + len(Path(self.owner.request.native['home']).parts) + 5 + 6
+        from .local_store_prepare import LocalStorePrepareRun
+        self.base_fds = (self.owner.quote['tree_base'] if type(self.owner) is LocalStorePrepareRun else
+            len(root.parts) + 1 + len(Path(self.owner.request.native['home']).parts) + 5 + 6)
         # Root walk, manifest/archive/export/three file originals, max64
         # nested directories plus one leaf and iterator, all coexist.
         need(self.base_fds + len(root.parts) + 3 + 1 + 6 + MAX_DEPTH + 2 <= 256)
@@ -208,7 +212,11 @@ class IOSCandidateBundleReview(CandidateBundleReview):
             'version': {k: value['savedVersion'][k] for k in ('name', 'build')},
             'files': [dict(row) for row in value['files']], 'archive': dict(value['archive']),
             'observation': 'current-bundle-only', 'priorCreateFinality': 'not-established'})
-        self.close(); need(self.tree_closed()); return summary
+        self.close(); need(self.tree_closed())
+        # No future traversal is allowed after these actual consuming closes.
+        # Retire only the now-unused name/stat table before prepared JSON reads.
+        self.bindings.clear()
+        return summary
 
     def tree_closed(self):
         return not self.tree_slots and not self.tree_iterators and not self.walking

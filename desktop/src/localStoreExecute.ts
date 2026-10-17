@@ -22,14 +22,14 @@ export function localStoreExecuteOwnerReason(s:LocalStoreExecuteState):string|nu
 // journal, exact files/source, Google assignment and actual registered tool lease.
 function executeContext(project:AndroidBuildProject|null,assets:AssetDisplayState|null,history:LocalHistoryState|null,tools:AndroidBuildState|null) {
  const base=localStoreRequest(project,assets);
- if(!base||assets?.status?.context?.stage!=='candidate'||assets.scope.stage!=='candidate'||!history||history.historical||localHistoryOwnerReason(history)||
+ if(!base||base.platform!==undefined||assets?.status?.context?.stage!=='candidate'||assets.scope.stage!=='candidate'||!history||history.historical||localHistoryOwnerReason(history)||
    !tools||tools.mode!=='native'||!tools.catalogListening||tools.catalogReadPending||tools.selectionPending||androidBuildOwnerReason(tools))return null;
  const catalog=parseAndroidToolchainCatalogStatus(tools.catalogStatus);
  if(!catalog||catalog.phase!=='ready'||catalog.availability!=='available'||!catalog.selected)return null;
  const status=parseLocalHistoryStatus(history.status),op=status?.operation;
- if(history.mode!=='native'||!op||op.phase!=='terminal'||op.outcome!=='complete'||op.context.projectId!==base.projectId||op.context.action!=='review-prepared'||!op.result)return null;
+ if(history.mode!=='native'||!op||op.phase!=='terminal'||op.outcome!=='complete'||op.context.projectId!==base.projectId||op.context.platform!==undefined||op.context.action!=='review-prepared'||!op.result)return null;
  const prepared=op.result.preparedIntent,last=op.result.history.at(-1);
- if(!prepared||!last||last.phase!=='prepared'||last.operationId!==prepared.operationId||op.context.candidateOperationId!==prepared.operationId||
+ if(!prepared||!('applicationId' in prepared)||!last||last.phase!=='prepared'||last.operationId!==prepared.operationId||op.context.candidateOperationId!==prepared.operationId||
    prepared.version.name!==base.savedVersion.name||prepared.version.build!==base.savedVersion.build||project?.selection?.applicationId!==prepared.applicationId)return null;
  const request=parseLocalStoreExecuteRequest({...base,candidateOperationId:prepared.operationId,candidateSha256:prepared.candidateSha256,
    intentSha256:prepared.intentSha256,toolchainSelection:catalog.selected,confirmation:`candidate:android:${base.savedVersion.name}:${base.savedVersion.build}`});

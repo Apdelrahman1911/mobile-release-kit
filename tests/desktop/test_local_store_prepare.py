@@ -95,8 +95,9 @@ class LocalStorePrepareTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory(dir=Path.home());self.addCleanup(self.tmp.cleanup)
         self.base=Path(self.tmp.name);self.root=self.base/'project';self.runtime=self.base/'runtime';self.home=self.base/'account'
         self.home.mkdir(mode=0o700)
-        config=android_config();config['source']['localStoreEnabled']=True
-        write_project(self.root,config)
+        platform=getattr(self,'fixture_platform','android')
+        config=(access_fixture.ios_config() if platform=='ios' else android_config());config['source']['localStoreEnabled']=True
+        write_project(self.root,config,platform=platform)
         for name in ('ruby','bundle'):
             p=self.runtime/'store/bin'/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'not executable payload');p.chmod(0o755)
         for name in REQUIRED_TOOLING_FILES:
@@ -109,18 +110,20 @@ class LocalStorePrepareTests(unittest.TestCase):
         for name in ('release/mobile-release.json','release/version.properties'):
             body=(self.root/name).read_bytes();self.rows.append((name.encode(),hashlib.sha1(b'blob '+str(len(body)).encode()+b'\0'+body).hexdigest().encode()))
         raw=request(self.root,self.runtime);c=raw['context'];c.update(operation='local-store-prepare',candidateOperationId=OP,
-            candidateSha256='b'*64,confirmation='candidate:android:1.2.3:42')
+            candidateSha256='b'*64,confirmation='candidate:%s:1.2.3:42'%platform,platform=platform)
         self.value=raw;raw['protocol']=W.PROTOCOL
-        self.bundle=self.root/'.mobile-release/desktop-android-build'/OP.replace('-','')/'artifacts'
-        self.bundle.mkdir(parents=True,mode=0o700)
-        p=self.bundle
-        while p!=self.root:p.chmod(0o700);p=p.parent
-        manifest=dict(schemaVersion=1,scope='local-android-candidate-inputs',operationId=OP,enrollment=ENROLLMENT,
-            sourceCommit='a'*40,sourceTree='b'*40,savedConfig=c['savedConfig'],savedVersion=c['savedVersion'],
-            applicationId=config['android']['applicationId'],signerSha256=config['android']['uploadCertificateSha256'].replace(':','').lower(),files=[])
-        for name,body in [('app-release.aab',b'not an AAB'),('store-metadata.zip',b'not ZIP'),('validation-report.json',b'{}')]:
-            p=self.bundle/name;p.write_bytes(body);p.chmod(0o600)
-            manifest['files'].append(dict(fileName=name,bytes=len(body),sha256=hashlib.sha256(body).hexdigest()))
+        if platform=='ios':manifest=self.ios_bundle(config,c)
+        else:
+            self.bundle=self.root/'.mobile-release/desktop-android-build'/OP.replace('-','')/'artifacts'
+            self.bundle.mkdir(parents=True,mode=0o700)
+            p=self.bundle
+            while p!=self.root:p.chmod(0o700);p=p.parent
+            manifest=dict(schemaVersion=1,scope='local-android-candidate-inputs',operationId=OP,enrollment=ENROLLMENT,
+                sourceCommit='a'*40,sourceTree='b'*40,savedConfig=c['savedConfig'],savedVersion=c['savedVersion'],
+                applicationId=config['android']['applicationId'],signerSha256=config['android']['uploadCertificateSha256'].replace(':','').lower(),files=[])
+            for name,body in [('app-release.aab',b'not an AAB'),('store-metadata.zip',b'not ZIP'),('validation-report.json',b'{}')]:
+                p=self.bundle/name;p.write_bytes(body);p.chmod(0o600)
+                manifest['files'].append(dict(fileName=name,bytes=len(body),sha256=hashlib.sha256(body).hexdigest()))
         m=canonical(manifest)+b'\n';p=self.bundle/'candidate-inputs.json';p.write_bytes(m);p.chmod(0o600)
         c['candidateSha256']=hashlib.sha256(m).hexdigest();self.manifest=manifest
         j=LocalReleaseJournal(str(self.home),end=time.monotonic()+30,enrollment=ENROLLMENT,key=KEY);j.open()
@@ -164,8 +167,11 @@ class LocalStorePrepareTests(unittest.TestCase):
         for fd in(ir,ow,ew):os.close(fd)
         os.write(iw,encode(value));oldcwd=Path.cwd();os.chdir(self.runtime)
         e=_Engine(time.monotonic());events=[];calls=[];high=[0];lost_target=[None];original_event=_Engine.local_event
-        fixture=json.loads((Path(access_fixture.__file__).resolve().parents[1]/'fixtures/local-intent-candidate-valid.json').read_bytes())['storePrecondition']
-        fixture['appIdentity']=self.manifest['applicationId']
+        apple=value['context']['platform']=='ios'
+        fixture=json.loads((Path(access_fixture.__file__).resolve().parents[1]/('fixtures/local-intent-ios-candidate-valid.json' if apple else 'fixtures/local-intent-candidate-valid.json')).read_bytes())['storePrecondition']
+        fixture['appIdentity']=self.manifest['bundleId' if apple else 'applicationId']
+        if fault=='snapshot-platform':fixture['platform']='android'
+        if fault=='snapshot-missing':fixture=None
         model=LocalLaneModel(self.execution_receipt if _execute or _reconcile else lambda argv,env:(fixture,0),terminal=fault!='nested-terminal')
         self.addCleanup(model.close)
         def peak():high[0]=max(high[0],len(os.listdir('/proc/self/fd')))
@@ -180,8 +186,15 @@ class LocalStorePrepareTests(unittest.TestCase):
             data=encode(reply)
             if kind=='lease-ready':data+=W.KEY_PREFIX+KEY+W.KEY_SUFFIX
             if kind==pending:
-                body=encode(account());data+=PREFIX+encode(dict(schemaVersion=1,files=[dict(role='google-service-account',bytes=len(body))]))+body+SUFFIX
+                if apple:
+                    parts=access_fixture.apple_material()
+                    data+=PREFIX+encode(dict(schemaVersion=1,files=[dict(role=role,bytes=len(body))
+                        for role,body in zip(('asc-p8','asc-key-id','asc-issuer-id'),parts)]))+b''.join(parts)+SUFFIX
+                else:
+                    body=encode(account());data+=PREFIX+encode(dict(schemaVersion=1,files=[dict(role='google-service-account',bytes=len(body))]))+body+SUFFIX
             os.write(iw,data)
+            if kind=='prepare-settled' and fault=='ack-stop':engine.input.stop('cancelled')
+            if kind=='prepare-settled' and fault=='ack-time':engine.input.work_end=time.monotonic()-1
             if kind=='prepare-settled' and fault=='publication-close':lost_target[0]=engine.service.publishers[-1].slots[-1].number
             if kind=='recovery-settled' and hasattr(self,'recovery_after_ack'):self.recovery_after_ack(engine)
             if kind=='recovery-settled' and fault=='recovery-marker-close':lost_target[0]=engine.service.fence_readers[0].fd
@@ -209,10 +222,21 @@ class LocalStorePrepareTests(unittest.TestCase):
             self.assertIn(pending,events);self.assertEqual(self.current_phase(),initial_phase if _reconcile else pending)
             for name in ('GITHUB_ACTIONS','MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON','RUBYOPT'):self.assertNotIn(name,kwargs['environ'])
             if kwargs['capture']:
-                i=len(e.service._runtime_rows)-1;out=('3.3.12','4.0.16','','MRK_RUNTIME_3.3.12_FIDDLE_1.1.2','MRK_RUNTIME_3.3.12_FIDDLE_1.1.2')[i]
+                i=len(e.service._runtime_rows)-1
+                if apple and i==5:
+                    from mobile_release.credentials import APPLE_P8_CHECK
+                    self.assertEqual(tuple(argv[:6]),('bundle','exec','ruby','-ropenssl','-e',APPLE_P8_CHECK))
+                    self.assertEqual(Path(argv[-1]).read_bytes(),access_fixture.apple_material()[0])
+                    self.assertLessEqual(kwargs['timeout'],30);self.assertEqual(kwargs['output_limit'],4096)
+                    out=''
+                else:out=('3.3.12','4.0.16','','MRK_RUNTIME_3.3.12_FIDDLE_1.1.2','MRK_RUNTIME_3.3.12_FIDDLE_1.1.2')[i]
                 e.guard.lifetime_ledger._commands+=1;e.guard.lifetime_ledger._command_dispatched=True
-                return subprocess.CompletedProcess(argv,0,stdout=out,stderr='')
-            self.assertEqual(argv[-1],'android_internal_upload');self.assertLessEqual(kwargs['timeout'],900)
+                return subprocess.CompletedProcess(argv,1 if apple and i==5 and fault=='bad-p8' else 0,stdout=out,stderr='')
+            self.assertEqual(argv[-1],'ios_testflight_internal' if apple else 'android_internal_upload');self.assertLessEqual(kwargs['timeout'],900)
+            if apple:
+                self.assertEqual(kwargs['environ']['MOBILE_RELEASE_STORE_MODE'],'prepare')
+                self.assertEqual(e.service.record._files_owner().mode,'prepare')
+                self.assertNotIn('MOBILE_RELEASE_LOCAL_EXECUTE_AUTHORITY_JSON',kwargs['environ'])
             timing=e.service.record._files_owner().timing
             self.assertEqual(timing.run,__import__('math').floor(e.input.work_end*1e9))
             self.assertEqual(timing.hard-timing.run,3_000_000_000)
@@ -222,7 +246,7 @@ class LocalStorePrepareTests(unittest.TestCase):
             if _execute and fault=='tool-close-cancel':lost_target[0]=e.service.tool_manifest.slot.number
             if _execute and fault=='tool-manifest-post':
                 path=self.tools/'android-toolchain.json';path.chmod(0o600);path.write_bytes(b'changed original manifest')
-            if fault=='bundle-post':(self.bundle/'app-release.aab').write_bytes(b'changed during original lane')
+            if fault=='bundle-post':(self.bundle/('export/App.ipa' if apple else 'app-release.aab')).write_bytes(b'changed during original lane')
             return answer
         original_begin=owner_type._begin
         def begin(op):

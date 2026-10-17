@@ -22,6 +22,7 @@ class StorePrepareInput(_SavedCommandInput):
         self._material=None;self.reply_step=0;self.read_remaining=0;self.reading=False
         self.lease=self.lease_identity=None;self.lease_close_claimed=self.lease_closed=False
         self.raw_clock=self.raw_work_end=self.raw_hard_end=None
+        self._ios_final_reply=False
         self.hard_end=started+wire.FINALITY_SECONDS
     def _bind_engine(self,engine):
         from ._desktop_store_prepare_engine import _Engine
@@ -66,15 +67,43 @@ class StorePrepareInput(_SavedCommandInput):
     # Identical original OFD checks: no new root open, flock or numeric retry.
     lease_post=LocalHistoryInput.lease_post
     borrow_project=LocalHistoryInput.borrow_project
+    def _final_read_point(self):
+        # Only an already-written iOS Prepare final checkpoint may drain its
+        # original reply under F/H. No new forward work/material uses this cut.
+        from .local_store_prepare import LocalStorePrepareRun
+        op=self.require_operation()
+        self._require(type(self) is StorePrepareInput and type(op) is LocalStorePrepareRun
+            and op.apple_prepare and self._ios_final_reply and self.reply_step==4
+            and self.reading and self.material_pending and self.material_receiving
+            and self.initial is op.request and not op._close_claimed)
+        self.guard._check_owner();self.lease_post()
+        self._require(not self.guard.lifetime_ledger.fatal and not self.custody_unknown
+            and self.guard.handler_state!='UNKNOWN' and self.fd is not None)
+        v=os.fstat(self.fd)
+        if (v.st_dev,v.st_ino,v.st_mode)!=self.identity:
+            self.custody_unknown=True;error=wire.ProtocolError();self.guard._abort(error);raise error
+        now=time.monotonic()
+        if now>=self.work_end:self.stop('timed-out')
+        self._require(now<self.hard_endpoint())
+
     def _take(self,count):
         value=bytearray()
         try:
             while len(value)<count:
-                self.read_remaining=count-len(value);self.guard.check();self.lease_post()
+                self.read_remaining=count-len(value)
+                if self._ios_final_reply:
+                    self._final_read_point()
+                    if not self.buffer:
+                        try:chunk=os.read(self.fd,self.read_remaining)
+                        except BlockingIOError:chunk=None
+                        if chunk is not None:self._require(bool(chunk));self.buffer.extend(chunk)
+                else:self.guard.check();self.lease_post()
                 if self.buffer:
                     n=min(len(self.buffer),count-len(value));value.extend(self.buffer[:n])
                     self.buffer[:n]=b'\0'*n;del self.buffer[:n]
-                else:select.select([self.fd],[],[],min(.05,max(0,self.work_end-time.monotonic())))
+                else:
+                    end=self.hard_endpoint() if self._ios_final_reply else self.work_end
+                    select.select([self.fd],[],[],min(.05,max(0,end-time.monotonic())))
             return value
         except BaseException:
             value[:]=b'\0'*len(value);raise
@@ -90,6 +119,7 @@ class StorePrepareInput(_SavedCommandInput):
         self.material_pending=self.material_receiving=True;line=bytearray();key=None
         try:
             self.engine.local_event(event,payload)
+            self._ios_final_reply=type(self) is StorePrepareInput and op.apple_prepare and self.reply_step==4
             while not line.endswith(b'\n'):
                 self._require(len(line)<2048);line.extend(self._take(1))
             result=wire.reply(bytes(line),self.initial,'key-material' if self.reply_step==1 else 'checkpoint-settled',self.reply_step)
@@ -102,7 +132,9 @@ class StorePrepareInput(_SavedCommandInput):
         except BaseException:
             if key is not None:key[:]=b'\0'*len(key)
             raise
-        finally:line[:]=b'\0'*len(line);self.reading=False;self.read_remaining=0;self.material_receiving=False
+        finally:
+            line[:]=b'\0'*len(line);self.reading=False;self.read_remaining=0;self.material_receiving=False
+            self._ios_final_reply=False
     def receive_material(self,operation,scratch):
         self._require(self.reply_step==_protocol(self.domain).MATERIAL_STEP and self.material_pending and not self.reading)
         return StorePreflightInput.receive_material(self,operation,scratch)

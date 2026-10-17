@@ -14,6 +14,13 @@ pub(crate) struct SelectedStoreMaterial {
 }
 #[derive(Clone,PartialEq,Eq)]
 enum StoreCommand {Access(wire::Context),Prepare(crate::local_store_prepare_protocol::Context),Reconcile(crate::local_store_reconcile_protocol::Context),Execute(crate::local_store_execute_protocol::Context)}
+impl StoreCommand {
+    fn apple_material(&self)->bool {match self {
+        Self::Access(c)=>c.platform==wire::AccessPlatform::Ios,
+        Self::Prepare(c)=>c.platform==crate::local_store_prepare_protocol::Platform::Ios,
+        Self::Reconcile(_)|Self::Execute(_)=>false,
+    }}
+}
 fn refused() -> BridgeError {
     BridgeError::new("local_store_credentials", "Select This Mac and assign the current Store credential for this release context, then review again.")
 }
@@ -50,7 +57,7 @@ impl SelectedStoreMaterial {
         if let Some(loan)=&self.execute_tools{bytes=bytes.checked_add(loan.own_backing_bytes()?)?;}
         Some(bytes)
     }
-    fn apple_access(&self)->bool {matches!(&self.command,Some(StoreCommand::Access(c)) if c.platform==wire::AccessPlatform::Ios)}
+    fn apple_material(&self)->bool {self.command.as_ref().is_some_and(StoreCommand::apple_material)}
     pub(crate) fn accepts_access_consent(&self,input:&wire::Start)->bool {
         matches!(&self.command,Some(StoreCommand::Access(c)) if input.matches_context(c))
     }
@@ -70,8 +77,8 @@ impl SelectedStoreMaterial {
     // payload bytes; holding the Arc keeps them alive until all original joins.
     pub(crate) fn parts(&self) -> Result<Vec<(&'static str, &[u8])>, BridgeError> {
         if self.command.is_none() { return Err(refused()); }
-        let mut parts = Vec::new(); parts.try_reserve_exact(if self.apple_access(){3}else{1}).map_err(|_| refused())?;
-        if self.apple_access(){
+        let mut parts = Vec::new(); parts.try_reserve_exact(if self.apple_material(){3}else{1}).map_err(|_| refused())?;
+        if self.apple_material(){
             let(key,key_id,issuer)=apple_parts(&self.payload).ok_or_else(refused)?;
             parts.extend([("asc-p8",key),("asc-key-id",key_id),("asc-issuer-id",issuer)]);
         }else{parts.push(("google-service-account", bytes(&self.payload).ok_or_else(refused)?));}
@@ -84,7 +91,7 @@ impl SelectedStoreMaterial {
         header.push(b'\n'); if header.len() > 1024 { return Err(refused()); } Ok(header)
     }
     pub(super) fn current(&self, state: &DocumentState, registration: u32, root: &asset_source::RegisteredRoot) -> bool {
-        let apple=self.apple_access();
+        let apple=self.apple_material();
         self.native.execution_mode == commands::ExecutionMode::Local
             && self.native.platform == if apple{Platform::Ios}else{Platform::Android}
             && matches!(self.native.purpose, Purpose::Full | Purpose::Store)
@@ -106,23 +113,23 @@ pub(super) fn borrow_material(state: &DocumentState, record: commands::RecordRef
     -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
     borrow_selected_material(state,record,context_revision,None)
 }
-fn borrow_selected_material(state:&DocumentState,record:commands::RecordRef<'_>,context_revision:u32,access:Option<&wire::Context>)
+fn borrow_selected_material(state:&DocumentState,record:commands::RecordRef<'_>,context_revision:u32,command:Option<StoreCommand>)
     ->Result<Arc<SelectedStoreMaterial>,BridgeError>{
     if record.record_id.len() != 32 || !record.record_id.bytes().all(|b| b.is_ascii_hexdigit())
         || record.expected_revision == 0 || context_revision == 0 { return Err(refused()); }
     let native = state.context.as_ref().filter(|v| v.revision == context_revision
         && !v.project_id.is_empty() && !v.draft.is_empty() && v.draft.len() <= 512 * 1024).ok_or_else(refused)?.clone();
     let key = RecordKey { id: Token(record.record_id.into()), revision: record.expected_revision };
-    let kind=if access.is_some_and(|c|c.platform==wire::AccessPlatform::Ios){Kind::AscP8}else{Kind::GoogleServiceAccount};
+    let kind=if command.as_ref().is_some_and(StoreCommand::apple_material){Kind::AscP8}else{Kind::GoogleServiceAccount};
     let payload = github_secret::assigned(state, &key, kind, &native).ok_or_else(refused)?.clone();
-    let original = Arc::new(SelectedStoreMaterial { native, key, payload, command: access.map(|c|StoreCommand::Access(c.clone())),prepare_document:None,execute_tools:None });
+    let original = Arc::new(SelectedStoreMaterial { native, key, payload, command,prepare_document:None,execute_tools:None });
     if !original.current(state, original.native.registry_generation, &original.native.project) { return Err(refused()); }
     Ok(original)
 }
 pub(super) fn borrow_preflight_material(state: &DocumentState, context: &wire::Context,
     registration: u32, project: &asset_source::RegisteredRoot) -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
     let original = borrow_selected_material(state, commands::RecordRef { record_id: &context.record_id,
-        expected_revision: context.record_revision }, context.credential_context_revision,Some(context))?;
+        expected_revision: context.record_revision }, context.credential_context_revision,Some(StoreCommand::Access(context.clone())))?;
     if !original.matches(context, registration, project) || !original.current(state, registration, project) { return Err(refused()); }
     original.parts()?;
     Ok(original)
@@ -216,6 +223,32 @@ mod tests {
         let held=Arc::downgrade(&original.payload);state.lock_pending=true;assert!(!original.current(&state,7,&root));
         drop(parts);drop(state);assert!(held.upgrade().is_some());assert_eq!(original.parts().unwrap().len(),3);
         drop(original);assert!(held.upgrade().is_none());
+    }
+    #[test]
+    fn apple_prepare_loan_binds_original_command_and_consent_without_google_or_document_grant(){
+        use crate::local_store_prepare_protocol as prepare;
+        let mut state=apple_model();let root=state.context.as_ref().unwrap().project.clone();
+        let mut input=prepare::tests::input();input["platform"]=serde_json::json!("ios");input["confirmation"]=serde_json::json!("candidate:ios:1.2.3:42");
+        input["projectId"]=serde_json::json!("inert-project");input["credentialContextRevision"]=serde_json::json!(2);
+        input["recordId"]=serde_json::json!("a".repeat(32));input["recordRevision"]=serde_json::json!(1);
+        let c=prepare::prepare(&input).unwrap().context();
+        let original=borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,
+            Some(StoreCommand::Prepare(c.clone()))).unwrap();
+        assert!(original.prepare_matches(&c,7,&root)&&original.current(&state,7,&root));
+        assert!(!original.prepare_current(&c,7,&root)); // No actual Document minted this comparison fixture.
+        let parts=original.parts().unwrap();assert_eq!(parts.iter().map(|p|p.0).collect::<Vec<_>>(),vec!["asc-p8","asc-key-id","asc-issuer-id"]);
+        assert_eq!(parts[0].1.as_ptr(),state.records[0].payload.material.as_ref().unwrap().bytes().as_ptr());
+        assert_eq!(parts[1].1.as_ptr(),state.records[0].payload.fields.as_ref().unwrap().borrow_value("keyId").unwrap().as_ptr());
+        assert_eq!(parts[2].1.as_ptr(),state.records[0].payload.fields.as_ref().unwrap().borrow_value("issuerId").unwrap().as_ptr());
+        for token in [prepare::CONSENT,prepare::APPLE_CONSENT]{let start=prepare::start(&serde_json::json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":token})).unwrap();
+            assert_eq!(original.accepts_prepare_consent(&start),token==prepare::APPLE_CONSENT);}
+        assert!(original.with_bytes(&state,7,&root,|_,_|Ok(())).is_err());
+        assert!(borrow_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2).is_err());
+        let mut android=c.clone();android.platform=prepare::Platform::Android;android.confirmation="candidate:android:1.2.3:42".into();
+        assert!(!original.prepare_matches(&android,7,&root));
+        assert!(borrow_selected_material(&state,commands::RecordRef{record_id:&c.record_id,expected_revision:1},2,Some(StoreCommand::Prepare(android))).is_err());
+        assert!(original.own_retained_heap_bytes().unwrap()>=c.confirmation.capacity()+c.candidate_sha256.capacity());
+        state.assignments[0].context_revision+=1;assert!(!original.current(&state,7,&root));
     }
     #[test]
     fn apple_access_key_and_scalar_bounds_refuse_before_private_writer(){
@@ -368,12 +401,16 @@ mod tests {
 }
 
 impl SelectedStoreMaterial {
+    pub(crate) fn accepts_prepare_consent(&self,input:&crate::local_store_prepare_protocol::Start)->bool {
+        matches!(&self.command,Some(StoreCommand::Prepare(c)) if input.matches_context(c))
+    }
     pub(crate) fn prepare_matches(&self,context:&crate::local_store_prepare_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
         matches!(self.command.as_ref(),Some(StoreCommand::Prepare(c)) if c==context)
             &&self.native.registry_generation==registration&&self.native.project==*root&&self.native.project_id==context.project_id
             &&self.native.revision==context.credential_context_revision&&self.key.id.0==context.record_id&&self.key.revision==context.record_revision
-            &&self.native.execution_mode==commands::ExecutionMode::Local&&self.native.platform==Platform::Android&&self.native.stage==Stage::Candidate
-            &&matches!(self.native.purpose,Purpose::Full|Purpose::Store)
+            &&self.native.execution_mode==commands::ExecutionMode::Local
+            &&self.native.platform==if context.platform==crate::local_store_prepare_protocol::Platform::Ios{Platform::Ios}else{Platform::Android}
+            &&self.native.stage==Stage::Candidate&&matches!(self.native.purpose,Purpose::Full|Purpose::Store)
     }
     fn prepare_document_matches(&self,document:&Arc<Inner>,state:&DocumentState,context:&crate::local_store_prepare_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
         self.prepare_matches(context,registration,root)&&self.prepare_document.as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|held|Arc::ptr_eq(&held,document))
@@ -393,9 +430,10 @@ impl DocumentBinding {
     pub(super) fn review_store_prepare_material(&self,state:&DocumentState,context:&crate::local_store_prepare_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->Result<Arc<SelectedStoreMaterial>,BridgeError>{
         if !cfg!(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))||!self.native_qualified()
             ||encrypted_mode(state)&&!self.persistence_qualified(){return Err(refused());}
-        let mut original=borrow_material(state,commands::RecordRef{record_id:&context.record_id,expected_revision:context.record_revision},context.credential_context_revision)?;
+        let mut original=borrow_selected_material(state,commands::RecordRef{record_id:&context.record_id,expected_revision:context.record_revision},
+            context.credential_context_revision,Some(StoreCommand::Prepare(context.clone())))?;
         let held=Arc::get_mut(&mut original).ok_or_else(refused)?;
-        held.command=Some(StoreCommand::Prepare(context.clone()));held.prepare_document=Some(Arc::downgrade(&self.inner));
+        held.prepare_document=Some(Arc::downgrade(&self.inner));
         if !original.prepare_document_matches(&self.inner,state,context,registration,root){return Err(refused());}original.parts()?;Ok(original)
     }
     pub(super) fn recheck_store_prepare_material(&self,state:&DocumentState,original:&Arc<SelectedStoreMaterial>,registration:u32,root:&asset_source::RegisteredRoot)->Result<(),BridgeError>{

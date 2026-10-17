@@ -70,7 +70,7 @@ class IOSCandidateHistoryTests(unittest.TestCase):
         self.assertEqual(self.snapshot(directory), before)
 
     def test_ios_platform_context_is_exact_and_android_namespace_is_not_adopted(self):
-        for action in ['verify','enroll','review-prepared','review-execution','review-reconcile','review-recovery']:
+        for action in ['verify','enroll','review-execution','review-reconcile','review-recovery']:
             with self.assertRaises(wire.ProtocolError): wire.context(dict(projectId='p', executionMode='local', action=action, platform='ios', candidateOperationId=android.CANDIDATE))
         for platform in [None,'android','macos']:
             with self.assertRaises(wire.ProtocolError): wire.context(dict(projectId='p',executionMode='local',action='review-inputs',platform=platform,candidateOperationId=android.CANDIDATE))

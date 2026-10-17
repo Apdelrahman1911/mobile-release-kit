@@ -1,6 +1,6 @@
 import { iosCandidateInputs, IOS_CANDIDATE_CONSENT } from './iosArchiveProtocol.ts';
 import type { LocalExecutionReceipt } from './localStoreExecuteTypes.ts';
-import type { LocalPreparedIntent } from './localStorePrepareTypes.ts';
+import type { LocalPreparedIntent, IOSPreparedIntent } from './localStorePrepareTypes.ts';
 import { copyBoundedComparisonData, sameOfflineData } from './offlinePreflightProtocol.ts';
 import type { ApiError } from './types.ts';
 import type { LocalHistoryStatus, PrepareLocalHistory } from './localReleaseHistoryTypes.ts';
@@ -50,6 +50,17 @@ export function preparedIntentSummary(i: unknown, operationId: unknown): i is Lo
   return keys(i, ['operationId', 'candidateSha256', 'intentSha256', 'storePreconditionSha256', 'sourceCommit', 'sourceTree', 'applicationId', 'version', 'destination', 'observedAt', 'limitations']) &&
     hex(i.storePreconditionSha256, 64) && sameOfflineData(i.limitations, preparedLimits) && localStoreSummaryIdentity(i, operationId);
 }
+export function iosPreparedIntentSummary(i: unknown, operationId: unknown): i is IOSPreparedIntent {
+  if (!keys(i, ['operationId', 'candidateSha256', 'intentSha256', 'storePreconditionSha256', 'sourceCommit', 'sourceTree', 'bundleId', 'appStoreAppId', 'version', 'destination', 'observedAt', 'limitations']) ||
+    !uuid(i.operationId) || i.operationId !== operationId || !hex(i.candidateSha256, 64) || !hex(i.intentSha256, 64) || !hex(i.storePreconditionSha256, 64) || !hex(i.sourceCommit, 40) || !hex(i.sourceTree, 40) ||
+    typeof i.bundleId !== 'string' || i.bundleId.length > 255 || !/^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/.test(i.bundleId) ||
+    typeof i.appStoreAppId !== 'string' || !/^[0-9]{1,20}$/.test(i.appStoreAppId) ||
+    !keys(i.version, ['name', 'build']) || typeof i.version.name !== 'string' || !/^[0-9A-Za-z.+-]{1,64}$/.test(i.version.name) || !bounded(i.version.build, 2100000000) ||
+    !sameOfflineData(i.destination, {channel:'testflight-internal'}) ||
+    !sameOfflineData(i.limitations, ['non-publishing','prepare-not-execute','current-asc-snapshot-may-change','current-bundle-not-historical-finality','saved-inputs-not-atomic']) ||
+    typeof i.observedAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(i.observedAt) || !Number.isFinite(Date.parse(i.observedAt))) return false;
+  return new Date(i.observedAt).toISOString() === i.observedAt.replace('Z', '.000Z');
+}
 // Shared exact13-field DATA, not an Execute context or previous finality.
 export function executionReceiptSummary(i: unknown, operationId: unknown): i is LocalExecutionReceipt {
   return keys(i, ['operationId', 'candidateSha256', 'intentSha256', 'receiptSha256', 'authorizationId', 'sourceCommit', 'sourceTree', 'applicationId', 'version', 'destination', 'observedAt', 'result', 'limitations']) &&
@@ -67,7 +78,7 @@ export function recoveryReceiptFields(i: unknown, operationId: unknown): boolean
 }
 function request(v:unknown):boolean{
  const candidate=object(v)&&candidateHistoryAction(v.action),ios=object(v)&&Object.hasOwn(v,'platform');
- return (!ios||v.platform==='ios'&&['review-inputs','abandon-inputs'].includes(v.action as string))&&keys(v,[...contextKeys,...(candidate?['candidateOperationId']:[]),...(ios?['platform']:[])])&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&v.executionMode==='local'&&(candidate?uuid(v.candidateOperationId):member(['enroll','verify'],v.action));
+ return (!ios||v.platform==='ios'&&['review-inputs','abandon-inputs','review-prepared'].includes(v.action as string))&&keys(v,[...contextKeys,...(candidate?['candidateOperationId']:[]),...(ios?['platform']:[])])&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&v.executionMode==='local'&&(candidate?uuid(v.candidateOperationId):member(['enroll','verify'],v.action));
 }
 export function parseLocalHistoryRequest(input:unknown):PrepareLocalHistory|null{
  try{const v=copyBoundedComparisonData(input,8192);return request(v)?v as PrepareLocalHistory:null;}catch{return null;}
@@ -103,7 +114,7 @@ export function parseLocalHistoryStatus(input:unknown):LocalHistoryStatus|null{
     const allowed=context.action==='review-prepared'?(r.headSequence as number)>=5&&selected.phase==='prepared':(r.headSequence as number)>=6&&r.history.at(-1)===selected&&member(['execute-pending','settled-success','settled-failure','reconciliation-required'],selected.phase);
     if(!allowed||!object(prepared)||prepared.observation!=='current-prepared-files-only'||prepared.priorPrepareFinality!=='not-established')return null;
     const {observation:_,priorPrepareFinality:__,...summary}=prepared;
-    if(!preparedIntentSummary(summary,context.candidateOperationId))return null;
+    if(!(context.platform==='ios'?iosPreparedIntentSummary(summary,context.candidateOperationId):preparedIntentSummary(summary,context.candidateOperationId)))return null;
    }else if(context.action==='review-execution'){
     const receipt=r.executionReceipt;
     if((r.headSequence as number)<7||selected.phase!=='settled-success'||!object(receipt)||receipt.observation!=='current-execution-files-only'||receipt.priorExecutionFinality!=='not-established')return null;

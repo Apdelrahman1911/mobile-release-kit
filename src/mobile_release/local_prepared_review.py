@@ -10,7 +10,7 @@ from .build_inputs import _app_private_directory, _read_file
 from .local_candidate_bundle import CandidateBundleReview
 from .local_release_intent import decode_local_operation_intent, MAX_LOCAL_INTENT_BYTES
 from .provenance import canonical_json_bytes, validate_store_precondition, _reject_duplicate_pairs
-from ._desktop_store_prepare_protocol import LIMITATIONS
+from ._desktop_store_prepare_protocol import LIMITATIONS, IOS_LIMITATIONS
 
 FILES = {'operation-intent.json': MAX_LOCAL_INTENT_BYTES, 'store-precondition.json': 4 << 20}
 MEMORY_LIMIT = 96 << 20
@@ -79,9 +79,11 @@ def _scan(owner, out, *, kind='prepared'):
             owner.prepared_scan_state = 'unknown'; owner.guard._abort(ValueError('Prepared directory original unsettled'))
     owner.checkpoint(); out.check()
 
-def _intent(raw, *, enrollment, operation_id, rows, manifest, checkpoint):
+def _intent(raw, *, enrollment, operation_id, rows, manifest, checkpoint, platform='android'):
+    require(platform in {'android','ios'})
+    apple=platform=='ios'
     decode_quote(raw, FILES['operation-intent.json'], checkpoint=checkpoint)
-    value = decode_local_operation_intent(raw)
+    value = decode_local_operation_intent(raw,platform=platform)
     first, ready, pending, prepared = [r['payload'] for r in rows]
     source = value['operationSource']; version = value['version']; snapshot = value['storePrecondition']
     require(value['project'] == enrollment and value['operationId'] == operation_id
@@ -89,14 +91,14 @@ def _intent(raw, *, enrollment, operation_id, rows, manifest, checkpoint):
         and value['integrity']['sha256'] == prepared['intentSha256']
         and source['commit'] == manifest['sourceCommit'] == first['sourceCommit']
         and source['tree'] == manifest['sourceTree'] == first['sourceTree']
-        and value['application']['id'] == manifest['applicationId']
+        and value['application']['id'] == manifest['bundleId' if apple else 'applicationId']
         and version == {'marketing': manifest['savedVersion']['name'], 'build': manifest['savedVersion']['build']}
         and value['configuration'] == {'path': 'release/mobile-release.json', 'sha256': first['configurationSha256'],
                                        'metadataSha256': manifest['files'][1]['sha256']}
         and value['preparedBy']['confirmationSha256'] == pending['confirmationSha256']
-        and value['signing'] == [{'platform': 'android', 'kind': 'android-upload', 'certificateSha256': manifest['signerSha256']}])
-    for actual, expected in zip(value['artifacts'], manifest['files']):
-        require(actual['fileName'] == expected['fileName'] and actual['size'] == expected['bytes']
+        and value['signing'] == ([manifest['signing']] if apple else [{'platform': 'android', 'kind': 'android-upload', 'certificateSha256': manifest['signerSha256']}]))
+    for index,(actual, expected) in enumerate(zip(value['artifacts'], manifest['files'])):
+        require(actual['fileName'] == (expected['fileName'][7:] if apple and index==0 else expected['fileName']) and actual['size'] == expected['bytes']
                 and actual['sha256'] == expected['sha256'] and actual['architectures'] == [])
     summary = dict(operationId=operation_id, candidateSha256=value['candidateSha256'],
         intentSha256=value['integrity']['sha256'], storePreconditionSha256=prepared['storePreconditionSha256'],
@@ -104,17 +106,22 @@ def _intent(raw, *, enrollment, operation_id, rows, manifest, checkpoint):
         version={'name': version['marketing'], 'build': version['build']}, destination=value['destination'],
         observedAt=snapshot['observedAt'], limitations=list(LIMITATIONS),
         observation='current-prepared-files-only', priorPrepareFinality='not-established')
+    if apple:
+        require(value['artifacts'][3]==dict(logicalName='ios-archive',platform='ios',kind='xcarchive',**manifest['archive']))
+        summary['bundleId']=summary.pop('applicationId');summary['appStoreAppId']=value['application']['storeAppId']
+        summary['limitations']=list(IOS_LIMITATIONS)
     # The original raw snapshot digest is checked separately, NEVER substituted
     # with this semantic comparison of two independently parsed documents.
     return summary, hashlib.sha256(canonical_json_bytes(snapshot)).hexdigest()
 
-def _snapshot(raw, expected, *, checkpoint=None, retained_bytes=0):
+def _snapshot(raw, expected, *, checkpoint=None, retained_bytes=0, platform='android'):
+    require(platform in {'android','ios'})
     require(type(retained_bytes) is int and 0 <= retained_bytes <= MAX_LOCAL_INTENT_BYTES)
     require(decode_quote(raw, FILES['store-precondition.json'], checkpoint=checkpoint)
             + retained_bytes <= MEMORY_LIMIT)
     value = json.loads(raw.decode('utf-8'), object_pairs_hook=_reject_duplicate_pairs,
         parse_constant=lambda _: require(False))
-    validate_store_precondition(value, stage='candidate', platform='android')
+    validate_store_precondition(value, stage='candidate', platform=platform)
     require(hashlib.sha256(canonical_json_bytes(value)).hexdigest() == expected)
 
 @contextmanager
@@ -126,6 +133,8 @@ def _prepared_files(owner, enrollment):
     """
     from .local_release_history import LocalHistoryRun
     require(type(owner) is LocalHistoryRun and owner.request.context['action'] in {'review-prepared', 'review-execution', 'review-reconcile', 'review-recovery'})
+    platform=owner.request.context.get('platform','android')
+    require(platform=='android' or platform=='ios' and owner.request.context['action']=='review-prepared')
     recovery = owner.request.context['action'] == 'review-recovery'
     execution = owner.request.context['action'] == 'review-execution'
     reconcile = owner.request.context['action'] == 'review-reconcile'
@@ -145,10 +154,14 @@ def _prepared_files(owner, enrollment):
     n = owner.request.native['rootIdentity']
     require(owner.journal._rows[0][0]['payload']['rootIdentity'] == dict(device=int(n['device']), inode=int(n['inode']),
         mode=n['mode'] & 0o7777, uid=n['uid'], gid=n['gid']))
-    bundle = CandidateBundleReview(owner, operation_id=operation_id, enrollment=enrollment,
+    reader=CandidateBundleReview
+    if platform=='ios':
+        from .local_ios_candidate_review import IOSCandidateBundleReview
+        reader=IOSCandidateBundleReview
+    bundle = reader(owner, operation_id=operation_id, enrollment=enrollment,
         pending=rows[0]['payload'], candidate_sha256=rows[1]['payload']['candidateSha256'])
     bundle.acquire(); bundle.finish()  # Genuine full hashes and positive close before the two-file phase.
-    require(bundle.closed and not bundle.failed)
+    require(bundle.closed and not bundle.failed and (platform!='ios' or bundle.tree_closed()))
     path = owner.root / '.mobile-release/store/local' / UUID(operation_id).hex
     with _app_private_directory(path, app_root=owner.root, cancellation=owner.guard, create=False) as out:
         require(out is not None); owner.prepared_readers.append(out)
@@ -158,7 +171,7 @@ def _prepared_files(owner, enrollment):
         observed = _read_file(out.fd, 'operation-intent.json', owner.guard, FILES['operation-intent.json'], private=True)
         require(observed is not None)
         intent_binding, raw = observed; del observed
-        summary, snapshot_digest = _intent(raw, enrollment=enrollment, operation_id=operation_id, rows=rows[:4], manifest=bundle.value, checkpoint=owner.checkpoint)
+        summary, snapshot_digest = _intent(raw, enrollment=enrollment, operation_id=operation_id, rows=rows[:4], manifest=bundle.value, checkpoint=owner.checkpoint, platform=platform)
         if reconcile or recovery:
             from ._desktop_store_reconcile_protocol import execution_binding
             from .local_release_intent import decode_local_operation_intent
@@ -173,7 +186,7 @@ def _prepared_files(owner, enrollment):
         snapshot_binding, raw = observed; del observed
         require(snapshot_binding['sha256'] == rows[3]['payload']['storePreconditionSha256'])
         _snapshot(raw, snapshot_digest, checkpoint=owner.checkpoint,
-                  retained_bytes=0 if intent_raw is None else len(intent_raw)); del raw
+                  retained_bytes=0 if intent_raw is None else len(intent_raw), platform=platform); del raw
         yield summary, intent_raw, rows
         intent_raw = None
         # Every leaf is re-read under its original identity/hash after parsing.

@@ -1,4 +1,4 @@
-import { preparedIntentSummary } from './localReleaseHistoryProtocol.ts';
+import { preparedIntentSummary, iosPreparedIntentSummary } from './localReleaseHistoryProtocol.ts';
 import { copyBoundedComparisonData, sameOfflineData } from './offlinePreflightProtocol.ts';
 import { parseLocalStoreRequest } from './localStorePreflightProtocol.ts';
 import type { ApiError } from './types.ts';
@@ -6,6 +6,8 @@ import type { LocalStorePrepareStatus, PrepareLocalStoreIntent } from './localSt
 
 export const STORE_PREPARE_EVENT = 'local-store-prepare-state-changed';
 export const STORE_PREPARE_CONSENT = 'local-android-store-prepare-v1' as const;
+export const IOS_STORE_PREPARE_CONSENT = 'local-ios-store-prepare-v1' as const;
+export const storePrepareConsent = (platform?: 'ios') => platform === 'ios' ? IOS_STORE_PREPARE_CONSENT : STORE_PREPARE_CONSENT;
 export type StorePrepareCommand = 'prepare_local_store_prepare' | 'start_local_store_prepare' | 'local_store_prepare_status' | 'cancel_local_store_prepare';
 const phases = ['awaiting-consent', 'starting', 'running', 'stopping', 'terminal', 'unknown'];
 const outcomes = ['complete', 'refused', 'cancelled', 'timed-out', 'failed', 'unknown'];
@@ -18,10 +20,11 @@ const keys = (v: unknown, names: string[]): v is Record<string, unknown> => obje
 const member = (values: string[], v: unknown) => typeof v === 'string' && values.includes(v);
 const contextKeys = ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'credentialContextRevision', 'recordId', 'recordRevision', 'executionMode', 'candidateOperationId', 'candidateSha256', 'confirmation'];
 function request(v: unknown): v is PrepareLocalStoreIntent {
-  if (!keys(v, contextKeys) || !uuid(v.candidateOperationId) || !hex(v.candidateSha256, 64)) return false;
+  const ios = object(v) && Object.hasOwn(v, 'platform');
+  if (!keys(v, [...contextKeys, ...(ios ? ['platform'] : [])]) || ios && v.platform !== 'ios' || !uuid(v.candidateOperationId) || !hex(v.candidateSha256, 64)) return false;
   const base = { ...v }; delete base.candidateOperationId; delete base.candidateSha256; delete base.confirmation;
   const parsed = parseLocalStoreRequest(base);
-  return !!parsed && v.confirmation === `candidate:android:${parsed.savedVersion.name}:${parsed.savedVersion.build}`;
+  return !!parsed && v.confirmation === `candidate:${parsed.platform ?? 'android'}:${parsed.savedVersion.name}:${parsed.savedVersion.build}`;
 }
 export function parseLocalStorePrepareRequest(input: unknown): PrepareLocalStoreIntent | null {
   try { const v = copyBoundedComparisonData(input, 16384); return request(v) ? v : null; } catch { return null; }
@@ -31,7 +34,7 @@ export function encodeLocalStorePrepareRequest(command: StorePrepareCommand, inp
     const v = copyBoundedComparisonData(input, 16384);
     const valid = command === 'prepare_local_store_prepare' ? request(v) : command === 'local_store_prepare_status' ? keys(v, []) :
       keys(v, command === 'start_local_store_prepare' ? ['operationId', 'ownerGeneration', 'consentVersion'] : ['operationId', 'ownerGeneration']) &&
-      hex(v.operationId, 32) && hex(v.ownerGeneration, 32) && (command !== 'start_local_store_prepare' || v.consentVersion === STORE_PREPARE_CONSENT);
+      hex(v.operationId, 32) && hex(v.ownerGeneration, 32) && (command !== 'start_local_store_prepare' || (v.consentVersion === STORE_PREPARE_CONSENT || v.consentVersion === IOS_STORE_PREPARE_CONSENT));
     if (!valid) return null;
     const bytes = new TextEncoder().encode(JSON.stringify(v)); return bytes.length <= 16384 ? bytes : null;
   } catch { return null; }
@@ -45,22 +48,23 @@ export function parseLocalStorePrepareStatus(input: unknown): LocalStorePrepareS
     if (op === null) return v as unknown as LocalStorePrepareStatus;
     if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result']) || !hex(op.operationId, 32) || !hex(op.ownerGeneration, 32) || !member(phases, op.phase) || typeof op.intentUsable !== 'boolean' || !member(reasons, op.reason)) return null;
     const c = op.context;
-    if (!keys(c, [...contextKeys, 'platform', 'operation']) || c.platform !== 'android' || c.operation !== 'local-store-prepare') return null;
-    const prepared = { ...c }; delete prepared.platform; delete prepared.operation;
+    if (!keys(c, [...contextKeys, 'platform', 'operation']) || !member(['android','ios'], c.platform) || c.operation !== 'local-store-prepare') return null;
+    const prepared = { ...c }; if (c.platform === 'android') delete prepared.platform; delete prepared.operation;
     if (!request(prepared)) return null;
     if (op.phase === 'terminal') { if (!member(outcomes, op.outcome) || op.outcome === 'unknown' || op.intentUsable) return null; }
     else if (op.phase === 'unknown') { if (op.outcome !== 'unknown' || op.reason !== 'cleanup-unknown' || op.intentUsable || op.result !== null) return null; }
     else if (op.outcome !== null || op.result !== null || op.intentUsable && op.phase !== 'awaiting-consent') return null;
     if (op.result !== null) {
       const r = op.result;
-      if (op.phase !== 'terminal' || op.outcome !== 'complete' || op.reason !== 'none' || !keys(r, ['schemaVersion', 'scope', 'headSequence', 'preparedIntent']) || r.schemaVersion !== 1 || r.scope !== 'local-android-store-prepare' || !counter(r.headSequence) || r.headSequence < 1 || r.headSequence > 513) return null;
+      if (op.phase !== 'terminal' || op.outcome !== 'complete' || op.reason !== 'none' || !keys(r, ['schemaVersion', 'scope', 'headSequence', 'preparedIntent']) || r.schemaVersion !== 1 || r.scope !== (c.platform === 'ios' ? 'local-ios-store-prepare' : 'local-android-store-prepare') || !counter(r.headSequence) || r.headSequence < (c.platform === 'ios' ? 5 : 1) || r.headSequence > 513) return null;
       const i = r.preparedIntent;
-      if (!preparedIntentSummary(i, prepared.candidateOperationId) || i.candidateSha256 !== prepared.candidateSha256 ||
-        !sameOfflineData(i.version, { name: prepared.savedVersion.name, build: prepared.savedVersion.build })) return null;
+      const summary = c.platform === 'ios' ? (iosPreparedIntentSummary(i, prepared.candidateOperationId) ? i : null) : (preparedIntentSummary(i, prepared.candidateOperationId) ? i : null);
+      if (!summary || summary.candidateSha256 !== prepared.candidateSha256 ||
+        !sameOfflineData(summary.version, { name: prepared.savedVersion.name, build: prepared.savedVersion.build })) return null;
     } else if (op.outcome === 'complete') return null;
     return v as unknown as LocalStorePrepareStatus;
   } catch { return null; }
 }
 export function localStorePrepareError(_value?: unknown): ApiError {
-  return { code: 'local_store_prepare_unavailable', retryable: false, message: 'The original Play preparation is unavailable or unverified. Keep its history and files; refresh status or cancel the original operation, not a new release.' };
+  return { code: 'local_store_prepare_unavailable', retryable: false, message: 'The original Store preparation is unavailable or unverified. Keep its history and files; refresh status or cancel the original operation, not a new release.' };
 }

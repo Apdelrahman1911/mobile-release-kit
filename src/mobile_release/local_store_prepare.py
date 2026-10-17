@@ -6,7 +6,8 @@ from ._desktop_store_prepare_protocol import require
 # successful phases are retired; failed/unknown phases never enter successors.
 ORIGINAL_LIMIT=256
 
-def resource_quote(*,project_depth,version_parent_depth,source,history_depth):
+def resource_quote(*,project_depth,version_parent_depth,source,history_depth,platform='android'):
+    require(platform in {'android','ios'})
     require(all(type(n) is int and 1<=n<=128 for n in
         (project_depth,version_parent_depth,source,history_depth)) and project_depth<=24 and source<=96)
     p,v,s,h=project_depth,version_parent_depth,source,history_depth
@@ -28,10 +29,18 @@ def resource_quote(*,project_depth,version_parent_depth,source,history_depth):
     # All earlier original owners MUST positively close before publication.
     # New output parent, two document originals+writer, reopened journal.
     publication_phase=fixed+(p+4)+4+journal+2
-    total=max(source_phase,pending_phase,material_phase,lane_phase,publication_phase)
+    # iOS archive traversal never overlaps a native command. The final scan
+    # follows real Store resources.close(), not an assumed future close. The
+    # original pending marker/HOME/received owners remain charged below.
+    tree_base=tree_phase=0
+    if platform=='ios':
+        from .ios_artifacts import MAX_DEPTH
+        tree_base=fixed+namespace+project+s+max(journal+2,16+(p+3)+4)
+        tree_phase=tree_base+bundle+MAX_DEPTH+2
+    total=max(source_phase,pending_phase,material_phase,lane_phase,publication_phase,tree_phase)
     require(total<=ORIGINAL_LIMIT)
     return dict(source=source_phase,pending=pending_phase,material=material_phase,
-        lane=lane_phase,publication=publication_phase,total=total)
+        lane=lane_phase,publication=publication_phase,tree=tree_phase,tree_base=tree_base,total=total)
 
 from contextlib import contextmanager
 import hashlib
@@ -144,6 +153,7 @@ class LocalStorePrepareRun:
         self.operation=self;self.root=Path(request.native['projectRoot'])
         self._request_bytes=canonical([request.context,request.native])
         self.invocation=self.runtime=self.home=self.received=self.material_original=None
+        self._apple_material=self._received_material=None
         self.config=self.version=self.record=self.store_request=None
         self.observation=self.bundle=self.readback=None
         self.directories=[];self.reads=[];self.saved_bytes={};self.scratches=[];self.journals=[];self.publishers=[]
@@ -165,6 +175,19 @@ class LocalStorePrepareRun:
         self.guard.check();self.source.lease_post()
     remember=StorePreflightRun.remember
     validate_material_shape=staticmethod(StorePreflightRun.validate_material_shape)
+    validate_apple_shape=staticmethod(StorePreflightRun.validate_apple_shape)
+    @property
+    def apple_prepare(self):
+        return type(self) is LocalStorePrepareRun and self.request.context['platform']=='ios'
+    @property
+    def runtime_count(self):
+        return 7 if self.apple_prepare else 6
+    def _received_post(self):
+        self.checkpoint()
+        require(self.material_original is not None and self.source._material is self._received_material)
+        self.received.require(self.material_original)
+        if self.apple_prepare:self.validate_apple_shape(self._received_material)
+    apple_material_command=StorePreflightRun.apple_material_command
     _saved=StorePreflightRun._saved
     _source_post=StorePreflightRun._source_post
     def _read(self,relative,maximum):
@@ -173,7 +196,8 @@ class LocalStorePrepareRun:
         self.checkpoint()
         value=resource_quote(project_depth=len(self.root.parts),
             version_parent_depth=len((self.root/self.request.context['savedVersion']['source']).parent.parts),
-            source=source,history_depth=len(Path(self.request.native['home']).parts))
+            source=source,history_depth=len(Path(self.request.native['home']).parts),
+            platform='ios' if self.apple_prepare else 'android')
         if self.quote is not None:require(value['total']<=self.quote['total'])
         self.quote=value;return value
     def bind_invocation(self,owner):
@@ -203,7 +227,7 @@ class LocalStorePrepareRun:
         self.checkpoint();index=len(self._source_rows)
         require(source is self.observation and source._composition is self and source.execution_source is None
             and source.endpoint==self.source.work_end and self._pending is None and index<8
-            and (index<6 and not self._runtime_rows or index>=6 and len(self._runtime_rows)==6))
+            and (index<6 and not self._runtime_rows or index>=6 and len(self._runtime_rows)==self.runtime_count))
         initial=(["config","--local","--no-includes","--null","--list"],
             ["rev-parse","--shared-index-path","HEAD","HEAD^{tree}"],
             ["ls-files","--stage","-z"],["ls-files","-v","-z"])
@@ -231,12 +255,20 @@ class LocalStorePrepareRun:
     @contextmanager
     def command(self,runtime,argv,*,capture):
         self.checkpoint();self.runtime_admitted(runtime)
-        expected=(*_fastlane_probe_commands(runtime.tooling_root),
-            ('bundle','exec','ruby',str(runtime.tooling_root/'fastlane/run_lane.rb'),'android_internal_upload'))
         index=len(self._runtime_rows)
-        require(self._store_entered and len(self._source_rows)==6 and self._pending is None and index<6
-            and tuple(argv)==expected[index] and capture is (index<5))
-        self._arm('probe' if index<5 else 'lane',argv,capture,60 if index<5 else 900,2<<20,self._runtime_rows)
+        expected=tuple(_fastlane_probe_commands(runtime.tooling_root))
+        if self.apple_prepare:
+            # P8 is already selected by the original material validator; callers
+            # cannot arm this role using a path or a fabricated material object.
+            expected+=((self.apple_material_command(self._apple_material) if index==5 else ()),)
+        expected+=(('bundle','exec','ruby',str(runtime.tooling_root/'fastlane/run_lane.rb'),
+                    'ios_testflight_internal' if self.apple_prepare else 'android_internal_upload'),)
+        lane=self.runtime_count-1
+        require(self._store_entered and len(self._source_rows)==6 and self._pending is None and index<self.runtime_count
+            and tuple(argv)==expected[index] and capture is (index<lane))
+        self._arm('lane' if index==lane else 'apple-key' if self.apple_prepare and index==5 else 'probe',
+            argv,capture,900 if index==lane else 30 if self.apple_prepare and index==5 else 60,
+            4096 if self.apple_prepare and index==5 else 2<<20,self._runtime_rows)
         try:
             yield
             # The unchanged probe caller checks nonzero. Lane's actual return
@@ -261,7 +293,7 @@ class LocalStorePrepareRun:
         from . import _store_lane_contract as lane
         self.checkpoint()
         require(files is self.record._files_owner() and files.mode==('prepare' if type(self) is LocalStorePrepareRun else 'execute') and files.phase=='SEALING'
-            and len(self._runtime_rows)==5 and self._pending is None)
+            and len(self._runtime_rows)==self.runtime_count-1 and self._pending is None)
         # Same clock label already enforced by the existing native lane codec.
         # Map once from original monotonic endpoint, rounded DOWN; never renew.
         run=math.floor(self.source.work_end*1e9)
@@ -274,6 +306,11 @@ class LocalStorePrepareRun:
         return True
     def material_values(self):
         self.checkpoint();require(self._store_entered and self.source.reply_step==self.protocol.MATERIAL_STEP and self.material_original is not None)
+        if self.apple_prepare:
+            self._received_post()
+            return {'MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH':str(self.received.require(self.material_original)),
+                'MOBILE_RELEASE_ASC_KEY_ID':self._received_material[1].decode('ascii'),
+                'MOBILE_RELEASE_ASC_ISSUER_ID':self._received_material[2].decode('ascii')}
         return {'GOOGLE_APPLICATION_CREDENTIALS':str(self.received.require(self.material_original))}
     def admit_store(self,config,release,request,record,guard,invocation):
         self.checkpoint()
@@ -281,7 +318,7 @@ class LocalStorePrepareRun:
             and record is self.record and guard is self.guard and invocation is self.invocation
             and request.prepare and not request.execute and request.operation_intent is None
             and request.recovery_run_id is None and request.recovery_confirmation is None
-            and request.stage=='candidate' and request.platform=='android' and self.source.reply_step==self.protocol.MATERIAL_STEP
+            and request.stage=='candidate' and request.platform==('ios' if self.apple_prepare else 'android') and self.source.reply_step==self.protocol.MATERIAL_STEP
             and self.pending_head is not None and self.material_original is not None
             and len(self._source_rows)==6 and not self._runtime_rows and self.bundle is not None and not self.bundle.closed)
         self._store_entered=True;return True
@@ -311,12 +348,23 @@ class LocalStorePrepareRun:
             and last['payload']=={'candidateSha256':c['candidateSha256']} and head['sequence']<=MAX_ENTRIES-2)
         previous=[row for row,_ in j._rows if row['operationId']==c['candidateOperationId'] and row['phase']=='inputs-pending']
         require(len(previous)==1)
-        bundle=CandidateBundleReview(self,operation_id=c['candidateOperationId'],enrollment=self.enrollment,
+        reader=CandidateBundleReview
+        if self.apple_prepare:
+            from .local_ios_candidate_review import IOSCandidateBundleReview
+            reader=IOSCandidateBundleReview
+        bundle=reader(self,operation_id=c['candidateOperationId'],enrollment=self.enrollment,
             pending=previous[0]['payload'],candidate_sha256=c['candidateSha256'])
         bundle.acquire();m=bundle.value;o=self.observation.observed
         require(m['sourceCommit']==o.commit and m['sourceTree']==o.tree and m['savedConfig']==c['savedConfig']
-            and m['savedVersion']==c['savedVersion'] and m['applicationId']==self.config.section('android')['applicationId']
-            and m['signerSha256']==self.config.section('android')['uploadCertificateSha256'].replace(':','').lower())
+            and m['savedVersion']==c['savedVersion'])
+        if self.apple_prepare:
+            from .provenance import _signing_identity
+            from .local_ios_candidate_bundle import signing_data
+            require(m['bundleId']==self.config.section('ios')['bundleId'])
+            _signing_identity(self.config,'ios',signing_data(m['signing']))
+        else:
+            require(m['applicationId']==self.config.section('android')['applicationId']
+                and m['signerSha256']==self.config.section('android')['uploadCertificateSha256'].replace(':','').lower())
         self.source.exchange('history-head',head);self.checkpoint();require(j.head()==head)
         self.pending_head=j._append(expected_head=head,operation_id=c['candidateOperationId'],phase='prepare-pending',
             payload={'candidateSha256':c['candidateSha256'],'confirmationSha256':hashlib.sha256(c['confirmation'].encode()).hexdigest()})
@@ -371,8 +419,14 @@ class LocalStorePrepareRun:
             'applicationId':intent['application']['id'],'version':{'name':intent['version']['marketing'],'build':intent['version']['build']},
             'destination':{'channel':'internal','releaseStatus':'completed'},'observedAt':intent['storePrecondition']['observedAt'],
             'limitations':list(wire.LIMITATIONS)}
-        self.report={'schemaVersion':1,'scope':'local-android-store-prepare','headSequence':prepared['sequence'],'preparedIntent':summary}
-        wire.validate_result(self.report)
+        if self.apple_prepare:
+            summary['bundleId']=summary.pop('applicationId')
+            summary['appStoreAppId']=intent['application']['storeAppId']
+            summary['destination']={'channel':'testflight-internal'}
+            summary['limitations']=list(wire.IOS_LIMITATIONS)
+        platform='ios' if self.apple_prepare else 'android'
+        self.report={'schemaVersion':1,'scope':'local-%s-store-prepare'%platform,'headSequence':prepared['sequence'],'preparedIntent':summary}
+        wire.validate_result(self.report,platform=platform)
     def run(self):
         self.checkpoint();require(not self._ran and sys.platform=='darwin' and os.getcwd()==self.request.native['cwd'])
         self._ran=True
@@ -380,7 +434,7 @@ class LocalStorePrepareRun:
             self._quote() # Conservative original peak BEFORE any source/material/file acquisition.
             self.config,self.version=self._saved()
             output=self.root/'.mobile-release/store/local'/UUID(self.request.context['candidateOperationId']).hex
-            self.store_request=StoreRequest(stage='candidate',platform='android',confirmation=self.request.context['confirmation'],
+            self.store_request=StoreRequest(stage='candidate',platform='ios' if self.apple_prepare else 'android',confirmation=self.request.context['confirmation'],
                 execute=False,prepare=True,output_dir=output,store_precondition=output/'store-precondition.json')
             self.record=new_store_lane_evidence(self.config,self.store_request,self.guard)
             with invocation_custody(self.root,mode='store',cancellation=self.guard,lane_evidence=self.record) as invocation:
@@ -397,10 +451,11 @@ class LocalStorePrepareRun:
                             self.runtime=StoreRuntimeContext.installed(Path(self.request.native['cwd']),invocation=invocation,private_home=home)
                             with finite_scratch(layout='store-selection',cancellation=self.guard,parent=home._path) as received:
                                 self.received=received;self.material_original=self.source.receive_material(self,received)
+                                self._received_material=self.source._material
                                 self.readback=_store_operation(config=self.config,release=self.version,request=self.store_request,
                                     operation_intent=None,lane_evidence=self.record,cancellation=self.guard,invocation=invocation,_local_prepare=self)
                                 observation.check();self.bundle.finish()
-            require(self._lane_owners_closed() and len(self._source_rows)==8 and len(self._runtime_rows)==6)
+            require(self._lane_owners_closed() and len(self._source_rows)==8 and len(self._runtime_rows)==self.runtime_count)
             complete_store_operation(self.readback,lane_evidence=self.record,cancellation=self.guard)
             self.store_completed=True;self._publication(self.readback._content)
         except BaseException as error:self.remember(error);raise
@@ -412,7 +467,8 @@ class LocalStorePrepareRun:
             and (project is None or project.claimed and all(s.number is None and s.close_state=='CLOSED' for s in (*project.directory.slots,project.meta)))
             and (o is None or o.closed and all(s.state in {'UNACQUIRED','CLOSED'} for r in o.readers for s in r.descriptors))
             and (b is None or b.closed and not b.failed and b.scan_state in {'new','closed'} and b.iterator is None
-                 and all(s.state in {'UNACQUIRED','CLOSED'} for s in b.reader.descriptors))
+                 and all(s.state in {'UNACQUIRED','CLOSED'} for s in b.reader.descriptors)
+                 and (not self.apple_prepare or b.tree_closed()))
             and all(s.claimed and not s.active and s._cleanup_complete and not s.created
                 and all(v.number is None and v.close_state=='CLOSED' for v in (*s.writer_slots,s.slot,*s.parent.slots)) for s in self.scratches)
             and self._saved_closed())
@@ -438,7 +494,7 @@ class LocalStorePrepareRun:
     def terminal(self):
         from ._desktop_store_prepare_protocol import request_phases
         v=self.guard.lifetime_ledger.verdict()
-        if v.profile_calls or v.commands>14:self.guard._abort(wire.ProtocolError());v=self.guard.lifetime_ledger.verdict()
+        if v.profile_calls or v.commands>8+self.runtime_count:self.guard._abort(wire.ProtocolError());v=self.guard.lifetime_ledger.verdict()
         if time.monotonic()>=self.source.work_end:self.source.stop('timed-out')
         elif self.guard.cancelled and self.source.stop_reason=='none':self.source.stop('cancelled')
         lifetime={'complete':v.complete,'fatal':v.fatal,'contained':v.contained,'commandDispatched':v.command_dispatched,
@@ -450,6 +506,6 @@ class LocalStorePrepareRun:
         if not settled:outcome,reason='unknown','cleanup-unknown'
         elif self.source.stop_reason!='none':outcome=reason=self.source.stop_reason
         elif self.primary is not None or self.report is None:outcome,reason='refused',self.request.context['operation'].removeprefix('local-store-')+'-unavailable'
-        elif not self.store_completed or v.commands!=14 or self.source.reply_step!=len(request_phases(self.request)):outcome,reason='failed','command-incomplete'
+        elif not self.store_completed or v.commands!=8+self.runtime_count or self.source.reply_step!=len(request_phases(self.request)):outcome,reason='failed','command-incomplete'
         else:outcome,reason,result='complete','none',self.report
         return {'schemaVersion':1,'context':self.request.context,'outcome':outcome,'reason':reason,'result':result,'lifetime':lifetime}

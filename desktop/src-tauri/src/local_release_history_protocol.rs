@@ -51,7 +51,7 @@ pub(crate) struct Context {
 impl Context {
     pub(crate) fn consent(&self)->&'static str{if self.platform==Some(CandidatePlatform::Ios){IOS_CANDIDATE_CONSENT}else{self.action.consent()}}
     pub(crate) fn valid(&self)->bool{valid_id(&self.project_id)
-        &&(self.platform.is_none()||matches!(self.action,Action::ReviewInputs|Action::AbandonInputs))&&if self.action.candidate(){
+        &&(self.platform.is_none()||matches!(self.action,Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared))&&if self.action.candidate(){
     self.candidate_operation_id.as_deref().is_some_and(journal_uuid)
 }else{self.candidate_operation_id.is_none()}}}
 impl<'de> Deserialize<'de> for Context {
@@ -218,13 +218,15 @@ struct PreparedReview {
     intent:crate::local_store_prepare_protocol::PreparedIntent,
     observation:String,prior_prepare_finality:String,
 }
-// Explicit13-key admission keeps the existing11-key Prepare grammar closed;
+// Exact13/14-key admission keeps the corresponding11/12-key Prepare grammar closed;
 // deny_unknown_fields + flatten would not provide that boundary on deserialize.
 impl<'de> Deserialize<'de> for PreparedReview {
     fn deserialize<D:serde::Deserializer<'de>>(decoder:D)->Result<Self,D::Error>{
         let mut value=Value::deserialize(decoder)?;
         if !keys(&value,&["operationId","candidateSha256","intentSha256","storePreconditionSha256",
             "sourceCommit","sourceTree","applicationId","version","destination","observedAt","limitations",
+            "observation","priorPrepareFinality"]) && !keys(&value,&["operationId","candidateSha256","intentSha256","storePreconditionSha256",
+            "sourceCommit","sourceTree","bundleId","appStoreAppId","version","destination","observedAt","limitations",
             "observation","priorPrepareFinality"]){return Err(serde::de::Error::custom("invalid prepared review"));}
         let object=value.as_object_mut().ok_or_else(||serde::de::Error::custom("invalid prepared review"))?;
         let observation=String::deserialize(object.remove("observation").unwrap()).map_err(serde::de::Error::custom)?;
@@ -236,6 +238,10 @@ impl<'de> Deserialize<'de> for PreparedReview {
 impl PreparedReview {
     fn valid(&self,operation:&str)->bool{self.intent.valid_for(operation)
         &&self.observation=="current-prepared-files-only"&&self.prior_prepare_finality=="not-established"}
+    fn matches_platform(&self,context:&Context)->bool {
+        self.intent.platform()==if context.platform==Some(CandidatePlatform::Ios){crate::local_store_prepare_protocol::Platform::Ios}
+            else{crate::local_store_prepare_protocol::Platform::Android}
+    }
 }
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(untagged)]
@@ -293,7 +299,7 @@ impl ResultData {fn valid(&self)->bool{self.schema_version==1&&self.scope=="loca
         &&r.recovery_required!=matches!(r.phase,HistoryPhase::SettledSuccess|HistoryPhase::SettledFailure|HistoryPhase::TargetReconciled))}}
 impl ResultData {
     fn matches_context(&self,context:&Context)->bool{
-        if !self.valid()||context.action!=Action::ReviewRecovery&&self.reconciliation_receipt.is_some(){return false;}
+        if !context.valid()||!self.valid()||context.action!=Action::ReviewRecovery&&self.reconciliation_receipt.is_some(){return false;}
         if !context.action.candidate(){return self.candidate_inputs.is_none()&&self.prepared_intent.is_none()&&self.execution_receipt.is_none();}
         let Some(id)=context.candidate_operation_id.as_deref() else{return false;};
         let Some(row)=self.history.iter().find(|row|row.operation_id==id) else{return false;};
@@ -305,13 +311,13 @@ impl ResultData {
             // Latest state for this selected operation, not necessarily the
             // final operation in the genuine journal's public current table.
             return self.head_sequence>=5&&row.phase==HistoryPhase::Prepared&&self.candidate_inputs.is_none()&&self.execution_receipt.is_none()
-                &&self.prepared_intent.as_ref().and_then(Option::as_ref).is_some_and(|p|p.valid(id));
+                &&self.prepared_intent.as_ref().and_then(Option::as_ref).is_some_and(|p|p.valid(id)&&p.matches_platform(context));
         }
         if context.action==Action::ReviewReconcile {
             return self.head_sequence>=6&&self.history.last().is_some_and(|r|r.operation_id==id)
                 &&matches!(row.phase,HistoryPhase::ExecutePending|HistoryPhase::SettledSuccess|HistoryPhase::SettledFailure|HistoryPhase::ReconciliationRequired)
                 &&self.candidate_inputs.is_none()&&self.execution_receipt.is_none()
-                &&self.prepared_intent.as_ref().and_then(Option::as_ref).is_some_and(|p|p.valid(id));
+                &&self.prepared_intent.as_ref().and_then(Option::as_ref).is_some_and(|p|p.valid(id)&&p.matches_platform(context));
         }
         if context.action==Action::ReviewExecution {
             return self.head_sequence>=7&&row.phase==HistoryPhase::SettledSuccess&&self.candidate_inputs.is_none()&&self.prepared_intent.is_none()
@@ -495,14 +501,14 @@ mod tests {
     }
     #[test]
     fn local_release_history_ios_platform_has_original_distinct_consent(){
-        for action in [Action::ReviewInputs,Action::AbandonInputs]{
+        for action in [Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared]{
             let mut c=context(action);c.platform=Some(CandidatePlatform::Ios);let value=json!(c);
             assert_eq!(prepare(&value).unwrap(),c);assert_eq!(c.consent(),IOS_CANDIDATE_CONSENT);
             for token in [CONSENT,CANDIDATE_CONSENT,IOS_CANDIDATE_CONSENT]{let input=start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":token})).unwrap();
                 assert_eq!(input.consents(c.consent()),token==IOS_CANDIDATE_CONSENT);}
             for platform in [Value::Null,json!("android"),json!("macos")]{let mut v=value.clone();v["platform"]=platform;assert!(prepare(&v).is_err());}
         }
-        for action in [Action::Enroll,Action::Verify,Action::ReviewPrepared,Action::ReviewExecution,Action::ReviewReconcile,Action::ReviewRecovery]{
+        for action in [Action::Enroll,Action::Verify,Action::ReviewExecution,Action::ReviewReconcile,Action::ReviewRecovery]{
             let mut value=json!(context(action));value["platform"]=json!("ios");assert!(prepare(&value).is_err());}
     }
     #[test]
@@ -667,6 +673,25 @@ mod tests {
                 assert!(!ResultData::deserialize(&bad).unwrap().matches_context(&old_c));
             }
         }
+    }
+    #[test]
+    fn local_ios_prepared_history_is_exact_platform_summary_not_reconcile_permission(){
+        let mut c=context(Action::ReviewPrepared);c.platform=Some(CandidatePlatform::Ios);
+        let mut ready=prepared_result(&c);let summary=&mut ready["preparedIntent"];
+        summary.as_object_mut().unwrap().remove("applicationId");summary["bundleId"]=json!("dev.example.my-app");summary["appStoreAppId"]=json!("0012345678");
+        summary["destination"]=json!({"channel":"testflight-internal"});
+        summary["limitations"]=json!(["non-publishing","prepare-not-execute","current-asc-snapshot-may-change","current-bundle-not-historical-finality","saved-inputs-not-atomic"]);
+        let check=|v:&Value|ResultData::deserialize(v).is_ok_and(|r|r.matches_context(&c));
+        assert!(check(&ready));assert_eq!(ready["preparedIntent"].as_object().unwrap().len(),14);
+        assert_eq!(serde_json::to_value(ResultData::deserialize(&ready).unwrap()).unwrap(),ready);
+        assert!(!ResultData::deserialize(&ready).unwrap().matches_context(&context(Action::ReviewPrepared)));
+        assert!(!check(&prepared_result(&context(Action::ReviewPrepared))));
+        for field in ready["preparedIntent"].as_object().unwrap().keys(){let mut bad=ready.clone();bad["preparedIntent"].as_object_mut().unwrap().remove(field);assert!(!check(&bad),"{field}");}
+        for(field,value)in[("applicationId",json!("dev.example.app")),("appStoreAppId",Value::Null),("priorPrepareFinality",json!("complete"))]{
+            let mut bad=ready.clone();bad["preparedIntent"][field]=value;assert!(!check(&bad));}
+        let mut reconcile=ready.clone();reconcile["headSequence"]=json!(6);reconcile["history"][0]["phase"]=json!("execute-pending");
+        for platform in [None,Some(CandidatePlatform::Ios)]{let mut other=context(Action::ReviewReconcile);other.platform=platform;
+            assert!(!ResultData::deserialize(&reconcile).unwrap().matches_context(&other));}
     }
     #[test]
     fn local_release_history_prepared_review_requires_selected_prepared_row_not_global_latest(){

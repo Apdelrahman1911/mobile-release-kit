@@ -4,7 +4,7 @@ import type { AndroidMacToolchainSelection } from './androidBuildTypes.ts';
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 
 // Renderer comparison DATA only. Native Document/material/tool originals own admission.
-export interface PrepareLocalStoreExecute extends PrepareLocalStoreIntent {
+export interface PrepareLocalStoreExecute extends Omit<PrepareLocalStoreIntent,'platform'> {
   intentSha256: string; toolchainSelection: AndroidMacToolchainSelection;
 }
 export interface LocalStoreExecuteContext extends PrepareLocalStoreExecute { platform: 'android'; operation: 'local-store-execute' }

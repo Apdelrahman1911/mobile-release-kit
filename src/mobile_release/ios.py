@@ -243,6 +243,10 @@ def _ipa_observation_options(observation: _ArtifactIPASigning | None) -> dict:
 
 
 def _ipa_native_tools(deadline, *names: str) -> bool:
+    current = _current_ipa(deadline)
+    if current is not None:
+        current.post()
+        return all(name in current.tools for name in names)
     operation = _artifact_operation(deadline)
     if operation is not None:
         operation.inspection_checkpoint()
@@ -452,6 +456,13 @@ def _artifact_operation(deadline):
     return operation_for(deadline)
 
 
+def _current_ipa(deadline):
+    if type(deadline).__name__ != '_CurrentIPADeadline':
+        return None
+    from .ios_current_tools_macos import operation_for
+    return operation_for(deadline)
+
+
 def _artifact_tool(name: str, deadline) -> str | None:
     operation = _artifact_operation(deadline)
     if operation is None:
@@ -479,6 +490,9 @@ def _run_native(
     # inspection clock. This is cooperative bounding, not syscall preemption.
     if deadline is not None:
         deadline.check()
+    current = _current_ipa(deadline)
+    if current is not None:
+        return current.native_call(argv, timeout=timeout, text=text, cancellation=cancellation)
     operation = _artifact_operation(deadline)
     if operation is not None:
         return operation.ios_native_call(argv, timeout=timeout, text=text, cancellation=cancellation)
@@ -498,6 +512,12 @@ def _native_scratch(*, prefix: str, directory: Path | None = None,
     )
     source = guard._artifact_inspection_source
     operation = None if source is None else source.require_operation()
+    current = getattr(guard, '_current_ipa_tools', None)
+    if current is not None:
+        from .ios_current_tools_macos import CurrentIPATools
+        if type(current) is not CurrentIPATools or operation is not None:
+            raise ValidationError('current IPA cannot borrow another scratch owner')
+        current.origin(); operation = current
     if operation is not None:
         if owns:
             raise ValidationError("artifact scratch must borrow the original cancellation owner")
@@ -584,7 +604,13 @@ def _validated_ipa_entries(path: Path, *, deadline: InspectionDeadline | None = 
     if path.is_symlink() or not path.is_file():
         raise ValidationError(f"IPA must be a regular non-symlink file: {path}")
     try:
-        archive = zipfile.ZipFile(path)
+        current = _current_ipa(deadline)
+        if current is not None:
+            if current.policy_source is None or path != current.snapshot.paths['ios-ipa']:
+                raise ValidationError('current IPA requires its held prequoted ZIP source')
+            archive = zipfile.ZipFile(current.policy_source)
+        else:
+            archive = zipfile.ZipFile(path)
     except zipfile.BadZipFile as error:
         raise ValidationError("IPA is not a valid ZIP archive") from error
     entries = archive.infolist()
@@ -656,6 +682,8 @@ def _profile_details(path: Path, *, deadline: InspectionDeadline | None = None, 
     if operation is not None:
         operation.require(operation.inputs.config, cancellation)
         operation.profile_preflight()  # Before even the evidence constructor can bind an original.
+    current = _current_ipa(deadline)
+    if current is not None: current.post()
     evidence = ProfileCallEvidence(operation="load")
     primary = None
     try:
@@ -664,6 +692,7 @@ def _profile_details(path: Path, *, deadline: InspectionDeadline | None = None, 
         primary = error
     consume_profile_evidence(evidence, primary=primary,
                              message="embedded profile lifetime is unconfirmed; end this invocation")
+    if current is not None: current.post()
     if operation is not None:
         operation.ios_tools.check()
         operation.inspection_checkpoint()
@@ -1201,8 +1230,12 @@ def _validate_ipa(
                 )
             )
 
-            with _native_scratch(prefix="mobile-release-ipa-", cancellation=cancellation) as (temporary, cancellation):
-                archive.extractall(temporary)
+            current = _current_ipa(deadline)
+            workspace = (_native_scratch(prefix="mobile-release-ipa-", cancellation=cancellation)
+                         if current is None else current.validation_view(path))
+            with workspace as (temporary, cancellation):
+                if current is None:
+                    archive.extractall(temporary)
                 deadline.check()
                 app_path = temporary / app_prefix.rstrip("/")
                 profile_path = app_path / "embedded.mobileprovision"
@@ -1303,16 +1336,20 @@ def _validate_ipa(
                             category="ios-artifact",
                         )
                     )
-                if candidate_operation is not None and all(
+                if (candidate_operation is not None or current is not None) and all(
                         item.status in {Status.PASS, Status.NOT_APPLICABLE} for item in findings):
                     uuid = profile.get('UUID') if profile is not None else None
                     if not isinstance(uuid, str) or not PROFILE_UUID_RE.fullmatch(uuid):
                         raise ValidationError('validated IPA profile UUID is unavailable')
-                    candidate_operation._candidate_validated_ipa(path, original_cancellation, deadline, {
+                    facts = {
                         'platform': 'ios', 'kind': 'apple-distribution',
                         'certificateSha256': fingerprint, 'teamId': expected_team_id,
                         'profileUuid': uuid, 'profileExpiresAt': interval.upper_bound.replace(
-                            microsecond=0).isoformat().replace('+00:00', 'Z')})
+                            microsecond=0).isoformat().replace('+00:00', 'Z')}
+                    if candidate_operation is not None:
+                        candidate_operation._candidate_validated_ipa(path, original_cancellation, deadline, facts)
+                    else:
+                        current.validated(path, original_cancellation, deadline, facts)
             deadline.check()
         except ValidationError as error:
             if isinstance(error, ProcessError) and error.fatal:

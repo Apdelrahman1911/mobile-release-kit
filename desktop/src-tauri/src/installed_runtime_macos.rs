@@ -1729,12 +1729,14 @@ struct IOSXcodeAlias { parent: usize, identity: Identity, target: PathBuf }
 pub(crate) struct IOSXcodeSlots {
     original: Book, alias: Option<IOSXcodeAlias>, sdk_alias: Option<IOSXcodeAlias>, developer: Option<usize>, executable: Option<usize>,
     sdk: Option<usize>, developer_path: Option<PathBuf>, sdk_path: Option<PathBuf>,
-    signing: Option<[usize; 3]>, recovery_security: Option<usize>, audit: watch::Receiver<Instant>, prepared: bool,
+    signing: Option<[usize; 3]>, recovery_security: Option<usize>, validation_only: bool,
+    audit: watch::Receiver<Instant>, prepared: bool,
 }
 impl IOSXcodeSlots {
     pub(crate) fn new(audit: watch::Receiver<Instant>) -> Self {
         Self { original: Book::new(), alias: None, sdk_alias: None, developer: None, executable: None, sdk: None,
-            developer_path: None, sdk_path: None, signing: None, recovery_security: None, audit, prepared: false }
+            developer_path: None, sdk_path: None, signing: None, recovery_security: None,
+            validation_only: false, audit, prepared: false }
     }
     pub(crate) fn arm_acl_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         self.original.arm_acl_once(end, stop)
@@ -1754,6 +1756,25 @@ impl IOSXcodeSlots {
     }
     pub(crate) fn inspect_signed_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         self.inspect_selected(end, stop, true)
+    }
+    /// Current IPA validation needs only the three fixed system tools, not an
+    /// Xcode selection, signing account, build permission or upload executable.
+    /// The same original inspector must have armed this Book before entry.
+    pub(crate) fn inspect_validation_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        if !self.original.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
+        self.original.records.try_reserve_exact(6).map_err(native_error)?;
+        self.original.started = true;
+        self.validation_only = true;
+        checkpoint(end, stop)?;
+        native::real_user().map_err(native_error)?;
+        let bin = self.original.chain(Path::new("/usr/bin"), end, stop)?;
+        let security = self.original.open(Some(bin), "security", false, end, stop)?;
+        let codesign = self.original.open(Some(bin), "codesign", false, end, stop)?;
+        let openssl = self.original.open(Some(bin), "openssl", false, end, stop)?;
+        self.signing = Some([security, codesign, openssl]);
+        self.original.inspected = true;
+        let _ = self.validation_binding_data()?;
+        self.check_current(end, stop)
     }
     pub(crate) fn inspect_recovery_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         if !self.original.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
@@ -1872,6 +1893,7 @@ impl IOSXcodeSlots {
     }
     pub(crate) fn binding_data(&self) -> Result<crate::ios_archive_protocol::ToolchainBinding> {
         use crate::ios_archive_protocol::{RootIdentity, ToolchainBinding};
+        if self.validation_only { return Err(AdmissionFailure::Inventory); }
         if !self.original.inspected || !self.original.admission_custody_ready() { return Err(AdmissionFailure::Unknown); }
         let identity = |index: Option<usize>| -> Result<Identity> {
             self.original.records.get(index.ok_or(AdmissionFailure::Unknown)?).and_then(|r| r.identity).ok_or(AdmissionFailure::Identity)
@@ -1897,13 +1919,27 @@ impl IOSXcodeSlots {
             mtime_ns: nanos(tool.mtime, tool.mtime_ns)?, ctime_ns: nanos(tool.ctime, tool.ctime_ns)? })
     }
     pub(crate) fn signing_binding_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
+        if self.validation_only { return Err(AdmissionFailure::Inventory); }
+        self.system_signing_data()
+    }
+    pub(crate) fn validation_binding_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
+        if !self.validation_only || self.alias.is_some() || self.sdk_alias.is_some()
+            || self.developer.is_some() || self.executable.is_some() || self.sdk.is_some()
+            || self.developer_path.is_some() || self.sdk_path.is_some() || self.recovery_security.is_some()
+            || self.signing != Some([3, 4, 5]) || self.original.records.len() != 6
+            || self.original.retained_original_count() != Some(6) {
+            return Err(AdmissionFailure::Inventory);
+        }
+        self.system_signing_data()
+    }
+    fn system_signing_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
         if !self.original.inspected || !self.original.admission_custody_ready() { return Err(AdmissionFailure::Unknown); }
         let [security, codesign, openssl] = self.signing.ok_or(AdmissionFailure::Inventory)?;
         crate::ios_archive_protocol::SigningToolBindings::new_data(self.tool_data(Some(security))?,
             self.tool_data(Some(codesign))?, self.tool_data(Some(openssl))?).map_err(|_| AdmissionFailure::Inventory)
     }
     pub(crate) fn recovery_binding_data(&self) -> Result<crate::ios_archive_protocol::ToolIdentity> {
-        if !self.original.inspected || !self.original.admission_custody_ready()
+        if self.validation_only || !self.original.inspected || !self.original.admission_custody_ready()
             || self.signing.is_some() || self.developer.is_some() || self.sdk.is_some() || self.executable.is_some() {
             return Err(AdmissionFailure::Inventory);
         }
@@ -1934,6 +1970,37 @@ impl IOSXcodeSlots {
         self.original.settle(expired)
     }
     pub(crate) fn settled(&self) -> bool { self.original.settled() }
+}
+
+#[cfg(test)]
+mod ios_validation_tools_data_tests {
+    use super::*;
+
+    #[test]
+    fn ios_validation_tools_need_original_inspector_and_never_grant_build_or_recovery() {
+        let end = Instant::now();
+        let (_audit, audit) = watch::channel(end);
+        let (_stop, stop) = watch::channel(false);
+        let mut tools = IOSXcodeSlots::new(audit);
+        // No native entry: without the original inspector's ACL arm, refuse
+        // before real_user/open. A constructed Book is not an admitted loan.
+        assert!(matches!(tools.inspect_validation_once(end, &stop), Err(AdmissionFailure::AlreadyUsed)));
+        assert!(!tools.original.started && tools.original.records.is_empty());
+        assert!(!tools.validation_only && tools.signing.is_none());
+        assert!(tools.validation_binding_data().is_err());
+
+        // Merely selecting the closed DATA mode/indices cannot manufacture
+        // retained originals, and the old build/signing/recovery projections
+        // remain unavailable even before considering the missing ACL custody.
+        tools.validation_only = true;
+        tools.signing = Some([3, 4, 5]);
+        assert!(matches!(tools.binding_data(), Err(AdmissionFailure::Inventory)));
+        assert!(matches!(tools.signing_binding_data(), Err(AdmissionFailure::Inventory)));
+        assert!(matches!(tools.recovery_binding_data(), Err(AdmissionFailure::Inventory)));
+        assert!(tools.validation_binding_data().is_err());
+        assert_eq!(tools.retained_original_count(), None);
+        assert!(!tools.original.started && tools.original.records.is_empty());
+    }
 }
 
 // Test-only DATA calls over the existing nested Android owners.

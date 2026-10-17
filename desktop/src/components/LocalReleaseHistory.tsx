@@ -52,7 +52,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
     </>}
     {state.consentUntil !== null && <div className="notice">
       <p>{consent[selectedAction]}</p>
-      {(selectedAction==='review-inputs'||selectedAction==='abandon-inputs') && <p>Input platform: {op?.context.platform==='ios'?'iOS':'Android'}. No cross-platform conversion or Store action.</p>}
+      {(selectedAction==='review-inputs'||selectedAction==='abandon-inputs'||selectedAction==='review-prepared') && <p>Input platform: {op?.context.platform==='ios'?'iOS':'Android'}. No cross-platform conversion or Store action.</p>}
       {op?.context.candidateOperationId && <p>Operation: <code>{op.context.candidateOperationId}</code></p>}
       <label><input type="checkbox" checked={state.acknowledged} onChange={event => controller.acknowledge(event.target.checked)} /> I authorize this specific local action.</label>
       <button disabled={!state.acknowledged || state.pending} onClick={() => void controller.start()}>{labels[selectedAction]}</button>
@@ -63,9 +63,9 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
     {op && <p>{state.historical ? 'Earlier project context · ' : ''}{op.phase}{op.reason !== 'none' ? ` · ${op.reason.replaceAll('-', ' ')}` : ''}</p>}
     {op && hints[op.reason] && <p className="save-note">{hints[op.reason]}</p>}
     {op?.result && <>
-      {!compact && <label>Input platform <select value={state.inputPlatform} disabled={!!retained} onChange={event => controller.setInputPlatform(event.target.value === 'ios' ? 'ios' : 'android')}>
+      {!compact && <label>Input / prepared-intent platform <select value={state.inputPlatform} disabled={!!retained} onChange={event => controller.setInputPlatform(event.target.value === 'ios' ? 'ios' : 'android')}>
         <option value="android">Android candidate inputs</option><option value="ios">iOS candidate inputs</option>
-      </select><span className="save-note">Choose the platform used to create the input operation below. History rows do not identify a platform; this choice selects which saved bundle to check. A wrong choice refuses review—it never converts or rebuilds files. Play receipt actions are separate.</span></label>}
+      </select><span className="save-note">Choose the platform used to create the input operation below. History rows do not identify a platform; this choice selects which saved bundle or prepared intent to check. A wrong choice refuses review—it never converts or rebuilds files. Play receipt actions are separate.</span></label>}
       <h3>Verified local history</h3><p>Checkpoint {op.result.headSequence}. {op.result.history.length === 0 ? 'No release operations recorded.' : 'Latest recorded operation states (up to 64):'}</p>
       <ul>{op.result.history.map(row => <li key={row.operationId}>
         <code>{row.operationId}</code> — {row.phase.replaceAll('-', ' ')}{row.recoveryRequired && <strong> · Review before retrying</strong>}
@@ -90,10 +90,10 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
       {prepared && state.historical && <p>This intent was reviewed for an earlier project context. Its current prepared files have not been checked for the selected project.</p>}
       {prepared && !state.historical && <div className="notice">
         <h3>{selectedAction==='review-reconcile'?'Files ready for a separate Store check':'Prepared files currently verified · Not executed'}</h3>
-        <p>{prepared.applicationId} · Version {prepared.version.name} · Build {prepared.version.build} · Play internal testing</p>
+        <p>{'bundleId' in prepared?prepared.bundleId:prepared.applicationId} · Version {prepared.version.name} · Build {prepared.version.build} · {'bundleId' in prepared?'TestFlight internal':'Play internal testing'}</p>
         <p>Candidate operation: <code>{prepared.operationId}</code></p>
         <p>Intent SHA-256: <code>{prepared.intentSha256}</code></p>
-        <p>Store snapshot originally observed at {prepared.observedAt}. It is not a current Store check; the temporary edit may have expired.</p>
+        <p>Store snapshot originally observed at {prepared.observedAt}. {'bundleId' in prepared?'It is not a current App Store Connect check; the snapshot may have changed.':'It is not a current Store check; the temporary edit may have expired.'}</p>
         <p>This verifies the current retained files only, not the earlier preparation’s finality or the current working tree. It grants no Execute, Recover, retry or Store authority. Keep all files and history intact.</p>
       </div>}
       {execution && state.historical && <p>This receipt was reviewed for an earlier project context. Its current files have not been checked for the selected project.</p>}

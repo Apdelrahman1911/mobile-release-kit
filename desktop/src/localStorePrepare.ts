@@ -1,30 +1,29 @@
 // UI coordination only. The native saved-command Session owns work and cleanup.
-import type { AndroidBuildProject } from './androidBuild.ts';
 import type { AssetDisplayState } from './assetSessionTypes.ts';
-import { localStoreRequest } from './localStorePreflight.ts';
+import { localStoreRequest, type LocalStoreProject } from './localStorePreflight.ts';
 import { localHistoryOwnerReason, type LocalHistoryState } from './localReleaseHistory.ts';
 import { parseLocalHistoryStatus } from './localReleaseHistoryProtocol.ts';
 import { sameOfflineData } from './offlinePreflightProtocol.ts';
-import { parseLocalStorePrepareRequest, parseLocalStorePrepareStatus, STORE_PREPARE_CONSENT } from './localStorePrepareProtocol.ts';
+import { parseLocalStorePrepareRequest, parseLocalStorePrepareStatus, storePrepareConsent } from './localStorePrepareProtocol.ts';
 import type { BridgeMode } from './types.ts';
 import type { LocalStorePrepareIdentity, LocalStorePrepareApi, LocalStorePrepareStatus, PrepareLocalStoreIntent } from './localStorePrepareTypes.ts';
 type Port=LocalStorePrepareApi&{mode:BridgeMode};
 export interface LocalStorePrepareState {mode:BridgeMode;applicationId:string|null;request:PrepareLocalStoreIntent|null;status:LocalStorePrepareStatus|null;pending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
-interface Source {project:()=>AndroidBuildProject|null;assets:()=>AssetDisplayState|null;history:()=>LocalHistoryState|null;otherOperationReason:()=>string|null;now?:()=>number}
+interface Source {project:()=>LocalStoreProject|null;assets:()=>AssetDisplayState|null;history:()=>LocalHistoryState|null;otherOperationReason:()=>string|null;now?:()=>number}
 const active=(s:LocalStorePrepareStatus|null)=>!!s?.operation&&s.operation.phase!=='terminal';
 const identity=(v:LocalStorePrepareIdentity)=>({operationId:v.operationId,ownerGeneration:v.ownerGeneration});
 const sameId=(a:LocalStorePrepareIdentity|null|undefined,b:LocalStorePrepareIdentity|null|undefined)=>!!a&&!!b&&a.operationId===b.operationId&&a.ownerGeneration===b.ownerGeneration;
-const error='The original Play preparation is unverified. Keep its status and cancel; another run is not safe until native cleanup is confirmed.';
-export function localStorePrepareOwnerReason(s:LocalStorePrepareState):string|null{return s.blocked||s.unconfirmed||s.pending||active(s.status)?'A local Play preparation intent or operation is retained. Cancel or finish it before other work.':null;}
+const error='The original Store preparation is unverified. Keep its status and cancel; another run is not safe until native cleanup is confirmed.';
+export function localStorePrepareOwnerReason(s:LocalStorePrepareState):string|null{return s.blocked||s.unconfirmed||s.pending||active(s.status)?'A local Store preparation intent or operation is retained. Cancel or finish it before other work.':null;}
 // This is current UI context, not a grant or proof of native file finality.
-export function localStorePrepareRequest(project:AndroidBuildProject|null,assets:AssetDisplayState|null,history:LocalHistoryState|null):PrepareLocalStoreIntent|null {
+export function localStorePrepareRequest(project:LocalStoreProject|null,assets:AssetDisplayState|null,history:LocalHistoryState|null):PrepareLocalStoreIntent|null {
  const base=localStoreRequest(project,assets);
  if(!base||assets?.status?.context?.stage!=='candidate'||assets.scope.stage!=='candidate'||!history||history.historical||localHistoryOwnerReason(history))return null;
  const status=parseLocalHistoryStatus(history.status),op=status?.operation;
- if(history.mode!=='native'||!op||op.phase!=='terminal'||op.outcome!=='complete'||op.context.projectId!==base.projectId||op.context.action!=='review-inputs'||op.context.platform!==undefined||!op.result)return null;
+ if(history.mode!=='native'||!op||op.phase!=='terminal'||op.outcome!=='complete'||op.context.projectId!==base.projectId||op.context.action!=='review-inputs'||op.context.platform!==base.platform||!op.result)return null;
  const candidate=op.result.candidateInputs,last=op.result.history.at(-1);
- if(!candidate||!('applicationId' in candidate)||!last||last.phase!=='inputs-ready'||last.operationId!==candidate.operationId||op.context.candidateOperationId!==candidate.operationId||candidate.version.name!==base.savedVersion.name||candidate.version.build!==base.savedVersion.build)return null;
- return parseLocalStorePrepareRequest({...base,candidateOperationId:candidate.operationId,candidateSha256:candidate.candidateSha256,confirmation:`candidate:android:${base.savedVersion.name}:${base.savedVersion.build}`});
+ if(!candidate||!(base.platform==='ios'?'bundleId' in candidate:'applicationId' in candidate)||!last||last.phase!=='inputs-ready'||last.operationId!==candidate.operationId||op.context.candidateOperationId!==candidate.operationId||candidate.version.name!==base.savedVersion.name||candidate.version.build!==base.savedVersion.build)return null;
+ return parseLocalStorePrepareRequest({...base,candidateOperationId:candidate.operationId,candidateSha256:candidate.candidateSha256,confirmation:`candidate:${base.platform??'android'}:${base.savedVersion.name}:${base.savedVersion.build}`});
 }
 export class LocalStorePrepareController {
  private state:LocalStorePrepareState={mode:'unavailable',applicationId:null,request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
@@ -39,7 +38,7 @@ export class LocalStorePrepareController {
  private now(){return(this.source.now??(()=>performance.now()))();}
  private update(patch:Partial<LocalStorePrepareState>){this.state=Object.freeze({...this.state,...patch});if(!this.disposed)for(const listener of this.listeners)listener();}
  private clearTimer(){if(this.timer!==null)clearTimeout(this.timer);this.timer=null;}
- syncProject=()=>{const history=this.source.history(),next=this.selectionPending?null:localStorePrepareRequest(this.source.project(),this.source.assets(),history);const candidate=history?.status?.operation?.result?.candidateInputs;const applicationId=next&&candidate&&'applicationId' in candidate?candidate.applicationId:null;const head=next?history?.status?.operation?.result?.headSequence??null:null;if(applicationId!==this.state.applicationId||head!==this.historyHead||!sameOfflineData(next,this.state.request)){this.invalidate();this.historyHead=head;this.update({request:next,applicationId});}};
+ syncProject=()=>{const history=this.source.history(),next=this.selectionPending?null:localStorePrepareRequest(this.source.project(),this.source.assets(),history);const candidate=history?.status?.operation?.result?.candidateInputs;const applicationId=next&&candidate?('bundleId' in candidate?candidate.bundleId:candidate.applicationId):null;const head=next?history?.status?.operation?.result?.headSequence??null:null;if(applicationId!==this.state.applicationId||head!==this.historyHead||!sameOfflineData(next,this.state.request)){this.invalidate();this.historyHead=head;this.update({request:next,applicationId});}};
  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
@@ -53,15 +52,15 @@ export class LocalStorePrepareController {
   if(old&&next.statusRevision===old.statusRevision){if(!sameOfflineData(old,next))this.fail();return;}
   const a=this.attempt,op=next.operation;
   if(a?.id&&active(old)&&!sameId(a.id,op)){this.fail();return;}
-  if(a&&!a.id&&next.statusRevision>a.after&&op&&!sameId(a.previous,op)&&sameOfflineData(op.context,{...a.request,platform:'android',operation:'local-store-prepare'}))a.id=identity(op);
+  if(a&&!a.id&&next.statusRevision>a.after&&op&&!sameId(a.previous,op)&&sameOfflineData(op.context,{...a.request,platform:a.request.platform??'android',operation:'local-store-prepare'}))a.id=identity(op);
   const ours=!!a?.id&&sameId(a.id,op);
-  if(ours&&!sameOfflineData(op!.context,{...a!.request,platform:'android',operation:'local-store-prepare'})){this.fail();return;}
-  this.update({status:next,unconfirmed:a&&!a.id?this.state.unconfirmed:false,blocked:this.state.blocked||next.availability==='cleanup-unknown'||op?.phase==='unknown',historical:!!op&&(!!a?.retired||!sameOfflineData(op.context,this.state.request?{...this.state.request,platform:'android',operation:'local-store-prepare'}:null))});
+  if(ours&&!sameOfflineData(op!.context,{...a!.request,platform:a!.request.platform??'android',operation:'local-store-prepare'})){this.fail();return;}
+  this.update({status:next,unconfirmed:a&&!a.id?this.state.unconfirmed:false,blocked:this.state.blocked||next.availability==='cleanup-unknown'||op?.phase==='unknown',historical:!!op&&(!!a?.retired||!sameOfflineData(op.context,this.state.request?{...this.state.request,platform:this.state.request.platform??'android',operation:'local-store-prepare'}:null))});
   if(ours&&a!.retired&&active(next))void this.cancelOriginal(false);
   if(ours&&op?.phase==='terminal'){this.clearTimer();this.update({unconfirmed:false,pending:false,acknowledged:false,consentUntil:null});if(this.disposed){this.unlisten?.();this.unlisten=null;}}
  }
  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading)return;this.reading=true;try{this.receive(await this.api.localStorePrepareStatus());}catch{this.fail();}finally{this.reading=false;}}
- prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Google Play.';if(localStorePrepareOwnerReason(this.state))return localStorePrepareOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local Play preparation.';if(!this.state.request)return'Review the current ready candidate in Release history, read the matching saved version, then assign a Google service-account JSON in Credentials → This Mac → Android → Candidate → Store (or Full).';return this.source.otherOperationReason();}
+ prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Stores.';if(localStorePrepareOwnerReason(this.state))return localStorePrepareOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for local Store preparation.';if(!this.state.request)return'Review the current ready candidate in Release history, read the matching saved version, then assign matching credentials in Credentials → This Mac → Android or iOS → Candidate → Store (or Full). Use a Google service-account JSON for Android, or an App Store Connect P8 with Key ID and Issuer ID for iOS.';return this.source.otherOperationReason();}
  async prepare(){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status)return;const api=this.api,request=this.state.request;
   this.attempt={request,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
   this.update({pending:true,unconfirmed:true,error:null,historical:false});
@@ -74,7 +73,7 @@ export class LocalStorePrepareController {
   if(a?.started)return; // A queued second click cannot cancel the running original.
   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});
-  try{this.receive(await api.startLocalStorePrepare({...a.id,consentVersion:STORE_PREPARE_CONSENT}));}catch{this.fail();}finally{this.update({pending:false});}}
+  try{this.receive(await api.startLocalStorePrepare({...a.id,consentVersion:storePrepareConsent(a.request.platform)}));}catch{this.fail();}finally{this.update({pending:false});}}
  cancel=()=>{this.invalidate();return this.cancelOriginal(true);};
  private async cancelOriginal(explicitRetry:boolean){const api=this.api,id=this.attempt?.id??this.state.status?.operation;if(!api||!id||this.state.status?.operation?.phase==='terminal')return;
   const key=id.operationId+id.ownerGeneration;if(this.cancelClaim===key||!explicitRetry&&this.failedCancel===key)return;this.cancelClaim=key;this.failedCancel=null;this.clearTimer();this.update({acknowledged:false,consentUntil:null});

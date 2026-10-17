@@ -3,7 +3,7 @@ import type { LocalStoreIdentity, LocalStoreReason } from './localStorePreflight
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 
 // Renderer comparison DATA only. Native Document/material/tool originals own admission.
-export interface PrepareLocalStoreReconcile extends PrepareLocalStoreIntent {
+export interface PrepareLocalStoreReconcile extends Omit<PrepareLocalStoreIntent,'platform'> {
   intentSha256: string;
   settlement?: 'record-current-target';
 }

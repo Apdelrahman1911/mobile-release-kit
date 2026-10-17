@@ -256,7 +256,7 @@ function iosHistory(request,phase='inputs-ready'){const v=inputHistory(request,p
 test('iOS input History has explicit platform, distinct consent and closed archive summary without Play authority',()=>{
  const request=localHistoryRequest('p1','review-inputs',UUID,'ios');assert.equal(request.platform,'ios');
  assert.ok(encodeLocalHistoryRequest('prepare_local_release_history',request));
- for(const action of ['enroll','verify','review-prepared','review-execution','review-reconcile','review-recovery'])assert.equal(localHistoryRequest('p1',action,UUID,'ios'),null);
+ for(const action of ['enroll','verify','review-execution','review-reconcile','review-recovery'])assert.equal(localHistoryRequest('p1',action,UUID,'ios'),null);
  for(const platform of [null,'android','macos'])assert.equal(encodeLocalHistoryRequest('prepare_local_release_history',{...request,platform}),null);
  const complete=iosHistory(request);assert.ok(parseLocalHistoryStatus(status(1,complete)));
  const foreign=copy(complete);delete foreign.context.platform;assert.equal(parseLocalHistoryStatus(status(1,foreign)),null);
@@ -296,4 +296,24 @@ test('platform changes retire late candidate review and project changes reset th
   assert.equal(h.controller.getSnapshot().request.platform,undefined);
  }finally{h.controller.dispose();}
  const h2=await fixture();try{h2.controller.setInputPlatform('ios');h2.project('p2');assert.equal(h2.controller.getSnapshot().inputPlatform,'android');assert.equal(h2.controller.getSnapshot().request.action,'verify');}finally{h2.controller.dispose();}
+});
+
+function iosPreparedHistory(request){const v=preparedHistory(request),s=v.result.preparedIntent;if(s){delete s.applicationId;s.bundleId='org.example.ios-app';s.appStoreAppId='0012345';s.destination={channel:'testflight-internal'};s.limitations[2]='current-asc-snapshot-may-change';}return v;}
+test('iOS prepared History14 is current-files-only and excludes Android or hybrid wrappers',()=>{
+ const request=localHistoryRequest('p1','review-prepared',UUID,'ios');assert.ok(request);const good=iosPreparedHistory(request);assert.ok(parseLocalHistoryStatus(status(1,good)));
+ for(const change of [v=>delete v.context.platform,v=>v.context.action='review-reconcile',v=>v.result.headSequence=4,v=>v.result.history[0].phase='execute-pending',v=>v.result.preparedIntent=prepared(),v=>v.result.preparedIntent.applicationId='org.example.app',v=>v.result.preparedIntent.appStoreAppId='123x',v=>v.result.preparedIntent.priorPrepareFinality='complete',v=>v.result.preparedIntent.observation='current-bundle-only',v=>v.result.preparedIntent.limitations[2]='temporary-edit-may-expire',v=>v.result.preparedIntent.destination.channel='internal',v=>v.result.preparedIntent.path='/private/secret']){
+  const bad=copy(good);change(bad);assert.equal(parseLocalHistoryStatus(status(1,bad)),null);
+ }
+ const earlier=copy(good);earlier.result.headSequence=6;earlier.result.history.push({operationId:'99999999-1234-4234-8234-123456789abc',phase:'inputs-pending',recoveryRequired:true});assert.ok(parseLocalHistoryStatus(status(1,earlier)));
+ for(const action of ['review-execution','review-reconcile','review-recovery','enroll','verify'])assert.equal(localHistoryRequest('p1',action,UUID,'ios'),null);
+});
+test('iOS prepared History selection uses original iOS consent once and platform changes retire pending consent',async()=>{
+ const h=await fixture();try{
+  h.emit(status(1,preparedHistory(localHistoryRequest('p1','verify'))));h.controller.setInputPlatform('ios');assert.equal(h.controller.selectCandidate('review-prepared',UUID),true);await h.controller.prepare();assert.equal(h.latest().operation.context.platform,'ios');let calls=0;
+  h.api.startLocalReleaseHistory=async request=>{calls++;assert.equal(request.consentVersion,'local-ios-candidate-inputs-v1');return status(3,{...iosPreparedHistory(h.latest().operation.context),operationId:A});};
+  h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(calls,1);assert.equal(h.controller.getSnapshot().status.operation.result.preparedIntent.appStoreAppId,'0012345');assert.equal(h.controller.getSnapshot().historical,false);
+ }finally{h.controller.dispose();}
+ const late=await fixture();try{
+  late.emit(status(1,preparedHistory(localHistoryRequest('p1','verify'))));late.controller.setInputPlatform('ios');assert.equal(late.controller.selectCandidate('review-prepared',UUID),true);const release=late.defer(),pending=late.controller.prepare();assert.equal(late.controller.setInputPlatform('android'),true);release();await pending;await Promise.resolve();assert.equal(late.counts().cancel,1);assert.equal(late.counts().start,0);assert.equal(late.controller.getSnapshot().consentUntil,null);
+ }finally{late.controller.dispose();}
 });

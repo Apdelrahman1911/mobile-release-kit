@@ -263,6 +263,9 @@ def _consumer_idle(guard: DefaultCancellation, *, lane_binding=None, desktop_bin
             if type(desktop_binding) is IOSArchiveSnapshotBinding:
                 return (lane_binding is None
                         and desktop_binding.dependents_settled_for(owner=owner, cancellation=guard))
+            from .ios_current_tools_macos import CurrentIPASnapshotBinding
+            if type(desktop_binding) is CurrentIPASnapshotBinding:
+                return (lane_binding is None and desktop_binding.dependents_settled_for(owner=owner, cancellation=guard))
             from .desktop_artifact_inspection import ArtifactInspectionSnapshotBinding
             return (lane_binding is None and type(desktop_binding) is ArtifactInspectionSnapshotBinding
                     and desktop_binding.dependents_settled_for(owner=owner, cancellation=guard))

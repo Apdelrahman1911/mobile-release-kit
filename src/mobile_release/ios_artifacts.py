@@ -45,6 +45,12 @@ CHUNK = 1024**2
 IOS_ARTIFACT_NAMES = frozenset({"ios-ipa", "ios-archive", "ios-dsyms"})
 
 
+def _current_ipa(deadline):
+    if type(deadline).__name__ != '_CurrentIPADeadline': return None
+    from .ios_current_tools_macos import operation_for
+    return operation_for(deadline)
+
+
 def _artifact_operation(deadline):
     # Import gate only. operation_for checks the exact class and original
     # source/guard; an object with this class name cannot lend custody.
@@ -77,6 +83,7 @@ class _Paths:
     def __init__(self, deadline=None) -> None:
         self.paths: dict[str, tuple[str, bool]] = {}
         self.artifact_operation = _artifact_operation(deadline)
+        self.current_ipa = _current_ipa(deadline)
         self.name_bytes = self.key_bytes = 0
 
     def add(self, name: str, directory: bool) -> None:
@@ -88,7 +95,7 @@ class _Paths:
             previous = self.paths.get(key)
             _require(previous is None or previous == (path, is_directory),
                      "case/Unicode collision or file/directory conflict")
-            if self.artifact_operation is not None and previous is None:
+            if (self.artifact_operation is not None or self.current_ipa is not None) and previous is None:
                 from .artifact_inspection import namespace_data
                 # Include the implicit root. Refuse BEFORE every eager parent
                 # insertion, not after building a potentially large dict.
@@ -111,6 +118,8 @@ class _Budget:
             from .artifact_inspection import MAX_NAMESPACE_ENTRIES
             self.maximum_entries = MAX_NAMESPACE_ENTRIES - 1 - (
                 artifact._preflight_retained if not artifact._preflight_complete else 0)
+        if _current_ipa(deadline) is not None:
+            self.maximum_bytes = 4 * 1024**3
         if type(deadline) is not InspectionDeadline:
             from .ios_archive_operation import _IOSInspectionDeadline
             if type(deadline) is _IOSInspectionDeadline:
@@ -336,6 +345,10 @@ class _IOSSnapshotOwner(FiniteScratch):
                 _require(desktop_operation.guard is guard and type(deadline) is _IOSInspectionDeadline
                          and desktop_operation.inspection_deadline is deadline,
                          "Desktop snapshot requires its original operation and inspection clock")
+            elif type(desktop_operation).__name__ == 'CurrentIPATools':
+                from .ios_current_tools_macos import CurrentIPATools, operation_for
+                _require(type(desktop_operation) is CurrentIPATools and operation_for(deadline) is desktop_operation
+                         and desktop_operation.guard is guard, 'current IPA snapshot requires original adapter')
             else:
                 from .desktop_artifact_inspection import ArtifactInspectionOperation
                 _require(type(desktop_operation) is ArtifactInspectionOperation
@@ -952,6 +965,10 @@ def _source_entries(number: int, *, owner=None, deadline=None):
         with owner.entries(number) as iterator:
             yield iterator
         return
+    current = _current_ipa(deadline if deadline is not None else getattr(owner, 'deadline', None))
+    if current is not None:
+        with current.entries(number, owner) as iterator: yield iterator
+        return
     artifact = _artifact_operation(deadline)
     if artifact is not None:
         with artifact.files.entries(number) as iterator:
@@ -991,6 +1008,16 @@ def _source_descriptor(path, flags, *, parent=None, owner=None, deadline=None):
     else:
         if parent is None and owner._desktop_binding is not None:
             operation = owner._desktop_binding.operation
+            current = _current_ipa(owner.deadline)
+            if current is not None:
+                if path in (current.input_paths[2],current.input_nodes[2].canonical):
+                    _require(flags == os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 'current IPA source is read only')
+                    with current.input_file(path) as source: yield source.fileno()
+                elif flags & os.O_DIRECTORY:
+                    with owner.directory(path) as number: yield number
+                else:
+                    with owner.descriptor(path, flags, parent=parent) as number: yield number
+                return
             originals = (operation.artifact(),) if operation.signing is None else (operation.artifact(), operation.ipa())
             for original in originals:
                 if path == original.path:
@@ -1007,7 +1034,14 @@ def _source_descriptor(path, flags, *, parent=None, owner=None, deadline=None):
 
 @contextmanager
 def _source_file(path: Path, *, owner=None, deadline=None):
-    if owner is None and _artifact_operation(deadline) is None:
+    current = _current_ipa(deadline)
+    if current is not None and current.policy_prelude:
+        _require(owner is current.snapshot._owner and path == current.snapshot.paths['ios-ipa'] and current.policy_source is not None,
+                 'current IPA prelude requires its held policy source')
+        yield current.policy_source
+    elif owner is None and current is not None:
+        with current.input_file(path) as source: yield source
+    elif owner is None and _artifact_operation(deadline) is None:
         with path.open("rb") as source:
             yield source
     else:
@@ -1172,14 +1206,21 @@ class IOSArtifactSnapshot:
 
 @contextmanager
 def snapshot_ios_artifacts(artifacts: Mapping[str, Path], *, cancellation=None,
-                           lane_evidence=None, desktop_operation=None, artifact_operation=None) -> Iterator[IOSArtifactSnapshot]:
+                           lane_evidence=None, desktop_operation=None, artifact_operation=None, current_tools=None) -> Iterator[IOSArtifactSnapshot]:
     """Only yielded private copies may be passed to native/content checks.
 
     A Store input binds its original finite owner before acquisition and never
     carries a delayed TemporaryDirectory finalizer. Standalone callers retain
     their existing scoped behavior.
     """
-    if artifact_operation is not None:
+    if current_tools is not None:
+        from .ios_current_tools_macos import CurrentIPATools
+        _require(type(current_tools) is CurrentIPATools and desktop_operation is None
+                 and artifact_operation is None and lane_evidence is None,
+                 'current IPA snapshot cannot borrow another owner')
+        desktop_operation = current_tools
+        deadline = current_tools.begin_inspection(artifacts, cancellation)
+    elif artifact_operation is not None:
         from .desktop_artifact_inspection import ArtifactInspectionOperation
         _require(type(artifact_operation) is ArtifactInspectionOperation and desktop_operation is None
                  and lane_evidence is None, "artifact snapshot cannot borrow another origin")
@@ -1235,6 +1276,8 @@ def snapshot_ios_artifacts(artifacts: Mapping[str, Path], *, cancellation=None,
                                            cancellation=cancellation, _owner=owner)
             if artifact_operation is not None:
                 artifact_operation.bind_snapshot(snapshot)
+            if current_tools is not None:
+                current_tools.bind_snapshot(snapshot)
             if owner is not None:
                 owner.audit()
             deadline.check()
@@ -1330,6 +1373,8 @@ def _zip_directory_bound(archive: Path, *, deadline: InspectionDeadline, owner=N
         artifact = _artifact_operation(deadline)
         if artifact is not None:
             artifact.zip_directory(archive, size, count, directory_size)
+        current = _current_ipa(deadline)
+        if current is not None: current.zip_directory(archive, size, count, directory_size)
         _require(0 < directory_offset < directory_end and directory_offset + directory_size == directory_end, "artifact ZIP central directory extent is invalid")
         source.seek(0)
         _require(source.read(4) == b"PK\x03\x04", "artifact ZIP prefixes are unsupported")
@@ -1381,7 +1426,7 @@ def safe_extract_zip(path: Path, destination: Path, *, deadline: InspectionDeadl
                          not entry.flag_bits & 1 and entry.compress_type in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED},
                          "ZIP contains links, special files, encryption or unsupported compression")
                 total += entry.file_size
-                _require(0 <= entry.file_size <= MAX_FILE_BYTES and total <= MAX_TOTAL_BYTES and
+                _require(0 <= entry.file_size <= MAX_FILE_BYTES and total <= (4*1024**3 if _current_ipa(deadline) is not None else MAX_TOTAL_BYTES) and
                          (not directory or entry.file_size == 0) and
                          entry.file_size <= max(1, entry.compress_size) * 1000,
                          "ZIP member expansion exceeds its bound")

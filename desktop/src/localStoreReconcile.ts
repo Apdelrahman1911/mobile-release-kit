@@ -21,11 +21,11 @@ export function localStoreReconcileOwnerReason(s:LocalStoreReconcileState):strin
 // journal, exact files/source, Google assignment and authenticated current history.
 function reconcileContext(project:AndroidBuildProject|null,assets:AssetDisplayState|null,history:LocalHistoryState|null,settlement=false) {
  const base=localStoreRequest(project,assets);
- if(!base||assets?.status?.context?.stage!=='candidate'||assets.scope.stage!=='candidate'||!history||history.historical||localHistoryOwnerReason(history))return null;
+ if(!base||base.platform!==undefined||assets?.status?.context?.stage!=='candidate'||assets.scope.stage!=='candidate'||!history||history.historical||localHistoryOwnerReason(history))return null;
  const status=parseLocalHistoryStatus(history.status),op=status?.operation;
- if(history.mode!=='native'||!op||op.phase!=='terminal'||op.outcome!=='complete'||op.context.projectId!==base.projectId||op.context.action!=='review-reconcile'||!op.result)return null;
+ if(history.mode!=='native'||!op||op.phase!=='terminal'||op.outcome!=='complete'||op.context.projectId!==base.projectId||op.context.platform!==undefined||op.context.action!=='review-reconcile'||!op.result)return null;
  const prepared=op.result.preparedIntent,last=op.result.history.at(-1);
- if(!prepared||!last||!['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(last.phase)||last.operationId!==prepared.operationId||op.context.candidateOperationId!==prepared.operationId||
+ if(!prepared||!('applicationId' in prepared)||!last||!['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(last.phase)||last.operationId!==prepared.operationId||op.context.candidateOperationId!==prepared.operationId||
    prepared.version.name!==base.savedVersion.name||prepared.version.build!==base.savedVersion.build||project?.selection?.applicationId!==prepared.applicationId)return null;
  if(settlement&&(last.phase==='settled-success'||op.result.headSequence>512))return null;
  const request=parseLocalStoreReconcileRequest({...base,...(settlement?{settlement:'record-current-target'}:{}),candidateOperationId:prepared.operationId,candidateSha256:prepared.candidateSha256,

@@ -20,7 +20,18 @@ module MobileReleaseKit
 
     module_function
 
-    def current!(python:, module_root:, app_root:, config_path:, intent_path:, ipa_path:, intent_sha256:, environment:, tooling_directory:)
+    def current!(**arguments)
+      current_impl!(**arguments)
+    end
+
+    def current_local!(**arguments)
+      invocation = StoreLaneLifetime.current_invocation
+      raise StoreLaneLifetime::LifetimeError unless invocation
+      request = invocation.local_current_validation_request(adapter: self)
+      current_impl!(**arguments, local_request: request)
+    end
+
+    def current_impl!(python:, module_root:, app_root:, config_path:, intent_path:, ipa_path:, intent_sha256:, environment:, tooling_directory:, local_request: nil)
       unless python.is_a?(String) && python.start_with?(File::SEPARATOR) && !python.match?(/[\x00-\x1f\x7f]/) && File.file?(python) && File.executable?(python)
         raise ContractError, "Current IPA validation requires the toolkit's absolute Python interpreter"
       end
@@ -39,8 +50,9 @@ module MobileReleaseKit
         # application input or inherited Python environment.
         python, "-I", "-S", "-c", BOOTSTRAP, trusted_module_root,
         "--app-root", File.realpath(app_root), "--config-path", config,
-        "--operation-intent", intent, "--ipa", ipa, "--intent-sha256", intent_sha256,
+        (local_request ? "--local-operation-intent" : "--operation-intent"), intent, "--ipa", ipa, "--intent-sha256", intent_sha256,
       ]
+      argv += ["--local-registered-tools-json", local_request] if local_request
       clean = environment.to_h.select { |name, value| ENVIRONMENT_NAMES.include?(name) && !value.to_s.empty? }
       clean.merge!("LANG" => "C", "LC_ALL" => "C")
       binding = StoreLaneLifetime.reserve_current_validation!(role: "current-ios", adapter: self,
@@ -59,6 +71,8 @@ module MobileReleaseKit
     ensure
       binding&.finish_call!
     end
+
+    private_class_method :current_impl!
 
     def validated_result(output, intent_sha256:, artifact:)
       value = MobileReleaseKit.strict_json(output, label: "current IPA validation result")

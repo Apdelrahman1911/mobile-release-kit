@@ -1,4 +1,4 @@
-//! Closed local Android preparation DATA; a temporary uncommitted edit is not publication authority.
+//! Closed local Store preparation DATA; a temporary uncommitted edit is not publication authority.
 //! A core terminal is provisional until this operation's original native joins.
 use std::path::Path;
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error
 
 pub(crate) const PROTOCOL: &str = "mrk-local-store-prepare/1";
 pub(crate) const CONSENT: &str = "local-android-store-prepare-v1";
+pub(crate) const APPLE_CONSENT: &str = "local-ios-store-prepare-v1";
 pub(crate) const EVENT: &str = "local-store-prepare-state-changed";
 pub(crate) const IPC_LIMIT: usize = 8192;
 pub(crate) const REQUEST_LIMIT: usize = 16 * 1024;
@@ -28,7 +29,20 @@ fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_as
 #[serde(deny_unknown_fields)]
 pub(crate) struct Content { pub(crate) bytes: u32, pub(crate) sha256: String }
 impl Content { fn valid(&self) -> bool { (1..=524288).contains(&self.bytes) && sha(&self.sha256) } }
-pub(crate) use crate::local_store_preflight_protocol::{Platform,ExecutionMode,Profile,Outcome,Phase,Availability};
+pub(crate) use crate::local_store_preflight_protocol::{ExecutionMode,Profile,Outcome,Phase,Availability};
+// Prepare-only selection. Execute/Reconcile retain the Android-only type.
+#[derive(Clone,Copy,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="lowercase")]
+pub(crate) enum Platform { Android, Ios }
+impl Platform {
+    fn name(self)->&'static str { match self {Self::Android=>"android",Self::Ios=>"ios"} }
+    fn consent(self)->&'static str { match self {Self::Android=>CONSENT,Self::Ios=>APPLE_CONSENT} }
+    fn commands(self)->u32 { match self {Self::Android=>14,Self::Ios=>15} }
+    fn scope(self)->&'static str { match self {Self::Android=>"local-android-store-prepare",Self::Ios=>"local-ios-store-prepare"} }
+}
+#[derive(Deserialize)]
+#[serde(rename_all="lowercase")]
+enum AppleSelection { Ios }
 pub(crate) use crate::local_release_history_protocol::Head;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -49,7 +63,7 @@ impl Context {
         && self.credential_context_revision > 0 && self.credential_context_revision < u32::MAX
         && token(&self.record_id) && self.record_revision > 0 && self.record_revision < u32::MAX
         && uuid(&self.candidate_operation_id) && sha(&self.candidate_sha256)
-        && self.confirmation==format!("candidate:android:{}:{}",self.saved_version.name,self.saved_version.build) }
+        && self.confirmation==format!("candidate:{}:{}:{}",self.platform.name(),self.saved_version.name,self.saved_version.build) }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -58,6 +72,7 @@ pub(crate) struct Prepare {
     pub(crate) saved_config: Content, pub(crate) saved_version: crate::android_build_protocol::SavedVersion,
     pub(crate) credential_context_revision: u32, pub(crate) record_id: String, pub(crate) record_revision: u32,
     pub(crate) execution_mode: ExecutionMode,
+    #[serde(default)] platform:Option<AppleSelection>,
     pub(crate) candidate_operation_id:String, pub(crate) candidate_sha256:String, pub(crate) confirmation:String,
 }
 impl Prepare {
@@ -65,7 +80,7 @@ impl Prepare {
         baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
         saved_version: self.saved_version.clone(), credential_context_revision: self.credential_context_revision,
         record_id: self.record_id.clone(), record_revision: self.record_revision, execution_mode: self.execution_mode,
-        platform: Platform::Android, operation: Operation::LocalStorePrepare, candidate_operation_id:self.candidate_operation_id.clone(),
+        platform: if self.platform.is_some(){Platform::Ios}else{Platform::Android}, operation: Operation::LocalStorePrepare, candidate_operation_id:self.candidate_operation_id.clone(),
         candidate_sha256:self.candidate_sha256.clone(),confirmation:self.confirmation.clone() } }
 }
 #[derive(Deserialize)]
@@ -75,15 +90,20 @@ pub(crate) struct Start { pub(crate) operation_id: String, pub(crate) owner_gene
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Cancel { pub(crate) operation_id: String, pub(crate) owner_generation: String }
 pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
-    if !keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
-        "credentialContextRevision", "recordId", "recordRevision", "executionMode", "candidateOperationId", "candidateSha256", "confirmation"]) { return Err(invalid()); }
+    let fields=["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+        "credentialContextRevision", "recordId", "recordRevision", "executionMode", "candidateOperationId", "candidateSha256", "confirmation"];
+    if !keys(value,&fields) && !(keys(value,&[fields.as_slice(), &["platform"]].concat())
+        && value.get("platform").and_then(Value::as_str)==Some("ios")) { return Err(invalid()); }
     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
     if !input.context().valid() { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || input.consent_version != CONSENT { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT) { return Err(invalid()); } Ok(input)
+}
+impl Start {
+    pub(crate) fn matches_context(&self,context:&Context)->bool { self.consent_version==context.platform.consent() }
 }
 pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration"]) { return Err(invalid()); }
@@ -141,8 +161,9 @@ pub(crate) enum Reason {
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="kebab-case")]
-enum Limitation {NonPublishing,PrepareNotExecute,TemporaryEditMayExpire,CurrentBundleNotHistoricalFinality,SavedInputsNotAtomic}
+enum Limitation {NonPublishing,PrepareNotExecute,TemporaryEditMayExpire,CurrentAscSnapshotMayChange,CurrentBundleNotHistoricalFinality,SavedInputsNotAtomic}
 const LIMITATIONS:[Limitation;5]=[Limitation::NonPublishing,Limitation::PrepareNotExecute,Limitation::TemporaryEditMayExpire,Limitation::CurrentBundleNotHistoricalFinality,Limitation::SavedInputsNotAtomic];
+const APPLE_LIMITATIONS:[Limitation;5]=[Limitation::NonPublishing,Limitation::PrepareNotExecute,Limitation::CurrentAscSnapshotMayChange,Limitation::CurrentBundleNotHistoricalFinality,Limitation::SavedInputsNotAtomic];
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(deny_unknown_fields)]
 struct Version {name:String,build:u32}
@@ -151,35 +172,61 @@ struct Version {name:String,build:u32}
 struct Destination {channel:String,release_status:String}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-pub(crate) struct PreparedIntent {operation_id:String,candidate_sha256:String,intent_sha256:String,store_precondition_sha256:String,
+pub(crate) struct AndroidPreparedIntent {operation_id:String,candidate_sha256:String,intent_sha256:String,store_precondition_sha256:String,
     source_commit:String,source_tree:String,application_id:String,version:Version,destination:Destination,observed_at:String,limitations:Vec<Limitation>}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(deny_unknown_fields)]
+struct AppleDestination {channel:String}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct IOSPreparedIntent {operation_id:String,candidate_sha256:String,intent_sha256:String,store_precondition_sha256:String,
+    source_commit:String,source_tree:String,bundle_id:String,app_store_app_id:String,version:Version,
+    destination:AppleDestination,observed_at:String,limitations:Vec<Limitation>}
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(untagged)]
+pub(crate) enum PreparedIntent {Android(AndroidPreparedIntent),Ios(IOSPreparedIntent)}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct ResultData {schema_version:u32,scope:String,head_sequence:u32,prepared_intent:PreparedIntent}
 // Shared bounded summary DATA, not a Store/runtime/Document grant. Review uses
 // this same grammar without manufacturing an earlier Prepare Context/finality.
 impl PreparedIntent {
+    pub(crate) fn platform(&self)->Platform {match self {Self::Android(_)=>Platform::Android,Self::Ios(_)=>Platform::Ios}}
+    fn version(&self)->&Version {match self {Self::Android(p)=>&p.version,Self::Ios(p)=>&p.version}}
+    fn candidate_hash(&self)->&str {match self {Self::Android(p)=>&p.candidate_sha256,Self::Ios(p)=>&p.candidate_sha256}}
     pub(crate) fn valid_for(&self,operation:&str)->bool {
-        let p=self;
+        let (id,candidate,intent,precondition,commit,tree,app,date,limits)=match self {
+            Self::Android(p)=>(&p.operation_id,&p.candidate_sha256,&p.intent_sha256,&p.store_precondition_sha256,
+                &p.source_commit,&p.source_tree,&p.application_id,&p.observed_at,&p.limitations),
+            Self::Ios(p)=>(&p.operation_id,&p.candidate_sha256,&p.intent_sha256,&p.store_precondition_sha256,
+                &p.source_commit,&p.source_tree,&p.bundle_id,&p.observed_at,&p.limitations),
+        };
+        let version=self.version();
         let hex=|v:&str,n|v.len()==n&&v.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b));
-        let app=p.application_id.len()<=255&&p.application_id.split('.').count()>=2&&p.application_id.split('.').all(|v|
-            v.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)&&v.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'));
-        let date=p.observed_at.as_bytes();
+        let separator=if self.platform()==Platform::Ios{b'-'}else{b'_'};
+        let app_valid=app.len()<=255&&app.split('.').count()>=2&&app.split('.').all(|v|
+            v.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)&&v.bytes().all(|b|b.is_ascii_alphanumeric()||b==separator));
+        let date=date.as_bytes();
         let timestamp=date.len()==20&&date.iter().enumerate().all(|(i,b)|match i{4|7=>*b==b'-',10=>*b==b'T',13|16=>*b==b':',19=>*b==b'Z',_=>b.is_ascii_digit()});
-        p.operation_id==operation&&uuid(operation)&&sha(&p.candidate_sha256)
-            &&sha(&p.intent_sha256)&&sha(&p.store_precondition_sha256)&&hex(&p.source_commit,40)&&hex(&p.source_tree,40)
-            &&app&&!p.version.name.is_empty()&&p.version.name.len()<=64
-            &&p.version.name.bytes().all(|b|b.is_ascii_alphanumeric()||b".+-".contains(&b))
-            &&(1..=2_100_000_000).contains(&p.version.build)
-            &&p.destination.channel=="internal"&&p.destination.release_status=="completed"&&timestamp&&p.limitations==LIMITATIONS
+        let destination=match self {
+            Self::Android(p)=>p.destination.channel=="internal"&&p.destination.release_status=="completed"&&*limits==LIMITATIONS,
+            Self::Ios(p)=>p.destination.channel=="testflight-internal"&&*limits==APPLE_LIMITATIONS
+                &&(1..=20).contains(&p.app_store_app_id.len())&&p.app_store_app_id.bytes().all(|b|b.is_ascii_digit()),
+        };
+        id==operation&&uuid(operation)&&sha(candidate)&&sha(intent)&&sha(precondition)&&hex(commit,40)&&hex(tree,40)
+            &&app_valid&&!version.name.is_empty()&&version.name.len()<=64
+            &&version.name.bytes().all(|b|b.is_ascii_alphanumeric()||b".+-".contains(&b))
+            &&(1..=2_100_000_000).contains(&version.build)&&destination&&timestamp
     }
 }
 impl ResultData {
     fn valid(&self,c:&Context)->bool {
-        self.schema_version==1&&self.scope=="local-android-store-prepare"&&(1..=513).contains(&self.head_sequence)
-            &&self.prepared_intent.valid_for(&c.candidate_operation_id)
-            &&self.prepared_intent.candidate_sha256==c.candidate_sha256
-            &&self.prepared_intent.version.name==c.saved_version.name&&self.prepared_intent.version.build==c.saved_version.build
+        let p=&self.prepared_intent;
+        self.schema_version==1&&self.scope==c.platform.scope()
+            &&(if c.platform==Platform::Ios{5}else{1}..=513).contains(&self.head_sequence)
+            &&p.platform()==c.platform&&p.valid_for(&c.candidate_operation_id)
+            &&p.candidate_hash()==c.candidate_sha256
+            &&p.version().name==c.saved_version.name&&p.version().build==c.saved_version.build
     }
 }
 
@@ -205,10 +252,10 @@ pub(crate) struct Terminal {
 impl Terminal {
     fn valid(&self, context: &Context) -> bool {
         if self.schema_version != 1 || &self.context != context || !self.context.valid() || self.lifetime.profile_calls != 0
-            || self.lifetime.commands > 14 { return false; }
+            || self.lifetime.commands > context.platform.commands() { return false; }
         if self.outcome == Outcome::Complete {
             return self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
-                && self.lifetime.commands==14 && self.lifetime.command_dispatched==Some(true)
+                && self.lifetime.commands==context.platform.commands() && self.lifetime.command_dispatched==Some(true)
                 && self.result.as_ref().is_some_and(|r| r.valid(context));
         }
         if self.result.is_some() || self.reason == Reason::None { return false; }
@@ -310,6 +357,42 @@ pub(crate) mod tests {
     fn frames()->Vec<Vec<u8>>{vec![frame(0,"accepted",json!({"schemaVersion":1,"context":context()})),frame(1,"lease-ready",json!({})),
         frame(2,"history-head",json!({"sequence":3,"sha256":"a".repeat(64)})),frame(3,"prepare-pending",json!({"sequence":4,"sha256":"b".repeat(64)})),
         frame(4,"prepare-settled",json!({"head":{"sequence":5,"sha256":"c".repeat(64)},"phase":"prepared"})),frame(5,"terminal",complete())]}
+    fn apple_complete()->Value {
+        let mut value=complete();value["context"]["platform"]=json!("ios");
+        value["context"]["confirmation"]=json!("candidate:ios:1.2.3:42");
+        value["result"]["scope"]=json!("local-ios-store-prepare");
+        let summary=&mut value["result"]["preparedIntent"];
+        summary.as_object_mut().unwrap().remove("applicationId");
+        summary["bundleId"]=json!("dev.example.my-app");summary["appStoreAppId"]=json!("0012345678");
+        summary["destination"]=json!({"channel":"testflight-internal"});summary["limitations"]=json!(APPLE_LIMITATIONS);
+        value["lifetime"]["commands"]=json!(15);value
+    }
+    #[test]
+    fn local_ios_prepare_requires_distinct_consent_and_closed_fifteen_call_result(){
+        let mut input=input();input["platform"]=json!("ios");input["confirmation"]=json!("candidate:ios:1.2.3:42");
+        let c=prepare(&input).unwrap().context();assert_eq!(c.platform,Platform::Ios);
+        for field in [Value::Null,json!("android"),json!("macos")] {let mut bad=input.clone();bad["platform"]=field;assert!(prepare(&bad).is_err());}
+        for token in [CONSENT,APPLE_CONSENT] {let consent=start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":token})).unwrap();
+            assert_eq!(consent.matches_context(&c),token==APPLE_CONSENT);assert_eq!(consent.matches_context(&context()),token==CONSENT);}
+        assert!(crate::local_store_execute_protocol::prepare(&input).is_err());
+        assert!(crate::local_store_reconcile_protocol::prepare(&input).is_err());
+        let value=apple_complete();let check=|v:&Value|Terminal::deserialize(v).is_ok_and(|t|t.valid(&c));
+        assert!(check(&value));assert!(!Terminal::deserialize(&value).unwrap().valid(&context()));
+        assert_eq!(serde_json::to_value(Terminal::deserialize(&value).unwrap()).unwrap(),value);
+        for count in [0,14,16]{let mut bad=value.clone();bad["lifetime"]["commands"]=json!(count);assert!(!check(&bad));}
+        for(field,v)in[("applicationId",json!("dev.example.app")),("appStoreAppId",Value::Null),("appStoreAppId",json!(123)),
+            ("appStoreAppId",json!("1".repeat(21))),("appStoreAppId",json!("-1")),("bundleId",json!("dev.bad_name")),
+            ("destination",json!({"channel":"testflight-internal","releaseStatus":"completed"})),("limitations",json!(LIMITATIONS))]{
+            let mut bad=value.clone();bad["result"]["preparedIntent"][field]=v;assert!(!check(&bad),"{field}");}
+        let mut bad=value.clone();bad["result"]["headSequence"]=json!(4);assert!(!check(&bad));
+        let mut d=Decoder::new();for (sequence,raw) in frames().iter().enumerate(){
+            let mut row:Value=serde_json::from_slice(raw).unwrap();
+            if sequence==0{row["payload"]["context"]=json!(c);}
+            if sequence==5{row["payload"]=value.clone();}
+            let mut bytes=serde_json::to_vec(&row).unwrap();bytes.push(b'\n');
+            d.decode(&bytes,&"a".repeat(32),&"b".repeat(32),&c,&"c".repeat(32),&"d".repeat(64)).unwrap();
+        }assert!(d.finish());
+    }
     #[test]
     fn local_prepare_requires_exact_candidate_consent_not_access_or_execute(){
         let c=context();assert!(c.valid());

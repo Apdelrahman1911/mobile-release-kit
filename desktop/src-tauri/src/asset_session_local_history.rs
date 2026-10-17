@@ -155,7 +155,7 @@ mod tests {
         consent.action=wire::Action::ReviewPrepared;
         assert!(consent.matches_context(&context));
         context.platform=Some(wire::CandidatePlatform::Ios);assert!(!consent.matches_context(&context));
-        consent.platform=context.platform;assert!(!consent.matches_context(&context));assert_eq!(consent.consent(),wire::IOS_CANDIDATE_CONSENT);
+        consent.platform=context.platform;assert!(consent.matches_context(&context));assert_eq!(consent.consent(),wire::IOS_CANDIDATE_CONSENT);
         assert!(!consent.current(&context,7,&root)); // Same DATA platform still lacks a Document owner.
         context.platform=None;assert!(!consent.matches_context(&context));consent.platform=None;
         context.candidate_operation_id=Some("12345678-1234-4234-9234-123456789abd".into());

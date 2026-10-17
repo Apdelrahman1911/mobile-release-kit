@@ -822,7 +822,9 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                         stage="production" if request.stage == "production-submit" else request.stage,
                         invocation=invocation, cancellation=guard, lane_evidence=record,
                         **({} if local is None else {"scratch_parent":local.home._path})))
-                    findings = material.validate()
+                    findings = (material.validate(runtime_context=_local_prepare.runtime)
+                                if _local_prepare is not None and request.platform == "ios"
+                                else material.validate())
                     if any(item.status in FAILING_STATUSES for item in findings):
                         raise StoreOperationError("Selected Store credential material is missing or invalid")
                     content = _run_store_lane(config=config, release=release, request=request,

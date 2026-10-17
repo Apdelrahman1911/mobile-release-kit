@@ -342,24 +342,26 @@ module MobileReleaseKit
       end
 
       def admit_local_execution!
-        raise Error.new(:local_reused) if @local_execution || @binding.fetch("lane") != "android_internal_upload" || @binding.fetch("mode") != "execute"
+        raise Error.new(:local_reused) if @local_execution || !%w[android_internal_upload ios_testflight_internal].include?(@binding.fetch("lane")) || @binding.fetch("mode") != "execute"
         require_relative "release_support"
         # Exact private transport, never authority selected from a decoded
         # purpose or an ambient fallback. Execute keeps its original grammar.
         keys=[LOCAL_EXECUTE_KEY,LOCAL_RECONCILE_KEY].select { |key| @environment.key?(key) }
         raise Error.new(:local_shape) unless keys.length == 1
         recover=keys.first == LOCAL_RECONCILE_KEY
+        platform=@binding.fetch("lane") == "ios_testflight_internal" ? "ios" : "android"
+        raise Error.new(:local_shape) if recover && platform != "android"
         raw=@environment.fetch(keys.first)
         raise Error.new(:local_size) unless raw.bytesize <= 16*1024
         value=MobileReleaseKit.strict_json(raw,label:"local execution context")
-        fields=recover ? %w[authority expectedIntentSha256] : %w[authority expectedIntentSha256 toolchain]
+        fields=recover ? %w[authority expectedIntentSha256] : %w[authority expectedIntentSha256] + [platform == "ios" ? "signingTools" : "toolchain"]
         raise Error.new(:local_shape) unless value.instance_of?(Hash) && value.keys.sort == fields.sort
         path=MobileReleaseKit.safe_path(@environment.fetch("MOBILE_RELEASE_APP_ROOT"),@environment.fetch("MOBILE_RELEASE_OPERATION_INTENT_PATH"))
         raise Error.new(:local_intent) unless File.file?(path) && !File.symlink?(path) && File.size(path) <= 2*1024*1024
         body=File.binread(path,2*1024*1024+1)
-        payload,digest=MobileReleaseKit.local_operation_intent(body,expected_sha256:value.fetch("expectedIntentSha256"))
+        payload,digest=MobileReleaseKit.local_operation_intent(body,expected_sha256:value.fetch("expectedIntentSha256"),platform:platform)
         authority=MobileReleaseKit.local_execution_authority(MobileReleaseKit.canonical_json(value.fetch("authority")),
-          intent_content:body,expected_intent_sha256:digest,purpose:recover ? "recover" : "execute")
+          intent_content:body,expected_intent_sha256:digest,purpose:recover ? "recover" : "execute",platform:platform)
         raise Error.new(:local_binding) unless payload.fetch("confirmation") == @environment.fetch("MOBILE_RELEASE_CONFIRMATION") &&
           payload.fetch("application").fetch("id") == @environment.fetch("MOBILE_RELEASE_APP_IDENTITY") &&
           payload.fetch("version").fetch("marketing") == @environment.fetch("MOBILE_RELEASE_MARKETING_VERSION") &&
@@ -368,9 +370,24 @@ module MobileReleaseKit
         # owner and sealed with ALL command environment bytes. It is comparison
         # DATA, not a new provider/consent grant or a caller runtime factory.
         context={payload:payload,digest:digest,authority:authority}
-        context[:toolchain]=value.fetch("toolchain") unless recover
+        if !recover && platform == "ios"
+          tools=value.fetch("signingTools")
+          raise Error.new(:local_shape) unless tools.instance_of?(Hash) && tools.keys.sort == %w[codesign openssl security] &&
+            tools.values.all? { |tool| local_signing_tool?(tool) }
+          raise Error.new(:local_binding) unless payload.fetch("application").fetch("storeAppId") == @environment.fetch("MOBILE_RELEASE_ASC_APP_ID")
+          context[:signing_tools]=tools
+        elsif !recover
+          context[:toolchain]=value.fetch("toolchain")
+        end
         freeze_local(context);@local_execution=context
         @invocation.bind_local_execution!(self,context)
+      end
+      def local_signing_tool?(tool)
+        tool.instance_of?(Hash) && tool.keys.sort == %w[ctimeNs device gid inode links mode mtimeNs size uid] &&
+          %w[device inode mtimeNs ctimeNs].all? { |name| tool[name].instance_of?(String) && tool[name].match?(/\A(?:0|[1-9][0-9]{0,19})\z/) && tool[name].to_i <= 2**64-1 } &&
+          tool['inode'] != '0' && %w[mode uid gid].all? { |name| tool[name].instance_of?(Integer) && tool[name].between?(0,2**32-1) } &&
+          tool['uid'] == 0 && tool['mode'] & 0170000 == 0100000 && tool['mode'] & 07022 == 0 && tool['mode'] & 0111 != 0 &&
+          tool['links'].instance_of?(Integer) && tool['links'] == 1 && tool['size'].instance_of?(Integer) && tool['size'].between?(1,64*1024*1024)
       end
       def freeze_local(value)
         value.each { |k,v| freeze_local(k);freeze_local(v) } if value.instance_of?(Hash)

@@ -548,7 +548,7 @@ export function App() {
   localHistoryControllerRef.current = localHistory;
   const localHistoryState = useSyncExternalStore(localHistory.subscribe, localHistory.getSnapshot, localHistory.getSnapshot);
   const [localStorePrepare] = useState(() => new LocalStorePrepareController({
-    project: () => androidBuild.getSnapshot().project, assets: assetSession.getSnapshot,
+    project: () => {const current=workspaceRef.current;return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?localStoreProjectObservation(current.projects[current.selectedId]!,releaseVersion.getSnapshot()):null;}, assets: assetSession.getSnapshot,
     history: localHistory.getSnapshot,
     // Exclude this controller's own intent from reciprocal admission.
     otherOperationReason: () => storeReconcileBusy() ?? storeExecuteBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
@@ -762,9 +762,9 @@ export function App() {
     localStoreReconcile.syncProject();return()=>{a();b();c();};
   },[assetSession,androidBuild,localHistory,localStoreReconcile]);
   useEffect(() => {
-    const a=assetSession.subscribe(localStorePrepare.syncProject),b=androidBuild.subscribe(localStorePrepare.syncProject),c=localHistory.subscribe(localStorePrepare.syncProject);
+    const a=assetSession.subscribe(localStorePrepare.syncProject),b=releaseVersion.subscribe(localStorePrepare.syncProject),c=localHistory.subscribe(localStorePrepare.syncProject);
     localStorePrepare.syncProject();return()=>{a();b();c();};
-  },[assetSession,androidBuild,localHistory,localStorePrepare]);
+  },[assetSession,releaseVersion,localHistory,localStorePrepare]);
   useEffect(() => () => localHistory.dispose(), [localHistory]);
   useEffect(() => {const a=assetSession.subscribe(localStore.syncProject), b=releaseVersion.subscribe(localStore.syncProject);localStore.syncProject(); localStorePrepare.syncProject();return()=>{a();b();};},[assetSession,releaseVersion,localStore]);
   useEffect(() => () => androidBuild.dispose(), [androidBuild]);

@@ -16,6 +16,7 @@ impl SavedCommandOwner {
     pub(crate) fn start_store_prepare(&self,input:prepare_wire::Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,
         gate:prepare_wire::Availability,material:Arc<SelectedStoreMaterial>)->Result<crate::local_store_prepare_owner::Admitted,BridgeError>{
         self.require_domain(SavedCommandDomain::LocalStorePrepare)?;
+        if !material.accepts_prepare_consent(&input) { return Err(prepare_wire::invalid()); }
         let admitted=self.start_bound(Start{operation_id:input.operation_id,owner_generation:input.owner_generation},admitted_at,registered,
             Availability::from_store(gate),Some(PrivateSigningMaterial::Store(material)))?;
         Ok(crate::local_store_prepare_owner::Admitted::new(admitted.status.prepare()?,admitted.release))

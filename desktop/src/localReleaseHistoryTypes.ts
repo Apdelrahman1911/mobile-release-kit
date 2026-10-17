@@ -1,13 +1,13 @@
 import type { IOSCandidateInputs } from './iosArchiveTypes.ts';
 import type { LocalReconciliationReceipt } from './localStoreReconcileTypes.ts';
 import type { LocalExecutionReceipt } from './localStoreExecuteTypes.ts';
-import type { LocalPreparedIntent } from './localStorePrepareTypes.ts';
+import type { LocalPreparedIntent, IOSPreparedIntent } from './localStorePrepareTypes.ts';
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
 export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile' | 'review-recovery';
 export type PrepareLocalHistory = { projectId: string; executionMode: 'local' } & (
   { action: 'enroll' | 'verify'; candidateOperationId?: never; platform?: never } |
-  { action: 'review-inputs' | 'abandon-inputs'; candidateOperationId: string; platform?: 'ios' } |
-  { action: 'review-prepared' | 'review-execution' | 'review-reconcile' | 'review-recovery'; candidateOperationId: string; platform?: never }
+  { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared'; candidateOperationId: string; platform?: 'ios' } |
+  { action: 'review-execution' | 'review-reconcile' | 'review-recovery'; candidateOperationId: string; platform?: never }
 );
 export interface LocalCandidateInputs {
   operationId: string; candidateSha256: string; sourceCommit: string; sourceTree: string;
@@ -16,6 +16,9 @@ export interface LocalCandidateInputs {
   observation: 'current-bundle-only'; priorCreateFinality: 'not-established';
 }
 export interface LocalPreparedIntentReview extends LocalPreparedIntent {
+  observation: 'current-prepared-files-only'; priorPrepareFinality: 'not-established';
+}
+export interface IOSPreparedIntentReview extends IOSPreparedIntent {
   observation: 'current-prepared-files-only'; priorPrepareFinality: 'not-established';
 }
 export interface LocalExecutionReceiptReview extends LocalExecutionReceipt {
@@ -32,7 +35,7 @@ export interface LocalHistoryResult {
   history: { operationId: string; phase: LocalJournalPhase; recoveryRequired: boolean }[];
   limitations: ['no-store-authority', 'no-build-or-publishing', 'keychain-intact-rollback-boundary'];
   candidateInputs?: LocalCandidateInputs | IOSCandidateInputs | null;
-  preparedIntent?: LocalPreparedIntentReview;
+  preparedIntent?: LocalPreparedIntentReview | IOSPreparedIntentReview;
   executionReceipt?: LocalExecutionReceiptReview;
   reconciliationReceipt?: LocalRecoveryReceiptReview;
 }
