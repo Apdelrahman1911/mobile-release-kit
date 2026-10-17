@@ -21,7 +21,7 @@ jobs:
       max-parallel: 4
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
-        mode: [ordinary-ui, ordinary-ios-ui, ordinary-saved-ui]
+        mode: [ordinary-ui, ordinary-ios-ui, ordinary-saved-ui, ordinary-saved-version-ui]
         include:
           - runner: macos-26
             target: aarch64-apple-darwin
@@ -52,7 +52,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          case "$MRK_CANDIDATE_MODE" in restore|ordinary-ui|ordinary-ios-ui|ordinary-saved-ui) ;; *) exit 1 ;; esac
+          case "$MRK_CANDIDATE_MODE" in restore|ordinary-ui|ordinary-ios-ui|ordinary-saved-ui|ordinary-saved-version-ui) ;; *) exit 1 ;; esac
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$RUNNER_OS" = macOS
           test "$GITHUB_WORKSPACE" = /Users/runner/work/mobile-release-kit/mobile-release-kit
@@ -260,7 +260,7 @@ jobs:
 
       - name: Install the exact final candidate once without rebuilding or signing it
         id: ordinary_install
-        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui'
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui'
         timeout-minutes: 12
         shell: bash
         env:
@@ -450,8 +450,60 @@ jobs:
           # build/test outputs, not the installed app, finite phase controls or
           # private synthetic fixtures.
           # Unknown owners stop the sequence and remain for hosted VM disposal.
+      - name: Observe one current-candidate saved-version rollback with the newer helper harness
+        id: ordinary_saved_version_ui
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui' && steps.ordinary_install.outcome == 'success'
+        timeout-minutes: 40
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          unset GITHUB_TOKEN GH_TOKEN
+          # Each existing helper keeps its original inner and outer deadlines;
+          # this containing step/job does not grant a new native clock. Only the
+          # nonshipping XCTest harness builds once from this helper checkout.
+          # Installed app and core retain their actual candidate source; the
+          # runner executes at the helper root with an explicit separate source.
+          ui() {
+            local phase=$1 status saved status_path
+            case "$phase" in
+              build|saved-version-recovery-test|saved-version-recovery-summary)
+                status_path="$MRK_MACOS_WORK/normal-ui/$phase.status" ;;
+              result|cleanup) status_path="$MRK_MACOS_WORK/candidate-ui-$phase.status" ;;
+              *) return 1 ;;
+            esac
+            set +e
+            "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B \
+              "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_ui.py" --saved-version "$phase" \
+              > "$MRK_MACOS_WORK/candidate-ui-$phase.json"
+            status=$?
+            printf '%s\n' "$status" > "$status_path"
+            saved=$?
+            set -e
+            printf 'MRK_CANDIDATE_UI_PHASE=%s;originalReturncode=%s;observationOnly=true\n' "$phase" "$status"
+            if [[ "$status" != 0 ]]; then return "$status"; fi
+            [[ "$saved" == 0 ]] || return "$saved"
+          }
+          # One existing rollback method only. Genuine candidate core interrupt86
+          # precedes fresh UI recovery; this is not an interrupted GUI save.
+          # Fixed order, never a retry or a roster supplied by a downloaded file.
+          # read_phase admits each prior actual0 + its original captures/receipt.
+          ui build
+          ui saved-version-recovery-test
+          ui saved-version-recovery-summary
+          ui result
+          ui cleanup
+          # Cleanup runs only after every original succeeded. It retires known
+          # build/test outputs, not the installed app, finite phase controls or
+          # private synthetic fixtures.
+          # Unknown owners stop the sequence and remain for hosted VM disposal.
       - name: Retain only the bounded ordinary UI observation and positive cleanup
-        if: (env.MRK_CANDIDATE_MODE == 'ordinary-ui' && steps.ordinary_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' && steps.ordinary_ios_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' && steps.ordinary_saved_ui.outcome == 'success')
+        if: (env.MRK_CANDIDATE_MODE == 'ordinary-ui' && steps.ordinary_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' && steps.ordinary_ios_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' && steps.ordinary_saved_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui' && steps.ordinary_saved_version_ui.outcome == 'success')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-${{ env.MRK_CANDIDATE_MODE }}-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -461,5 +513,5 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
-          # Selected cohort only: ordinary6, unsigned-iOS/Android-diagnostics2 or saved-documents2. No raw captures, xcresult,
+          # Selected cohort only: ordinary6, unsigned-iOS/Android-diagnostics2 saved-documents2 or current saved-version1. No raw captures, xcresult,
           # credential fixtures, signed carrier or full-feature readiness claim.
