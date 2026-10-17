@@ -31,6 +31,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         self.intent_bytes=self.intent=self.authority=None;self._source_final=False;self._intent_memory=0
         self.tool_reader=None;self.tool_manifest=None;self.tool_environment=None
         self.fence_readers=[];self.fence_iterator=None;self.fence_state='new'
+        self.prior_readers=[];self.preserved_markers={}
         super().__init__(request,guard,source)
     def _quote(self,source=96):
         self.checkpoint()
@@ -38,7 +39,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
             source=source,history_depth=len(Path(self.request.native['home']).parts))
         # Two held prepared-file parent walks, protected tool manifest original,
         # and empty-fence original/iterator. Unknown close gets no phase credit.
-        extra=2*len(self.root.parts)+len(Path(self.request.native['toolchain']['root']).parts)+12
+        extra=3*len(self.root.parts)+len(Path(self.request.native['toolchain']['root']).parts)+18
         value={k:v+extra for k,v in value.items()};require(value['total']<=256)
         if self.quote is not None:require(value['total']<=self.quote['total'])
         self.quote=value;return value
@@ -77,25 +78,8 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
             self.checkpoint();part=os.pread(n,min(65536,size-len(body)),len(body));require(0<len(part)<=size-len(body));body.extend(part)
         require(not os.pread(n,1,size));self.tool_reader.terminal();return bytes(body)
     def _fence_empty(self):
-        path=self.root/'.mobile-release/store/lane-attempts-v1'
-        out=self.prepared_scope.enter_context(_app_private_directory(path,app_root=self.root,cancellation=self.guard,create=False))
-        # Prepare already created and retired its original marker; missing or
-        # replaced namespaces cannot be interpreted as a clean earlier attempt.
-        require(out is not None);self.fence_readers.append(out)
-        root=os.fstat(out.parent.fd);require((root.st_dev,root.st_ino,root.st_mode,root.st_uid,root.st_gid)==self.source.lease_identity)
-        out.check();self.fence_state='acquiring'
-        try:
-            self.fence_iterator=os.scandir(out.fd);self.fence_state='open'
-            require(next(self.fence_iterator,None) is None)
-        finally:
-            original,self.fence_iterator=self.fence_iterator,None
-            if original is not None:
-                self.fence_state='closing'
-                try:original.close()
-                except BaseException:self.fence_state='unknown';raise
-                self.fence_state='closed'
-            elif self.fence_state=='acquiring':self.fence_state='unknown'
-        out.check();self.checkpoint()
+        from . import local_recovery_fence as fence
+        fence.open_fence(self,self.prepared_scope);fence.post(self)
     def _begin(self):
         self.checkpoint();require(self.observation.calls==6 and not self.journals)
         self.enrollment,self.key=self.source.exchange('lease-ready',{})
@@ -104,6 +88,8 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         require(last['operationId']==c['candidateOperationId'] and last['phase']=='prepared' and head['sequence']<=MAX_ENTRIES-2)
         rows=[r for r,_ in j._rows if r['operationId']==c['candidateOperationId']]
         require([r['phase'] for r in rows]==['inputs-pending','inputs-ready','prepare-pending','prepared'])
+        from .local_recovery_fence import prior_markers
+        self.preserved_markers=prior_markers(self,[r for r,_ in j._rows])
         self._admit_prepared(rows)
         self._prepared_post();self._tools();self._fence_empty()
         self.source.exchange('history-head',head);self.checkpoint();require(j.head()==head)
@@ -148,12 +134,21 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
             actual=_read_file(out.fd,name,self.guard,FILES[name],private=True,binding_only=True)
             require(actual is not None and actual==(binding,b''))
         _scan(self,out);out.check();self.checkpoint()
+    def _final_source_fence(self):
+        from .local_recovery_fence import post
+        post(self,own_pending=True)
+    def _arm_source(self,source,args,timeout,limit):
+        self.checkpoint();require(source is self.observation)
+        if len(self._source_rows)==7:self._final_source_fence()
+        return super()._arm_source(source,args,timeout,limit)
     def source_final(self,observation):
         require(observation is self.observation and observation.calls==8 and not self._source_final)
-        self._prepared_post();self.bundle.finish()
+        self._prepared_post()
+        from .local_recovery_fence import post
+        post(self,own_pending=True);self.bundle.finish()
         require(hashlib.sha256(self._tool_bytes()).hexdigest()==self.request.native['toolchain']['inventorySha256'])
         self.tool_reader.close();self.tool_reader.assert_closed()
-        self.prepared_scope.close();require(all(p.closed() for p in (*self.prepared_readers,*self.fence_readers)))
+        self.prepared_scope.close();require(all(p.closed() for p in (*self.prepared_readers,*self.fence_readers,*self.prior_readers)))
         self._source_final=True
     def runtime_environment(self):
         self.checkpoint();require(self.tool_environment is not None and self.tool_reader is not None)
@@ -177,18 +172,8 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
         out=self.fence_readers[0];out.check();directory.check()
         left,right=os.fstat(out.fd),os.fstat(directory.fd)
         require((left.st_dev,left.st_ino,left.st_mode,left.st_uid,left.st_gid)==(right.st_dev,right.st_ino,right.st_mode,right.st_uid,right.st_gid))
-        self.fence_state='acquiring'
-        try:
-            self.fence_iterator=os.scandir(out.fd);self.fence_state='open';require(next(self.fence_iterator,None) is None)
-        finally:
-            original,self.fence_iterator=self.fence_iterator,None
-            if original is not None:
-                self.fence_state='closing'
-                try:original.close()
-                except BaseException:self.fence_state='unknown';raise
-                self.fence_state='closed'
-            elif self.fence_state=='acquiring':self.fence_state='unknown'
-        out.check();directory.check()
+        from .local_recovery_fence import post
+        post(self)
     def lane_context(self,files):
         self.checkpoint();require(files is self.record._files_owner() and files.mode=='execute' and files.phase=='SEALING' and self._store_entered)
         self._prepared_post()
@@ -250,7 +235,7 @@ class LocalStoreExecuteRun(LocalStorePrepareRun):
     def _lane_owners_closed(self):
         return (super()._lane_owners_closed() and self.prepared_iterator is None and self.prepared_scan_state in {'new','closed'}
             and self.fence_iterator is None and self.fence_state in {'new','closed'}
-            and all(p.closed() for p in (*self.prepared_readers,*self.fence_readers))
+            and all(p.closed() for p in (*self.prepared_readers,*self.fence_readers,*self.prior_readers))
             and (self.tool_reader is None or all(s.state in {'UNACQUIRED','CLOSED'} for s in self.tool_reader.descriptors)))
     def close(self):
         if self._close_claimed:return super().close()

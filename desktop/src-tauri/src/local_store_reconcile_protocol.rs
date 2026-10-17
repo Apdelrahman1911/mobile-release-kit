@@ -8,10 +8,11 @@ use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error
 
 pub(crate) const PROTOCOL: &str = "mrk-local-store-reconcile/1";
 pub(crate) const CONSENT: &str = "local-android-store-reconcile-v1";
+pub(crate) const SETTLEMENT_CONSENT: &str = "local-android-recovery-settle-v1";
 pub(crate) const EVENT: &str = "local-store-reconcile-state-changed";
 pub(crate) const IPC_LIMIT: usize = 16 * 1024;
 pub(crate) const REQUEST_LIMIT: usize = 16 * 1024;
-pub(crate) const RESPONSE_LIMIT: usize = 64 * 1024; // Four frames, framing and rejected drain bytes.
+pub(crate) const RESPONSE_LIMIT: usize = 64 * 1024; // Aggregate cap including up to five settlement frames and rejected drain bytes.
 pub(crate) const STATUS_LIMIT: usize = 16 * 1024;
 
 fn keys(value: &Value, expected: &[&str]) -> bool {
@@ -32,7 +33,13 @@ pub(crate) use crate::local_store_preflight_protocol::{Platform,ExecutionMode,Pr
 pub(crate) use crate::local_release_history_protocol::Head;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Operation { LocalStoreReconcile }
+pub(crate) enum Operation { LocalStoreReconcile, LocalStoreRecoverySettle }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all="kebab-case")]
+pub(crate) enum Settlement { RecordCurrentTarget }
+fn settlement_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Settlement>,D::Error>{
+    Ok(Some(Settlement::deserialize(decoder)?))
+}
 fn uuid(v:&str)->bool { crate::local_release_history_protocol::journal_uuid(v) }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -43,9 +50,14 @@ pub(crate) struct Context {
     pub(crate) execution_mode: ExecutionMode, pub(crate) platform: Platform, pub(crate) operation: Operation,
     pub(crate) candidate_operation_id:String, pub(crate) candidate_sha256:String, pub(crate) confirmation:String,
     pub(crate) intent_sha256:String,
+    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="settlement_field")]
+    pub(crate) settlement:Option<Settlement>,
 }
 impl Context {
-    fn valid(&self) -> bool { valid_id(&self.project_id) && self.draft_revision < u32::MAX
+    pub(crate) fn settling(&self)->bool { self.operation==Operation::LocalStoreRecoverySettle && self.settlement==Some(Settlement::RecordCurrentTarget) }
+    pub(crate) fn consent(&self)->&'static str { if self.settling(){SETTLEMENT_CONSENT}else{CONSENT} }
+    pub(crate) fn frame_limit(&self)->usize { if self.settling(){5}else{4} }
+    fn valid(&self) -> bool { ((self.operation==Operation::LocalStoreReconcile&&self.settlement.is_none())||self.settling()) && valid_id(&self.project_id) && self.draft_revision < u32::MAX
         && self.baseline_generation < u32::MAX && self.saved_config.valid() && self.saved_version.valid()
         && self.credential_context_revision > 0 && self.credential_context_revision < u32::MAX
         && token(&self.record_id) && self.record_revision > 0 && self.record_revision < u32::MAX
@@ -61,32 +73,39 @@ pub(crate) struct Prepare {
     pub(crate) execution_mode: ExecutionMode,
     pub(crate) candidate_operation_id:String, pub(crate) candidate_sha256:String, pub(crate) confirmation:String,
     pub(crate) intent_sha256:String,
+    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="settlement_field")]
+    pub(crate) settlement:Option<Settlement>,
 }
 impl Prepare {
     pub(crate) fn context(&self) -> Context { Context { project_id: self.project_id.clone(), draft_revision: self.draft_revision,
         baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
         saved_version: self.saved_version.clone(), credential_context_revision: self.credential_context_revision,
         record_id: self.record_id.clone(), record_revision: self.record_revision, execution_mode: self.execution_mode,
-        platform: Platform::Android, operation: Operation::LocalStoreReconcile, candidate_operation_id:self.candidate_operation_id.clone(),
+        platform: Platform::Android, operation: if self.settlement.is_some(){Operation::LocalStoreRecoverySettle}else{Operation::LocalStoreReconcile}, candidate_operation_id:self.candidate_operation_id.clone(),
         candidate_sha256:self.candidate_sha256.clone(),confirmation:self.confirmation.clone(),
-        intent_sha256:self.intent_sha256.clone() } }
+        intent_sha256:self.intent_sha256.clone(),settlement:self.settlement } }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct Start { pub(crate) operation_id: String, pub(crate) owner_generation: String, consent_version: String }
+pub(crate) struct Start { pub(crate) operation_id: String, pub(crate) owner_generation: String, pub(crate) consent_version: String }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Cancel { pub(crate) operation_id: String, pub(crate) owner_generation: String }
 pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
-    if !keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
-        "credentialContextRevision", "recordId", "recordRevision", "executionMode", "candidateOperationId", "candidateSha256", "confirmation", "intentSha256"]) { return Err(invalid()); }
+    let mut expected=vec!["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+        "credentialContextRevision", "recordId", "recordRevision", "executionMode", "candidateOperationId", "candidateSha256", "confirmation", "intentSha256"];
+    if value.get("settlement").is_some(){
+        if value.get("settlement").and_then(Value::as_str)!=Some("record-current-target"){return Err(invalid());}
+        expected.push("settlement");
+    }
+    if !keys(value, &expected) { return Err(invalid()); }
     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
     if !input.context().valid() { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || input.consent_version != CONSENT { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|SETTLEMENT_CONSENT) { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration"]) { return Err(invalid()); }
@@ -139,7 +158,7 @@ pub(crate) fn request(operation: &str, generation: &str, context: &Context, prof
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Reason {
-    None, ReconcileUnavailable, Cancelled, ContextChanged, DocumentLost, Shutdown, TimedOut, ProtocolError, RuntimeUnavailable, IntentExpired,
+    None, ReconcileUnavailable, RecoverySettleUnavailable, Cancelled, ContextChanged, DocumentLost, Shutdown, TimedOut, ProtocolError, RuntimeUnavailable, IntentExpired,
     StaleIntent, SavedSourceChanged, SavedSourceInvalid, CredentialsUnavailable, QueryPrerequisites, CommandIncomplete, CleanupUnknown,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -172,7 +191,9 @@ fn utc_second(value:&str)->bool{
 // Closed summary DATA shared with read-only History. It is not a Reconcile
 // Context, original authorization comparison or native completion observation.
 impl ReconciliationReceipt {
-    pub(crate) fn valid_for(&self,operation:&str)->bool {
+    pub(crate) fn valid_for(&self,operation:&str)->bool { self.valid_shape(operation)&&self.observation=="current-internal-target-only" }
+    pub(crate) fn valid_recovery_review(&self,operation:&str)->bool { self.valid_shape(operation)&&self.observation=="current-recovery-files-only" }
+    fn valid_shape(&self,operation:&str)->bool {
         let p=self;
         let hex=|v:&str,n|v.len()==n&&v.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b));
         let app=p.application_id.len()<=255&&p.application_id.split('.').count()>=2&&p.application_id.split('.').all(|v|
@@ -182,14 +203,15 @@ impl ReconciliationReceipt {
             &&!p.version.name.is_empty()&&p.version.name.len()<=64
             &&p.version.name.bytes().all(|b|b.is_ascii_alphanumeric()||b".+-".contains(&b))
             &&(1..=2_100_000_000).contains(&p.version.build)
-            &&p.observation=="current-internal-target-only"&&p.prior_execution_finality=="not-established"
+            &&p.prior_execution_finality=="not-established"
             &&p.destination.channel=="internal"&&p.destination.release_status=="completed"&&utc_second(&p.observed_at)&&p.limitations==LIMITATIONS
     }
 }
 impl ResultData {
     fn valid(&self,c:&Context,authorization:&str)->bool {
         let p=&self.reconciliation_receipt;
-        self.schema_version==1&&self.scope=="local-android-store-reconcile"&&(6..=513).contains(&self.head_sequence)
+        self.schema_version==1&&self.scope==(if c.settling(){"local-android-recovery-settlement"}else{"local-android-store-reconcile"})
+            &&(if c.settling(){7}else{6}..=513).contains(&self.head_sequence)
             &&p.valid_for(&c.candidate_operation_id)&&p.candidate_sha256==c.candidate_sha256&&p.intent_sha256==c.intent_sha256
             &&uuid(authorization)&&p.authorization_id==authorization
             &&p.version.name==c.saved_version.name&&p.version.build==c.saved_version.build
@@ -224,7 +246,9 @@ impl Terminal {
                 && self.lifetime.commands==14 && self.lifetime.command_dispatched==Some(true)
                 && self.result.as_ref().is_some_and(|r| r.valid(context,authorization));
         }
-        if self.result.is_some() || self.reason == Reason::None { return false; }
+        if self.result.is_some() || self.reason == Reason::None
+            ||self.reason==Reason::RecoverySettleUnavailable&&!context.settling()
+            ||self.reason==Reason::ReconcileUnavailable&&context.settling() { return false; }
         if self.outcome == Outcome::Unknown { return self.reason == Reason::CleanupUnknown && !self.lifetime.settled(); }
         if !self.lifetime.settled() { return false; }
         match self.outcome {
@@ -240,7 +264,7 @@ impl Terminal {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Accepted { schema_version: u32, context: Context }
 #[derive(Clone,Debug,PartialEq,Eq)]
-pub(crate) enum Event {LeaseReady,HistoryHead(Head)}
+pub(crate) enum Event {LeaseReady,HistoryHead(Head),RecoverySettled(Head)}
 pub(crate) enum Frame {Accepted,Event(Event),Terminal(Terminal)}
 #[derive(Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
@@ -262,12 +286,12 @@ impl Decoder {
             let value=strict_json(&bytes[..bytes.len()-1])?;
             let e=Envelope::deserialize(&value).map_err(|_|BridgeError::protocol())?;
             if e.protocol!=PROTOCOL||e.operation_id!=operation||e.owner_generation!=generation||e.nonce!=nonce||e.request_sha256!=digest
-                ||e.sequence!=self.next||self.next>=4||!token(operation)||!token(generation)||nonce.len()!=32||!token(nonce)||nonce=="0".repeat(32)||!sha(digest){return Err(BridgeError::protocol());}
+                ||e.sequence!=self.next||self.next>=context.frame_limit() as u32||!token(operation)||!token(generation)||nonce.len()!=32||!token(nonce)||nonce=="0".repeat(32)||!sha(digest){return Err(BridgeError::protocol());}
             if e.kind=="terminal" {
                 if self.next==0||!keys(&e.payload,&["schemaVersion","context","outcome","reason","result","lifetime"])
                     ||!e.payload.get("lifetime").is_some_and(|l|keys(l,&["complete","fatal","contained","commandDispatched","commands","profileCalls","inputClosed","handlersRestored","invocationClosed","stopObserved"])) {return Err(BridgeError::protocol());}
                 let t=Terminal::deserialize(&e.payload).map_err(|_|BridgeError::protocol())?;
-                if !t.valid(context,&self.authorization)||t.outcome==Outcome::Complete&&(self.next!=3||!self.head.as_ref().is_some_and(|h|t.result.as_ref().is_some_and(|r|r.head_sequence==h.sequence))){return Err(BridgeError::protocol());}
+                if !t.valid(context,&self.authorization)||t.outcome==Outcome::Complete&&(self.next!=(if context.settling(){4}else{3})||!self.head.as_ref().is_some_and(|h|t.result.as_ref().is_some_and(|r|r.head_sequence==h.sequence))){return Err(BridgeError::protocol());}
                 self.terminal=true;return Ok(Frame::Terminal(t));
             }
             if self.next==0 {
@@ -280,8 +304,14 @@ impl Decoder {
                 (1,"lease-ready")=>{if !keys(&e.payload,&[]){return Err(BridgeError::protocol());}Ok(Frame::Event(Event::LeaseReady))},
                 (2,"history-head")=>{
                     let head=Head::deserialize(&e.payload).map_err(|_|BridgeError::protocol())?;
-                    if !head.valid()||!(6..=513).contains(&head.sequence){return Err(BridgeError::protocol());}
+                    if !head.valid()||!(6..=if context.settling(){512}else{513}).contains(&head.sequence){return Err(BridgeError::protocol());}
                     self.head=Some(head.clone());Ok(Frame::Event(Event::HistoryHead(head)))
+                },
+                (3,"recovery-settled") if context.settling()=>{
+                    if !keys(&e.payload,&["head","phase"])||e.payload.get("phase").and_then(Value::as_str)!=Some("target-reconciled"){return Err(BridgeError::protocol());}
+                    let head=Head::deserialize(&e.payload["head"]).map_err(|_|BridgeError::protocol())?;
+                    if !head.valid()||!self.head.as_ref().is_some_and(|old|old.sequence<513&&head.sequence==old.sequence+1){return Err(BridgeError::protocol());}
+                    self.head=Some(head.clone());Ok(Frame::Event(Event::RecoverySettled(head)))
                 },_=>Err(BridgeError::protocol()),
             }
         })();if result.is_err(){self.failed=true;}else{self.next+=1;}result
@@ -308,7 +338,7 @@ pub(crate) mod tests {
     const AUTH:&str="23456789-1234-4234-8234-123456789abc";
     pub(crate) fn input()->Value{let mut v=crate::local_store_prepare_protocol::tests::input();v["intentSha256"]=json!("e".repeat(64));v}
     pub(crate) fn context()->Context{prepare(&input()).unwrap().context()}
-    fn terminal()->Value{json!({"schemaVersion":1,"context":context(),"outcome":"complete","reason":"none",
+    pub(crate) fn terminal()->Value{json!({"schemaVersion":1,"context":context(),"outcome":"complete","reason":"none",
         "result":{"schemaVersion":1,"scope":"local-android-store-reconcile","headSequence":6,
             "reconciliationReceipt":{"operationId":UUID,"candidateSha256":"d".repeat(64),"intentSha256":"e".repeat(64),
                 "receiptSha256":"f".repeat(64),"authorizationId":AUTH,"sourceCommit":"a".repeat(40),"sourceTree":"b".repeat(40),
@@ -375,4 +405,46 @@ pub(crate) mod tests {
         unknown["lifetime"]["complete"]=json!(false);unknown["lifetime"]["stopObserved"]=json!("cancelled");
         assert!(read(&mut prefix(6),3,"terminal",unknown).is_ok());
     }
+    fn settle_context()->Context{let mut v=input();v["settlement"]=json!("record-current-target");prepare(&v).unwrap().context()}
+    fn settle_read(d:&mut Decoder,seq:u32,kind:&str,payload:Value)->Result<Frame,BridgeError>{
+        d.decode(&frame(seq,kind,payload),&"a".repeat(32),&"b".repeat(32),&settle_context(),&"c".repeat(32),&"d".repeat(64))
+    }
+    fn settle_prefix(head:u32)->Decoder{
+        let mut d=Decoder::new(AUTH).unwrap();settle_read(&mut d,0,"accepted",json!({"schemaVersion":1,"context":settle_context()})).unwrap();
+        settle_read(&mut d,1,"lease-ready",json!({})).unwrap();settle_read(&mut d,2,"history-head",json!({"sequence":head,"sha256":"a".repeat(64)})).unwrap();d
+    }
+    fn settle_terminal(head:u32)->Value{let mut t=terminal();t["context"]=json!(settle_context());
+        t["result"]["scope"]=json!("local-android-recovery-settlement");t["result"]["headSequence"]=json!(head);t}
+    #[test]
+    fn local_recovery_context_and_consent_cannot_upgrade_read_only_reconcile(){
+        let ordinary=context();let settlement=settle_context();
+        assert!(!ordinary.settling()&&settlement.settling());assert_eq!(ordinary.consent(),CONSENT);assert_eq!(settlement.consent(),SETTLEMENT_CONSENT);
+        assert_eq!(ordinary.frame_limit(),4);assert_eq!(settlement.frame_limit(),5);
+        for bad in [Value::Null,json!(true),json!("record"),json!({})]{let mut v=input();v["settlement"]=bad;assert!(prepare(&v).is_err());}
+        let mut hybrid=json!(settlement);hybrid["operation"]=json!("local-store-reconcile");assert!(!Context::deserialize(&hybrid).unwrap().valid());
+        let mut null=json!(ordinary);null["settlement"]=Value::Null;assert!(Context::deserialize(&null).is_err());
+        let start_value=|consent|json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":consent});
+        assert!(start(&start_value(SETTLEMENT_CONSENT)).is_ok());assert!(start(&start_value("saved-ios-signed-export-v2")).is_err());
+        // A live result's observation is not the offline recovery receipt.
+        let r=ResultData::deserialize(&settle_terminal(7)["result"]).unwrap();assert!(r.valid(&settlement,AUTH));assert!(!r.valid(&ordinary,AUTH));
+        assert!(!r.reconciliation_receipt.valid_recovery_review(UUID));
+    }
+    #[test]
+    fn local_recovery_checkpoint_requires_next_head_then_five_frames_and_original_closes(){
+        for before in [6,511,512]{let mut d=settle_prefix(before);
+            settle_read(&mut d,3,"recovery-settled",json!({"head":{"sequence":before+1,"sha256":"b".repeat(64)},"phase":"target-reconciled"})).unwrap();
+            assert!(settle_read(&mut d,4,"terminal",settle_terminal(before+1)).is_ok());assert!(d.finish());}
+        assert!(settle_read(&mut settle_prefix(6),3,"terminal",settle_terminal(7)).is_err());
+        for (head,phase) in [(6,"target-reconciled"),(8,"target-reconciled"),(7,"settled-success")]{
+            assert!(settle_read(&mut settle_prefix(6),3,"recovery-settled",json!({"head":{"sequence":head,"sha256":"b".repeat(64)},"phase":phase})).is_err());}
+        let mut d=Decoder::new(AUTH).unwrap();settle_read(&mut d,0,"accepted",json!({"schemaVersion":1,"context":settle_context()})).unwrap();
+        settle_read(&mut d,1,"lease-ready",json!({})).unwrap();assert!(settle_read(&mut d,2,"history-head",json!({"sequence":513,"sha256":"a".repeat(64)})).is_err());
+        for field in ["inputClosed","handlersRestored","invocationClosed"]{let mut d=settle_prefix(6);
+            settle_read(&mut d,3,"recovery-settled",json!({"head":{"sequence":7,"sha256":"b".repeat(64)},"phase":"target-reconciled"})).unwrap();
+            let mut t=settle_terminal(7);t["lifetime"][field]=json!(false);assert!(settle_read(&mut d,4,"terminal",t).is_err());}
+        let mut failed=settle_terminal(7);failed["result"]=Value::Null;failed["outcome"]=json!("failed");failed["reason"]=json!("recovery-settle-unavailable");
+        assert!(settle_read(&mut settle_prefix(6),3,"terminal",failed.clone()).is_ok());
+        failed["context"]=json!(context());assert!(read(&mut prefix(6),3,"terminal",failed).is_err());
+    }
+
 }

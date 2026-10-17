@@ -8,7 +8,7 @@ export const LOCAL_HISTORY_CONSENT='local-release-history-v1' as const;
 export const LOCAL_CANDIDATE_CONSENT='local-android-candidate-inputs-v1' as const;
 export type LocalHistoryCommand='prepare_local_release_history'|'start_local_release_history'|'local_release_history_status'|'cancel_local_release_history';
 const limits=['no-store-authority','no-build-or-publishing','keychain-intact-rollback-boundary'];
-const journalPhases=['inputs-pending','inputs-ready','prepare-pending','prepared','execute-pending','settled-success','settled-failure','reconciliation-required'];
+const journalPhases=['inputs-pending','inputs-ready','prepare-pending','prepared','execute-pending','settled-success','settled-failure','reconciliation-required','target-reconciled'];
 const phases=['awaiting-consent','starting','running','stopping','terminal','unknown'];
 const outcomes=['complete','refused','cancelled','timed-out','failed','unknown'];
 const reasons=['none','cancelled','context-changed','document-lost','shutdown','timed-out','protocol-error','runtime-unavailable','intent-expired','stale-intent','saved-source-changed','saved-source-invalid','credentials-unavailable','query-prerequisites','command-incomplete','cleanup-unknown','journal-unavailable','enrollment-exists','recovery-required','project-busy'];
@@ -21,7 +21,7 @@ const contextKeys=['projectId','executionMode','action'];
 const uuid=(v:unknown):v is string=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
 const hex=(v:unknown,n:number)=>typeof v==='string'&&new RegExp(`^[0-9a-f]{${n}}$`).test(v);
 const bounded=(v:unknown,max:number)=>typeof v==='number'&&Number.isSafeInteger(v)&&v>=1&&v<=max;
-export const candidateHistoryAction=(action:unknown)=>action==='review-inputs'||action==='abandon-inputs'||action==='review-prepared'||action==='review-execution'||action==='review-reconcile';
+export const candidateHistoryAction=(action:unknown)=>action==='review-inputs'||action==='abandon-inputs'||action==='review-prepared'||action==='review-execution'||action==='review-reconcile'||action==='review-recovery';
 export function localHistoryConsent(request:PrepareLocalHistory){return candidateHistoryAction(request.action)?LOCAL_CANDIDATE_CONSENT:LOCAL_HISTORY_CONSENT;}
 // Predicate for already copied bounded DATA; both callers own descriptor-safe copying.
 export function candidateInputs(v:unknown,operationId:unknown):boolean {
@@ -56,6 +56,14 @@ export function executionReceiptSummary(i: unknown, operationId: unknown): i is 
     sameOfflineData(i.limitations, ['internal-testing-only', 'not-public-release', 'prior-prepare-finality-not-established', 'saved-inputs-not-atomic']) &&
     localStoreSummaryIdentity(i, operationId);
 }
+// Shared exact13-field recovery receipt DATA. Each caller separately validates
+// its live/offline observation and original finality fields; no synthetic owner.
+export function recoveryReceiptFields(i: unknown, operationId: unknown): boolean {
+  return keys(i, ['operationId', 'candidateSha256', 'intentSha256', 'receiptSha256', 'authorizationId', 'sourceCommit', 'sourceTree', 'applicationId', 'version', 'destination', 'observedAt', 'result', 'limitations']) &&
+    uuid(i.authorizationId) && hex(i.receiptSha256, 64) && i.result === 'reconciled' &&
+    sameOfflineData(i.limitations, ['non-publishing', 'not-retry-permission', 'old-evidence-preserved', 'saved-inputs-not-atomic']) &&
+    localStoreSummaryIdentity(i, operationId);
+}
 function request(v:unknown):boolean{
  const candidate=object(v)&&candidateHistoryAction(v.action);
  return keys(v,[...contextKeys,...(candidate?['candidateOperationId']:[])])&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&v.executionMode==='local'&&(candidate?uuid(v.candidateOperationId):member(['enroll','verify'],v.action));
@@ -80,10 +88,10 @@ export function parseLocalHistoryStatus(input:unknown):LocalHistoryStatus|null{
  else if(op.phase==='unknown'){if(op.outcome!=='unknown'||op.reason!=='cleanup-unknown'||op.intentUsable||op.result!==null)return null;}
  else if(op.outcome!==null||op.result!==null||op.intentUsable&&op.phase!=='awaiting-consent')return null;
  if(op.result!==null){const r=op.result;
-  if(op.phase!=='terminal'||op.outcome!=='complete'||op.reason!=='none'||!keys(r,['schemaVersion','scope','enrolled','headSequence','history','limitations',...((context.action==='review-prepared'||context.action==='review-reconcile')?['preparedIntent']:context.action==='review-execution'?['executionReceipt']:candidate?['candidateInputs']:[])])||r.schemaVersion!==1||r.scope!=='local-release-history'||r.enrolled!==true||!counter(r.headSequence)||r.headSequence<1||r.headSequence>513||!sameOfflineData(r.limitations,limits)||!Array.isArray(r.history)||r.history.length>64||r.history.length>r.headSequence-1)return null;
+  if(op.phase!=='terminal'||op.outcome!=='complete'||op.reason!=='none'||!keys(r,['schemaVersion','scope','enrolled','headSequence','history','limitations',...((context.action==='review-prepared'||context.action==='review-reconcile')?['preparedIntent']:context.action==='review-execution'?['executionReceipt']:context.action==='review-recovery'?['reconciliationReceipt']:candidate?['candidateInputs']:[])])||r.schemaVersion!==1||r.scope!=='local-release-history'||r.enrolled!==true||!counter(r.headSequence)||r.headSequence<1||r.headSequence>513||!sameOfflineData(r.limitations,limits)||!Array.isArray(r.history)||r.history.length>64||r.history.length>r.headSequence-1)return null;
   const ids=new Set<string>();
   for(const row of r.history){
-   if(!keys(row,['operationId','phase','recoveryRequired'])||typeof row.operationId!=='string'||!/^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.test(row.operationId)||ids.has(row.operationId)||!member(journalPhases,row.phase)||row.recoveryRequired!==!['settled-success','settled-failure'].includes(row.phase as string))return null;
+   if(!keys(row,['operationId','phase','recoveryRequired'])||typeof row.operationId!=='string'||!/^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.test(row.operationId)||ids.has(row.operationId)||!member(journalPhases,row.phase)||row.recoveryRequired!==!['settled-success','settled-failure','target-reconciled'].includes(row.phase as string))return null;
    ids.add(row.operationId);
   }
   if(candidate){
@@ -100,6 +108,11 @@ export function parseLocalHistoryStatus(input:unknown):LocalHistoryStatus|null{
     if((r.headSequence as number)<7||selected.phase!=='settled-success'||!object(receipt)||receipt.observation!=='current-execution-files-only'||receipt.priorExecutionFinality!=='not-established')return null;
     const {observation:_,priorExecutionFinality:__,...summary}=receipt;
     if(!executionReceiptSummary(summary,context.candidateOperationId))return null;
+   }else if(context.action==='review-recovery'){
+    const receipt=r.reconciliationReceipt;
+    if((r.headSequence as number)<7||selected.phase!=='target-reconciled'||!object(receipt)||receipt.observation!=='current-recovery-files-only'||receipt.priorExecutionFinality!=='not-established')return null;
+    const {observation:_,priorExecutionFinality:__,...summary}=receipt;
+    if(!recoveryReceiptFields(summary,context.candidateOperationId))return null;
    }else if(context.action==='abandon-inputs'){
     if(selected.phase!=='settled-failure'||r.history.at(-1)!==selected||r.candidateInputs!==null)return null;
    }else if(selected.phase==='inputs-ready'){

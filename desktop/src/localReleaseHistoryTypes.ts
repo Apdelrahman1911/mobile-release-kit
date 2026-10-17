@@ -1,10 +1,11 @@
+import type { LocalReconciliationReceipt } from './localStoreReconcileTypes.ts';
 import type { LocalExecutionReceipt } from './localStoreExecuteTypes.ts';
 import type { LocalPreparedIntent } from './localStorePrepareTypes.ts';
 import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome } from './offlinePreflightTypes.ts';
-export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile';
+export type LocalHistoryAction = 'enroll' | 'verify' | 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile' | 'review-recovery';
 export type PrepareLocalHistory = { projectId: string; executionMode: 'local' } & (
   { action: 'enroll' | 'verify'; candidateOperationId?: never } |
-  { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile'; candidateOperationId: string }
+  { action: 'review-inputs' | 'abandon-inputs' | 'review-prepared' | 'review-execution' | 'review-reconcile' | 'review-recovery'; candidateOperationId: string }
 );
 export interface LocalCandidateInputs {
   operationId: string; candidateSha256: string; sourceCommit: string; sourceTree: string;
@@ -18,9 +19,12 @@ export interface LocalPreparedIntentReview extends LocalPreparedIntent {
 export interface LocalExecutionReceiptReview extends LocalExecutionReceipt {
   observation: 'current-execution-files-only'; priorExecutionFinality: 'not-established';
 }
+export interface LocalRecoveryReceiptReview extends Omit<LocalReconciliationReceipt, 'observation'> {
+  observation: 'current-recovery-files-only';
+}
 export interface LocalHistoryIdentity { operationId: string; ownerGeneration: string }
 export type LocalHistoryReason = 'none'|'cancelled'|'context-changed'|'document-lost'|'shutdown'|'timed-out'|'protocol-error'|'runtime-unavailable'|'intent-expired'|'stale-intent'|'saved-source-changed'|'saved-source-invalid'|'credentials-unavailable'|'query-prerequisites'|'command-incomplete'|'cleanup-unknown'|'journal-unavailable'|'enrollment-exists'|'recovery-required'|'project-busy';
-export type LocalJournalPhase = 'inputs-pending'|'inputs-ready'|'prepare-pending'|'prepared'|'execute-pending'|'settled-success'|'settled-failure'|'reconciliation-required';
+export type LocalJournalPhase = 'inputs-pending'|'inputs-ready'|'prepare-pending'|'prepared'|'execute-pending'|'settled-success'|'settled-failure'|'reconciliation-required'|'target-reconciled';
 export interface LocalHistoryResult {
   schemaVersion: 1; scope: 'local-release-history'; enrolled: true; headSequence: number;
   history: { operationId: string; phase: LocalJournalPhase; recoveryRequired: boolean }[];
@@ -28,6 +32,7 @@ export interface LocalHistoryResult {
   candidateInputs?: LocalCandidateInputs | null;
   preparedIntent?: LocalPreparedIntentReview;
   executionReceipt?: LocalExecutionReceiptReview;
+  reconciliationReceipt?: LocalRecoveryReceiptReview;
 }
 export interface LocalHistoryOperation extends LocalHistoryIdentity {
   context: PrepareLocalHistory; phase: OfflinePreflightPhase; intentUsable: boolean;

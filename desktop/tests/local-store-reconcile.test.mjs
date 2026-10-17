@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { LocalStoreReconcileController, localStoreReconcileRequest, localStoreReconcileOwnerReason } from '../src/localStoreReconcile.ts';
-import { encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, STORE_RECONCILE_CONSENT } from '../src/localStoreReconcileProtocol.ts';
+import { encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, STORE_RECONCILE_CONSENT, STORE_RECOVERY_CONSENT, reconcileRequestContext } from '../src/localStoreReconcileProtocol.ts';
 import { encodeLocalStorePrepareRequest, parseLocalStorePrepareStatus } from '../src/localStorePrepareProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
@@ -14,14 +14,14 @@ const assets=()=>({mode:'native',scope:{executionMode:'local',platform:'android'
 const prepared=()=>({operationId:U,candidateSha256:'a'.repeat(64),intentSha256:'b'.repeat(64),storePreconditionSha256:'c'.repeat(64),sourceCommit:'b'.repeat(40),sourceTree:'c'.repeat(40),applicationId:'dev.example.app',version:{name:'1.2.3',build:42},destination:{channel:'internal',releaseStatus:'completed'},observedAt:'2026-10-16T20:00:00Z',limitations:['non-publishing','prepare-not-execute','temporary-edit-may-expire','current-bundle-not-historical-finality','saved-inputs-not-atomic'],observation:'current-prepared-files-only',priorPrepareFinality:'not-established'});
 const status=(revision=0,operation=null)=>({schemaVersion:1,statusRevision:revision,availability:'available',operation});
 const history=()=>({mode:'native',historical:false,pending:false,blocked:false,unconfirmed:false,status:status(1,{operationId:C,ownerGeneration:B,context:{projectId:'p1',executionMode:'local',action:'review-reconcile',candidateOperationId:U},phase:'terminal',intentUsable:false,outcome:'complete',reason:'none',result:{schemaVersion:1,scope:'local-release-history',enrolled:true,headSequence:6,history:[{operationId:U,phase:'execute-pending',recoveryRequired:true}],limitations:['no-store-authority','no-build-or-publishing','keychain-intact-rollback-boundary'],preparedIntent:prepared()}})});
-const op=request=>({operationId:A,ownerGeneration:B,context:{...copy(request),platform:'android',operation:'local-store-reconcile'},phase:'awaiting-consent',intentUsable:true,outcome:null,reason:'none',result:null});
+const op=request=>({operationId:A,ownerGeneration:B,context:reconcileRequestContext(copy(request)),phase:'awaiting-consent',intentUsable:true,outcome:null,reason:'none',result:null});
 const cancelled=o=>({...o,phase:'terminal',intentUsable:false,outcome:'cancelled',reason:'cancelled',result:null});
-const complete=o=>({...o,phase:'terminal',intentUsable:false,outcome:'complete',reason:'none',result:{schemaVersion:1,scope:'local-android-store-reconcile',headSequence:6,reconciliationReceipt:{operationId:U,candidateSha256:'a'.repeat(64),intentSha256:'b'.repeat(64),receiptSha256:'d'.repeat(64),authorizationId:V,sourceCommit:'b'.repeat(40),sourceTree:'c'.repeat(40),applicationId:'dev.example.app',version:{name:'1.2.3',build:42},destination:{channel:'internal',releaseStatus:'completed'},observedAt:'2026-10-16T20:01:00Z',result:'reconciled',observation:'current-internal-target-only',priorExecutionFinality:'not-established',limitations:['non-publishing','not-retry-permission','old-evidence-preserved','saved-inputs-not-atomic']}}});
+const complete=o=>({...o,phase:'terminal',intentUsable:false,outcome:'complete',reason:'none',result:{schemaVersion:1,scope:o.context.settlement?'local-android-recovery-settlement':'local-android-store-reconcile',headSequence:o.context.settlement?7:6,reconciliationReceipt:{operationId:U,candidateSha256:'a'.repeat(64),intentSha256:'b'.repeat(64),receiptSha256:'d'.repeat(64),authorizationId:V,sourceCommit:'b'.repeat(40),sourceTree:'c'.repeat(40),applicationId:'dev.example.app',version:{name:'1.2.3',build:42},destination:{channel:'internal',releaseStatus:'completed'},observedAt:'2026-10-16T20:01:00Z',result:'reconciled',observation:'current-internal-target-only',priorExecutionFinality:'not-established',limitations:['non-publishing','not-retry-permission','old-evidence-preserved','saved-inputs-not-atomic']}}});
 async function fixture(){let p=project(),a=assets(),h=history(),now=100,listener,latest=status(),starts=0,cancels=0,prepares=0,gate=null,other=null;
  const controller=new LocalStoreReconcileController({project:()=>p,assets:()=>a,history:()=>h,otherOperationReason:()=>other,now:()=>now});
  const api={mode:'native',subscribeLocalStoreReconcile:async f=>{listener=f;return()=>{};},localStoreReconcileStatus:async()=>latest,
  prepareLocalStoreReconcile:async request=>{prepares++;if(gate)await gate;latest=status(latest.statusRevision+1,op(request));return copy(latest);},
- startLocalStoreReconcile:async request=>{starts++;assert.equal(request.consentVersion,STORE_RECONCILE_CONSENT);latest=status(latest.statusRevision+1,{...latest.operation,phase:'running',intentUsable:false});return copy(latest);},
+ startLocalStoreReconcile:async request=>{starts++;assert.equal(request.consentVersion,latest.operation.context.settlement?STORE_RECOVERY_CONSENT:STORE_RECONCILE_CONSENT);latest=status(latest.statusRevision+1,{...latest.operation,phase:'running',intentUsable:false});return copy(latest);},
  cancelLocalStoreReconcile:async(x,y)=>{assert.equal(x,A);assert.equal(y,B);cancels++;latest=status(latest.statusRevision+1,cancelled(latest.operation));return copy(latest);}};
  await controller.connect(api);controller.syncProject();
  return{controller,api,counts:()=>({starts,cancels,prepares}),change:fn=>{fn(p,a,h);controller.syncProject();},time:v=>now=v,busy:v=>other=v,defer:()=>{let release;gate=new Promise(r=>release=r);return release;},emit:v=>{latest=v;listener(copy(v));},latest:()=>copy(latest)};
@@ -84,4 +84,38 @@ test('review-reconcile History is current-last only and cannot weaken ordinary p
 });
 test('changed head, saved version or Google assignment retires readback consent before network start',async()=>{
  for(const change of [h=>h.change(p=>p.savedVersion.sha256='e'.repeat(64)),h=>h.change((_p,a)=>{a.status.context.revision++;a.status.assignments[0].contextRevision++;}),h=>h.change((_p,_a,s)=>s.status.operation.result.headSequence++),h=>h.time(60101),h=>h.busy('Other original owner')]){const h=await fixture();try{await h.controller.prepare();h.controller.acknowledge(true);change(h);await h.controller.start();assert.equal(h.counts().starts,0);assert.equal(h.counts().cancels,1);}finally{h.controller.dispose();}}
+});
+
+
+test('recovery checkpoint uses a distinct closed context, scope and current-last eligibility',()=>{
+ const request=localStoreReconcileRequest(project(),assets(),history(),true);assert.equal(request.settlement,'record-current-target');
+ assert.ok(encodeLocalStoreReconcileRequest('prepare_local_store_reconcile',request));
+ const value=complete(op(request));assert.ok(parseLocalStoreReconcileStatus(status(1,value)));
+ const refused={...op(request),phase:'terminal',intentUsable:false,outcome:'refused',reason:'recovery-settle-unavailable'};assert.ok(parseLocalStoreReconcileStatus(status(1,refused)));
+ assert.equal(parseLocalStoreReconcileStatus(status(1,{...refused,reason:'reconcile-unavailable'})),null);
+ const ordinary=localStoreReconcileRequest(project(),assets(),history());assert.equal(parseLocalStoreReconcileStatus(status(1,{...refused,context:reconcileRequestContext(ordinary)})),null);
+ assert.equal(parseLocalStoreReconcileStatus(status(1,{...refused,reason:'unexpected-private-message'})),null);
+ for(const change of [v=>delete v.context.settlement,v=>v.context.operation='local-store-reconcile',v=>v.context.settlement=null,v=>v.result.scope='local-android-store-reconcile',v=>v.result.headSequence=6,v=>v.result.reconciliationReceipt.priorExecutionFinality='complete']){
+  const bad=copy(value);change(bad);assert.equal(parseLocalStoreReconcileStatus(status(1,bad)),null);
+ }
+ for(const settlement of [null,true,'repair-old-execution'])assert.equal(encodeLocalStoreReconcileRequest('prepare_local_store_reconcile',{...request,settlement}),null);
+ for(const phase of ['execute-pending','settled-failure','reconciliation-required']){const h=history();h.status.operation.result.history[0]={operationId:U,phase,recoveryRequired:phase!=='settled-failure'};assert.ok(localStoreReconcileRequest(project(),assets(),h,true));}
+ const h=history();h.status.operation.result.history[0]={operationId:U,phase:'settled-success',recoveryRequired:false};assert.equal(localStoreReconcileRequest(project(),assets(),h,true),null);assert.ok(localStoreReconcileRequest(project(),assets(),h));
+ const full=history();full.status.operation.result.headSequence=513;assert.equal(localStoreReconcileRequest(project(),assets(),full,true),null);assert.ok(localStoreReconcileRequest(project(),assets(),full));
+});
+test('record recovery stays explicit and cannot change mode during the original pending or running action',async()=>{
+ const h=await fixture();try{
+  assert.equal(h.controller.getSnapshot().settlement,false);assert.equal(h.controller.setSettlement(true),true);assert.equal(h.counts().prepares,0);
+  const release=h.defer(),pending=h.controller.prepare();assert.equal(h.controller.setSettlement(false),false);release();await pending;
+  assert.equal(h.controller.getSnapshot().status.operation.context.operation,'local-store-recovery-settle');
+  assert.equal(h.controller.setSettlement(false),false);assert.equal(h.counts().starts,0);h.controller.acknowledge(true);await h.controller.start();await h.controller.start();assert.equal(h.counts().starts,1);assert.equal(h.counts().cancels,0);
+  h.emit(status(h.latest().statusRevision+1,complete(h.latest().operation)));assert.ok(h.controller.getSnapshot().status.operation.result);assert.equal(h.controller.getSnapshot().historical,false);
+  assert.equal(h.controller.setSettlement(false),true);assert.equal(h.controller.getSnapshot().historical,true);assert.equal(h.counts().starts,1);
+ }finally{h.controller.dispose();}
+});
+test('recovery successor uses the original reviewed head and late cancelled Prepare never restores consent',async()=>{
+ for(const wrongHead of [true,false]){const h=await fixture();try{h.controller.setSettlement(true);
+  if(wrongHead){await h.controller.prepare();h.controller.acknowledge(true);await h.controller.start();const result=complete(h.latest().operation);result.result.headSequence=8;h.emit(status(h.latest().statusRevision+1,result));assert.equal(h.controller.getSnapshot().blocked,true);assert.equal(h.controller.getSnapshot().status.operation.result,null);}
+  else{const release=h.defer(),pending=h.controller.prepare();await h.controller.cancel();assert.equal(h.controller.setSettlement(false),false);release();await pending;await Promise.resolve();assert.equal(h.counts().starts,0);assert.equal(h.counts().cancels,1);assert.equal(h.controller.getSnapshot().consentUntil,null);}
+ }finally{h.controller.dispose();}}
 });

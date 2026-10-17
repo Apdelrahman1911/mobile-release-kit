@@ -296,6 +296,16 @@ mod tests {
         // Document minted its Weak/Arc binding. It cannot admit a key helper.
         Arc::get_mut(&mut original).unwrap().command=Some(StoreCommand::Reconcile(context.clone()));
         assert!(original.reconcile_matches(&context,7,&root));assert!(!original.reconcile_current(&context,7,&root));
+        assert!(original.reconcile_accepts_consent(crate::local_store_reconcile_protocol::CONSENT));
+        assert!(!original.reconcile_accepts_consent(crate::local_store_reconcile_protocol::SETTLEMENT_CONSENT));
+        let mut settlement=context.clone();settlement.operation=crate::local_store_reconcile_protocol::Operation::LocalStoreRecoverySettle;
+        settlement.settlement=Some(crate::local_store_reconcile_protocol::Settlement::RecordCurrentTarget);
+        assert!(!original.reconcile_matches(&settlement,7,&root));
+        Arc::get_mut(&mut original).unwrap().command=Some(StoreCommand::Reconcile(settlement.clone()));
+        assert!(original.reconcile_accepts_consent(crate::local_store_reconcile_protocol::SETTLEMENT_CONSENT));
+        assert!(!original.reconcile_accepts_consent(crate::local_store_reconcile_protocol::CONSENT));
+        assert!(!original.reconcile_current(&settlement,7,&root));
+        Arc::get_mut(&mut original).unwrap().command=Some(StoreCommand::Reconcile(context.clone()));
         let mut changed=context.clone();changed.candidate_sha256="e".repeat(64);assert!(!original.reconcile_matches(&changed,7,&root));
         assert!(!original.matches(&wire::tests::context(),7,&root));
         assert_eq!(original.parts().unwrap()[0].1.as_ptr(),state.records[0].payload.material.as_ref().unwrap().bytes().as_ptr());
@@ -488,6 +498,9 @@ impl SelectedStoreMaterial {
 }
 
 impl SelectedStoreMaterial {
+    pub(crate) fn reconcile_accepts_consent(&self,consent:&str)->bool {
+        matches!(self.command.as_ref(),Some(StoreCommand::Reconcile(c)) if c.consent()==consent)
+    }
     pub(crate) fn reconcile_matches(&self,context:&crate::local_store_reconcile_protocol::Context,registration:u32,root:&asset_source::RegisteredRoot)->bool {
         matches!(self.command.as_ref(),Some(StoreCommand::Reconcile(c)) if c==context)
             &&self.native.registry_generation==registration&&self.native.project==*root&&self.native.project_id==context.project_id

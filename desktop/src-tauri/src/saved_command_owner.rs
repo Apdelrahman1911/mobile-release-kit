@@ -212,7 +212,7 @@ impl Context {
     fn signed_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signed()) }
     fn requires_private_material(&self) -> bool { self.signed_ios() || matches!(self, Self::AndroidBuild(c) if c.signed()) || matches!(self, Self::LocalStorePreflight(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_)) }
     fn recovery_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.recovery()) }
-    fn frame_limit(&self) -> usize { match self { Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), _ => self.domain().frame_limit() } }
+    fn frame_limit(&self) -> usize { match self { Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), Self::LocalStoreReconcile(context)=>context.frame_limit(), _ => self.domain().frame_limit() } }
     fn domain(&self) -> SavedCommandDomain { match self {
         Self::LocalReleaseHistory(_) => SavedCommandDomain::LocalReleaseHistory, Self::LocalStoreExecute(_) => SavedCommandDomain::LocalStoreExecute, Self::LocalStorePrepare(_) => SavedCommandDomain::LocalStorePrepare, Self::LocalStoreReconcile(_) => SavedCommandDomain::LocalStoreReconcile, Self::LocalStorePreflight(_) => SavedCommandDomain::LocalStorePreflight, Self::OfflinePreflight(_) => SavedCommandDomain::OfflinePreflight, Self::AndroidBuild(_) => SavedCommandDomain::AndroidBuild, Self::ProjectRecovery(_) => SavedCommandDomain::ProjectRecovery, Self::IOSArchive(_) => SavedCommandDomain::IOSArchive, Self::ArtifactInspection(_) => SavedCommandDomain::ArtifactInspection,
     } }
@@ -396,7 +396,7 @@ impl Outcome {
     } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Reason { ReconcileUnavailable, PrepareUnavailable, ExecuteUnavailable, CandidateInputsUnavailable, JournalUnavailable, EnrollmentExists, RecoveryRequired,
+enum Reason { RecoverySettleUnavailable, ReconcileUnavailable, PrepareUnavailable, ExecuteUnavailable, CandidateInputsUnavailable, JournalUnavailable, EnrollmentExists, RecoveryRequired,
     SavedSourceChanged, SavedSourceInvalid, CredentialsUnavailable, QueryPrerequisites,
     None, Cancelled, ContextChanged, DocumentLost, Shutdown,
     TimedOut, ProtocolError, RuntimeUnavailable, IntentExpired, StaleIntent,
@@ -454,6 +454,7 @@ impl Reason {
     } }
     fn from_reconcile(value: reconcile_wire::Reason) -> Self { match value {
         reconcile_wire::Reason::ReconcileUnavailable => Self::ReconcileUnavailable,
+        reconcile_wire::Reason::RecoverySettleUnavailable => Self::RecoverySettleUnavailable,
         reconcile_wire::Reason::None => Self::None,
         reconcile_wire::Reason::Cancelled => Self::Cancelled,
         reconcile_wire::Reason::ContextChanged => Self::ContextChanged,
@@ -554,6 +555,7 @@ impl Reason {
     }) }
     fn reconcile(self) -> Result<reconcile_wire::Reason, BridgeError> { Ok(match self {
         Self::ReconcileUnavailable => reconcile_wire::Reason::ReconcileUnavailable,
+        Self::RecoverySettleUnavailable => reconcile_wire::Reason::RecoverySettleUnavailable,
         Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::None => reconcile_wire::Reason::None,
         Self::Cancelled => reconcile_wire::Reason::Cancelled,
@@ -595,7 +597,7 @@ impl Reason {
         _ => return Err(BridgeError::protocol()),
     }) }
     fn store(self) -> Result<store_wire::Reason, BridgeError> { Ok(match self {
-        Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
+        Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::None => store_wire::Reason::None,
         Self::Cancelled => store_wire::Reason::Cancelled,
         Self::ContextChanged => store_wire::Reason::ContextChanged,
@@ -651,7 +653,7 @@ impl Reason {
         artifact_wire::Reason::ResourcesUnavailable => Self::ResourcesUnavailable,
     } }
     fn artifact(self) -> Result<artifact_wire::Reason,BridgeError> { Ok(match self {
-        Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
+        Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::None => artifact_wire::Reason::None,
         Self::Cancelled => artifact_wire::Reason::Cancelled,
@@ -690,7 +692,7 @@ impl Reason {
     }) }
 
     fn recovery(self) -> Result<recovery_wire::Reason, BridgeError> { Ok(match self {
-        Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
+        Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),
         Self::None => recovery_wire::Reason::None,
@@ -817,7 +819,7 @@ impl Reason {
         ios_wire::Reason::CleanupUnknown => Self::CleanupUnknown,
     } }
     fn ios(self) -> Result<ios_wire::Reason, BridgeError> { Ok(match self {
-        Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
+        Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),
         Self::None => ios_wire::Reason::None,
@@ -873,7 +875,7 @@ impl Reason {
     }) }
     fn offline(self) -> Result<wire::Reason, BridgeError> {
         Ok(match self {
-        Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
+        Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),
             Self::None => wire::Reason::None, Self::Cancelled => wire::Reason::Cancelled, Self::ContextChanged => wire::Reason::ContextChanged,
@@ -895,7 +897,7 @@ impl Reason {
     }
     fn android(self) -> Result<android_wire::Reason, BridgeError> { Ok(match self {
         Self::JournalUnavailable=>android_wire::Reason::JournalUnavailable,Self::RecoveryRequired=>android_wire::Reason::RecoveryRequired,
-        Self::CandidateInputsUnavailable=>android_wire::Reason::CandidateInputsUnavailable,Self::ReconcileUnavailable|Self::ExecuteUnavailable|Self::PrepareUnavailable|Self::EnrollmentExists=>return Err(BridgeError::protocol()),
+        Self::CandidateInputsUnavailable=>android_wire::Reason::CandidateInputsUnavailable,Self::RecoverySettleUnavailable|Self::ReconcileUnavailable|Self::ExecuteUnavailable|Self::PrepareUnavailable|Self::EnrollmentExists=>return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),
             Self::None => android_wire::Reason::None, Self::Cancelled => android_wire::Reason::Cancelled, Self::ContextChanged => android_wire::Reason::ContextChanged,
@@ -1373,6 +1375,7 @@ struct Session {
     fixture: Option<Arc<offline_tests::hosted::Permit>>,
 }
 impl Session {
+    fn recovery_settlement(&self)->bool {matches!(&self.context,Context::LocalStoreReconcile(c) if c.settling())}
     fn candidate_android(&self)->bool{matches!(&self.context,Context::AndroidBuild(context) if context.candidate())}
 
     // Bounded DATA publication only: no Registry/Document acquisition while
@@ -3121,7 +3124,7 @@ impl Inner {
                 if owner.history.receive_prepare(event).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
             }
             Incoming::Reconcile(event) if owner.domain==SavedCommandDomain::LocalStoreReconcile&&a.accepted&&!a.terminal&&!a.unknown&&a.first_stop.is_none()=>{
-                if owner.history.receive_reconcile(event).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
+                if owner.history.receive_reconcile(event,owner.recovery_settlement()).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
             }
             Incoming::Execute(event) if owner.domain==SavedCommandDomain::LocalStoreExecute&&a.accepted&&!a.terminal&&!a.unknown&&a.first_stop.is_none()=>{
                 if owner.history.receive_execute(event).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}

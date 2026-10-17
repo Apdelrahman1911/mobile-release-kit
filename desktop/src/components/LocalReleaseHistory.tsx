@@ -16,10 +16,11 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
 }) {
   const retained = localHistoryOwnerReason(state), op = state.status?.operation;
   const action = state.request?.action ?? 'verify', reason = controller.prepareReason();
-  const labels = { enroll: 'Enroll project', verify: 'Verify history', 'review-inputs': 'Review candidate inputs', 'abandon-inputs': 'Abandon input operation', 'review-prepared': 'Review prepared intent', 'review-execution': 'Review execution receipt', 'review-reconcile': 'Review for Store check' };
+  const labels = { enroll: 'Enroll project', verify: 'Verify history', 'review-inputs': 'Review candidate inputs', 'abandon-inputs': 'Abandon input operation', 'review-prepared': 'Review prepared intent', 'review-execution': 'Review execution receipt', 'review-reconcile': 'Review for Store check', 'review-recovery': 'Review recovery checkpoint' };
   const consent = {
     enroll: 'Enrollment creates local project history and private Keychain state on this Mac. It does not replace an existing enrollment, build, sign, upload or publish.',
     verify: 'Verify this project’s existing local history against its Mac Keychain state. This does not enroll a project, repair an interrupted release, or authorize publishing.',
+    'review-recovery': 'Read the retained recovery receipt and its original candidate files against local history and Mac Keychain. No network call, repair, retry or promotion is authorized. This does not confirm current Play state or establish the earlier execution’s cleanup.',
     'review-reconcile': 'Read the latest execution’s retained prepared files against local history and Keychain. No network, Store action, history repair or retry is authorized. A separate consent is required to check Play.',
     'review-execution': 'Read this operation’s retained execution receipt and candidate/prepared files against project history and Mac Keychain. This makes no Store call, does not repair the earlier execution’s finality or authorize retrying, and does not confirm current Play state.',
     'review-prepared': 'Read this operation’s retained prepared intent and candidate files against project history and Mac Keychain. This makes no Store call and does not execute, recover or retry a release, or prove that the earlier preparation finished cleanly.',
@@ -27,8 +28,8 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
     'abandon-inputs': 'Record this pending or ready input operation as cancelled so another input operation can be prepared. Existing files stay untouched. This does not stop a running build, undo a Store action, delete files or repair uncertain history.',
   };
   const selectedAction = op?.context.action ?? action;
-  const candidate = op?.result?.candidateInputs, prepared = op?.result?.preparedIntent, execution = op?.result?.executionReceipt;
-  const choose = (action:'review-inputs'|'abandon-inputs'|'review-prepared'|'review-execution'|'review-reconcile',id:string) => {
+  const candidate = op?.result?.candidateInputs, prepared = op?.result?.preparedIntent, execution = op?.result?.executionReceipt, recovery = op?.result?.reconciliationReceipt;
+  const choose = (action:'review-inputs'|'abandon-inputs'|'review-prepared'|'review-execution'|'review-reconcile'|'review-recovery',id:string) => {
     if(controller.selectCandidate(action,id))void controller.prepare();
   };
   if (compact && !retained) return null;
@@ -42,7 +43,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
       </details>
       <label>History action <select value={action} disabled={!!retained} onChange={event => controller.setAction(event.target.value === 'enroll' ? 'enroll' : 'verify')}>
         <option value="verify">Verify existing history</option><option value="enroll">Enroll this project for the first time</option>
-        {(action === 'review-inputs' || action === 'abandon-inputs' || action === 'review-prepared' || action === 'review-execution' || action === 'review-reconcile') && <option value={action}>{labels[action]}</option>}
+        {(action === 'review-inputs' || action === 'abandon-inputs' || action === 'review-prepared' || action === 'review-execution' || action === 'review-reconcile' || action === 'review-recovery') && <option value={action}>{labels[action]}</option>}
       </select></label>
       <p>No Store credentials, network access, build tools or release version are required.</p>
       {state.request?.candidateOperationId && <p>Selected operation: <code>{state.request.candidateOperationId}</code>. {labels[action]}.</p>}
@@ -69,6 +70,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
           {op.result!.history.at(-1) === row && ['inputs-pending','inputs-ready'].includes(row.phase) && <button onClick={() => choose('abandon-inputs',row.operationId)}>Review abandonment</button>}
         </div>}
         {!compact && !retained && !state.historical && op.result!.history.at(-1) === row && ['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(row.phase) && <button onClick={() => choose('review-reconcile',row.operationId)}>Review for Store check</button>}
+        {!compact && !retained && !state.historical && row.phase === 'target-reconciled' && <button onClick={() => choose('review-recovery',row.operationId)}>Review recovery checkpoint</button>}
         {!compact && !retained && !state.historical && row.phase === 'prepared' && <button onClick={() => choose('review-prepared',row.operationId)}>Review prepared intent</button>}
         {!compact && !retained && !state.historical && row.phase === 'settled-success' && <button onClick={() => choose('review-execution',row.operationId)}>Review execution receipt</button>}
       </li>)}</ul>
@@ -98,9 +100,17 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
         <p>Receipt originally observed at {execution.observedAt}. This is not a current Play check or proof of public release.</p>
         <p>This verifies the current retained files only. It does not establish that the earlier execution’s native cleanup finished, repair an uncertain tail, or grant retry, recovery or promotion authority. Keep all files and history intact.</p>
       </div>}
+      {recovery && state.historical && <p>This recovery checkpoint belongs to an earlier project context; its files have not been checked for the selected project.</p>}
+      {recovery && !state.historical && <div className="notice">
+        <h3>Recovery checkpoint files currently verified</h3>
+        <p>{recovery.applicationId} · Version {recovery.version.name} · Build {recovery.version.build} · Play internal testing</p>
+        <p>Operation: <code>{recovery.operationId}</code></p>
+        <p>Target originally observed at {recovery.observedAt}. This offline review does not check current Play state.</p>
+        <p>The checkpoint recorded the matching internal target and preserved the original evidence. It does not establish the earlier operation’s cleanup or authorize resending, mapping replay or promotion. A new, distinct release still requires its own checks and consent. Keep the original files and history intact.</p>
+      </div>}
       {op.result.candidateInputs === null && <p>{op.context.action === 'abandon-inputs' ? 'The input operation was abandoned. Its files were preserved; no Store action was performed.' : 'No verified ready input bundle was returned. The operation is pending or abandoned; keep its files intact.'}</p>}
       {!compact && <details><summary>Help: review or abandon an input operation?</summary><p>Review checks the saved Android bundle without rebuilding or contacting a Store. If you no longer need a pending or ready input operation, review abandonment and confirm it. Abandonment records cancellation but keeps the files. Only the current pending or ready input operation can be abandoned; uncertain or changed history must be reconciled instead.</p></details>}
-      {!compact && <p>After restarting, Verify history and select a prepared or completed execution row to inspect its retained intent or receipt without Store credentials or network access. For the latest execution, Review for Store check also reads the retained prepared files. Then use Check previous Play upload for a separate network check. Neither action repairs old cleanup or authorizes a retry.</p>}
+      {!compact && <p>After restarting, Verify history and select a prepared or completed execution row to inspect its retained intent or receipt without Store credentials or network access. For the latest execution, Review for Store check also reads the retained prepared files. Then use Check previous Play upload for a separate network check. Neither action repairs old cleanup or authorizes a retry. A target-reconciled row can be reviewed offline with Review recovery checkpoint, even after a later release.</p>}
       <p>This is a point-in-time local record, not Store access, publication proof, or permission to retry a release.</p>
     </>}
   </section>;

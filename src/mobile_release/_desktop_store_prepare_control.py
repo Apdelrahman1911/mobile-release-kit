@@ -82,7 +82,9 @@ class StorePrepareInput(_SavedCommandInput):
     def exchange(self,event,payload):
         wire=_protocol(self.domain)
         op=self.require_operation();op.checkpoint()
-        self._require(self.reply_step<len(wire.PHASES) and event==wire.PHASES[self.reply_step] and not self.reading
+        from ._desktop_store_prepare_protocol import request_phases
+        phases=request_phases(self.initial)
+        self._require(self.reply_step<len(phases) and event==phases[self.reply_step] and not self.reading
             and not self.material_pending and not self.buffer)
         self.reply_step+=1;self.reading=True;self.read_remaining=1
         self.material_pending=self.material_receiving=True;line=bytearray();key=None

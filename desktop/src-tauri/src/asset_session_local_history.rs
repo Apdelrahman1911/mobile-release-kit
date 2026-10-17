@@ -142,7 +142,7 @@ mod tests {
         context.candidate_operation_id=Some("12345678-1234-4234-9234-123456789abd".into());
         assert!(!consent.matches_context(&context));
         context.candidate_operation_id=consent.candidate_operation_id.clone();
-        for action in [wire::Action::AbandonInputs,wire::Action::ReviewExecution,wire::Action::ReviewPrepared,wire::Action::ReviewReconcile]{
+        for action in [wire::Action::AbandonInputs,wire::Action::ReviewExecution,wire::Action::ReviewPrepared,wire::Action::ReviewReconcile,wire::Action::ReviewRecovery]{
             context.action=action;assert!(!consent.matches_context(&context));
         }
         // The foreign-action loop must not select this positive case implicitly.

@@ -201,10 +201,10 @@ impl Route {
     fn candidate_replies_complete(&self)->bool{
         self.original.is_some()&&!self.failed&&!self.reply_writing&&self.received==4&&self.completed==4&&self.pending.is_none()
     }
-    fn reconcile_replies_complete(&self)->bool{
+    fn reconcile_replies_complete(&self,settlement:bool)->bool{
         self.original.is_some()&&self.authorization.is_some()&&!self.failed&&!self.reply_writing
-            &&self.received==2&&self.completed==2&&self.pending.is_none()
-            &&self.reconcile_head.is_some_and(|head|(6..=513).contains(&head))
+            &&self.received==(if settlement{3}else{2})&&self.completed==self.received&&self.pending.is_none()
+            &&self.reconcile_head.is_some_and(|head|(6..=if settlement{512}else{513}).contains(&head))
     }
 
 }
@@ -215,7 +215,7 @@ impl State {
     pub(super) fn receive(&self,event:history_wire::Event)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::History(event),3)}
     pub(super) fn receive_candidate(&self,event:android_wire::CandidateEvent)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::Candidate(event),4)}
     pub(super) fn receive_prepare(&self,event:prepare_wire::Event)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::Prepare(event),4)}
-    pub(super) fn receive_reconcile(&self,event:reconcile_wire::Event)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::Reconcile(event),2)}
+    pub(super) fn receive_reconcile(&self,event:reconcile_wire::Event,settlement:bool)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::Reconcile(event),if settlement{3}else{2})}
     pub(super) fn receive_execute(&self,event:execute_wire::Event)->Result<(),BridgeError>{self.receive_phase(PhaseEvent::Execute(event),4)}
     fn receive_phase(&self,event:PhaseEvent,limit:u8)->Result<(),BridgeError>{
         let mut r=self.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
@@ -424,7 +424,7 @@ pub(super) fn acquire_reconcile_sources(owner:&Session,runtime:&Arc<Mutex<StoreR
 }
 pub(super) fn reconcile_complete(owner:&Session)->bool{
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
-    {owner.domain==SavedCommandDomain::LocalStoreReconcile&&owner.history.route.try_lock().is_ok_and(|r|r.reconcile_replies_complete())&&native::reconcile_helpers_complete(owner)}
+    {owner.domain==SavedCommandDomain::LocalStoreReconcile&&owner.history.route.try_lock().is_ok_and(|r|r.reconcile_replies_complete(owner.recovery_settlement()))&&native::reconcile_helpers_complete(owner)}
     #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
     {let _=owner;false}
 }
@@ -448,11 +448,25 @@ mod reconcile_route_tests {
     fn local_reconcile_actual_ack_head_not_terminal_count_controls_route_completion(){
         let mut r=Route{reconcile_head:None,authorization:Some("23456789-1234-4234-8234-123456789abc".into()),original:Some(("a".repeat(32),"b".repeat(64))),
             received:2,completed:1,pending:None,reply_writing:true,failed:false};
-        assert!(!r.reconcile_replies_complete());r.completed=2;r.reply_writing=false;assert!(!r.reconcile_replies_complete());
-        for head in [6,512,513]{r.reconcile_head=Some(head);assert!(r.reconcile_replies_complete());}
-        for head in [0,5,514]{r.reconcile_head=Some(head);assert!(!r.reconcile_replies_complete());}
-        r.reconcile_head=Some(6);r.failed=true;assert!(!r.reconcile_replies_complete());r.failed=false;
-        r.pending=Some(PhaseEvent::Reconcile(reconcile_wire::Event::LeaseReady));assert!(!r.reconcile_replies_complete());r.pending=None;
-        r.authorization=None;assert!(!r.reconcile_replies_complete());
+        assert!(!r.reconcile_replies_complete(false));r.completed=2;r.reply_writing=false;assert!(!r.reconcile_replies_complete(false));
+        for head in [6,512,513]{r.reconcile_head=Some(head);assert!(r.reconcile_replies_complete(false));}
+        for head in [0,5,514]{r.reconcile_head=Some(head);assert!(!r.reconcile_replies_complete(false));}
+        r.reconcile_head=Some(6);r.failed=true;assert!(!r.reconcile_replies_complete(false));r.failed=false;
+        r.pending=Some(PhaseEvent::Reconcile(reconcile_wire::Event::LeaseReady));assert!(!r.reconcile_replies_complete(false));r.pending=None;
+        r.authorization=None;assert!(!r.reconcile_replies_complete(false));
     }
+    #[test]
+    fn local_recovery_route_requires_actual_third_ack_without_pending_write(){
+        let mut r=Route{reconcile_head:Some(6),authorization:Some("23456789-1234-4234-8234-123456789abc".into()),original:Some(("a".repeat(32),"b".repeat(64))),
+            received:2,completed:2,pending:None,reply_writing:false,failed:false};
+        assert!(r.reconcile_replies_complete(false));assert!(!r.reconcile_replies_complete(true));
+        r.received=3;assert!(!r.reconcile_replies_complete(true));r.completed=3;assert!(r.reconcile_replies_complete(true));
+        assert!(!r.reconcile_replies_complete(false));
+        for head in [6,512]{r.reconcile_head=Some(head);assert!(r.reconcile_replies_complete(true));}
+        r.reconcile_head=Some(513);assert!(!r.reconcile_replies_complete(true));r.reconcile_head=Some(6);
+        r.reply_writing=true;assert!(!r.reconcile_replies_complete(true));r.reply_writing=false;
+        r.pending=Some(PhaseEvent::Reconcile(reconcile_wire::Event::LeaseReady));assert!(!r.reconcile_replies_complete(true));r.pending=None;
+        r.failed=true;assert!(!r.reconcile_replies_complete(true));r.failed=false;r.authorization=None;assert!(!r.reconcile_replies_complete(true));
+    }
+
 }

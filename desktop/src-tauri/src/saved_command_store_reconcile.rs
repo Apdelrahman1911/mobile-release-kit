@@ -16,6 +16,7 @@ impl SavedCommandOwner {
     pub(crate) fn start_store_reconcile(&self,input:reconcile_wire::Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,
         gate:reconcile_wire::Availability,material:Arc<SelectedStoreMaterial>)->Result<crate::local_store_reconcile_owner::Admitted,BridgeError>{
         self.require_domain(SavedCommandDomain::LocalStoreReconcile)?;
+        if !material.reconcile_accepts_consent(&input.consent_version){return Err(reconcile_wire::invalid());}
         let admitted=self.start_bound(Start{operation_id:input.operation_id,owner_generation:input.owner_generation},admitted_at,registered,
             Availability::from_store(gate),Some(PrivateSigningMaterial::Store(material)))?;
         Ok(crate::local_store_reconcile_owner::Admitted::new(admitted.status.reconcile()?,admitted.release))
@@ -45,6 +46,8 @@ mod tests{
         assert_eq!(SavedCommandDomain::LocalStoreReconcile.response_limit(),64*1024);assert_eq!(SavedCommandDomain::LocalStorePreflight.response_limit(),16*1024);
         assert_eq!(Reason::ReconcileUnavailable.reconcile().unwrap(),reconcile_wire::Reason::ReconcileUnavailable);
         assert!(Reason::ReconcileUnavailable.store().is_err()&&Reason::ReconcileUnavailable.android().is_err());
+        assert_eq!(Reason::RecoverySettleUnavailable.reconcile().unwrap(),reconcile_wire::Reason::RecoverySettleUnavailable);
+        assert!(Reason::RecoverySettleUnavailable.store().is_err()&&Reason::RecoverySettleUnavailable.android().is_err());
         assert!(document_backing_bytes().unwrap()>store::document_backing_bytes().unwrap());
         assert!(document_backing_bytes().unwrap()<1024*1024);
         assert!(Context::LocalStoreReconcile(reconcile_wire::tests::context()).requires_private_material());

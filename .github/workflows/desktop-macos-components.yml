@@ -317,7 +317,7 @@ jobs:
           if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == local-keychain-contracts ]]; then
             # Contracts-only is an explicit retry scope when the unchanged app,
             # helper and wire/lease graph already passed on the same toolchain.
-            # It still compiles the actual library test graph and runs all59.
+            # It still compiles the actual library test graph and runs all66.
             if [[ "$APP_CHECKS" == local-keychain ]]; then
             # Separate Cargo invocation preserves helper-only native policy.
             # Closed DATA/DocumentState/driver contracts plus an owned temporary
@@ -403,8 +403,15 @@ jobs:
               local_store_preflight_protocol::tests::apple_access_consent_scope_and_seven_calls_do_not_widen_google_mutations \
               asset_session::store_material::tests::apple_access_loan_retains_exact_fields_and_never_lends_google_mutation_material \
               asset_session::store_material::tests::apple_access_key_and_scalar_bounds_refuse_before_private_writer \
+              local_store_reconcile_protocol::tests::local_recovery_context_and_consent_cannot_upgrade_read_only_reconcile \
+              local_store_reconcile_protocol::tests::local_recovery_checkpoint_requires_next_head_then_five_frames_and_original_closes \
+              local_release_history_protocol::tests::local_release_history_recovery_review_is_distinct_current_files_not_live_or_old_finality \
+              local_release_history_protocol::tests::local_release_history_recovery_review_keeps_two_events_and_all_original_close_checks \
+              saved_command_owner::local_history::reconcile_route_tests::local_recovery_route_requires_actual_third_ack_without_pending_write \
+              saved_command_owner::local_history::native::reconcile_tests::local_recovery_helpers_add_exactly_one_after_three_reads_not_for_offline_review \
+              saved_command_owner::local_history::native::reconcile_tests::local_recovery_joined_final_original_uses_cleanup_tail_not_a_new_forward_grant \
               --exact --test-threads=1 | tee "$WORK_ROOT/local-keychain-owner-tests.log"
-            grep -Eq '^test result: ok\. 59 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
+            grep -Eq '^test result: ok\. 66 passed; 0 failed; 0 ignored;' "$WORK_ROOT/local-keychain-owner-tests.log"
             exit 0
           fi
           # The same Mac Store implementation is in the headless library graph.

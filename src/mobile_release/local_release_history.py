@@ -67,7 +67,7 @@ class LocalHistoryRun:
             # Original project+journal plus independent fixed4-dir namespace,
             # one leaf/iterator, inherited input and stdio. No tool child.
             wire.require(2*project+home+18 <=256)
-        if self.request.context["action"]=="review-execution":
+        if self.request.context["action"] in {"review-execution","review-recovery"}:
             # Candidate originals are already closed before two independent
             # namespace walks coexist. Include both fixed four-component walks,
             # original project/journal ancestry, stdio/lease and leaf/iterator.
@@ -129,16 +129,17 @@ class LocalHistoryRun:
                         if self.request.context["action"] in {"review-prepared","review-reconcile"}:
                             from .local_prepared_review import review_prepared
                             candidate=review_prepared(self,enrollment)
-                        elif self.request.context["action"]=="review-execution":
-                            from .local_execution_review import review_execution
-                            candidate=review_execution(self,enrollment)
+                        elif self.request.context["action"] in {"review-execution","review-recovery"}:
+                            from .local_execution_review import review_execution,review_recovery
+                            reader=review_recovery if self.request.context["action"]=="review-recovery" else review_execution
+                            candidate=reader(self,enrollment)
                         else:candidate=self._candidate_inputs(enrollment)
                         head=self.journal.head()
                     result={"schemaVersion":1,"scope":"local-release-history","enrolled":True,
                         "headSequence":head["sequence"],"history":self.journal.history_summary(),
                         "limitations":["no-store-authority","no-build-or-publishing","keychain-intact-rollback-boundary"]}
                     if wire.candidate_action(self.request.context):
-                        key={"review-prepared":"preparedIntent","review-reconcile":"preparedIntent","review-execution":"executionReceipt"}.get(self.request.context["action"],"candidateInputs")
+                        key={"review-prepared":"preparedIntent","review-reconcile":"preparedIntent","review-execution":"executionReceipt","review-recovery":"reconciliationReceipt"}.get(self.request.context["action"],"candidateInputs")
                         result[key]=candidate
                     self.journal.close();self.checkpoint()
                     self.report=result

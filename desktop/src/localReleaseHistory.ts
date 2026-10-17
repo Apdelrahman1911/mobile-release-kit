@@ -32,11 +32,11 @@ export class LocalReleaseHistoryController {
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
  setAction=(action:LocalHistoryAction)=>{if(action!==this.action||this.candidateOperationId!==undefined){this.action=action;this.candidateOperationId=undefined;this.candidateProjectId=null;this.syncProject();}};
- selectCandidate=(action:'review-inputs'|'abandon-inputs'|'review-prepared'|'review-execution'|'review-reconcile',operationId:string):boolean=>{
+ selectCandidate=(action:'review-inputs'|'abandon-inputs'|'review-prepared'|'review-execution'|'review-reconcile'|'review-recovery',operationId:string):boolean=>{
   const op=this.state.status?.operation;
   if(localHistoryOwnerReason(this.state)||this.state.historical||!op?.result||op.context.projectId!==this.source.projectId())return false;
   const row=op.result.history.find(row=>row.operationId===operationId);
-  if(!row||(action==='review-prepared'?row.phase!=='prepared':action==='review-execution'?row.phase!=='settled-success':action==='review-reconcile'?(op.result.history.at(-1)!==row||!['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(row.phase)):!['inputs-pending','inputs-ready','settled-failure'].includes(row.phase))||action==='abandon-inputs'&&(row.phase==='settled-failure'||op.result.history.at(-1)!==row))return false;
+  if(!row||(action==='review-prepared'?row.phase!=='prepared':action==='review-execution'?row.phase!=='settled-success':action==='review-recovery'?row.phase!=='target-reconciled':action==='review-reconcile'?(op.result.history.at(-1)!==row||!['execute-pending','settled-success','settled-failure','reconciliation-required'].includes(row.phase)):!['inputs-pending','inputs-ready','settled-failure'].includes(row.phase))||action==='abandon-inputs'&&(row.phase==='settled-failure'||op.result.history.at(-1)!==row))return false;
   this.action=action;this.candidateOperationId=operationId;this.candidateProjectId=op.context.projectId;this.syncProject();return this.state.request?.candidateOperationId===operationId&&this.state.request.action===action;
  };
  setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};

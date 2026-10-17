@@ -166,7 +166,9 @@ class _SavedCommandEngine:
         if self.domain in (SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
             self._require(self.frames == (1 if terminal else 0))
         elif self.domain in (SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
-            self._require(1<=self.frames<len(wire.PHASES)+2 if terminal else self.frames<len(wire.PHASES)+1)
+            from ._desktop_store_prepare_protocol import request_phases
+            phases=request_phases(self.request)
+            self._require(1<=self.frames<len(phases)+2 if terminal else self.frames<len(phases)+1)
         elif self.domain is SavedCommandDomain.LocalReleaseHistory:
             self._require(1 <= self.frames < 8 if terminal else self.frames < 7)
         elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):

@@ -481,3 +481,36 @@ recovery. The shared GitHub-backed lanes already implement those Store
 transitions; the missing work is their explicit local authority, original
 artifact/checkpoint ownership and UI/native lifecycle, not a replacement Store
 engine. Cross-origin evidence and public-release authority stay excluded.
+
+
+## 2026-10-17: Apple access checks and Google recovery checkpoint
+
+Source `c6c53cad` passed actual ARM and Intel app/helper builds, 7 lower native
+tests and 59 app contracts per architecture (`38996643235/1`). The same source
+passed bundled P256 PEM/DER signing checks on both Macs (`38996646179/1`), and
+58 Supply/7 runtime tests including late Google edit/commit cases
+(`38996649315/1`). These are not installed application or live-account acceptance.
+
+The next task patch integrates independently reviewed Google recovery across
+core, native IPC, UI and offline History. The user explicitly chooses a fresh
+internal-target check plus a new local/Keychain checkpoint. Exact earlier
+markers and evidence remain intact; a changed or unknown marker refuses. A
+matching target checkpoint may admit a **new unique** release under the current
+local one-edit algorithm and documented Google edit invalidation rules. It
+never proves old process/HTTP finality, retries an old upload, replays mapping,
+repairs Keychain rollback or authorizes promotion. `Review recovery checkpoint`
+reads stored evidence offline, including an earlier terminal operation.
+
+Focused local checks: 93 Python methods and 49 frontend methods + TypeScript;
+one existing frontend method additionally verifies variant-specific failures.
+Native review corrected the final joined Keychain helper's cleanup-time source
+check without allowing a new helper after the work deadline. Seven new native
+contracts are registered in the existing scoped job (66 total); their execution
+and installed journeys remain pending. No new signing/notarization is needed
+for this scoped compilation.
+
+Still missing: complete local iOS candidate/source/journal publication and native
+UI, Apple Store preparation/upload/recovery, build-once promotion, corrected
+signed installation and full installed journeys. Existing signed-runtime
+evidence applies only to its checked source. Desktop remains **NOT READY**;
+no main change or public release is authorized or claimed.

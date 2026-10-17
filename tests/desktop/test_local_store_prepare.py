@@ -148,9 +148,10 @@ class LocalStorePrepareTests(unittest.TestCase):
             from mobile_release import local_store_prepare as S,_desktop_store_prepare_protocol as W
             from mobile_release._desktop_store_prepare_engine import _Engine
             owner_type=S.LocalStorePrepareRun
-        pending,settled=("history-head",None) if _reconcile else W.PHASES[2:]
+        settlement=_reconcile and W.settling(self.value["context"])
+        pending,settled=("history-head","recovery-settled" if settlement else None) if _reconcile else W.PHASES[2:]
         initial_phase=self.current_phase() if _reconcile else 'prepared' if _execute else 'inputs-ready'
-        final_phase='settled-success' if _execute else 'prepared'
+        final_phase='target-reconciled' if settlement else 'settled-success' if _execute else 'prepared'
         parent=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC);fcntl.flock(parent,fcntl.LOCK_EX|fcntl.LOCK_NB)
         loan=os.dup(parent);os.set_inheritable(loan,True)
         value=copy.deepcopy(self.value);now=time.monotonic_ns();value['native'].update(home=str(self.home),leaseFd=loan,
@@ -170,7 +171,7 @@ class LocalStorePrepareTests(unittest.TestCase):
         def peak():high[0]=max(high[0],len(os.listdir('/proc/self/fd')))
         def parent_reply(engine,kind,payload):
             peak();original_event(engine,kind,payload);events.append(kind)
-            self.assertEqual(engine.service.journals[-1]._rows[-1][0]['phase'] if engine.service.journals and not engine.service.journals[-1].closed else self.current_phase(),initial_phase if _reconcile else pending if kind==pending else final_phase if kind==settled else initial_phase)
+            self.assertEqual(engine.service.journals[-1]._rows[-1][0]['phase'] if engine.service.journals and not engine.service.journals[-1].closed else self.current_phase(),final_phase if kind==settled else initial_phase if _reconcile else pending if kind==pending else initial_phase)
             reply=dict(protocol=W.PROTOCOL,operationId=engine.request.operation_id,ownerGeneration=engine.request.owner_generation,
                 nonce=engine.request.native['nonce'],requestSha256=engine.request.digest,kind='key-material' if kind=='lease-ready' else 'checkpoint-settled',
                 step=engine.input.reply_step,payload=ENROLLMENT if kind=='lease-ready' else {})
@@ -182,6 +183,8 @@ class LocalStorePrepareTests(unittest.TestCase):
                 body=encode(account());data+=PREFIX+encode(dict(schemaVersion=1,files=[dict(role='google-service-account',bytes=len(body))]))+body+SUFFIX
             os.write(iw,data)
             if kind=='prepare-settled' and fault=='publication-close':lost_target[0]=engine.service.publishers[-1].slots[-1].number
+            if kind=='recovery-settled' and hasattr(self,'recovery_after_ack'):self.recovery_after_ack(engine)
+            if kind=='recovery-settled' and fault=='recovery-marker-close':lost_target[0]=engine.service.fence_readers[0].fd
             if kind=='prepare-settled' and fault=='publication-post':
                 Path(engine.service.record._output).with_name('operation-intent.json').write_bytes(b'changed after prepared checkpoint')
         def command(argv,**kwargs):
@@ -198,6 +201,7 @@ class LocalStorePrepareTests(unittest.TestCase):
                 elif 'ls-tree' in argv:out=b''.join(b'100644 blob '+sha+b'\t'+name+b'\0' for name,sha in self.rows)
                 else:
                     out=b''
+                    if _reconcile and settlement and hasattr(self,'recovery_final_source') and len(e.service._source_rows)==8:self.recovery_final_source(e)
                     if (_execute or _reconcile) and fault=='last-source' and len(e.service._source_rows)==8:
                         (self.root/'.mobile-release/store/local'/OP.replace('-','')/'operation-intent.json').write_bytes(b'changed at last source status')
                 e.guard.lifetime_ledger._commands+=1;e.guard.lifetime_ledger._command_dispatched=True
@@ -244,7 +248,7 @@ class LocalStorePrepareTests(unittest.TestCase):
             target=None
             if fault=='publication-close' and not lost and e.service is not None and e.service.publishers and 'prepare-settled' in events:
                 target=lost_target[0]
-            if (_execute and fault=='tool-close-cancel' or _reconcile and fault=='prepared-close') and not lost:target=lost_target[0]
+            if (_execute and fault=='tool-close-cancel' or _reconcile and fault in {'prepared-close','recovery-marker-close'}) and not lost:target=lost_target[0]
             native_close(number)
             if number==target and fault=='tool-close-cancel':e.input.stop('cancelled')
             if number==target:lost.append(number);raise RuntimeError('inert lost original close')

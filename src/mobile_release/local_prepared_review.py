@@ -53,10 +53,10 @@ def decode_quote(raw, maximum, *, checkpoint=None):
     return quote
 
 def _scan(owner, out, *, kind='prepared'):
-    require(kind in {'prepared', 'execution'})
-    if kind == 'execution':
+    require(kind in {'prepared', 'execution', 'recovery'})
+    if kind != 'prepared':
         from .local_release_history import LocalHistoryRun
-        require(type(owner) is LocalHistoryRun and owner.request.context['action'] == 'review-execution')
+        require(type(owner) is LocalHistoryRun and owner.request.context['action'] == ('review-recovery' if kind=='recovery' else 'review-execution'))
     names_expected = set(FILES) if kind == 'prepared' else {'raw-store-receipt.json'}
     owner.checkpoint(); out.check()
     require(owner.prepared_scan_state in {'new', 'closed'} and owner.prepared_iterator is None)
@@ -125,14 +125,19 @@ def _prepared_files(owner, enrollment):
     This scope is not a caller-supplied file/roster or authority adapter.
     """
     from .local_release_history import LocalHistoryRun
-    require(type(owner) is LocalHistoryRun and owner.request.context['action'] in {'review-prepared', 'review-execution', 'review-reconcile'})
+    require(type(owner) is LocalHistoryRun and owner.request.context['action'] in {'review-prepared', 'review-execution', 'review-reconcile', 'review-recovery'})
+    recovery = owner.request.context['action'] == 'review-recovery'
     execution = owner.request.context['action'] == 'review-execution'
     reconcile = owner.request.context['action'] == 'review-reconcile'
     operation_id = owner.request.context['candidateOperationId']
     rows = [r for r, _ in owner.journal._rows if r['operationId'] == operation_id]
     phases = ['inputs-pending', 'inputs-ready', 'prepare-pending', 'prepared']
     if execution: phases += ['execute-pending', 'settled-success']
-    if reconcile:
+    if recovery:
+        from .local_release_journal import recovery_chain
+        require(rows and owner.journal.head()['sequence']>=7 and rows[-1]['phase']=='target-reconciled')
+        recovery_chain(rows[:-1],operation_id)
+    elif reconcile:
         from ._desktop_store_reconcile_protocol import execution_chain
         require(rows and owner.journal.head()['sequence']>=6 and owner.journal._rows[-1][0] is rows[-1])
         execution_chain(rows,operation_id)
@@ -154,13 +159,13 @@ def _prepared_files(owner, enrollment):
         require(observed is not None)
         intent_binding, raw = observed; del observed
         summary, snapshot_digest = _intent(raw, enrollment=enrollment, operation_id=operation_id, rows=rows[:4], manifest=bundle.value, checkpoint=owner.checkpoint)
-        if reconcile:
+        if reconcile or recovery:
             from ._desktop_store_reconcile_protocol import execution_binding
             from .local_release_intent import decode_local_operation_intent
             # _intent already prequoted this same bounded graph. Its parsed
             # graph retired before this sequential pending-binding comparison.
             intent=decode_local_operation_intent(raw);execution_binding(intent,rows);del intent
-        intent_raw = raw if execution else None
+        intent_raw = raw if execution or recovery else None
         del raw  # _intent's complete parsed graph has already returned/retired.
         out.check(); owner.checkpoint()
         observed = _read_file(out.fd, 'store-precondition.json', owner.guard, FILES['store-precondition.json'], private=True)

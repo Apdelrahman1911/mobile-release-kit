@@ -90,6 +90,15 @@ def _payload(phase, payload):
             _need(all(_sha(payload[k], 40) for k in extra))
         if phase == "execute-pending":
             _need(_uuid(payload["authorizationId"]) and _int(payload["assignmentRevision"], (1 << 32) - 2))
+    elif phase == 'target-reconciled':
+        _need(set(payload)=={'intentSha256','receiptSha256','executeAuthorizationId',
+              'recoveryAuthorizationId','assignmentRevision','preservedAttempt','priorExecutionFinality'}
+              and all(_sha(payload[k]) for k in ('intentSha256','receiptSha256'))
+              and all(_uuid(payload[k]) for k in ('executeAuthorizationId','recoveryAuthorizationId'))
+              and payload['executeAuthorizationId']!=payload['recoveryAuthorizationId']
+              and _int(payload['assignmentRevision'],(1<<32)-2)
+              and payload['priorExecutionFinality']=='not-established')
+        marker_data(payload['preservedAttempt'])
     elif phase in ("settled-failure", "reconciliation-required"):
         reasons = ({"cancelled", "validation", "native-failure", "resource-close", "store-refused"}
                    if phase == "settled-failure" else
@@ -98,6 +107,30 @@ def _payload(phase, payload):
               and payload["phase"] in _NEXT and type(payload["reason"]) is str and payload["reason"] in reasons)
     else:
         raise LocalJournalError()
+
+
+def marker_data(value):
+    """Closed conserved-file DATA, never original custody or name authority."""
+    if value is None:return
+    _need(type(value) is dict and set(value)=={'name','binding'} and type(value['name']) is str
+          and re.fullmatch('[0-9a-f]{64}\\.pending',value['name']) is not None)
+    b=value['binding']
+    _need(type(b) is dict and set(b)=={'device','inode','uid','gid','mode','links','size','mtime','ctime','sha256'}
+          and all(_int(b[k],(1<<64)-1,0) for k in ('device','inode','uid','gid'))
+          and b['inode']>0 and b['uid']>0 and type(b['mode']) is int and b['mode']==0o600
+          and type(b['links']) is int and b['links']==1 and _int(b['size'],8192)
+          and all(type(b[k]) is int and -(1<<63)<=b[k]<(1<<63) for k in ('mtime','ctime'))
+          and _sha(b['sha256']))
+
+
+def recovery_chain(rows, operation):
+    _need(type(rows) is list and len(rows) in (5,6) and all(r['operationId']==operation for r in rows)
+          and [r['phase'] for r in rows[:5]]==['inputs-pending','inputs-ready','prepare-pending','prepared','execute-pending'])
+    if len(rows)==6:
+        _need(rows[-1]['phase'] in {'settled-failure','reconciliation-required'}
+              and rows[-1]['payload']['phase']=='execute-pending')
+    _need(rows[3]['payload']['intentSha256']==rows[4]['payload']['intentSha256'])
+    return rows
 
 
 def _pairs(pairs):
@@ -176,7 +209,7 @@ class LocalReleaseJournal(_Custodian):
         _need(len(final) <= MAX_OPERATIONS)
         for operation, row in final.items():
             result.append({"operationId": operation, "phase": row["phase"],
-                           "recoveryRequired": row["phase"] not in {"settled-success", "settled-failure"}})
+                           "recoveryRequired": row["phase"] not in {"settled-success", "settled-failure", "target-reconciled"}})
         return result
 
     def _leaf_limit(self, name):
@@ -212,10 +245,18 @@ class LocalReleaseJournal(_Custodian):
             _need(phase != "genesis" and operation is not None)
             last = self._rows[-1][0]
             # Unknown Store/checkpoint effects cannot be hidden by a new ID.
-            _need(last["phase"] != "reconciliation-required")
-            if phase == "inputs-pending":
+            _need(last["phase"] != "reconciliation-required" or phase=='target-reconciled')
+            if phase=='target-reconciled':
+                rows=recovery_chain([r for r,_ in self._rows if r['operationId']==operation],operation)
+                _need(operation==last['operationId'])
+                old,new=rows[4]['payload'],row['payload']
+                _need(new['executeAuthorizationId']==old['authorizationId']
+                      and new['assignmentRevision']==old['assignmentRevision']
+                      and new['intentSha256']==old['intentSha256']
+                      and all(r['payload'].get('recoveryAuthorizationId')!=new['recoveryAuthorizationId'] for r,_ in self._rows))
+            elif phase == "inputs-pending":
                 _need(operation not in self._operations and len(self._operations) < MAX_OPERATIONS
-                      and last["phase"] in {"genesis", "settled-success", "settled-failure"})
+                      and last["phase"] in {"genesis", "settled-success", "settled-failure", "target-reconciled"})
             else:
                 _need(operation == last["operationId"] and last["phase"] in _NEXT)
                 if phase in ("settled-failure", "reconciliation-required"):

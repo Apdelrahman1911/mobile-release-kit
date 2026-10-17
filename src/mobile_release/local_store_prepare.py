@@ -422,6 +422,7 @@ class LocalStorePrepareRun:
             and all(j.closed and not j.ancestors and not j._close_errors for j in self.journals)
             and all(p.closed() for p in self.publishers) and (self.key is None or not any(self.key)))
     def terminal(self):
+        from ._desktop_store_prepare_protocol import request_phases
         v=self.guard.lifetime_ledger.verdict()
         if v.profile_calls or v.commands>14:self.guard._abort(wire.ProtocolError());v=self.guard.lifetime_ledger.verdict()
         if time.monotonic()>=self.source.work_end:self.source.stop('timed-out')
@@ -435,6 +436,6 @@ class LocalStorePrepareRun:
         if not settled:outcome,reason='unknown','cleanup-unknown'
         elif self.source.stop_reason!='none':outcome=reason=self.source.stop_reason
         elif self.primary is not None or self.report is None:outcome,reason='refused',self.request.context['operation'].removeprefix('local-store-')+'-unavailable'
-        elif not self.store_completed or v.commands!=14 or self.source.reply_step!=len(self.protocol.PHASES):outcome,reason='failed','command-incomplete'
+        elif not self.store_completed or v.commands!=14 or self.source.reply_step!=len(request_phases(self.request)):outcome,reason='failed','command-incomplete'
         else:outcome,reason,result='complete','none',self.report
         return {'schemaVersion':1,'context':self.request.context,'outcome':outcome,'reason':reason,'result':result,'lifetime':lifetime}

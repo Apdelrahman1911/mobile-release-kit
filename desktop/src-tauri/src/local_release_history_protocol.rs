@@ -30,9 +30,9 @@ fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_as
 pub(crate) enum ExecutionMode { Local }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="kebab-case")]
-pub(crate) enum Action { Enroll, Verify, ReviewInputs, AbandonInputs, ReviewPrepared, ReviewExecution, ReviewReconcile }
+pub(crate) enum Action { Enroll, Verify, ReviewInputs, AbandonInputs, ReviewPrepared, ReviewExecution, ReviewReconcile, ReviewRecovery }
 impl Action {
-    pub(crate) fn candidate(self)->bool{matches!(self,Self::ReviewInputs|Self::AbandonInputs|Self::ReviewPrepared|Self::ReviewExecution|Self::ReviewReconcile)}
+    pub(crate) fn candidate(self)->bool{matches!(self,Self::ReviewInputs|Self::AbandonInputs|Self::ReviewPrepared|Self::ReviewExecution|Self::ReviewReconcile|Self::ReviewRecovery)}
     pub(crate) fn consent(self)->&'static str{if self.candidate(){CANDIDATE_CONSENT}else{CONSENT}}
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -144,7 +144,7 @@ pub(crate) enum Reason {
 }
 #[derive(Clone,Copy,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="kebab-case")]
-pub(crate) enum HistoryPhase {InputsPending,InputsReady,PreparePending,Prepared,ExecutePending,SettledSuccess,SettledFailure,ReconciliationRequired}
+pub(crate) enum HistoryPhase {InputsPending,InputsReady,PreparePending,Prepared,ExecutePending,SettledSuccess,SettledFailure,ReconciliationRequired,TargetReconciled}
 #[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct HistoryRow {operation_id:String,phase:HistoryPhase,recovery_required:bool}
@@ -163,12 +163,17 @@ pub(crate) struct ResultData {schema_version:u32,scope:String,enrolled:bool,head
     prepared_intent:Option<Option<PreparedReview>>,
     #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="execution_field")]
     execution_receipt:Option<Option<ExecutionReview>>,
+    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="recovery_field")]
+    reconciliation_receipt:Option<Option<crate::local_store_reconcile_protocol::ReconciliationReceipt>>,
 }
 fn candidate_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Option<CandidateInputs>>,D::Error>{
     Ok(Some(Option::<CandidateInputs>::deserialize(decoder)?))
 }
 fn prepared_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Option<PreparedReview>>,D::Error>{
     Ok(Some(Option::<PreparedReview>::deserialize(decoder)?))
+}
+fn recovery_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Option<crate::local_store_reconcile_protocol::ReconciliationReceipt>>,D::Error>{
+    Ok(Some(Option::<crate::local_store_reconcile_protocol::ReconciliationReceipt>::deserialize(decoder)?))
 }
 fn execution_field<'de,D:serde::Deserializer<'de>>(decoder:D)->Result<Option<Option<ExecutionReview>>,D::Error>{
     Ok(Some(Option::<ExecutionReview>::deserialize(decoder)?))
@@ -268,13 +273,17 @@ impl ResultData {fn valid(&self)->bool{self.schema_version==1&&self.scope=="loca
     &&(1..=513).contains(&self.head_sequence)&&self.history.len()<=64&&self.history.len()<(self.head_sequence as usize)
     &&self.limitations==LIMITATIONS&&self.history.iter().enumerate().all(|(i,r)|journal_uuid(&r.operation_id)
         &&!self.history[..i].iter().any(|p|p.operation_id==r.operation_id)
-        &&r.recovery_required!=matches!(r.phase,HistoryPhase::SettledSuccess|HistoryPhase::SettledFailure))}}
+        &&r.recovery_required!=matches!(r.phase,HistoryPhase::SettledSuccess|HistoryPhase::SettledFailure|HistoryPhase::TargetReconciled))}}
 impl ResultData {
     fn matches_context(&self,context:&Context)->bool{
-        if !self.valid(){return false;}
+        if !self.valid()||context.action!=Action::ReviewRecovery&&self.reconciliation_receipt.is_some(){return false;}
         if !context.action.candidate(){return self.candidate_inputs.is_none()&&self.prepared_intent.is_none()&&self.execution_receipt.is_none();}
         let Some(id)=context.candidate_operation_id.as_deref() else{return false;};
         let Some(row)=self.history.iter().find(|row|row.operation_id==id) else{return false;};
+        if context.action==Action::ReviewRecovery {
+            return self.head_sequence>=7&&row.phase==HistoryPhase::TargetReconciled&&self.candidate_inputs.is_none()&&self.prepared_intent.is_none()&&self.execution_receipt.is_none()
+                &&self.reconciliation_receipt.as_ref().and_then(Option::as_ref).is_some_and(|r|r.valid_recovery_review(id));
+        }
         if context.action==Action::ReviewPrepared {
             // Latest state for this selected operation, not necessarily the
             // final operation in the genuine journal's public current table.
@@ -364,7 +373,7 @@ impl Decoder {
             let e=Envelope::deserialize(&value).map_err(|_|BridgeError::protocol())?;
             if e.protocol!=PROTOCOL||e.operation_id!=operation||e.owner_generation!=generation||e.nonce!=nonce
                 ||e.request_sha256!=digest||e.sequence!=self.next||self.next>=8{return Err(BridgeError::protocol());}
-            let expected=match (context.action,self.next){(_,0)=>"accepted",(_,1)=>"lease-ready",(Action::Enroll,2)=>"empty-journal-ready",(Action::Enroll,3)=>"durable-genesis",(Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile,2)=>"history-head",(Action::AbandonInputs,3)=>"abandoned-head",_=>"terminal"};
+            let expected=match (context.action,self.next){(_,0)=>"accepted",(_,1)=>"lease-ready",(Action::Enroll,2)=>"empty-journal-ready",(Action::Enroll,3)=>"durable-genesis",(Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile|Action::ReviewRecovery,2)=>"history-head",(Action::AbandonInputs,3)=>"abandoned-head",_=>"terminal"};
             if e.kind=="terminal" {
                 if self.next==0||!keys(&e.payload,&["schemaVersion","context","outcome","reason","result","lifetime"])
                     ||!e.payload.get("lifetime").is_some_and(|l|keys(l,&["complete","fatal","contained","commandDispatched","commands","profileCalls","inputClosed","handlersRestored","invocationClosed","stopObserved"])) {return Err(BridgeError::protocol());}
@@ -469,7 +478,7 @@ mod tests {
     }
     #[test]
     fn local_release_history_candidate_context_and_consent_are_action_specific(){
-        for action in [Action::Enroll,Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared,Action::ReviewExecution,Action::ReviewReconcile]{
+        for action in [Action::Enroll,Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared,Action::ReviewExecution,Action::ReviewReconcile,Action::ReviewRecovery]{
             let c=context(action);let value=serde_json::to_value(&c).unwrap();
             assert_eq!(prepare(&value).unwrap(),c);assert_eq!(Context::deserialize(&value).unwrap(),c);
             assert_eq!(value.as_object().unwrap().len(),if action.candidate(){4}else{3});
@@ -737,6 +746,45 @@ mod tests {
         let c=context(Action::Verify);let mut t=terminal(&c);t["lifetime"]["inputClosed"]=json!(false);
         assert!(!Terminal::deserialize(&t).unwrap().valid(&c));
     }
+    fn recovery_result(c:&Context)->Value{
+        let mut r=execution_result(c);r["history"][0]["phase"]=json!("target-reconciled");
+        r.as_object_mut().unwrap().remove("executionReceipt");
+        let mut receipt=crate::local_store_reconcile_protocol::tests::terminal()["result"]["reconciliationReceipt"].clone();
+        receipt["operationId"]=json!(c.candidate_operation_id);receipt["observation"]=json!("current-recovery-files-only");r["reconciliationReceipt"]=receipt;r
+    }
+    #[test]
+    fn local_release_history_recovery_review_is_distinct_current_files_not_live_or_old_finality(){
+        let c=context(Action::ReviewRecovery);let ready=recovery_result(&c);
+        let check=|v:&Value|ResultData::deserialize(v).is_ok_and(|r|r.matches_context(&c));
+        assert!(check(&ready));assert_eq!(serde_json::to_value(ResultData::deserialize(&ready).unwrap()).unwrap(),ready);
+        assert_eq!(ready.as_object().unwrap().len(),7);assert_eq!(ready["reconciliationReceipt"].as_object().unwrap().len(),15);
+        for head in [8,513]{let mut good=ready.clone();good["headSequence"]=json!(head);assert!(check(&good));}
+        let mut first=ready.clone();first["headSequence"]=json!(7);first["history"].as_array_mut().unwrap().pop();assert!(check(&first));
+        for head in [6,514]{let mut bad=first.clone();bad["headSequence"]=json!(head);assert!(!check(&bad));}
+        for phase in ["execute-pending","settled-success","settled-failure","reconciliation-required"]{
+            let mut bad=ready.clone();bad["history"][0]["phase"]=json!(phase);bad["history"][0]["recoveryRequired"]=json!(!phase.starts_with("settled-"));assert!(!check(&bad));}
+        let mut bad=ready.clone();bad["history"][0]["recoveryRequired"]=json!(true);assert!(!check(&bad));
+        for(key,value) in [("observation",json!("current-internal-target-only")),("priorExecutionFinality",json!("established")),
+            ("result",json!("accepted")),("receiptSha256",json!("wrong")),("authorizationId",json!("not-native")),("privatePath",json!("/no"))]{
+            let mut bad=ready.clone();bad["reconciliationReceipt"][key]=value;assert!(!check(&bad));}
+        for key in ready["reconciliationReceipt"].as_object().unwrap().keys(){let mut bad=ready.clone();bad["reconciliationReceipt"].as_object_mut().unwrap().remove(key);assert!(!check(&bad));}
+        for key in ["candidateInputs","preparedIntent","executionReceipt","reconciliationReceipt"]{let mut bad=ready.clone();bad[key]=Value::Null;assert!(!check(&bad));}
+        let mut missing=ready.clone();missing.as_object_mut().unwrap().remove("reconciliationReceipt");assert!(!check(&missing));
+        for action in [Action::Verify,Action::ReviewPrepared,Action::ReviewExecution,Action::ReviewReconcile]{assert!(!ResultData::deserialize(&ready).unwrap().matches_context(&context(action)));}
+        let receipt=crate::local_store_reconcile_protocol::ReconciliationReceipt::deserialize(&ready["reconciliationReceipt"]).unwrap();
+        assert!(!receipt.valid_for(c.candidate_operation_id.as_deref().unwrap()));
+        assert!(receipt.valid_recovery_review(c.candidate_operation_id.as_deref().unwrap()));
+    }
+    #[test]
+    fn local_release_history_recovery_review_keeps_two_events_and_all_original_close_checks(){
+        let c=context(Action::ReviewRecovery);let ready=recovery_result(&c);let mut t=terminal(&c);t["result"]=ready;
+        assert!(decode(&mut prefix(&c,8),&c,3,"terminal",t.clone()).is_ok());
+        for field in ["inputClosed","handlersRestored","invocationClosed"]{let mut bad=t.clone();bad["lifetime"][field]=json!(false);assert!(decode(&mut prefix(&c,8),&c,3,"terminal",bad).is_err());}
+        let mut wrong=t.clone();wrong["result"]["headSequence"]=json!(9);assert!(decode(&mut prefix(&c,8),&c,3,"terminal",wrong).is_err());
+        assert!(decode(&mut prefix(&c,8),&c,3,"recovery-settled",json!({"head":{"sequence":9,"sha256":"a".repeat(64)},"phase":"target-reconciled"})).is_err());
+        t["outcome"]=json!("refused");t["reason"]=json!("recovery-required");t["result"]=Value::Null;assert!(decode(&mut prefix(&c,8),&c,3,"terminal",t).is_ok());
+    }
+
 }
 
 // Closed helper callback DATA: nominal H is checked, but only an actual failure
