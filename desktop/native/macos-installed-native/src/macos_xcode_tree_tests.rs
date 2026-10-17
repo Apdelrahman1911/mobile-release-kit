@@ -378,7 +378,11 @@ fn retirement_checks_recorded_identity_and_never_follows_partial_or_sealed_alias
         symlink("../../outside-pending", &alias)?;
         root_owner(&alias)?;
         let alias_c = path_c(&alias)?;
-        if unsafe { libc::lchmod(alias_c.as_ptr(), 0o500) } != 0 {
+        // Darwin fchmodat is exported by the pinned libc crate; NOFOLLOW
+        // changes only this test-owned alias, never the outside sentinel.
+        if unsafe {
+            libc::fchmodat(libc::AT_FDCWD, alias_c.as_ptr(), 0o500, libc::AT_SYMLINK_NOFOLLOW)
+        } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
         require(
