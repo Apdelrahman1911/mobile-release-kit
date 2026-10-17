@@ -1,0 +1,12 @@
+#!/bin/sh
+# Fixed read-only carrier admission BEFORE PackageKit writes its tiny payload.
+set -eu
+umask 077
+[ "${3:-}" = / ] || exit 1
+case "$0" in
+    ./preinstall) scripts=. ;;
+    /*/preinstall) scripts=${0%/*} ;;
+    *) exit 1 ;;
+esac
+cd -P "$scripts" 2>/dev/null || exit 1
+exec ./setup/mrk-macos-xcode-setup --carrier-preflight

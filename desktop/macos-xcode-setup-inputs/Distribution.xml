@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>Prepare Xcode for MobileReleaseKit</title>
+  <options customize="never" require-scripts="false" allow-external-scripts="false" rootVolumeOnly="true"/>
+  <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+  <volume-check script="true">
+    <allowed-os-versions><os-version min="26.0" before="27.0"/></allowed-os-versions>
+  </volume-check>
+  <readme file="InstallerReadMe.html"/>
+  <choices-outline><line choice="prepare-xcode"/></choices-outline>
+  <choice id="prepare-xcode" title="Prepare Xcode" visible="false">
+    <pkg-ref id="dev.mobile-release-kit.desktop.xcode-setup"/>
+  </choice>
+  <pkg-ref id="dev.mobile-release-kit.desktop.xcode-setup" version="__MRK_PACKAGE_VERSION__" auth="root">PrepareXcode.pkg</pkg-ref>
+</installer-gui-script>

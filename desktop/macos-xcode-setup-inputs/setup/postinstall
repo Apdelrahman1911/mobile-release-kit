@@ -1,0 +1,14 @@
+#!/bin/sh
+# Component-only hook: never also install this as a top-level postinstall.
+# Native admission authenticates these originals; Installer arguments are not paths.
+set -eu
+umask 077
+[ "${3:-}" = / ] || exit 1
+case "$0" in
+    ./setup/postinstall|setup/postinstall) scripts=setup ;;
+    ./postinstall) scripts=. ;;
+    /*/postinstall) scripts=${0%/*} ;;
+    *) exit 1 ;;
+esac
+cd -P "$scripts" 2>/dev/null || exit 1
+exec ./mrk-macos-xcode-setup

@@ -4247,6 +4247,103 @@ def audit_install_product_command(args):
             "qualification": INSTALL_PRODUCT_QUALIFICATION}
 
 
+# Fixed Setup DATA only. No workflow/native entry is enabled by these recipes.
+XCODE_SETUP_ID = "dev.mobile-release-kit.desktop.xcode-setup"
+XCODE_SETUP_CARRIER_ID = XCODE_SETUP_ID + ".carrier"
+# Payload root is installed at /Library, not at /. Never ship a Library
+# ancestor directory whose package metadata could alter the real /Library.
+XCODE_SETUP_INSTALL_LOCATION = "/Library"
+XCODE_SETUP_CARRIER = "MobileReleaseKitXcodeSetup.bundle"
+XCODE_SETUP_PROGRAM = "setup/mrk-macos-xcode-setup"
+XCODE_SETUP_COMPONENT = "PrepareXcode.pkg"
+XCODE_SETUP_BOM_LIMIT = 64 * 1024
+XCODE_SETUP_PROGRAM_LIMIT = 64 * 1024 * 1024
+
+
+def xcode_setup_sources(selection):
+    selection = selected_build(selection)
+    source = DESKTOP / "macos-xcode-setup-inputs"
+    names = ("preinstall", "setup/postinstall", "Distribution.xml", "InstallerReadMe.html",
+             "Component.plist", "CarrierInfo.plist")
+    files = {name: read(source / name, INSTALL_PRESENTATION_LIMIT) for name in names}
+    token = b"__MRK_PACKAGE_VERSION__"
+    for name in ("Distribution.xml", "CarrierInfo.plist"):
+        need(files[name].count(token) == 1, "xcode-setup-source-version")
+        files[name] = files[name].replace(token, selection.package_version.encode("ascii"))
+    need(plistlib.dumps(plistlib.loads(files["Component.plist"])) == plistlib.dumps([{
+        "RootRelativeBundlePath": XCODE_SETUP_CARRIER, "BundleIsRelocatable": False,
+        "BundleIsVersionChecked": False, "BundleHasStrictIdentifier": True,
+        "BundleOverwriteAction": "upgrade", "BundlePostInstallScriptPath": "setup/postinstall",
+        "BundleInstallScriptTimeout": 3800}]), "xcode-setup-component-source")
+    need(plistlib.loads(files["CarrierInfo.plist"]) == {
+        "CFBundleIdentifier": XCODE_SETUP_CARRIER_ID, "CFBundleName": "MobileReleaseKit Xcode Setup",
+        "CFBundlePackageType": "BNDL", "CFBundleVersion": selection.package_version},
+        "xcode-setup-carrier-source")
+    return files
+
+
+def xcode_setup_script_files(program, expected_program, selection):
+    selection = selected_build(selection)
+    need(type(program) is bytes and 0 < len(program) <= XCODE_SETUP_PROGRAM_LIMIT
+         and sha(expected_program) and digest(program) == expected_program, "xcode-setup-program-anchor")
+    macho(program, system_only=True, target=selection.target)
+    source = xcode_setup_sources(selection)
+    return {"preinstall": (source["preinstall"], 0o555),
+            "setup/postinstall": (source["setup/postinstall"], 0o555),
+            XCODE_SETUP_PROGRAM: (program, 0o555)}
+
+
+def xcode_setup_scripts_with_bom(scripts, bom, expected_program, selection):
+    """Closed augmentation for the later actual original-component owner.
+
+    This is NOT a BOM parser, package audit or native preflight grant. The caller
+    must retain/compare the genuine pkgbuild Bom and audit the full final package.
+    No PackageInfo timeout or original payload bytes are rewritten here.
+    """
+    need(type(scripts) is dict and XCODE_SETUP_PROGRAM in scripts
+         and type(scripts[XCODE_SETUP_PROGRAM]) is tuple and len(scripts[XCODE_SETUP_PROGRAM]) == 2,
+         "xcode-setup-scripts-shape")
+    expected = xcode_setup_script_files(scripts[XCODE_SETUP_PROGRAM][0], expected_program, selection)
+    need(scripts == expected, "xcode-setup-exact-source-scripts")
+    need(type(bom) is bytes and 0 < len(bom) <= XCODE_SETUP_BOM_LIMIT, "xcode-setup-bom-bound")
+    return {**scripts, "setup/carrier.bom": (bom, 0o444)}
+
+
+def prepare_xcode_setup_scripts_command(args):
+    selection = source_build_selection(command_target(args))
+    need(type(args.expected_source) is str and re.fullmatch(r"[0-9a-f]{40}", args.expected_source),
+         "xcode-setup-source-binding")
+    with parent(args.helper) as (fd, name):
+        program, info = read_at(fd, name, XCODE_SETUP_PROGRAM_LIMIT)
+        need(stat.S_IMODE(info.st_mode) == 0o555, "xcode-setup-program-mode")
+    files = xcode_setup_script_files(program, args.expected_helper, selection)
+    write_tree(args.output, files, root_mode=0o755)
+    return {"schemaVersion": 1, "packageIdentifier": XCODE_SETUP_ID, "sourceCommit": args.expected_source,
+            "helperSha256": digest(program), "scriptFileCount": 3,
+            "qualification": "setup-scripts-prepared-without-bom-not-signed-or-executed"}
+
+
+def prepare_xcode_setup_carrier_command(args):
+    selection = source_build_selection(command_target(args))
+    source = xcode_setup_sources(selection)
+    name = XCODE_SETUP_CARRIER + "/Contents/Info.plist"
+    write_tree(args.output, {name: (source["CarrierInfo.plist"], 0o444)}, root_mode=0o755)
+    return {"schemaVersion": 1, "packageIdentifier": XCODE_SETUP_ID, "packageVersion": selection.package_version,
+            "carrierInfoSha256": digest(source["CarrierInfo.plist"]), "payloadFileCount": 1,
+            "qualification": "inert-setup-carrier-prepared-not-installed"}
+
+
+def prepare_xcode_setup_product_command(args):
+    selection = source_build_selection(command_target(args))
+    source = xcode_setup_sources(selection)
+    write_tree(args.output, {"Distribution": (source["Distribution.xml"], 0o444),
+        "resources/InstallerReadMe.html": (source["InstallerReadMe.html"], 0o444),
+        "Component.plist": (source["Component.plist"], 0o444)}, root_mode=0o700)
+    return {"schemaVersion": 1, "packageIdentifier": XCODE_SETUP_ID, "packageVersion": selection.package_version,
+            "componentSha256": digest(source["Component.plist"]), "scriptTimeoutSeconds": 3800,
+            "qualification": "setup-presentation-prepared-not-built-or-Installer-qualified"}
+
+
 def remove_scripts_command(args):
     selection = source_build_selection(command_target(args))
     fixture_arguments = removal_fixture_script_arguments(args)
@@ -6474,6 +6571,14 @@ def main(argv=None):
             package.add_argument("--output", required=True, type=Path)
         else:
             package.add_argument("--original-package", required=True, type=Path)
+    setup_scripts = commands.add_parser("prepare-xcode-setup-scripts")
+    setup_scripts.add_argument("--helper", required=True, type=Path)
+    setup_scripts.add_argument("--expected-helper", required=True)
+    setup_scripts.add_argument("--expected-source", required=True)
+    setup_scripts.add_argument("--output", required=True, type=Path)
+    for name in ("prepare-xcode-setup-carrier", "prepare-xcode-setup-product"):
+        setup = commands.add_parser(name)
+        setup.add_argument("--output", required=True, type=Path)
     remove_scripts = commands.add_parser("remove-scripts")
     remove_scripts.add_argument("--output", required=True, type=Path)
     remove_scripts.add_argument("--remover", required=True, type=Path)
@@ -6546,6 +6651,9 @@ def main(argv=None):
               "describe-current-runtime": current_runtime_command, "current-runtime": current_runtime_command, "app": app_command, "preview": preview_command, "remove-preview": remove_preview_command,
               "input": input_command, "android-support": android_support_command, "scripts": scripts_command, "package-format-input": package_format_input_command,
               "prepare-package": prepare_package_command, "audit-package": audit_command,
+              "prepare-xcode-setup-scripts": prepare_xcode_setup_scripts_command,
+              "prepare-xcode-setup-carrier": prepare_xcode_setup_carrier_command,
+              "prepare-xcode-setup-product": prepare_xcode_setup_product_command,
               "remove-scripts": remove_scripts_command, "remove-input": remove_input_command,
               "prepare-remove-package": prepare_package_command, "audit-remove-package": audit_command,
               "check-installer-result-absent": installer_result_absent_command,

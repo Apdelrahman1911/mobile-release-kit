@@ -10900,6 +10900,147 @@ def channel_data(path, body=None, *, private=False):
 @unittest.skipUnless(TOOL is not None, "Darwin/POSIX DATA tool only")
 class MacInstalledData(unittest.TestCase):
 
+    def test_xcode_setup_recipe_has_one_inert_carrier_and_separate_fixed_hooks(self):
+        # Actual original reads/fresh writes and shared Mach-O checks, never A,
+        # pkgbuild, PackageKit, root preflight, signing or installed evidence.
+        for target in TOOL.MAC_TARGETS:
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                program = entry_macho_fixture(target=target)
+                helper = root / "helper"
+                helper.write_bytes(program)
+                helper.chmod(0o555)
+                selection = TOOL.source_build_selection(target)
+                before = len(os.listdir("/proc/self/fd")) if sys.platform == "linux" else None
+                scripts_result = TOOL.prepare_xcode_setup_scripts_command(SimpleNamespace(
+                    target=target, helper=helper, expected_helper=TOOL.digest(program),
+                    expected_source="a" * 40, output=root / "Scripts"))
+                carrier_result = TOOL.prepare_xcode_setup_carrier_command(SimpleNamespace(
+                    target=target, output=root / "payload"))
+                presentation_result = TOOL.prepare_xcode_setup_product_command(SimpleNamespace(
+                    target=target, output=root / "product"))
+                scripts = TOOL.tree(root / "Scripts", packager=True)
+                carrier = TOOL.tree(root / "payload", packager=True)
+                presentation = TOOL.tree(root / "product", current_root_mode=0o700)
+                self.assertEqual(set(scripts), {"preinstall", "setup/postinstall", TOOL.XCODE_SETUP_PROGRAM})
+                self.assertNotIn("postinstall", scripts)
+                self.assertEqual(scripts[TOOL.XCODE_SETUP_PROGRAM], (program, 0o555))
+                self.assertTrue(scripts["preinstall"][0].endswith(b"exec ./setup/mrk-macos-xcode-setup --carrier-preflight\n"))
+                self.assertTrue(scripts["setup/postinstall"][0].endswith(b"exec ./mrk-macos-xcode-setup\n"))
+                self.assertEqual(set(carrier), {TOOL.XCODE_SETUP_CARRIER + "/Contents/Info.plist"})
+                self.assertEqual(TOOL.XCODE_SETUP_INSTALL_LOCATION, "/Library")
+                self.assertEqual(TOOL.XCODE_SETUP_CARRIER, "MobileReleaseKitXcodeSetup.bundle")
+                self.assertEqual(stat.S_IMODE((root / "payload").stat().st_mode), 0o755)
+                self.assertEqual(set(p.name for p in (root / "payload").iterdir()), {TOOL.XCODE_SETUP_CARRIER})
+                self.assertEqual(stat.S_IMODE((root / "payload" / TOOL.XCODE_SETUP_CARRIER).stat().st_mode), 0o555)
+                info, mode = next(iter(carrier.values()))
+                parsed = TOOL.plistlib.loads(info)
+                self.assertEqual(mode, 0o444)
+                self.assertNotIn("CFBundleExecutable", parsed)
+                self.assertEqual(parsed["CFBundleVersion"], selection.package_version)
+                component = TOOL.plistlib.loads(presentation["Component.plist"][0])[0]
+                self.assertEqual(component["BundleInstallScriptTimeout"], 3800)
+                self.assertEqual(component["BundlePostInstallScriptPath"], "setup/postinstall")
+                self.assertFalse(component["BundleIsRelocatable"])
+                self.assertFalse(component["BundleIsVersionChecked"])
+                definition = TOOL.install_product_xml(presentation["Distribution"][0])
+                reference = [row for row in definition.findall("pkg-ref") if row.text][0]
+                self.assertEqual(reference.text, TOOL.XCODE_SETUP_COMPONENT)
+                self.assertEqual(reference.get("id"), TOOL.XCODE_SETUP_ID)
+                self.assertEqual(reference.get("version"), selection.package_version)
+                self.assertEqual(scripts_result["scriptFileCount"], 3)
+                self.assertEqual(carrier_result["payloadFileCount"], 1)
+                self.assertIn("not-installed", carrier_result["qualification"])
+                self.assertIn("not-built", presentation_result["qualification"])
+                if before is not None:
+                    self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
+    def test_xcode_setup_source_timeout_path_and_nonexecutable_carrier_are_closed(self):
+        selection = TOOL.source_build_selection(TOOL.ARM_TARGET)
+        original_read = TOOL.read
+        for key, value in (("RootRelativeBundlePath", "Applications/Xcode.app"),
+                           ("BundlePostInstallScriptPath", "postinstall"),
+                           ("BundleInstallScriptTimeout", 600), ("BundleInstallScriptTimeout", "3800"),
+                           ("BundleIsRelocatable", True), ("BundleIsVersionChecked", 0),
+                           ("BundlePreInstallScriptPath", "other")):
+            def changed(path, *args, **kwargs):
+                body = original_read(path, *args, **kwargs)
+                if Path(path).name == "Component.plist":
+                    data = TOOL.plistlib.loads(body)
+                    data[0][key] = value
+                    return TOOL.plistlib.dumps(data)
+                return body
+            with self.subTest(key=key, value=value), mock.patch.object(TOOL, "read", side_effect=changed):
+                with self.assertRaisesRegex(TOOL.Refused, "xcode-setup-component-source"):
+                    TOOL.xcode_setup_sources(selection)
+        def executable(path, *args, **kwargs):
+            body = original_read(path, *args, **kwargs)
+            if Path(path).name == "CarrierInfo.plist":
+                data = TOOL.plistlib.loads(body)
+                data["CFBundleExecutable"] = "root-command"
+                return TOOL.plistlib.dumps(data)
+            return body
+        with mock.patch.object(TOOL, "read", side_effect=executable), self.assertRaises(TOOL.Refused):
+            TOOL.xcode_setup_sources(selection)
+
+    def test_xcode_setup_helper_and_exclusive_output_refuse_before_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            body = entry_macho_fixture()
+            helper = root / "helper"
+            helper.write_bytes(body)
+            helper.chmod(0o555)
+            output = root / "Scripts"
+            args = SimpleNamespace(target=TOOL.ARM_TARGET, helper=helper,
+                expected_helper=TOOL.digest(body), expected_source="a" * 40, output=output)
+            for change in ({"expected_helper": "b" * 64}, {"expected_source": "not-source"},
+                           {"target": TOOL.INTEL_TARGET}):
+                with self.subTest(change=change), self.assertRaises(TOOL.Refused):
+                    TOOL.prepare_xcode_setup_scripts_command(SimpleNamespace(**(vars(args) | change)))
+                self.assertFalse(output.exists())
+            helper.chmod(0o755)
+            with self.assertRaises(TOOL.Refused): TOOL.prepare_xcode_setup_scripts_command(args)
+            helper.chmod(0o555)
+            link = root / "alias"
+            link.symlink_to(helper)
+            with self.assertRaises((TOOL.Refused, OSError)):
+                TOOL.prepare_xcode_setup_scripts_command(SimpleNamespace(**(vars(args) | {"helper": link})))
+            output.mkdir()
+            sentinel = output / "foreign"
+            sentinel.write_bytes(b"must remain")
+            with self.assertRaises(FileExistsError): TOOL.prepare_xcode_setup_scripts_command(args)
+            self.assertEqual(sentinel.read_bytes(), b"must remain")
+            self.assertEqual(list(output.iterdir()), [sentinel])
+
+    def test_xcode_setup_bom_augmentation_is_exact_and_does_not_relax_old_packages(self):
+        selection = TOOL.source_build_selection(TOOL.ARM_TARGET)
+        body = entry_macho_fixture()
+        expected = TOOL.digest(body)
+        scripts = TOOL.xcode_setup_script_files(body, expected, selection)
+        original = dict(scripts)
+        # BOM bytes are deliberately inert: this helper only preserves them;
+        # the later genuine original-package owner must validate/correlate them.
+        bom = b"inert-original-BOM-not-PackageKit-evidence"
+        final = TOOL.xcode_setup_scripts_with_bom(scripts, bom, expected, selection)
+        self.assertEqual(scripts, original)
+        self.assertEqual(final, dict(original, **{"setup/carrier.bom": (bom, 0o444)}))
+        for changed in ({**scripts, "postinstall": (b"exit 0", 0o555)},
+                        {**scripts, "setup/foreign": (b"foreign", 0o444)},
+                        {**scripts, "preinstall": (b"different", 0o555)}, final):
+            with self.subTest(scripts=list(changed)), self.assertRaises(TOOL.Refused):
+                TOOL.xcode_setup_scripts_with_bom(changed, bom, expected, selection)
+        for changed in (b"", b"x" * (TOOL.XCODE_SETUP_BOM_LIMIT + 1), bytearray(bom)):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.xcode_setup_scripts_with_bom(scripts, changed, expected, selection)
+        _files, members = package_data(selection=selection)
+        ordinary = members["PackageInfo"]
+        self.assertEqual(TOOL.package_info(ordinary, selection=selection), TOOL.PACKAGE_ID)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.package_info(ordinary.replace(TOOL.PACKAGE_ID.encode(), TOOL.XCODE_SETUP_ID.encode()), selection=selection)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.package_info(ordinary.replace(b'numberOfFiles="0"', b'numberOfFiles="1"'), selection=selection)
+
+
 
 
 
@@ -11150,7 +11291,7 @@ class MacInstalledData(unittest.TestCase):
             writer.assert_called_once_with(Path("/fresh-parts"), {"PackageInfo": (original_members["PackageInfo"], 0o444)}, root_mode=0o700)
             self.assertEqual(prepared["qualification"], "caller-owned-original-prepared-not-root-audited-or-installed")
             audited = TOOL.audit_command(args)
-            original.assert_called_with(Path("/scripts"), Path("/original.pkg"), fixture=False, remove=False,
+            original.assert_called_with(Path("/scripts"), Path("/original.pkg"), fixture=False, remove=False, store_runtime=False,
                                         selection=TOOL.source_build_selection(TOOL.ARM_TARGET))
             self.assertEqual(audited["originalPackageSha256"], TOOL.digest(b"original"))
             self.assertEqual(audited["packageInfoSha256"], TOOL.digest(original_members["PackageInfo"]))
@@ -11511,7 +11652,7 @@ class MacInstalledData(unittest.TestCase):
                 scripts = writer.call_args.args[1]
                 self.assertEqual(scripts["mrk-macos-install"], (bodies[args.installer], 0o555))
                 self.assertEqual(scripts["postinstall"], (bodies[TOOL.DESKTOP / "macos-installed-inputs/postinstall"], 0o555))
-                self.assertEqual(writer.call_args.kwargs, {"root_mode": 0o755})
+                self.assertEqual(writer.call_args.kwargs, {"root_mode": 0o755, "mac_store_prefix": None})
                 self.assertEqual(result["packageIdentifier"], TOOL.PACKAGE_ID + "-fixture")
                 writer.reset_mock()
                 opposite = TOOL.INTEL_TARGET if target == TOOL.ARM_TARGET else TOOL.ARM_TARGET
@@ -13803,7 +13944,7 @@ class MacInstalledData(unittest.TestCase):
             with mock.patch.object(TOOL, "original_package", side_effect=TOOL.Refused("sentinel-original")) as original:
                 for action, path in ((TOOL.prepare_package_command, command.package), (TOOL.audit_command, command.original_package)):
                     with self.assertRaisesRegex(TOOL.Refused, "sentinel-original"): action(command)
-                    original.assert_called_with(command.scripts, path, fixture=False, remove=True,
+                    original.assert_called_with(command.scripts, path, fixture=False, remove=True, store_runtime=False,
                                                 selection=selection, expected_remover=program_sha)
         self.assertIn(b'exec \'/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove\' "$1"', remove_script)
         self.assertIn(b'if [ -e "$app" ] || [ -L "$app" ]; then', remove_script)

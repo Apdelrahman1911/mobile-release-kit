@@ -38,9 +38,9 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools]
+        options: [all, integration, launcher, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe]
       architecture:
-        description: Architecture for Store runtime and iOS resolver checks; other components use both
+        description: Architecture for Store, iOS tools and package probe; other components use both
         type: choice
         default: both
         options: [both, arm64, x86_64]
@@ -1102,6 +1102,75 @@ jobs:
           shutil.rmtree(work)
           PY
 
+  xcode-package-probe:
+    # Explicit synthetic PackageKit routing only; no A helper, Xcode or signing.
+    if: github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-package-probe'
+    name: Probe fixed Xcode package component (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(inputs.architecture == 'arm64' && '[{"runner":"macos-26","arch":"arm64"}]' || inputs.architecture == 'x86_64' && '[{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run only the fixed synthetic component callback probe
+        timeout-minutes: 6
+        shell: bash
+        env:
+          COMPONENT_ARCH: ${{ matrix.arch }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          ulimit -f 2048
+          [[ "$RUNNER_OS" == macOS && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == "$COMPONENT_ARCH" && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp ]] || exit 1
+          log="$RUNNER_TEMP/mrk-xcode-package-probe-tests.log"
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" \
+            RUNNER_OS="$RUNNER_OS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_TEMP="$RUNNER_TEMP" \
+            MRK_XCODE_SETUP_PACKAGE_PROBE=1 \
+            /usr/bin/python3 -I -B tests/desktop/test_macos_xcode_setup_package.py -v \
+              XcodeSetupPackageNative.test_component_callback_once_reinstall_and_documented_timeout \
+              > "$log" 2>&1
+          status=$?
+          set -e
+          /usr/bin/tail -c 16384 "$log"
+          [[ "$status" == 0 ]] || exit "$status"
+          grep -Eq '^Ran 1 test in [0-9]+([.][0-9]+)?s$' "$log"
+          grep -qx 'OK' "$log"
+      - name: Retain only bounded public synthetic package observations
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcode-package-probe-${{ matrix.arch }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/mrk-xcode-package-probe-tests.log
+            ${{ runner.temp }}/mrk-xcode-package-probe/PackageInfo.xml
+            ${{ runner.temp }}/mrk-xcode-package-probe/ProductTOC.xml
+            ${{ runner.temp }}/mrk-xcode-package-probe/BOM.txt
+            ${{ runner.temp }}/mrk-xcode-package-probe/Original.bom
+            ${{ runner.temp }}/mrk-xcode-package-probe/Receipt-*.plist.raw
+            ${{ runner.temp }}/mrk-xcode-package-probe/Receipt-*.plist.xml
+            ${{ runner.temp }}/mrk-xcode-package-probe/Receipt-*.facts.json
+            ${{ runner.temp }}/mrk-xcode-package-probe/Receipt-*.bom
+            ${{ runner.temp }}/mrk-xcode-package-probe/RESULT.json
+            ${{ runner.temp }}/mrk-xcode-package-probe/Failure.json
+          if-no-files-found: error
+          retention-days: 7
+    # Only the test's positively observed same-attempt fixture is cleaned. On
+    # timeout/failure preserve root state for disposable-host teardown; killing
+    # an Installer client does not prove PackageKit service finality.
+
   ui-build:
     # Compile the existing external XCTest target, never run it or build its app.
     if: github.event_name == 'workflow_dispatch' && inputs.component == 'ui-build'
@@ -1170,7 +1239,8 @@ jobs:
           [[ "$(/usr/bin/stat -f '%u:%Lp' "$WORK_ROOT")" == "$(/usr/bin/id -u):700" ]] || exit 1
           /bin/rm -rf -- "$WORK_ROOT"
 
-# No Installer/Remover main, app launch, privileged installation, distribution
-# signing or notarization runs. XCTest uses its existing ad-hoc project signing. The explicit Store job only verifies already-signed code
+# No production Installer/Remover main, app launch, distribution signing or
+# notarization runs. The explicit package probe alone installs/removes its fixed
+# inert synthetic carrier; it does not execute the Xcode setup helper. XCTest uses its existing ad-hoc project signing. The explicit Store job only verifies already-signed code
 # and executes the network-denied CRC32/Fastlane loader smoke, never a Store lane.
 # Installation/update/removal behavior still requires native integration tests.
