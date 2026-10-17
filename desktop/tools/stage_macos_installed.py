@@ -4003,19 +4003,32 @@ def install_product_distribution(body, expected, *, xcode_setup=False):
         return (element.tag, tuple(sorted(element.attrib.items())), (element.text or "").strip(),
                 tuple((tree(child), (child.tail or "").strip()) for child in element))
     actual = install_product_xml(body)
+    definition = install_product_xml(expected)
     references = actual.findall("pkg-ref")
     # Exact macOS26 context-product observations only, not a general duplicate
-    # reference merge or authorization to add an action. The metadata reference
-    # has no payload/bundle and is the final child of the original definition.
+    # reference merge or authorization to add an action. productbuild appends
+    # bundle metadata from the component: empty for the scripts-only Installer,
+    # or the one fixed inert carrier for Xcode setup. Neither adds an action.
     if len(references) == 2:
         metadata = references[1]
         need(list(actual)[-1] is metadata and metadata.attrib == {"id": package_id}
              and not (metadata.text or "").strip() and not (metadata.tail or "").strip()
              and len(metadata) == 1, "install-product-distribution")
         bundle = metadata[0]
-        need(bundle.tag == "bundle-version" and not bundle.attrib and not list(bundle)
+        need(bundle.tag == "bundle-version" and not bundle.attrib
              and not (bundle.text or "").strip() and not (bundle.tail or "").strip(),
              "install-product-distribution")
+        if len(bundle):
+            expected_refs = definition.findall("pkg-ref")
+            need(xcode_setup and len(bundle) == 1 and len(expected_refs) == 1
+                 and expected_refs[0].get("id") == XCODE_SETUP_ID
+                 and bool(expected_refs[0].get("version")), "install-product-distribution")
+            carrier = bundle[0]
+            need(carrier.tag == "bundle" and carrier.attrib == {
+                "id": XCODE_SETUP_CARRIER_ID, "path": XCODE_SETUP_CARRIER,
+                "CFBundleVersion": expected_refs[0].get("version")}
+                and not list(carrier) and not (carrier.text or "").strip()
+                and not (carrier.tail or "").strip(), "install-product-distribution")
         actual.remove(metadata)
     for reference in actual.findall("pkg-ref"):
         for name, value in (("installKBytes", "2" if xcode_setup else "0"), ("updateKBytes", "0"), ("onConclusion", "None")):
@@ -4023,7 +4036,7 @@ def install_product_distribution(body, expected, *, xcode_setup=False):
                 need(reference.attrib.pop(name) == value, "install-product-distribution")
         if (reference.text or "").strip() == "#" + component_name:
             reference.text = component_name
-    need(tree(actual) == tree(install_product_xml(expected)), "install-product-distribution")
+    need(tree(actual) == tree(definition), "install-product-distribution")
 
 
 # Closed diagnostic vocabulary; no arbitrary exception text is public authority.

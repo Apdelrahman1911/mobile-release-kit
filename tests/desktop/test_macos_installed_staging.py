@@ -11500,10 +11500,11 @@ class MacInstalledData(unittest.TestCase):
             root = Path(tmp)
             args, original, final, source, maker = self.xcode_setup_package_fixture(root, TOOL.ARM_TARGET)
             component = TOOL.XCODE_SETUP_COMPONENT
-            product = {"Distribution": source["Distribution.xml"], "Resources/InstallerReadMe.html": source["InstallerReadMe.html"],
+            distribution = (Path(__file__).absolute().parents[1] / "fixtures/macos-xcode-product-distribution.xml").read_bytes()
+            product = {"Distribution": distribution, "Resources/InstallerReadMe.html": source["InstallerReadMe.html"],
                        **{component+"/"+name: body for name, body in final.items()}}
             for flat in (False, True):
-                members = ({"Distribution": source["Distribution.xml"], "Resources/InstallerReadMe.html": source["InstallerReadMe.html"],
+                members = ({"Distribution": distribution, "Resources/InstallerReadMe.html": source["InstallerReadMe.html"],
                             component: maker(final)} if flat else product)
                 args.package.write_bytes(maker(members, product=True))
                 result = TOOL.audit_xcode_setup_product_command(args)
@@ -11515,6 +11516,53 @@ class MacInstalledData(unittest.TestCase):
                             dict(product, **{"Resources/InstallerReadMe.html": b"changed"})):
                 args.package.write_bytes(maker(changed, product=True))
                 with self.assertRaises(TOOL.Refused): TOOL.audit_xcode_setup_product_command(args)
+
+    def test_xcode_product_native_bundle_annotation_is_source_bound(self):
+        # Actual unsigned productbuild output on macOS26 ARM and Intel,
+        # run39067503871/1. Synthetic carrier, no signed/installed claim.
+        captured = (Path(__file__).absolute().parents[1] / "fixtures/macos-xcode-product-distribution.xml").read_bytes()
+        for target in TOOL.MAC_TARGETS:
+            selection = TOOL.source_build_selection(target)
+            expected = TOOL.xcode_setup_sources(selection)["Distribution.xml"]
+            TOOL.install_product_distribution(captured, expected, xcode_setup=True)
+        # Version is checked against the expected definition, not a constant
+        # and not the untrusted package's own reference/annotation pair.
+        TOOL.install_product_distribution(captured.replace(b'0.1.2', b'1.2.3'),
+            expected.replace(b'0.1.2', b'1.2.3'), xcode_setup=True)
+        for mutation in ("id", "path", "version", "extra-attribute", "extra-bundle", "nested",
+                         "text", "tail", "wrapper-attribute", "reference-attribute", "reference-text",
+                         "not-final", "paired-version", "active-action"):
+            changed = TOOL.ET.fromstring(captured)
+            metadata = changed.findall("pkg-ref")[1]
+            wrapper, carrier = metadata[0], metadata[0][0]
+            if mutation == "id": carrier.set("id", TOOL.PACKAGE_ID)
+            elif mutation == "path": carrier.set("path", "../" + TOOL.XCODE_SETUP_CARRIER)
+            elif mutation == "version": carrier.set("CFBundleVersion", "9.9.9")
+            elif mutation == "extra-attribute": carrier.set("CFBundleShortVersionString", "0.1.2")
+            elif mutation == "extra-bundle": wrapper.append(copy.deepcopy(carrier))
+            elif mutation == "nested": TOOL.ET.SubElement(carrier, "bundle")
+            elif mutation == "text": carrier.text = "unexpected"
+            elif mutation == "tail": carrier.tail = "unexpected"
+            elif mutation == "wrapper-attribute": wrapper.set("active", "true")
+            elif mutation == "reference-attribute": metadata.set("onConclusion", "RequireRestart")
+            elif mutation == "reference-text": metadata.text = "other.pkg"
+            elif mutation == "not-final": changed.remove(metadata); changed.insert(0, metadata)
+            elif mutation == "paired-version":
+                carrier.set("CFBundleVersion", "9.9.9"); changed.find("pkg-ref").set("version", "9.9.9")
+            elif mutation == "active-action": TOOL.ET.SubElement(changed, "installation-check", {"script": "true"})
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(TOOL.Refused, "^install-product-distribution$"):
+                TOOL.install_product_distribution(TOOL.ET.tostring(changed), expected, xcode_setup=True)
+        # Even otherwise matching ordinary Installer metadata cannot contain
+        # the setup carrier. Its established empty/absent metadata still works.
+        ordinary = TOOL.install_product_sources(selection)[0]
+        TOOL.install_product_distribution(ordinary, ordinary)
+        changed = TOOL.ET.fromstring(ordinary)
+        metadata = TOOL.ET.SubElement(changed, "pkg-ref", {"id": TOOL.PACKAGE_ID})
+        wrapper = TOOL.ET.SubElement(metadata, "bundle-version")
+        TOOL.install_product_distribution(TOOL.ET.tostring(changed), ordinary)
+        wrapper.append(copy.deepcopy(TOOL.ET.fromstring(captured).findall("pkg-ref")[1][0][0]))
+        with self.assertRaisesRegex(TOOL.Refused, "^install-product-distribution$"):
+            TOOL.install_product_distribution(TOOL.ET.tostring(changed), ordinary)
 
     def test_xcode_setup_package_policy_bom_and_allocation_bounds_are_exact(self):
         with tempfile.TemporaryDirectory() as tmp:
