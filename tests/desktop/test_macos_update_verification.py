@@ -65,6 +65,79 @@ def nested_nomination():
 
 class UpdateDataTests(unittest.TestCase):
 
+    def test_workflow_credential_pairs_preserve_original_status_and_fail_fast(self):
+        """Execute the real inline Bash; only its native Python child is inert."""
+        import subprocess
+        import textwrap
+
+        workflow = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_text()
+        script = textwrap.dedent(workflow.split("        run: &mrk_update_credentials |\n", 1)[1]
+                                 .split("\n      - name:", 1)[0])
+        for segment in ("update-p0-bootstrap", "update-p1-resume"):
+            for scenario in ("success", "test-fails", "summary-fails", "test-status-fails",
+                             "original-and-status-fail", "summary-status-fails", "missing-context"):
+                with self.subTest(segment=segment, scenario=scenario), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    normal = root / "normal-ui"
+                    (normal / "tmp").mkdir(parents=True)
+                    child = root / "desktop/tools/macos_normal_ui_runner.py"
+                    child.parent.mkdir(parents=True)
+                    child.write_text(textwrap.dedent(f"""
+                        import os, pathlib, sys
+                        phase = sys.argv[-1].rsplit('-', 1)[1]
+                        assert phase in ('test', 'summary')
+                        assert sys.argv[1:] == ['--target', 'aarch64-apple-darwin', '--normal-{segment}-' + phase]
+                        assert sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
+                        assert 'SHOULD_NOT_REACH_NATIVE' not in os.environ
+                        assert os.environ['GITHUB_SHA'] == os.environ['GITHUB_WORKFLOW_SHA'] == 'b' * 40
+                        assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE'] == 'b' * 40
+                        assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE'] == 'b' * 40
+                        assert os.environ['GITHUB_REF'] == 'refs/heads/verify/desktop-macos-positive-update'
+                        assert os.environ['GITHUB_RUN_ID'] == '123' and os.environ['GITHUB_RUN_ATTEMPT'] == '1'
+                        with (pathlib.Path(os.environ['TMPDIR']) / 'calls.txt').open('a') as output:
+                            output.write(phase + '\\n')
+                        if phase == 'test' and {scenario!r} in ('test-fails', 'original-and-status-fail'):
+                            sys.exit(17)
+                        if phase == 'summary' and {scenario!r} == 'summary-fails':
+                            sys.exit(19)
+                    """))
+                    failed_status = ("test" if scenario in ("test-status-fails", "original-and-status-fail")
+                                     else "summary" if scenario == "summary-status-fails" else None)
+                    if failed_status:
+                        (normal / f"{segment}-{failed_status}.status").mkdir()
+                    environment = {
+                        "PATH": "/usr/bin:/bin", "MRK_UPDATE_SEGMENT": segment, "MRK_PYTHON": sys.executable,
+                        "MRK_MACOS_WORK": str(root), "MRK_MACOS_TARGET": "aarch64-apple-darwin",
+                        "MRK_MACOS_HOSTED_JOB": "github-hosted-macos26-arm64", "GITHUB_SHA": "b" * 40,
+                        "GITHUB_WORKFLOW_SHA": "b" * 40, "GITHUB_REF": "refs/heads/verify/desktop-macos-positive-update",
+                        "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "GITHUB_EVENT_NAME": "push",
+                        "GITHUB_WORKFLOW_REF": "synthetic-workflow-context", "GITHUB_WORKSPACE": str(root),
+                        "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_ENVIRONMENT": "github-hosted",
+                        "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "SHOULD_NOT_REACH_NATIVE": "synthetic-ambient-value",
+                    }
+                    if scenario == "missing-context":
+                        del environment["GITHUB_WORKFLOW_SHA"]
+                    actual = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script],
+                                            cwd=root, env=environment, capture_output=True, timeout=10)
+                    expected = (0 if scenario == "success" else 17 if scenario in ("test-fails", "original-and-status-fail")
+                                else 19 if scenario == "summary-fails" else 1)
+                    if scenario == "missing-context":
+                        self.assertNotEqual(actual.returncode, 0, "unset context must stop before the child")
+                    else:
+                        self.assertEqual(actual.returncode, expected, actual.stderr.decode(errors="replace"))
+                    calls = normal / "tmp/calls.txt"
+                    observed = calls.read_text().splitlines() if calls.exists() else []
+                    self.assertEqual(observed, [] if scenario == "missing-context" else ["test", "summary"]
+                                     if scenario in ("success", "summary-fails", "summary-status-fails") else ["test"])
+                    for phase in observed:
+                        status = normal / f"{segment}-{phase}.status"
+                        if phase != failed_status:
+                            code = 17 if phase == "test" and scenario == "test-fails" else 19 if phase == "summary" and scenario == "summary-fails" else 0
+                            self.assertEqual(status.read_text(), f"{code}\n")
+                    self.assertFalse((normal / f"{segment}.result.json").exists(), "Bash must not manufacture native results")
+                    self.assertFalse((normal / f"{segment}.stdout").exists(), "runner-owned capture name must stay free")
+                    self.assertFalse((normal / f"{segment}.stderr").exists(), "runner-owned capture name must stay free")
+
     def test_credential_update_closed_state_and_original_bootstrap_handoff(self):
         facts = lambda inode, mode, size, links=1: [str(x) for x in (1, inode, mode, 501, 20, links, 0, size, 1, 0, 1, 0)]
         leaf = lambda inode, size, digest: {"facts": facts(inode, stat.S_IFREG | 0o600, size), "bytes": size, "sha256": digest}

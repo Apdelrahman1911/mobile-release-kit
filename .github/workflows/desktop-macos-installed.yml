@@ -902,7 +902,7 @@ jobs:
             > "$MRK_MACOS_WORK/store-smoke/result.txt"
       - name: Build only the external normal-app XCTest runner, not an instrumented app
         id: normal_ui_build
-        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && (env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' || env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery') && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven')))
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-positive-update' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && (env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' || env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery') && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven')))
         timeout-minutes: 9
         shell: bash
         env:
@@ -2205,8 +2205,63 @@ jobs:
           [[ "$save_status" == 0 ]] || exit "$save_status"
           # P1 remains the existing one package-install original, not a replay.
 
+      - name: Verify the owned credential on P0 before installing P1
+        id: update_p0_credentials
+        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.normal_ui_build.outcome == 'success' && steps.update_baseline.outcome == 'success'
+        timeout-minutes: 12
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_UPDATE_SEGMENT: update-p0-bootstrap
+        run: &mrk_update_credentials |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          case "$MRK_UPDATE_SEGMENT" in update-p0-bootstrap|update-p1-resume) ;; *) exit 1 ;; esac
+          # The actual runner enforces the same one-GiB file cap and original
+          # phase deadlines. Never rebuild either app or the existing harness.
+          ulimit -f 1048576
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
+              LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+              DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+              "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+              "GITHUB_REF=$GITHUB_REF" "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" \
+              "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+              "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" "GITHUB_RUN_ID=$GITHUB_RUN_ID" \
+              "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+              "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" "$@"
+          }
+          phase() {
+            local kind=$1 status saved
+            case "$kind" in test|summary) ;; *) return 1 ;; esac
+            set +e
+            clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py \
+              --target "$MRK_MACOS_TARGET" "--normal-$MRK_UPDATE_SEGMENT-$kind" \
+              > "$MRK_MACOS_WORK/normal-ui/$MRK_UPDATE_SEGMENT-$kind.caller.log" 2>&1
+            status=$?
+            printf '%s\n' "$status" > "$MRK_MACOS_WORK/normal-ui/$MRK_UPDATE_SEGMENT-$kind.status"
+            saved=$?
+            set -e
+            printf 'MRK_UPDATE_CREDENTIAL_PHASE=%s-%s;originalReturncode=%s\n' "$MRK_UPDATE_SEGMENT" "$kind" "$status"
+            if [[ "$status" != 0 ]]; then return "$status"; fi
+            [[ "$saved" == 0 ]] || return "$saved"
+          }
+          # Native code authenticates the actual P0 identity before switching
+          # the application label; the shell always names current P1 SOURCE.
+          # Private caller logs never occupy the runner-owned .stdout/.stderr.
+          # No summary/result is synthesized after a failed original or write.
+          phase test
+          phase summary
+
       - name: Standard Installer only is privileged; never execute the app or Python as root
-        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature'
+        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-positive-update' || steps.update_p0_credentials.outcome == 'success')
         id: package_install
         timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' && 32 || 18 }}
         shell: bash
@@ -2242,6 +2297,15 @@ jobs:
           # saved Installer0, same-request readback and known detach permit use.
           # Unknown resources remain retained; no forced detach or root Python.
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Verify credential continuity and owned-record deletion on P1
+        id: update_p1_credentials
+        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success'
+        timeout-minutes: 12
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_UPDATE_SEGMENT: update-p1-resume
+        run: *mrk_update_credentials
       - name: Notarize, staple and verify only the final user image
         id: finalize_image
         if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-installed') && steps.package_install.outcome == 'success'
