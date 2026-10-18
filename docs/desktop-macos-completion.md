@@ -4,6 +4,26 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
+Focused consumer `39125144371/1` at helper `8bae2e1c` passed ARM installation,
+Applications launch/dashboard/quit and its summary against the unchanged signed
+`fcb1aa46` app. Its two project journeys then failed: local edits at configuration
+navigation and path fields at Android source-folder setup. This is real progress,
+not full UI acceptance. The earlier startup failure's cause remains unestablished;
+the added pre-wait observation may affect timing. Intel Applications is not yet
+passed. The independent Restore cohort is still pending its native result.
+
+Source inspection found that `DraftEditor` uses `button[aria-pressed]` for settings
+tabs. [Core-AAM's Mac mapping](https://w3c.github.io/core-aam/#role-map-button-pressed)
+is `AXCheckBox`/`AXToggle`, while the harness searched plain buttons. The scoped
+settings-tab helper now uses exact checkboxes in the original settings group,
+retaining singleton, enabled, visibility and click checks. This corrects a source
+mismatch; it does not yet prove the exact native configuration failure is solved.
+Plain button failures now retain their actual caller line. Existing failure
+diagnostics additionally classify eleven exact clock/text-reader errors, without
+new UI queries, private text or timeout changes. One focused privacy regression
+passed locally after correcting its stale assumption that Applications was an
+unwired diagnostic cohort. Native verification of these changes is pending.
+
 The current signed candidate is `fcb1aa46fb95e601479078fdc98ba05acb701c05`
 (run `39116948396/1`). Both Apple Silicon and Intel application/Installer signing,
 notarization, stapling, actual installation/readback and final disk-image retention

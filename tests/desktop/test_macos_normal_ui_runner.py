@@ -3952,6 +3952,44 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertEqual(bounded["sourceFailures"], old["sourceFailures"])
         self.assertEqual(bounded["originalReturncode"], 65)
 
+        # Direct clock/text-reader throws bypass require(), but their complete
+        # fixed errors can still be explained without exporting arbitrary text.
+        reasons = (
+            (b"case clock unavailable", "case-clock-unavailable"),
+            (b"case clock moved backwards or became unavailable", "case-clock-invalid"),
+            (b"invalid bounded wait", "invalid-wait"),
+            (b"original case or stage deadline elapsed", "wait-deadline"),
+            (b"original case deadline elapsed", "case-deadline"),
+            (b"original static text wait context missing", "static-text-context"),
+            (b"static text selector count differs", "static-text-selectors"),
+            (b"static text prefix collection exceeds its bound", "static-text-count"),
+            (b"static text prefix role differs", "static-text-role"),
+            (b"static text content exceeds its bound", "static-text-bytes"),
+            (b"static text failure roster exceeds its bound", "static-text-failures"),
+        )
+        for method in (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages"):
+            for reason, code in reasons:
+                for prefix in (b'caught error: ', b'failed: caught error: '):
+                    for quote in (b'"', b'\\"'):
+                        message = prefix + b'"condition(' + quote + reason + quote + b')"'
+                        raw = site.replace(b"testSyntheticProjectPathFields", method) + message + b"\n"
+                        value = classify(raw)
+                        self.assertEqual(value["xctestIssues"][0]["condition"], code)
+                        self.assertEqual(value["originalReturncode"], 65)
+                        self.assertLessEqual(len(MODULE.encoded(value)) + 1, 4096)
+        for message in (message + private, message.replace(reason, reason + private),
+                message.replace(reason, private), b'caught error: prefix ' + message,
+                message[:-1], message + b' ', message + b'\x00'):
+            self.assertTrue(all("condition" not in row
+                for row in classify(site + message + b"\n").get("xctestIssues", [])))
+        exact = site + b'caught error: "condition(\\"original case or stage deadline elapsed\\")"\n'
+        for raw, phase, selection in ((exact[:-1], "test", selected),
+                (exact.replace(b"testSyntheticProjectPathFields", b"unselected"), "test", selected),
+                (exact, "summary", selected), (exact, "test", "test.xcresult"),
+                (exact[:-1] + b"x" * 4096 + b"\n", "test", selected)):
+            self.assertTrue(all("condition" not in row
+                for row in classify(raw, phase=phase, selection=selection).get("xctestIssues", [])))
+
         def navigation_marker(method='testSyntheticProjectPathFields',phase='after-typing',role='combo-child',
                 relation='exact',unchanged='0',field='ready',fields='1',combos='1',go='ready',opened='disabled',cancel='ready'):
             return ('MRK_NORMAL_PROJECT_NAVIGATION=v1;method='+method+';phase='+phase+';role='+role+';relation='+relation
@@ -4146,7 +4184,9 @@ class NormalPhaseDataTests(unittest.TestCase):
                 self.assertEqual(observed["originalReturncode"], 65)
                 self.assertNotIn(secret, MODULE.encoded(observed))
                 self.assertNotIn(b"PRIVATE", MODULE.encoded(observed))
-        other = next(name for name in MODULE.NORMAL_SELECTIONS if name != "test.xcresult")
+        # Applications now intentionally has this diagnostic; select an
+        # actually unwired cohort rather than depending on dictionary order.
+        other = "project-test.xcresult"
         for phase, selection, stdout, stderr in (("test", "test.xcresult", b"", marker),
                 ("test", other, marker, b""), ("summary", "test.xcresult", marker, b""),
                 ("build", None, marker, b""), ("query", None, marker, b"")):

@@ -5198,9 +5198,19 @@ final class NormalAppUITests: XCTestCase {
         try require(element.isHittable, "expected renderer control could not be revealed in " + journeyStage)
     }
     @MainActor private func press(_ root: XCUIElement, _ label: String, renderer: XCUIElement,
-                                 failures: [String] = [], timeout: TimeInterval = 5) throws {
+                                 failures: [String] = [], timeout: TimeInterval = 5, line: UInt = #line) throws {
         let item = try waitElement(root.buttons.matching(identifier: label), in: root, enabled: true,
-                                   timeout: timeout, failures: failures)
+                                   timeout: timeout, failures: failures, line: line)
+        try reveal(item, in: renderer)
+        item.click()
+    }
+    @MainActor private func settingsTab(_ root: XCUIElement, _ label: String, renderer: XCUIElement,
+                                       line: UInt = #line) throws {
+        // DraftEditor uses button[aria-pressed]. Core-AAM maps that control on
+        // macOS to AXCheckBox/AXToggle, not the plain-button role used by press.
+        // Keep the original Settings section scope and exact singleton label.
+        let item = try waitElement(root.checkBoxes.matching(identifier: label), in: root,
+                                   enabled: true, line: line)
         try reveal(item, in: renderer)
         item.click()
     }
@@ -6125,7 +6135,7 @@ final class NormalAppUITests: XCTestCase {
         @MainActor func settings(_ tab: String) throws {
             try press(renderer, "Project settings", renderer: renderer)
             let tabs = try waitElement(named(renderer, "Settings section"), in: renderer)
-            try press(tabs, tab, renderer: renderer)
+            try settingsTab(tabs, tab, renderer: renderer)
         }
         @MainActor func selected(_ label: String, relative: String) throws {
             _ = try waitElement(controls(renderer, [.textField], label: label, prefix: true)
@@ -6287,7 +6297,7 @@ final class NormalAppUITests: XCTestCase {
         try stage("config") {
             try press(renderer, "Project settings", renderer: renderer)
             let settings = try waitElement(named(renderer, "Settings section"), in: renderer)
-            try press(settings, "General", renderer: renderer)
+            try settingsTab(settings, "General", renderer: renderer)
             let candidate = try field(renderer, "Candidate branch")
             try require(candidate.value as? String == "main", "saved candidate branch was not loaded")
             try replace(candidate, with: "qa-candidate", renderer: renderer)
@@ -8039,7 +8049,7 @@ final class NormalAppUITests: XCTestCase {
             if !candidateInputs {
             try press(renderer, "Project settings", renderer: renderer)
             let settings = try waitElement(named(renderer, "Settings section"), in: renderer)
-            try press(settings, "Android", renderer: renderer)
+            try settingsTab(settings, "Android", renderer: renderer)
             try replace(field(renderer, "Android upload certificate"), with: certificate, renderer: renderer)
             try press(renderer, "Validate only", renderer: renderer)
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation complete")),
@@ -8057,7 +8067,7 @@ final class NormalAppUITests: XCTestCase {
             } else {
                 try press(renderer,"Project settings",renderer:renderer)
                 let settings=try waitElement(named(renderer,"Settings section"),in:renderer)
-                try press(settings,"General",renderer:renderer)
+                try settingsTab(settings,"General",renderer:renderer)
                 let local=try waitElement(renderer.checkBoxes.matching(NSPredicate(format:"label BEGINSWITH %@","Allow local Store release preparation")),in:renderer)
                 try require((local.value as? String)=="1" || (local.value as? NSNumber)?.intValue==1,"candidate saved local policy not enabled")
                 try fixture.prepareCandidateJournalObservation {_ = try self.remaining(5)}

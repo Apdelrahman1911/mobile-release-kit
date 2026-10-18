@@ -3882,6 +3882,29 @@ def panel_topology_diagnostics(stdout, stderr):
 PROJECT_STAGES = tuple('launch fixture project-open android-source-jdk android-source-sdk android-source-gradle android-source-cancel android-source-reselect android-source-refused field-version field-project field-workspace field-metadata field-file-cancel field-directory-cancel field-review quit project-cancel config github text version images-cancel images readback-and-quit'.split())
 
 
+def project_wait_condition(message):
+    """Classify complete fixed XCTest errors, never copy their private prose."""
+    reasons = (
+        (b"case clock unavailable", "case-clock-unavailable"),
+        (b"case clock moved backwards or became unavailable", "case-clock-invalid"),
+        (b"invalid bounded wait", "invalid-wait"),
+        (b"original case or stage deadline elapsed", "wait-deadline"),
+        (b"original case deadline elapsed", "case-deadline"),
+        (b"original static text wait context missing", "static-text-context"),
+        (b"static text selector count differs", "static-text-selectors"),
+        (b"static text prefix collection exceeds its bound", "static-text-count"),
+        (b"static text prefix role differs", "static-text-role"),
+        (b"static text content exceeds its bound", "static-text-bytes"),
+        (b"static text failure roster exceeds its bound", "static-text-failures"),
+    )
+    for reason, code in reasons:
+        for prefix in (b'caught error: ', b'failed: caught error: '):
+            for quote in (b'"', b'\\"'):
+                if message == prefix + b'"condition(' + quote + reason + quote + b')"':
+                    return code
+    return None
+
+
 def project_require_source_sites(stdout, stderr):
     """First-latched SOURCE sites for two project cases; no arbitrary error prose."""
     namespace = b"MRK_NORMAL_PROJECT_REQUIRE_FAILURE"
@@ -4532,6 +4555,12 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                                 if kind is not None:
                                     finding = {"stream": stream, "method": match.group(3).decode("ascii"),
                                         "line": line, "column": column, "kind": kind}
+                                    if (selection == "project-test.xcresult" and kind == "caught-error"
+                                            and match.group(3) in (b"testSyntheticProjectPathFields",
+                                                b"testSyntheticProjectLocalEditsAndImages")):
+                                        condition = project_wait_condition(message)
+                                        if condition is not None:
+                                            finding["condition"] = condition
                                     if finding not in xctest_issues:
                                         if len(xctest_issues) < 4:
                                             xctest_issues.append(finding)
