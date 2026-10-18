@@ -33,12 +33,6 @@ jobs:
             python-architecture: arm64
             rust-version: 1.98.1
             rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: aarch64-apple-darwin
-            mode: restore
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:

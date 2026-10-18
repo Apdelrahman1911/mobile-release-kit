@@ -2783,6 +2783,61 @@ class NormalPhaseDataTests(unittest.TestCase):
         refusal=swift.split('func testSyntheticProjectManagedWorkflowRefusal()',1)[1].split('func savedOperationComplete(',1)[0]
         self.assertIn('texts.count <= 128',refusal);self.assertIn('factTexts.count == 8',refusal)
         self.assertIn('try staticTextContent($0, limit: 64)',refusal);self.assertNotIn('$0.label',refusal)
+        # Typed waits preserve immediate >=1/singleton cases and the original
+        # absolute endpoint; no Foundation comparison is applied to Any AXValue.
+        typed=swift.split('@MainActor private func waitStaticTexts(',1)[1].split('@MainActor private func waitStaticText(',1)[0]
+        self.assertEqual(typed.count('clock.end(within: timeout)'),1)
+        self.assertLess(typed.index('clock.end(within: timeout)'),typed.index('while true'))
+        self.assertIn('clock.remaining(1, before: end)',typed)
+        self.assertIn('clock.progress(until: end)',typed)
+        self.assertIn('readyExists.allSatisfy',typed);self.assertIn('query.element(boundBy: 0).exists',typed)
+        self.assertIn('matches.allSatisfy { $0.count <= 1 }',typed)
+        self.assertNotIn('catch',typed);self.assertNotIn('NSPredicate',typed)
+        self.assertLess(typed.index('try check()\n                return selected'),typed.index('clock.progress(until: end)'))
+        path=swift.split('func testSyntheticProjectPathFields()',1)[1].split('func testSyntheticProjectLocalEditsAndImages()',1)[0]
+        self.assertLess(path.index('exerciseStaticTextContentData()'),path.index('let fixture = LocalFixture()'))
+        self.assertIn('matching: .equalOrContains(name,',path)
+        self.assertIn('matching: .contains(phase), timeout: 48, failures: failures',path)
+        self.assertIn('matching: .contains(reason), timeout: 48, failures: failures',path)
+        version=swift.split('let panel = try waitElement(named(editor, "Saved-version recovery inspection")',1)[1].split('func testSyntheticProjectSavedReleaseEvidence()',1)[0]
+        self.assertIn('try require(facts.count >= 1, "recovery byte/mode facts unavailable")',version)
+        self.assertIn('waitStaticText(panel, matching: .contains("Native: settled; reason: discarded."), timeout: 48)',version)
+        offline=swift.split('func testSyntheticProjectSavedOfflineChecks()',1)[1].split('func testSyntheticProjectBuildToolDiagnostics()',1)[0]
+        self.assertIn('staticTextMatching(consent, .contains(comparison))',offline)
+        self.assertIn('comparisonFields.count == 1',offline);self.assertIn('scopeFields.count == 1',offline)
+        self.assertIn('staticTextFailureCount(panel, failures)',offline)
+        self.assertIn('staticTextFailureCount(review, refusalFailures)',refusal)
+        self.assertNotIn('staticTexts.matching(NSPredicate(format: "label IN %@"',offline)
+        self.assertNotIn('staticTexts.matching(NSPredicate(format: "label IN %@"',refusal)
+        for name,end in (('testSyntheticProjectBuildToolDiagnostics','iosCurrentArchiveIdentity'),('observeIOSToolDiagnostics','testSyntheticProjectUnsignedIOSArchive')):
+            body=swift.split('func '+name+'(',1)[1].split('func '+end+'(',1)[0]
+            self.assertIn('matching: [contextMatch, provenanceMatch]',body)
+            self.assertIn('ready: [fresh, phase, outcome, finality], timeout: 15, failures: failures',body)
+            self.assertIn('staticTextContent(currentText[0][0]) == originalContext',body)
+            self.assertNotIn('label BEGINSWITH',body);self.assertNotIn('.label',body)
+        report=swift.split('func diagnosticsCoreReport(',1)[1].split('func testSyntheticProjectBuildToolDiagnostics()',1)[0]
+        self.assertIn('try staticTextContent($0, limit: 64)',report)
+        self.assertIn('start + 22 <= texts.count',report)
+        self.assertNotIn('.label',report)
+        # Remaining non-diagnostic callers reuse the SAME typed reader/wait;
+        # no new helper/profile or native action, old immediate counts preserved.
+        evidence=swift.split('func testSyntheticProjectSavedReleaseEvidence()',1)[1].split('func testSyntheticProjectManagedWorkflowRefusal()',1)[0]
+        self.assertIn('guidanceFields.count == 1',evidence)
+        self.assertIn('separationFields.count == 1',evidence)
+        current=evidence.split('func currentDocuments()',1)[1].split('func staleDocuments()',1)[0]
+        self.assertEqual(current.count('try staticTextMatching('),2)
+        self.assertNotIn('waitStaticText(',current)
+        self.assertIn('waitStaticText(renderer, matching: .contains(guidance))',evidence)
+        self.assertNotIn('staticTexts.matching(NSPredicate(format: "label CONTAINS',evidence)
+        history=swift.split('func candidateHistoryAction(',1)[1].split('func syntheticAndroidBuild(',1)[0]
+        self.assertIn('waitStaticText(history,matching:.prefix("Checkpoint \\(checkpoint)."),timeout:48)',history)
+        android=swift.split('func syntheticAndroidBuild(',1)[1]
+        self.assertEqual(android.count('waitStaticText(service, matching: .prefix("Service action completed."), timeout: 48, failures: failures)'),2)
+        self.assertEqual(android.count('waitStaticText(catalog, matching: .contains("Tool catalog: ready."), timeout: 48)'),2)
+        self.assertIn('waitStaticText(group, matching: .equalOrContains(leaf,',android)
+        self.assertNotIn('staticTexts.matching(NSPredicate(format: "label ',android)
+        # Interactive consent retains its original named role and checkbox state.
+        self.assertIn('review.checkBoxes.matching(NSPredicate(format: "label BEGINSWITH %@"',android)
         # Complete fixed previews and added diffs fit the existing4096 reader;
         # do not increase the generic fixture32KiB or content limits.
         for path,encoded in fixture['stages']['workflows'].items():
@@ -2799,6 +2854,16 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertIn('clock.observationAllowed(now, before: end)',observer)
         self.assertIn('clock.observationAllowed(finish, before: end)',observer)
         self.assertNotIn('remaining(',observer);self.assertNotIn('clock.fail(',observer)
+        self.assertEqual(observer.count('try root.snapshot()'),1)
+        self.assertIn('catch { return }',observer)
+        self.assertIn('children.count <= 1024 - visited - pending.count',observer)
+        self.assertIn('children.isEmpty || depth < 32',observer)
+        self.assertIn('guard observed.count < 256',observer)
+        self.assertIn('knownReasons.first',observer)
+        self.assertNotIn('.matching(',observer)
+        self.assertNotIn('dictionaryRepresentation',observer)
+        self.assertNotIn('value(forKey:',observer)
+
         # Ten existing post-selection identity assertions now share the narrow
         # wait; the later explicit-refresh assertion retains its old contract.
         self.assertEqual(swift.count('waitForSnapshotIdentity('),11)
@@ -2880,7 +2945,14 @@ class NormalPhaseDataTests(unittest.TestCase):
         # Two existing project methods may fail separately. Preserve both fixed
         # observations, never infer they were atomic or a single method's state.
         self.assertEqual(len(MODULE.snapshot_state_diagnostics(snapshot*2,b'')['samples']),2)
-        for reason in (b'none',b'query-timeout',b'android-2',b'images-3'):
+        # Mac Book/profile refusals are distinct source literals, not the Linux
+        # original-custody message; keep the observer and closed decoder paired.
+        for code,text in (
+            ('mac-runtime-inspection','The installed Mac runtime failed original custody inspection.'),
+            ('mac-runtime-profile','This Mac method is outside its passive profile or original document-bound signing-input assessment profile.'),
+        ):
+            self.assertIn('("'+code+'", "'+text+'")',SWIFT.read_text())
+        for reason in (b'none',b'query-timeout',b'android-2',b'images-3',b'mac-runtime-inspection',b'mac-runtime-profile'):
             row=MODULE.snapshot_state_diagnostics(snapshot.replace(b'runtime-inspection',reason),b'')['samples'][0]
             self.assertEqual(row['firstKnownReason'],reason.decode())
         pair=MODULE.normal_failure_diagnostics('test','project-test.xcresult',subprocess.CompletedProcess([],65,snapshot*2+valid+private,b''))
@@ -3825,6 +3897,52 @@ class NormalPhaseDataTests(unittest.TestCase):
                             with self.assertRaises(OSError): os.fstat(fd)
 
     def test_closed_normal_failure_diagnostics_preserve_original_nonzero_and_privacy(self):
+        # Genuine selected error records retain only finite lexical XCTest kinds.
+        selected = "project-test.xcresult"
+        site = (b"NormalAppUITests.swift:5009:7: error: "
+            b"-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectPathFields] : ")
+        private = b"PRIVATE-synthetic-path-and-typed-secret"
+        cases = (
+            (b"Failed to get matching snapshots: ", "matching-snapshot"),
+            (b"Failed to get attributes for element ", "attribute-acquisition"),
+            (b"Multiple matching elements found for ", "multiple-match"),
+            (b"No matches found for ", "no-match"),
+            (b"Timed out while evaluating UI query: ", "query-timeout"),
+            (b"caught error: ", "caught-error"),
+        )
+        def classify(raw, phase="test", selection=selected):
+            return MODULE.normal_failure_diagnostics(phase, selection,
+                subprocess.CompletedProcess([], 65, raw, b""))
+        old = classify(site + b"unknown " + private + b"\n")
+        for prefix, kind in cases:
+            for path in (b"", b"/Users/runner/work/private source/"):
+                value = classify(path + site + prefix + private + b"\r\n")
+                self.assertEqual(value["xctestIssues"], [{"stream":"stdout",
+                    "method":"testSyntheticProjectPathFields", "line":5009, "column":7, "kind":kind}])
+                self.assertEqual(value["sourceFailures"], old["sourceFailures"])
+                self.assertEqual(value["originalReturncode"], 65)
+                self.assertNotIn(private, MODULE.encoded(value))
+                self.assertNotIn(b"private source", MODULE.encoded(value))
+                self.assertLessEqual(len(MODULE.encoded(value)) + 1, 4096)
+        good = site + cases[0][0] + private + b"\n"
+        for raw in (good[:-1], b"private: " + good, b"unknown "+good,
+                good.replace(b"testSyntheticProjectPathFields", b"unselected"),
+                good.replace(b":5009:7:", b":65536:7:"), good.replace(b":5009:7:", b":5009:4097:"),
+                site + cases[0][0] + b"x" * 4096 + b"\n", site + b"unknown " + cases[0][0] + b"\n",
+                good.replace(private, b"private\x00value"), site + b"Failed to get attributes for elementary text\n",
+                site + b"Timed out while evaluating UI queryPrivate\n"):
+            self.assertNotIn("xctestIssues", classify(raw))
+        self.assertNotIn("xctestIssues", classify(good, phase="summary"))
+        self.assertNotIn("xctestIssues", classify(good, selection="test.xcresult"))
+        capped = classify(b"".join(good.replace(b":5009:7:", (":"+str(n)+":7:").encode()) for n in range(1,6)))
+        self.assertEqual(len(capped["xctestIssues"]), 4); self.assertTrue(capped["findingsTruncated"])
+        encode = MODULE.encoded
+        with patch.object(MODULE, "encoded", side_effect=lambda v: b"x" * 4096 if "xctestIssues" in v else encode(v)):
+            bounded = classify(good)
+        self.assertNotIn("xctestIssues", bounded); self.assertTrue(bounded["findingsTruncated"])
+        self.assertEqual(bounded["sourceFailures"], old["sourceFailures"])
+        self.assertEqual(bounded["originalReturncode"], 65)
+
         def navigation_marker(method='testSyntheticProjectPathFields',phase='after-typing',role='combo-child',
                 relation='exact',unchanged='0',field='ready',fields='1',combos='1',go='ready',opened='disabled',cancel='ready'):
             return ('MRK_NORMAL_PROJECT_NAVIGATION=v1;method='+method+';phase='+phase+';role='+role+';relation='+relation
@@ -5527,13 +5645,16 @@ class NormalIOSPendingRecoveryDataTests(unittest.TestCase):
         self.assertIn('(value as? String) ?? label',content)
         self.assertIn('element.elementType == .staticText',content)
         self.assertNotIn('String(describing:',content)
-        prefix=swift.split('@MainActor private func staticTextPrefix(',1)[1].split('private static func exerciseStaticTextContentData()',1)[0]
-        self.assertIn('check: () throws -> Void',prefix)
-        self.assertLess(prefix.index('guard count <= 256'),prefix.index('query.allElementsBoundByIndex'))
-        self.assertIn('guard elements.count <= 256',prefix)
-        self.assertIn('element.elementType == .staticText',prefix)
-        self.assertIn('Self.staticTextContent(value: value, label: label).hasPrefix(prefix)',prefix)
-        self.assertNotIn('NSPredicate',prefix);self.assertNotIn('require(',prefix);self.assertNotIn('remaining(',prefix)
+        collection=swift.split('@MainActor private func staticTextSelections(',1)[1].split('@MainActor private func staticTextMatching(',1)[0]
+        self.assertIn('check: () throws -> Void',collection)
+        self.assertLess(collection.index('guard count <= 256'),collection.index('query.allElementsBoundByIndex'))
+        self.assertIn('guard elements.count <= 256',collection)
+        self.assertIn('element.elementType == .staticText',collection)
+        self.assertIn('Self.staticTextContent(value: value, label: label)',collection)
+        self.assertIn('selectors[index].accepts(text)',collection)
+        self.assertNotIn('NSPredicate',collection);self.assertNotIn('require(',collection);self.assertNotIn('remaining(',collection)
+        prefix=swift.split('@MainActor private func staticTextPrefix(',1)[1].split('@MainActor private func staticTextFailureCount(',1)[0]
+        self.assertIn('try staticTextMatching(root, .prefix(prefix), check: check)',prefix)
         data=swift.split('private static func exerciseStaticTextContentData()',1)[1].split('@MainActor private func androidCurrentBuildIdentity',1)[0]
         self.assertNotIn('evaluate(',data);self.assertIn('NSNumber(value: 4)',data)
         self.assertIn('([noMatch], 0)',data);self.assertIn('([oneMatch, oneMatch], 2)',data)
@@ -5947,7 +6068,42 @@ class PanelTopologyDiagnosticTests(unittest.TestCase):
             self.assertEqual(MODULE.recovery_field_diagnostics(stdout,stderr),dict(state='refused',sample=None))
         self.assertEqual(MODULE.recovery_field_diagnostics(private,b''),dict(state='absent',sample=None))
         with self.assertRaises(MODULE.Refused): MODULE.recovery_field_diagnostics(b'x'*(1024*1024+1),b'')
-        original=subprocess.CompletedProcess([],65,valid,b'')
+        # Three public String channels remain separate; caption-only includes
+        # either exact caption spelling (with or without its trailing space).
+        channel_keys=("staticTexts","nonStaticPrefix","titleFull","titleTrimmed","titleCaption","titleHex",
+                      "valueFull","valueTrimmed","valueCaption","valueHex","labelFull","labelTrimmed","labelCaption","labelHex")
+        channels=('MRK_NORMAL_RECOVERY_FIELD=v3;phase=awaiting-consent;field=operation-id;sample=pre-check;'
+                  +';'.join(key+'='+str(index%6) for index,key in enumerate(channel_keys))+';nonAtomic=1\n').encode()
+        for phase in ('awaiting-consent','terminal'):
+            for field in ('operation-id','owner-generation','phase','outcome','reason'):
+                body=channels.replace(b'awaiting-consent',phase.encode()).replace(b'operation-id',field.encode())
+                value=MODULE.recovery_field_diagnostics(body+private,b'')
+                self.assertEqual(value['state'],'observed')
+                self.assertEqual(value['sample'],dict(zip(channel_keys,(i%6 for i in range(len(channel_keys)))),
+                    phase=phase,field=field,timing='pre-check',countsCappedAt=5,nonAtomic=True,source='single-details-snapshot'))
+                self.assertNotIn('exactPrefix',value['sample']);self.assertNotIn(b'PRIVATE',MODULE.encoded(value))
+        for bad in (channels+valid,legacy+channels,channels+channels,channels[:-1],b'prefix '+channels,
+            channels.replace(b'titleFull=2',b'titleFull=6'),channels.replace(b'valueFull=0',b'valueFull=PRIVATE'),
+            channels.replace(b';labelHex=1',b''),channels.replace(b'nonAtomic=1',b'nonAtomic=0'),
+            channels.replace(b'=v3;',b'=v2;'),valid.replace(b'=v2;',b'=v3;')):
+            self.assertEqual(MODULE.recovery_field_diagnostics(bad,b''),dict(state='refused',sample=None))
+        self.assertEqual(MODULE.recovery_field_diagnostics(b'',channels),dict(state='refused',sample=None))
+        swift=SWIFT.read_text()
+        observer=swift.split('private func iosRecoveryFieldDiagnostic(',1)[1].split('private func iosRecoveryObservation(',1)[0]
+        self.assertEqual(observer.count('try details.snapshot()'),1)
+        for source in ('catch { return nil }','children.count <= 64 - visited - pending.count',
+            'children.isEmpty || depth < 16','guard staticTexts <= 32','node.value as? String',
+            'text == trimmed || text == prefix','bytes.count == 32','clock.observationAllowed(finish, before: end)'):
+            self.assertIn(source,observer)
+        for forbidden in ('.matching(','.label BEGINSWITH','remaining(','clock.fail(','dictionaryRepresentation','value(forKey:'):
+            self.assertNotIn(forbidden,observer)
+        reader=swift.split('private func iosRecoveryObservation(',1)[1].split('private func iosRecoverySession(',1)[0]
+        self.assertIn('fields.count == 1 ? nil : iosRecoveryFieldDiagnostic(',reader)
+        self.assertIn('try require(fields.count == 1, "current recovery field missing or repeated"',reader)
+        self.assertNotIn('label BEGINSWITH',reader)
+        caught=reader.split('catch {',1)[1].split('let text =',1)[0]
+        self.assertIn('throw error',caught);self.assertNotIn('snapshot()',caught)
+        original=subprocess.CompletedProcess([],65,channels,b'')
         for mode,selection in (('test','project-test.xcresult'),('test','diagnostics-test.xcresult'),('summary',MODULE.IOS_PENDING_RESULT)):
             self.assertNotIn('recoveryField',MODULE.normal_failure_diagnostics(mode,selection,original))
         # Use actual existing publication; failures remain diagnostics, never

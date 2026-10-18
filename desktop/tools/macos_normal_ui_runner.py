@@ -3795,7 +3795,7 @@ def snapshot_state_diagnostics(stdout, stderr):
     need(type(stdout) is bytes and type(stderr) is bytes and len(stdout)+len(stderr) <= 1024*1024,
          "normal-snapshot-state-original")
     fields = ("error", "partial", "unread", "loading", "empty", "unsupported", "invalid", "missing", "runtime", "protocol", "engineDisabled", "engineUnavailable")
-    reasons = ('none', 'runtime-inventory', 'runtime-inspection', 'runtime-custody', 'runtime-start', 'runtime-acl', 'query-timeout', 'cleanup-unknown', 'protocol', 'engine-exit', 'output-limit', 'output-io', 'request-io', 'query-busy', 'query-owner', 'native-profile', 'core-profile', 'method-absent', 'capabilities-absent', 'runtime-absent', 'history-1', 'store-readback-1', 'store-execute-1', 'store-prepare-1', 'store-check-1', 'artifact-1', 'artifact-2', 'artifact-3', 'offline-1', 'offline-2', 'offline-3', 'android-1', 'android-2', 'android-3', 'android-4', 'android-5', 'android-6', 'android-7', 'android-8', 'ios-1', 'ios-2', 'ios-3', 'recovery-1', 'recovery-2', 'recovery-3', 'github-history-1', 'github-publication-1', 'github-setup-1', 'github-preflight-1', 'github-release-1', 'path-1', 'path-2', 'initialization-1', 'initialization-2', 'initialization-3', 'version-1', 'version-2', 'version-3', 'images-1', 'images-2', 'images-3')
+    reasons = ('none', 'runtime-inventory', 'runtime-inspection', 'mac-runtime-inspection', 'mac-runtime-profile', 'runtime-custody', 'runtime-start', 'runtime-acl', 'query-timeout', 'cleanup-unknown', 'protocol', 'engine-exit', 'output-limit', 'output-io', 'request-io', 'query-busy', 'query-owner', 'native-profile', 'core-profile', 'method-absent', 'capabilities-absent', 'runtime-absent', 'history-1', 'store-readback-1', 'store-execute-1', 'store-prepare-1', 'store-check-1', 'artifact-1', 'artifact-2', 'artifact-3', 'offline-1', 'offline-2', 'offline-3', 'android-1', 'android-2', 'android-3', 'android-4', 'android-5', 'android-6', 'android-7', 'android-8', 'ios-1', 'ios-2', 'ios-3', 'recovery-1', 'recovery-2', 'recovery-3', 'github-history-1', 'github-publication-1', 'github-setup-1', 'github-preflight-1', 'github-release-1', 'path-1', 'path-2', 'initialization-1', 'initialization-2', 'initialization-3', 'version-1', 'version-2', 'version-3', 'images-1', 'images-2', 'images-3')
     prefix = b"MRK_NORMAL_SNAPSHOT_STATE"
     pattern = re.escape(prefix) + rb"=v2;sample=post-wait;waiter=(completed|timed-out|other)" + b"".join(b";"+key.encode("ascii")+rb"=([0-5])" for key in fields) + rb";firstKnownReason=(" + b"|".join(x.encode("ascii") for x in reasons) + rb");nonAtomic=1\r?\n"
     samples = []
@@ -3814,10 +3814,21 @@ def recovery_field_diagnostics(stdout, stderr):
     need(type(stdout) is bytes and type(stderr) is bytes and len(stdout)+len(stderr) <= 1024*1024,
          "normal-recovery-field-original")
     prefix = b"MRK_NORMAL_RECOVERY_FIELD"
+    channel_fields = ("staticTexts", "nonStaticPrefix", "titleFull", "titleTrimmed", "titleCaption", "titleHex",
+                      "valueFull", "valueTrimmed", "valueCaption", "valueHex", "labelFull", "labelTrimmed", "labelCaption", "labelHex")
+    channel_pattern = (re.escape(prefix) + rb"=v3;phase=(awaiting-consent|terminal);field=(operation-id|owner-generation|phase|outcome|reason);sample=pre-check"
+                       + b"".join(b";"+key.encode("ascii")+rb"=([0-5])" for key in channel_fields) + rb";nonAtomic=1\r?\n")
     sample = None
     for stream, body in (("stdout", stdout), ("stderr", stderr)):
         for record in body.splitlines(keepends=True):
             if prefix not in record: continue
+            if stream == "stdout" and record.startswith(prefix + b"=v3;"):
+                match = re.fullmatch(channel_pattern, record)
+                if match is None or sample is not None: return {"state": "refused", "sample": None}
+                phase, field, *counts = match.groups()
+                sample = dict(zip(channel_fields, map(int, counts)), phase=phase.decode("ascii"), field=field.decode("ascii"),
+                              timing="pre-check", countsCappedAt=5, nonAtomic=True, source="single-details-snapshot")
+                continue
             match = re.fullmatch(re.escape(prefix) + rb"=v([12]);phase=(awaiting-consent|terminal);field=(operation-id|owner-generation|phase|outcome|reason);sample=pre-check;exactPrefix=([0-5]);trimmedPrefix=([0-5]);captionOnly=([0-5]);anyPrefix=([0-5])(?:;role=(group|static-text|other);children=([0-5]);descendants=([0-5]);rendererPrefix=([0-5]))?;nonAtomic=1\r?\n", record) if stream == "stdout" else None
             if match is None or sample is not None: return {"state": "refused", "sample": None}
             version, phase, field, *facts = match.groups()
@@ -4458,6 +4469,17 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     output_markers, output_failures = 0, 0
     output_scenario = output_reason = output_site = None
     output_invalid = False
+    # Lexical XCTest observations only, not a diagnosis or error-prose projection.
+    xctest_issues = []
+    xctest_prefixes = (
+        ("matching-snapshot", (b"Failed to get matching snapshots:", b"Failed to get matching snapshot:")),
+        ("attribute-acquisition", (b"Failed to get attributes for element ", b"Failed to get attribute value for element ")),
+        ("multiple-match", (b"Multiple matching elements found for ", b"Multiple matching elements found:")),
+        ("no-match", (b"No matches found for ", b"No matching elements found for ")),
+        ("query-timeout", (b"Timed out while evaluating UI query:", b"Timed out while evaluating UI query.",
+            b"Timed out waiting for matching snapshots:", b"Timed out waiting for matching snapshots.")),
+        ("caught-error", (b"caught error:", b"failed: caught error:")),
+    )
     android_conditions = []
     android_condition_invalid = False
 
@@ -4490,6 +4512,27 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                 if line <= 65535 and (column is None or column <= 4096):
                     retain("sourceFailures", {"stream": stream, "source": "NormalAppUITests.swift",
                         "method": match.group(3).decode("ascii"), "line": line, "column": column}, 4)
+                    if phase == "test":
+                        start = body.rfind(b"\n", 0, match.start()) + 1
+                        end = body.find(b"\n", match.end())
+                        # A complete selected record, never a site embedded in error text.
+                        prefix = body[start:match.start()]
+                        if (end != -1 and end - start <= 4096
+                                and re.fullmatch(rb"(?:/[A-Za-z0-9_. /-]{1,2048}/)?", prefix)):
+                            suffix = body[match.end():end].removesuffix(b"\r")
+                            if (re.match(rb"[ \t]{1,8}[^ \t]", suffix)
+                                    and not re.search(rb"[\x00-\x08\x0b-\x1f\x7f]", suffix)):
+                                message = suffix.lstrip(b" \t")
+                                kind = next((kind for kind, prefixes in xctest_prefixes
+                                    if message.startswith(prefixes)), None)
+                                if kind is not None:
+                                    finding = {"stream": stream, "method": match.group(3).decode("ascii"),
+                                        "line": line, "column": column, "kind": kind}
+                                    if finding not in xctest_issues:
+                                        if len(xctest_issues) < 4:
+                                            xctest_issues.append(finding)
+                                        else:
+                                            value["findingsTruncated"] = True
                     if "androidCandidateCondition" in value:
                         start = body.rfind(b"\n", 0, match.start()) + 1
                         end = body.find(b"\n", match.end())
@@ -4844,6 +4887,11 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             value["findingsTruncated"] = True
         if len(encoded(value)) + 1 > 4096:
             del value["panelTopology"]  # Optional observations never displace original failure facts.
+    if xctest_issues:
+        value["xctestIssues"] = xctest_issues
+        if len(encoded(value)) + 1 > 4096:
+            del value["xctestIssues"]  # Optional kinds never displace the original failure facts.
+            value["findingsTruncated"] = True
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value
 
