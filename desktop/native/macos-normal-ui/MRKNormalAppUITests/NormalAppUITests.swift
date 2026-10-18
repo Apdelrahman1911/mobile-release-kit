@@ -785,7 +785,8 @@ final class NormalAppUITests: XCTestCase {
         element.click()
     }
 
-    @MainActor private func dashboard(_ renderer: XCUIElement, diagnosticOrdinal: UInt8? = nil) throws {
+    @MainActor private func dashboard(_ renderer: XCUIElement, startup: Bool = false,
+                                     diagnosticOrdinal: UInt8? = nil) throws {
         let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Good releases start here."))
         try require(heading.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "dashboard heading did not render")
         // Fixed dashboard query diagnostics only; observations are non-atomic.
@@ -806,11 +807,23 @@ final class NormalAppUITests: XCTestCase {
         // End fixed dashboard query diagnostics.
         let open = try unique(renderer.buttons.matching(identifier: "Open project folder"),
                               "ordinary first-party project control is missing or ambiguous")
+        // Bootstrap awaits capabilities and then catalogue, each using the native
+        // ten-second passive operation plus two-second cleanup allowance. Five
+        // seconds is not a valid startup budget. Revisits are still five seconds;
+        // one absolute end includes diagnostics and cannot extend the whole case.
+        guard let clock = caseClock, let wholeEnd = journeyDeadline else {
+            throw Refusal.condition("original case deadline missing in " + journeyStage)
+        }
+        let readinessAllowance: TimeInterval = startup ? 24 : 5
+        let readinessEnd = min(wholeEnd, try clock.end(within: readinessAllowance))
+        func readinessRemaining() throws -> TimeInterval {
+            try checkOriginalOwners()
+            return try clock.remaining(readinessAllowance, before: readinessEnd)
+        }
         let snapshot: DashboardSnapshot?
         if packagedRequireDiagnosticActive, let ordinal = diagnosticOrdinal, (1...4).contains(ordinal) {
             // The added fixed observations use the same originals and case end.
-            try checkOriginalOwners()
-            _ = try remaining(5)
+            _ = try readinessRemaining()
             let enabled = open.isEnabled
             let hittable = open.isHittable
             // Closed public literals only; never fetch or emit arbitrary AX text.
@@ -900,11 +913,10 @@ final class NormalAppUITests: XCTestCase {
             // Already-ready samples need no refusal queries; the real wait below is still required.
             if !enabled || !hittable {
                 for (titles, reason) in reasons {
-                    try checkOriginalOwners()
-                    _ = try remaining(5)
+                    _ = try readinessRemaining()
                     let matches = renderer.staticTexts.matching(NSPredicate(
-                        format: "identifier IN %@ OR label IN %@ OR title IN %@",
-                        argumentArray: [titles, titles, titles])).count
+                        format: "identifier IN %@ OR label IN %@ OR title IN %@ OR value IN %@",
+                        argumentArray: [titles, titles, titles, titles])).count
                     if matches > 1 || (matches == 1 && selected != nil) {
                         ambiguous = true
                         break // No further diagnostic observation can repair ambiguity.
@@ -912,13 +924,12 @@ final class NormalAppUITests: XCTestCase {
                     if matches == 1 { selected = reason }
                 }
             }
-            try checkOriginalOwners()
-            _ = try remaining(5)
+            _ = try readinessRemaining()
             snapshot = DashboardSnapshot(ordinal: ordinal, enabled: enabled, hittable: hittable,
                                          reason: ambiguous ? .ambiguous : selected ?? .otherOrUnobserved)
         } else { snapshot = nil }
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true AND hittable == true"), object: open)
-        let returned = XCTWaiter.wait(for: [ready], timeout: try remaining(5))
+        let returned = XCTWaiter.wait(for: [ready], timeout: try readinessRemaining())
         let readiness = snapshot.map { ($0, DashboardWaiter(returned)) }
         try require(returned == .completed, "ordinary project control is not usable", dashboard: readiness)
         try require(renderer.staticTexts.matching(identifier: "BROWSER PREVIEW — EXAMPLE DATA ONLY").count == 0,
@@ -1427,7 +1438,7 @@ final class NormalAppUITests: XCTestCase {
         try require(window.isHittable, "Applications main window is not usable")
         try require(window.webViews.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "Applications renderer is missing")
         let renderer = try unique(window.webViews, "Applications renderer is ambiguous")
-        try dashboard(renderer, diagnosticOrdinal: 1)
+        try dashboard(renderer, startup: true, diagnosticOrdinal: 1)
         try click(renderer.buttons.matching(identifier: "Project settings"), "Applications settings navigation is unavailable")
         try require(renderer.staticTexts.matching(identifier: "A little clarity before the next release.")
                     .element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "Applications settings did not render")
@@ -1496,7 +1507,7 @@ final class NormalAppUITests: XCTestCase {
         try require(observedReadyCount == 1, "ordinary first-party renderer is missing or ambiguous")
         let renderer = rendererQuery.element(boundBy: 0)
         // End bounded initial renderer readiness.
-        try dashboard(renderer, diagnosticOrdinal: 1)
+        try dashboard(renderer, startup: true, diagnosticOrdinal: 1)
         try gate.probe(busy: true)
         // Exercise the real same-window native picker without selecting a
         // project or creating a document/Store operation.
@@ -1803,7 +1814,7 @@ final class NormalAppUITests: XCTestCase {
         try require(rendererQuery.element(boundBy: 0).waitForExistence(timeout: try remaining(5)),
                     "removal renderer did not become available")
         let renderer = try unique(rendererQuery, "removal renderer unavailable or ambiguous")
-        try dashboard(renderer)
+        try dashboard(renderer, startup: true)
         guard let owner = originalLaunch, let gate = entryGateObservation else { throw clock.fail("removal UI original custody missing") }
         try owner.healthy(); try gate.probe(busy: true)
         try channel.publish("launched")
@@ -4748,12 +4759,17 @@ final class NormalAppUITests: XCTestCase {
         var matches = [[XCUIElement]](repeating: [], count: selectors.count)
         for element in elements {
             try check()
-            guard element.elementType == .staticText else { throw Refusal.condition("static text prefix role differs") }
+            // One attributes snapshot per original indexed element, rather
+            // than separate live role/value/label resolutions. Keep that same
+            // XCUIElement for the caller's existing final live validation.
+            let snapshot = try element.snapshot()
             try check()
-            let value = element.value
+            guard snapshot.elementType == .staticText else { throw Refusal.condition("static text prefix role differs") }
+            try check()
+            let value = snapshot.value
             try check()
             let label: String
-            if value is String { label = "" } else { label = element.label; try check() }
+            if value is String { label = "" } else { label = snapshot.label; try check() }
             let text = try Self.staticTextContent(value: value, label: label)
             for index in selectors.indices where selectors[index].accepts(text) { matches[index].append(element) }
         }
@@ -5538,7 +5554,7 @@ final class NormalAppUITests: XCTestCase {
         try require(observedReadyCount == 1, "ordinary first-party renderer is missing or ambiguous")
         let renderer = rendererQuery.element(boundBy: 0)
         // End shared journey bounded renderer readiness.
-        try dashboard(renderer, diagnosticOrdinal: diagnosticOrdinal)
+        try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
         return (app, window, renderer)
     }
 

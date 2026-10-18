@@ -4,6 +4,22 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
+The next focused ordinary/pending-iOS consumer corrects the startup harness's
+five-second assumption: `App.tsx` awaits capabilities then catalogue, each under
+native ten-second work/two-second cleanup limits. Four initial entry sites now
+use one 24-second readiness end, clamped by the unchanged whole-case deadline;
+revisits remain five seconds. Diagnostics consume that same end and now include
+exact AXValue equality. This is a justified test allowance, not a demonstrated
+cause or resolution of the earlier intermittent startup failure.
+
+Static-text matching now obtains one standard XCTest snapshot per indexed
+element instead of two or three separate live attribute reads. Existing typed
+content limits, indexed targets, final live rechecks and deadlines are unchanged.
+Distinct implementation reviewers accepted both narrow changes. No new framework,
+source-string tests, app rebuild or signing cycle is needed. Native compilation
+and actual behavior remain required in the focused consumer. Restore-only run
+`39127457166/1` at `0e08c6d2` continues independently.
+
 Latest consumer `39126901753/1` at helper `3dc97ec6` failed both ARM ordinary
 Applications and pending-iOS at Open-project readiness, before project journeys.
 Both pre-wait samples saw the control disabled and hittable; neither identifies
