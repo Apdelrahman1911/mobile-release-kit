@@ -188,6 +188,61 @@ class UpdateDataTests(unittest.TestCase):
         for flag in ("op.package_settled()", 'op.stager_io_pending = "update-" + name', '"CompletionUnknown"'):
             self.assertIn(flag, source.split("def io(op, name, function", 1)[1].split("def retain", 1)[0])
 
+    def test_update_product_inventory_uses_full_runtime_cpio_without_relaxing_validation(self):
+        # Real small CPIO/package-info parsers; only outer XAR transport is inert.
+        def odc(name, mode, body=b"", *, uid=0):
+            encoded = name.encode("ascii") + b"\0"
+            header = b"070707" + ("%06o%06o%06o%06o%06o%06o%06o%011o%06o%011o" %
+                (0, 1, mode, uid, 0, 1, 0, 0, len(encoded), len(body))).encode("ascii")
+            return header + encoded + body
+        inventory = b'{"public":"synthetic inventory correspondence only"}\n'
+        inventory_name = "input/" + STAGER.INSTALLATION_INVENTORY_NAME
+        root = odc(".", stat.S_IFDIR | 0o755)
+        manifest = odc(inventory_name, stat.S_IFREG | 0o444, inventory)
+        trailer = odc("TRAILER!!!", 0)
+        files = b"".join(odc("input/runtime/store/lib/row%04d.rb" % i,
+                              stat.S_IFREG | 0o444, b"x") for i in range(4097))
+        scoped = odc("input/runtime/store/licenses/Locked Gems.txt", stat.S_IFREG | 0o444, b"public")
+        archive = root + manifest + files + scoped + trailer
+        self.assertLess(len(archive), 1 << 20)
+        # Unrelated/default callers keep the old bound and grammar unchanged.
+        with self.assertRaisesRegex(STAGER.Refused, "scripts-entry-count"):
+            STAGER.cpio_members(archive)
+        with self.assertRaisesRegex(STAGER.Refused, "scripts-entry-owner"):
+            STAGER.cpio_members(root + scoped + trailer)
+        for target in DATA.TARGETS:
+            selected = nomination()["targets"][target]
+            selected["inventory"] = {"name": STAGER.INSTALLATION_INVENTORY_NAME,
+                "bytes": len(inventory), "sha256": DATA.sha(inventory)}
+            info = ('<pkg-info identifier="%s" version="%s" install-location="/" auth="root">'
+                '<scripts><postinstall file="postinstall"/></scripts></pkg-info>' %
+                (STAGER.PACKAGE_ID, selected["release"]["packageVersion"])).encode("ascii")
+            op = SimpleNamespace(stager=STAGER, target=target)
+            def read(body, *, nested=False):
+                component = {"PackageInfo": info, "Scripts": body}
+                outer = ({STAGER.INSTALL_COMPONENT: b"inert component"} if nested else
+                         {STAGER.INSTALL_COMPONENT + "/" + key: value for key, value in component.items()})
+                with mock.patch.object(STAGER, "install_product_members", return_value=outer), \
+                     mock.patch.object(STAGER, "xar_members", return_value=component):
+                    return DATA.product_inventory(op, b"inert outer XAR", selected)
+            for nested in (False, True):
+                with self.subTest(target=target, nested=nested):
+                    self.assertEqual(read(archive, nested=nested), inventory)
+                    self.assertEqual(read(root + manifest + trailer, nested=nested), inventory)
+            mutations = {
+                "missing-inventory": root + files + scoped + trailer,
+                "inventory-tamper": root + odc(inventory_name, stat.S_IFREG | 0o444, b"x" * len(inventory)) + trailer,
+                "late-owner": root + manifest + files + odc("input/runtime/store/late.rb", stat.S_IFREG | 0o444, b"x", uid=501) + trailer,
+                "traversal": root + manifest + odc("input/runtime/store/../escape", stat.S_IFREG | 0o444) + trailer,
+                "outside-store": root + manifest + odc("input/Other Data.txt", stat.S_IFREG | 0o444) + trailer,
+                "duplicate": root + manifest + manifest + trailer,
+                "writable": root + manifest + odc("input/runtime/store/write.rb", stat.S_IFREG | 0o644) + trailer,
+                "symlink": root + manifest + odc("input/runtime/store/link", stat.S_IFLNK | 0o777, b"elsewhere") + trailer,
+            }
+            for fault, body in mutations.items():
+                with self.subTest(target=target, fault=fault), self.assertRaises((ValueError, STAGER.Refused)):
+                    read(body)
+
     def test_closed_nomination_requires_real_independent_qualified_source(self):
         source = nomination()
         for target in DATA.TARGETS:

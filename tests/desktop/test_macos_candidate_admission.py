@@ -71,6 +71,41 @@ class CandidateAdmission(unittest.TestCase):
                 self.assertEqual(h.admit(old, target=target, phase='prepare'), Path(env['MRK_MACOS_WORK']))
                 with self.assertRaises(h.Refused): h.admit(old, target=target, phase='finalize-image')
 
+    def test_update_signed_tool_data_preserves_fixed_roles_and_context(self):
+        h = HELPER
+        phases = ('select-github-tools-signed', 'project-history-provider', 'project-github-seal')
+        for target in (h.ARM_TARGET, h.INTEL_TARGET):
+            env = self.environment(target)
+            env.update(GITHUB_REF=h.UPDATE_REF,
+                GITHUB_WORKFLOW_REF=env['GITHUB_WORKFLOW_REF'].replace(h.CANDIDATE_REF, h.UPDATE_REF))
+            with self.host(target):
+                for phase in phases:
+                    with self.subTest(target=target, phase=phase):
+                        h.tool_data_context(env, phase, target)
+                for phase in (*h.TOOL_SELECTION_PHASES[:2], *h.TOOL_SIGNING_PHASES, 'package-install', 'unknown'):
+                    with self.subTest(target=target, rejectedPhase=phase), self.assertRaisesRegex(
+                            h.Refused, '^app-signature-fixed-data-phase$'):
+                        h.tool_data_context(env, phase, target)
+                for key, value in (
+                    ('GITHUB_REF', 'refs/heads/unrelated'), ('GITHUB_EVENT_NAME', 'workflow_dispatch'),
+                    ('GITHUB_WORKFLOW_REF', env['GITHUB_WORKFLOW_REF'].replace('desktop-macos-installed.yml',
+                                                                                 'desktop-macos-python-runtime-signing.yml')),
+                    ('GITHUB_WORKFLOW_SHA', 'b' * 40), ('MRK_MACOS_INSTALL_SOURCE_COMMIT', 'b' * 40),
+                    ('GITHUB_RUN_ATTEMPT', '0'), ('RUNNER_ENVIRONMENT', 'self-hosted'),
+                    ('RUNNER_ARCH', 'X64' if target == h.ARM_TARGET else 'ARM64')):
+                    with self.subTest(target=target, field=key), self.assertRaises(h.Refused):
+                        h.tool_data_context(dict(env, **{key: value}), phases[0], target)
+                with patch.object(h.os, 'getuid', return_value=0), self.assertRaisesRegex(
+                        h.Refused, '^tool-data-platform$'):
+                    h.tool_data_context(env, phases[0], target)
+                with patch.object(h, '__file__', '/unrelated/helper.py'), self.assertRaisesRegex(
+                        h.Refused, '^tool-data-source-context$'):
+                    h.tool_data_context(env, phases[0], target)
+                # DATA admission does not grant signing/build execution on the
+                # update branch; the existing native route remains separate.
+                with self.assertRaisesRegex(h.Refused, '^update-fixed-native-route$'):
+                    h.admit(env, target=target, phase='sign-history-provider')
+
     def companion_environment(self, target):
         h = HELPER
         env = dict(self.environment(target), GITHUB_EVENT_NAME='workflow_dispatch',

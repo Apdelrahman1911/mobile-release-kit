@@ -721,7 +721,7 @@ jobs:
           # No account baseline/control, Keychain data, raw captures or xcresult.
 
       - name: Retain only existing sanitized native failure diagnostics
-        if: failure() && (env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-pending-ui')
+        if: failure() && (env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-pending-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-native-failure-${{ matrix.target }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -737,6 +737,16 @@ jobs:
             ${{ env.MRK_MACOS_WORK }}/normal-ui/persistence-summary.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/saved-checks-test.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/saved-checks-summary.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/diagnostics-test.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/diagnostics-summary.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/ios-unsigned-archive-test.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/ios-unsigned-archive-summary.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/release-evidence-test.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/release-evidence-summary.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/workflow-refusal-test.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/workflow-refusal-summary.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/saved-version-recovery-test.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/saved-version-recovery-summary.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs.failure.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/ios-pending-recovery-test.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/ios-pending-recovery-summary.failure-diagnostics.json

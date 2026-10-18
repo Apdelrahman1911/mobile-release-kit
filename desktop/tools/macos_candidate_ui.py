@@ -359,6 +359,82 @@ def read_phase(read, normal, name, selected, work, *, helper_source=None, ios_to
     return phase_admission_data(row, request, selected['source'], stdout, stderr, normal=normal, helper_source=helper_source, ios_tools=ios_tools)
 
 
+# Fixed public assertion literals from the Applications journey and its shared
+# dashboard/quit helpers. Diagnostics only, never arbitrary XCTest error text.
+APPLICATIONS_CONDITIONS = {
+    "case deadline cannot be reset": "case-already-active",
+    "removal harness channel is exclusive to its fixed case": "unexpected-removal-channel",
+    "this scenario is not admitted on a shared or personal desktop": "hosted-scenario",
+    "the ordinary application must run as the original nonroot account": "host-account",
+    "unsupported hosted OS major": "host-os",
+    "unsupported hosted Foundation account name": "host-foundation-account",
+    "exact application and harness source bindings are required": "source-bindings",
+    "this same-build scenario needs exact application and harness source bindings": "same-build-source",
+    "the exact ordinary entry/payload installation is missing": "installed-entry-payload",
+    "Applications observation requires empty ordinary custody": "initial-custody",
+    "the exact installed Applications launcher is missing": "launcher-bundle",
+    "occupied launcher, outer or payload cannot be adopted": "already-running",
+    "Applications payload is not foreground": "payload-foreground",
+    "Applications payload has no window": "window-missing",
+    "Applications main window is ambiguous": "window-ambiguous",
+    "Applications main window is not usable": "window-not-hittable",
+    "Applications renderer is missing": "renderer-missing",
+    "Applications renderer is ambiguous": "renderer-ambiguous",
+    "Applications settings navigation is unavailable": "settings-navigation",
+    "Applications settings did not render": "settings-render",
+    "Applications Dashboard navigation is unavailable": "dashboard-navigation",
+    "Applications genuine normal Quit is unavailable": "quit-action",
+    "Applications payload UI did not stop": "payload-quit",
+    "Applications monitored state changed after observed termination": "termination-state",
+    "dashboard heading did not render": "dashboard-heading",
+    "dashboard heading is ambiguous": "dashboard-heading-ambiguous",
+    "ordinary first-party project control is missing or ambiguous": "project-control",
+    "ordinary project control is not usable": "project-control-readiness",
+    "browser-preview data is not ordinary-app evidence": "browser-preview",
+    "an unrelated sheet is already present": "existing-sheet",
+    "application menu bar is missing or ambiguous": "menu-bar",
+    "the application's native menu is unavailable": "application-menu",
+    "the application menu has no unique Quit action": "quit-menu-item",
+    "normal Quit did not present its native sheet": "quit-sheet-missing",
+    "normal Quit sheet is ambiguous": "quit-sheet-ambiguous",
+    "unexpected confirmation sheet": "quit-sheet-content",
+    "unexpected actions in the normal Quit sheet": "quit-sheet-actions",
+    "normal Quit has no unique Cancel button": "quit-cancel-button",
+    "normal Quit has no unique affirmative button": "quit-confirm-button",
+}
+
+
+def applications_condition_diagnostic(stdout, stderr):
+    """Best-effort finite explanation of one complete selected XCTest failure."""
+    unavailable = {'status': 'unavailable', 'condition': None}
+    if (type(stdout) is not bytes or type(stderr) is not bytes
+            or len(stdout) + len(stderr) > (1 << 20) + 4096):
+        return unavailable
+    observed = []
+    for stream in (stdout, stderr):
+        for record in stream.splitlines(keepends=True):
+            if b'testApplicationsLaunchAndQuit' not in record or b'NormalAppUITests.swift:' not in record:
+                continue
+            if b': error:' not in record:
+                continue
+            if len(record) > 4096 or not record.endswith(b'\n') or record.count(b'condition(') != 1:
+                return unavailable
+            site = re.search(rb'(?:\A|(?<=[/ \t]))NormalAppUITests\.swift:([1-9][0-9]{0,4})'
+                rb'(?::([1-9][0-9]{0,3}))?:[ \t]{1,8}error:[ \t]{1,8}'
+                rb'-\[MRKNormalAppUITests\.NormalAppUITests testApplicationsLaunchAndQuit\][ \t]{0,8}:', record)
+            if (site is None or int(site.group(1)) > 65535
+                    or site.group(2) is not None and int(site.group(2)) > 4096):
+                return unavailable
+            # Same literal/escaped quotation forms as the existing native
+            # diagnostic parser. Unknown text is never returned to the caller.
+            match = re.search(rb'condition\(("|\\")([^"\\\r\n]{1,240})\1\)', record[site.end():])
+            condition = APPLICATIONS_CONDITIONS.get(match.group(2).decode('ascii', 'replace')) if match else None
+            if condition is None:
+                return unavailable
+            observed.append(condition)
+    return {'status': 'classified', 'condition': observed[0]} if len(observed) == 1 else unavailable
+
+
 def run_phase(normal, owner, book, quota, context, selected, name, clock, verify_sources, *, ios_tools=False, saved_files=False, saved_version=False):
     """One fixed existing CLI under the existing owned-process API.
 
@@ -399,6 +475,12 @@ def run_phase(normal, owner, book, quota, context, selected, name, clock, verify
                 if key in diagnosis}
         except BaseException:
             pass
+        if name == 'applications-test':
+            try:
+                diagnosis = applications_condition_diagnostic(original.stdout, original.stderr)
+                NATIVE_DIAGNOSTIC = dict(NATIVE_DIAGNOSTIC or {}, applicationsCondition=diagnosis)
+            except BaseException:
+                pass  # A diagnostic error never replaces the original nonzero.
     resume.need(original.returncode == 0, 'candidate-ui-original-cli-nonzero')
     row_entry, body = quota.call(book, 'file', directory / admission_name(name), 32768, modes=(0o600,))
     row = resume.decode(body)

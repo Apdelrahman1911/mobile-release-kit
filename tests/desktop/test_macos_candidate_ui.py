@@ -463,9 +463,35 @@ class CandidateUITests(unittest.TestCase):
                     changed=deepcopy(row);changed['commands'][1].update(stdoutBytes=len(wrong),stdoutSha256=R.sha(wrong))
                     with self.assertRaises(R.Refused):U.phase_admission_data(changed,req,selected['source'],wrong,b'')
 
+    def test_applications_condition_diagnostic_never_exports_unknown_error_text(self):
+        reason = 'Applications payload is not foreground'
+        def record(reason, escaped=False):
+            quote = '\\"' if escaped else '"'
+            return ('/inert/NormalAppUITests.swift:765: error: '
+                    '-[MRKNormalAppUITests.NormalAppUITests testApplicationsLaunchAndQuit] : '
+                    'threw error "condition(' + quote + reason + quote + ')"\n').encode()
+        for escaped in (False, True):
+            body = record(reason, escaped)
+            self.assertEqual(U.applications_condition_diagnostic(body, b''),
+                             {'status': 'classified', 'condition': 'payload-foreground'})
+            for candidate in (body.rstrip(b'\n'), body + body, body.replace(b': error:', b': note:'),
+                              body.replace(b'testApplicationsLaunchAndQuit', b'otherTest'),
+                              body.replace(b'testApplicationsLaunchAndQuit]', b'testApplicationsLaunchAndQuitOther]'),
+                              body.replace(b'testApplicationsLaunchAndQuit]', b'prefixTestApplicationsLaunchAndQuit]'),
+                              record('PRIVATE input should never leave the runner'), body + record('unknown'),
+                              b'x' * 4096 + body, body.replace(b'condition(', b'condition(condition(')):
+                result = U.applications_condition_diagnostic(candidate, b'')
+                self.assertEqual(result, {'status': 'unavailable', 'condition': None})
+                self.assertNotIn('PRIVATE', R.canonical(result).decode())
+        self.assertEqual(U.applications_condition_diagnostic(b'x' * ((1 << 20) + 4097), b'')['status'], 'unavailable')
+        # Every published label is tied only to an existing public SOURCE literal.
+        source = (ROOT / 'desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift').read_text()
+        self.assertTrue(all('"' + text + '"' in source for text in U.APPLICATIONS_CONDITIONS))
+
     def test_actual_owned_wrapper_known_nonzero_unknown_and_changed_post_never_publish_status(self):
-        for fault in (None,'nonzero','unknown','post'):
-            selected,context,_,_,req,row,out=phase_fixture('project-test')
+        for fault in (None,'nonzero','unknown','post','applications'):
+            phase = 'applications-test' if fault == 'applications' else 'project-test'
+            selected,context,_,_,req,row,out=phase_fixture(phase)
             events=[]
             class Book:
                 def __init__(self):self.entries=[];self.directories={WORK/'normal-ui':{}}
@@ -482,6 +508,9 @@ class CandidateUITests(unittest.TestCase):
                         error='runner-admission-or-owner-error',stage='execute',exceptionClass='Refused',
                         sourceFrames=[],commands=[],ownerFailure=dict(dispatched=True,contained=True,cleanupComplete=True),
                         unknownStateRetained=True)) if fault=='nonzero' else b''
+                    if fault == 'applications':
+                        body = b'NormalAppUITests.swift:765: error: -[MRKNormalAppUITests.NormalAppUITests testApplicationsLaunchAndQuit] : threw error condition("Applications payload is not foreground")\n'
+                        return subprocess.CompletedProcess(argv, 65, body, b'')
                     return subprocess.CompletedProcess(argv,1 if fault=='nonzero' else 0,out,failure)
             count=0
             def verify():
@@ -490,7 +519,7 @@ class CandidateUITests(unittest.TestCase):
                 if fault=='post' and count==2:raise R.Refused('inert source POST')
             quota=R.OriginalQuota();book=quota.book(Book);owner=Owner()
             clock=N.PhaseClock(req['phaseSeconds']+180,now=lambda:1,started=1)
-            call=lambda:U.run_phase(N,owner,book,quota,context,selected,'project-test',clock,verify)
+            call=lambda:U.run_phase(N,owner,book,quota,context,selected,phase,clock,verify)
             if fault is None:self.assertEqual(call(),'f'*64)
             else:
                 with self.assertRaises((R.Refused,RuntimeError)):call()
@@ -502,6 +531,11 @@ class CandidateUITests(unittest.TestCase):
                 self.assertEqual(U.NATIVE_DIAGNOSTIC['status'],'observed-exception-only')
                 self.assertEqual(U.NATIVE_DIAGNOSTIC['stage'],'execute')
                 self.assertEqual(U.NATIVE_DIAGNOSTIC['exceptionClass'],'Refused')
+            if fault == 'applications':
+                self.assertEqual(U.NATIVE_STATUS, 65)
+                self.assertEqual(U.NATIVE_DIAGNOSTIC['applicationsCondition'],
+                                 {'status': 'classified', 'condition': 'payload-foreground'})
+                self.assertNotIn('source2', events)
             self.assertEqual(owner.kw['timeout'],req['phaseSeconds']+15)
             self.assertEqual(owner.kw['environ'],U.clean_environment(N,selected,WORK))
             self.assertEqual(owner.kw['cwd'],U.consumer.CANDIDATE_ROOT)

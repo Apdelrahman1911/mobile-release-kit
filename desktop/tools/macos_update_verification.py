@@ -280,7 +280,7 @@ def product_inventory(op, body, nomination):
     stager.package_info(component["PackageInfo"], selection=stager.BuildSelection(op.target, release["packageVersion"], release["release"]))
     packed = component["Scripts"]
     archive = stager.inflate(packed, LIMIT, gzip=True) if packed[:2] == b"\x1f\x8b" else packed
-    rows = stager.cpio_members(archive)
+    rows = stager.cpio_members(archive, store_runtime=True)
     key = "input/" + stager.INSTALLATION_INVENTORY_NAME
     need(key in rows and rows[key][1] == 0o444 and type(rows[key][0]) is bytes, "update-original-inventory-member")
     inventory = rows[key][0]

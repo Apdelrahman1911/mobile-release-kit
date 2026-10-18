@@ -10084,11 +10084,11 @@ def tool_data_context(environment, phase, target):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "tool-data-platform")
     ref = environment.get("GITHUB_REF")
     build_selection = phase in TOOL_SELECTION_PHASES[:2]
-    if ref in (APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, CANDIDATE_REF):
+    if ref in (APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF):
         need(phase in APP_SIGNATURE_DATA, "app-signature-fixed-data-phase")
     workflow = "desktop-macos-python-runtime-signing.yml" if build_selection else "desktop-macos-installed.yml"
     need(ref == TOOL_REF if build_selection else ref in
-         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, CANDIDATE_REF), "tool-data-ref")
+         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF), "tool-data-ref")
     sha = environment.get("GITHUB_SHA")
     need(tool_hex(sha, 40) and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py"
          and all(environment.get(k) == v for k, v in {
