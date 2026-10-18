@@ -2237,6 +2237,9 @@ final class NormalAppUITests: XCTestCase {
             private(set) var terminalClose = false
             private static let roles = ["jdk": "tools/jdk/temurin-17.jdk", "sdk": "tools/sdk", "gradle": "tools/gradle"]
             private static let fileNames: Set<String> = ["upload.jks", "upload.der", "scalars.json"]
+            private static let systemAncestors: Set<String> = ["/", "/Users", "/Users/runner",
+                "/Users/runner/work", "/Users/runner/work/_temp"]
+            private static let protectiveFlags: UInt32 = 0x00080000 | 0x00100000 | 0x00800000
             #if arch(arm64)
             static let target = "aarch64-apple-darwin"
             private static let hostedJob = "github-hosted-macos26-arm64"
@@ -2273,15 +2276,18 @@ final class NormalAppUITests: XCTestCase {
                 try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) + Data([10])
             }
             private func directory(_ parent: Directory?, name: String, full: Bool = false,
-                                   mode: mode_t? = nil, check: () throws -> Void) throws -> Directory {
+                                   mode: mode_t? = nil, systemAncestor: Bool = false,
+                                   check: () throws -> Void) throws -> Directory {
                 try check()
                 let fd = parent.map { openat($0.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
                     ?? open(name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                 try LocalFixture.need(fd >= 0, "Android private directory open")
                 descriptors.append(fd)
                 let before = try LocalFixture.facts(fd)
+                let allowedFlags: UInt32 = systemAncestor ? Self.protectiveFlags : 0
                 try LocalFixture.need(before.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
-                    && (before.uid == 0 || before.uid == getuid()) && before.mode & 0o022 == 0 && before.flags == 0,
+                    && (before.uid == 0 || before.uid == getuid()) && before.mode & 0o022 == 0
+                    && before.flags & ~allowedFlags == 0,
                     "Android private directory shape")
                 if let parent {
                     try LocalFixture.need(before == LocalFixture.androidOutputNamed(parent.fd, name),
@@ -2487,10 +2493,13 @@ final class NormalAppUITests: XCTestCase {
                 let normal = String(handoff.dropLast("/android-input-fixture.json".count))
                 let value = AndroidInputs()
                 do {
-                    var parent = try value.directory(nil, name: "/", check: check)
+                    var parent = try value.directory(nil, name: "/", systemAncestor: true, check: check)
+                    var path = ""
                     for name in normal.split(separator: "/").map(String.init) {
+                        path += "/" + name
                         let mode: mode_t? = name == "normal-ui" || name.hasPrefix("mrk-macos-installed.") ? 0o700 : nil
-                        parent = try value.directory(parent, name: name, mode: mode, check: check)
+                        parent = try value.directory(parent, name: name, mode: mode,
+                            systemAncestor: Self.systemAncestors.contains(path), check: check)
                     }
                     try value.load(normal: parent, path: normal, source: source, run: run, attempt: attempt, candidate:candidate, check: check)
                     return value

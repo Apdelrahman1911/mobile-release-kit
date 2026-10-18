@@ -1427,8 +1427,10 @@ class NormalPhaseDataTests(unittest.TestCase):
         # Real tiny files and FD bindings, with only the fixed Mac root mapped to
         # an isolated private test directory. No actual credential/vendor bytes.
         native=Path('/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui')
-        real_open,real_close,real_stat=os.open,os.close,os.stat
-        for fault in (None,'ancestor','leaf','fifo','hardlink','close','primary-close','post-close-clock'):
+        real_open,real_close,real_stat,real_fstat=os.open,os.close,os.stat,os.fstat
+        for fault in (None,'ancestor','leaf','fifo','hardlink','close','primary-close','post-close-clock',
+                      'protected-root','protected-ancestors','unknown-ancestor-flag','task-flag','normal-flag',
+                      'tool-flag','ancestor-flags-post','ancestor-group-write','ancestor-foreign-owner'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
                 scratch=Path(temporary);normal=scratch/str(native).lstrip('/');normal.mkdir(parents=True,mode=0o700)
                 for parent in normal.parents:
@@ -1462,12 +1464,35 @@ class NormalPhaseDataTests(unittest.TestCase):
                     doc['credentialDirectoryFacts']=wire(credentials)
                     handoff.write_bytes(MODULE.encoded(doc)+b'\n')
                 if fault=='hardlink': os.link(credentials/'upload.jks',scratch/'linked')
+                # Only Darwin metadata is modeled; real descriptors, names,
+                # bytes, replacement detection and consuming closes remain live.
+                identities = lambda path: (real_stat(path).st_dev, real_stat(path).st_ino)
+                root_key = identities(scratch)
+                flag_values = {}
+                if fault in ('protected-root', 'ancestor-flags-post', 'ancestor-group-write', 'ancestor-foreign-owner'):
+                    flag_values[root_key] = 0x00100000
+                elif fault == 'protected-ancestors':
+                    for relative in ('Users', 'Users/runner', 'Users/runner/work', 'Users/runner/work/_temp'):
+                        flag_values[identities(scratch / relative)] = 0x00980000
+                elif fault == 'unknown-ancestor-flag': flag_values[root_key] = 0x2
+                elif fault in ('task-flag', 'normal-flag', 'tool-flag'):
+                    chosen = normal.parent if fault == 'task-flag' else normal if fault == 'normal-flag' else root / MODULE.ANDROID_ROOTS['jdk']
+                    flag_values[identities(chosen)] = 0x00100000
+                def metadata(value):
+                    fields = {key: getattr(value, key) for key in ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid',
+                        'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                    key = (value.st_dev, value.st_ino)
+                    fields['st_flags'] = flag_values.get(key, 0)
+                    if key == root_key:
+                        if fault == 'ancestor-group-write': fields['st_mode'] |= 0o020
+                        if fault == 'ancestor-foreign-owner': fields['st_uid'] = os.getuid() + 1
+                    return SimpleNamespace(**fields)
                 opened,closed,flags=[],[],[]
                 sentinel=ValueError('synthetic primary remains private')
                 def opening(path,mode,*args,**kwargs):
                     actual=scratch if path=='/' else path
                     fd=real_open(actual,mode,*args,**kwargs);opened.append(fd);flags.append((path,mode));return fd
-                def stating(path,*args,**kwargs): return real_stat(scratch if path=='/' else path,*args,**kwargs)
+                def stating(path,*args,**kwargs): return metadata(real_stat(scratch if path=='/' else path,*args,**kwargs))
                 def closing(fd):
                     closed.append(fd);real_close(fd)
                     if fault in ('close','primary-close'): raise OSError('synthetic consuming close')
@@ -1477,7 +1502,8 @@ class NormalPhaseDataTests(unittest.TestCase):
                 phase=SimpleNamespace(clock=SimpleNamespace(check=check),environment={MODULE.ANDROID_RUN_ENV:'42',MODULE.ANDROID_ATTEMPT_ENV:'1'})
                 reader=MODULE.AndroidPrivateInputs(phase,'a'*40,native)
                 failure=None
-                with patch.object(MODULE.os,'open',opening),patch.object(MODULE.os,'stat',stating),patch.object(MODULE.os,'close',closing):
+                with patch.object(MODULE.os,'open',opening),patch.object(MODULE.os,'stat',stating), \
+                     patch.object(MODULE.os,'fstat',lambda fd: metadata(real_fstat(fd))),patch.object(MODULE.os,'close',closing):
                     try:
                         with reader:
                             self.assertEqual((len(reader.fds),len(reader.files)),(18,4))
@@ -1487,6 +1513,7 @@ class NormalPhaseDataTests(unittest.TestCase):
                                 (scratch/'Users/runner/work').mkdir(mode=0o700)
                             elif fault=='leaf':
                                 leaf=credentials/'upload.jks';leaf.write_bytes(b'x'*len(data['upload.jks']))
+                            elif fault=='ancestor-flags-post': flag_values[root_key] = 0x00080000
                             elif fault=='primary-close': raise sentinel
                     except BaseException as error: failure=error
                     finally:
@@ -1497,12 +1524,15 @@ class NormalPhaseDataTests(unittest.TestCase):
                 self.assertEqual(len(closed),len(set(closed)))
                 self.assertFalse(reader.fds or reader.files or reader.directories)
                 self.assertTrue(all(mode&os.O_NONBLOCK for path,mode in flags if path in ('android-input-fixture.json',*MODULE.ANDROID_PRIVATE_FILES)))
-                if fault is None: self.assertIsNone(failure)
+                if fault in (None, 'protected-root', 'protected-ancestors'): self.assertIsNone(failure)
                 elif fault=='primary-close': self.assertIs(failure,sentinel)
                 else:
                     expected={'ancestor':'android-input-ancestor-post','leaf':'android-input-private-post',
                         'fifo':'android-input-private-file','hardlink':'android-input-private-file',
-                        'close':'android-input-close-or-clock','post-close-clock':'android-input-close-or-clock'}[fault]
+                        'close':'android-input-close-or-clock','post-close-clock':'android-input-close-or-clock',
+                        'ancestor-flags-post':'android-input-ancestor-post',
+                        **{key:'android-input-directory-original' for key in ('unknown-ancestor-flag','task-flag',
+                            'normal-flag','tool-flag','ancestor-group-write','ancestor-foreign-owner')}}[fault]
                     self.assertIsInstance(failure,MODULE.Refused)
                     self.assertEqual(str(failure),expected)
 

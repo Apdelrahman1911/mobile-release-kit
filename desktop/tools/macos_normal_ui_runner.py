@@ -1167,6 +1167,10 @@ def android_input_scalars(body):
 
 class AndroidPrivateInputs:
     """At most14 retained directories+4 leaves; no vendor traversal or execution."""
+    SYSTEM_ANCESTORS = frozenset(Path(value) for value in
+        ("/", "/Users", "/Users/runner", "/Users/runner/work", "/Users/runner/work/_temp"))
+    # Apple protective metadata, never permission or authority to modify it.
+    PROTECTIVE_FLAGS = 0x00080000 | 0x00100000 | 0x00800000
     def __init__(self, phase, source, normal, *, target=ARM_TARGET, expected_ref=ANDROID_REF):
         normal_target_data(target)
         need(type(expected_ref) is str and expected_ref in (ANDROID_REF, ANDROID_CANDIDATE_REF), "android-input-trusted-ref")
@@ -1179,7 +1183,7 @@ class AndroidPrivateInputs:
         self.public_certificate = None
         self.credentials = None
 
-    def adopt_directory(self, parent, name, *, full=False, private=False):
+    def adopt_directory(self, parent, name, *, full=False, private=False, system_ancestor=False):
         self.phase.clock.check()
         fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
                      **({"dir_fd": parent} if parent is not None else {}))
@@ -1187,7 +1191,9 @@ class AndroidPrivateInputs:
         observed = saved_version_facts(os.fstat(fd))
         named = saved_version_facts(os.stat(name, dir_fd=parent, follow_symlinks=False))
         need(stat.S_ISDIR(observed[2]) and observed == named and observed[3] in (0, os.getuid())
-             and not observed[2] & 0o022 and observed[9] == 0, "android-input-directory-original")
+             and not observed[2] & 0o022
+             and observed[9] & ~(self.PROTECTIVE_FLAGS if system_ancestor else 0) == 0,
+             "android-input-directory-original")
         if private:
             need(observed[3:5] == (os.getuid(), os.getgid()) and observed[2] & 0o7777 == 0o700,
                  "android-input-private-directory")
@@ -1213,9 +1219,13 @@ class AndroidPrivateInputs:
 
     def __enter__(self):
         try:
-            fd, _ = self.adopt_directory(None, "/")
+            fd, _ = self.adopt_directory(None, "/", system_ancestor=True)
+            path = Path("/")
             for name in self.normal.parts[1:]:
-                fd, _ = self.adopt_directory(fd, name, private=name == "normal-ui" or name.startswith("mrk-macos-installed."))
+                path /= name
+                fd, _ = self.adopt_directory(fd, name,
+                    private=name == "normal-ui" or name.startswith("mrk-macos-installed."),
+                    system_ancestor=path in self.SYSTEM_ANCESTORS)
             normal = fd
             body, _, _ = self.read(normal, "android-input-fixture.json", 16384)
             value = android_input_document(body, source=self.source,
