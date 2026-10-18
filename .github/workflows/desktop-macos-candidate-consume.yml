@@ -511,6 +511,7 @@ jobs:
           path: |
             ${{ env.MRK_MACOS_WORK }}/candidate-ui-result.json
             ${{ env.MRK_MACOS_WORK }}/candidate-ui-cleanup.json
+            ${{ env.MRK_MACOS_WORK }}/consumer-result.json
           if-no-files-found: error
           retention-days: 7
           compression-level: 0

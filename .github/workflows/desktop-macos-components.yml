@@ -40,7 +40,7 @@ on:
         default: all
         options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
       architecture:
-        description: Architecture for Store, iOS tools and package probe; other components use both
+        description: Architecture for Store, iOS tools, package probe and Xcode files; other components use both
         type: choice
         default: both
         options: [both, arm64, x86_64]
@@ -208,11 +208,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include:
-          - runner: macos-26
-            arch: arm64
-          - runner: macos-26-intel
-            arch: x86_64
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files' && inputs.architecture == 'arm64' && '[{"runner":"macos-26","arch":"arm64"}]' || github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files' && inputs.architecture == 'x86_64' && '[{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

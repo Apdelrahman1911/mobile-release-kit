@@ -60,11 +60,12 @@ def install_admission_data(value, selected, context):
         'originalMountDetached': True, 'originalClosesKnown': True,
         'workloadsKnownSettled': True, 'privateOutputsRetired': True,
         'productReady': False, 'uiQualified': False, 'p0Qualified': False}
-    resume.need(type(value) is dict and set(value) == set(expected) | {'helperTree'}
+    resume.need(type(value) is dict and set(value) == set(expected) | {'helperTree', 'predecessorMetadata'}
         and all(type(value[k]) is type(v) and value[k] == v for k, v in expected.items())
         and selected['target'] == context['target'] and type(value['helperTree']) is str
         and re.fullmatch(r'[0-9a-f]{40}', value['helperTree']) and value['helperTree'] != '0' * 40,
         'candidate-ui-install-handoff')
+    consumer.predecessor_metadata_data(value['predecessorMetadata'], selected)
     return dict(value)
 
 

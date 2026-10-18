@@ -35,12 +35,16 @@ def mounted_fixture(target):
     """Parser seam supplies already-parsed inert structures, not fake XAR proof."""
     bodies = {'Install.pkg': b'package', 'producer.json': b'descriptor', 'producer.sig': b'signature'}
     row = nomination(target)
-    row.update(packageVersion='0.1.9', release='current-source-release',
+    architecture = 'arm64' if target == 'aarch64-apple-darwin' else 'x86_64'
+    row.update(packageVersion='0.1.9', release='macos26-'+architecture+'-current-source-release',
                runtimeManifestSha256='a' * 64, inventorySha256=R.sha(b'inventory'),
-               members=[], signingIdentity={'teamIdentifier': 'INERTTEAM0'})
+               members=[dict(name=name, bytes=7, sha256=R.sha(name.encode())) for name in sorted(R.CANDIDATE_MEMBERS)],
+               signingIdentity={'teamIdentifier': 'INERTTEAM0'})
     for key, name in (('package', 'Install.pkg'), ('descriptor', 'producer.json'), ('signature', 'producer.sig')):
         row[key] = dict(name=name, bytes=len(bodies[name]), sha256=R.sha(bodies[name]))
-    release = dict(sourceCommit=row['source'], runtimeManifestSha256=row['runtimeManifestSha256'],
+    release = dict(profile='fixed-macos26-'+architecture+'-maintenance-v2',
+                   packageIdentifier='dev.mobile-release-kit.desktop.installed', bundleIdentifier='dev.mobile-release-kit.desktop',
+                   protocolSha256='c'*64, sourceCommit=row['source'], runtimeManifestSha256=row['runtimeManifestSha256'],
                    inventorySha256=row['inventorySha256'], packageVersion=row['packageVersion'],
                    release=row['release'], packageSha256=row['package']['sha256'], signingPolicySha256='b' * 64)
     policy = {'sha256': 'b' * 64, 'policy': dict(row['signingIdentity'])}
@@ -130,6 +134,69 @@ class CandidateConsumerTests(unittest.TestCase):
             with self.assertRaises(ValueError): R.mounted_data(originals, row, target, stage, candidate=True)
             stage.install_product_members.assert_not_called()
 
+    def test_public_predecessor_projection_keeps_real_mounted_bindings_without_payload(self):
+        for target in ('aarch64-apple-darwin', 'x86_64-apple-darwin'):
+            originals, row, stage = mounted_fixture(target)
+            # Actual shared reducer; lower archive/native boundaries are inert,
+            # not fabricated native signature or filesystem qualification.
+            result, inventory = R.mounted_data(originals, row, target, stage, candidate=True)
+            raw = C.predecessor_metadata_projection(result, nomination(target))
+            value = R.decode(raw)
+            self.assertIs(C.predecessor_metadata_data(value, nomination(target)), value)
+            self.assertEqual(value['inventory']['sha256'], R.sha(inventory))
+            self.assertEqual(value['release'], result['release'])
+            self.assertEqual(value['members'], row['members'])
+            self.assertLessEqual(len(raw), C.PREDECESSOR_METADATA_LIMIT)
+            for excluded in ('inventoryDocument', 'signingPolicy', 'policy', 'qualificationEvidenceSha256'):
+                self.assertNotIn(excluded, value)
+            self.assertNotIn(b'INERTTEAM0', raw)
+            self.assertFalse(value['nativeQualificationInferred'] or value['updateActivated'])
+            changes = [lambda v: v['nomination'].update(source='f'*40),
+                lambda v: v['package'].update(sha256='f'*64),
+                lambda v: v['inventory'].update(sha256='f'*64),
+                lambda v: v['release'].update(sourceCommit='f'*40),
+                lambda v: v['release'].update(packageVersion='1.02.3'),
+                lambda v: v['members'].append(v['members'][0]),
+                lambda v: v['members'][0].update(name='../private'),
+                lambda v: v.update(inventoryFiles=True),
+                lambda v: v.update(nativeQualificationInferred=True),
+                lambda v: v.update(inventoryDocument={'private': 'must never publish'})]
+            for change in changes:
+                wrong = copy.deepcopy(value); change(wrong)
+                with self.assertRaises(ValueError): C.predecessor_metadata_data(wrong, nomination(target))
+
+    def test_public_predecessor_receipt_requires_actual_consume_finality(self):
+        originals, row, stage = mounted_fixture('aarch64-apple-darwin')
+        result, inventory = R.mounted_data(originals, row, row['target'], stage, candidate=True)
+        for fault in (None, 'installer', 'readback', 'mount', 'call', 'close', 'post-source'):
+            with self.subTest(fault=fault):
+                owner = instance()
+                owner._CandidateResume__source_loaded = True
+                owner.helper_source, owner.helper_tree, owner.run_id, owner.run_attempt = 'd'*40, 'e'*40, '51', '2'
+                owner.quota = SimpleNamespace(reserved=0, finish=mock.Mock(return_value=fault != 'close'))
+                owner.clock = SimpleNamespace(finality=False, check=mock.Mock())
+                owner.point = mock.Mock(); owner.admit_resources = mock.Mock(); owner.retire = mock.Mock()
+                owner.acquire_candidate = mock.Mock(return_value={'PREVIEW.json': b'inert', 'MobileReleaseKit.dmg': b'inert'})
+                owner.verify_sources = mock.Mock(side_effect=[None, RuntimeError('original source POST')] if fault == 'post-source' else None)
+                owner.installer_zero = owner.readback_known = owner.mount_detached = False
+                owner.calls = [{'returned': True, 'capturesSettled': fault != 'call'}]
+                def install(*args):
+                    owner.prepare_readback(result, inventory)
+                    if fault == 'installer': raise RuntimeError('original Installer failure')
+                    owner.installer_zero = True
+                    if fault == 'readback': raise RuntimeError('original readback failure')
+                    owner.readback_known = True; owner.mount_detached = fault != 'mount'
+                owner.install_image = install
+                with mock.patch.object(C.candidate, 'candidate_preview_data', return_value={}):
+                    if fault is None:
+                        observed = owner.consume(0, 0)
+                        self.assertEqual(observed['predecessorMetadata'], R.decode(C.predecessor_metadata_projection(result, owner.nomination)))
+                        self.assertFalse(observed['p0Qualified'] or observed['productReady'])
+                        self.assertLessEqual(len(R.canonical(observed)), C.PREDECESSOR_METADATA_LIMIT)
+                    else:
+                        with self.assertRaises((RuntimeError, ValueError)): owner.consume(0, 0)
+                self.assertGreaterEqual(owner.quota.finish.call_count, 1)
+
     def test_legacy_mounted_default_never_enables_store_or_source_override(self):
         originals, row, stage = mounted_fixture('aarch64-apple-darwin')
         row['qualificationEvidenceSha256'] = 'c' * 64
@@ -149,7 +216,9 @@ class CandidateConsumerTests(unittest.TestCase):
                                        observation_command=mock.Mock(return_value=response))
         args = SimpleNamespace(target=owner.target)
         with mock.patch.object(R, 'original_release_readback_data', side_effect=AssertionError('legacy route entered')):
-            self.assertIsNone(owner.prepare_readback({}, b'inert'))
+            originals, row, stage = mounted_fixture(owner.target)
+            result, inventory = R.mounted_data(originals, row, owner.target, stage, candidate=True)
+            self.assertIsNone(owner.prepare_readback(result, inventory))
             self.assertIs(owner.observe_installation(args, None), response)
         owner.stager.observation_command.assert_called_once_with(args)
         for action, generations in (('same-package-noop', [{}]), ('update', [{}]), ('fresh-install', [{}, {}])):
@@ -235,7 +304,7 @@ class CandidateConsumerTests(unittest.TestCase):
             fresh_directory=mock.Mock(side_effect=AssertionError('input published before guard')),
             clock=SimpleNamespace(finality=False))
         owner.purpose = 'acquire'
-        owner.prepare_readback = lambda result, inventory: C.CandidateResume.prepare_readback(owner, result, inventory)
+        owner.prepare_readback = mock.Mock(side_effect=lambda result, inventory: C.CandidateResume.prepare_readback(owner, result, inventory))
         with ExitStack() as patches:
             patches.enter_context(mock.patch.object(R.os, 'fstat', return_value=info))
             patches.enter_context(mock.patch.object(R.os, 'stat', return_value=info))
@@ -250,7 +319,21 @@ class CandidateConsumerTests(unittest.TestCase):
             calls.clear(); mounted.finish.return_value=False
             with self.assertRaisesRegex(ValueError, 'resume-mounted-close-unknown'):
                 R.Resume.install_image(owner,image,{})
-        self.assertEqual(calls, ['attach', 'producer-key', 'producer-signature'])
+            mounted.finish.return_value = True
+            for fault in ('signature', 'mounted-post'):
+                calls.clear(); owner.prepare_readback.reset_mock()
+                def refused_command(role, argv, timeout):
+                    observed = command(role, argv, timeout)
+                    if fault == 'signature' and role == 'producer-signature': observed.returncode = 1
+                    return observed
+                def checked():
+                    if fault == 'mounted-post' and calls and calls[-1] == 'producer-signature':
+                        raise RuntimeError('original mounted signature POST')
+                owner.command = refused_command; mounted.check = checked
+                with self.assertRaises((ValueError, RuntimeError)):
+                    R.Resume.install_image(owner, image, {})
+                owner.prepare_readback.assert_not_called()
+        self.assertEqual(calls, ['attach', 'producer-key', 'producer-signature', 'detach'])
         self.assertFalse(owner.installer_entered)
         owner.fresh_directory.assert_not_called()
 

@@ -46,6 +46,71 @@ HELPER_SOURCE_INPUTS = tuple(path for path in resume.SOURCE_FILES if path not in
                            (STAGER_PATH, 'desktop/tools/macos_public_verification_evidence.py'))
 
 
+PREDECESSOR_METADATA_LIMIT = 16 << 10
+
+
+def predecessor_metadata_data(value, nomination):
+    """Closed public DATA only; actual owner finality, not this parser, permits export."""
+    selected = candidate.candidate_selection_data(nomination)
+    keys = {'schemaVersion', 'scope', 'nomination', 'members', 'package', 'descriptor', 'signature',
+            'inventory', 'release', 'inventoryFiles', 'inventoryPayloadBytes',
+            'nativeQualificationInferred', 'updateActivated'}
+    resume.need(type(value) is dict and set(value) == keys
+        and type(value['schemaVersion']) is int and value['schemaVersion'] == 1
+        and value['scope'] == 'candidate-public-predecessor-metadata-v1'
+        and candidate.candidate_selection_data(value['nomination']) == selected
+        and value['nativeQualificationInferred'] is False and value['updateActivated'] is False,
+        'candidate-predecessor-metadata-shape')
+    def member(row, name, cap):
+        resume.need(type(row) is dict and set(row) == {'name', 'bytes', 'sha256'}
+            and row['name'] == name and type(row['bytes']) is int and 0 < row['bytes'] <= cap
+            and digest(row['sha256'], 64), 'candidate-predecessor-member')
+    def digest(value, length):
+        return type(value) is str and len(value) == length and re.fullmatch(r'[0-9a-f]+', value) is not None and value != '0'*length
+    members = value['members']
+    resume.need(type(members) is list and len(members) == len(resume.CANDIDATE_MEMBERS), 'candidate-predecessor-members')
+    for row, name in zip(members, sorted(resume.CANDIDATE_MEMBERS)):
+        member(row, name, resume.CANDIDATE_MEMBERS[name])
+    resume.need(sum(row['bytes'] for row in members) <= resume.LIMIT, 'candidate-predecessor-members')
+    for key, name, cap in (('package', 'Install.pkg', resume.LIMIT), ('descriptor', 'producer.json', 16384),
+            ('signature', 'producer.sig', 512), ('inventory', 'install-inventory.json', 12 << 20)):
+        member(value[key], name, cap)
+    release = value['release']
+    resume.need(type(release) is dict and set(release) == {'profile', 'packageIdentifier', 'bundleIdentifier',
+        'packageVersion', 'release', 'sourceCommit', 'protocolSha256', 'runtimeManifestSha256',
+        'inventorySha256', 'signingPolicySha256', 'packageSha256'}, 'candidate-predecessor-release')
+    architecture = 'arm64' if selected['target'] == 'aarch64-apple-darwin' else 'x86_64'
+    version, label = release['packageVersion'], release['release']
+    resume.need(type(version) is str and len(version) <= 32
+        and re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', version) is not None
+        and all(int(part) <= 0xffffffff for part in version.split('.'))
+        and type(label) is str and len(label) <= 128 and label.startswith('macos26-'+architecture+'-')
+        and len(label) > len('macos26-'+architecture+'-') and re.fullmatch(r'[a-z0-9_.-]*[a-z0-9]', label) is not None
+        and release['profile'] == 'fixed-macos26-'+architecture+'-maintenance-v2'
+        and release['packageIdentifier'] == 'dev.mobile-release-kit.desktop.installed'
+        and release['bundleIdentifier'] == 'dev.mobile-release-kit.desktop'
+        and release['sourceCommit'] == selected['source']
+        and all(digest(release[key], 64) for key in ('protocolSha256', 'runtimeManifestSha256',
+            'inventorySha256', 'signingPolicySha256', 'packageSha256'))
+        and release['packageSha256'] == value['package']['sha256']
+        and release['inventorySha256'] == value['inventory']['sha256'], 'candidate-predecessor-release')
+    resume.need(type(value['inventoryFiles']) is int and 0 < value['inventoryFiles'] <= 16384
+        and type(value['inventoryPayloadBytes']) is int and 0 <= value['inventoryPayloadBytes'] <= resume.LIMIT,
+        'candidate-predecessor-inventory-counts')
+    resume.need(len(resume.canonical(value)) <= PREDECESSOR_METADATA_LIMIT, 'candidate-predecessor-metadata-bound')
+    return value
+
+
+def predecessor_metadata_projection(result, nomination):
+    # Called only after the existing native producer-signature and mounted POST.
+    # Do not retain inventoryDocument, raw signed bodies or signing-policy data.
+    value = {key: result[key] for key in ('members', 'package', 'descriptor', 'signature', 'inventory',
+                                         'release', 'inventoryFiles', 'inventoryPayloadBytes')}
+    value.update(schemaVersion=1, scope='candidate-public-predecessor-metadata-v1',
+        nomination=dict(nomination), nativeQualificationInferred=False, updateActivated=False)
+    return resume.canonical(predecessor_metadata_data(value, nomination))
+
+
 def selection_data(body, target):
     value = resume.decode(body)
     resume.need(type(value) is dict and set(value) == {'schemaVersion', 'targets'}
@@ -185,6 +250,7 @@ class CandidateResume(resume.Resume):
         self.__purpose = purpose
         self.baseline = self.baseline_entry = self.baseline_receipt = self.fixture_api = None
         self.acquisition_result = None
+        self.__predecessor_metadata = None
         self.__nomination = None if nomination is None else MappingProxyType(candidate.candidate_selection_data(nomination))
         self.__binding = None
         self.candidate_root = candidate_root
@@ -458,6 +524,9 @@ class CandidateResume(resume.Resume):
             resume.need(all(result[key] == expected[key] for key in ('package','descriptor','signature','inventory'))
                         and result['release']['runtimeManifestSha256'] == expected['runtimeManifestSha256'],
                         'candidate-baseline-product')
+        if self.purpose == 'install':
+            resume.need(self.__predecessor_metadata is None, 'candidate-predecessor-metadata-once')
+            self.__predecessor_metadata = predecessor_metadata_projection(result, self.nomination)
         # Do not manufacture legacy P0/ce644 release evidence.
         return None
 
@@ -552,6 +621,11 @@ class CandidateResume(resume.Resume):
                     'originalMountDetached': True, 'originalClosesKnown': True,
                     'workloadsKnownSettled': True, 'privateOutputsRetired': True,
                     'productReady': False, 'uiQualified': False, 'p0Qualified': False}
+            if self.purpose == 'install':
+                resume.need(type(self.__predecessor_metadata) is bytes, 'candidate-predecessor-metadata-missing')
+                result['predecessorMetadata'] = predecessor_metadata_data(resume.decode(self.__predecessor_metadata), self.nomination)
+                resume.need(len(resume.canonical(result)) <= PREDECESSOR_METADATA_LIMIT, 'candidate-predecessor-receipt-bound')
+                self.clock.check()
             if self.purpose == 'restore-install':
                 result['scope'] = 'candidate-baseline-fresh-installer-observation'
                 result['privateOutputsRetired'] = False  # Prior original handoffs remain for the chain.

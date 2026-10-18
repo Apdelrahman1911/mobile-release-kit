@@ -25,6 +25,17 @@ def fixture(target=R.TARGETS[0]):
         producerJobId='19', helperSource='d'*40, helperTree='e'*40, consumerRunId='31', consumerRunAttempt='1',
         originalInstallerReturnedZero=True, sameRequestReadback=True, originalMountDetached=True, originalClosesKnown=True,
         workloadsKnownSettled=True, privateOutputsRetired=True, productReady=False, uiQualified=False, p0Qualified=False)
+    architecture = 'arm64' if target == N.ARM_TARGET else 'x86_64'
+    def member(name, digest, size=7): return dict(name=name, bytes=size, sha256=digest*64)
+    install['predecessorMetadata'] = dict(schemaVersion=1, scope='candidate-public-predecessor-metadata-v1',
+        nomination=dict(selected), members=[member(name, '1') for name in sorted(R.CANDIDATE_MEMBERS)],
+        package=member('Install.pkg', '2'), descriptor=member('producer.json', '3'), signature=member('producer.sig', '4'),
+        inventory=member('install-inventory.json', '5'), inventoryFiles=1, inventoryPayloadBytes=7,
+        release=dict(profile='fixed-macos26-'+architecture+'-maintenance-v2',
+            packageIdentifier='dev.mobile-release-kit.desktop.installed', bundleIdentifier='dev.mobile-release-kit.desktop',
+            packageVersion='0.1.9', release='macos26-'+architecture+'-fixture', sourceCommit=selected['source'],
+            protocolSha256='6'*64, runtimeManifestSha256='7'*64, inventorySha256='5'*64,
+            signingPolicySha256='8'*64, packageSha256='2'*64), nativeQualificationInferred=False, updateActivated=False)
     return selected, context, install
 
 
@@ -154,6 +165,13 @@ class CandidateUITests(unittest.TestCase):
                 changed=dict(value);changed[key]=bad
                 with self.subTest(target=target,key=key),self.assertRaises(R.Refused):U.install_admission_data(changed,selected,context)
             with self.assertRaises(R.Refused):U.install_admission_data(dict(value,fixedCarrierResumeScope='fixed-ce644'),selected,context)
+            for change in (lambda v: v.pop('predecessorMetadata'),
+                    lambda v: v['predecessorMetadata']['nomination'].update(artifactId='99'),
+                    lambda v: v['predecessorMetadata']['release'].update(inventorySha256='f'*64),
+                    lambda v: v['predecessorMetadata'].update(updateActivated=True),
+                    lambda v: v['predecessorMetadata'].update(signingPolicy={'secret': 'not public output'})):
+                changed=deepcopy(value); change(changed)
+                with self.assertRaises(R.Refused):U.install_admission_data(changed,selected,context)
 
     def test_only_existing_same_source_phases_targets_and_clean_environment(self):
         for target in (N.ARM_TARGET,N.INTEL_TARGET):

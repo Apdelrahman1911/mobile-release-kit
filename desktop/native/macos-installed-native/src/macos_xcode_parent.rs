@@ -4124,9 +4124,12 @@ mod native {
         fn selected_system_xcode_initial_census_is_read_only_and_reports_first_failure() {
             assert_eq!(unsafe { libc::getuid() }, 0);
             assert_eq!(unsafe { libc::geteuid() }, 0);
+            // Full source census measured ~568s on ARM; Intel reached the old
+            // 600s probe limit. This read-only test has its own original budget,
+            // not a changed shipping setup deadline or per-node renewal.
             let start = Instant::now();
-            let finish = start + Duration::from_secs(630);
-            let work = copy::Work { end: start + Duration::from_secs(600),
+            let finish = start + Duration::from_secs(930);
+            let work = copy::Work { end: start + Duration::from_secs(900),
                 parent: unsafe { libc::getppid() } };
             let mut files = crate::macos_xcode_tree::CopierFiles::new(finish, 1).unwrap();
             let mut root: Option<libc::c_int> = None;
@@ -4165,7 +4168,7 @@ mod native {
                 (census.quote.entries(), census.quote.logical_bytes())
             }));
             // Earliest source/copy error survives final cleanup. The root uses
-            // the SAME effective F; not another 630-second cleanup allowance.
+            // the SAME effective F; not a renewed cleanup allowance.
             if observed.is_err() { files.note_failure(); }
             let children_closed = files.close_all();
             let cutoff = files.first_failure()
