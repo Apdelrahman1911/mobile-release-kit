@@ -16519,7 +16519,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let budget=RemovalRecoveryProgramVerifier::project_owned_upper_bound()
                     .and_then(|n|n.checked_add(RemovalProducerVerifier::project_owned_upper_bound()?))
                     .and_then(|n|n.checked_add(REMOVAL_RESUME_RAW+512*1024+std::mem::size_of::<Self>()))
-                    .filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-fixture-own-budget")?;
+                    .filter(|n|*n<=installation_record::CONTROL_LIMIT).ok_or("removal-fixture-own-budget")?;
                 book.removal_control_reserved=budget as u64;
                 // Existing Input/open/owned-root rules are unchanged. Neither
                 // the phase literals nor mounted target P grant code authority.

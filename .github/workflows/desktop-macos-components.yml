@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
+        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
       architecture:
         description: Architecture for Store, iOS tools, package probe and Xcode files; other components use both
         type: choice
@@ -203,8 +203,8 @@ jobs:
         run: rm -rf -- "$WORK_ROOT"
 
   installer-check:
-    name: ${{ inputs.component == 'xcode-setup-files' && 'Test native Xcode copy and retirement on private files' || inputs.component == 'xcode-setup-compile' && 'Typecheck inert Xcode setup and Installer diagnostic' || inputs.component == 'installer-restore-chain' && 'Test Restore chain observer' || inputs.component == 'installer-restore-fixtures' && 'Check Restore fixtures' || inputs.component == 'installer-tests' && 'Test installer contracts' || inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
-    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-tests' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames' || inputs.component == 'installer-restore-fixtures' || inputs.component == 'installer-restore-chain' || inputs.component == 'xcode-setup-compile' || (github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files')
+    name: ${{ inputs.component == 'xcode-setup-files' && 'Test native Xcode copy and retirement on private files' || inputs.component == 'xcode-setup-compile' && 'Typecheck inert Xcode setup and Installer diagnostic' || inputs.component == 'installer-restore-chain' && 'Test Restore chain observer' || inputs.component == 'installer-removal-fixtures' && 'Check removal fixture roles' || inputs.component == 'installer-restore-fixtures' && 'Check Restore fixtures' || inputs.component == 'installer-tests' && 'Test installer contracts' || inputs.component == 'installer-frames' && 'Test installer frames' || inputs.component == 'installer-recovery' && 'Test installer recovery' || 'Check installer and remover' }} (${{ matrix.arch }})
+    if: github.event_name != 'workflow_dispatch' || inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'installer' || inputs.component == 'installer-tests' || inputs.component == 'installer-recovery' || inputs.component == 'installer-frames' || inputs.component == 'installer-removal-fixtures' || inputs.component == 'installer-restore-fixtures' || inputs.component == 'installer-restore-chain' || inputs.component == 'xcode-setup-compile' || (github.event_name == 'workflow_dispatch' && inputs.component == 'xcode-setup-files')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -331,6 +331,15 @@ jobs:
               ios_toolchain::tests::managed_developer_is_exact_without_relaxing_legacy_selection \
               --exact --test-threads=1 | tee "$WORK_ROOT/managed-selection-tests.log"
             grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/managed-selection-tests.log"
+            exit 0
+          fi
+          if [[ "$INSTALLER_CHECKS" == installer-removal-fixtures ]]; then
+            # Distinct nonshipping graphs; never execute either privileged entry.
+            # One task-owned target reuses unchanged dependencies across checks.
+            for role in abrupt-fixture observer; do
+              rustup run 1.98.1 cargo check --locked --no-default-features \
+                --features "macos-installed-removal-$role" --bin mrk-macos-remove
+            done
             exit 0
           fi
           if [[ "$INSTALLER_CHECKS" == installer-restore-chain ]]; then
