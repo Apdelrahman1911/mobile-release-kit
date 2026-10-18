@@ -1032,16 +1032,63 @@ def mount_identity(info):
     return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
 
 
+def candidate_mount_path(op, role):
+    # Caller-selected fixture role, never a supplied path or mount collision retry.
+    need(getattr(op, "candidate_restore_context", None) is not None
+         and ((op.phase == "candidate-baseline" and role == "app-absence-baseline-attach")
+              or (op.phase == RESTORE and role == "app-absence-restore-attach")),
+         "candidate-fixture-mount-role")
+    binding = binding_data(op.app_absence["binding"])
+    need(binding["target"] == op.target
+         and (binding["runId"], binding["runAttempt"]) ==
+             (op.environment.get("GITHUB_RUN_ID"), op.environment.get("GITHUB_RUN_ATTEMPT")),
+         "candidate-fixture-mount-binding")
+    context = "\n".join((binding["runId"], binding["runAttempt"], op.target, role))
+    return Path("/Volumes") / ("MRK-AppAbsence-" + digest(context.encode("ascii"))[:32])
+
+
+def mounted_path(op):
+    if getattr(op, "candidate_restore_context", None) is None:
+        return op.work / "app-absence-mount"
+    state = op.app_absence["mount"]
+    need(state is not None and state.get("protected") is True
+         and state["path"] == candidate_mount_path(op, state["role"]),
+         "candidate-fixture-mount-path")
+    return state["path"]
+
+
+def candidate_mount_post(op):
+    state = op.app_absence["mount"]
+    path = mounted_path(op)
+    need(state["known"] and not state["detached"], "candidate-fixture-mount-original")
+    op.removal_directory_post(state["entry"])
+    for entry in (state["slash"], state["parent"]):
+        op.removal_directory_post(entry)
+        need(not entry["removal_facts"][2]["flags"] & 0x400000, "candidate-fixture-mount-automounted")
+    facts = state["entry"]["removal_facts"]
+    need(not facts[2]["flags"] & 0x400000
+         and facts[0][0] != state["parent"]["removal_facts"][0][0]
+         and facts[2]["mountOn"] == str(path) and facts[2]["mountFrom"] == state["device"],
+         "candidate-fixture-mount-device")
+    wanted = dict(state["parentRoster"])
+    wanted[state["name"]] = (state["entry"]["identity"][0], state["entry"]["identity"][1], stat.S_IFDIR)
+    need(op.removal_roster(state["parent"]) == wanted, "candidate-fixture-mount-namespace")
+
+
 def mounted_post(op):
     state = op.app_absence["mount"]
     if state is None or not state["known"] or state["detached"]:
         return
     entry = state["entry"]; api = op.app_absence_api
+    protected = getattr(op, "candidate_restore_context", None) is not None
+    if protected:
+        candidate_mount_post(op)
+    parent = state["parent"] if protected else op.work_entry
     need(entry["fd"] is not None and not entry["closed"]
          and mount_identity(os.fstat(entry["fd"])) == entry["identity"]
-         == mount_identity(os.stat(state["name"], dir_fd=op.work_entry["fd"], follow_symlinks=False))
+         == mount_identity(os.stat(state["name"], dir_fd=parent["fd"], follow_symlinks=False))
          and os.fstatvfs(entry["fd"]).f_flag & os.ST_RDONLY
-         and entry["identity"][0] != op.work_entry["identity"][0]
+         and entry["identity"][0] != (parent["removal_facts"][0][0] if protected else parent["identity"][0])
          and set(os.listdir(entry["fd"])) == set(carrier_names(op)), "app-absence-readonly-mount-post")
     for leaf in state["files"]:
         identity = leaf["identity"]
@@ -1060,17 +1107,42 @@ def mounted_post(op):
 
 def attach(op, role, rows):
     need(role in ("app-absence-baseline-attach", "app-absence-restore-attach"), "app-absence-attach-role")
-    name = "app-absence-mount"
-    placeholder = op.package_directory(name)
-    state = {"name": name, "placeholder": placeholder, "entered": False, "known": False, "detached": False,
+    protected = getattr(op, "candidate_restore_context", None) is not None
+    path = candidate_mount_path(op, role) if protected else op.work / "app-absence-mount"
+    name = path.name
+    state = {"name": name, "path": path, "role": role, "protected": protected,
+             "entered": False, "known": False, "detached": False,
              "entry": None, "device": None, "files": []}
-    op.app_absence["mount"] = state
+    op.app_absence["mount"] = state  # Retain custody even if acquisition refuses.
+    if protected:
+        need(op.removal_host_module is not None and op.removal_api is not None,
+             "candidate-fixture-mount-host")
+        # Quote BOTH system originals before either acquisition. The existing
+        # register/native/capture limits still count them throughout this phase.
+        op.removal_reserve(2)
+        state["slash"] = op.removal_open_directory(None, "/", "fixture-transport-root", protected=True, system_ancestor=True)
+        state["parent"] = op.removal_open_directory(state["slash"], "Volumes", "fixture-transport-volumes", protected=True, system_ancestor=True)
+        for entry in (state["slash"], state["parent"]):
+            need(not entry["removal_facts"][2]["flags"] & 0x400000, "candidate-fixture-mount-automounted")
+        op.removal_absent(state["parent"], name)
+        state["parentRoster"] = op.removal_roster(state["parent"])
+        parent = state["parent"]
+    else:
+        state["placeholder"] = op.package_directory(name)
+        parent = op.work_entry
     result = call(op, role, ["/usr/bin/hdiutil", "attach", str(op.work / "app-absence-fixture.dmg"), "-readonly", "-nobrowse",
-                  "-noautoopen", "-mountpoint", str(op.work / name), "-plist"], maximum=60)
-    state["device"] = op.stager.distribution_mount_data(result.stdout, result.stderr, result.returncode, op.work / name)
-    fd = os.open(name, op.app_absence_api.READ_FLAGS | os.O_DIRECTORY, dir_fd=op.work_entry["fd"])
-    entry = op.register(fd, "app-absence-mount", "app-absence-mount", op.work_entry["fd"], name)
-    entry["identity"] = mount_identity(os.fstat(fd)); state["entry"] = entry
+                  "-noautoopen", "-mountpoint", str(path), "-plist"], maximum=60)
+    state["device"] = op.stager.distribution_mount_data(result.stdout, result.stderr, result.returncode, path)
+    if protected:
+        entry = op.removal_open_directory(parent, name, "fixture-transport-mount", readonly=True)
+        state["entry"] = entry
+        entry["identity"] = mount_identity(os.fstat(entry["fd"]))
+        op.removal_own_parent_post(parent, state["parentRoster"], name, present=True)
+        fd = entry["fd"]
+    else:
+        fd = os.open(name, op.app_absence_api.READ_FLAGS | os.O_DIRECTORY, dir_fd=parent["fd"])
+        entry = op.register(fd, "app-absence-mount", "app-absence-mount", parent["fd"], name)
+        entry["identity"] = mount_identity(os.fstat(fd)); state["entry"] = entry
     state["known"] = True
     need(set(rows) == set(carrier_names(op)) and set(os.listdir(fd)) == set(carrier_names(op)), "app-absence-mount-roster")
     for name in carrier_names(op):
@@ -1095,11 +1167,22 @@ def detach(op, role):
     state["closing"] = True
     result = op.package_call(role, ["/usr/bin/hdiutil", "detach", state["device"]], timeout=30)
     need(result.returncode == 0, "app-absence-detach-original")
-    state["detached"] = True
-    op.recheck_directory(state["placeholder"])
-    need(not os.listdir(state["placeholder"]["fd"]), "app-absence-mount-placeholder")
-    op.close(state["placeholder"]); need(state["placeholder"]["closed"], "app-absence-placeholder-close")
-    os.rmdir(state["name"], dir_fd=op.work_entry["fd"])
+    if getattr(op, "candidate_restore_context", None) is not None:
+        before = dict(state["parentRoster"])
+        before[state["name"]] = (state["entry"]["identity"][0], state["entry"]["identity"][1], stat.S_IFDIR)
+        op.removal_own_parent_post(state["parent"], before, state["name"], present=False)
+        op.removal_absent(state["parent"], state["name"])
+        for entry in (state["parent"], state["slash"]):
+            op.removal_directory_post(entry)
+            op.close(entry); need(entry["closed"], "candidate-fixture-mount-parent-close")
+        # hdiutil owns removal of its mountpoint. Never rmdir a discovered name.
+        state["detached"] = True
+    else:
+        state["detached"] = True
+        op.recheck_directory(state["placeholder"])
+        need(not os.listdir(state["placeholder"]["fd"]), "app-absence-mount-placeholder")
+        op.close(state["placeholder"]); need(state["placeholder"]["closed"], "app-absence-placeholder-close")
+        os.rmdir(state["name"], dir_fd=op.work_entry["fd"])
     post(op)
 
 
@@ -1389,7 +1472,7 @@ def root_call(op, phase):
     role = "app-absence-" + phase
     reserve(op)
     result = call(op, role, ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg",
-        str(op.work / "app-absence-mount" / PHASE_NAMES[index]), "-target", "/", "-dumplog", "-verboseR"], maximum=123, limit=256*1024)
+        str(mounted_path(op) / PHASE_NAMES[index]), "-target", "/", "-dumplog", "-verboseR"], maximum=123, limit=256*1024)
     return phase_observation(op, result, phase)
 
 
@@ -1474,9 +1557,9 @@ def restore_from_initial(op, previous, body, *, initial_status=None):
     args = SimpleNamespace(target=op.target, fixture=False, input=op.work / "input", expected_source=op.image_source,
         expected_inventory=op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"], expected_manifest=op.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
         request_id=initial["requestId"], expected_package=previous["binding"]["packageSha256"],
-        producer_descriptor=op.work / "app-absence-mount/producer.json", producer_signature=op.work / "app-absence-mount/producer.sig",
+        producer_descriptor=mounted_path(op) / "producer.json", producer_signature=mounted_path(op) / "producer.sig",
         installer_status=initial_status if initial_status is not None else op.work / "installer-output.status",
-        package=op.work / "app-absence-mount/Install.pkg")
+        package=mounted_path(op) / "Install.pkg")
     observed = io(op, "initial-readback", op.stager.observation_command, args)
     initial_readback(op, observed)
     need(op.app_absence["initial"] == initial, "app-absence-initial-state-post")
@@ -1535,7 +1618,7 @@ def recovery_restore(op, args, previous, baseline_body, image_sha, withdraw):
         # Same bounded original owner, actual return1, then the fixed readonly
         # observer MUST prove this exact durable cut before another write.
         call(op, "app-absence-cut-" + cut, ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg",
-            str(op.work / "app-absence-mount" / package), "-target", "/", "-dumplog", "-verboseR"], maximum=123, limit=256*1024)
+            str(mounted_path(op) / package), "-target", "/", "-dumplog", "-verboseR"], maximum=123, limit=256*1024)
         observations.append(root_call(op, RECOVERY_PHASES[index]))
     call(op, "app-absence-install", ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg", str(args.package),
         "-target", "/", "-dumplog", "-verboseR"], maximum=123, limit=256*1024)

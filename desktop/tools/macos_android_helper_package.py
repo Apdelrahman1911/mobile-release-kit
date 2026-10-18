@@ -3005,7 +3005,7 @@ class Operation:
     def app_absence_load(self):
         # One fixed current SOURCE leaf, held before loading any definitions.
         # Not a plug-in resolver or a new process owner.
-        entry = self.source_original("desktop/tools/macos_app_absence_fixture.py", "source-app-absence-adapter", 96 * 1024)
+        entry = self.source_original("desktop/tools/macos_app_absence_fixture.py", "source-app-absence-adapter", 112 * 1024)
         body = self.read(entry)
         path = self.checkout / "desktop/tools/macos_app_absence_fixture.py"
         spec = importlib.util.spec_from_file_location("mrk_app_absence_adapter", path)
@@ -10493,7 +10493,7 @@ def candidate_fixture_phase(consumer, context, purpose, started, bootstrap):
     # These two tiny SOURCE bootstrap reads have already consumed their only
     # originals before creating Operation. Each is retained and compared below.
     fixture_path = consumer.HELPER_ROOT / consumer.FIXTURE_PATH
-    fixture_id, fixture_body = r.host_read(fixture_path, 96 << 10)
+    fixture_id, fixture_body = r.host_read(fixture_path, 112 << 10)
     f = r.load_module("_mrk_candidate_phase_fixture", fixture_path, fixture_body)
     need(phase in (f.PREPARE, "candidate-baseline", f.RESTORE), "candidate-fixture-phase")
     hard = 3240 if phase == f.PREPARE else 720
@@ -10590,7 +10590,14 @@ def candidate_fixture_phase(consumer, context, purpose, started, bootstrap):
         op.release_entry = originals[(False,op.release_input)]
         op.candidate_fixture_source_original = originals[(False,"desktop/src-tauri/src/macos_app_absence_fixture.rs")]
         host = module("macos_xcode_host_preparation.py", "_mrk_candidate_fixture_host")
-        host.DarwinAPI(phase_clock,target=op.target).waitable_sigchld()
+        host_api = host.DarwinAPI(phase_clock,target=op.target)
+        host_api.waitable_sigchld()
+        # The fixture mount uses the SAME already SOURCE-bound observer and
+        # original phase clock. Its mount authority never aliases normal Install.
+        if phase != f.PREPARE:
+            need(op.removal_host_module is None and op.removal_api is None,
+                 "candidate-fixture-mount-host-once")
+            op.removal_host_module, op.removal_api = host, host_api
         host_root=work/"host-python"
         def directory(path):
             entry=op.descend(op.work_entry,Path(path).relative_to(work).parts)

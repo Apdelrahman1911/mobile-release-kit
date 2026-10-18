@@ -789,17 +789,28 @@ class RestoreChainFixtureData(unittest.TestCase):
     def test_whole_fixed_chain_requires_each_observer_and_preserves_ambiguous_failure(self):
         # Actual adapter order/dispatch/return/proof/finish functions. Only the
         # existing native call and readonly final filesystem POST are inert.
-        for fault in (None, 'unknown-cut', 'bad-proof', 'cut-zero', 'cut-two'):
+        for fault in (None, 'current-candidate', 'unknown-cut', 'bad-proof', 'cut-zero', 'cut-two'):
             with self.subTest(fault=fault), patch.object(FIXTURE.time, 'monotonic_ns', return_value=NOW):
                 op, template = phase_value('verify')
                 op.phase = FIXTURE.RESTORE; op.environment['GITHUB_REF'] = FIXTURE.RECOVERY_REF
                 op.work = Path('/owned/work'); op.app_absence['complete'] = False
+                expected_mount = op.work/'app-absence-mount'
+                if fault == 'current-candidate':
+                    op.candidate_restore_context = {}; op.target = FIXTURE.TARGETS[1]
+                    op.environment.update(GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1')
+                    op.app_absence['binding'] = dict(fixtureSource='1'*40,productSource='1'*40,
+                        runId='123',runAttempt='1',target=op.target)
+                    expected_mount = FIXTURE.candidate_mount_path(op,'app-absence-restore-attach')
+                    op.app_absence['mount'] = dict(protected=True,path=expected_mount,role='app-absence-restore-attach',
+                        entered=True,detached=False)
+                fails = fault not in (None, 'current-candidate')
                 op.app_absence['preparationSha256'] = '6'*64; op.receipt = {}
                 op.calls = [call_row('app-absence-restore-attach'), call_row('app-absence-withdraw')]
                 events = []
                 def native(role, argv, **kwargs):
                     FIXTURE.dispatch(op, role); events.append(role)
                     self.assertEqual(argv[:5], ['/usr/bin/sudo','-n','--','/usr/sbin/installer','-pkg'])
+                    self.assertEqual(Path(argv[5]).parent, expected_mount)
                     if role == 'app-absence-cut-app-write' and fault == 'unknown-cut':
                         raise RuntimeError('inert unresolved native original')
                     cut = role in ['app-absence-cut-'+c for c in FIXTURE.CUTS]
@@ -825,15 +836,16 @@ class RestoreChainFixtureData(unittest.TestCase):
                 previous = {'binding': op.app_absence['nativeBinding'], 'baselineSha256':'3'*64, 'baselineOriginal':{'held':True}}
                 def detached(_op, role):
                     FIXTURE.dispatch(_op, role); events.append(role); _op.calls.append(call_row(role)); FIXTURE.returned(_op, role)
+                    if _op.app_absence['mount'] is not None: _op.app_absence['mount']['detached'] = True
                 with patch.object(FIXTURE, 'reserve'), patch.object(FIXTURE, 'post'), \
                      patch.object(FIXTURE, 'baseline_read', return_value={'held':True}), patch.object(FIXTURE, 'detach', side_effect=detached):
-                    if fault:
+                    if fails:
                         with self.assertRaises((ValueError, RuntimeError)):
-                            FIXTURE.recovery_restore(op, SimpleNamespace(package=op.work/'Install.pkg'), previous, b'baseline', '7'*64, {})
+                            FIXTURE.recovery_restore(op, SimpleNamespace(package=expected_mount/'Install.pkg'), previous, b'baseline', '7'*64, {})
                         self.assertFalse(op.app_absence['complete']); self.assertFalse(FIXTURE.finish_ready(op))
                         self.assertNotIn('app-absence-cut-own-attempt', events)
                     else:
-                        FIXTURE.recovery_restore(op, SimpleNamespace(package=op.work/'Install.pkg'), previous, b'baseline', '7'*64, {})
+                        FIXTURE.recovery_restore(op, SimpleNamespace(package=expected_mount/'Install.pkg'), previous, b'baseline', '7'*64, {})
                         self.assertEqual(tuple(e['role'] for e in op.calls), FIXTURE.roles(op))
                         self.assertTrue(FIXTURE.finish_ready(op)); self.assertTrue(op.receipt['restoreChain']['nativeRecoveredReadback'])
                         self.assertFalse(op.receipt['restoreChain']['nonrootExportCensusClaimed'])
@@ -844,6 +856,130 @@ class RestoreChainFixtureData(unittest.TestCase):
                 (FIXTURE.RECOVERY_REF,FIXTURE.RESTORE,'app-absence-cut-app-write',True)):
             op = inert_operation(phase); op.environment['GITHUB_REF'] = ref
             self.assertFalse(FIXTURE.cut_return_data(op,role,code))
+
+    def test_candidate_fixture_mount_binds_protected_parent_and_actual_root_argv(self):
+        # Real original FDs, namespace mutation, roster/POST and consuming closes.
+        # Only macOS metadata/API and the existing native command are inert ports;
+        # no mount, Installer, sudo or signing executes on this host.
+        for fault in (None, "root-owner", "group-write", "collision", "unknown-attach",
+                      "wrong-device", "post-name", "native-one", "detach-one", "detach-post"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="mrk-fixture-mount-") as temporary:
+                root = Path(temporary); system = root / "system"; system.mkdir(mode=0o755)
+                volumes = system / "Volumes"; volumes.mkdir(mode=0o755)
+                work = root / "work"; work.mkdir(mode=0o700)
+                environment = dict(GITHUB_SHA="a"*40, GITHUB_WORKFLOW_SHA="a"*40,
+                    GITHUB_WORKFLOW_REF="inert", GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1",
+                    MRK_MACOS_PACKAGE_ROLE="ordinary-image")
+                op = HELPER.Operation(SimpleNamespace(), root, work, "candidate-baseline", environment, None)
+                op.app_absence, op.app_absence_api = state(), HELPER
+                op.app_absence["binding"] = dict(fixtureSource="b"*40, productSource="b"*40,
+                    runId="123", runAttempt="1", target=op.target)
+                op.candidate_restore_context = {"helperSource":"a"*40}
+                op.package_clock = lambda: NOW
+                op.package_settled = lambda: True
+                role = "app-absence-baseline-attach"
+                expected = FIXTURE.candidate_mount_path(op, role)
+                self.assertEqual(expected.parent, Path("/Volumes"))
+                self.assertEqual(len(expected.name), len("MRK-AppAbsence-") + 32)
+                for bad_role in ("distribution-attach", "app-absence-restore-attach"):
+                    with self.assertRaisesRegex(ValueError,"candidate-fixture-mount-role"):
+                        FIXTURE.candidate_mount_path(op,bad_role)
+                op.environment["GITHUB_RUN_ATTEMPT"] = "2"
+                with self.assertRaisesRegex(ValueError,"candidate-fixture-mount-binding"):
+                    FIXTURE.candidate_mount_path(op,role)
+                op.environment["GITHUB_RUN_ATTEMPT"] = "1"
+                own = volumes / expected.name
+                sentinel = object(); op.transport_mount = sentinel
+                original_open, original_stat, original_lstat, original_fstat = os.open, os.stat, os.lstat, os.fstat
+                def path_for_fd(fd): return Path(os.readlink("/proc/self/fd/" + str(fd)))
+                def metadata(info, path):
+                    # Exact public Darwin-only scalar port. All identities,
+                    # bytes, mode mutation and links otherwise come from real FDs.
+                    fields = {name:getattr(info,name) for name in dir(info) if name.startswith("st_")}
+                    mounted = path == own or own in path.parents
+                    fields.update(st_uid=501 if fault == "root-owner" and path == volumes else 0,
+                        st_gid=80 if path == volumes else 0, st_dev=72 if mounted else 71,
+                        st_flags=1048576 if path == system else 0)
+                    if fault == "group-write" and path == volumes: fields["st_mode"] |= 0o020
+                    return SimpleNamespace(**fields)
+                def opened(path, flags, *args, **kwargs):
+                    return original_open(system if path == "/" else path, flags, *args, **kwargs)
+                def stated(path, *args, **kwargs):
+                    full = path_for_fd(kwargs["dir_fd"]) / path if kwargs.get("dir_fd") is not None else Path(path)
+                    return metadata(original_stat(path, *args, **kwargs), full)
+                def fstated(fd): return metadata(original_fstat(fd), path_for_fd(fd))
+                def lstated(path, *args, **kwargs):
+                    actual = system if path == "/" else Path(path)
+                    return metadata(original_lstat(actual, *args, **kwargs), actual)
+                def filesystem(fd):
+                    mounted = path_for_fd(fd) == own
+                    return dict(typeName="hfs" if mounted else "apfs", flags=0x1001 if mounted else 0x1000,
+                        mountOn=str(expected) if mounted else str(path_for_fd(fd)),
+                        mountFrom="/dev/wrong" if mounted and fault == "wrong-device" else "/dev/disk-test" if mounted else "/dev/system")
+                op.removal_api = SimpleNamespace(filesystem=filesystem)
+                op.removal_host_module = SimpleNamespace()
+                op.removal_acl = lambda entry, info: info.st_flags  # Existing empty-ACL observer is a native port.
+                op.stager = SimpleNamespace(distribution_mount_data=lambda stdout,stderr,code,path:
+                    "/dev/disk-test" if code == 0 and path == expected else self.fail("wrong mount parser path"))
+                rows = {name:{"bytes":len(name.encode()),"sha256":FIXTURE.digest(name.encode())}
+                        for name in FIXTURE.carrier_names(op)}
+                if fault == "collision": own.mkdir()
+                op.calls = [call_row("app-absence-image-create"), call_row("app-absence-image-verify")]
+                commands = []; captured = []
+                def native(name, argv, **kwargs):
+                    FIXTURE.dispatch(op, name); commands.append((name, argv))
+                    if name == role:
+                        self.assertEqual(argv[argv.index("-mountpoint")+1], str(expected))
+                        if fault == "unknown-attach": raise RuntimeError("inert native custody unknown")
+                        own.mkdir(mode=0o755)
+                        for leaf in rows:
+                            (own/leaf).write_bytes(leaf.encode()); (own/leaf).chmod(0o444)
+                    elif name == "app-absence-baseline":
+                        self.assertEqual(argv[:5], ["/usr/bin/sudo","-n","--","/usr/sbin/installer","-pkg"])
+                        self.assertEqual(argv[5], str(expected / FIXTURE.PHASE_NAMES[0]))
+                    else:
+                        self.assertEqual(name, "app-absence-baseline-detach")
+                        self.assertEqual(argv, ["/usr/bin/hdiutil","detach","/dev/disk-test"])
+                    code = int((name == "app-absence-baseline" and fault == "native-one")
+                               or (name.endswith("-detach") and fault == "detach-one"))
+                    op.calls.append(call_row(name, returncode=code))
+                    if code: raise HELPER.Refused("original-nonzero-" + name)
+                    if name.endswith("-detach"):
+                        for leaf in rows: (own/leaf).unlink()
+                        own.rmdir()
+                        if fault == "detach-post": volumes.chmod(0o750)
+                    FIXTURE.returned(op,name)
+                    return SimpleNamespace(returncode=0,stdout=b"inert",stderr=b"")
+                op.package_call = native
+                with patch.object(FIXTURE,"clock",return_value=NOW), patch.object(FIXTURE,"reserve"), \
+                     patch.object(FIXTURE,"phase_observation",side_effect=lambda o,r,p: captured.append(p)), \
+                     patch.object(HELPER.os,"open",side_effect=opened), patch.object(HELPER.os,"stat",side_effect=stated), \
+                     patch.object(HELPER.os,"lstat",side_effect=lstated), patch.object(HELPER.os,"fstat",side_effect=fstated), \
+                     patch.object(HELPER.os,"fstatvfs",return_value=SimpleNamespace(f_flag=os.ST_RDONLY)):
+                    try:
+                        def run():
+                            FIXTURE.attach(op,role,rows)
+                            self.assertIs(op.transport_mount,sentinel)
+                            mount = op.app_absence["mount"]
+                            self.assertEqual(mount["parent"]["removal_system_path"],"/Volumes")
+                            self.assertEqual(mount["parent"]["removal_facts"][0][5],80)
+                            if fault == "post-name": own.rename(volumes / "changed")
+                            FIXTURE.root_call(op,"baseline")
+                            FIXTURE.detach(op,"app-absence-baseline-detach")
+                        if fault:
+                            with self.assertRaises((ValueError,HELPER.Refused,RuntimeError,OSError)): run()
+                            self.assertFalse(op.app_absence["mount"]["detached"])
+                            if fault in ("root-owner","group-write","collision"): self.assertEqual(commands,[])
+                            if fault == "native-one": self.assertEqual(op.app_absence["pendingRoot"],"app-absence-baseline")
+                        else:
+                            run(); self.assertTrue(FIXTURE.finish_ready(op)); self.assertEqual(captured,["baseline"])
+                            self.assertFalse(own.exists())
+                            self.assertTrue(all(e["closed"] for e in op.entries))
+                        self.assertIs(op.transport_mount,sentinel)
+                    finally:
+                        for entry in reversed(op.entries): op.close(entry)
+                    self.assertFalse(op.errors)
+                    self.assertTrue(all(e["fd"] is None and e["closed"] for e in op.entries))
 
     def test_native_fixture_outputs_admit_private_umask_without_relaxing_original_policy(self):
         # Real private files/FDs and actual Operation.original + retained/hash.
