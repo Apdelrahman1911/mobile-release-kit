@@ -572,4 +572,7 @@ jobs:
           # The existing phase owners returned with their children joined,
           # keychains retired and mounts detached. Failed/unknown phases instead
           # rely on disposal of this hosted VM; never guess a kill or deletion.
+          # Staging seals owned directories read-only. Restore only directory
+          # owner-write permission, without following links or changing files.
+          /usr/bin/find -P "$MRK_MACOS_WORK" -type d -exec /bin/chmod u+w {} +
           /bin/rm -rf -- "$MRK_MACOS_WORK"

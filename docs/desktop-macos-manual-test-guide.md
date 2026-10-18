@@ -2,8 +2,10 @@
 
 Updated 2026-10-18. **Private candidate trial, not a public release or a claim that
 every feature works.** The owner will test the interface manually; unfinished
-XCTest journeys are not feature passes. Use a disposable Mac VM for this trial:
-the current download does not include a matching uninstaller.
+XCTest journeys are not feature passes. Signed/notarized application installers
+and matching removal images are available for both architectures. Prefer a
+disposable Mac VM or noncritical test installation with backups: actual removal,
+interrupted recovery and update preservation still need verification.
 
 ## Choose the correct download
 
@@ -37,8 +39,9 @@ Intel 113033403 bytes  63bbdae7d00da1609396fd0896dd03d97efced596cfec5dcd4c29654d
 
 ## Install and open without bypasses
 
-1. Start with a disposable VM and copies of test projects. Preserve a VM snapshot
-   from before installation. Do not install over an important existing copy.
+1. Use copies of test projects and back up your test installation. Prefer a
+   disposable VM with a snapshot from before installation. Do not install over
+   an important existing copy.
 2. Open `MobileReleaseKit.dmg` in Finder. Open **Install.pkg inside the mounted
    image** and follow macOS Installer, including its administrator prompt. Keep
    `producer.json` and `producer.sig` alongside the package inside that image.
@@ -135,19 +138,40 @@ These are **remaining lifecycle checks**, not completed features inferred from
 successful packaging. There is no automatic updater. A different/newer arbitrary
 PKG is not permission to replace this installation.
 
+### Matching removal downloads
+
+These separate images match application source `fcb1aa46` above. Both passed
+package signing/notarization, image signing/notarization/stapling, readonly-image
+verification and Gatekeeper assessment in
+[run 39156454767, attempt 1](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39156454767).
+Both artifacts uploaded successfully. The run failed **after upload**, while
+deleting read-only temporary directories; this does not invalidate those files.
+The cleanup correction does not rebuild or change the application or remover.
+
+| Mac | Download | Current expiration (UTC) |
+| --- | --- | --- |
+| Apple Silicon | [Removal artifact 12146269919](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39156454767/artifacts/12146269919) | November 1, 2026, 19:03 |
+| Intel | [Removal artifact 12147143924](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39156454767/artifacts/12147143924) | November 1, 2026, 19:05 |
+
+The ZIP contains `MobileReleaseKit-Remove.dmg`, `REMOVE.md` and `REMOVAL.json`.
+Keep all three. Actual removal has **not** been verified by this packaging run;
+its metadata correctly records `removalExecuted=false` and `productReady=false`.
+
+### Lifecycle precautions
+
 - **Update:** wait for a genuinely matching, authorized successor installer and
   its instructions. On a disposable test installation, save work, use **Prepare
   app to quit** when available and Quit normally. Test the actual update, reopen,
   and verify project data, saved credentials and assignments survived. A
   qualified predecessor/successor pair has not yet been established for this
   delivery; do not attempt to manufacture one by editing metadata.
-- **Removal:** this candidate has **no matching removal image included**. Do not
-  Trash the Applications entry as a substitute, delete the protected tree or run
-  an unrelated remover. When a matching `MobileReleaseKit-Remove.dmg` is supplied,
-  follow its `REMOVE.md`, use its genuine `Remove.pkg` and required app consent,
-  and verify projects/credential data remain. The existing
-  [removal guide](../desktop/packaging/macos-removal.md) describes the intended
-  route; it is not proof that a remover for this download is available or tested.
+- **Removal:** use the matching separate download above. Save work and stop app
+  operations, mount `MobileReleaseKit-Remove.dmg`, then open **Remove.pkg inside
+  the mounted image**, keeping its companion files in place. Follow `REMOVE.md`
+  and the app's explicit consent. Do not Trash the Applications entry, delete the
+  protected tree or use an unrelated remover. The remover is designed to preserve
+  projects, vault data and Keychain credentials; verify that outcome on a test
+  installation. See the [removal guide](../desktop/packaging/macos-removal.md).
 - **Failure/interruption:** wait for Installer to finish and preserve its result
   and existing files. Some interrupted installations require the exact original
   release's complete Install image; newer is not necessarily suitable. Installer
