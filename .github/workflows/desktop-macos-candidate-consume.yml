@@ -20,24 +20,89 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        target: [aarch64-apple-darwin]
-        mode: [ordinary-entry-ui]
         include:
-          - runner: macos-26
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
+            mode: ordinary-ui
+            runner: macos-26
             python-architecture: arm64
             rust-version: 1.98.1
             rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - target: x86_64-apple-darwin
+            mode: ordinary-ui
+            runner: macos-26-intel
+            python-architecture: x64
+            rust-version: 1.98.0
+            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
+          - target: aarch64-apple-darwin
+            mode: ordinary-ios-ui
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - target: x86_64-apple-darwin
+            mode: ordinary-ios-ui
+            runner: macos-26-intel
+            python-architecture: x64
+            rust-version: 1.98.0
+            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
+          - target: aarch64-apple-darwin
+            mode: ordinary-saved-ui
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - target: x86_64-apple-darwin
+            mode: ordinary-saved-ui
+            runner: macos-26-intel
+            python-architecture: x64
+            rust-version: 1.98.0
+            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
+          - target: aarch64-apple-darwin
+            mode: ordinary-saved-version-ui
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - target: x86_64-apple-darwin
+            mode: ordinary-saved-version-ui
+            runner: macos-26-intel
+            python-architecture: x64
+            rust-version: 1.98.0
+            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
+          - target: aarch64-apple-darwin
+            mode: ordinary-ios-pending-ui
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - target: x86_64-apple-darwin
+            mode: ordinary-ios-pending-ui
+            runner: macos-26-intel
+            python-architecture: x64
+            rust-version: 1.98.0
+            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
+          - target: aarch64-apple-darwin
+            mode: restore
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - target: x86_64-apple-darwin
+            mode: restore
+            runner: macos-26-intel
+            python-architecture: x64
+            rust-version: 1.98.0
+            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:
       # Independent SOURCE-selected cohorts, each on its own fresh Mac.
-      # For a later focused recovery run, select only mode: [restore] above.
+      # For focused reruns, retain only the required explicit include rows.
       MRK_CANDIDATE_MODE: ${{ matrix.mode }}
       # All routes stay inactive until this and candidate-carrier-selection.json
       # name the same genuine retained candidate. No guessed/latest artifact.
       # This is checkout routing, not artifact/source admission authority.
-      MRK_CANDIDATE_SOURCE: '8800fd3e2e242b5d48df409168c10164fee531b2'
+      MRK_CANDIDATE_SOURCE: 'cafb4f9887938cbe21df698dc79abdcd87c72a96'
       MRK_MACOS_TARGET: ${{ matrix.target }}
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
