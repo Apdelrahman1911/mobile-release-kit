@@ -2915,6 +2915,143 @@ def packaging_fixture(target="aarch64-apple-darwin", *, package=b"synthetic comp
 class MacAndroidHelperPackagingData(unittest.TestCase):
     """No compiler/codesign/helper/owner execution; every child is a DATA double."""
 
+    def test_removal_target_routes_keep_preparation_scripts_and_observers_bound(self):
+        module = ANDROID_HELPER
+        for target in TOOL.MAC_TARGETS:
+            other = TOOL.INTEL_TARGET if target == TOOL.ARM_TARGET else TOOL.ARM_TARGET
+            profile, service, selection, history, descriptor = packaging_fixture(target, package=b"xar!inert")
+            binding = dict(sourceCommit="a" * 40, target=target, release=selection.release,
+                inventorySha256="b" * 64, packageSha256="c" * 64,
+                removeDescriptorSha256="d" * 64, removeSignatureSha256="e" * 64)
+            self.assertIs(TOOL.removal_fixture_binding_data(binding, selection=selection), binding)
+            with self.assertRaises(TOOL.Refused):
+                TOOL.removal_fixture_binding_data(dict(binding, target=other), selection=selection)
+            for case in ("ordinary", "abrupt"):
+                environment = dict(GITHUB_REF=module.REMOVAL_REF, MRK_MACOS_PACKAGE_ROLE="ordinary-image",
+                    MRK_MACOS_REMOVAL_CASE=case, MRK_MACOS_REMOVAL_CORRELATION="f" * 32,
+                    GITHUB_SHA="a" * 40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1")
+                self.assertEqual(module.removal_context_data(environment, target), (case, "f" * 32))
+                for changes in (dict(GITHUB_REF="refs/heads/main"), dict(MRK_MACOS_PACKAGE_ROLE="observer"),
+                                dict(MRK_MACOS_REMOVAL_CASE="other"), dict(MRK_MACOS_REMOVAL_CORRELATION="0" * 32)):
+                    with self.assertRaises(module.Refused): module.removal_context_data(dict(environment, **changes), target)
+                with self.assertRaises(module.Refused): module.removal_context_data(environment, "other")
+                prepared = dict(schemaVersion=1, phase="prepare-removal-observers", source="a" * 40,
+                    workflowSource="a" * 40, target=target, runId="123", runAttempt="1", case=case,
+                    correlation="f" * 32, passed=True, targetRetired=True, originalClosesKnown=True,
+                    outerFinalityRequired=True, nativeCalls=46, nativeCallsSha256="b" * 64,
+                    credentialCalls=158, credentialCallsSha256="c" * 64, credentialContexts=8,
+                    targetBinding=binding, targetFiles={}, targetImage={}, observerImage={}, observers={},
+                    observerProgramSha256="d" * 64, controlBytes=1024, productReady=False)
+                self.assertIs(module.removal_prepared_data(prepared, environment, target, case, "f" * 32), prepared)
+                for changes in (dict(target=other), dict(source="b" * 40), dict(originalClosesKnown=False),
+                                dict(case="abrupt" if case == "ordinary" else "ordinary"), dict(nativeCalls=45)):
+                    with self.assertRaises(module.Refused):
+                        module.removal_prepared_data(dict(prepared, **changes), environment, target, case, "f" * 32)
+            # Real small filesystem reads/copies and actual Mach-O DATA parser;
+            # bytes are never executed or signed. Only the source selection is supplied.
+            program = entry_macho_fixture(target=target)
+            real_stat, real_fstat = os.stat, os.fstat
+            def flags(info):
+                # Linux has no st_flags: this port supplies only Darwin's
+                # observed-zero field; mode/identity/read/POST/close remain real.
+                values = {key: getattr(info, key) for key in dir(info) if key.startswith("st_")}
+                values["st_flags"] = 0
+                return SimpleNamespace(**values)
+            def named(*args, **kwargs): return flags(real_stat(*args, **kwargs))
+            def held(*args, **kwargs): return flags(real_fstat(*args, **kwargs))
+            for role in ("abrupt", "observer-before"):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary); original = root / "input"; original.write_bytes(program); original.chmod(0o555)
+                    args = SimpleNamespace(target=target, role=role, remover=original, expected_remover=TOOL.digest(program),
+                        output=root / "scripts", correlation=None if role == "abrupt" else "f" * 32,
+                        target_binding=None if role == "abrupt" else binding)
+                    with mock.patch.object(TOOL, "source_build_selection", return_value=selection), mock.patch.object(os, "stat", side_effect=named), mock.patch.object(os, "fstat", side_effect=held):
+                        result = TOOL.removal_fixture_scripts_command(args)
+                    self.assertEqual(result["removerSha256"], TOOL.digest(program))
+                    self.assertEqual((args.output / TOOL.REMOVER_NAME).read_bytes(), program)
+                    self.assertEqual(original.read_bytes(), program)
+                    original.chmod(0o600); original.write_bytes(entry_macho_fixture(target=other)); original.chmod(0o555)
+                    args.expected_remover = TOOL.digest(original.read_bytes()); args.output = root / "wrong"
+                    with mock.patch.object(TOOL, "source_build_selection", return_value=selection), mock.patch.object(os, "stat", side_effect=named), mock.patch.object(os, "fstat", side_effect=held), self.assertRaises(TOOL.Refused):
+                        TOOL.removal_fixture_scripts_command(args)
+                    self.assertFalse(args.output.exists())
+            # The observer retains the real installed lineage but signs different
+            # own code. Both byte/target checks run through the ordinary parser.
+            _, inventory, _, _ = installation_record_fixture(selection=selection)
+            inventory = json.loads(inventory)
+            inventory["files"].append(dict(path="app/" + TOOL.REMOVER, size=len(program),
+                sha256=TOOL.digest(program), executable=True))
+            inventory["files"].sort(key=lambda row: row["path"]); inventory = TOOL.canonical(inventory)
+            descriptor["releaseSet"]["current"]["inventorySha256"] = TOOL.digest(inventory)
+            source = TOOL.ProducerSelection("TEST000001", "1" * 40, "2" * 64, 2048, "3" * 64, "4" * 64)
+            own = program + b"different inert observer DATA"
+            arguments = (TOOL.canonical(descriptor), inventory, program, own, b"xar!inert", source, selection)
+            emitted = TOOL.packaging_observer_descriptor_data(*arguments, source_commit="a" * 40, manifest="c" * 64)
+            self.assertEqual(json.loads(emitted)["target"], target)
+            self.assertEqual(json.loads(emitted)["removerExecutableSha256"], TOOL.digest(own))
+            for wrong in (program, entry_macho_fixture(target=other)):
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.packaging_observer_descriptor_data(*arguments[:3], wrong, *arguments[4:], source_commit="a" * 40, manifest="c" * 64)
+
+    def test_removal_ui_caller_routes_both_targets_into_actual_context(self):
+        module = ANDROID_HELPER
+        path = Path(__file__).absolute().parents[2] / "desktop/tools/macos_normal_ui_runner.py"
+        spec = importlib.util.spec_from_file_location("removal_actual_context_data", path)
+        normal = importlib.util.module_from_spec(spec); spec.loader.exec_module(normal)
+        resource = SimpleNamespace(RLIMIT_FSIZE=1, getrlimit=lambda _: (1073741824, 1073741824))
+        for target, machine, hosted in ((TOOL.ARM_TARGET, "arm64", "github-hosted-macos26-arm64"),
+                                       (TOOL.INTEL_TARGET, "x86_64", "github-hosted-macos26-x86_64")):
+            for case in ("ordinary", "abrupt"):
+                called = []
+                operation = object.__new__(module.Operation)
+                operation.target = target; operation.removal_case = case
+                operation.work = Path("/Users/runner/work/_temp/mrk-macos-installed.ABCDef12")
+                operation.checkout = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+                operation.image_source = "a" * 40; operation.removal_correlation = "f" * 32
+                operation.owner = SimpleNamespace(); operation.removal_runner = normal
+                operation.removal_resource = resource; operation.removal_thread = None
+                operation.removal_ui_outcome = {"done": False, "known": False}
+                operation.removal_ui_lock = contextlib.nullcontext()
+                class InlineThread:
+                    # Scheduling is the only substituted worker boundary: no
+                    # thread/native process is started by this DATA fixture.
+                    def __init__(self, *, target, name, daemon):
+                        self.callback = target
+                        self.name, self.daemon = name, daemon
+                    def start(self): self.callback()
+                operation.removal_threading = SimpleNamespace(Thread=InlineThread)
+                def admitted(phase, **options):
+                    selected, result = normal.removal_phase_context(phase, **options)
+                    self.assertEqual(phase.environment["TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB"], hosted)
+                    self.assertEqual(options["target"], target)
+                    self.assertEqual(phase.clock.containing_deadline_ns, 500_000_000_000)
+                    self.assertIs(phase.owner, operation.owner)
+                    called.append((selected, result.name))
+                    return CompletedProcess([], 0, b"", b""), {"case": case}
+                with mock.patch.object(normal.sys, "platform", "darwin"), mock.patch.object(normal.platform, "machine", return_value=machine), \
+                     mock.patch.object(normal.platform, "mac_ver", return_value=("26.6", (), "")), \
+                     mock.patch.object(normal, "_removal_resource", resource), mock.patch.object(normal.time, "monotonic_ns", return_value=0), \
+                     mock.patch.object(normal, "execute_removal_ui_phase", side_effect=admitted):
+                    operation.removal_ui_start(500_000_000_000)
+                self.assertEqual(called, [(normal.CLASS + normal.REMOVAL_METHODS[case], "removal-" + case + "-test.xcresult")])
+                self.assertEqual(operation.removal_ui_outcome["done"], True)
+                self.assertEqual(operation.removal_ui_outcome["known"], True)
+                self.assertEqual(operation.removal_thread.name, "mrk-fixed-removal-ui")
+                self.assertFalse(operation.removal_thread.daemon)
+                self.assertTrue(operation.removal_ui_entered)
+
+    def test_current_removal_matrix_keeps_each_target_and_case_isolated(self):
+        source = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()
+        match = re.search(r"include: \$\{\{ fromJSON\(github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '([^']+)' \|\| '([^']+)'\) \}\}", source)
+        self.assertIsNotNone(match)
+        selected, ordinary = map(json.loads, match.groups())
+        self.assertEqual(selected, [dict(row, removal_case=case) for case in ("ordinary", "abrupt") for row in ordinary])
+        self.assertEqual([(row["target"], row["runner"], row["machine"], row["hosted_job"]) for row in ordinary],
+            [(TOOL.ARM_TARGET, "macos-26", "arm64", "github-hosted-macos26-arm64"),
+             (TOOL.INTEL_TARGET, "macos-26-intel", "x86_64", "github-hosted-macos26-x86_64")])
+        self.assertEqual(len(selected), 4)
+        self.assertIn("      fail-fast: false\n      max-parallel: 2\n      matrix:", source)
+
     def test_primary_owner_finality_failure_data_is_closed_bounded_and_private(self):
         module = ANDROID_HELPER
         class ProcessErrorData(RuntimeError):
@@ -18295,11 +18432,17 @@ class MacNormalPreviewData(unittest.TestCase):
                                           ("remover", TOOL.remover_cargo_artifact, remover_cargo_fixture)):
                 directory, binary, rows, body = fixture(build_target=build_target)
                 graphs.append((role, parser, (), {}, directory, binary, rows, body))
-            if build_target == TOOL.ARM_TARGET:
-                for role, feature in TOOL.REMOVAL_FIXTURE_FEATURES.items():
-                    directory, binary, rows, body = remover_cargo_fixture(build_target=build_target)
-                    for row in rows[:2]: row["features"] = sorted(["macos-installed-remover", feature])
-                    graphs.append((role, TOOL.removal_fixture_cargo_artifact, (), {"role": role}, directory, binary, rows, body))
+            for role, feature in TOOL.REMOVAL_FIXTURE_FEATURES.items():
+                directory, binary, rows, body = remover_cargo_fixture(build_target=build_target)
+                for row in rows[:2]: row["features"] = sorted(["macos-installed-remover", feature])
+                graphs.append((role, TOOL.removal_fixture_cargo_artifact, (), {"role": role}, directory, binary, rows, body))
+                other = TOOL.INTEL_TARGET if build_target == TOOL.ARM_TARGET else TOOL.ARM_TARGET
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.removal_fixture_cargo_artifact(cargo_lines(*rows, final), binary, directory, body,
+                        role=role, target=other, package_version="0.1.2")
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.removal_fixture_cargo_artifact(cargo_lines(*rows, final), binary, directory,
+                        remover_cargo_fixture(build_target=other)[3], role=role, target=build_target, package_version="0.1.2")
             for role, parser, positional, keywords, directory, binary, old, body in graphs:
                 app = [i for i, row in enumerate(old) if "#mobile-release-kit-desktop@" in row["package_id"]]
                 native = [i for i in range(len(old)) if i not in app]

@@ -410,7 +410,7 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
          and Path(result).name == IOS_PENDING_RESULT)), "ios-pending-fixed-test-selection")
     if removal_case is not None:
         selected, basename = removal_selection(removal_case)
-        need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending)) and target == ARM_TARGET
+        need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending))
              and tuple(methods) == (selected,) and allowance == 300 and Path(result).name == basename,
              "removal-fixed-test-selection")
     if credential_segment is not None:
@@ -450,7 +450,7 @@ def run_admitted_test(call, derived, result, methods, allowance, timeout, *, tar
          and Path(result).name == IOS_PENDING_RESULT)), "ios-pending-fixed-test-owner")
     if removal_case is not None:
         selected, basename = removal_selection(removal_case)
-        need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending)) and target == ARM_TARGET
+        need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending))
              and tuple(methods) == (selected,) and allowance == 300 and timeout == 420
              and Path(result).name == basename, "removal-fixed-test-owner")
     if credential_segment is not None:
@@ -2932,10 +2932,11 @@ def removal_ui_result(stdout, summary_body, tests_body, case):
 def removal_phase_context(phase, *, case, derived, channel, source, file_limit, target):
     """Explicit supplied environment; never an os.environ/cwd/loader mutation."""
     method, result_name = removal_selection(case)
+    machine, hosted = normal_target_data(target)
     need(type(phase) is NormalPhase and type(phase.clock) is RemovalPhaseClock
-         and phase.retain_nonzero is True and not phase.records and target == ARM_TARGET,
+         and phase.retain_nonzero is True and not phase.records,
          "removal-own-phase")
-    need(sys.platform == "darwin" and platform.machine() == "arm64"
+    need(sys.platform == "darwin" and platform.machine() == machine
          and platform.mac_ver()[0].startswith("26.") and _removal_resource is not None,
          "removal-native-runtime")
     need(file_limit == normal_file_limit("test", _removal_resource.getrlimit(_removal_resource.RLIMIT_FSIZE)),
@@ -2952,7 +2953,7 @@ def removal_phase_context(phase, *, case, derived, channel, source, file_limit, 
     expected = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner", "USER": "runner",
         "LOGNAME": "runner", "TMPDIR": str(derived.parent / "tmp") + "/", "LANG": "en_US.UTF-8",
         "LC_ALL": "en_US.UTF-8", "TZ": "UTC", "DEVELOPER_DIR": DEVELOPER,
-        "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": "github-hosted-macos26-arm64",
+        "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": hosted,
         "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": source,
         "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE": source, REMOVAL_CHANNEL_ENV: str(channel)}
     need(type(phase.environment) is dict and phase.environment == expected, "removal-explicit-clean-environment")

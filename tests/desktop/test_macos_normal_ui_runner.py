@@ -431,11 +431,20 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         for case in ("ordinary", "abrupt"):
             method, result_name = MODULE.removal_selection(case)
             values = dict(methods=(method,), allowance=300, result=normal / result_name, removal_case=case)
-            command = MODULE.xcode_test_arguments(Path("fixed.xctestrun"), **values)
-            self.assertEqual([v for v in command if v.startswith("-only-testing:")], ["-only-testing:" + method])
+            for selected_target, destination in ((MODULE.ARM_TARGET, "platform=macOS,arch=arm64"),
+                                                 (MODULE.INTEL_TARGET, "platform=macOS")):
+                command = MODULE.xcode_test_arguments(Path("fixed.xctestrun"), **dict(values, target=selected_target))
+                self.assertEqual([v for v in command if v.startswith("-only-testing:")], ["-only-testing:" + method])
+                self.assertEqual(command[command.index("-destination") + 1], destination)
+                # Admission reaches only the existing product owner, not a native child.
+                class ReachedProducts(Exception): pass
+                with patch.object(MODULE, "RunnerProducts", side_effect=ReachedProducts):
+                    with self.assertRaises(ReachedProducts):
+                        MODULE.run_admitted_test(lambda *_: self.fail("no native work"), normal / "DerivedData",
+                            timeout=420, **dict(values, target=selected_target))
             self.assertNotIn(result_name, MODULE.NORMAL_SELECTIONS)
             for changed in (dict(removal_case=None), dict(removal_case=True), dict(removal_case="unknown"),
-                            dict(target=MODULE.INTEL_TARGET), dict(engineering=True), dict(output_data=True),
+                            dict(target="x86_64h-apple-darwin"), dict(engineering=True), dict(output_data=True),
                             dict(android_positive=True), dict(ios_unsigned=True), dict(allowance=60),
                             dict(methods=(method, method)), dict(result=normal / "test.xcresult")):
                 with self.subTest(removal=case, changed=changed), self.assertRaises(MODULE.Refused):
@@ -2588,17 +2597,24 @@ class NormalPhaseDataTests(unittest.TestCase):
                 MODULE.RemovalPhaseClock(600 * 10**9, now=now), retain_nonzero=True)
         root = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
         resource = SimpleNamespace(RLIMIT_FSIZE=1, getrlimit=lambda _: limit)
-        with patch.object(MODULE.sys, "platform", "darwin"), patch.object(MODULE.platform, "machine", return_value="arm64"), \
-             patch.object(MODULE.platform, "mac_ver", return_value=("26.6", (), "")), patch.object(MODULE, "_removal_resource", resource):
-            phase = make_phase(root)
-            kwargs = dict(case="ordinary", derived=derived, channel=channel, source=source, file_limit=limit, target=MODULE.ARM_TARGET)
-            self.assertEqual(MODULE.removal_phase_context(phase, **kwargs)[1].name, "removal-ordinary-test.xcresult")
-            for mutation in (dict(channel=channel.parent / ("r-" + "0" * 32)), dict(channel=Path("/foreign/r-" + "a" * 32)),
-                             dict(source="b" * 40), dict(target=MODULE.INTEL_TARGET), dict(file_limit=(-1, -1))):
-                with self.assertRaises(MODULE.Refused): MODULE.removal_phase_context(phase, **dict(kwargs, **mutation))
-            for mutation in (dict(PATH="/foreign"), dict(UNEXPECTED="value"), {MODULE.REMOVAL_CHANNEL_ENV: str(channel) + "/other"}):
-                with self.assertRaises(MODULE.Refused):
-                    MODULE.removal_phase_context(make_phase(root, dict(environment, **mutation)), **kwargs)
+        for selected_target, machine, hosted in ((MODULE.ARM_TARGET, "arm64", "github-hosted-macos26-arm64"),
+                                                  (MODULE.INTEL_TARGET, "x86_64", "github-hosted-macos26-x86_64")):
+            selected_environment = dict(environment, TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=hosted)
+            with patch.object(MODULE.sys, "platform", "darwin"), patch.object(MODULE.platform, "machine", return_value=machine), \
+                 patch.object(MODULE.platform, "mac_ver", return_value=("26.6", (), "")), patch.object(MODULE, "_removal_resource", resource):
+                for case in ("ordinary", "abrupt"):
+                    phase = make_phase(root, selected_environment)
+                    kwargs = dict(case=case, derived=derived, channel=channel, source=source, file_limit=limit, target=selected_target)
+                    self.assertEqual(MODULE.removal_phase_context(phase, **kwargs)[1].name, "removal-" + case + "-test.xcresult")
+                    other = MODULE.INTEL_TARGET if selected_target == MODULE.ARM_TARGET else MODULE.ARM_TARGET
+                    for mutation in (dict(channel=channel.parent / ("r-" + "0" * 32)), dict(channel=Path("/foreign/r-" + "a" * 32)),
+                                     dict(source="b" * 40), dict(target=other), dict(target="other"), dict(file_limit=(-1, -1))):
+                        with self.assertRaises(MODULE.Refused): MODULE.removal_phase_context(phase, **dict(kwargs, **mutation))
+                    for mutation in (dict(PATH="/foreign"), dict(UNEXPECTED="value"), {MODULE.REMOVAL_CHANNEL_ENV: str(channel) + "/other"},
+                                     dict(TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB="github-hosted-macos26-arm64" if machine == "x86_64" else "github-hosted-macos26-x86_64")):
+                        with self.assertRaises(MODULE.Refused):
+                            MODULE.removal_phase_context(make_phase(root, dict(selected_environment, **mutation)), **kwargs)
+        kwargs = dict(case="ordinary", derived=derived, channel=channel, source=source, file_limit=limit, target=MODULE.ARM_TARGET)
 
         # Actual result/receipt descriptors in disposable files; all native calls remain inert.
         for fault in (None, "native-nonzero", "query-nonzero", "result-replaced", "source-changed",

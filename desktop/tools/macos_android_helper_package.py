@@ -2619,7 +2619,7 @@ REMOVAL_PHASE_ENDPOINTS = {"attach": 60, "before": 120, "joint": 720, "resume": 
 
 
 def removal_context_data(environment, target):
-    need(target == ARM_TARGET and environment.get("GITHUB_REF") == REMOVAL_REF
+    need(target in (ARM_TARGET, INTEL_TARGET) and environment.get("GITHUB_REF") == REMOVAL_REF
          and environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image"
          and environment.get("MRK_MACOS_REMOVAL_CASE") in REMOVAL_CASES,
          "removal-fixture-fixed-route")
@@ -2752,7 +2752,8 @@ def removal_prepared_data(value, environment, target, case, correlation):
     need(type(value) is dict and set(value) == fields and type(value["schemaVersion"]) is int
          and value["schemaVersion"] == 1 and value["phase"] == "prepare-removal-observers"
          and value["source"] == value["workflowSource"] == environment["GITHUB_SHA"]
-         and value["target"] == target == ARM_TARGET and value["runId"] == environment["GITHUB_RUN_ID"]
+         and value["target"] == target and target in (ARM_TARGET, INTEL_TARGET)
+         and value["runId"] == environment["GITHUB_RUN_ID"]
          and value["runAttempt"] == environment["GITHUB_RUN_ATTEMPT"] and value["case"] == case
          and value["correlation"] == correlation
          and all(value[key] is True for key in ("passed", "targetRetired", "originalClosesKnown", "outerFinalityRequired"))
@@ -7602,7 +7603,8 @@ class Operation:
         channel = self.work / "removal-ui-v1" / ("r-" + self.removal_correlation)
         environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner", "USER": "runner", "LOGNAME": "runner",
             "TMPDIR": str(normal / "tmp") + "/", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "TZ": "UTC",
-            "DEVELOPER_DIR": str(NOTARY_XCODE), "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": "github-hosted-macos26-arm64",
+            "DEVELOPER_DIR": str(NOTARY_XCODE),
+            "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": "github-hosted-macos26-" + build_profile(self.target)[0],
             "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": self.image_source,
             "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE": self.image_source,
             "TEST_RUNNER_MRK_NORMAL_UI_REMOVAL_CHANNEL": str(channel)}

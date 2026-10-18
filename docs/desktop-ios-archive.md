@@ -51,8 +51,15 @@ administrator prompt. It prepares a separate protected copy without changing
 the original Xcode; allow disk space for that copy. It does not download Xcode
 or accept Apple's licenses. On failure/interruption, preserve its message and
 existing files; do not delete the managed namespace or recursively change
-Applications permissions. Never run the desktop app as root. This companion's
-signed installation and the complete installed iOS flow remain under verification.
+Applications permissions. Never run the desktop app as root. The separate
+companion has passed Developer ID signing, notarization, stapling, first and
+repeat installation, and native managed-tool admission on both Apple Silicon
+and Intel macOS 26. This does not qualify the complete installed iOS flow or a
+successful signed export; those still need their own application-level evidence.
+The companion checks used source `eda8b0cc2258a49f6b1494752e04b1a5bcba22aa`:
+[Apple Silicon run 39083122098](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39083122098)
+and [Intel run 39082603257](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39082603257),
+both attempt 1. Their retained signed companion is separate from the app DMG.
 
 Only native terminal finality can publish the bounded result. The output is
 retained at `.mobile-release/desktop-ios-archive/<operation>/archive.xcarchive`
@@ -76,6 +83,22 @@ Build / signing to select, assess, keep and assign the P12, its password and the
 matching provisioning profile. Any required Firebase/project-read input belongs
 to the same current context. Native file selection and contextual help are in the
 application; no manual internal-folder placement is needed.
+
+A successful local export needs an **Apple Distribution** certificate with its
+matching private key in a password-protected P12, a valid **App Store Connect
+distribution provisioning profile** containing that certificate, and a trusted
+project with a shared Xcode scheme. Use a bundle ID and Apple Developer team you
+control; the saved team, bundle ID, profile and expected signing-certificate
+SHA-256 fingerprint must agree. Obtain the identity and profile through your
+team's Apple Developer Certificates, Identifiers & Profiles account. The Mac
+application's **Developer ID Application/Installer** certificates and notarization
+API key are different credentials and cannot replace these mobile signing inputs.
+
+Use the application's private file pickers and credential storage; never put the
+P12, its password or private-key bytes in chat, Git or diagnostic artifacts. No
+Store upload, Store API credential or physical iPhone is required merely to export
+and validate a local IPA. Real positive export and signing-session restoration
+remain unverified until the genuine matching inputs are available and exercised.
 
 Review the exact saved signing policy and current assignments, acknowledge the
 project-code effects, then start once. Native admission requires full Xcode and

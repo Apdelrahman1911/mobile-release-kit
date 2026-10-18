@@ -3359,7 +3359,7 @@ def app_with_github_seal(args, seal):
     remover = read(args.remover, REMOVER_BYTES)
     need(sha(args.expected_remover) and digest(remover) == args.expected_remover, "remover-final-signed-digest")
     abrupt = getattr(args, "removal_abrupt_fixture", False)
-    need(type(abrupt) is bool and (not abrupt or role == "ordinary-image" and target == ARM_TARGET),
+    need(type(abrupt) is bool and (not abrupt or role == "ordinary-image" and target in MAC_TARGETS),
          "app-removal-fixture-role")
     if abrupt:
         remover_compiled = removal_fixture_cargo_artifact(read(args.remover_cargo_messages, 4 * 1024 * 1024),
@@ -4688,8 +4688,8 @@ def removal_fixture_mount_path(correlation, role):
 
 def removal_fixture_binding_data(value, *, selection=None):
     selection = selected_build(selection)
-    need(selection.target == ARM_TARGET and type(value) is dict and set(value) == set(REMOVAL_FIXTURE_COMMON)
-         and maintenance_hex(value["sourceCommit"], 40) and value["target"] == ARM_TARGET
+    need(type(value) is dict and set(value) == set(REMOVAL_FIXTURE_COMMON)
+         and maintenance_hex(value["sourceCommit"], 40) and value["target"] == selection.target
          and value["release"] == selection.release
          and all(maintenance_hex(value[key], 64) for key in REMOVAL_FIXTURE_COMMON[3:]),
          "removal-fixture-binding")
@@ -4717,7 +4717,7 @@ def removal_fixture_script_data(role, *, correlation=None, target=None, selectio
 
 def removal_fixture_cargo_artifact(messages, binary, target_dir, body, *, role, target=ARM_TARGET, package_version):
     """Actual compiled fixed feature graph; no signing/execution authority."""
-    need(target == ARM_TARGET and role in REMOVAL_FIXTURE_FEATURES, "removal-fixture-cargo-role")
+    need(target in MAC_TARGETS and role in REMOVAL_FIXTURE_FEATURES, "removal-fixture-cargo-role")
     root, binary, target_dir = DESKTOP / "src-tauri", Path(binary), Path(target_dir)
     need(binary.is_absolute() and target_dir.is_absolute()
          and all(part not in (".", "..") for part in binary.parts + target_dir.parts)
@@ -4749,13 +4749,13 @@ def removal_fixture_cargo_artifact(messages, binary, target_dir, body, *, role, 
 
 def removal_fixture_scripts_command(args):
     selection = source_build_selection(command_target(args))
-    need(selection.target == ARM_TARGET and sha(args.expected_remover), "removal-fixture-program-anchor")
+    need(sha(args.expected_remover), "removal-fixture-program-anchor")
     body = removal_fixture_script_data(args.role, correlation=args.correlation, target=args.target_binding, selection=selection)
     with parent(args.remover) as (fd, name):
         program, info = read_at(fd, name, REMOVER_BYTES, zero_flags=True)
         need(stat.S_IMODE(info.st_mode) == 0o555 and digest(program) == args.expected_remover,
              "removal-fixture-program-correspondence")
-        macho(program, target=ARM_TARGET)
+        macho(program, target=selection.target)
     write_tree(args.output, {"postinstall": (body, 0o555), REMOVER_NAME: (program, 0o555)}, root_mode=0o755)
     return {"schemaVersion": 1, "role": args.role, "packageIdentifier": REMOVE_PACKAGE_ID,
             "packageVersion": selection.package_version, "postinstallSha256": digest(body),
@@ -5532,7 +5532,7 @@ def packaging_observer_descriptor_data(installed, inventory, installed_program, 
     emitter's genuine installed signature or actual own-program verifier.
     """
     selection = selected_build(selection)
-    need(selection.target == ARM_TARGET and type(own_program) is bytes
+    need(type(own_program) is bytes
          and 0 < len(own_program) <= REMOVER_BYTES and digest(own_program) != digest(installed_program),
          "observer-distinct-program")
     body = packaging_removal_descriptor_data(installed, inventory, installed_program, package, source, selection,

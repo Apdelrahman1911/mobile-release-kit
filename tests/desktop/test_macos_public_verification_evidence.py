@@ -120,9 +120,9 @@ def write(root, name, value):
     return path
 
 
-def project(root, *, removal_case="disabled"):
+def project(root, *, removal_case="disabled", target=CONTEXT["target"]):
     return DATA.project(str(root), profile="installed", source=CONTEXT["source"], workflow_source=CONTEXT["workflowSource"],
-                        run_id=CONTEXT["runId"], run_attempt=CONTEXT["runAttempt"], target=CONTEXT["target"], removal_case=removal_case)
+                        run_id=CONTEXT["runId"], run_attempt=CONTEXT["runAttempt"], target=target, removal_case=removal_case)
 
 
 def normal_diagnostic_data(*, removal=False, positive=False):
@@ -318,7 +318,7 @@ def removal_data():
 
 def removal_receipt(case, stager, helper, normal):
     """Synthetic normalized observations, never native/removal authority."""
-    binding = {"sourceCommit": CONTEXT["source"], "target": CONTEXT["target"], "release": DATA.REMOVAL_RELEASE,
+    binding = {"sourceCommit": CONTEXT["source"], "target": CONTEXT["target"], "release": DATA.REMOVAL_RELEASES[CONTEXT["target"]],
         "inventorySha256": "b" * 64, "packageSha256": "c" * 64, "removeDescriptorSha256": "d" * 64,
         "removeSignatureSha256": "e" * 64}
     before = {"phase": "before", "binding": binding, "rootIdentity": [1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -1198,7 +1198,8 @@ class PublicVerificationEvidenceData(unittest.TestCase):
 
     def test_genuine_removal_data_preserves_case_facts_and_expected_nonzero(self):
         stager, helper = removal_data(); normal = normal_diagnostic_data(removal=True)
-        self.assertEqual(DATA.REMOVAL_RELEASE, json.loads((ROOT / "desktop/macos-installed-inputs/build-release.json").read_text())["release"])
+        for target, filename in ((DATA.TARGETS[0], "build-release.json"), (DATA.TARGETS[1], "build-release-intel.json")):
+            self.assertEqual(DATA.REMOVAL_RELEASES[target], json.loads((ROOT / "desktop/macos-installed-inputs" / filename).read_text())["release"])
         self.assertEqual(DATA.REMOVAL_METHODS, normal["REMOVAL_METHODS"])
         union = set()
         for case in ("ordinary", "abrupt"):
@@ -1310,16 +1311,23 @@ class PublicVerificationEvidenceData(unittest.TestCase):
 
     def test_removal_file_projection_keeps_case_and_caller_status_independent(self):
         stager, helper = removal_data(); normal = normal_diagnostic_data(removal=True)
-        for case in ("ordinary", "abrupt"):
-            with tempfile.TemporaryDirectory() as directory:
-                root = Path(directory); value = removal_receipt(case, stager, helper, normal)
-                path = write(root, "android-helper-package-removal-fixture.json", value); before = path.read_bytes()
-                result = project(root, removal_case=case)
-                self.assertEqual(result["expectedRemovalCase"], case)
-                row = result["phases"]["package-removal-fixture"]
-                self.assertEqual(row["removalFixture"]["case"], case)
-                self.assertEqual(row["callerStatus"], {"receiptState": "absent"})
-                self.assertEqual(path.read_bytes(), before)
+        for target in DATA.TARGETS:
+            for case in ("ordinary", "abrupt"):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory); value = removal_receipt(case, stager, helper, normal)
+                    value["target"] = target
+                    value["removalFixture"]["targetBinding"].update(target=target, release=DATA.REMOVAL_RELEASES[target])
+                    path = write(root, "android-helper-package-removal-fixture.json", value); before = path.read_bytes()
+                    result = project(root, removal_case=case, target=target)
+                    self.assertEqual(result["expectedRemovalCase"], case)
+                    row = result["phases"]["package-removal-fixture"]
+                    self.assertEqual(row["removalFixture"]["case"], case)
+                    self.assertEqual(row["callerStatus"], {"receiptState": "absent"})
+                    self.assertEqual(path.read_bytes(), before)
+                    wrong = copy.deepcopy(value)
+                    wrong["removalFixture"]["targetBinding"]["release"] = DATA.REMOVAL_RELEASES[DATA.TARGETS[1] if target == DATA.TARGETS[0] else DATA.TARGETS[0]]
+                    with self.assertRaises(DATA.Refused):
+                        DATA.project_receipt(wrong, {**CONTEXT, "target": target, "expectedRemovalCase": case}, "package-removal-fixture")
 
     def test_data_contract_five_statuses_are_observations_not_phase_acceptance(self):
         names = tuple("data-contracts/" + role + ".status" for role in ("mount", "apfs", "build", "rust", "python"))

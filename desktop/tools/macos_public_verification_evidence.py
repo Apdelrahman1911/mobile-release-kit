@@ -67,7 +67,8 @@ REMOVAL_ROLES = {case: REMOVAL_ROLE_PREFIX + middle + REMOVAL_ROLE_SUFFIX for ca
     ("ordinary", ("removal-live-cancel", "removal-observer-after-cancel", "removal-live-continue")),
     ("abrupt", ("removal-live-cut", "removal-observer-after-cut", "removal-resume")))}
 REMOVAL_METHODS = {"ordinary": "testInstalledRemovalCancelThenContinue", "abrupt": "testInstalledRemovalContinueBeforeInterruption"}
-REMOVAL_RELEASE = "macos26-arm64-desktop-01"
+REMOVAL_RELEASES = {"aarch64-apple-darwin": "macos26-arm64-desktop-02",
+                    "x86_64-apple-darwin": "macos26-x86_64-desktop-02"}
 NATIVE_ROLES = frozenset((
     "update-baseline-attach", "update-baseline-installer", "update-baseline-detach",
     *REMOVAL_ROLES["ordinary"], *REMOVAL_ROLES["abrupt"],
@@ -1176,7 +1177,7 @@ def project_removal_fixture(value, context, calls):
         return None
     case = context.get("expectedRemovalCase", "disabled")
     need(case in ("ordinary", "abrupt") and context.get("profile") == "installed"
-         and context["target"] == "aarch64-apple-darwin" and type(value) is dict)
+         and context["target"] in TARGETS and type(value) is dict)
     true_fields = ("allPayloadAbsent", "ordinaryOriginalFinalityRequired", "originalUIJoined",
         "requestsDirectoryNamedOnly", "mountedInputsDetached", "sourcePrePostMatched", "firstOriginalErrorPreserved")
     abrupt_fields = ("abruptProcessCutObserved", "samePackageLinkedResumeObserved", "appRootLastReturnedEffectObserved")
@@ -1194,7 +1195,7 @@ def project_removal_fixture(value, context, calls):
     hashes = ("inventorySha256", "packageSha256", "removeDescriptorSha256", "removeSignatureSha256")
     need(type(binding) is dict and set(binding) == {"sourceCommit", "target", "release", *hashes}
          and binding["sourceCommit"] == context["source"] and binding["target"] == context["target"]
-         and binding["release"] == REMOVAL_RELEASE)
+         and binding["release"] == REMOVAL_RELEASES[context["target"]])
     for name in hashes:
         hex_value(binding[name])
     ui = value["uiObservation"]
@@ -2898,7 +2899,7 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
             delivery_purpose="legacy-preview"):
     need(profile in ("installed", "aqua") and target in TARGETS)
     need(removal_case in ("disabled", "ordinary", "abrupt")
-         and (removal_case == "disabled" or profile == "installed" and target == "aarch64-apple-darwin"))
+         and (removal_case == "disabled" or profile == "installed"))
     need(type(delivery_purpose) is str and delivery_purpose in ("legacy-preview", "installed-passive-carrier")
          and (delivery_purpose == "legacy-preview" or profile == "installed" and removal_case == "disabled"))
     context = {"profile": profile, "source": hex_value(source, 40), "workflowSource": hex_value(workflow_source, 40),

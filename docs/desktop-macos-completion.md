@@ -1,8 +1,36 @@
 # macOS completion plan and working status
 
-Updated: 2026-10-17. **NOT READY; not delivered or approved for public release.**
+Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.**
 
-### Latest integration checkpoint
+### Current Mac verification checkpoint
+
+Two concrete application defects were corrected after the previous final package:
+16 registered history/Store commands lacked their explicit main-window Tauri
+permissions, blocking project selection at startup; the Android UI also called
+an unregistered toolchain-recovery command. The current source restores only
+those intended permissions and connects recovery to the existing original owner.
+Native admission, explicit consent and separate Recover/Choose/Build remain
+unchanged. Independent reviews and focused Linux regressions passed. Source
+`cafb4f9887938cbe21df698dc79abdcd87c72a96` is being rebuilt for both Mac targets in
+run `39094572546/1`; native success is **not yet established**. Earlier signed
+`8800fd3e` packages contain the startup defect and are not usable predecessors.
+
+The next installed checks reuse each corrected final signed application rather
+than rebuild it per feature: ordinary launch/project/configuration/GitHub Apply,
+metadata/images/version and credential persistence; saved evidence and recovery;
+unsigned iOS archive; pending-operation recovery; and interrupted installation
+restoration. Android is not repeated if its same-source producer test passes.
+The existing two-generation update and removal checks remain separate unfinished
+obligations. No predecessor enrollment follows merely from a signed artifact.
+
+**Positive iOS IPA export needs genuine mobile signing inputs.** The available
+Mac Developer ID and notarization credentials cannot substitute for an Apple
+Distribution identity, matching distribution profile and controlled project.
+See [signed-export prerequisites](desktop-ios-archive.md#signed-export).
+No physical-device requirement has been established for local export; no live
+Store mutation is authorized as a test.
+
+### Earlier integration checkpoint
 
 Task commit `39624bd3` integrates local Android/iOS build-once external-testing
 and production preparation, separate TestFlight Beta Review readiness refresh,
@@ -601,9 +629,13 @@ implemented and integrated, with contextual UI guidance. It validates the Apple
 source and prepares a separate protected copy rather than changing the source
 installation. Six focused native entry/cleanup/copy tests passed per architecture
 in `39057955509/1`; that is not full signed setup or installed-app qualification.
-The integrated package run `39059076506/1` at `883ff26a` is pending. Until its
-actual setup and installed flows pass, ordinary consumer usability remains
-unverified.
+The later companion source `eda8b0cc2258a49f6b1494752e04b1a5bcba22aa`
+passed Developer ID Application/Installer signing, notarization/stapling,
+first/repeat installation and two actual managed-provider app-native tests on
+Intel (`39082603257/1`) and Apple Silicon (`39083122098/1`). Its signed
+**Prepare Xcode.pkg** can accompany the app without another unchanged-companion
+build. This qualifies that setup/admission route, not a successful installed
+archive, IPA export or general application readiness.
 
 Read-only run39006573875/1 observed both hosted architectures with Applications
 root:admin0775 and the concrete Xcode app/Contents/Developer user-owned0755.
