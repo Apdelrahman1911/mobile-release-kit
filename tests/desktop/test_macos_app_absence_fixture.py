@@ -52,11 +52,11 @@ def inert_operation(phase=None):
 def file_operation():
     """Real descriptor registry/read/close, without the native owner's entry."""
     with tempfile.TemporaryDirectory(prefix="mrk-app-absence-data-") as directory:
-        op = HELPER.Operation.__new__(HELPER.Operation)
-        op.work = Path(directory)
-        op.work_entry = op.source_entry = None
-        op.entries, op.errors, op.calls = [], [], []
-        op.entry_registry, op.directories = {}, {}
+        environment = dict(GITHUB_SHA="a" * 40, GITHUB_WORKFLOW_SHA="a" * 40,
+            GITHUB_WORKFLOW_REF="inert", GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1")
+        # The constructor initializes custody state only; no native entry runs.
+        op = HELPER.Operation(SimpleNamespace(), Path(directory), Path(directory), FIXTURE.RESTORE,
+                              environment, None)
         op.app_absence, op.app_absence_api = state(), HELPER
         op.store_signing = None
         op.stager_io_pending = None
@@ -711,6 +711,85 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
                 FIXTURE.original_hash(op, target)
             op.close(target)  # Consumed originals never close a reused numeric FD.
             self.assertEqual(op.read(replacement), body)
+
+    def test_candidate_initial_readback_keeps_original_status_and_projects_sibling_inventory(self):
+        stager = load_tool("initial_status_stager", "stage_macos_installed.py")
+        for fault in (None, "collision", "symlink", "storage", "originals", "status-content", "status-mode"):
+            with self.subTest(fault=fault), file_operation() as op, \
+                    patch.object(FIXTURE.time, "monotonic_ns", return_value=NOW):
+                op.phase = FIXTURE.RESTORE
+                op.candidate_restore_context = {}
+                op.app_absence["future"] = {}
+                op.stager = stager
+                op.environment = {}
+                parent = FIXTURE.mkdir(op, op.work_entry, "resume-carrier")
+                source = FIXTURE.output(op, op.work_entry, "inventory-source", b"authenticated fixture inventory\n")
+                status = FIXTURE.output(op, parent, "installer-output.status", b"0\n", mode=0o600)
+                status_path = op.work / "resume-carrier/installer-output.status"
+                status_before = os.stat(status_path)
+                op.candidate_inventory_original = (source, {})
+                op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"] = FIXTURE.digest(op.read(source))
+                # Original native failure: unchanged stager rejects mismatched
+                # input/status parents before attempting any filesystem access.
+                args = SimpleNamespace(input=op.work / "input", installer_status=status_path)
+                with self.assertRaisesRegex(stager.Refused, "installer-status-original-path"):
+                    stager.installer_success_status(args)
+                destination = status_path.parent / "input"
+                if fault == "collision":
+                    destination.mkdir(mode=0o700)
+                if fault == "symlink":
+                    destination.symlink_to(op.work)
+                live = sum(e["fd"] is not None or not e["closed"] for e in op.entries)
+                op.app_absence_live_limit = lambda: live + (1 if fault == "originals" else 2)
+                capacity = SimpleNamespace(f_bavail=0 if fault == "storage" else 16 * 1024**3, f_frsize=1)
+                with patch.object(FIXTURE.os, "fstatvfs", return_value=capacity):
+                    if fault in ("collision", "symlink", "storage", "originals"):
+                        with self.assertRaises((ValueError, FileExistsError)):
+                            FIXTURE.initial_readback_input(op, status_path)
+                        if fault in ("storage", "originals"):
+                            self.assertFalse(destination.exists())
+                        self.assertEqual(os.stat(status_path), status_before)
+                        self.assertEqual(op.read(status), b"0\n")
+                        continue
+                    args.input = FIXTURE.initial_readback_input(op, status_path)
+                self.assertEqual(args.input, destination)
+                self.assertEqual((destination / stager.INSTALLATION_INVENTORY_NAME).read_bytes(), op.read(source))
+                self.assertEqual(op.app_absence["roots"][-1][1], {stager.INSTALLATION_INVENTORY_NAME})
+                self.assertEqual(op.app_absence["outputs"][-1][0]["parent_entry"]["name"], "input")
+                self.assertEqual(os.stat(status_path), status_before)
+                self.assertEqual(op.read(status), b"0\n")
+                self.assertNotIn("candidateReadbackInput", op.app_absence["future"])
+                FIXTURE.post(op)
+                # Only the Darwin ancestor-admission port is substituted. The
+                # real original status leaf open/read/identity/EOF/close executes.
+                @contextlib.contextmanager
+                def channel(path, *, private=None):
+                    self.assertEqual(path, status_path)
+                    self.assertEqual(private, status_path.parent)
+                    fd = os.open(private, stager.READ_FLAGS | os.O_DIRECTORY)
+                    try:
+                        self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o700)
+                        yield fd, path.name
+                    finally:
+                        os.close(fd)
+                if fault == "status-content":
+                    os.pwrite(status["fd"], b"1\n", 0)
+                if fault == "status-mode":
+                    os.fchmod(status["fd"], 0o644)
+                with patch.object(stager, "installer_channel_parent", side_effect=channel), \
+                        patch.object(stager, "packager_ids", return_value=(os.getuid(), os.getgid())):
+                    if fault:
+                        with self.assertRaises(stager.Refused):
+                            stager.installer_success_status(args)
+                    else:
+                        stager.installer_success_status(args)
+        legacy = SimpleNamespace(work=Path("/legacy"))
+        self.assertEqual(FIXTURE.initial_readback_input(legacy, None), Path("/legacy/input"))
+        with self.assertRaisesRegex(ValueError, "candidate-initial-readback-purpose"):
+            FIXTURE.initial_readback_input(legacy, Path("/foreign/installer-output.status"))
+        candidate = SimpleNamespace(work=Path("/candidate"), phase=FIXTURE.RESTORE, candidate_restore_context={})
+        with self.assertRaisesRegex(ValueError, "candidate-initial-readback-status-route"):
+            FIXTURE.initial_readback_input(candidate, Path("/foreign/installer-output.status"))
 
     def test_native_data_result_requires_all_six_exact_names_and_genuine_zero(self):
         names = tuple("installer::worker::app_absence_fixture::tests::" + name for name in (

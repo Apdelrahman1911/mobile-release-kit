@@ -1671,6 +1671,38 @@ def restore(op):
     return restore_from_initial(op, previous, body)
 
 
+def initial_readback_input(op, initial_status):
+    """Keep the original Installer status in place; project only its inventory."""
+    candidate = getattr(op, "candidate_restore_context", None) is not None
+    need(candidate == (initial_status is not None), "candidate-initial-readback-purpose")
+    if not candidate:
+        return op.work / "input"
+    need(op.phase == RESTORE and initial_status == op.work / "resume-carrier/installer-output.status",
+         "candidate-initial-readback-status-route")
+    parent = op.directory(op.work_entry, "resume-carrier", "candidate-transport")
+    inventory, _ = input_rows(op)
+    # input_rows may acquire its two existing input originals. Quote the two
+    # additional projection originals AFTER that acquisition, before creating.
+    external = getattr(op, "candidate_external_originals", None)
+    extra = 0 if external is None else external()
+    need(type(extra) is int and 0 <= extra <= 96
+         and len(op.entries) + getattr(op, "candidate_bootstrap_originals", 0) + 24 + 2 <= 24576
+         and extra + sum(e["fd"] is not None or not e["closed"] for e in op.entries) + 2
+             <= op.app_absence_live_limit(), "candidate-initial-readback-original-quote")
+    allocation = "candidateReadbackInput"
+    need(allocation not in op.app_absence["future"], "candidate-initial-readback-allocation")
+    op.app_absence["future"][allocation] = inventory["identity"][6] + 4096
+    reserve(op, allocation)
+    projected = mkdir(op, parent, "input")  # Existing names, including symlinks, refuse.
+    names = set()
+    op.app_absence["roots"].append((projected, names))
+    copy(op, inventory, projected, op.stager.INSTALLATION_INVENTORY_NAME, op.stager.INVENTORY_BYTES)
+    names.add(op.stager.INSTALLATION_INVENTORY_NAME)
+    # The original status is neither copied nor rewritten. The unchanged stager
+    # requires these sibling paths and independently reads that same status.
+    return initial_status.parent / "input"
+
+
 def restore_from_initial(op, previous, body, *, initial_status=None):
     """Common effect path AFTER the caller's real predecessor admission.
 
@@ -1694,7 +1726,8 @@ def restore_from_initial(op, previous, body, *, initial_status=None):
         op.app_absence_api.candidate_carrier_retire(op)
     attach(op, "app-absence-restore-attach", rows)
     initial = previous["initial"]
-    args = SimpleNamespace(target=op.target, fixture=False, input=op.work / "input", expected_source=op.image_source,
+    initial_input = initial_readback_input(op, initial_status)
+    args = SimpleNamespace(target=op.target, fixture=False, input=initial_input, expected_source=op.image_source,
         expected_inventory=op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"], expected_manifest=op.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
         request_id=initial["requestId"], expected_package=previous["binding"]["packageSha256"],
         producer_descriptor=mounted_path(op) / "producer.json", producer_signature=mounted_path(op) / "producer.sig",

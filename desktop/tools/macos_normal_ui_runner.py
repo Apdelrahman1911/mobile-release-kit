@@ -3922,7 +3922,7 @@ def panel_topology_diagnostics(stdout, stderr):
 PROJECT_STAGES = tuple('launch fixture project-open android-source-jdk android-source-sdk android-source-gradle android-source-cancel android-source-reselect android-source-refused field-version field-project field-workspace field-metadata field-file-cancel field-directory-cancel field-review quit project-cancel config github text version images-cancel images readback-and-quit'.split())
 
 
-def project_wait_condition(message, *, stages=(), ios_pending=False):
+def project_wait_condition(message, *, stages=(), ios_pending=False, empty_build=False):
     """Classify complete fixed XCTest errors, never copy their private prose."""
     reasons = (
         (b"case clock unavailable", "case-clock-unavailable"),
@@ -3941,6 +3941,18 @@ def project_wait_condition(message, *, stages=(), ios_pending=False):
     )
     if ios_pending:
         reasons += ((b"current account session absent or ambiguous", "account-session-unavailable"),)
+    if empty_build:
+        reasons += (
+            (b"empty build-input inspection contains an unconfirmed acknowledgement", "empty-input-unconfirmed"),
+            (b"empty build-input inspection contains a historical observation", "empty-input-historical"),
+            (b"empty build-input inspection contains a recorded session", "empty-input-recorded-session"),
+            (b"empty build-input inspection contains a recovery result", "empty-input-recovery-result"),
+            (b"empty build-input inspection contains a retirement result", "empty-input-retirement-result"),
+            (b"empty build-input inspection contains a pending session", "empty-input-pending-session"),
+            (b"empty build-input inspection contains terminal metadata", "empty-input-terminal-metadata"),
+            (b"empty build-input inspection contains an outcome refusal", "empty-input-outcome-refusal"),
+            (b"empty build-input inspection contains unknown cleanup", "empty-input-cleanup-unknown"),
+        )
     # Only the caller's fixed selected-subset stages; never a runtime suffix.
     reasons += tuple((prefix + stage.encode("ascii"), code) for stage in stages for prefix, code in (
         (b"missing or ambiguous expected control in ", "expected-control-missing-or-ambiguous"),
@@ -4643,7 +4655,9 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                                         if selection == "saved-checks-test.xcresult":
                                             prefix = "offline-" if match.group(3) == b"testSyntheticProjectSavedOfflineChecks" else "recovery-idle-"
                                             stages = tuple(stage for stage in stages if stage.startswith(prefix))
-                                        condition = project_wait_condition(message, stages=stages, ios_pending=selection == IOS_PENDING_RESULT)
+                                        condition = project_wait_condition(message, stages=stages, ios_pending=selection == IOS_PENDING_RESULT,
+                                            empty_build=selection == "saved-checks-test.xcresult"
+                                                and match.group(3) == b"testSyntheticProjectEmptyBuildInputInspection")
                                         if condition is not None:
                                             finding["condition"] = condition
                                     if finding not in xctest_issues:
@@ -4887,9 +4901,19 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             wait = re.fullmatch(rb"MRK_NORMAL_WAIT=v1;line=([1-9][0-9]{0,4});waiter=(completed|timed-out|other);matches=([0-5]);failures=([0-5]);nonAtomic=1", record)
             if wait and phase == "test" and stream == "stdout" and int(wait[1]) <= 65535:
                 if wait[2] != b"completed" or wait[3] != b"1" or wait[4] != b"0":
-                    retain("queryObservations", {"kind": "wait", "stream": "stdout", "line": int(wait[1]),
+                    rows = value["queryObservations"]
+                    # Preserve failed-wait facts ahead of initial renderer probes,
+                    # retaining encounter order within each class and the same cap.
+                    index = next((i for i, row in enumerate(rows)
+                        if row["kind"] == "renderer" and row["observation"] == "initial"), len(rows))
+                    rows.insert(index, {"kind": "wait", "stream": "stdout", "line": int(wait[1]),
                         "waiter": wait[2].decode("ascii"), "matches": int(wait[3]), "failures": int(wait[4]),
-                        "nonAtomic": True}, 4, distinct=False)
+                        "nonAtomic": True})
+                    if len(rows) > 4:
+                        initial = [i for i, row in enumerate(rows)
+                            if row["kind"] == "renderer" and row["observation"] == "initial"]
+                        rows.pop(initial[-1] if initial else -1)
+                        value["findingsTruncated"] = True
                 continue
             match = re.fullmatch(query, record)
             if match is None:

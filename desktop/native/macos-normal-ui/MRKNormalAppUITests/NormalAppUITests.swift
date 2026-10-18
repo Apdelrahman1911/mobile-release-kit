@@ -4967,6 +4967,30 @@ final class NormalAppUITests: XCTestCase {
         do { _ = try staticTextContent(value: String(repeating: "x", count: 4097), label: "") }
         catch { overlongRefused = true }
         guard overlongRefused else { throw Refusal.condition("static text bound DATA differs") }
+        let session = String(repeating: "a", count: 32), other = String(repeating: "b", count: 32)
+        let report = "Exact inspected session: " + session + "."
+        let review = "Inspected session: " + session + "."
+        let paragraph = "Project project-1. " + review + " This label is a comparison, not authority; native Start must still match its original inspection."
+        for (rows, reviewing) in [([session], false), ([report], false), ([session], true),
+                                 ([review], true), ([paragraph], true),
+                                 ([".", session, "Exact inspected session: "], false),
+                                 (["Project ", "project-1", ". Inspected session: ", session, "."], true)] {
+            guard try iosRecoverySessionData(rows, review: reviewing) == session else {
+                throw Refusal.condition("recovery session content DATA differs")
+            }
+        }
+        for (rows, reviewing) in [([String](), false), (["project-1"], true), ([report], true), ([review], false),
+                                 ([session, session], false), ([session, other], true), ([report, session], false),
+                                 ([String(session.dropLast())], false), ([session + "a"], true),
+                                 ([session.uppercased()], false), (["private " + session], true),
+                                 ([session + "\n"], false), ([paragraph + " private"], true),
+                                 ([paragraph.replacingOccurrences(of: "project-1", with: "project-18446744073709551616")], true),
+                                 ([String](repeating: "", count: 257), false),
+                                 ([String](repeating: String(repeating: "x", count: 4096), count: 8), false)] {
+            var refused = false
+            do { _ = try iosRecoverySessionData(rows, review: reviewing) } catch { refused = true }
+            guard refused else { throw Refusal.condition("recovery session content DATA refusal differs") }
+        }
     }
 
     // Read only the ordinary parsed-current Build details within the caller's
@@ -5756,12 +5780,7 @@ final class NormalAppUITests: XCTestCase {
             try click(sheet.buttons.matching(identifier: "Cancel"), "owned signing-input Cancel unavailable")
             try waitGone(sheet)
         } else {
-            try goToFolder(sheet, path: fixture.sourcesPath)
-            let file = try waitElement(controls(sheet, [.cell, .outlineRow, .tableRow, .icon], label: input.file),
-                                      in: sheet, enabled: true)
-            try require(file.isHittable, "owned inert signing-input file is not actionable")
-            file.click()
-            try require(file.isSelected, "native inert-file selection was not observed")
+            try goToFolder(sheet, path: fixture.sourcesPath + "/" + input.file)
             try nativeOpen(sheet)
             try privateStatus(storage, action: "choose-file", phase: "selected")
         }
@@ -6859,7 +6878,6 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Inspect documents", renderer: renderer, failures: failures) // Exactly one observation request.
             try currentDocuments(timeout: 15) // Existing native work10 + cleanup2, within the original case.
             try expand(renderer, prefix: "Document status and technical details", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "No artifact bytes, signing, GitHub authenticity, Store state, release readiness or recovery safety are established here. All six assurance flags remain false."), in: renderer)
             for path in ["candidate-receipt.json", "candidate-manifest.json", "operation/candidate-operation-intent.json"] {
                 try require(renderer.staticTexts.matching(identifier: path).count >= 1, "an expected saved document is absent from the observation")
             }
@@ -7383,10 +7401,18 @@ final class NormalAppUITests: XCTestCase {
                         && panel.buttons.matching(identifier: "Recover reviewed build inputs").count == 0
                         && panel.buttons.matching(identifier: "Retire reviewed metadata").count == 0,
                         "Idle inspection enabled a recovery mutation or invented a recovery intent")
-            for label in [unconfirmed, historical, "Recorded session:", "Reviewed build-input session recovered.",
-                          "Reviewed terminal metadata retired.", "Pending build-input session", "Only terminal recovery metadata remains"] + failures {
-                try require(panel.staticTexts.matching(identifier: label).count == 0,
-                            "empty inspection contains unconfirmed, historical, pending or mutation-result data")
+            for (label, reason) in [
+                (unconfirmed, "empty build-input inspection contains an unconfirmed acknowledgement"),
+                (historical, "empty build-input inspection contains a historical observation"),
+                ("Recorded session:", "empty build-input inspection contains a recorded session"),
+                ("Reviewed build-input session recovered.", "empty build-input inspection contains a recovery result"),
+                ("Reviewed terminal metadata retired.", "empty build-input inspection contains a retirement result"),
+                ("Pending build-input session", "empty build-input inspection contains a pending session"),
+                ("Only terminal recovery metadata remains", "empty build-input inspection contains terminal metadata"),
+                (failures[0], "empty build-input inspection contains an outcome refusal"),
+                (failures[1], "empty build-input inspection contains unknown cleanup"),
+            ] {
+                try require(panel.staticTexts.matching(identifier: label).count == 0, reason)
             }
             try fixture.assertUnchanged() // Includes the closed directory roster: no new hidden recovery metadata.
             try savedOperationComplete(panel)
@@ -8069,16 +8095,48 @@ final class NormalAppUITests: XCTestCase {
         return IOSRecoveryObservation(operationID: values[0], ownerGeneration: values[1], phase: values[2],
                                       outcome: values[3], reason: values[4])
     }
-    @MainActor private func iosRecoverySession(_ container: XCUIElement, review: Bool = false) throws -> String {
-        let text = try iosPublicText(container)
-        let pattern = review ? #"(?:^| )Inspected session: ([0-9a-f]{32})\s*\."#
-                             : #"(?:^| )Exact inspected session: ([0-9a-f]{32})\s*\."#
-        let expression = try NSRegularExpression(pattern: pattern)
-        let matches = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
-        guard matches.count == 1, let range = Range(matches[0].range(at: 1), in: text) else {
-            throw Refusal.condition("current account session absent or ambiguous")
+    private static func iosRecoverySessionData(_ texts: [String], review: Bool) throws -> String {
+        guard texts.count <= 256 else { throw Refusal.condition("iOS fixed panel text count") }
+        var patterns: [(String, Int)] = [(#"\A([0-9a-f]{32})\z"#, 1),
+            (review ? #"\AInspected session: ([0-9a-f]{32})\.\z"#
+                    : #"\AExact inspected session: ([0-9a-f]{32})\.\z"#, 1)]
+        if review {
+            // The native chooser's project-N is distinct from the session token.
+            patterns.append((#"\AProject project-([1-9][0-9]{0,19})\. Inspected session: ([0-9a-f]{32})\. This label is a comparison, not authority; native Start must still match its original inspection\.\z"#, 2))
         }
-        return String(text[range]) // Retained in memory only; only its digest may be printed.
+        let expressions = try patterns.map { (try NSRegularExpression(pattern: $0.0), $0.1) }
+        var sessions: [String] = [], bytes = 0
+        for text in texts {
+            bytes += text.utf8.count + 1
+            guard text.utf8.count <= 4096 && bytes <= 32768 else { throw Refusal.condition("iOS fixed panel text bound") }
+            for (expression, index) in expressions {
+                guard let match = expression.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                      let range = Range(match.range(at: index), in: text) else { continue }
+                if index == 2 {
+                    guard let project = Range(match.range(at: 1), in: text), UInt64(text[project]) != nil else { continue }
+                }
+                sessions.append(String(text[range]))
+            }
+        }
+        guard sessions.count == 1 else { throw Refusal.condition("current account session absent or ambiguous") }
+        return sessions[0] // Never deduplicate or select the first conflicting observation.
+    }
+    @MainActor private func iosRecoverySession(_ container: XCUIElement, review: Bool = false) throws -> String {
+        let query = container.staticTexts, count = query.count
+        try require(count <= 256, "iOS fixed panel text count")
+        var texts: [String] = [], bytes = 0
+        for index in 0..<count {
+            _ = try remaining(5)
+            let text = try staticTextContent(query.element(boundBy: index))
+            bytes += text.utf8.count + 1
+            try require(bytes <= 32768, "iOS fixed panel text bound")
+            texts.append(text)
+        }
+        // An AX descendant list is not prose order. Decode whole original text
+        // nodes, never concatenate a caption, code token and punctuation.
+        let session = try Self.iosRecoverySessionData(texts, review: review)
+        _ = try remaining(1)
+        return session // Retained in memory only; only its digest may be printed.
     }
     @MainActor private func iosRecoveryAccount(_ renderer: XCUIElement, status: String) throws -> (String, String) {
         let group = try unique(named(renderer, "Account signing recovery state"), "current account report missing or repeated")

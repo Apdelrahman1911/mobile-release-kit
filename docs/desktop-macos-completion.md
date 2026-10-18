@@ -2,27 +2,41 @@
 
 Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.**
 
-### 2026-10-18: focused follow-on native interaction checks
+### 2026-10-18: Restore readback integration and native UI follow-on
 
-Run `39142153087/1 @a602c26a`: Restore helper build/audit and original-absence
-baseline now **passed**. Candidate install and remaining Restore phases are still
-pending at this update. Three UI jobs failed; they are not feature passes.
+`39142153087/1 @a602c26a`: Restore helper build, protected baseline completion,
+and fresh candidate installation/readback passed. The next step stopped BEFORE
+withdrawal: the original candidate stager at `fcb1aa46`, line6412, rejected input
+and original Installer-status paths with different parents. It is not a signing
+failure. Candidate retirement had deliberately removed the sibling input directory.
+The reviewed fix recreates only that authenticated inventory beside the unchanged
+original status, with exclusive creation, storage/original-handle limits and the
+same stager validation. No status copying, permission relaxation or new signing.
 
-This independently reviewed helper-only batch removes the unsupported empty-menu
-census, retains exact owned menu-item selection/dismissal/value readback, uses
-XCTest's documented click-to-scroll for the same disclosure element, and matches
-format-validation text by exact String AXValue rather than heading aliases.
-Existing failure diagnostics retain first assertion sites in four more selected
-methods and three finite failure reasons; they never copy private runtime prose.
-The extended existing diagnostic/privacy test passed locally (one method, zero
-skips); this is not native interaction evidence.
+`39143714445/1 @8446643b`: all four jobs failed, but diagnostics now distinguish:
+- Credentials progressed through initialization/dropdowns; the native file-list
+  role query found zero matches before P12 selection. Full-path native selection
+  reuses the existing panel route rather than guessing file-row AX roles.
+- Pending iOS reached account inspection; concatenating AX text descendants did
+  not produce the expected session sentence. Exact whole-node session decoding
+  preserves singleton/session/consent checks without assuming traversal text order.
+- Saved evidence passed its current document summary and disclosure click; the
+  next failure was a fixed explanatory paragraph. Only this redundant prose wait
+  is removed; typed false-assurance flags and document/readback checks remain.
+- Ordinary project still failed configuration without a specific inner condition.
+  Path-fields reached its final quit stage; no whole project-job pass is claimed.
 
-Next run targets persistence (the representative dropdown journey), ordinary
-project configuration, saved evidence, and pending iOS only. Android/unsigned iOS
-are deferred until their shared interaction is understood, not waived. The older
-Restore run is allowed to finish; no duplicate Restore build or app signing.
-Main/public releases remain unchanged. Remaining installed features, Intel,
-removal/update continuity and final readiness are still unresolved.
+Four focused local methods passed: composed privacy/diagnostic coverage, the new
+real-FD sibling-path regression, existing copy/collision checks and the remaining
+thin-copy caller. Initial missing scratch build-release input and stale test-only
+constructor were corrected, not marked passed. All local callers joined and
+projections removed. New Swift DATA cases run in the existing pending-iOS journey;
+Linux results do not replace native proof.
+
+Next scoped run reuses signed `fcb1aa46`; only the nonshipping Restore helper
+rebuilds. Independent reviews remain; no repeat application signing/notarization.
+Remaining installed journeys, Intel, removal/update continuity and final readiness
+are unresolved. Main/public releases remain unchanged and require owner approval.
 
 ### 2026-10-18: protected Restore completion and real native dropdowns
 

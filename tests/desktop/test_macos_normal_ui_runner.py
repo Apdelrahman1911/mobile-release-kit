@@ -4048,6 +4048,33 @@ class NormalPhaseDataTests(unittest.TestCase):
                 row = ("MRK_NORMAL_PROJECT_STAGE=" + public_stage + ";result=passed\n").encode()
                 self.assertEqual(classify(row, selection=subset)[progress]["lastObserved"],
                                  {"stage": public_stage, "result": "passed"})
+        # Each unchanged empty-inspection negative guard reports only its fixed category.
+        empty_site = (b"NormalAppUITests.swift:7366: error: -[MRKNormalAppUITests.NormalAppUITests "
+                      b"testSyntheticProjectEmptyBuildInputInspection] : ")
+        empty_reasons = (
+            ("an unconfirmed acknowledgement", "unconfirmed"), ("a historical observation", "historical"),
+            ("a recorded session", "recorded-session"), ("a recovery result", "recovery-result"),
+            ("a retirement result", "retirement-result"), ("a pending session", "pending-session"),
+            ("terminal metadata", "terminal-metadata"), ("an outcome refusal", "outcome-refusal"),
+            ("unknown cleanup", "cleanup-unknown"),
+        )
+        for suffix, code in empty_reasons:
+            reason = b"empty build-input inspection contains " + suffix.encode()
+            for quote in (b'"', b'\\"'):
+                raw = empty_site + b'caught error: "condition(' + quote + reason + quote + b')"\n'
+                for stdout, stderr in ((raw, b""), (b"", raw)):
+                    value = MODULE.normal_failure_diagnostics("test", "saved-checks-test.xcresult",
+                        subprocess.CompletedProcess([], 65, stdout, stderr))
+                    self.assertEqual(value["xctestIssues"][0]["condition"], "empty-input-" + code)
+                    self.assertEqual(value["originalReturncode"], 65)
+                    self.assertLessEqual(len(MODULE.encoded(value)) + 1, 4096)
+                for bad in (raw[:-1], raw.replace(reason, reason + private), raw.replace(reason, private),
+                            raw.replace(b"testSyntheticProjectEmptyBuildInputInspection", b"testSyntheticProjectSavedOfflineChecks")):
+                    value = classify(bad, selection="saved-checks-test.xcresult")
+                    self.assertFalse(any("condition" in row for row in value.get("xctestIssues", [])))
+                    self.assertNotIn(private, MODULE.encoded(value))
+                self.assertNotIn("xctestIssues", classify(raw, selection="persistence-test.xcresult"))
+                self.assertNotIn("xctestIssues", classify(raw, phase="summary", selection="saved-checks-test.xcresult"))
         # Existing first-latched markers remain bound to the exact independent cohort.
         site_cases = tuple((selection, method) for selection, method, _, _ in subsets) + (
             (MODULE.ANDROID_CANDIDATE_RESULT, MODULE.ANDROID_CANDIDATE_METHOD),)
@@ -4099,6 +4126,29 @@ class NormalPhaseDataTests(unittest.TestCase):
             self.assertEqual(len(classify(raw)['queryObservations']), 1)
         capped=classify(wait*5); self.assertEqual(len(capped['queryObservations']), 4)
         self.assertTrue(capped['findingsTruncated']); self.assertLessEqual(len(MODULE.encoded(capped))+1,4096)
+        renderer = b"MRK_MACOS_NORMAL_RENDERER_QUERY=observation=initial;matches=0;exceedsFour=0;nonAtomic=1\n"
+        second_wait = wait.replace(b"6748", b"6368")
+        # Three ordinary test launches must not evict the later original wait.
+        prioritized = classify(renderer + renderer.replace(b"matches=0", b"matches=2") + wait
+            + renderer.replace(b"matches=0", b"matches=3") + second_wait + private + b"\n")
+        rows = prioritized["queryObservations"]
+        self.assertEqual([(row["kind"], row.get("line", row.get("matches"))) for row in rows],
+                         [("wait", 6748), ("wait", 6368), ("renderer", 0), ("renderer", 2)])
+        self.assertTrue(prioritized["findingsTruncated"])
+        self.assertEqual(prioritized["originalReturncode"], 65)
+        self.assertNotIn(private, MODULE.encoded(prioritized))
+        self.assertLessEqual(len(MODULE.encoded(prioritized)) + 1, 4096)
+        uncapped = classify(renderer + wait + second_wait)
+        self.assertEqual([row["kind"] for row in uncapped["queryObservations"]], ["wait", "wait", "renderer"])
+        self.assertFalse(uncapped["findingsTruncated"])
+        saturated = classify(renderer + b"".join(wait.replace(b"6748", str(n).encode()) for n in range(1, 6)))
+        self.assertEqual([row["line"] for row in saturated["queryObservations"]], [1, 2, 3, 4])
+        self.assertTrue(saturated["findingsTruncated"])
+        dashboard = b"MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=%s;matches=2;exceedsFour=0;nonAtomic=1\n"
+        mixed = classify(renderer + b"".join(dashboard % kind for kind in (b"identifier", b"title", b"label")) + wait)
+        self.assertEqual([(row["kind"], row.get("observation")) for row in mixed["queryObservations"]],
+                         [("wait", None), ("dashboard", "identifier"), ("dashboard", "title"), ("dashboard", "label")])
+        self.assertTrue(mixed["findingsTruncated"])
         self.assertEqual(classify(wait,'build',None)['queryObservations'], [])
         self.assertEqual(MODULE.normal_failure_diagnostics('test',selected,
             subprocess.CompletedProcess([],65,b'',wait))['queryObservations'], [])
