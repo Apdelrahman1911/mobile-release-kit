@@ -2761,7 +2761,7 @@ class NormalPhaseDataTests(unittest.TestCase):
         swift=SWIFT.read_text()
         helper=swift.split('@MainActor private func waitForSnapshotIdentity(',1)[1].split('@MainActor private func waitGone(',1)[0]
         self.assertIn('try waitElement(query, in: renderer, timeout: 15, failures: [',helper)
-        self.assertIn('], line: line)',helper)
+        self.assertIn('], snapshotObservation: true, line: line)',helper)
         for title in ('Static observation unavailable','Only a partial static observation is available'):
             self.assertIn('"'+title+'"',helper)
         # Disabled iOS legitimately renders textValue's default 'Not configured'
@@ -2775,13 +2775,19 @@ class NormalPhaseDataTests(unittest.TestCase):
         wait=swift.split('@MainActor private func waitElement(',1)[1].split('@MainActor private func waitForSnapshotIdentity(',1)[0]
         self.assertIn('timeout: TimeInterval = 5',wait)
         self.assertIn('timeout: try remaining(timeout)',wait)
-        self.assertIn('query.count != 1',wait)
+        self.assertIn('matchCount != 1',wait)
+        observer=helper.split('@MainActor private func observeSnapshotState(',1)[1]
+        self.assertIn('clock.observationAllowed(now, before: end)',observer)
+        self.assertIn('clock.observationAllowed(finish, before: end)',observer)
+        self.assertNotIn('remaining(',observer);self.assertNotIn('clock.fail(',observer)
         # Ten existing post-selection identity assertions now share the narrow
         # wait; the later explicit-refresh assertion retains its old contract.
         self.assertEqual(swift.count('waitForSnapshotIdentity('),11)
         self.assertIn('try waitGone(earlier)\n            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)',swift)
         for label in ('org.example.saved','org.example.mrk.observed'):
             self.assertIn('waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "'+label+'"), in: renderer)',swift)
+        self.assertEqual(MODULE.ORDINARY_CURRENT_RESULTS, ("applications-test.xcresult", "project-test.xcresult",
+            "persistence-test.xcresult", "saved-checks-test.xcresult", "release-evidence-test.xcresult", "workflow-refusal-test.xcresult"))
         root=MODULE.SAVED_VERSION_CANDIDATE_ROOT/".candidate-consumer-helper"
         env={MODULE.ORDINARY_CURRENT_ENV:MODULE.ORDINARY_CURRENT_SCOPE,
              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE":"a"*40,
@@ -2842,6 +2848,24 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertNotIn('projectIdentity',MODULE.normal_failure_diagnostics('test','test.xcresult',original))
         self.assertNotIn('projectIdentity',MODULE.normal_failure_diagnostics('summary','project-test.xcresult',original))
         with self.assertRaises(MODULE.Refused): MODULE.project_identity_diagnostics(b'x'*(1024*1024+1),b'')
+        snapshot=b'MRK_NORMAL_SNAPSHOT_STATE=v1;sample=post-wait;waiter=timed-out;error=0;partial=0;unread=1;loading=0;empty=1;unsupported=1;invalid=0;missing=0;runtime=0;protocol=0;nonAtomic=1\n'
+        for selection in ('project-test.xcresult',MODULE.ANDROID_CANDIDATE_RESULT):
+            original=subprocess.CompletedProcess(['fixed-original'],65,snapshot+private,b'')
+            diagnostic=MODULE.normal_failure_diagnostics('test',selection,original)
+            self.assertEqual(diagnostic['originalReturncode'],65)
+            sample=diagnostic['snapshotState']['samples'][0]
+            self.assertEqual((sample['unread'],sample['empty'],sample['unsupported']),(1,1,1))
+            self.assertEqual((sample['timing'],sample['waiter']),('post-wait','timed-out'))
+            self.assertNotIn(b'PRIVATE',MODULE.encoded(diagnostic));self.assertLessEqual(len(MODULE.encoded(diagnostic))+1,4096)
+        # Two existing project methods may fail separately. Preserve both fixed
+        # observations, never infer they were atomic or a single method's state.
+        self.assertEqual(len(MODULE.snapshot_state_diagnostics(snapshot*2,b'')['samples']),2)
+        for a,b in ((snapshot*3,b''),(snapshot[:-1],b''),(b'prefix '+snapshot,b''),(snapshot.replace(b'error=0',b'error=6'),b''),(b'',snapshot),(snapshot.replace(b'post-wait',b'PRIVATE'),b'')):
+            self.assertEqual(MODULE.snapshot_state_diagnostics(a,b)['state'],'refused')
+        self.assertNotIn('snapshotState',MODULE.normal_failure_diagnostics('summary','project-test.xcresult',original))
+        with self.assertRaises(MODULE.Refused): MODULE.snapshot_state_diagnostics(b'x'*(1024*1024+1),b'')
+        self.assertIn('observeSnapshotState(root, waiter: result)',wait)
+        self.assertNotIn('try? observeSnapshotState(',wait)
 
     def test_current_ios_candidate_context_is_two_source_and_only_two_journeys(self):
         root=MODULE.SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper"
@@ -5470,6 +5494,22 @@ class NormalIOSPendingRecoveryDataTests(unittest.TestCase):
         self.assertLess(navigation.index('recoveryFixture ==='), navigation.index('try recoveryFixture.post()'))
         self.assertIn('} else {\n            try require(path.hasPrefix("/private/tmp/mrk-normal-project-")', navigation)
         pending = swift.split('func testInstalledIOSPendingAccountRecoveryThroughUI()', 1)[1].split('func testSyntheticProjectAndroidSignedBuild()', 1)[0]
+        # Native Foundation cases run inside the existing journey before any
+        # private fixture admission; this Linux test proves wiring, not AX results.
+        self.assertLess(pending.index('try Self.exerciseStaticTextContentData()'),pending.index('try fixture.open(.pending)'))
+        content=swift.split('private static func staticTextContent(value:',1)[1].split('private static func staticTextPrefixPredicate(',1)[0]
+        self.assertIn('(value as? String) ?? label',content)
+        self.assertIn('element.elementType == .staticText',content)
+        self.assertNotIn('String(describing:',content)
+        for name,end in (('androidCurrentBuildIdentity','testPositiveAndroidOutputCustodyData'),
+                         ('iosCurrentArchiveIdentity','iosPublicText'),('iosRecoveryObservation','iosRecoverySession'),
+                         ('iosRecoveryAccount','testInstalledIOSPendingAccountRecoveryThroughUI')):
+            body=swift.split('func '+name+'(',1)[1].split('func '+end+'(',1)[0]
+            self.assertIn('staticTextPrefix(',body);self.assertIn('try staticTextContent(',body)
+        for name,end in (('androidPublicText','androidMatch'),('iosPublicText','iosResult')):
+            body=swift.split('func '+name+'(',1)[1].split('func '+end+'(',1)[0]
+            self.assertIn('try staticTextContent(query.element(boundBy: index))',body)
+            self.assertIn('<= 32768',body)
         call = 'try goToFolder(sheet, path: fixture.projectPath, recoveryFixture: fixture); try nativeOpen(sheet)'
         self.assertEqual(swift.count(call), 1)
         self.assertLess(pending.index('ownedIOSRecoveryFixture = fixture'), pending.index(call))

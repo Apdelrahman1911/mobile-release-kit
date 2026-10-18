@@ -1227,7 +1227,8 @@ final class NormalAppUITests: XCTestCase {
         let context = ProcessInfo.processInfo.environment
         if let marker = context["MRK_NORMAL_UI_CURRENT_ORDINARY"] {
             try require(marker == "current-candidate-ordinary-only-v1"
-                        && ["applications-test.xcresult", "project-test.xcresult", "persistence-test.xcresult", "saved-checks-test.xcresult"].contains(result)
+                        && ["applications-test.xcresult", "project-test.xcresult", "persistence-test.xcresult", "saved-checks-test.xcresult",
+                            "release-evidence-test.xcresult", "workflow-refusal-test.xcresult"].contains(result)
                         && ["MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE", "MRK_NORMAL_UI_CURRENT_IOS_PENDING",
                             "MRK_NORMAL_UI_CURRENT_IOS_TOOLS", "MRK_NORMAL_UI_CURRENT_SAVED_VERSION",
                             "MRK_NORMAL_UI_FIXED_CARRIER_RESUME", "MRK_NORMAL_UI_FIXED_NORMAL_BATCH"].allSatisfy({ context[$0] == nil }),
@@ -4684,6 +4685,56 @@ final class NormalAppUITests: XCTestCase {
     }
 
 
+    // macOS WebKit exposes static-text content through AXValue. A heading's
+    // value may instead be its numeric level; never stringify that as content.
+    // Only existing static-text roles use this reader, not controls or names.
+    private static func staticTextContent(value: Any?, label: String, limit: Int = 4096) throws -> String {
+        let text = (value as? String) ?? label
+        guard limit >= 0 && limit <= 4096 && text.utf8.count <= limit else {
+            throw Refusal.condition("static text content exceeds its bound")
+        }
+        return text
+    }
+    @MainActor private func staticTextContent(_ element: XCUIElement, limit: Int = 4096) throws -> String {
+        try require(element.elementType == .staticText, "static text content role differs")
+        let value = element.value
+        return try Self.staticTextContent(value: value, label: value is String ? "" : element.label, limit: limit)
+    }
+    private static func staticTextPrefixPredicate(_ prefix: String) -> NSPredicate {
+        NSPredicate(format: "label BEGINSWITH %@ OR title BEGINSWITH %@ OR value BEGINSWITH %@", prefix, prefix, prefix)
+    }
+    @MainActor private func staticTextPrefix(_ root: XCUIElement, _ prefix: String) -> XCUIElementQuery {
+        root.staticTexts.matching(Self.staticTextPrefixPredicate(prefix))
+    }
+    private static func exerciseStaticTextContentData() throws {
+        let prefix = "Recovery operation ID: ", identifier = String(repeating: "a", count: 32)
+        let complete = prefix + identifier
+        let cases: [([String: Any], Bool)] = [
+            (["label": "", "title": "", "value": complete], true),
+            (["label": complete, "title": ""], true),
+            (["label": "Heading", "title": "Heading", "value": NSNumber(value: 4)], false),
+            (["label": complete, "title": complete, "value": NSNumber(value: 4)], true),
+            (["label": "", "title": "", "value": ""], false),
+            (["label": "Unrelated", "title": "", "value": "Unrelated"], false),
+        ]
+        for (attributes, expected) in cases {
+            guard staticTextPrefixPredicate(prefix).evaluate(with: attributes as NSDictionary) == expected else {
+                throw Refusal.condition("static text predicate DATA differs")
+            }
+        }
+        guard try staticTextContent(value: complete, label: "other") == complete,
+              try staticTextContent(value: nil, label: complete) == complete,
+              try staticTextContent(value: NSNumber(value: 4), label: "Heading") == "Heading",
+              try staticTextContent(value: "", label: complete).isEmpty,
+              try !staticTextContent(value: "other", label: complete).hasPrefix(prefix) else {
+            throw Refusal.condition("static text content DATA differs")
+        }
+        var overlongRefused = false
+        do { _ = try staticTextContent(value: String(repeating: "x", count: 4097), label: "") }
+        catch { overlongRefused = true }
+        guard overlongRefused else { throw Refusal.condition("static text bound DATA differs") }
+    }
+
     // Read only the ordinary parsed-current Build details within the caller's
     // exact review or original-status container, never the three panels globally.
     @MainActor private func androidCurrentBuildIdentity(_ container: XCUIElement) throws -> LocalFixture.AndroidBuildIdentity {
@@ -4691,9 +4742,9 @@ final class NormalAppUITests: XCTestCase {
                                  "current Android Build details missing or repeated")
         var values: [String] = []
         for prefix in ["Build operation ID: ", "Build owner generation: "] {
-            let field = try unique(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)),
+            let field = try unique(staticTextPrefix(details, prefix),
                                    "current Android build identity field missing or repeated")
-            let label = field.label
+            let label = try staticTextContent(field)
             try require(field.isHittable && label.hasPrefix(prefix), "current Android build identity is not visible")
             let value = String(label.dropFirst(prefix.count))
             try require(value.range(of: #"^[0-9a-f]{32}$"#, options: .regularExpression) != nil,
@@ -4787,22 +4838,28 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func waitElement(_ query: XCUIElementQuery, in root: XCUIElement,
                                        enabled: Bool = false, timeout: TimeInterval = 5,
-                                       failures: [String] = [], line: UInt = #line) throws -> XCUIElement {
+                                       failures: [String] = [], snapshotObservation: Bool = false, line: UInt = #line) throws -> XCUIElement {
         let first = query.element(boundBy: 0)
-        let failed = root.staticTexts.matching(NSPredicate(format: "label IN %@", failures))
+        let failed = root.staticTexts.matching(NSPredicate(format: "label IN %@ OR title IN %@ OR value IN %@", failures, failures, failures))
         let targets: NSDictionary = ["ready": first, "failed": failed.element(boundBy: 0)]
         let ready = "ready.exists == true" + (enabled ? " AND ready.enabled == true" : "")
         let predicate = NSPredicate(format: "(" + ready + ") OR failed.exists == true")
         let expected = XCTNSPredicateExpectation(predicate: predicate, object: targets)
         let result = XCTWaiter.wait(for: [expected], timeout: try remaining(timeout))
-        if failed.count > 0 {
+        let failureCount = failed.count, matchCount = query.count
+        if snapshotObservation && (failureCount > 0 || result != .completed || matchCount != 1) {
+            // Same original wait, before its existing refusal. Finite public
+            // facts only; exhausted observation budget cannot replace its error.
+            observeSnapshotState(root, waiter: result)
+        }
+        if failureCount > 0 {
             diagnostic(root)
             if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {
                 try require(false, "terminal UI refusal in " + journeyStage, line: line)
             }
             throw Refusal.condition("terminal UI refusal in " + journeyStage)
         }
-        if result != .completed || query.count != 1 {
+        if result != .completed || matchCount != 1 {
             diagnostic(root)
             if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {
                 try require(false, "missing or ambiguous expected control in " + journeyStage, line: line)
@@ -4821,7 +4878,35 @@ final class NormalAppUITests: XCTestCase {
         // The exact identity/singleton and terminal failures remain mandatory.
         try waitElement(query, in: renderer, timeout: 15, failures: [
             "Static observation unavailable", "Only a partial static observation is available",
-        ], line: line)
+        ], snapshotObservation: true, line: line)
+    }
+    @MainActor private func observeSnapshotState(_ root: XCUIElement, waiter: XCTWaiter.Result) {
+        guard let clock = caseClock else { return }
+        let end = min(clock.deadline, journeyDeadline ?? clock.deadline)
+        let start = ProcessInfo.processInfo.systemUptime
+        guard clock.observationAllowed(start, before: end) else { return }
+        var last = start
+        let expectations = [
+            ("error", "Static observation unavailable"),
+            ("partial", "Only a partial static observation is available"),
+            ("unread", "The folder is selected, but it has not been read"),
+            ("loading", "Reading recognized static files…"),
+            ("empty", "No observation loaded"),
+            ("unsupported", "Static snapshots are unavailable on this platform/profile."),
+            ("invalid", "config.invalid"), ("missing", "config.missing"),
+            ("runtime", "runtime_unavailable"), ("protocol", "protocol_error")
+        ]
+        var fields: [String] = []
+        for (key, text) in expectations {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now >= last, clock.observationAllowed(now, before: end) else { return }
+            last = now
+            fields.append("\(key)=\(min(root.staticTexts.matching(identifier: text).count, 5))")
+        }
+        let finish = ProcessInfo.processInfo.systemUptime
+        guard finish >= last, clock.observationAllowed(finish, before: end) else { return }
+        let state = waiter == .completed ? "completed" : waiter == .timedOut ? "timed-out" : "other"
+        print("MRK_NORMAL_SNAPSHOT_STATE=v1;sample=post-wait;waiter=\(state);\(fields.joined(separator: ";"));nonAtomic=1")
     }
     @MainActor private func waitGone(_ element: XCUIElement, timeout: TimeInterval = 5, line: UInt = #line) throws {
         let wait = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
@@ -7031,7 +7116,7 @@ final class NormalAppUITests: XCTestCase {
         var value = ""
         for index in 0..<query.count {
             _ = try remaining(5)
-            let text = query.element(boundBy: index).label
+            let text = try staticTextContent(query.element(boundBy: index))
             try require(text.utf8.count <= 4096 && value.utf8.count + text.utf8.count + 1 <= 32768,
                         "Android fixed panel text bound")
             value += text + "\n"
@@ -7072,9 +7157,9 @@ final class NormalAppUITests: XCTestCase {
                                  "current unsigned Archive details missing or repeated")
         var values: [String] = []
         for prefix in ["Archive operation ID: ", "Archive owner generation: "] {
-            let field = try unique(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)),
+            let field = try unique(staticTextPrefix(details, prefix),
                                    "current unsigned archive identity absent or ambiguous")
-            let text = field.label
+            let text = try staticTextContent(field)
             try require(field.isHittable && text.hasPrefix(prefix), "current unsigned archive identity not visible")
             values.append(String(text.dropFirst(prefix.count)))
         }
@@ -7086,7 +7171,7 @@ final class NormalAppUITests: XCTestCase {
         var text = ""
         for index in 0..<query.count {
             _ = try remaining(5)
-            let value = query.element(boundBy: index).label
+            let value = try staticTextContent(query.element(boundBy: index))
             try require(value.utf8.count <= 4096 && text.utf8.count + value.utf8.count + 1 <= 32768,
                         "iOS fixed panel text bound")
             text += value + "\n"
@@ -7142,8 +7227,10 @@ final class NormalAppUITests: XCTestCase {
             let status = try only(panel.descendants(matching: .any).matching(identifier: "Original iOS archive status"))
             let details = try only(status.descendants(matching: .group).matching(identifier: "Archive details"))
             for (prefix, expected) in [("Archive operation ID: ", identity.operationID), ("Archive owner generation: ", identity.ownerGeneration)] {
-                let field = try only(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)))
-                try need(field.label == prefix + expected)
+                let field = try only(staticTextPrefix(details, prefix))
+                try need(field.elementType == .staticText)
+                let value = field.value
+                try need(try Self.staticTextContent(value: value, label: value is String ? "" : field.label) == prefix + expected)
             }
             if status.staticTexts.matching(identifier: "iOS request finished").count == 1 { break }
             if !cancelRequested {
@@ -7382,11 +7469,11 @@ final class NormalAppUITests: XCTestCase {
         var values: [String] = []
         for (role, prefix) in [("operation-id", "Recovery operation ID: "), ("owner-generation", "Recovery owner generation: "),
                                ("phase", "Recovery phase: "), ("outcome", "Recovery outcome: "), ("reason", "Recovery reason: ")] {
-            let query = details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix))
+            let query = staticTextPrefix(details, prefix)
             // Fixed caption counts before the original singleton check. No
             // observed identifiers/values or new AX queries after its failure.
             let trimmed = String(prefix.dropLast())
-            let exactPrefix = min(query.count, 5)
+            let exactPrefix = min(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).count, 5)
             let trimmedPrefix = min(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", trimmed)).count, 5)
             let captionOnly = min(details.staticTexts.matching(NSPredicate(format: "label == %@", trimmed)).count, 5)
             let anyPrefix = min(details.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).count, 5)
@@ -7407,8 +7494,9 @@ final class NormalAppUITests: XCTestCase {
                 }
                 throw error // Keep the original singleton refusal and its cleanup.
             }
-            try require(field.isHittable && field.label.hasPrefix(prefix), "current recovery field is not visible")
-            let value = String(field.label.dropFirst(prefix.count))
+            let text = try staticTextContent(field)
+            try require(field.isHittable && text.hasPrefix(prefix), "current recovery field is not visible")
+            let value = String(text.dropFirst(prefix.count))
             try require(value.utf8.count <= 64, "current recovery field exceeds its bound")
             values.append(value)
         }
@@ -7437,11 +7525,12 @@ final class NormalAppUITests: XCTestCase {
         let group = try unique(named(renderer, "Account signing recovery state"), "current account report missing or repeated")
         try reveal(group, in: renderer)
         let prefix = "Account signing state · "
-        let heading = try unique(group.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)),
+        let heading = try unique(staticTextPrefix(group, prefix),
                                  "current account state missing or repeated")
-        try require(heading.isHittable && heading.label == prefix + status && (status == "pending" || status == "recovered"),
+        let text = try staticTextContent(heading)
+        try require(heading.isHittable && text == prefix + status && (status == "pending" || status == "recovered"),
                     "current account state differs")
-        return (String(heading.label.dropFirst(prefix.count)), try iosRecoverySession(group))
+        return (String(text.dropFirst(prefix.count)), try iosRecoverySession(group))
     }
 
     @MainActor func testInstalledIOSPendingAccountRecoveryThroughUI() throws {
@@ -7457,6 +7546,7 @@ final class NormalAppUITests: XCTestCase {
         let fixture = IOSRecoveryFixture(clock: clock)
         ownedIOSRecoveryFixture = fixture // Includes partial-admission consuming closes in teardown.
         do {
+            try Self.exerciseStaticTextContentData() // Actual Foundation semantics before private fixture admission.
             try stage("ios-recovery-admission") {
                 _ = try admitHostedAccount(profile)
                 try fixture.open(.pending)

@@ -1911,6 +1911,21 @@ _FAILURE_SETUP_REASONS = (
     'xcode-setup-source-version',
 )
 _FAILURE_SETUP_ROLES = XCODE_SETUP_VERIFY_ROLES + (XCODE_SETUP_LOG_CAPTURE,) + XCODE_SETUP_COMPONENT_ROLES + ("final-package-productbuild",) + FINAL_PACKAGE_ROLES
+
+_FIXTURE_COMPILER_ROLES = ("app-absence-build", "app-absence-cut-app-write-build",
+                         "app-absence-cut-own-attempt-build", "app-absence-cut-stage-move-build")
+
+# Closed existing fixture commands, not arbitrary role/prefix passthrough.
+_FAILURE_FIXTURE_ROLES = (
+    "app-absence-build", "app-absence-data-tests", "app-absence-adhoc", "app-absence-verify-code",
+    "app-absence-pkgbuild", "app-absence-tar", "app-absence-xar",
+    "app-absence-image-create", "app-absence-image-verify", "app-absence-baseline-attach",
+    "app-absence-baseline", "app-absence-baseline-detach", "app-absence-restore-attach",
+    "app-absence-withdraw", "app-absence-install", "app-absence-verify", "app-absence-restore-detach",
+    "app-absence-recovery-cut-1", "app-absence-recovery-cut-2", "app-absence-recovery-cut-3", "app-absence-recovered",
+) + tuple("app-absence-cut-" + cut + suffix
+          for cut in ("app-write", "own-attempt", "stage-move")
+          for suffix in ("", "-build", "-adhoc", "-verify-code", "-pkgbuild", "-tar", "-xar"))
 _FAILURE_SETUP_STAGES = ("setup-verification-input", "setup-verification-cleanup") + _FAILURE_SETUP_ROLES + tuple(role + "-adoption" for role in XCODE_SETUP_MUTATION_ROLES) + (
     "sign-xcode-setup", "sign-xcode-setup-verify", "setup-carrier", "setup-scripts-original", "setup-scripts-final",
     "setup-input-root", "setup-presentation", "setup-packager-directory", "setup-original-component-audit",
@@ -1957,7 +1972,8 @@ _FAILURE_PRODUCT_REASONS = (
     'install-product-output-roster',
 )
 
-_FAILURE_REASONS = frozenset((*_FAILURE_SETUP_REASONS, *_FAILURE_PRODUCT_REASONS, *("original-nonzero-" + role for role in _FAILURE_SETUP_ROLES),
+_FAILURE_REASONS = frozenset((*_FAILURE_SETUP_REASONS, *_FAILURE_PRODUCT_REASONS, *("original-nonzero-" + role for role in _FAILURE_SETUP_ROLES + _FAILURE_FIXTURE_ROLES),
+    "candidate-fixture-terminal", "candidate-fixture-source-finality",
     *_FAILURE_NOTARY_REASONS, *FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
     *( 'original-nonzero-' + role for role in _PACKAGE_DIAGNOSTIC_ROLES),
     'package-group-clock', 'package-io-finality-unknown', 'package-compiled-bindings',
@@ -2341,7 +2357,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
                 "distribution-image", "observation-image") + SIGNING_PHASES + TOOL_SIGNING_PHASES + STORE_SIGNING_PHASES
     phases = ((APP_SIGNATURE_SUMMARY,) + PHASES + SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES
               + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES
-              + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
+              + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES + ("candidate-baseline",))
     pending = receipt.get("directStagerIOPending")
     package = None
     if state.get("phase") == "package-install":
@@ -2419,7 +2435,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
             "errno": integer(captured.get("errno", original.get("errno")), 1, 65535),
         },
         "lastRecordedNative": {
-            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES + notary_roles(True) + _PACKAGE_DIAGNOSTIC_ROLES + _FAILURE_SETUP_ROLES),
+            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES + notary_roles(True) + _PACKAGE_DIAGNOSTIC_ROLES + _FAILURE_SETUP_ROLES + _FAILURE_FIXTURE_ROLES),
             **{key: flag(native.get(key)) for key in ("entered", "returned", "capturesSettled", "dispatched", "contained", "cleanup_complete")},
             "returncode": integer(native.get("returncode"), -65536, 65535),
             "originalFailure": {"available": flag(owned.get("available")),
@@ -3354,7 +3370,8 @@ class Operation:
                 record["notarySubmitDiagnostic"] = notary_submit_diagnostic(result.stderr)
             except BaseException:
                 pass  # Never replace the same nonzero original or affect cleanup.
-        if self.phase == "prepare" and role == "build" and result.returncode != 0:
+        if (self.phase == "prepare" and role == "build"
+                or self.phase == "prepare-app-absence" and role in _FIXTURE_COMPILER_ROLES) and result.returncode != 0:
             try:
                 self.compiler_failure = compiler_diagnostic(result.stdout, result.stderr, str(self.checkout),
                     package_version=self.image_package_version)
@@ -10495,6 +10512,20 @@ def candidate_fixture_phase(consumer, context, purpose, started, bootstrap):
     op.candidate_restore_context = dict(context)
     files, originals, source_phase = {}, {}, None
     op.candidate_bootstrap_originals = 6  # Two closed bootstrap reads + four sequential existing owner-loader reads.
+    failure = None
+    def diagnose(error, *, capture=False):
+        # Passive only. Preserve the primary before the unchanged finalizer,
+        # and emit its existing bounded projection only after finalization.
+        try:
+            if capture:
+                op.diagnostic_failure = failure_exception(error, op.stager)
+                op.receipt["failure"] = {"stage": op.stage, **op.diagnostic_failure}
+                op.stager_failure_line = failure_stager_line(error, op.stager)
+            else:
+                emit_failure_diagnostic(error, phase=phase, target=op.target,
+                    main_stage="operation-execute", operation=op, stager=op.stager)
+        except BaseException:
+            pass  # Never replace the original exception, including cleanup.
     try:
         f.clock(op)
         op.open()
@@ -10610,19 +10641,36 @@ def candidate_fixture_phase(consumer, context, purpose, started, bootstrap):
         need(len(source_phase.records)==8 and op.app_absence["complete"],"candidate-fixture-source-finality")
         op.receipt["candidateSource"]={key:op.candidate_restore_context[key] for key in ("helperSource","helperTree","runId","runAttempt")}
         op.receipt["candidateSource"].update(productSource=nomination["source"],productTree=nomination["tree"],originalQueryCount=8,originalQueriesReturned=True)
+    except BaseException as error:
+        failure = error
+        diagnose(error, capture=True)
+        raise
     finally:
-        if op.app_absence is not None:
-            try: f.clock(op, work=False)
-            except BaseException: op.errors.append({"stage":"candidate-retirement-clock","type":"deadline"})
-        op.finish()
-    need(op.receipt["originalClosesKnown"] is True and op.receipt["targetRetired"] is True and not op.errors
-         and op.app_absence["complete"] and len(op.calls)==len(f.roles(op))
-         and all(row["returned"] and row["capturesSettled"] for row in op.calls),"candidate-fixture-terminal")
-    f.clock(op, work=False)
-    if phase == "candidate-baseline":
-        return f.candidate_baseline_result(op,nomination,op.candidate_restore_context["helperTree"])
-    op.receipt["passed"]=True
-    return op.receipt
+        try:
+            if op.app_absence is not None:
+                try: f.clock(op, work=False)
+                except BaseException: op.errors.append({"stage":"candidate-retirement-clock","type":"deadline"})
+            op.finish()
+        except BaseException as error:
+            if failure is None:
+                diagnose(error, capture=True)
+            diagnose(error)
+            raise  # Preserve existing cleanup-exception precedence.
+        if failure is not None:
+            diagnose(failure)
+    try:
+        need(op.receipt["originalClosesKnown"] is True and op.receipt["targetRetired"] is True and not op.errors
+             and op.app_absence["complete"] and len(op.calls)==len(f.roles(op))
+             and all(row["returned"] and row["capturesSettled"] for row in op.calls),"candidate-fixture-terminal")
+        f.clock(op, work=False)
+        if phase == "candidate-baseline":
+            return f.candidate_baseline_result(op,nomination,op.candidate_restore_context["helperTree"])
+        op.receipt["passed"]=True
+        return op.receipt
+    except BaseException as error:
+        diagnose(error, capture=True)
+        diagnose(error)
+        raise
 
 
 def main():

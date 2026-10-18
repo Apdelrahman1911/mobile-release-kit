@@ -1759,7 +1759,8 @@ IOS_TOOLS_CURRENT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_CURRENT_IOS_TOOLS"
 IOS_TOOLS_CURRENT_SCOPE = "current-candidate-ios-tools-only-v1"
 ORDINARY_CURRENT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ORDINARY"
 ORDINARY_CURRENT_SCOPE = "current-candidate-ordinary-only-v1"
-ORDINARY_CURRENT_RESULTS = ("applications-test.xcresult", "project-test.xcresult", "persistence-test.xcresult", "saved-checks-test.xcresult")
+ORDINARY_CURRENT_RESULTS = ("applications-test.xcresult", "project-test.xcresult", "persistence-test.xcresult", "saved-checks-test.xcresult",
+                            "release-evidence-test.xcresult", "workflow-refusal-test.xcresult")
 SAVED_VERSION_CURRENT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_CURRENT_SAVED_VERSION"
 SAVED_VERSION_CURRENT_SCOPE = "current-candidate-saved-version-only-v1"
 SAVED_VERSION_CANDIDATE_ROOT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
@@ -3755,6 +3756,8 @@ def failure_base(phase, selection, original, *, engineering=False):
     if not engineering and phase == "test" and selection == "project-test.xcresult":
         value["projectProgress"] = None
         value["projectIdentity"] = {"state": "absent", "sample": None}
+    if not engineering and phase == "test" and selection in ("project-test.xcresult", ANDROID_CANDIDATE_RESULT):
+        value["snapshotState"] = {"state": "absent", "samples": []}
     if not engineering and phase == "test" and selection == IOS_PENDING_RESULT:
         value["recoveryField"] = {"state": "absent", "sample": None}
     if not engineering and phase == "test" and selection == ANDROID_CANDIDATE_RESULT:
@@ -3785,6 +3788,24 @@ def project_identity_diagnostics(stdout, stderr):
             if match is None or found: return {"state": "refused", "sample": None}
             found.append(dict(zip(("staticText", "anyRole", "androidCaption", "iosCaption"), map(int, match.groups()))))
     return {"state": "observed", "sample": dict(found[0], timing="pre-wait", countsCappedAt=5, nonAtomic=True)} if found else {"state": "absent", "sample": None}
+
+
+def snapshot_state_diagnostics(stdout, stderr):
+    """Fixed UI counts after the original identity wait, never visible values."""
+    need(type(stdout) is bytes and type(stderr) is bytes and len(stdout)+len(stderr) <= 1024*1024,
+         "normal-snapshot-state-original")
+    fields = ("error", "partial", "unread", "loading", "empty", "unsupported", "invalid", "missing", "runtime", "protocol")
+    prefix = b"MRK_NORMAL_SNAPSHOT_STATE"
+    pattern = re.escape(prefix) + rb"=v1;sample=post-wait;waiter=(completed|timed-out|other)" + b"".join(b";"+key.encode("ascii")+rb"=([0-5])" for key in fields) + rb";nonAtomic=1\r?\n"
+    samples = []
+    for stream, body in (("stdout", stdout), ("stderr", stderr)):
+        for record in body.splitlines(keepends=True):
+            if prefix not in record: continue
+            match = re.fullmatch(pattern, record) if stream == "stdout" else None
+            if match is None or len(samples) >= 2: return {"state": "refused", "samples": []}
+            samples.append(dict(zip(fields, map(int, match.groups()[1:])), waiter=match.group(1).decode("ascii"),
+                                timing="post-wait", countsCappedAt=5, nonAtomic=True))
+    return {"state": "observed" if samples else "absent", "samples": samples}
 
 
 def recovery_field_diagnostics(stdout, stderr):
@@ -4801,6 +4822,12 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         if value["projectIdentity"]["state"] == "refused": value["findingsTruncated"] = True
         if len(encoded(value)) + 1 > 4096:
             del value["projectIdentity"]
+            value["findingsTruncated"] = True
+    if "snapshotState" in value:
+        value["snapshotState"] = snapshot_state_diagnostics(original.stdout, original.stderr)
+        if value["snapshotState"]["state"] == "refused": value["findingsTruncated"] = True
+        if len(encoded(value)) + 1 > 4096:
+            del value["snapshotState"]
             value["findingsTruncated"] = True
     if "recoveryField" in value:
         value["recoveryField"] = recovery_field_diagnostics(original.stdout, original.stderr)

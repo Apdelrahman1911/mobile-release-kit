@@ -1,5 +1,6 @@
 """Real held source/host/control bootstrap; explicit inert native phase endpoints."""
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr
 from types import SimpleNamespace
 from collections import namedtuple
 import test_macos_app_absence_fixture as fixture_tests
@@ -24,7 +25,7 @@ from test_macos_candidate_carrier import fixture
 ROOT=Path(__file__).resolve().parents[2]
 
 class CandidateFixtureBootstrapTests(unittest.TestCase):
-    def exercise(self, fault=None, *, actual_builder=False, depth=8):
+    def exercise(self, fault=None, *, actual_builder=False, depth=8, diagnostics=None, diagnostic_fault=None):
         with tempfile.TemporaryDirectory() as name:
             top=Path(name);root=top/'checkout';root.mkdir(mode=0o700)
             helper=root/'.candidate-consumer-helper';helper.mkdir(mode=0o700)
@@ -72,8 +73,20 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
             env=dict(GITHUB_SHA=context['helperSource'],GITHUB_WORKFLOW_SHA=context['helperSource'],GITHUB_RUN_ID='51',GITHUB_RUN_ATTEMPT='2',
                 GITHUB_REF='refs/heads/'+C.BRANCH,GITHUB_EVENT_NAME='push',GITHUB_WORKFLOW_REF=R.REPOSITORY+'/'+C.WORKFLOW+'@refs/heads/'+C.BRANCH)
             operations=[];effects=[];calls=[];load=R.load_module;construct=H.Operation;register=H.Operation.register
-            def operation(*args,**kwargs):
-                value=construct(*args,**kwargs);operations.append(value);return value
+            initialize, finish = construct.__init__, construct.finish
+            native_error=RuntimeError('inert native original unknown')
+            cleanup_error=RuntimeError('inert cleanup error with private text')
+            class ProcessError(RuntimeError): pass
+            owned_error=ProcessError('owned command exceeded its original deadline')
+            owned_error.dispatched=True;owned_error.contained=False;owned_error.cleanup_complete=False
+            capture=io.StringIO()
+            def operation(value,*args,**kwargs):
+                initialize(value,*args,**kwargs);operations.append(value)
+            def finished(value):
+                value.test_finish_calls=getattr(value,'test_finish_calls',0)+1
+                finish(value)
+                if fault=='cleanup': raise cleanup_error
+                if fault=='terminal': value.app_absence['complete']=False
             def registered(op,*args,**kwargs):
                 value=register(op,*args,**kwargs)
                 op.test_peak=max(getattr(op,'test_peak',0),sum(e['fd'] is not None for e in op.entries))
@@ -114,12 +127,19 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
                             path=Path(argv[argv.index('-f')+1]);path.write_bytes(b'inert archive');path.chmod(0o644)
                         elif argv[0]=='/usr/bin/xar':
                             path=Path(argv[argv.index('-cf')+1]);path.write_bytes(b'inert compact archive');path.chmod(0o644)
-                    if fault=='native' and len(effects)==2: raise RuntimeError('inert native original unknown')
+                    if fault=='native' and len(effects)==2: raise native_error
+                    if fault=='owned' and len(effects)==2: raise owned_error
+                    if (fault in ('nonzero','cleanup') and len(effects)==2
+                            or fault in ('cut-app-write','cut-own-attempt','cut-stage-move') and argv[-1]=='app-absence-'+fault+'-build'):
+                        message=dict(reason='compiler-message',package_id='path+'+(root/'desktop/src-tauri').as_uri()+'#mobile-release-kit-desktop@0.1.2',
+                            message=dict(level='error',code=dict(code='E0308'),message='private compiler text',rendered='private rendered text',
+                                spans=[dict(is_primary=True,file_name='src/macos_app_absence_fixture.rs',line_start=123,column_start=4)]))
+                        return subprocess.CompletedProcess(argv,101,R.canonical(message),b'private error text')
                 return subprocess.CompletedProcess(argv,0,out,b'')
             def module(mod,path,body):
                 if path.name=='macos_app_absence_fixture.py': return F
                 if path.name=='macos_normal_ui_runner.py': return N
-                if path.name=='macos_aqua_qualification.py': return SimpleNamespace(load_owner=lambda r:SimpleNamespace(run_owned=owned))
+                if path.name=='macos_aqua_qualification.py': return SimpleNamespace(load_owner=lambda r:SimpleNamespace(run_owned=owned,ProcessError=ProcessError))
                 if path.name=='macos_xcode_host_preparation.py': return SimpleNamespace(DarwinAPI=lambda *a,**k:SimpleNamespace(waitable_sigchld=lambda:None))
                 if path.name=='stage_macos_installed.py':
                     return SimpleNamespace(DESKTOP=root/'desktop',source_build_selection=lambda target:SimpleNamespace(release='current-release',package_version='0.1.2'),MAX_BYTES=768<<20,
@@ -138,15 +158,26 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
                 with ExitStack() as stack:
                     for obj,key,value in ((C,'ROOT',helper),(C,'HELPER_ROOT',helper),(C,'CANDIDATE_ROOT',root),
                         (C,'context_data',lambda *a:{k:v for k,v in context.items() if k!='started'}),(R,'load_module',module),
-                        (H,'Operation',operation),(construct,'register',registered),(F,'prepare',F.prepare if actual_builder else prepare),
+                        (construct,'__init__',operation),(construct,'register',registered),(construct,'finish',finished),(F,'prepare',F.prepare if actual_builder else prepare),
                         (os,'fstatvfs',lambda fd:SimpleNamespace(f_bavail=100*1024*1024,f_frsize=4096)),
                         (sys,'executable',str(host/'bin/python3')),(sys,'prefix',str(host)),(sys,'base_prefix',str(base.parent.parent)),(sys,'_base_executable',str(base))):
                         stack.enter_context(mock.patch.object(obj,key,value))
+                    stack.enter_context(redirect_stderr(capture))
+                    if diagnostic_fault=='write':
+                        stack.enter_context(mock.patch.object(capture,'write',side_effect=OSError('private write failure')))
+                    elif diagnostic_fault in ('capture','location'):
+                        stack.enter_context(mock.patch.object(H,'failure_exception' if diagnostic_fault=='capture' else 'failure_stager_line',
+                            side_effect=RuntimeError('private diagnostic parser fault')))
+                    elif diagnostic_fault=='compiler':
+                        stack.enter_context(mock.patch.object(H,'compiler_diagnostic',side_effect=RuntimeError('private compiler parser fault')))
                     stack.enter_context(mock.patch.dict(os.environ,env,clear=True))
                     bp=helper/'desktop/tools/macos_android_helper_package.py';identity,body=R.host_read(bp,1<<20)
                     result=H.candidate_fixture_phase(C,context,'prepare-restore',context['started'],(identity,bp,body))
             except BaseException as error: failure=error
             finally:
+                if diagnostics is not None:
+                    diagnostics.update(stderr=capture.getvalue(), native_error=native_error, owned_error=owned_error,
+                        cleanup_error=cleanup_error, closes_before_test_cleanup=[all(e['closed'] for e in op.entries) for op in operations])
                 for op in operations:
                     for e in reversed(op.entries):op.close(e)
             return result,failure,operations,effects,calls
@@ -184,6 +215,69 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
                 self.assertIsNone(result);self.assertIsNotNone(error)
                 if fault in ('source','acquisition'):self.assertEqual(effects,[])
                 if fault in ('native','last-source'):self.assertFalse(ops[0].receipt['targetRetired'])
+        # SAME real Operation class and bootstrap, only native execution is inert.
+        # Read emitted facts before fixture-owned cleanup of unresolved originals.
+        for fault in (None,'nonzero','native','owned','cleanup','terminal'):
+            with self.subTest(diagnostic=fault):
+                facts={};result,error,ops,effects,calls=self.exercise(fault,diagnostics=facts)
+                op=ops[0];self.assertIs(type(op),H.Operation);self.assertEqual(op.test_finish_calls,1)
+                if fault is None:
+                    self.assertIsNone(error);self.assertTrue(result['passed']);self.assertEqual(facts['stderr'],'');continue
+                self.assertIsNone(result);self.assertIsNotNone(error)
+                lines=facts['stderr'].splitlines();self.assertEqual(len(lines),1)
+                self.assertTrue(lines[0].isascii());self.assertLessEqual(len(lines[0])+1,4096)
+                self.assertNotIn('private',lines[0]);self.assertNotIn('inert',lines[0])
+                data=json.loads(lines[0]);native=data['lastRecordedNative']
+                self.assertEqual(data['phase'],F.PREPARE);self.assertEqual(data['mainStage'],'operation-execute')
+                self.assertFalse(data['productReady']);self.assertEqual(data['counts']['credential'],0)
+                self.assertTrue(data['originalFailure']['recorded'])
+                if fault=='terminal':
+                    self.assertEqual(data['terminal']['reason'],'candidate-fixture-terminal')
+                    self.assertEqual(native['role'],'app-absence-cut-stage-move-xar')
+                    self.assertTrue(data['cleanup']['originalClosesKnown']);continue
+                self.assertEqual(len(op.calls),1);self.assertEqual(native['role'],'app-absence-build')
+                if fault in ('nonzero','cleanup'):
+                    self.assertTrue(native['returned']);self.assertTrue(native['capturesSettled']);self.assertEqual(native['returncode'],101)
+                    self.assertEqual(data['originalFailure']['reason'],'original-nonzero-app-absence-build')
+                    self.assertTrue(data['cleanup']['originalClosesKnown']);self.assertEqual(facts['closes_before_test_cleanup'],[True])
+                    self.assertEqual(data['compiler']['rows'],[dict(kind='rust',code='E0308',source='desktop/src-tauri/src/macos_app_absence_fixture.rs',line=123,column=4)])
+                    if fault=='cleanup':self.assertIs(error,facts['cleanup_error']);self.assertEqual(data['terminal']['type'],'runtime-error')
+                    else:self.assertIs(type(error),H.Refused)
+                else:
+                    self.assertFalse(native['returned']);self.assertFalse(native['capturesSettled']);self.assertIsNone(native['returncode'])
+                    self.assertFalse(data['cleanup']['targetRetired'])
+                    # Existing finish positively closes files but cannot retire an unknown native call.
+                    self.assertTrue(data['cleanup']['originalClosesKnown']);self.assertEqual(facts['closes_before_test_cleanup'],[True])
+                    self.assertIs(error,facts['owned_error' if fault=='owned' else 'native_error'])
+                    if fault=='owned':
+                        self.assertEqual(native['originalFailure']['classification'],'deadline')
+                        self.assertEqual(native['originalFailure']['ownerErrorType'],'ProcessError')
+                        self.assertFalse(native['contained']);self.assertFalse(native['cleanup_complete'])
+        for fault in ('write','capture','location'):
+            with self.subTest(diagnosticFault=fault):
+                facts={};result,error,ops,effects,calls=self.exercise('native',diagnostics=facts,diagnostic_fault=fault)
+                self.assertIs(error,facts['native_error']);self.assertIsNone(result)
+                self.assertEqual(ops[0].test_finish_calls,1);self.assertEqual(len(ops[0].calls),1)
+                self.assertFalse(ops[0].receipt['targetRetired'])
+                if fault!='location':self.assertEqual(facts['stderr'],'')
+        for cut,index in (('app-write',8),('own-attempt',14),('stage-move',20)):
+            with self.subTest(compilerCut=cut):
+                facts={};result,error,ops,effects,calls=self.exercise('cut-'+cut,diagnostics=facts)
+                self.assertIs(type(error),H.Refused);self.assertIsNone(result)
+                data=json.loads(facts['stderr']);native=data['lastRecordedNative']
+                self.assertEqual(len(ops[0].calls),index);self.assertEqual(native['role'],'app-absence-cut-'+cut+'-build')
+                self.assertEqual(native['returncode'],101);self.assertTrue(native['capturesSettled'])
+                self.assertEqual(data['compiler']['rows'][0]['code'],'E0308')
+                self.assertEqual(data['compiler']['rows'][0]['source'],'desktop/src-tauri/src/macos_app_absence_fixture.rs')
+                self.assertNotIn('private',facts['stderr'])
+        facts={};result,error,ops,effects,calls=self.exercise('nonzero',diagnostics=facts,diagnostic_fault='compiler')
+        self.assertIs(type(error),H.Refused);self.assertEqual(str(error),'original-nonzero-app-absence-build')
+        self.assertIsNone(json.loads(facts['stderr'])['compiler']);self.assertEqual(ops[0].test_finish_calls,1)
+        # Only current closed roles/phases survive; similar private names do not.
+        op.calls[-1]['role']='app-absence-cut-private-value'
+        value=H.failure_diagnostic(error,phase='candidate-baseline',operation=op)
+        self.assertEqual(value['phase'],'candidate-baseline')
+        self.assertEqual(value['lastRecordedNative']['role'],'unclassified')
 
 class CandidateChainHandoffTests(unittest.TestCase):
     def test_actual_native_status_original_not_wrapper_zero_controls_chain(self):

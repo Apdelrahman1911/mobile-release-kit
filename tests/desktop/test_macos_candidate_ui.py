@@ -136,7 +136,7 @@ def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False, saved_files=Fal
         assert ios_tools and not saved_version
         row.update(sourceCommit=context['helperSource'],applicationSourceCommit=selected['source'],currentCandidateScope=U.IOS_TOOLS_SCOPE)
     if current_ordinary:
-        assert not (ios_tools or saved_files or saved_version or entry)
+        assert not (ios_tools or saved_version or entry)
         row.update(sourceCommit=context['helperSource'],applicationSourceCommit=selected['source'],currentCandidateScope=U.ORDINARY_SCOPE)
     row['normalPhase' if mode=='test' else 'phase']=mode
     row['originalTestReturncode' if mode=='test' else 'originalReturncode']=0
@@ -419,21 +419,44 @@ class CandidateUITests(unittest.TestCase):
         self.assertEqual(U.SAVED_FILE_PHASES, ('build','release-evidence-test','release-evidence-summary',
             'workflow-refusal-test','workflow-refusal-summary'))
         for target in (N.ARM_TARGET,N.INTEL_TARGET):
-            for phase in U.SAVED_FILE_PHASES:
-                selected,_,_,args,request,row,body=phase_fixture(phase,target,saved_files=True)
-                self.assertEqual(N.normal_request(args,str(WORK/'normal-ui/tmp')+'/'),request)
-                self.assertEqual(request['phaseSeconds'],450 if phase=='build' else 90 if phase.endswith('summary') else 585)
-                self.assertEqual(U.phase_admission_data(row,request,selected['source'],body,b'',normal=N),'f'*64)
-                if phase.endswith('-test'):
-                    self.assertEqual(request['methods'],tuple(N.CLASS+m for m in N.NORMAL_SELECTIONS[phase+'.xcresult'][0]))
-                    for replacement in (body.replace(b' passed (',b' skipped ('), body+body,
-                                        body.replace(b'originalTerminated=1',b'originalTerminated=0')):
-                        wrong=deepcopy(row); command=wrong['commands'][-2]
-                        command.update(stdoutBytes=len(replacement),stdoutSha256=R.sha(replacement))
-                        with self.assertRaises((R.Refused,N.Refused)):
-                            U.phase_admission_data(wrong,request,selected['source'],replacement,b'',normal=N)
+            for current in (False, True):
+                for phase in U.SAVED_FILE_PHASES:
+                    selected,context,_,args,request,row,body=phase_fixture(phase,target,saved_files=True,current_ordinary=current)
+                    helper=context['helperSource'] if current else None
+                    flags=dict(normal=N,saved_files=True,helper_source=helper)
+                    self.assertEqual(N.normal_request(args,str(WORK/'normal-ui/tmp')+'/'),request)
+                    self.assertEqual(request['phaseSeconds'],450 if phase=='build' else 90 if phase.endswith('summary') else 585)
+                    self.assertEqual(U.phase_admission_data(row,request,selected['source'],body,b'',**flags),'f'*64)
+                    content={phase+'.status':b'0\n',U.admission_name(phase):R.canonical(row),phase+'.stdout':body,phase+'.stderr':b''}
+                    self.assertEqual(U.read_phase(lambda path,limit:content[path.name],N,phase,selected,WORK,
+                        saved_files=True,helper_source=helper),'f'*64)
+                    if current:
+                        for changes in ({'sourceCommit':selected['source']},{'applicationSourceCommit':'f'*40},
+                                        {'currentCandidateScope':U.SAVED_VERSION_SCOPE},{'sourcePrePostMatched':False}):
+                            with self.assertRaises(R.Refused):
+                                U.phase_admission_data({**row,**changes},request,selected['source'],body,b'',**flags)
+                    if phase.endswith('-test'):
+                        self.assertEqual(len(row['commands']),5) # No saved-version producer or exit86 authority.
+                        wrong=deepcopy(row);wrong['commands'][1]['returncode']=86
+                        with self.assertRaises(R.Refused):U.phase_admission_data(wrong,request,selected['source'],body,b'',**flags)
+                        self.assertEqual(request['methods'],tuple(N.CLASS+m for m in N.NORMAL_SELECTIONS[phase+'.xcresult'][0]))
+                        for replacement in (body.replace(b' passed (',b' skipped ('), body+body,
+                                            body.replace(b'originalTerminated=1',b'originalTerminated=0')):
+                            wrong=deepcopy(row); command=wrong['commands'][-2]
+                            command.update(stdoutBytes=len(replacement),stdoutSha256=R.sha(replacement))
+                            with self.assertRaises((R.Refused,N.Refused)):
+                                U.phase_admission_data(wrong,request,selected['source'],replacement,b'',**flags)
+                    if phase != 'build':
+                        with self.assertRaises(R.Refused):
+                            U.phase_admission_data(row,request,selected['source'],body,b'',normal=N,ordinary=True,helper_source=helper)
+                    for mixed in ({'ordinary':True},{'ios_tools':True},{'entry':True},{'saved_files':1}):
+                        with self.assertRaises(R.Refused):
+                            U.phase_admission_data(row,request,selected['source'],body,b'',**{**flags,**mixed})
             for phase in ('project-test','saved-checks-test','ios-unsigned-archive-test','saved-version-recovery-test'):
                 with self.assertRaises(R.Refused):U.phase_request(N,phase,target,WORK,saved_files=True)
+            selected,context,_,_,request,row,body=phase_fixture('project-test',target,current_ordinary=True)
+            with self.assertRaises(R.Refused):
+                U.phase_admission_data(row,request,selected['source'],body,b'',normal=N,saved_files=True,helper_source=context['helperSource'])
             with self.assertRaises(R.Refused):U.phase_request(N,'build',target,WORK,ios_tools=True,saved_files=True)
         for args in (['--saved-files'],['--saved-files','project-test'],['--saved-files','--ios-tools','build']):
             with mock.patch.object(sys,'argv',['helper',*args]),mock.patch.object(U.consumer,'entry_context') as entry:
@@ -628,8 +651,8 @@ class CandidateUITests(unittest.TestCase):
                     self.assertEqual(events.count('source'), 1)
                     self.assertFalse(any(isinstance(e,tuple) and e[1].endswith('.status') for e in events))
                     self.assertEqual(owner.kw['timeout'], request['phaseSeconds']+15)
-                    # Saved is the unchanged candidate child; current iOS remains its existing explicit helper route.
-                    expected_root=U.consumer.CANDIDATE_ROOT if phase=='release-evidence-test' else U.consumer.HELPER_ROOT
+                    # Both existing cohorts use the explicitly selected current helper on this distinct-source fixture.
+                    expected_root=U.consumer.HELPER_ROOT
                     self.assertEqual(owner.kw['cwd'], expected_root)
                     self.assertIn(str(expected_root / U.RUNNER), owner.argv)
                     output=U.failure_data(R.Refused('candidate-ui-original-cli-nonzero'),phase)
@@ -724,7 +747,7 @@ class CandidateUIMainTests(unittest.TestCase):
         if same_source:
             context['helperSource']=selected['source'];install['helperSource']=selected['source'];install['helperTree']=selected['tree']
         ordinary=not (ios_tools or saved_files or saved_version or entry)
-        current_ordinary=ordinary and not same_source
+        current_ordinary=(ordinary or saved_files) and not same_source
         current_ios=ios_tools and not same_source
         helper_source=context['helperSource'] if saved_version or current_ios or current_ordinary else None
         files={};directories=set();books=[];effects=[];modes={}
@@ -820,7 +843,7 @@ class CandidateUIMainTests(unittest.TestCase):
                 effects.append('native-cli')
                 child_root=root if helper_source is not None else U.consumer.CANDIDATE_ROOT
                 assert argv[4]==str(child_root/U.RUNNER) and kw['cwd']==child_root
-                assert kw['environ']==U.clean_environment(N,selected,WORK,helper_source=helper_source,ios_tools=ios_tools,ordinary=ordinary)
+                assert kw['environ']==U.clean_environment(N,selected,WORK,helper_source=helper_source,ios_tools=ios_tools,ordinary=ordinary or saved_files)
                 _,_,_,_,_,row,out=phase_fixture(name,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,current_ios=current_ios,current_ordinary=current_ordinary,entry=entry)
                 if native_fault=='unknown':raise RuntimeError('inert unknown native original')
                 files[WORK/'normal-ui'/U.admission_name(name)]=R.canonical(row)
@@ -945,15 +968,21 @@ class CandidateUIMainTests(unittest.TestCase):
 
     def test_actual_saved_files_main_77_originals_and_unknown_close(self):
         for target in (N.ARM_TARGET,N.INTEL_TARGET):
-            for phase in ('build','release-evidence-test','workflow-refusal-test','result'):
-                value,effects,count=self.exercise(phase,target,saved_files=True)
-                self.assertEqual(value['cohort'],'saved-files')
-                self.assertEqual(effects,[] if phase=='result' else ['native-cli'])
-                if phase=='result':
-                    self.assertEqual((count,value['totalTests']),(77,2))
-                    self.assertEqual((value['savedReleaseEvidenceTests'],value['managedWorkflowRefusalTests']),(1,1))
-                    self.assertFalse(value['savedVersionRecoveryQualified'] or value['remoteReleaseAttempted'])
-                    self.assertNotIn('unsignedIosArchiveTests',value)
+            for same_source in (False,True):
+                for phase in (*U.SAVED_FILE_PHASES,'result'):
+                    value,effects,count=self.exercise(phase,target,saved_files=True,same_source=same_source)
+                    self.assertEqual(value['cohort'],'saved-files')
+                    self.assertEqual((value['applicationSource'],value['harnessSource']),('a'*40,('a' if same_source else 'd')*40))
+                    self.assertEqual(effects,[] if phase=='result' else ['native-cli'])
+                    if phase=='result':
+                        self.assertEqual((count,value['totalTests']),(77,2))
+                        self.assertEqual((value['savedReleaseEvidenceTests'],value['managedWorkflowRefusalTests']),(1,1))
+                        self.assertFalse(value['savedVersionRecoveryQualified'] or value['remoteReleaseAttempted'])
+                        self.assertNotIn('unsignedIosArchiveTests',value)
+            for fault in ('prior-status','prior-source','nonzero','unknown','post'):
+                value,effects,_=self.exercise('release-evidence-test',target,saved_files=True,native_fault=fault)
+                self.assertIsNone(value)
+                self.assertEqual(effects,[] if fault.startswith('prior-') else ['native-cli'])
             value,effects,_=self.exercise('workflow-refusal-summary',target,unknown_close=True,saved_files=True)
             self.assertIsNone(value);self.assertEqual(effects,['native-cli'])
 
