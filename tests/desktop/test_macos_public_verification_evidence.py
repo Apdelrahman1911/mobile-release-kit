@@ -1912,18 +1912,14 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertNotIn(SENTINEL, json.dumps(projected))
 
         # Exact original stager failures remain distinct from helper refusals.
-        # Execute only the real finite classifier and real receipt projection
-        # SOURCE fragment; no Operation admission, process, signing or mount.
+        # Import the actual passive helper, not a reconstructed subset of its
+        # constants. No Operation admission, process, signing or mount is called.
         helper_path = ROOT / "desktop/tools/macos_android_helper_package.py"
         helper_tree = ast.parse(helper_path.read_bytes())
-        names = {"Refused", "DISTRIBUTION_STAGER_REASONS", "_APP_ABSENCE_BASELINE_REASONS", "_FAILURE_REASONS", "failure_exception"}
-        nodes = [node for node in helper_tree.body if
-                 isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names or
-                 isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
-                 and node.targets[0].id in names]
-        self.assertEqual(len(nodes), len(names))
-        namespace = {"sys": __import__("sys"), "json": json}
-        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(helper_path), "exec"), namespace)
+        helper_spec = importlib.util.spec_from_file_location("public_failure_helper_data", helper_path)
+        helper = importlib.util.module_from_spec(helper_spec)
+        helper_spec.loader.exec_module(helper)
+        namespace = vars(helper)
         stager_path = ROOT / "desktop/tools/stage_macos_installed.py"
         refused_node = [node for node in ast.parse(stager_path.read_bytes()).body
                         if isinstance(node, ast.ClassDef) and node.name == "Refused"]
@@ -1953,7 +1949,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         for label in labels:
             error = stager.Refused(label); before = BaseException.args.__get__(error)
             captured = namespace["failure_exception"](error, stager)
-            original = SimpleNamespace(stage="package-readonly-attach", stager=stager, diagnostic_failure=captured, receipt={})
+            original = SimpleNamespace(stage="package-readonly-attach", phase="package-install", stager_failure_module=stager, diagnostic_failure=captured, receipt={})
             namespace["project_original"](original, error)
             self.assertEqual(original.receipt["failure"], {"stage": "package-readonly-attach", "type": "Refused", "reason": label})
             self.assertEqual(DATA.project_failure(original.receipt["failure"])["reason"], label)
@@ -1970,7 +1966,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         for error in unknown:
             before = BaseException.args.__get__(error)
             captured = namespace["failure_exception"](error, stager)
-            original = SimpleNamespace(stage="package-readonly-attach", stager=stager, diagnostic_failure=captured, receipt={})
+            original = SimpleNamespace(stage="package-readonly-attach", phase="package-install", stager_failure_module=stager, diagnostic_failure=captured, receipt={})
             namespace["project_original"](original, error)
             self.assertEqual(original.receipt["failure"]["reason"], "original-operation-refused")
             self.assertEqual(BaseException.args.__get__(error), before)
@@ -1981,7 +1977,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                          {"type": "stager-refused", "reason": next(iter(labels)), "errno": 1},
                          {"type": "stager-refused", "reason": next(iter(labels)), "errno": None, "extra": SENTINEL}):
             error = stager.Refused(next(iter(labels)))
-            original = SimpleNamespace(stage="package-readonly-attach", stager=stager, diagnostic_failure=captured, receipt={})
+            original = SimpleNamespace(stage="package-readonly-attach", phase="package-install", stager_failure_module=stager, diagnostic_failure=captured, receipt={})
             namespace["project_original"](original, error)
             self.assertEqual(original.receipt["failure"]["reason"], "original-operation-refused")
             self.assertNotIn(SENTINEL, json.dumps(original.receipt))
@@ -2017,7 +2013,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             error = namespace["Refused"](label); before = BaseException.args.__get__(error)
             captured = namespace["failure_exception"](error, stager)
             self.assertEqual(captured, {"type": "helper-refused", "reason": "unclassified", "errno": None})
-            original = SimpleNamespace(stage="package-readonly-attach", stager=stager,
+            original = SimpleNamespace(stage="package-readonly-attach", phase="package-install", stager_failure_module=stager,
                 diagnostic_failure=captured, receipt={})
             namespace["project_original"](original, error)
             expected = {"stage": "package-readonly-attach", "type": "Refused", "reason": label}
@@ -2026,7 +2022,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertIs(type(error), namespace["Refused"])
             self.assertEqual(BaseException.args.__get__(error), before)
             private = namespace["Refused"](label + "-" + SENTINEL)
-            current = SimpleNamespace(stage="package-readonly-attach", stager=stager,
+            current = SimpleNamespace(stage="package-readonly-attach", phase="package-install", stager_failure_module=stager,
                 diagnostic_failure=namespace["failure_exception"](private, stager), receipt={})
             namespace["project_original"](current, private)
             projected = DATA.project_failure(current.receipt["failure"])
@@ -2044,7 +2040,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertEqual(classified["reason"], "unclassified")
             self.assertEqual(BaseException.args.__get__(error), before)
             if type(error) is not namespace["Refused"]:
-                current = SimpleNamespace(stage="package-readonly-attach", stager=stager,
+                current = SimpleNamespace(stage="package-readonly-attach", phase="package-install", stager_failure_module=stager,
                     diagnostic_failure=classified, receipt={})
                 namespace["project_original"](current, error)
                 projected = DATA.project_failure(current.receipt["failure"])
