@@ -935,7 +935,7 @@ def package_staple_observation_data(value):
 
 
 def final_package_receipt(body, environment, target, selection, profile_sha, notary_sha, package_size, package_sha,
-                          image_release, release_sha, *, remove=False, runtime_stager=None, setup=False, setup_originals=None):
+                          image_release, release_sha, *, remove=False, runtime_stager=None, setup=False, setup_originals=None, product_source=None):
     """Closed preceding original observation AND the current immutable P.
 
     This is not a stand-alone cryptographic authority. The fixed workflow also
@@ -950,6 +950,10 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
               and type(setup_originals) is dict
               and set(setup_originals) == {"helperSha256", "bomSha256", "payloadSha256"}
               and all(tool_hex(v) for v in setup_originals.values())), "final-package-receipt-purpose")
+    if product_source is not None:
+        need(remove and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+             and environment.get("GITHUB_WORKFLOW_REF") == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-consume.yml@refs/heads/task/ci-simplification-20261015"
+             and tool_hex(product_source, 40), "candidate-removal-receipt-purpose")
     value = final_package_json(body, 16384, "final-package-receipt-json")
     keys = {"schemaVersion", "phase", "target", "source", "packageRole", "workflowSource", "workflow", "runId", "runAttempt",
             "toolchain", "helperIdentifier", "originalCalls", "credentialOriginals", "credentialContexts", "targetRetired",
@@ -965,7 +969,7 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
          and value["workflow"] == environment["GITHUB_WORKFLOW_REF"]
          and value["runId"] == environment["GITHUB_RUN_ID"] and value["runAttempt"] == environment["GITHUB_RUN_ATTEMPT"]
          and value["packageRole"] == environment["MRK_MACOS_PACKAGE_ROLE"]
-         and value["imageSourceCommit"] == environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"] == value["source"]
+         and value["imageSourceCommit"] == environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"] == (value["source"] if product_source is None else product_source)
          and value["imageReleaseId"] == image_release and value["imageReleaseSourceSha256"] == release_sha
          and value["toolchain"] is None and value["helperIdentifier"] is None, "final-package-receipt-source")
     need(all(value[name] is True for name in ("targetRetired", "originalClosesKnown", "passed", "outerFinalityRequired"))
@@ -2958,6 +2962,9 @@ class Operation:
                  and prepared.origin["target"] == target
                  and (phase == "package-install" or prepared.same_source), "prepared-fixed-owner-purpose")
             prepared.finalization_environment(environment)  # Exact current caller, no env mutation.
+        self.candidate_removal_context = None
+        self.candidate_removal_inputs = []
+        self.candidate_removal_root = None
         self.prepared_binding = prepared
         self.prepared_staging = False
         self.diagnostic_source_entry = None
@@ -3180,7 +3187,7 @@ class Operation:
             need(len(self.entries) <= 24576
                  and sum(e["fd"] is not None or not e["closed"] for e in self.entries) + 24 <= 96,
                  "setup-original-ledger-bound")
-        if self.prepared_binding is not None or self.prepared_staging:
+        if self.prepared_binding is not None or self.prepared_staging or self.candidate_removal_context is not None:
             # One current book plus forty reserved codec/native/capture slots;
             # consumed-unknown rows never get future-close credit.
             need(len(self.entries) <= 24576
@@ -3323,6 +3330,7 @@ class Operation:
         need(entry["closed"], "output-close-unknown")
 
     def call(self, role, argv, environment, *, cwd, timeout, limit):
+        self.candidate_removal_quote()
         need(self.credential_known() and not self.credential_failed, "credential-dispatch-unknown")
         image_purpose = {"distribution-sign": "distribution-image", "observation-sign": "observation-image"}.get(role)
         if self.phase in ("package-install", "package-remove", "prepare-removal-observers") and image_purpose is not None:
@@ -3660,6 +3668,7 @@ class Operation:
         self.credential_io(context, "census", inspect)
 
     def credential_call(self, context, role, argv, *, timeout=10):
+        self.candidate_removal_quote()
         """The SAME process owner, but no public raw argv/captures/exception text."""
         need(context is self.credential_active and role in CREDENTIAL_ROLES
              and self.credential_known() and context["pending"] is None
@@ -4565,6 +4574,7 @@ class Operation:
     def notary_post(self, *, work=True):
         self.notary_clock(work=work)
         need(not self.errors and self.stager_io_pending is None, "notary-post-unknown")
+        self.candidate_removal_post()
         for entry, body in self.package_sources:
             need(self.read(entry) == body, "notary-source-post")
         for item in self.notary_roots:
@@ -5101,7 +5111,8 @@ class Operation:
              and digest(input_values["install-inventory.json"]) == self.environment.get("MRK_MACOS_INSTALL_INVENTORY_SHA256")
              and digest(input_values[self.stager.REMOVER_NAME]) == self.environment.get("MRK_MACOS_REMOVER_SHA256"), "final-removal-source-originals")
         _, owner_body = retained(self.work_entry, "android-helper-package-remove.json", 16384, (0o600,))
-        binding = {"source": self.image_source, "runId": self.environment["GITHUB_RUN_ID"], "runAttempt": self.environment["GITHUB_RUN_ATTEMPT"]}
+        binding = ({"source": self.image_source, "runId": self.environment["GITHUB_RUN_ID"], "runAttempt": self.environment["GITHUB_RUN_ATTEMPT"]}
+                   if self.candidate_removal_context is None else self.candidate_removal_binding())
         distribution = self.stager.removal_package_receipt_data(owner_body, selection=selection, binding=binding,
             package=package, descriptor=descriptor, signed=signed, expected_descriptor=expected,
             final_package_sha=self.receipt["finalPackageReceiptSha256"], release_body=self.read(self.release_entry),
@@ -6279,7 +6290,8 @@ class Operation:
                                       self.target, self.installer_selection,
                                       self.installer_profile_sha, digest(profile_body), len(body), digest(body),
                                       self.image_release, digest(self.read(self.release_entry)), remove=self.removal,
-                                      runtime_stager=self.stager if self.selected_package_store() else None)
+                                      runtime_stager=self.stager if self.selected_package_store() else None,
+                                      product_source=None if self.candidate_removal_context is None else self.candidate_removal_context["productSource"])
         need(self.read(original) == body, "package-finalization-package-post")
         self.package_outputs.extend(((status, digest(status_body)), (receipt, digest(receipt_body))))
         self.receipt["finalPackageReceiptSha256"] = digest(receipt_body)
@@ -6660,7 +6672,8 @@ class Operation:
         self.release_entry = self.source_original(self.release_input, "source-image-release", self.stager.BUILD_RELEASE_LIMIT)
         body = self.read(self.release_entry)
         value = self.stager.build_release_data(body, target=self.target)
-        source = self.environment["GITHUB_SHA"] if self.prepared_binding is None else self.prepared_binding.source
+        source = (self.candidate_removal_context["productSource"] if self.candidate_removal_context is not None else
+                  self.environment["GITHUB_SHA"] if self.prepared_binding is None else self.prepared_binding.source)
         release = value["release"]
         need(re.fullmatch(r"[0-9a-f]{40}", source) is not None and source != "0" * 40
              and source == self.environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"]
@@ -8379,6 +8392,7 @@ class Operation:
 
     def package_post(self):
         self.package_clock()
+        self.candidate_removal_post()
         for root, names in self.package_roots:
             self.recheck_directory(root)
             observed_names = self.removal_names(root, len(names)) if self.phase in REMOVAL_OWNER_PHASES else os.listdir(root["fd"])
@@ -9264,12 +9278,34 @@ class Operation:
         self.sha256 = user_image["sha256"]
         self.package_clock()
 
+    def candidate_removal_quote(self):
+        if self.candidate_removal_context is not None:
+            need(len(self.entries) <= 24576 and sum(e["fd"] is not None or not e["closed"] for e in self.entries) + 40 <= 256,
+                 "candidate-removal-original-quote")
+
+    def candidate_removal_binding(self):
+        value = self.candidate_removal_context
+        need(type(value) is dict and self.removal, "candidate-removal-binding")
+        return dict(source=value["helperSource"], productSource=value["productSource"], tree=value["tree"],
+            runId=value["runId"], runAttempt=value["runAttempt"], runtimeManifestSha256=value["runtimeManifestSha256"],
+            artifactId=value["artifactId"], artifactSha256=value["artifactSha256"])
+
+    def candidate_removal_post(self):
+        if getattr(self, "candidate_removal_root", None) is None:
+            return
+        self.recheck_directory(self.candidate_removal_root)
+        need(set(os.listdir(self.candidate_removal_root["fd"])) == {
+            "Install.pkg", "producer.json", "producer.sig", "install-inventory.json", "mrk-macos-remove"}, "candidate-removal-donor-roster")
+        for entry, sha in self.candidate_removal_inputs:
+            need(digest(self.read(entry)) == sha, "candidate-removal-donor-post")
+
     def package_remove(self):
         need(self.phase == "package-remove" and self.removal and self.signing is not None,
              "remove-package-configured-purpose")
         self.stage = "remove-package-final-inputs"
-        self.package_started = self.package_observed = time.monotonic_ns()
-        self.package_endpoint = self.package_started + 990_000_000_000
+        if self.candidate_removal_context is None:
+            self.package_started = self.package_observed = time.monotonic_ns()
+            self.package_endpoint = self.package_started + 990_000_000_000
         self.package_clock()
         manifest_hash = self.environment.get("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
         inventory_hash = self.environment.get("MRK_MACOS_INSTALL_INVENTORY_SHA256")
@@ -9288,19 +9324,22 @@ class Operation:
         self.package_finalization_input(original, package)
         package_hash, package_bytes = digest(package), len(package)
         self.package_outputs.append((original, package_hash))
-        installed_root = self.directory(self.work_entry, "producer-root", "remove-installed-producer")
-        need(set(os.listdir(installed_root["fd"])) == {"Install.pkg", "producer.json", "producer.sig"},
+        candidate = self.candidate_removal_context is not None
+        installed_name = "resume-carrier" if candidate else "producer-root"
+        installed_root = self.directory(self.work_entry, installed_name, "remove-installed-producer")
+        donor_names = ({"Install.pkg", "producer.json", "producer.sig", "install-inventory.json", "mrk-macos-remove"} if candidate else {"Install.pkg", "producer.json", "producer.sig"})
+        need(set(os.listdir(installed_root["fd"])) == donor_names,
              "remove-installed-producer-roster")
-        self.package_roots.append((installed_root, {"Install.pkg", "producer.json", "producer.sig"}))
+        self.package_roots.append((installed_root, donor_names))
         installed_entry = self.original(installed_root, "producer.json", "remove-installed-descriptor", self.stager.PRODUCER_DESCRIPTOR_BYTES, (0o444,))
         signature_entry = self.original(installed_root, "producer.sig", "remove-installed-signature", self.stager.PRODUCER_SIGNATURE_BYTES, (0o444,))
         installed, signature = self.read(installed_entry), self.read(signature_entry)
         self.package_outputs.extend(((installed_entry, digest(installed)), (signature_entry, digest(signature))))
-        input_root = self.directory(self.work_entry, "input", "remove-installed-input")
+        input_root = installed_root if candidate else self.directory(self.work_entry, "input", "remove-installed-input")
         inventory_entry = self.original(input_root, self.stager.INSTALLATION_INVENTORY_NAME, "remove-installed-inventory", self.stager.INVENTORY_BYTES, (0o444,))
         inventory = self.read(inventory_entry)
-        remover_path = self.work / "input/app" / self.stager.REMOVER
-        parts = ("app/" + self.stager.REMOVER).split("/")
+        remover_path = self.work / "resume-carrier" / self.stager.REMOVER_NAME if candidate else self.work / "input/app" / self.stager.REMOVER
+        parts = [self.stager.REMOVER_NAME] if candidate else ("app/" + self.stager.REMOVER).split("/")
         remover_root = self.descend(input_root, tuple(parts[:-1]))
         remover_entry = self.original(remover_root, parts[-1], "remove-signed-installed-program", self.stager.REMOVER_BYTES, (0o555,))
         program = self.read(remover_entry)
@@ -9311,8 +9350,8 @@ class Operation:
         self.package_post()
         self.stage = "remove-package-five-input-preparation"
         prepared = self.package_stager_io("remove-input", argparse.Namespace(target=self.target,
-            installed_producer=self.work / "producer-root/producer.json", installed_signature=self.work / "producer-root/producer.sig",
-            inventory=self.work / "input" / self.stager.INSTALLATION_INVENTORY_NAME, remover=remover_path,
+            installed_producer=self.work / installed_name / "producer.json", installed_signature=self.work / installed_name / "producer.sig",
+            inventory=self.work / ("resume-carrier" if candidate else "input") / self.stager.INSTALLATION_INVENTORY_NAME, remover=remover_path,
             package=self.work / self.final_package_name / self.package_filename, output=self.work / "remove-emitter-input",
             expected_source=self.image_source, expected_manifest=manifest_hash))
         need(type(prepared) is dict and prepared == {"schemaVersion": 1, "kind": "remove-emitter-input-data", "target": self.target,
@@ -9340,6 +9379,9 @@ class Operation:
         environment = build_environment(self.environment, self.work, self.image_release, target=self.target)
         environment.update(CARGO_TARGET_DIR=str(self.work / self.target_name), TMPDIR=str(self.work / self.target_name / "tmp"),
                            MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=manifest_hash)
+        if candidate:
+            # Compile the unchanged P producer; workflow/receipt identity remains H.
+            environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"] = self.image_source
         compiled = self.package_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(self.checkout / "desktop/src-tauri/Cargo.toml"),
             "--locked", "--offline", "--release", "--config", PRODUCER_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target, "--no-default-features",
             "--features", "macos-remove-producer", "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"],
@@ -9675,6 +9717,8 @@ class Operation:
                 self.python_clock()
                 self.receipt.update(toolchain=None, helperIdentifier=None, pythonIdentifier=PYTHON_IDENTIFIER)
             self.open()
+            if self.candidate_removal_context is not None:
+                self.candidate_removal_load()
             if self.prepared_binding is not None:
                 # Acquired INSIDE this execute try/finally, including malformed
                 # or changed HEAD. Main never leaves a preexecute original open.
@@ -9741,6 +9785,8 @@ class Operation:
                     self.finalize_image()
                 else:
                     self.verify_staged(expected, self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256"))
+            if self.candidate_removal_context is not None:
+                self.candidate_removal_post(); self.candidate_removal_sources()
             need(self.read(self.profile_entry) == self.service_profile
                  and self.read(self.producer_profile_entry) == self.producer_profile, "source-signing-profile-changed")
             if self.phase not in SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + TOOL_SIGNING_PHASES:
@@ -10629,6 +10675,174 @@ def candidate_materialize(session, originals, inventory, app_scripts):
          and op.receipt["targetRetired"] is True and not op.errors
          and all(entry["closed"] for entry in op.entries), "candidate-materialize-finality")
     session.point()
+
+
+def candidate_removal_phase(consumer, context, phase, bootstrap):
+    """Current workflow H packages the authenticated P remover, never an app build.
+
+    Source queries use the same native owner. Their records are separate from
+    the unchanged signing/notary rosters. No old producer receipt is rewritten.
+    """
+    r = consumer.resume
+    need(phase in consumer.REMOVAL_PHASES
+         and context == consumer.context_data(os.environ, consumer.ROOT, consumer.platform.machine())
+         and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+         and os.environ.get("MRK_CANDIDATE_MODE") == "remove-delivery"
+         and bootstrap[1] == consumer.HELPER_ROOT / "desktop/tools/macos_android_helper_package.py",
+         "candidate-removal-entry")
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    need((soft == resource.RLIM_INFINITY or soft >= 256) and (hard == resource.RLIM_INFINITY or hard >= 256),
+         "candidate-removal-os-fd-limit")
+    allowed = (INSTALLER_CREDENTIAL_VARIABLES + (NOTARY_KEY_VARIABLE,) if phase == "finalize-remove-package" else
+               CREDENTIAL_VARIABLES if phase == "package-remove" else
+               (NOTARY_KEY_VARIABLE,) if phase == "finalize-remove-image" else ())
+    all_credentials = CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES + (NOTARY_KEY_VARIABLE,)
+    need(all(key not in os.environ for key in all_credentials if key not in allowed), "candidate-removal-credentials")
+    env = {key:os.environ[key] for key in ("GITHUB_SHA", "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF",
+        "GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", *allowed)}
+    env.update(HOME="/Users/runner", DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer",
+        MACOSX_DEPLOYMENT_TARGET="26.0", MRK_MACOS_PACKAGE_ROLE="ordinary-image", MRK_MACOS_SAME_PACKAGE_SCOPE="disabled")
+    # Export is passive stager I/O, not an additional signing phase/receipt.
+    op = Operation(None, consumer.CANDIDATE_ROOT, context["work"].parent,
+                   "package-remove" if phase == "remove-preview" else phase, env, None, target=context["target"])
+    op.candidate_removal_context = dict(context)
+    started = time.monotonic_ns()
+    seconds = 180 if phase == "remove-preview" else 990 if phase == "package-remove" else 1740
+    op.package_started = op.package_observed = started
+    op.package_endpoint = started + seconds * 1_000_000_000
+    files, originals = {}, {}
+    source_phase = None
+    helper_files = tuple(dict.fromkeys((*consumer.HELPER_SOURCE_INPUTS, consumer.CONSUMER_PATH,
+        consumer.LEGACY_PATH, consumer.PARSER_PATH, consumer.SELECTION_PATH, consumer.STAGER_PATH,
+        "desktop/tools/macos_android_helper_package.py", "desktop/tools/macos_normal_ui_runner.py")))
+    shared = ("desktop/macos-installed-inputs/build-release.json", op.release_input, PROFILE, PRODUCER_PROFILE, INSTALLER_PROFILE, NOTARY_PROFILE,
+              "desktop/macos-installed-inputs/remove-postinstall", "desktop/packaging/macos-removal.md")
+    helper_files = tuple(dict.fromkeys((*helper_files, *shared)))
+    product_files = tuple(dict.fromkeys((consumer.STAGER_PATH, *shared)))
+    nomination = None
+
+    def load():
+        nonlocal source_phase, nomination
+        for helper, paths in ((True, helper_files), (False, product_files)):
+            for relative in paths:
+                entry = op.source_original((".candidate-consumer-helper/" if helper else "") + relative,
+                                           "candidate-removal-source", r.SOURCE_MODULE_LIMIT)
+                body = op.read(entry)
+                op.package_sources.append((entry, body))
+                files[(helper, relative)], originals[(helper, relative)] = body, entry
+        need(consumer.resume_identity(originals[(True, "desktop/tools/macos_android_helper_package.py")]) == bootstrap[0]
+             and files[(True, "desktop/tools/macos_android_helper_package.py")] == bootstrap[2], "candidate-bootstrap-original-post")
+        nomination = consumer.selection_data(files[(True, consumer.SELECTION_PATH)], op.target)
+        def module(leaf, name, helper=True):
+            relative = "desktop/tools/" + leaf
+            return r.load_module(name, (consumer.HELPER_ROOT if helper else consumer.CANDIDATE_ROOT) / relative, files[(helper,relative)])
+        normal = module("macos_normal_ui_runner.py", "_mrk_remove_phase_clock")
+        clock = normal.PhaseClock(seconds, started=started)
+        qualification = module("macos_aqua_qualification.py", "_mrk_remove_phase_owner")
+        op.owner = qualification.load_owner(consumer.HELPER_ROOT)
+        clean = dict(PATH="/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", LANG="C", LC_ALL="C", TZ="UTC",
+            TMPDIR=str(op.work/op.target_name/"tmp")+"/", DEVELOPER_DIR=env["DEVELOPER_DIR"],
+            GIT_CONFIG_NOSYSTEM="1",GIT_CONFIG_GLOBAL="/dev/null",GIT_NO_REPLACE_OBJECTS="1",GIT_OPTIONAL_LOCKS="0",GIT_TERMINAL_PROMPT="0")
+        source_phase = normal.NormalPhase(op.owner, clean, op.checkout, clock)
+        sources()
+        op.stager = module("stage_macos_installed.py", "_mrk_candidate_remove_stager")
+        op.stager_failure_module = op.stager
+        product = module("stage_macos_installed.py", "_mrk_candidate_remove_product", False)
+        selection = product.source_build_selection(op.target)
+        current = op.stager.source_build_selection(op.target)
+        need((selection.target,selection.package_version,selection.release) == (current.target,current.package_version,current.release)
+             and product.CURRENT_PROTOCOL == op.stager.CURRENT_PROTOCOL
+             and all(files[(True,path)] == files[(False,path)] for path in shared), "candidate-removal-compatible-source")
+        # Same copied-host admission as the existing candidate adapter.
+        host_root = op.work / "host-python"
+        def directory(path):
+            entry = op.descend(op.work_entry, Path(path).relative_to(op.work).parts)
+            return entry["identity"], os.listdir(entry["fd"])
+        def read_file(path, limit):
+            path = Path(path); parent = op.descend(op.work_entry, path.parent.relative_to(op.work).parts)
+            entry = op.original(parent, path.name, "candidate-host", limit, (0o600,0o644,0o755))
+            body = op.read(entry); op.package_sources.append((entry, body))
+            return consumer.resume_identity(entry), body
+        _, host_body = read_file(host_root/"host-binding.json",32768)
+        snapshot,cfg = r.host_snapshot(host_root,directory,read_file,sidecar=True)
+        r.host_selection_data(r.decode(host_body),snapshot,cfg,host_root,
+            dict(executable=str(Path(sys.executable).resolve()),prefix=sys.prefix,basePrefix=sys.base_prefix,
+                 baseExecutable=str(Path(sys._base_executable).resolve())),context["helperSource"],context["runId"],context["runAttempt"])
+        acquired = op.original(op.work_entry,"candidate-acquisition.json","candidate-handoff",65536,(0o600,))
+        status = op.original(op.work_entry,"candidate-acquisition.status","candidate-handoff",4,(0o600,))
+        body = op.read(acquired)
+        need(op.read(status) == b"0\n", "candidate-acquisition-caller-zero")
+        value = consumer.removal_acquisition_data(tool_json(body),nomination,context["helperSource"],
+            op.candidate_removal_context["helperTree"],context["runId"],context["runAttempt"],selection)
+        op.package_sources.extend(((acquired,body),(status,b"0\n")))
+        root = op.directory(op.work_entry,"resume-carrier","candidate-removal-donors")
+        need(set(os.listdir(root["fd"])) == set(consumer.REMOVAL_DONORS), "candidate-removal-donor-roster")
+        op.candidate_removal_root = root
+        op.candidate_removal_inputs = []
+        for key in ("package","descriptor","signature","inventory","remover"):
+            row = value[key]
+            entry = op.original(root,row["name"],"candidate-removal-donor",row["bytes"],(0o555,) if key=="remover" else (0o444,))
+            need(entry["identity"][6] == row["bytes"] and digest(op.read(entry)) == row["sha256"], "candidate-removal-donor-post")
+            op.candidate_removal_inputs.append((entry,row["sha256"]))
+        env.update(MRK_MACOS_INSTALL_SOURCE_COMMIT=nomination["source"],
+            MRK_MACOS_INSTALL_INVENTORY_SHA256=value["inventory"]["sha256"],
+            MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=value["runtimeManifestSha256"],
+            MRK_MACOS_REMOVER_SHA256=value["remover"]["sha256"])
+        op.candidate_removal_context.update(productSource=nomination["source"], tree=nomination["tree"],
+            artifactId=nomination["artifactId"], artifactSha256=nomination["artifactSha256"], runtimeManifestSha256=value["runtimeManifestSha256"])
+        op.candidate_removal_post()
+
+    def sources():
+        for entry, body in op.package_sources:
+            need(op.read(entry) == body, "candidate-removal-source-post")
+        for helper, root, sha, paths in ((True,consumer.HELPER_ROOT,context["helperSource"],helper_files),
+                                        (False,consumer.CANDIDATE_ROOT,nomination["source"],product_files)):
+            prefix=["/usr/bin/git","-C",str(root),"-c","core.fsmonitor=false","-c","core.hooksPath=/dev/null","--no-optional-locks","--literal-pathspecs"]
+            op.candidate_removal_quote()
+            op.stager_io_pending = "candidate-source-query"
+            result=source_phase.call("helper-source" if helper else "candidate-source",prefix+["rev-parse","HEAD","HEAD^{tree}"],15,8192)
+            need(result.returncode==0 and result.stderr==b"", "candidate-source-query")
+            values=result.stdout.splitlines()
+            need(len(values)==2 and values[0]==sha.encode("ascii") and re.fullmatch(rb"[0-9a-f]{40}",values[1]), "candidate-source-identity")
+            tree=values[1].decode("ascii")
+            if helper:
+                need(op.candidate_removal_context.get("helperTree",tree)==tree,"candidate-helper-tree-post")
+                op.candidate_removal_context["helperTree"]=tree
+            else: need(tree==nomination["tree"],"candidate-source-tree")
+            result=source_phase.call("helper-source" if helper else "candidate-source",prefix+["ls-tree","-z","--full-tree",sha,"--",*sorted(paths)],15,8192)
+            need(result.returncode==0 and result.stderr==b"", "candidate-source-query")
+            consumer.source_rows_data(result.stdout,{path:files[(helper,path)] for path in paths})
+            op.stager_io_pending = None
+        for entry, body in op.package_sources:
+            need(op.read(entry) == body, "candidate-removal-source-post")
+
+    op.candidate_removal_load = load
+    op.candidate_removal_sources = sources
+    try:
+        if phase != "remove-preview":
+            op.execute()
+            return {"schemaVersion":1,"phase":phase,"source":context["helperSource"],
+                    "productSource":nomination["source"],"passed":True,"removalExecuted":False}
+        try:
+            op.open(); load()
+            args = argparse.Namespace(target=op.target, work=op.work, expected_source=nomination["source"],
+                output=op.work/"remove-preview")
+            result = op.stager.remove_preview_command(args, candidate_binding=op.candidate_removal_binding())
+            op.candidate_removal_post(); sources()
+        finally:
+            op.finish()
+        need(op.receipt["originalClosesKnown"] and op.receipt["targetRetired"] and not op.errors
+             and not op.calls and not op.credential_calls and len(source_phase.records)==8,
+             "candidate-removal-export-finality")
+        source_phase.clock.check()
+        return result
+    except BaseException as error:
+        try:
+            emit_failure_diagnostic(error,phase=phase,target=op.target,main_stage="operation-execute",operation=op,stager=op.stager)
+        except BaseException:
+            pass
+        raise
 
 
 def candidate_fixture_phase(consumer, context, purpose, started, bootstrap):

@@ -558,6 +558,13 @@ class CandidateConsumerTests(unittest.TestCase):
                                ('GITHUB_REF', 'refs/heads/main'), ('MRK_MACOS_WORK', '/tmp/user-work')):
                 with self.subTest(target=target, key=key), self.assertRaises(ValueError):
                     C.context_data(dict(env, **{key: value}), C.HELPER_ROOT, machine)
+            manual = dict(env, GITHUB_EVENT_NAME='workflow_dispatch', MRK_CANDIDATE_MODE='remove-delivery',
+                GITHUB_REF='refs/heads/'+C.REMOVAL_BRANCH,
+                GITHUB_WORKFLOW_REF=R.REPOSITORY+'/'+C.WORKFLOW+'@refs/heads/'+C.REMOVAL_BRANCH)
+            self.assertEqual(C.context_data(manual,C.HELPER_ROOT,machine)['target'],target)
+            for key,value in (('GITHUB_EVENT_NAME','push'),('MRK_CANDIDATE_MODE','restore'),
+                              ('GITHUB_REF','refs/heads/'+C.BRANCH),('GITHUB_WORKFLOW_SHA','e'*40)):
+                with self.assertRaises(ValueError): C.context_data(dict(manual,**{key:value}),C.HELPER_ROOT,machine)
             value = {'schemaVersion': 1, 'targets': {key: nomination(key) for key in ('aarch64-apple-darwin', 'x86_64-apple-darwin')}}
             self.assertEqual(C.selection_data(json.dumps(value).encode(), target), nomination(target))
             value['targets'][target]['target'] = 'other'
@@ -837,3 +844,95 @@ class CandidateConsumerTests(unittest.TestCase):
         for _ in range(3): quota.reserve(1)  # original transport iterators
         self.assertEqual(quota.reserved, R.MAX_ORIGINALS)
         with self.assertRaises(ValueError): quota.reserve(1)
+        # New read-only purpose never acquires Installer(1)/sudo(4), nor
+        # install-input directory/inventory/status(3); it publishes five donors.
+        removal = R.OriginalQuota()
+        removal.reserve(76-5)
+        removal.reserve(17+5)
+        self.assertEqual(removal.reserved,93)
+        removal.reserve(3)
+        with self.assertRaises(ValueError): removal.reserve(1)
+
+    def test_removal_donors_use_actual_exclusive_publisher_and_closed_acquisition(self):
+        import os
+        import tempfile
+        from desktop.tools import macos_e2_native_fixture as E
+        for fault in (None, 'collision', 'close'):
+            with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+                work=Path(temp);work.chmod(0o700)
+                clock=SimpleNamespace(check=lambda:None)
+                owner=C.CandidateResume(C.HELPER_ROOT,C.CANDIDATE_ROOT,work,clock,E.Originals,
+                    nomination=nomination(),purpose='acquire-removal')
+                owner.selection=SimpleNamespace(package_version='0.1.2',release='macos26-arm64-candidate02')
+                owner.installer_entered=False;owner.point=lambda:None
+                owner.admit_resources=mock.Mock();owner._resource_inputs=(1,1)
+                owner._CandidateResume__binding_image_bytes=10
+                owner._restore_originals={name:(name.encode(),0o444) for name in C.REMOVAL_DONORS[:3]}
+                owner._CandidateResume__removal_program=b'signed remover'
+                owner.acquisition_result={}
+                if fault=='collision': (work/'Install.pkg').write_bytes(b'original')
+                original_close=owner.outer.close
+                def close(entry):
+                    original_close(entry)
+                    if fault=='close' and entry['kind']=='output':
+                        entry['closed']=False;owner.outer.errors.append('inert close unknown')
+                try:
+                    with mock.patch.object(owner.outer,'close',side_effect=close):
+                        if fault is None: owner.publish_removal_inputs(b'inventory')
+                        else:
+                            with self.assertRaises((ValueError,FileExistsError)): owner.publish_removal_inputs(b'inventory')
+                    if fault is None:
+                        self.assertEqual(set(os.listdir(work)),set(C.REMOVAL_DONORS))
+                        self.assertTrue(all(e['closed'] for e in owner.outer.entries if e['kind']=='output'))
+                        self.assertEqual((work/'mrk-macos-remove').read_bytes(),b'signed remover')
+                        self.assertEqual(stat.S_IMODE((work/'mrk-macos-remove').stat().st_mode),0o555)
+                        owner.retire()
+                        self.assertEqual(set(os.listdir(work)),set(C.REMOVAL_DONORS))
+                        self.assertEqual(owner.acquisition_result['removalDonor']['sourcePackageVersion'],'0.1.2')
+                    elif fault=='collision':
+                        self.assertEqual((work/'Install.pkg').read_bytes(),b'original')
+                        self.assertFalse((work/'producer.json').exists())
+                    else:
+                        self.assertFalse((work/'producer.json').exists())
+                        self.assertFalse(owner.quota.finish())
+                finally: owner.quota.finish()
+        selected=SimpleNamespace(package_version='0.1.2',release='macos26-arm64-candidate02')
+        fixed=dict(schemaVersion=1,scope='candidate-closed-acquisition',nomination=nomination(),
+            helperSource='a'*40,helperTree='b'*40,consumerRunId='51',consumerRunAttempt='2',
+            nativeProducerSignatureVerified=True,originalMountDetached=True,originalClosesKnown=True,
+            installerEntered=False,productReady=False,runtimeManifestSha256='c'*64)
+        for key,name in zip(('package','descriptor','signature','inventory','remover'),C.REMOVAL_DONORS):
+            fixed[key]=dict(name=name,bytes=1,sha256='d'*64)
+        fixed['removalDonor']=dict(sourcePackageVersion=selected.package_version,release=selected.release,removerSha256='d'*64)
+        args=(nomination(),'a'*40,'b'*40,'51','2',selected)
+        self.assertIs(C.removal_acquisition_data(fixed,*args),fixed)
+        for key,val in (('originalClosesKnown',False),('originalMountDetached',False),('nativeProducerSignatureVerified',False),
+                        ('helperSource','1'*40),('nomination',nomination('x86_64-apple-darwin')),('installerEntered',True)):
+            with self.assertRaises(ValueError): C.removal_acquisition_data(dict(fixed,**{key:val}),*args)
+
+    def test_removal_native_quote_preserves_unknown_originals_before_dispatch(self):
+        from desktop.tools import macos_android_helper_package as H
+        op=H.Operation(SimpleNamespace(run_owned=mock.Mock()),Path('/inert/source'),Path('/inert/work'),
+            'package-remove',dict(GITHUB_SHA='a'*40,GITHUB_WORKFLOW_SHA='a'*40,GITHUB_WORKFLOW_REF='inert',
+            GITHUB_RUN_ID='51',GITHUB_RUN_ATTEMPT='2',MRK_MACOS_PACKAGE_ROLE='ordinary-image'),None)
+        op.candidate_removal_context={}
+        op.entries=[dict(fd=None,closed=True) for _ in range(24576)]
+        op.candidate_removal_quote()
+        op.entries.append(dict(fd=None,closed=True))
+        with self.assertRaises(H.Refused):op.candidate_removal_quote()
+        op.entries=[dict(fd=3,closed=False) for _ in range(216)]
+        op.candidate_removal_quote()
+        op.entries.append(dict(fd=None,closed=False))  # Unknown close consumes a live slot.
+        with self.assertRaises(H.Refused):
+            op.call('producer-build',['inert'],{},cwd=op.work,timeout=1,limit=32)
+        op.owner.run_owned.assert_not_called()
+
+    def test_removal_manual_context_cannot_enter_installer_or_restore(self):
+        with mock.patch.dict(C.os.environ, {'GITHUB_EVENT_NAME':'workflow_dispatch','MRK_CANDIDATE_MODE':'remove-delivery'}, clear=True):
+            for purpose in ('install','acquire','acquire-restore','restore-install'):
+                with self.subTest(purpose=purpose), mock.patch.object(C,'entry_context') as entry:
+                    with self.assertRaises(ValueError): C.main(purpose)
+                    entry.assert_not_called()
+            with mock.patch.object(C,'entry_context',return_value={}), mock.patch.object(R,'host_read') as read:
+                with self.assertRaises(ValueError): C.fixture_main('prepare-restore')
+                read.assert_not_called()

@@ -2402,6 +2402,14 @@ def remover_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TAR
             "qualification": "actual-remover-data-not-signed-or-launched"}
 
 
+def removal_product_source(binding, workflow):
+    candidate = workflow == _CANDIDATE_REMOVE_WORKFLOW
+    need(type(binding) is dict and ((candidate and maintenance_hex(binding.get("productSource"), 40)
+         and maintenance_hex(binding.get("source"), 40)) or
+         (not candidate and "productSource" not in binding)), "remove-product-workflow-binding")
+    return binding["productSource"] if candidate else binding["source"]
+
+
 def removal_package_receipt_data(body, *, selection, binding, package, descriptor, signed, expected_descriptor,
                                  final_package_sha, release_body, profiles, expected_workflow=None):
     """Closed prior Remove emission correspondence. Caller retains original0 separately."""
@@ -2416,13 +2424,14 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
         "developerIdOrNotarizationQualified", "productReady", "finalPackageReceiptSha256", "removalDistribution", "directStagerIOPending",
         "cleanupErrors", "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"), "remove-owner-fields")
     workflow = _PREVIEW_FINAL_IMAGE_WORKFLOW if expected_workflow is None else expected_workflow
-    need(workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW), "remove-owner-workflow")
+    need(workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW, _CANDIDATE_REMOVE_WORKFLOW), "remove-owner-workflow")
+    product_source = removal_product_source(binding, workflow)
     need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["phase"] == "package-remove"
          and value["target"] == selection.target and value["source"] == value["workflowSource"] == binding["source"]
          and maintenance_hex(value["source"], 40) and value["workflow"] == workflow
          and value["runId"] == binding["runId"] and value["runAttempt"] == binding["runAttempt"]
          and all(type(value[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) for key in ("runId", "runAttempt"))
-         and value["packageRole"] == "ordinary-image" and value["imageSourceCommit"] == value["source"]
+         and value["packageRole"] == "ordinary-image" and value["imageSourceCommit"] == product_source
          and value["imageReleaseId"] == selection.release and value["imageReleaseSourceSha256"] == digest(release_body)
          and value["toolchain"] == ("1.98.0" if selection.target == INTEL_TARGET else "1.98.1")
          and value["helperIdentifier"] == "dev.mobile-release-kit.desktop.android-register", "remove-owner-current-source")
@@ -2478,6 +2487,7 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
     return distribution
 
 
+_CANDIDATE_REMOVE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-consume.yml@refs/heads/task/ci-simplification-20261015'
 _PREVIEW_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview'
 _INSTALLED_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed'
 _CANDIDATE_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-candidate'
@@ -2543,9 +2553,11 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
     """
     need(type(remove) is bool and type(expected_workflow) is str
          and expected_workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _INSTALLED_FINAL_IMAGE_WORKFLOW,
-                                   _CANDIDATE_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW)
-         and (not remove or expected_workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW)),
+                                   _CANDIDATE_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW, _CANDIDATE_REMOVE_WORKFLOW)
+         and (not remove or expected_workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW, _CANDIDATE_REMOVE_WORKFLOW))
+         and (expected_workflow != _CANDIDATE_REMOVE_WORKFLOW or remove),
          "final-image-receipt-purpose")
+    product_source = removal_product_source(binding, expected_workflow)
     selection = selected_build(selection)
     release = build_release_data(release_body, target=selection.target)
     need((release["packageVersion"], release["release"]) == (selection.package_version, selection.release)
@@ -2566,7 +2578,7 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
          and maintenance_hex(value["source"], 40) and value["workflow"] == workflow
          and value["runId"] == binding["runId"] and value["runAttempt"] == binding["runAttempt"]
          and all(type(value[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) for key in ("runId", "runAttempt"))
-         and value["packageRole"] == "ordinary-image" and value["imageSourceCommit"] == value["source"]
+         and value["packageRole"] == "ordinary-image" and value["imageSourceCommit"] == product_source
          and value["imageReleaseId"] == selection.release and value["imageReleaseSourceSha256"] == digest(release_body)
          and value["toolchain"] is None and value["helperIdentifier"] is None, "final-image-receipt-source")
     need(all(value[key] is True for key in ("targetRetired", "originalClosesKnown", "passed", "outerFinalityRequired"))
@@ -2863,7 +2875,7 @@ def preview_command(args, *, prepared=None):
                              "installed-passive-carrier-not-consumer-or-product-qualified" if installed else
                              "normal-early-preview-not-launched-or-product-qualified"}
 
-def remove_preview_command(args):
+def remove_preview_command(args, *, candidate_binding=None):
     """Stage only the separately completed Remove carrier; never execute removal."""
     args._carrier_validation_group = "source-binding"
     update = getattr(args, "positive_update_carrier", False)
@@ -2873,15 +2885,32 @@ def remove_preview_command(args):
     selection = source_build_selection(command_target(args))
     need(maintenance_hex(args.expected_source, 40) and Path(args.work).is_absolute(), "remove-preview-source")
     work = Path(args.work)
-    binding = maintenance_json(read(work / "source-binding.json", 65536), 65536)
-    source_inventory = maintenance_json(read(work / "source-inventory.json", 1024 * 1024), 1024 * 1024)
-    need(type(binding) is dict and type(source_inventory) is dict
-         and binding.get("source") == source_inventory.get("source") == args.expected_source
-         and binding.get("workflowSource") == args.expected_source
-         and source_inventory.get("tree") == binding.get("tree") and maintenance_hex(source_inventory.get("tree"), 40)
-         and binding.get("scope") == (_UPDATE_DISTRIBUTION_SCOPE if update else "normal-macos-early-preview")
-         and binding.get("instrumented") is False
-         and binding.get("packageRole") == "ordinary-image", "remove-preview-source-binding")
+    if candidate_binding is None:
+        binding = maintenance_json(read(work / "source-binding.json", 65536), 65536)
+        source_inventory = maintenance_json(read(work / "source-inventory.json", 1024 * 1024), 1024 * 1024)
+        need(type(binding) is dict and type(source_inventory) is dict
+             and binding.get("source") == source_inventory.get("source") == args.expected_source
+             and binding.get("workflowSource") == args.expected_source
+             and source_inventory.get("tree") == binding.get("tree") and maintenance_hex(source_inventory.get("tree"), 40)
+             and binding.get("scope") == (_UPDATE_DISTRIBUTION_SCOPE if update else "normal-macos-early-preview")
+             and binding.get("instrumented") is False
+             and binding.get("packageRole") == "ordinary-image", "remove-preview-source-binding")
+    else:
+        need(not update and type(candidate_binding) is dict and set(candidate_binding) == {
+            "source", "productSource", "tree", "runId", "runAttempt", "runtimeManifestSha256", "artifactId", "artifactSha256"}
+            and candidate_binding["productSource"] == args.expected_source
+            and maintenance_hex(candidate_binding["tree"],40)
+            and maintenance_hex(candidate_binding["runtimeManifestSha256"],64), "candidate-remove-preview-binding")
+        workflow = _CANDIDATE_REMOVE_WORKFLOW
+        binding = candidate_binding
+        removal_product_source(binding, workflow)
+        need(os.environ.get("GITHUB_WORKFLOW_REF") == workflow
+             and os.environ.get("GITHUB_SHA") == os.environ.get("GITHUB_WORKFLOW_SHA") == binding["source"]
+             and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+             and os.environ.get("MRK_CANDIDATE_MODE") == "remove-delivery"
+             and os.environ.get("GITHUB_RUN_ID") == binding["runId"]
+             and os.environ.get("GITHUB_RUN_ATTEMPT") == binding["runAttempt"], "candidate-remove-preview-context")
+        source_inventory = {"tree": binding["tree"]}
     need(all(type(binding.get(k)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", binding[k])
              for k in ("runId", "runAttempt")), "remove-preview-run-binding")
     if update:
@@ -2950,6 +2979,10 @@ def remove_preview_command(args):
     guide = read(DESKTOP / "packaging/macos-removal.md", 32768)
     if update:
         summary.update(scope=_UPDATE_DISTRIBUTION_SCOPE, workflowRef=workflow)
+    if candidate_binding is not None:
+        summary.update(scope="candidate-matched-removal-delivery", workflowRef=workflow,
+            workflowSource=binding["source"], installedArtifactId=binding["artifactId"],
+            installedArtifactSha256=binding["artifactSha256"])
     write_tree(args.output, {"MobileReleaseKit-Remove.dmg": (image, 0o444), "REMOVE.md": (guide, 0o444),
                             "REMOVAL.json": (canonical(summary) + b"\n", 0o444)})
     return {"schemaVersion": 1, "sourceCommit": args.expected_source, "distributionSha256": digest(image), "fileCount": 3,

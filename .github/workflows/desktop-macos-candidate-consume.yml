@@ -1,8 +1,20 @@
-name: Mac candidate Restore regression
+name: Mac candidate recovery and removal package
 
 on:
   push:
     branches: [verify/desktop-macos-candidate-consume]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Package a matching remover from the existing signed app; no app rebuild or installation
+        type: choice
+        options: [remove-delivery]
+        default: remove-delivery
+      architecture:
+        description: Package only the selected architecture
+        type: choice
+        options: [both, arm64, x86_64]
+        default: both
 
 permissions:
   contents: read
@@ -241,3 +253,318 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+  remove-delivery:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && inputs.operation == 'remove-delivery' && github.ref == 'refs/heads/task/ci-simplification-20261015'
+    name: Matching removal package (${{ matrix.target }})
+    environment: macos-developer-id
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 125
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJSON(inputs.architecture == 'arm64' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","python":"arm64","rust":"1.98.1"}]' || inputs.architecture == 'x86_64' && '[{"target":"x86_64-apple-darwin","runner":"macos-26-intel","python":"x64","rust":"1.98.0"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","python":"arm64","rust":"1.98.1"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","python":"x64","rust":"1.98.0"}]') }}
+    env:
+      MRK_CANDIDATE_MODE: remove-delivery
+      MRK_CANDIDATE_SOURCE: fcb1aa46fb95e601479078fdc98ba05acb701c05
+      MRK_MACOS_TARGET: ${{ matrix.target }}
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - name: Require the disposable native Mac and fixed non-publishing delivery route
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]]
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]]
+          [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp ]]
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]]
+          case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$(/usr/bin/uname -m)" in
+            aarch64-apple-darwin/ARM64/arm64|x86_64-apple-darwin/X64/x86_64) ;;
+            *) exit 1 ;;
+          esac
+      - name: Check out the unchanged signed application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.MRK_CANDIDATE_SOURCE }}
+          persist-credentials: false
+      - name: Preserve candidate source while reserving the delivery helper path
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e "$GITHUB_WORKSPACE/.candidate-consumer-helper"
+          test ! -L "$GITHUB_WORKSPACE/.candidate-consumer-helper"
+      - name: Check out only the current delivery helper separately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .candidate-consumer-helper
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          architecture: ${{ matrix.python }}
+      - name: Prepare one private host interpreter for the existing delivery owner
+        id: work
+        timeout-minutes: 2
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          work=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+          export MRK_MACOS_WORK="$work"
+          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s/host-python/bin/python3\n' "$work" "$work" >> "$GITHUB_ENV"
+          printf 'root=%s\n' "$work" >> "$GITHUB_OUTPUT"
+          helper="$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py"
+          export MRK_HOST_BASE_CONTEXT
+          MRK_HOST_BASE_CONTEXT=$(python3 -I -S -B "$helper" host-base)
+          python3 -I -S -B -m venv --copies --without-pip --without-scm-ignore-files "$work/host-python"
+          "$work/host-python/bin/python3" -I -S -B "$helper" bind-host
+          unset MRK_HOST_BASE_CONTEXT
+      - name: Prepare only the locked small removal-producer compiler inputs
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          unset GITHUB_TOKEN GH_TOKEN
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+            CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
+            /Users/runner/.cargo/bin/rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+          toolbin="/Users/runner/.rustup/toolchains/$RUSTUP_TOOLCHAIN-$MRK_MACOS_TARGET/bin"
+          /usr/bin/env -i PATH="$toolbin:/usr/bin:/bin:/usr/sbin:/sbin" HOME=/Users/runner \
+            CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup RUSTC="$toolbin/rustc" \
+            RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
+            "$toolbin/cargo" fetch --manifest-path "$GITHUB_WORKSPACE/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
+      - name: Reuse and authenticate the signed candidate without installing it
+        timeout-minutes: 12
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          set +e
+          "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" acquire-removal \
+            > "$MRK_MACOS_WORK/candidate-acquisition.json"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/candidate-acquisition.status"
+          test "$status" = 0 || exit "$status"
+      - name: Read the authenticated donor's selected package values
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B - <<'PY_DONOR'
+          import json, os, re
+          from pathlib import Path
+          work = Path(os.environ["MRK_MACOS_WORK"])
+          assert (work / "candidate-acquisition.status").read_bytes() == b"0\n"
+          # These values configure the ordinary packaging CLI. Each native phase
+          # independently reauthenticates the donor; environment is not authority.
+          body = (work / "candidate-acquisition.json").read_bytes()
+          assert 0 < len(body) <= 65536
+          value = json.loads(body)
+          donor = value["removalDonor"]
+          version = donor["sourcePackageVersion"]
+          assert isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
+          values = {"MRK_MACOS_SOURCE_PACKAGE_VERSION": version,
+              "MRK_MACOS_REMOVER_SHA256": donor["removerSha256"],
+              "MRK_MACOS_INSTALL_INVENTORY_SHA256": value["inventory"]["sha256"],
+              "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256": value["runtimeManifestSha256"]}
+          for key, value in values.items():
+              if key != "MRK_MACOS_SOURCE_PACKAGE_VERSION":
+                  assert isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              for key, value in values.items():
+                  output.write(f"{key}={value}\n")
+          PY_DONOR
+      - name: Prepare the fixed two-file removal package without executing it
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/desktop/tools/stage_macos_installed.py" remove-scripts --target "$MRK_MACOS_TARGET" \
+            --remover "$MRK_MACOS_WORK/resume-carrier/mrk-macos-remove" \
+            --expected-remover "$MRK_MACOS_REMOVER_SHA256" --output "$MRK_MACOS_WORK/remove-scripts" \
+            > "$MRK_MACOS_WORK/remove-scripts-result.json"
+          [[ ! -e "$MRK_MACOS_WORK/Remove-original.pkg" && ! -L "$MRK_MACOS_WORK/Remove-original.pkg" ]] || exit 1
+          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/remove-scripts" \
+            --identifier dev.mobile-release-kit.desktop.remove --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \
+            --install-location / --ownership recommended "$MRK_MACOS_WORK/Remove-original.pkg"
+          "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/desktop/tools/stage_macos_installed.py" prepare-remove-package --target "$MRK_MACOS_TARGET" --expected-remover "$MRK_MACOS_REMOVER_SHA256" \
+            --scripts "$MRK_MACOS_WORK/remove-scripts" --package "$MRK_MACOS_WORK/Remove-original.pkg" \
+            --output "$MRK_MACOS_WORK/remove-package-parts" > "$MRK_MACOS_WORK/remove-package-prepare.json"
+          # Native tools only write fresh outputs as this nonroot account.
+          # Preparation is not final0:0 acceptance; preserve the original pkg.
+          # BSD tar pads stdout even when compressed; use the fresh private file.
+          [[ ! -e "$MRK_MACOS_WORK/remove-package-parts/Scripts" && ! -L "$MRK_MACOS_WORK/remove-package-parts/Scripts" ]] || exit 1
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/remove-scripts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/remove-package-parts/Scripts" --format=odc --uid=0 --gid=0 \
+              --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+          )
+          tar_status=$?
+          set -e
+          printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/remove-package-tar.status"
+          [[ $tar_status == 0 ]] || exit "$tar_status"
+          # xar is not a streaming/O_EXCL tool: reserve its private output parent.
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/remove-package-unsigned"
+          [[ ! -e "$MRK_MACOS_WORK/remove-package-unsigned/Remove.pkg" && ! -L "$MRK_MACOS_WORK/remove-package-unsigned/Remove.pkg" ]] || exit 1
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/remove-package-parts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/xar -c -f "$MRK_MACOS_WORK/remove-package-unsigned/Remove.pkg" \
+              --compression=none PackageInfo Scripts
+          )
+          xar_status=$?
+          set -e
+          printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/remove-package-xar.status"
+          [[ $xar_status == 0 ]] || exit "$xar_status"
+          # This completed unsigned XAR is not final P; the next fixed phase signs and notarizes it.
+      - name: Sign and notarize the completed removal package without executing it
+        timeout-minutes: 32
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_INSTALLER_P12_BASE64: ${{ secrets.MRK_MACOS_INSTALLER_P12_BASE64 }}
+          MRK_MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MRK_MACOS_INSTALLER_P12_PASSWORD }}
+          MRK_MACOS_NOTARY_API_KEY_BASE64: ${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # A separate Installer identity signs the completed Scripts XAR.
+          # Its private keychain closes before the bounded P8 notary wait;
+          # Accepted, append-prefix POST, native validation and full audit all
+          # precede final444 publication, P, the producer signature and Installer.
+          set +e
+          MRK_MACOS_INSTALLER_P12_BASE64="$MRK_MACOS_INSTALLER_P12_BASE64" \
+          MRK_MACOS_INSTALLER_P12_PASSWORD="$MRK_MACOS_INSTALLER_P12_PASSWORD" \
+          MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+            "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" finalize-remove-package \
+            > "$MRK_MACOS_WORK/remove-package-finalization.stdout"
+          finalization_status=$?
+          printf '%s\n' "$finalization_status" > "$MRK_MACOS_WORK/remove-package-finalization.status"
+          finalization_status_saved=$?
+          unset MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -e
+          if [[ "$finalization_status" != 0 ]]; then exit "$finalization_status"; fi
+          [[ "$finalization_status_saved" == 0 ]] || exit "$finalization_status_saved"
+          # The separate package-remove owner requires this original0/status
+          # plus the retained purpose-specific receipt; no removal is executed.
+
+      - name: Emit the genuine removal descriptor and readonly carrier without Installer
+        id: removal_package
+        timeout-minutes: 18
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # The same bounded owner compiles only the fixed nonshipping signer,
+          # emits genuine Remove-domain sidecars and creates one signed image.
+          # No Installer, application launch or payload removal occurs.
+          set +e
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" package-remove \
+            > "$MRK_MACOS_WORK/package-remove.stdout"
+          package_status=$?
+          printf '%s\n' "$package_status" > "$MRK_MACOS_WORK/package-remove.status"
+          package_status_saved=$?
+          set -e
+          if [[ "$package_status" != 0 ]]; then exit "$package_status"; fi
+          [[ "$package_status_saved" == 0 ]] || exit "$package_status_saved"
+          # Actual original0 and the exact Remove-purpose receipt are both
+          # required by finalization. Unknown resources remain retained.
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Notarize staple and verify the separate readonly removal carrier
+        timeout-minutes: 32
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_NOTARY_API_KEY_BASE64: ${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # The old signed image and package receipt remain immutable. The
+          # fixed phase finalizes only its own copy; the final readonly mount
+          # must contain exactly the already-bound P and two producer files.
+          set +e
+          MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+            "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" finalize-remove-image \
+            > "$MRK_MACOS_WORK/remove-image-finalization.stdout"
+          image_status=$?
+          printf '%s\n' "$image_status" > "$MRK_MACOS_WORK/remove-image-finalization.status"
+          image_status_saved=$?
+          unset MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -e
+          if [[ "$image_status" != 0 ]]; then exit "$image_status"; fi
+          [[ "$image_status_saved" == 0 ]] || exit "$image_status_saved"
+          # Neither a provisional file nor its receipt substitutes for this
+          # actual original0. Preview has no fallback to the old image.
+      - name: Export only the matching verified removal image and instructions
+        id: removal_preview
+        timeout-minutes: 3
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_consumer.py" remove-preview \
+            > "$MRK_MACOS_WORK/remove-preview-result.json"
+      - name: Deliver the removal image without repackaging the unchanged application
+        id: removal_upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mobile-release-kit-macos26-${{ matrix.target }}-remove-for-${{ env.MRK_CANDIDATE_SOURCE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/remove-preview/MobileReleaseKit-Remove.dmg
+            ${{ steps.work.outputs.root }}/remove-preview/REMOVE.md
+            ${{ steps.work.outputs.root }}/remove-preview/REMOVAL.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Remove only this completed delivery's private temporary outputs
+        if: always() && steps.removal_preview.outcome == 'success' && steps.removal_upload.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$MRK_MACOS_WORK" == "$RUNNER_TEMP"/mrk-macos-installed.* && -d "$MRK_MACOS_WORK" && ! -L "$MRK_MACOS_WORK" ]]
+          # The existing phase owners returned with their children joined,
+          # keychains retired and mounts detached. Failed/unknown phases instead
+          # rely on disposal of this hosted VM; never guess a kill or deletion.
+          /bin/rm -rf -- "$MRK_MACOS_WORK"

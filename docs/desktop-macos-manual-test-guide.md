@@ -103,6 +103,32 @@ unknown or unfinished result; do not repeatedly start the same operation.
   upload keystore and matching upload-certificate fingerprint. Store API
   credentials are separate again. Never send these private inputs in chat or Git.
 
+### Download the matching Xcode setup package
+
+These existing signed/notarized companions remain compatible with this app's
+managed-Xcode contract; no replacement app installation is needed:
+
+| Mac | Download | Current expiration (UTC) |
+| --- | --- | --- |
+| Apple Silicon | [Prepare Xcode.pkg artifact 12121286678](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39083122098/artifacts/12121286678) | November 1, 2026, 01:39 |
+| Intel | [Prepare Xcode.pkg artifact 12119409553](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39082603257/artifacts/12119409553) | November 1, 2026, 00:40 |
+
+On the matching macOS 26 Mac, first install genuine Apple Xcode at
+`/Applications/Xcode.app`, complete Apple's first-launch/license setup, and install
+the required iOS platform. Then extract the companion ZIP and open
+**Prepare Xcode.pkg** through macOS Installer, approving its administrator prompt.
+Allow space for a full Xcode copy plus a reserve of the larger of 10% or 2 GiB;
+do not assume cloning will eliminate that requirement.
+
+The package creates the protected tool copy at
+`/Library/MobileReleaseKitDeveloper/Xcode.app`. It does not download Xcode, accept
+Apple's licenses, alter your original Xcode, or change `xcode-select`. Reopen Mobile
+Release Kit normally afterward. On failure, preserve the result and files; do not
+delete or change permissions in the protected tool directory.
+
+Both companions passed signing/notarization, first/repeat installation and managed
+tool admission. These results do **not** establish a complete iOS archive/export.
+
 ## Update, removal and interrupted installation
 
 These are **remaining lifecycle checks**, not completed features inferred from

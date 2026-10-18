@@ -20,6 +20,7 @@ CANDIDATE_ROOT = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit'
 HELPER_ROOT = CANDIDATE_ROOT / '.candidate-consumer-helper'
 WORKFLOW = '.github/workflows/desktop-macos-candidate-consume.yml'
 BRANCH = 'verify/desktop-macos-candidate-consume'
+REMOVAL_BRANCH = 'task/ci-simplification-20261015'
 SELECTION_PATH = 'desktop/macos-installed-inputs/candidate-carrier-selection.json'
 CHILD_SOURCE_LIMIT = 256 << 10
 PARSER_SOURCE_LIMIT = 64 << 10
@@ -30,7 +31,9 @@ CONSUMER_PATH = 'desktop/tools/macos_candidate_consumer.py'
 FIXTURE_PATH = 'desktop/tools/macos_app_absence_fixture.py'
 BASELINE_RECEIPT = 'candidate-baseline.json'
 BASELINE_STATUS = 'candidate-baseline.status'
-PURPOSES = ('install', 'acquire', 'acquire-restore', 'restore-install')
+PURPOSES = ('install', 'acquire', 'acquire-restore', 'restore-install', 'acquire-removal')
+REMOVAL_PHASES = ('finalize-remove-package', 'package-remove', 'finalize-remove-image', 'remove-preview')
+REMOVAL_DONORS = ('Install.pkg', 'producer.json', 'producer.sig', 'install-inventory.json', 'mrk-macos-remove')
 CANDIDATE_SOURCE_INPUTS = (
     ('desktop/macos-installed-inputs/build-release.json', 4096),
     ('desktop/macos-installed-inputs/build-release-intel.json', 4096),
@@ -123,12 +126,16 @@ def context_data(environment, root, machine):
     target_names(target)
     arm = target == 'aarch64-apple-darwin'
     source = environment.get('GITHUB_SHA', '')
+    removal = environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and environment.get('MRK_CANDIDATE_MODE') == 'remove-delivery'
+    branch = REMOVAL_BRANCH if removal else BRANCH
     resume.need(root == HELPER_ROOT and environment.get('GITHUB_WORKSPACE') == str(CANDIDATE_ROOT)
                 and environment.get('RUNNER_TEMP') == '/Users/runner/work/_temp'
                 and environment.get('GITHUB_REPOSITORY') == resume.REPOSITORY
-                and environment.get('GITHUB_EVENT_NAME') == 'push'
-                and environment.get('GITHUB_REF') == 'refs/heads/' + BRANCH
-                and environment.get('GITHUB_WORKFLOW_REF') == resume.REPOSITORY + '/' + WORKFLOW + '@refs/heads/' + BRANCH
+                and (environment.get('GITHUB_EVENT_NAME') == 'push' or
+                     environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+                     and environment.get('MRK_CANDIDATE_MODE') == 'remove-delivery')
+                and environment.get('GITHUB_REF') == 'refs/heads/' + branch
+                and environment.get('GITHUB_WORKFLOW_REF') == resume.REPOSITORY + '/' + WORKFLOW + '@refs/heads/' + branch
                 and re.fullmatch(r'[0-9a-f]{40}', source) and source != '0' * 40
                 and environment.get('GITHUB_WORKFLOW_SHA') == source
                 and environment.get('RUNNER_OS') == 'macOS'
@@ -240,6 +247,7 @@ class CandidateResume(resume.Resume):
         self.__nomination = None if nomination is None else MappingProxyType(candidate.candidate_selection_data(nomination))
         self.__binding = None
         self.__restore_inputs = None
+        self.__removal_program = None
         self.candidate_root = candidate_root
         self.__source_loaded = False
         self.__artifact_admitted = False
@@ -486,12 +494,14 @@ class CandidateResume(resume.Resume):
             signingIdentity=dict(self.signing_identity))
         self.admit_resources(*self._resource_inputs, image_bytes=len(image),
                              package_bytes=len(originals['Install.pkg'][0]))
-        options = {'capture_scripts': self.__capture_restore_scripts} if self.purpose == 'acquire-restore' else {}
+        options = ({'capture_scripts': self.__capture_restore_scripts} if self.purpose == 'acquire-restore' else
+                   {'capture_scripts': self.__capture_removal_program} if self.purpose == 'acquire-removal' else {})
         result, inventory = resume.mounted_data(originals, row, self.target, self.stager,
                                                allocation_budget=self.allocation_budget, candidate=True, **options)
         self.point()
         self.__binding = resume.canonical(row)
-        if self.purpose == "acquire-restore": self._restore_originals = originals
+        self.__binding_image_bytes = len(image)
+        if self.purpose in ("acquire-restore", "acquire-removal"): self._restore_originals = originals
         return originals, row, result, inventory
 
     def install_image(self, image, preview):
@@ -518,9 +528,43 @@ class CandidateResume(resume.Resume):
                     'candidate-restore-capture-data')
         self.__restore_inputs = (inventory, MappingProxyType(selected))
 
+    def __capture_removal_program(self, inventory, rows, scripts):
+        # Same single full-package parse; retain one signed leaf, never rebuild it.
+        resume.need(self.purpose == 'acquire-removal' and self.__binding is None
+                    and self.__removal_program is None, 'candidate-removal-capture-order')
+        name = 'app/' + self.stager.REMOVER
+        row = rows[name]
+        body, mode = scripts['input/' + name]
+        resume.need(type(body) is bytes and mode == 0o555 and row['executable'] is True
+                    and (len(body), resume.sha(body)) == (row['size'], row['sha256']),
+                    'candidate-removal-program-inventory')
+        self.__removal_program = body
+
+    def publish_removal_inputs(self, inventory):
+        # Called after native producer verification. Each fresh original closes
+        # before returning; later phases independently rebind the exact donor.
+        resume.need(self.purpose == 'acquire-removal' and self.__removal_program is not None
+                    and not self.installer_entered, 'candidate-removal-publication-order')
+        values = {name: self._restore_originals[name][0] for name in REMOVAL_DONORS[:3]}
+        values.update({'install-inventory.json': inventory, 'mrk-macos-remove': self.__removal_program})
+        # Existing publisher cap, not a new large-file transport or quota.
+        resume.need(all(0 < len(body) <= 128 << 20 for body in values.values()), 'candidate-removal-output-bound')
+        self.admit_resources(*self._resource_inputs, image_bytes=self.__binding_image_bytes,
+                             package_bytes=len(values['Install.pkg']), reading=True)
+        resume.need(self.quota.reserved + len(values) <= resume.MAX_ORIGINALS, 'candidate-removal-original-quote')
+        for name in REMOVAL_DONORS:
+            self.publish_owned(self.work / name, values[name], mode=0o555 if name == 'mrk-macos-remove' else 0o444)
+        self.acquisition_result['remover'] = {'name': 'mrk-macos-remove', 'bytes': len(values['mrk-macos-remove']),
+                                            'sha256': resume.sha(values['mrk-macos-remove'])}
+        self.acquisition_result['removalDonor'] = {'sourcePackageVersion': self.selection.package_version,
+            'release': self.selection.release, 'removerSha256': resume.sha(values['mrk-macos-remove'])}
+        self.__removal_program = None
+        del self._restore_originals
+        self.point()
+
     def prepare_readback(self, result, inventory):
         # This hook runs only AFTER actual mounted producer signature POST.
-        if self.purpose in ('acquire', 'acquire-restore'):
+        if self.purpose in ('acquire', 'acquire-restore', 'acquire-removal'):
             self.acquisition_result = {key: result[key] for key in ('package','descriptor','signature','inventory')}
             self.acquisition_result.update(runtimeManifestSha256=result['release']['runtimeManifestSha256'])
             if self.purpose == 'acquire-restore':
@@ -532,6 +576,7 @@ class CandidateResume(resume.Resume):
                 finally:
                     self.__restore_inputs = None
                     del self._restore_originals
+            if self.purpose == 'acquire-removal': self.publish_removal_inputs(inventory)
             return False  # Existing owner detaches without ever entering Installer.
         if self.purpose == 'restore-install':
             self.baseline_post()
@@ -562,7 +607,8 @@ class CandidateResume(resume.Resume):
         if self.purpose == 'install':
             return super().retire()
         self.point()
-        keep = {target_names(self.target) + '-candidate.zip'}
+        keep = (set(REMOVAL_DONORS) if self.purpose == 'acquire-removal'
+                else {target_names(self.target) + '-candidate.zip'})
         if self.purpose == 'restore-install':
             keep.update((BASELINE_RECEIPT, BASELINE_STATUS, 'installer-output.status'))
         for book in self.quota.books:
@@ -592,7 +638,7 @@ class CandidateResume(resume.Resume):
         try:
             resume.need(self.__source_loaded, 'candidate-source-not-loaded')
             # Lifetime original cells, never live-FD credits.
-            pending = 17 if self.purpose in ('restore-install','acquire','acquire-restore') else 20
+            pending = 22 if self.purpose == 'acquire-removal' else 17 if self.purpose in ('restore-install','acquire','acquire-restore') else 20
             resume.need(self.quota.reserved + pending <= resume.MAX_ORIGINALS, 'candidate-original-ledger-capacity')
             self._resource_inputs = (retained, host_bytes)
             self.admit_resources(retained, host_bytes)
@@ -609,9 +655,9 @@ class CandidateResume(resume.Resume):
             self.clock.check()
             resume.need(all(row['returned'] and row['capturesSettled'] for row in self.calls)
                         and self.mount_detached and ((not self.installer_entered and self.acquisition_result is not None)
-                        if self.purpose in ('acquire','acquire-restore') else (self.installer_zero and self.readback_known)),
+                        if self.purpose in ('acquire','acquire-restore','acquire-removal') else (self.installer_zero and self.readback_known)),
                         'candidate-original-terminal-finality')
-            if self.purpose in ('acquire','acquire-restore'):
+            if self.purpose in ('acquire','acquire-restore','acquire-removal'):
                 return {'schemaVersion':1, 'scope':'candidate-closed-acquisition', 'nomination':self.nomination,
                     'helperSource':self.helper_source, 'helperTree':self.helper_tree,
                     'consumerRunId':self.run_id, 'consumerRunAttempt':self.run_attempt,
@@ -734,12 +780,46 @@ def candidate_restore(op, baseline_entry, baseline_status, installed_entry, inst
 
 def fixture_main(purpose):
     context = entry_context((purpose,))
+    resume.need(os.environ.get("GITHUB_EVENT_NAME") == "push", "candidate-fixture-push-only")
     context["started"] = STARTED_NS
     os.environ.pop("GITHUB_TOKEN", None)
     path = HELPER_ROOT / "desktop/tools/macos_android_helper_package.py"
     original, body = resume.host_read(path, resume.SOURCE_MODULE_LIMIT)
     module = resume.load_module("_mrk_candidate_fixture_phase", path, body)
     return module.candidate_fixture_phase(sys.modules[__name__], context, purpose, STARTED_NS, (original,path,body))
+
+
+def removal_acquisition_data(value, nomination, helper_source, helper_tree, run, attempt, selection):
+    """Same-run original acquisition, not an authority supplied by environment."""
+    fixed = dict(schemaVersion=1, scope='candidate-closed-acquisition', nomination=nomination,
+        helperSource=helper_source, helperTree=helper_tree, consumerRunId=run, consumerRunAttempt=attempt,
+        nativeProducerSignatureVerified=True, originalMountDetached=True, originalClosesKnown=True,
+        installerEntered=False, productReady=False)
+    names = dict(package='Install.pkg', descriptor='producer.json', signature='producer.sig',
+                 inventory='install-inventory.json', remover='mrk-macos-remove')
+    resume.need(type(value) is dict and set(value) == set(fixed) | set(names) | {'runtimeManifestSha256','removalDonor'}
+        and all(type(value[k]) is type(v) and value[k] == v for k,v in fixed.items()), 'candidate-removal-acquisition')
+    for key,name in names.items():
+        row=value[key]
+        resume.need(type(row) is dict and set(row)=={'name','bytes','sha256'} and row['name']==name
+            and type(row['bytes']) is int and 0 < row['bytes'] <= 128 << 20
+            and type(row['sha256']) is str and re.fullmatch('[0-9a-f]{64}',row['sha256'])
+            and row['sha256'] != '0'*64, 'candidate-removal-donor')
+    resume.need(type(value['runtimeManifestSha256']) is str and re.fullmatch('[0-9a-f]{64}',value['runtimeManifestSha256'])
+        and value['runtimeManifestSha256'] != '0'*64 and value['removalDonor'] == {
+            'sourcePackageVersion':selection.package_version,'release':selection.release,
+            'removerSha256':value['remover']['sha256']}, 'candidate-removal-source-selection')
+    return value
+
+
+def removal_main(phase):
+    context = entry_context((phase,))
+    resume.need(phase in REMOVAL_PHASES and os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+                and os.environ.get('MRK_CANDIDATE_MODE') == 'remove-delivery', 'candidate-removal-entry')
+    path = HELPER_ROOT / 'desktop/tools/macos_android_helper_package.py'
+    original, body = resume.host_read(path, resume.SOURCE_MODULE_LIMIT)
+    module = resume.load_module('_mrk_candidate_removal_phase', path, body)
+    return module.candidate_removal_phase(sys.modules[__name__], context, phase, (original, path, body))
 
 
 def entry_context(arguments):
@@ -857,6 +937,8 @@ def main(purpose="install"):
     global _SYSTEM_TOOL_FAILURE
     _SYSTEM_TOOL_FAILURE = None
     resume.need(type(purpose) is str and purpose in PURPOSES, 'candidate-purpose')
+    resume.need((purpose == 'acquire-removal') == (os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'),
+                'candidate-removal-purpose')
     context = entry_context(() if purpose == "install" else (purpose,))
     clock = resume.Deadline(started=STARTED_NS)
     quota = resume.OriginalQuota()
@@ -910,9 +992,11 @@ def main(purpose="install"):
         for role, tool in (('git', '/usr/bin/git'), ('hdiutil', '/usr/bin/hdiutil'),
                            ('vm_stat', '/usr/bin/vm_stat'), ('openssl', '/usr/bin/openssl'),
                            ('codesign', '/usr/bin/codesign'), ('installer', '/usr/sbin/installer')):
-            _admit_system_tool(session, role, tool)
-        sudo = quota.book(lambda: resume.FixedSudoOriginals(session.host_module, session.host, clock, os.getuid()))
-        sudo.acquire(quota)
+            if purpose != 'acquire-removal' or role != 'installer':
+                _admit_system_tool(session, role, tool)
+        if purpose != 'acquire-removal':
+            sudo = quota.book(lambda: resume.FixedSudoOriginals(session.host_module, session.host, clock, os.getuid()))
+            sudo.acquire(quota)
         session.load_sources()
         if purpose == 'restore-install':
             ca = b''  # No network/acquisition child, no unused CA originals.
@@ -1022,6 +1106,7 @@ if __name__ == '__main__':
     try:
         arguments = sys.argv[1:]
         result = (host_base() if arguments == ['host-base'] else bind_host() if arguments == ['bind-host'] else
+                  removal_main(arguments[0]) if len(arguments) == 1 and arguments[0] in REMOVAL_PHASES else
                   fixture_main(arguments[0]) if len(arguments) == 1 and arguments[0] in ('prepare-restore','restore-baseline','restore-chain') else
                   main(arguments[0]) if len(arguments) == 1 and arguments[0] in PURPOSES[1:] else main())
     except BaseException as error:

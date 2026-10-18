@@ -7087,19 +7087,39 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "MRK_MACOS_INSTALL_INVENTORY_SHA256": TOOL.digest(inventory), "MRK_MACOS_REMOVER_SHA256": TOOL.digest(program)}
         testcase = self
         class RemovePorts(module.Operation):
-            def __init__(self, fault):
-                super().__init__(SimpleNamespace(), Path("/inert/source"), Path("/inert/work"), "package-remove", environment, TOOL, target=target)
+            def __init__(self, fault, candidate=False):
+                env=dict(environment)
+                if candidate:
+                    env.update(GITHUB_SHA="b"*40,GITHUB_WORKFLOW_SHA="b"*40,
+                               GITHUB_WORKFLOW_REF=TOOL._CANDIDATE_REMOVE_WORKFLOW)
+                super().__init__(SimpleNamespace(), Path("/inert/source"), Path("/inert/work"), "package-remove", env, TOOL, target=target)
+                if candidate:
+                    self.candidate_removal_context=dict(helperSource="b"*40,productSource="a"*40)
+                    self.package_started=self.package_observed=10_000_000_000
+                    self.package_endpoint=self.package_started+990_000_000_000
+                self.loads=0;self.source_posts=0
                 self.fault, self.now, self.dispatched, self.saved = fault, [10_000_000_000], [], None
                 self.values = {"source/" + module.PROFILE: service, "source/" + module.PRODUCER_PROFILE: profile,
                     "source/" + self.release_input: release_body, "remove-package-final/Remove.pkg": package,
                     "producer-root/Install.pkg": b"INERT prior Install package", "producer-root/producer.json": installed,
                     "producer-root/producer.sig": b"INERT prior signature", "input/install-inventory.json": inventory,
                     "input/app/" + TOOL.REMOVER: program}
+                if candidate:
+                    for old,new in (("producer-root/Install.pkg","Install.pkg"),("producer-root/producer.json","producer.json"),
+                                    ("producer-root/producer.sig","producer.sig"),("input/install-inventory.json","install-inventory.json"),
+                                    ("input/app/"+TOOL.REMOVER,TOOL.REMOVER_NAME)):
+                        self.values["resume-carrier/"+new]=self.values.pop(old)
                 self.rosters = {}
                 for path in self.values:
                     parts = path.split("/")
                     for size in range(len(parts)):
                         self.rosters.setdefault("/".join(parts[:size]), set()).add(parts[size])
+            def candidate_removal_load(self):
+                self.loads+=1
+                if self.fault=="donor-changed": raise module.Refused("candidate-removal-donor-post")
+            def candidate_removal_sources(self):
+                self.source_posts+=1
+                if self.fault=="source-changed": raise module.Refused("candidate-removal-source-post")
             def open(self):
                 self.work_entry = {"fd": "", "path": ""}; self.target_entry = {"fd": self.target_name, "path": self.target_name}
             def source_original(self, name, *_): return {"path": "source/" + name}
@@ -7139,7 +7159,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             def package_stager_io(self, name, args):
                 testcase.assertEqual(name, "remove-input")
                 testcase.assertEqual((args.output, args.package, args.remover), (self.work / "remove-emitter-input",
-                    self.work / "remove-package-final/Remove.pkg", self.work / "input/app" / TOOL.REMOVER))
+                    self.work / "remove-package-final/Remove.pkg", self.work / "resume-carrier" / TOOL.REMOVER_NAME
+                    if self.candidate_removal_context is not None else self.work / "input/app" / TOOL.REMOVER))
                 self.stager_io_pending = name
                 if self.fault == "input-unknown": raise RuntimeError("INERT input not returned")
                 entries = {"remove-descriptor-input.json": descriptor, "producer.json": installed,
@@ -7160,6 +7181,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     testcase.assertEqual(argv[-5:], ["--features", "macos-remove-producer", "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"])
                     testcase.assertEqual(options["timeout"], 480)
                     testcase.assertEqual(options["environment"]["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"], "c" * 64)
+                    testcase.assertEqual(options["environment"]["MRK_MACOS_INSTALL_SOURCE_COMMIT"], "a" * 40)
                     graph = copy.deepcopy(remove_rows)
                     # The real strict graph parser still executes below.
                     old = "/inert/work/android-helper-target"
@@ -7279,12 +7301,33 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         self.assertEqual(operation.saved["directStagerIOPending"], "remove-input")
                         self.assertFalse(operation.saved["targetRetired"] or operation.saved["originalClosesKnown"])
             self.assertFalse(operation.installer_zero or operation.installation_readback or operation.mount_entered)
+        for fault in (None,"donor-changed","source-changed","input-unknown","credential-unknown"):
+            operation=RemovePorts(fault,candidate=True)
+            with self.subTest(candidateRemove=fault), mock.patch.object(module.time,"monotonic_ns",side_effect=lambda:operation.now[0]), mock.patch.object(module.os,"listdir",side_effect=lambda original:list(operation.rosters[original])):
+                if fault is None:
+                    self.assertEqual(operation.execute(),"e"*64)
+                    self.assertEqual((operation.loads,operation.source_posts),(1,1))
+                    self.assertEqual((operation.saved["source"],operation.saved["workflowSource"],operation.saved["imageSourceCommit"]),("b"*40,"b"*40,"a"*40))
+                    self.assertEqual(len(operation.dispatched),6)
+                else:
+                    with self.assertRaises((module.Refused,RuntimeError)):operation.execute()
+                    self.assertFalse(operation.saved["passed"])
+                    if fault=="donor-changed":self.assertEqual(operation.dispatched,[])
+            self.assertFalse(operation.installer_entered or operation.mount_entered)
         self.assertEqual(len(successful["originalCalls"]), 6)
         self.assertEqual(len(successful["credentialOriginals"]), 41)
         arguments = dict(selection=selected, binding={"source": "a" * 40, "runId": "123", "runAttempt": "1"},
             package=package, descriptor=descriptor, signed=signed, expected_descriptor=descriptor,
             final_package_sha="f" * 64, release_body=release_body, profiles=(profile, service))
         self.assertEqual(TOOL.removal_package_receipt_data(TOOL.canonical(successful), **arguments), successful["removalDistribution"])
+        candidate = copy.deepcopy(successful)
+        candidate.update(source="b"*40,workflowSource="b"*40,workflow=TOOL._CANDIDATE_REMOVE_WORKFLOW)
+        candidate_args=dict(arguments,binding=dict(arguments["binding"],source="b"*40,productSource="a"*40),
+                            expected_workflow=TOOL._CANDIDATE_REMOVE_WORKFLOW)
+        self.assertEqual(TOOL.removal_package_receipt_data(TOOL.canonical(candidate),**candidate_args),candidate["removalDistribution"])
+        for changed_args in (arguments,dict(candidate_args,expected_workflow=TOOL._UPDATE_FINAL_IMAGE_WORKFLOW),
+                             dict(candidate_args,binding=dict(candidate_args["binding"],productSource="b"*40))):
+            with self.assertRaises(TOOL.Refused):TOOL.removal_package_receipt_data(TOOL.canonical(candidate),**changed_args)
         updated = copy.deepcopy(successful)
         updated["workflow"] = TOOL._UPDATE_FINAL_IMAGE_WORKFLOW
         self.assertEqual(TOOL.removal_package_receipt_data(TOOL.canonical(updated),
@@ -8331,6 +8374,14 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     release_body=release_body, profiles=(state.credentials.producer, state.credentials.service,
                         (state.checkout / module.NOTARY_PROFILE).read_bytes()), remove=True)
                 self.assertEqual(TOOL.final_image_receipt_data(TOOL.canonical(removal), **removal_arguments), removal["finalImage"])
+                candidate = copy.deepcopy(removal)
+                candidate.update(source="b"*40,workflowSource="b"*40,workflow=TOOL._CANDIDATE_REMOVE_WORKFLOW)
+                candidate_args=dict(removal_arguments,binding=dict(removal_arguments["binding"],source="b"*40,productSource="a"*40),
+                                    expected_workflow=TOOL._CANDIDATE_REMOVE_WORKFLOW)
+                self.assertEqual(TOOL.final_image_receipt_data(TOOL.canonical(candidate),**candidate_args),candidate["finalImage"])
+                for changed_args in (removal_arguments,dict(candidate_args,remove=False),
+                                     dict(candidate_args,binding=dict(candidate_args["binding"],productSource="b"*40))):
+                    with self.assertRaises(TOOL.Refused):TOOL.final_image_receipt_data(TOOL.canonical(candidate),**changed_args)
                 updated = copy.deepcopy(removal)
                 updated["workflow"] = TOOL._UPDATE_FINAL_IMAGE_WORKFLOW
                 self.assertEqual(TOOL.final_image_receipt_data(TOOL.canonical(updated),
