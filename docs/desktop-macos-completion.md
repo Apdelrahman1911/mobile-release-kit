@@ -51,6 +51,21 @@ same settled failed fixture capture. Three focused methods pass; no native calls
 new log collector, signing changes or success/cleanup criteria were added. The obsolete legacy simultaneous-mount
 verification route is not fixed or qualified by this candidate-only change.
 
+The candidate Restore observer can now compile from the current helper while
+its three interruption writers and the signed application remain bound to the
+selected candidate. Both identities are explicit; helper/product target, version,
+release and protocol must agree. This avoids re-signing an unchanged app for a
+nonshipping observer diagnostic. Independent review caught an initial later-phase
+FD regression; compile-only source originals are now retained only during their
+compile phase. The real focused baseline bootstrap holds 62 originals, then 76
+after preparation admission; the next image/owner allocation is statically 95
+within the unchanged 96 cap. Seven distinct focused Linux methods passed (eight
+executions across the initial and corrected checks), with real file/receipt
+admission and inert native endpoints. The existing bounded completed-refusal
+marker is emitted only after known settlement; PackageKit forwarding and actual
+native Restore remain unverified. No new signing or application readiness is
+inferred from this helper change.
+
 Still required: actual installed project/configuration/GitHub Apply,
 metadata/images/version and credentials; Android, unsigned iOS, saved evidence
 and interrupted-operation recovery; corresponding Intel coverage; ordinary and

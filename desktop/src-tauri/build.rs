@@ -191,8 +191,12 @@ fn app_absence_fixture_data(target: &str, target_os: &str) {
     let values = values.map(|v| v.expect("complete fixture compile tuple required")
         .into_string().expect("fixture compile tuple must be UTF-8"));
     assert!(values[0].len() == 40 && values[0].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        && values[0].bytes().any(|b| b != b'0')
-        && env::var("MRK_MACOS_INSTALL_SOURCE_COMMIT").as_deref() == Ok(values[0].as_str()), "fixture same source differs");
+        && values[0].bytes().any(|b| b != b'0'), "fixture source differs");
+    let product = env::var("MRK_MACOS_INSTALL_SOURCE_COMMIT").expect("fixture product source required");
+    assert!(product.len() == 40 && product.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && product.bytes().any(|b| b != b'0')
+        && (cfg!(feature = "macos-installed-restore-chain-observer") || product == values[0]),
+        "fixture product source differs");
     for (value, limit) in [(&values[1], 20usize), (&values[2], 10usize)] {
         assert!(!value.is_empty() && value.len() <= limit && !value.starts_with('0')
             && value.bytes().all(|b| b.is_ascii_digit()), "fixture run tuple differs");

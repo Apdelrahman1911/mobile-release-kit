@@ -85,7 +85,7 @@ class CandidateBootstrapTests(unittest.TestCase):
         if purpose == 'restore-install':
             acquisition, problem, *_ = self.exercise(target, purpose='acquire', transport=(zip_body,selected))
             self.assertIsNone(problem, repr(problem))
-            binding = dict(fixtureSource=selected['source'],productSource=selected['source'],runId='51',runAttempt='2',target=target,
+            binding = dict(fixtureSource=context['helperSource'],productSource=selected['source'],runId='51',runAttempt='2',target=target,
                 packageSha256=preview['packageSha256'], producerDescriptorSha256=preview['descriptorSha256'],
                 producerSignatureSha256=preview['signatureSha256'], fixtureExecutableSha256='1'*64,
                 inventorySha256=preview['installerInventorySha256'], runtimeManifestSha256=preview['runtimeManifestSha256'], protocolSha256='2'*64)

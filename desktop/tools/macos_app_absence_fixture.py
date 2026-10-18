@@ -62,7 +62,7 @@ def binding_data(value):
     fields = {"fixtureSource", "productSource", "runId", "runAttempt", "target"}
     need(type(value) is dict and set(value) == fields, "fixture-binding-fields")
     need(nonzero_hex_data(value["fixtureSource"], 40)
-         and value["fixtureSource"] == value["productSource"]
+         and nonzero_hex_data(value["productSource"], 40)
          and decimal_data(value["runId"], 20) and decimal_data(value["runAttempt"], 10)
          and type(value["target"]) is str and value["target"] in TARGETS, "fixture-binding-values")
     return dict(value)
@@ -276,7 +276,9 @@ def package_roles(old):
 def source_binding(environment, target):
     value = {"fixtureSource": environment.get("GITHUB_SHA"), "productSource": environment.get("MRK_MACOS_INSTALL_SOURCE_COMMIT"),
              "runId": environment.get("GITHUB_RUN_ID"), "runAttempt": environment.get("GITHUB_RUN_ATTEMPT"), "target": target}
-    return binding_data(value)
+    value = binding_data(value)
+    need(value["fixtureSource"] == value["productSource"], "fixture-same-source")
+    return value
 
 
 def clock(op, *, work=True):
@@ -726,6 +728,12 @@ def prepare_one(op, cut=None):
         else:
             reserve(op, name)
     api = op.app_absence_api
+    # Observer implementation may evolve independently. Candidate writer cuts
+    # still compile from the actual product checkout and keep its source tuple.
+    checkout = op.checkout
+    if cut is None and getattr(op, "candidate_restore_context", None) is not None:
+        checkout = op.candidate_fixture_checkout
+        need(checkout == op.checkout / ".candidate-consumer-helper", "candidate-fixture-helper-source")
     inventory, rows = input_rows(op)
     environment = api.build_environment(op.environment, op.work, op.image_release, target=op.target)
     environment.update(CARGO_TARGET_DIR=str(op.work / op.target_name), TMPDIR=str(op.work / op.target_name / "tmp"),
@@ -733,16 +741,16 @@ def prepare_one(op, cut=None):
         MRK_MACOS_INSTALL_INVENTORY_SHA256=op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"],
         MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=op.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
         MRK_BUNDLED_PROTOCOL_SHA256=op.stager.CURRENT_PROTOCOL,
-        MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT=op.image_source, MRK_APP_ABSENCE_FIXTURE_RUN_ID=op.environment["GITHUB_RUN_ID"],
+        MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT=op.app_absence["binding"]["fixtureSource"], MRK_APP_ABSENCE_FIXTURE_RUN_ID=op.environment["GITHUB_RUN_ID"],
         MRK_APP_ABSENCE_FIXTURE_RUN_ATTEMPT=op.environment["GITHUB_RUN_ATTEMPT"])
     if cut is not None:
         for name in ("MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT", "MRK_APP_ABSENCE_FIXTURE_RUN_ID", "MRK_APP_ABSENCE_FIXTURE_RUN_ATTEMPT"):
             environment.pop(name)
     result = call(op, prefix + "-build", [api.direct_rust_tools(op.target)[0], "build", "--manifest-path",
-        str(op.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--jobs", "1", "--target", op.target,
+        str(checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--jobs", "1", "--target", op.target,
         "--no-default-features", "--features", feature, "--bin", program_name,
-        "--message-format=json-render-diagnostics"], maximum=1440, limit=4*MIB, environment=environment, cwd=op.checkout / "desktop/src-tauri")
-    binary_path = artifact_data(result.stdout, op.checkout, op.work / op.target_name, op.target, cut=cut, recovery=recovery_mode(op), package_version=selected(op).package_version)
+        "--message-format=json-render-diagnostics"], maximum=1440, limit=4*MIB, environment=environment, cwd=checkout / "desktop/src-tauri")
+    binary_path = artifact_data(result.stdout, checkout, op.work / op.target_name, op.target, cut=cut, recovery=recovery_mode(op), package_version=selected(op).package_version)
     release = op.descend(op.target_entry, (op.target, "release"))
     binary = op.original(release, program_name, "app-absence-compiler-binary", 64*MIB, (0o700, 0o755), alias=True)
     program = op.read(binary)
@@ -761,10 +769,10 @@ def prepare_one(op, cut=None):
              and b"#[ignore" not in tests_source and b"#[should_panic" not in tests_source, "app-absence-data-tests-source")
         op.package_sources.append((tests_entry, tests_source))
         tested = call(op, "app-absence-data-tests", [api.direct_rust_tools(op.target)[0], "test", "--manifest-path",
-            str(op.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--jobs", "1", "--target", op.target,
+            str(checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--jobs", "1", "--target", op.target,
             "--no-default-features", "--features", feature, "--bin", program_name,
             "--color", "never", "installer::worker::app_absence_fixture::tests::", "--", "--test-threads=1", "--color", "never"],
-            maximum=1440, limit=4*MIB, environment=environment, cwd=op.checkout / "desktop/src-tauri")
+            maximum=1440, limit=4*MIB, environment=environment, cwd=checkout / "desktop/src-tauri")
         pure_tests = native_data_tests_result(tested)
         need(original_hash(op, binary) == binary_sha and op.read(tests_entry) == tests_source, "app-absence-data-tests-original-post")
     allocation("executable")
@@ -824,6 +832,8 @@ def prepare_one(op, cut=None):
         inventorySha256=op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"],
         runtimeManifestSha256=op.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"], protocolSha256=op.stager.CURRENT_PROTOCOL,
         cargoMessagesSha256=digest(result.stdout), pureDataTests=pure_tests, archiveAudited=True, adHocOnly=True, productReady=False)
+    if cut is not None:
+        data["fixtureSource"] = op.image_source
     if recovery_mode(op):
         data["fixtureFeature"] = feature
     input_post(op)
@@ -929,7 +939,8 @@ def preparation_input(op):
         retained_cuts = {}
         for index, cut in enumerate(CUTS):
             row = cuts[cut]
-            need(type(row) is dict and all(row.get(k) == v for k, v in op.app_absence["binding"].items())
+            cut_binding = dict(op.app_absence["binding"], fixtureSource=op.image_source)
+            need(type(row) is dict and all(row.get(k) == v for k, v in cut_binding.items())
                  and all(row.get(k) == data.get(k) for k in ("inventorySha256", "runtimeManifestSha256", "protocolSha256"))
                  and row.get("fixtureFeature") == "macos-installed-restore-" + cut + "-fixture"
                  and row.get("cargoMessagesSha256") == value["originalCalls"][7+index*6].get("stdoutSha256")
@@ -1302,7 +1313,7 @@ def candidate_baseline(op, acquisition_entry, acquisition_status, producer, nomi
     need(0 < len(body) <= RECORD_LIMIT, "candidate-baseline-acquisition-bound")
     acquired = candidate_acquisition_data(op.app_absence_api.tool_json(body), nomination,
                                           helper_source, helper_tree, run, attempt)
-    binding = binding_data(dict(fixtureSource=nomination['source'], productSource=nomination['source'],
+    binding = binding_data(dict(fixtureSource=helper_source, productSource=nomination['source'],
                                 runId=run, runAttempt=attempt, target=op.target))
     now = time.monotonic_ns()
     started = getattr(op, "candidate_restore_context", {}).get("started", now)
@@ -1397,7 +1408,8 @@ def candidate_baseline_receipt_data(value, nomination, helper_source, helper_tre
     binding = value['binding']
     need(type(binding) is dict and set(binding) == set(BINDING_FIELDS), 'candidate-baseline-binding-fields')
     binding_data({key:binding[key] for key in ('fixtureSource','productSource','runId','runAttempt','target')})
-    need(binding['fixtureSource'] == nomination['source'] and binding['target'] == nomination['target']
+    need(binding['fixtureSource'] == helper_source and binding['productSource'] == nomination['source']
+         and binding['target'] == nomination['target']
          and (binding['runId'],binding['runAttempt']) == (run,attempt)
          and all(nonzero_hex_data(binding[key],64) for key in BINDING_FIELDS[5:])
          and all(binding[key] == acquisition[part]['sha256'] for key,part in

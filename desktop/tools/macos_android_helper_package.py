@@ -2010,7 +2010,7 @@ _FAILURE_PRODUCT_REASONS = (
 )
 
 _FAILURE_REASONS = frozenset((*_FAILURE_SETUP_REASONS, *_FAILURE_PRODUCT_REASONS, *("original-nonzero-" + role for role in _FAILURE_SETUP_ROLES + _FAILURE_FIXTURE_ROLES),
-    "candidate-fixture-terminal", "candidate-fixture-source-finality",
+    "candidate-fixture-terminal", "candidate-fixture-helper-source", "candidate-fixture-build-selection", "candidate-fixture-source-finality",
     *_FAILURE_NOTARY_REASONS, *FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
     *( 'original-nonzero-' + role for role in _PACKAGE_DIAGNOSTIC_ROLES),
     'package-group-clock', 'package-io-finality-unknown', 'package-compiled-bindings',
@@ -3412,7 +3412,10 @@ class Operation:
         if (self.phase == "prepare" and role == "build"
                 or self.phase == "prepare-app-absence" and role in _FIXTURE_COMPILER_ROLES) and result.returncode != 0:
             try:
-                self.compiler_failure = compiler_diagnostic(result.stdout, result.stderr, str(self.checkout),
+                compiler_root = (self.candidate_fixture_checkout
+                    if self.phase == "prepare-app-absence" and role == "app-absence-build"
+                    and getattr(self, "candidate_restore_context", None) is not None else self.checkout)
+                self.compiler_failure = compiler_diagnostic(result.stdout, result.stderr, str(compiler_root),
                     package_version=self.image_package_version)
             except BaseException:
                 pass  # No diagnostic failure may replace the SAME nonzero result.
@@ -10570,9 +10573,11 @@ def candidate_fixture_phase(consumer, context, purpose, started, bootstrap):
         op.open()
         helper_files = tuple(dict.fromkeys((*consumer.HELPER_SOURCE_INPUTS, consumer.CONSUMER_PATH,
             consumer.LEGACY_PATH, consumer.PARSER_PATH, consumer.FIXTURE_PATH, consumer.SELECTION_PATH,
-            "desktop/tools/macos_android_helper_package.py", "desktop/tools/macos_normal_ui_runner.py", consumer.STAGER_PATH)))
-        candidate_files = (consumer.STAGER_PATH, *(path for path,cap in consumer.CANDIDATE_SOURCE_INPUTS),
-                           "desktop/src-tauri/src/macos_app_absence_fixture.rs")
+            "desktop/tools/macos_android_helper_package.py", "desktop/tools/macos_normal_ui_runner.py", consumer.STAGER_PATH,
+            "desktop/macos-installed-inputs/build-release.json", "desktop/macos-installed-inputs/build-release-intel.json",
+            *(("desktop/src-tauri/src/macos_app_absence_fixture.rs", "desktop/src-tauri/build.rs",
+               "desktop/src-tauri/Cargo.toml") if phase == f.PREPARE else ()))))
+        candidate_files = (consumer.STAGER_PATH, *(path for path,cap in consumer.CANDIDATE_SOURCE_INPUTS))
         for helper, paths in ((True,helper_files),(False,candidate_files)):
             for relative in paths:
                 full = (".candidate-consumer-helper/" if helper else "") + relative
@@ -10620,14 +10625,28 @@ def candidate_fixture_phase(consumer, context, purpose, started, bootstrap):
                 op.stager_io_pending = None
             op.package_post()
         sources()
-        op.stager = module("stage_macos_installed.py", "_mrk_candidate_fixture_stager",False)
-        op.candidate_fixture_stager = module("stage_macos_installed.py", "_mrk_candidate_fixture_auditor")
-        need(op.stager.DESKTOP == op.checkout/"desktop", "candidate-fixture-product-source")
-        selection = op.stager.source_build_selection(op.target)
+        def fixture_sources():
+            op.stager = module("stage_macos_installed.py", "_mrk_candidate_fixture_stager",False)
+            op.candidate_fixture_stager = module("stage_macos_installed.py", "_mrk_candidate_fixture_auditor")
+            need(op.stager.DESKTOP == op.checkout/"desktop", "candidate-fixture-product-source")
+            need(op.candidate_fixture_stager.DESKTOP == consumer.HELPER_ROOT/"desktop",
+                 "candidate-fixture-helper-source")
+            product = op.stager.source_build_selection(op.target)
+            helper = op.candidate_fixture_stager.source_build_selection(op.target)
+            held = op.candidate_fixture_stager.build_release_data(files[(True,op.release_input)], target=op.target)
+            need((helper.target, helper.package_version, helper.release) ==
+                 (product.target, product.package_version, product.release) ==
+                 (op.target, held["packageVersion"], held["release"])
+                 and op.candidate_fixture_stager.CURRENT_PROTOCOL == op.stager.CURRENT_PROTOCOL,
+                 "candidate-fixture-build-selection")
+            return product
+        selection = f.io(op, "source-selection", fixture_sources)
+        op.candidate_fixture_checkout = consumer.HELPER_ROOT
         op.image_source,op.image_release = nomination["source"],selection.release
         op.image_package_version = selection.package_version
         op.release_entry = originals[(False,op.release_input)]
-        op.candidate_fixture_source_original = originals[(False,"desktop/src-tauri/src/macos_app_absence_fixture.rs")]
+        if phase == f.PREPARE:
+            op.candidate_fixture_source_original = originals[(True,"desktop/src-tauri/src/macos_app_absence_fixture.rs")]
         host = module("macos_xcode_host_preparation.py", "_mrk_candidate_fixture_host")
         host_api = host.DarwinAPI(phase_clock,target=op.target)
         host_api.waitable_sigchld()
@@ -10671,7 +10690,7 @@ def candidate_fixture_phase(consumer, context, purpose, started, bootstrap):
                 op.package_outputs.append((entry,row["sha256"]))
             op.package_roots.append((producer,{"Install.pkg","producer.json","producer.sig"}))
             op.candidate_producer_originals = {entry["name"]:entry for entry,sha in op.package_outputs if entry.get("parent_entry") is producer}
-        binding=f.binding_data(dict(fixtureSource=nomination["source"],productSource=nomination["source"],runId=context["runId"],runAttempt=context["runAttempt"],target=op.target))
+        binding=f.binding_data(dict(fixtureSource=context["helperSource"],productSource=nomination["source"],runId=context["runId"],runAttempt=context["runAttempt"],target=op.target))
         op.app_absence["binding"]=binding
         if phase == f.PREPARE:
             f.reserve(op);f.prepare(op)

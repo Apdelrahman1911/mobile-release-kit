@@ -146,6 +146,12 @@ jobs:
             CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup RUSTC="$toolbin/rustc" \
             RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
             "$toolbin/cargo" fetch --manifest-path "$GITHUB_WORKSPACE/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
+          if [[ "$GITHUB_SHA" != "$MRK_CANDIDATE_SOURCE" ]]; then
+            /usr/bin/env -i PATH="$toolbin:/usr/bin:/bin:/usr/sbin:/sbin" HOME=/Users/runner \
+              CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup RUSTC="$toolbin/rustc" \
+              RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
+              "$toolbin/cargo" fetch --manifest-path "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
+          fi
       - name: Acquire once and materialize only verified full P and nonshipping thin inputs
         if: env.MRK_CANDIDATE_MODE == 'restore'
         timeout-minutes: 12

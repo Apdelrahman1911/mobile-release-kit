@@ -25,17 +25,20 @@ from test_macos_candidate_carrier import fixture
 ROOT=Path(__file__).resolve().parents[2]
 
 class CandidateFixtureBootstrapTests(unittest.TestCase):
-    def exercise(self, fault=None, *, actual_builder=False, depth=8, diagnostics=None, diagnostic_fault=None):
+    def exercise(self, fault=None, *, actual_builder=False, depth=8, diagnostics=None, diagnostic_fault=None, target=F.TARGETS[0]):
         with tempfile.TemporaryDirectory() as name:
             top=Path(name);root=top/'checkout';root.mkdir(mode=0o700)
             helper=root/'.candidate-consumer-helper';helper.mkdir(mode=0o700)
             work=top/'work';work.mkdir(mode=0o700)
             host,base,context,base_value=bootstrap.CandidateBootstrapTests().host_fixture(work)
+            context['target']=target
             context['started']=time.monotonic_ns()
             target=context['target'];row,*_=fixture(target)
             paths=tuple(dict.fromkeys((*C.HELPER_SOURCE_INPUTS,C.CONSUMER_PATH,C.LEGACY_PATH,C.PARSER_PATH,C.FIXTURE_PATH,C.SELECTION_PATH,
-                'desktop/tools/macos_android_helper_package.py','desktop/tools/macos_normal_ui_runner.py',C.STAGER_PATH)))
-            cpaths=(C.STAGER_PATH,*(p for p,cap in C.CANDIDATE_SOURCE_INPUTS),'desktop/src-tauri/src/macos_app_absence_fixture.rs')
+                'desktop/tools/macos_android_helper_package.py','desktop/tools/macos_normal_ui_runner.py',C.STAGER_PATH,
+                'desktop/src-tauri/src/macos_app_absence_fixture.rs','desktop/src-tauri/build.rs','desktop/src-tauri/Cargo.toml',
+                'desktop/macos-installed-inputs/build-release.json','desktop/macos-installed-inputs/build-release-intel.json')))
+            cpaths=(C.STAGER_PATH,*(p for p,cap in C.CANDIDATE_SOURCE_INPUTS))
             bodies={}
             for parent,names in ((helper,paths),(root,cpaths)):
                 for leaf in names:
@@ -108,12 +111,25 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
                 else:
                     effects.append(argv[-1]);out=b''
                     if actual_builder:
+                        op=operations[0]
+                        if 'build' in argv or 'test' in argv:
+                            is_observer=argv[argv.index('--bin')+1]==F.FIXTURE_EXECUTABLE
+                            expected_root=helper if is_observer else root
+                            self.assertEqual(argv[argv.index('--manifest-path')+1],str(expected_root/'desktop/src-tauri/Cargo.toml'))
+                            self.assertEqual(kwargs['cwd'],expected_root/'desktop/src-tauri')
+                            self.assertEqual(kwargs['environ']['MRK_MACOS_INSTALL_SOURCE_COMMIT'],row['source'])
+                            if is_observer:
+                                self.assertEqual(kwargs['environ']['MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT'],context['helperSource'])
+                            else:
+                                self.assertFalse(any(k.startswith('MRK_APP_ABSENCE_FIXTURE_') for k in kwargs['environ']))
+                            self.assertEqual(op.checkout,root);self.assertEqual(op.stager.DESKTOP,root/'desktop')
+
                         if 'build' in argv and '--message-format=json-render-diagnostics' in argv:
                             selected=argv[argv.index('--bin')+1];feature=argv[argv.index('--features')+1]
                             op=operations[0];binary=work/op.target_name/target/'release'/selected
                             binary.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
                             binary.write_bytes(b'inert compiler bytes never executed');binary.chmod(0o755)
-                            rows=fixture_tests.cargo_rows(root,work/op.target_name,target)
+                            rows=fixture_tests.cargo_rows(expected_root,work/op.target_name,target)
                             for item in rows[:2]:
                                 item['features']=['macos-installed-app-absence-fixture',feature] if selected==F.FIXTURE_EXECUTABLE else ['macos-installed-installer',feature]
                             rows[0]['target']['name']=selected;rows[0]['executable']=str(binary);rows[0]['filenames']=[str(binary)]
@@ -131,7 +147,8 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
                     if fault=='owned' and len(effects)==2: raise owned_error
                     if (fault in ('nonzero','cleanup') and len(effects)==2
                             or fault in ('cut-app-write','cut-own-attempt','cut-stage-move') and argv[-1]=='app-absence-'+fault+'-build'):
-                        message=dict(reason='compiler-message',package_id='path+'+(root/'desktop/src-tauri').as_uri()+'#mobile-release-kit-desktop@0.1.2',
+                        compiler_root=root if fault and fault.startswith('cut-') else helper
+                        message=dict(reason='compiler-message',package_id='path+'+(compiler_root/'desktop/src-tauri').as_uri()+'#mobile-release-kit-desktop@0.1.2',
                             message=dict(level='error',code=dict(code='E0308'),message='private compiler text',rendered='private rendered text',
                                 spans=[dict(is_primary=True,file_name='src/macos_app_absence_fixture.rs',line_start=123,column_start=4)]))
                         return subprocess.CompletedProcess(argv,101,R.canonical(message),b'private error text')
@@ -142,9 +159,18 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
                 if path.name=='macos_aqua_qualification.py': return SimpleNamespace(load_owner=lambda r:SimpleNamespace(run_owned=owned,ProcessError=ProcessError))
                 if path.name=='macos_xcode_host_preparation.py': return SimpleNamespace(DarwinAPI=lambda *a,**k:SimpleNamespace(waitable_sigchld=lambda:None))
                 if path.name=='stage_macos_installed.py':
-                    return SimpleNamespace(DESKTOP=root/'desktop',source_build_selection=lambda target:SimpleNamespace(release='current-release',package_version='0.1.2'),MAX_BYTES=768<<20,
-                        BuildSelection=namedtuple('BuildSelection','target package_version release'),build_release_data=lambda *a,**k:{'packageVersion':'0.1.2'},
-                        CURRENT_PROTOCOL='b'*64,INSTALLATION_INVENTORY_NAME='install-inventory.json',INVENTORY_BYTES=12<<20,PACKAGE_ID='inert.fixture',
+                    is_helper=path.is_relative_to(helper)
+                    release_path='desktop/macos-installed-inputs/build-release'+('-intel' if target==F.TARGETS[1] else '')+'.json'
+                    release=json.loads(bodies[(helper if is_helper else root)/release_path])
+                    def selection(selected_target):
+                        if is_helper and fault=='selection-unknown':
+                            operations[0].test_selection_error=native_error;raise native_error
+                        return SimpleNamespace(target=selected_target,
+                            release='wrong-release' if is_helper and fault=='release' else release['release'],
+                            package_version='0.1.3' if is_helper and fault=='version' else release['packageVersion'])
+                    return SimpleNamespace(DESKTOP=(helper if is_helper else root)/'desktop',source_build_selection=selection,MAX_BYTES=768<<20,
+                        BuildSelection=namedtuple('BuildSelection','target package_version release'),build_release_data=lambda body,**k:json.loads(body),
+                        CURRENT_PROTOCOL='c'*64 if is_helper and fault=='protocol' else 'b'*64,INSTALLATION_INVENTORY_NAME='install-inventory.json',INVENTORY_BYTES=12<<20,PACKAGE_ID='inert.fixture',
                         observation_inventory_bytes=lambda body,*a,**k:json.loads(body),macho=lambda *a,**k:None,
                         app_absence_original_command=lambda args,**kw:dict(originalPackageSha256=R.sha(args.original_package.read_bytes()),packageInfo=b'inert package info'),
                         app_absence_final_command=lambda args,compact,**kw:dict(packageSha256=R.sha(args.package.read_bytes()),packageSize=args.package.stat().st_size))
@@ -153,6 +179,82 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
                 effects.append(('phase',len(op.entries),sum(e['fd'] is not None for e in op.entries)))
                 for role in F.roles(op): op.package_call(role,['/inert/native-not-executed',role],timeout=20,limit=65536)
                 op.app_absence['complete']=True;op.sha256='a'*64
+            def preparation_handoff(prepared):
+                # Actual completed builder bytes and actual prepared originals;
+                # only the native baseline endpoint is replaced, never its reader.
+                encoded=R.canonical(prepared)
+                for leaf,data in (('app-absence-preparation.status',b'0\n'),
+                                  ('android-helper-prepare-app-absence.json',encoded)):
+                    path=work/leaf
+                    with path.open('xb') as stream:stream.write(data)
+                    path.chmod(0o600)
+                prior=operations[0]
+                class StopBeforeNativeBaseline(Exception):pass
+                stopped=StopBeforeNativeBaseline()
+                def state(owner):
+                    now=time.monotonic_ns()
+                    owner.app_absence=dict(started=now,observed=now,workSeconds=660,hardSeconds=720,
+                        pendingRoot=None,pendingCut=None,mount=None,roots=[],outputs=[],future={},complete=False,
+                        binding=dict(prior.app_absence['binding']))
+                    owner.app_absence_module=F;owner.app_absence_api=H
+                def baseline(owner,*args):
+                    # Real current phase SOURCE/host/acquisition/producer roster,
+                    # including optional host executable. Compile-only sources
+                    # must not occupy the later original96 book.
+                    self.assertIsNone(owner.app_absence)
+                    self.assertEqual(sum(e['fd'] is not None for e in owner.entries),62)
+                    self.assertEqual(owner.app_absence_live_limit(),96)
+                    self.assertFalse(hasattr(owner,'candidate_fixture_source_original'))
+                    state(owner)
+                    program=F.preparation_input(owner)
+                    self.assertEqual(owner.app_absence['preparation'],prepared['appAbsencePreparation'])
+                    self.assertEqual(F.original_hash(owner,program),prepared['appAbsencePreparation']['fixturePackageSha256'])
+                    live=sum(e['fd'] is not None for e in owner.entries)
+                    self.assertEqual(live,76) # two receipt + four (directory, executable, package)
+                    # Static next allocations, NOT a native image execution:
+                    # carrier directory+nine copies, image, existing owner8.
+                    self.assertEqual(live+1+len(F.carrier_names(owner))+1+8,95)
+                    self.assertLessEqual(live+1+len(F.carrier_names(owner))+1+8,owner.app_absence_live_limit())
+                    prior.test_later_phase_live=live
+                    raise stopped
+                fresh=dict(context,started=time.monotonic_ns())
+                with mock.patch.object(F,'candidate_baseline',baseline):
+                    try:H.candidate_fixture_phase(C,fresh,'restore-baseline',fresh['started'],(identity,bp,body))
+                    except StopBeforeNativeBaseline as error:self.assertIs(error,stopped)
+                    else:self.fail('inert baseline boundary did not stop')
+                self.assertTrue(all(e['closed'] for e in operations[-1].entries))
+                # Preserve immutable successful receipt/files. Changed DATA is
+                # supplied at the existing small-input port only; the actual
+                # receipt/binding reducers and retained prepared readers run.
+                for change in ('cut-helper','cut-product-helper','observer-product-helper','observer-stale','observer-swapped'):
+                    mutated=json.loads(encoded)
+                    data=mutated['appAbsencePreparation']
+                    if change=='cut-helper':data['restoreCuts'][F.CUTS[0]]['fixtureSource']=context['helperSource']
+                    elif change=='cut-product-helper':data['restoreCuts'][F.CUTS[0]]['productSource']=context['helperSource']
+                    elif change=='observer-product-helper':data['productSource']=context['helperSource']
+                    elif change=='observer-stale':data['fixtureSource']='f'*40
+                    else:data['fixtureSource'],data['productSource']=data['productSource'],data['fixtureSource']
+                    owner=construct(None,root,work,'candidate-baseline',prior.environment,prior.stager,target=target)
+                    owner.image_source=prior.image_source;owner.candidate_restore_context=dict(prior.candidate_restore_context)
+                    state(owner)
+                    fd=os.open(work,H.READ_FLAGS|os.O_DIRECTORY)
+                    owner.work_entry=owner.register(fd,'work','directory')
+                    owner.work_entry['identity']=H.directory_identity(os.fstat(fd))
+                    def receipt(owner,parent,name,limit=16384,modes=(0o444,0o600)):
+                        self.assertIs(parent,owner.work_entry)
+                        self.assertIn(name,('app-absence-preparation.status','android-helper-prepare-app-absence.json'))
+                        return b'0\n' if name.endswith('.status') else R.canonical(mutated)
+                    try:
+                        with mock.patch.object(F,'small',receipt),self.assertRaisesRegex(ValueError,
+                            'restore-chain-cut-binding' if change.startswith('cut-') else 'app-absence-preparation-binding'):
+                            F.preparation_input(owner)
+                    finally:
+                        for entry in reversed(owner.entries):owner.close(entry)
+                    self.assertFalse(owner.app_absence['complete']);self.assertEqual(owner.calls,[])
+                    self.assertTrue(all(e['closed'] for e in owner.entries));self.assertEqual(owner.errors,[])
+                    self.assertEqual(R.canonical(prepared),encoded)
+                    self.assertEqual((work/'android-helper-prepare-app-absence.json').read_bytes(),encoded)
+                prior.test_preparation_refusals=5
             failure=result=None
             try:
                 with ExitStack() as stack:
@@ -173,6 +275,7 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
                     stack.enter_context(mock.patch.dict(os.environ,env,clear=True))
                     bp=helper/'desktop/tools/macos_android_helper_package.py';identity,body=R.host_read(bp,1<<20)
                     result=H.candidate_fixture_phase(C,context,'prepare-restore',context['started'],(identity,bp,body))
+                    if actual_builder:preparation_handoff(result)
             except BaseException as error: failure=error
             finally:
                 if diagnostics is not None:
@@ -192,29 +295,43 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
         print('INERT fixture bootstrap held/peak/lifetime',effects[0],ops[0].test_peak,len(ops[0].entries))
 
     def test_full_four_builders_use_same_input_original_and_fit_maximum_depth_real_ledger(self):
-        for depth in (8,15):
-            with self.subTest(depth=depth):
-                self.check_four_builders(depth)
+        for target in F.TARGETS:
+            for depth in (8,15):
+                with self.subTest(target=target,depth=depth):
+                    self.check_four_builders(depth,target)
 
-    def check_four_builders(self, depth):
-        result,error,ops,effects,calls=self.exercise(actual_builder=True,depth=depth)
+    def check_four_builders(self, depth, target):
+        result,error,ops,effects,calls=self.exercise(actual_builder=True,depth=depth,target=target)
         self.assertIsNone(error,repr(error));op=ops[0]
         self.assertTrue(result['passed']);self.assertEqual(len(op.calls),25)
         self.assertLessEqual(op.test_peak,160)
         self.assertEqual(op.app_absence_live_limit(),160)
         self.assertEqual(len([e for e in op.entries if e.get('role')=='app-absence-retained-install-inventory.json']),1)
         self.assertEqual(len([e for e in op.entries if e.get('role')=='source-app-absence-data-tests']),0)
-        self.assertEqual(set(result['appAbsencePreparation']['restoreCuts']),set(F.CUTS))
-        self.assertTrue(all(e['closed'] for e in op.entries))
-        print('INERT four-builder depth/peak/lifetime',depth,op.test_peak,len(op.entries))
+        preparation=result['appAbsencePreparation']
+        self.assertEqual(set(preparation['restoreCuts']),set(F.CUTS))
+        self.assertEqual(preparation['fixtureSource'],op.environment['GITHUB_SHA'])
+        self.assertEqual(preparation['productSource'],op.image_source)
+        self.assertNotEqual(preparation['fixtureSource'],preparation['productSource'])
+        self.assertTrue(all(cut['fixtureSource']==cut['productSource']==op.image_source
+            for cut in preparation['restoreCuts'].values()))
+        self.assertEqual(result['candidateSource']['originalQueryCount'],8)
+        self.assertEqual(op.test_later_phase_live,76)
+        self.assertEqual(op.test_preparation_refusals,5)
+        self.assertTrue(all(e['closed'] for owner in ops for e in owner.entries))
+        print('INERT four-builder depth/peak/lifetime',depth,op.test_peak,len(op.entries),
+              'actual later bootstrap/prepared',62,op.test_later_phase_live,'static image+owner quote',95)
 
     def test_source_and_handoff_refusal_before_phase_and_unknown_never_complete(self):
-        for fault in ('source','acquisition','native','last-source'):
+        for fault in ('source','acquisition','native','last-source','release','version','protocol','selection-unknown'):
             with self.subTest(fault=fault):
                 result,error,ops,effects,calls=self.exercise(fault)
                 self.assertIsNone(result);self.assertIsNotNone(error)
-                if fault in ('source','acquisition'):self.assertEqual(effects,[])
-                if fault in ('native','last-source'):self.assertFalse(ops[0].receipt['targetRetired'])
+                if fault in ('source','acquisition','release','version','protocol','selection-unknown'):self.assertEqual(effects,[])
+                if fault in ('native','last-source','release','version','protocol','selection-unknown'):self.assertFalse(ops[0].receipt['targetRetired'])
+                if fault in ('release','version','protocol','selection-unknown'):
+                    self.assertEqual(ops[0].stager_io_pending,'app-absence-source-selection')
+                if fault=='selection-unknown':self.assertIs(error,ops[0].test_selection_error)
         # SAME real Operation class and bootstrap, only native execution is inert.
         # Read emitted facts before fixture-owned cleanup of unresolved originals.
         for fault in (None,'nonzero','native','owned','cleanup','terminal'):
@@ -285,6 +402,11 @@ class CandidateChainHandoffTests(unittest.TestCase):
         self.assertIsNone(error,repr(error))
         body=next(data for path,data in files.items() if path.name==C.BASELINE_RECEIPT)
         baseline=R.decode(body);nomination=baseline['acquisition']['nomination']
+        self.assertNotEqual(baseline['binding']['fixtureSource'],baseline['binding']['productSource'])
+        for key,wrong in (('fixtureSource',nomination['source']),('productSource',baseline['helperSource'])):
+            changed=R.decode(R.canonical(baseline));changed['binding'][key]=wrong
+            with self.assertRaisesRegex(ValueError,'candidate-baseline-source-product'):
+                F.candidate_baseline_receipt_data(changed,nomination,baseline['helperSource'],baseline['helperTree'],'51','2')
         for fault in (None,'caller','native-body','native-original','prior-source'):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as name:
                 work=Path(name);work.chmod(0o700)

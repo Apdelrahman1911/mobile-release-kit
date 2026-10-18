@@ -57,13 +57,14 @@ fn nonzero_hex_data(value: &str, length: usize) -> bool {
 fn decimal_data(value: &str, limit: usize) -> bool {
     !value.is_empty() && value.len() <= limit && !value.starts_with('0') && value.bytes().all(|b| b.is_ascii_digit())
 }
-struct BindingData<'a> { source: &'a str, run: &'a str, attempt: &'a str, target: &'a str }
+struct BindingData<'a> { source: &'a str, product_source: &'a str, run: &'a str, attempt: &'a str, target: &'a str }
 impl<'a> BindingData<'a> {
-    fn new(source: &'a str, product_source: &str, run: &'a str, attempt: &'a str, target: &'a str) -> Result<Self> {
-        check(nonzero_hex_data(source,40) && source == product_source && decimal_data(run,20)
+    fn new(source: &'a str, product_source: &'a str, run: &'a str, attempt: &'a str, target: &'a str) -> Result<Self> {
+        check(nonzero_hex_data(source,40) && nonzero_hex_data(product_source,40)
+            && (cfg!(feature="macos-installed-restore-chain-observer") || source == product_source) && decimal_data(run,20)
             && decimal_data(attempt,10) && matches!(target,"aarch64-apple-darwin"|"x86_64-apple-darwin"),
             "app-absence-source-run-binding")?;
-        Ok(Self { source, run, attempt, target })
+        Ok(Self { source, product_source, run, attempt, target })
     }
     fn baseline_name(&self) -> String {
         let target = if self.target == "aarch64-apple-darwin" { "arm64" } else { "intel" };
@@ -276,7 +277,7 @@ fn stable_identity_shape(value:&Value)->Result<()> {
 }
 fn binding_value(admission:&Admission)->Result<Value> {
     let b=compiled_binding_data()?;
-    let value=json!({"fixtureSource":b.source,"productSource":b.source,"runId":b.run,"runAttempt":b.attempt,
+    let value=json!({"fixtureSource":b.source,"productSource":b.product_source,"runId":b.run,"runAttempt":b.attempt,
         "target":b.target,"packageSha256":admission.producer.input.package_sha256_data(),
         "producerDescriptorSha256":digest_data(admission.producer.input.descriptor_data()),
         "producerSignatureSha256":digest_data(admission.producer.input.signature_data()),
@@ -656,7 +657,13 @@ pub(in crate::installer) fn entry()->i32 {
     }
     let closed=book.settle_originals();
     let timely=book.shared_deadline().and_then(Deadline::check_total).is_ok();
-    if result.is_ok() && closed && timely && !book.unknown {0}else{1}
+    let exit=if result.is_ok() && closed && timely && !book.unknown {0}else{1};
+    if let Some(line)=completed_failure_line_data(result.err(),exit,closed,
+        admission.is_some() && native,timely,book.unknown,native) {
+        // Same bounded diagnostic as ordinary Install; never a success receipt.
+        let _=std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
+    }
+    exit
 }
 
 
@@ -672,7 +679,16 @@ mod tests {
             assert!(binding.private_name(&"2".repeat(32)).unwrap().len()<255);
             for bad in ["0".repeat(32),"A".repeat(32),"../other".into()] {assert!(binding.private_name(&bad).is_err());}
         }
-        for (product,run,attempt,target) in [(&"2".repeat(40)[..],"123","1","aarch64-apple-darwin"),
+        let product="2".repeat(40);
+        let split=BindingData::new(&source,&product,"123","1","aarch64-apple-darwin");
+        assert_eq!(split.is_ok(),cfg!(feature="macos-installed-restore-chain-observer"));
+        if let Ok(binding)=split {assert_eq!(binding.source,source);assert_eq!(binding.product_source,product);}
+        let line=completed_failure_line_data(Some("app-absence-source-run-binding"),1,true,false,true,false,true).unwrap();
+        assert!(line.contains(";native=0;"));assert!(!line.contains("app-absence-source-run-binding"));
+        for (exit,closed,timely,settled) in [(0,true,true,true),(1,false,true,true),(1,true,false,true),(1,true,true,false)] {
+            assert!(completed_failure_line_data(Some("app-absence-source-run-binding"),exit,closed,false,timely,false,settled).is_none());
+        }
+        for (product,run,attempt,target) in [(&"0".repeat(40)[..],"123","1","aarch64-apple-darwin"),
             (&source[..],"0123","1","aarch64-apple-darwin"),(&source[..],"123","0","aarch64-apple-darwin"),
             (&source[..],"123","1","x86_64-unknown-linux-gnu")] {
             assert!(BindingData::new(&source,product,run,attempt,target).is_err());

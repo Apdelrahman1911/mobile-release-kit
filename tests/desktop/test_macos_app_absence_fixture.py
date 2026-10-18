@@ -487,7 +487,15 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
             FIXTURE.script_quote({"core.zip": {"size": FIXTURE.PRODUCT_LIMIT}}, 1024, FIXTURE.MIB)
         binding = {"fixtureSource": "1" * 40, "productSource": "1" * 40,
             "runId": "123", "runAttempt": "1", "target": FIXTURE.TARGETS[0]}
-        for changes in ({"productSource": "2" * 40}, {"runId": "0123"},
+        split=dict(binding,productSource="2"*40)
+        self.assertEqual(FIXTURE.binding_data(split),split)
+        self.assertEqual(FIXTURE.baseline_name_data(split),FIXTURE.baseline_name_data(binding))
+        legacy=dict(GITHUB_SHA=binding['fixtureSource'],MRK_MACOS_INSTALL_SOURCE_COMMIT=binding['productSource'],
+            GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1')
+        self.assertEqual(FIXTURE.source_binding(legacy,FIXTURE.TARGETS[0]),binding)
+        with self.assertRaisesRegex(ValueError,'fixture-same-source'):
+            FIXTURE.source_binding(dict(legacy,MRK_MACOS_INSTALL_SOURCE_COMMIT='2'*40),FIXTURE.TARGETS[0])
+        for changes in ({"productSource": "0" * 40}, {"productSource":None}, {"runId": "0123"},
                         {"runAttempt": True}, {"target": "linux"}, {"extra": "path"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 FIXTURE.binding_data(dict(binding, **changes))
