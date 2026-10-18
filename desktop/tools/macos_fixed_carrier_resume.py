@@ -32,7 +32,7 @@ RESUME_WORKFLOW = '.github/workflows/desktop-macos-fixed-carrier-resume.yml'
 ENROLLMENT_REF = 'refs/heads/verify/desktop-macos-installed'
 TARGETS = ('aarch64-apple-darwin',)
 LIMIT = 512 << 20
-SOURCE_LIMIT = 164 << 10
+SOURCE_LIMIT = 192 << 10
 MAX_ORIGINALS = 96
 OUTPUT_LIMIT = 2 << 20
 TERMINAL_LIMIT = 64 << 10
@@ -997,11 +997,12 @@ def scripts_archive_data(packed, stager, live, allocation_budget=None):
     return archive
 
 
-def mounted_data(originals, row, target, stager, *, allocation_budget=None, candidate=False):
+def mounted_data(originals, row, target, stager, *, allocation_budget=None, candidate=False, capture_scripts=None):
     """Actual unchanged package parsers; inventory digest precedes observed size."""
     need(type(originals) is dict and set(originals) == {'Install.pkg', 'producer.json', 'producer.sig'}
          and all(type(v) is tuple and len(v) == 2 and type(v[0]) is bytes and type(v[1]) is int for v in originals.values()), 'enrollment-mounted-roster')
     need(type(candidate) is bool, 'resume-mounted-purpose')
+    need(capture_scripts is None or candidate and callable(capture_scripts), 'resume-mounted-capture-purpose')
     bodies = {k: v[0] for k, v in originals.items()}
     for key in ('package', 'descriptor', 'signature'):
         selected = row[key]; body = bodies[selected['name']]
@@ -1057,6 +1058,7 @@ def mounted_data(originals, row, target, stager, *, allocation_budget=None, cand
             'inventoryFiles': len(rows), 'inventoryPayloadBytes': sum(v['size'] for v in rows.values()),
             'nativeQualificationInferred': False, 'updateActivated': False, 'productReady': False}
     if not candidate: result['qualificationEvidenceSha256'] = row['qualificationEvidenceSha256']
+    if capture_scripts is not None: capture_scripts(inventory, rows, scripts)
     return result, inventory
 
 def retained_image_post(book, entry, image, clock):

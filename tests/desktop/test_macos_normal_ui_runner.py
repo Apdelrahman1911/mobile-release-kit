@@ -2838,6 +2838,56 @@ class NormalPhaseDataTests(unittest.TestCase):
                     self.assertTrue(all(kw['cwd']==root for _,kw in calls))
                     if name==MODULE.IOS_UNSIGNED_RESULT:self.assertEqual(value['iosUnsignedTestCounts']['passedTests'],1)
 
+    def test_saved_version_fresh_root_group_normalization_is_original_and_scoped(self):
+        # Real private descriptors; only Darwin's inherited-group observation is
+        # modeled. A separate nonroot setgid-parent check exercises real fchown.
+        for fault in (None, "same-group", "nonempty", "wrong-owner", "wrong-mode", "existing", "fchown", "post"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                parent = Path(temporary)
+                os.chown(parent, -1, os.getgid())  # Only this exclusive test directory.
+                root = parent / "mrk-normal-project-regression"
+                root.mkdir(mode=0o700)
+                if fault == "nonempty": (root / "keep").write_bytes(b"preserve")
+                if fault == "wrong-mode": root.chmod(0o755)
+                fixture = object.__new__(MODULE.SavedVersionFixture)
+                fixture.fds, fixture.dirs, fixture.root = [], {}, root
+                fixture.temporary = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+                before = MODULE.saved_version_facts(root.stat())
+                original_facts, original_chown = MODULE.saved_version_facts, os.fchown
+                normalized, calls = [fault == "same-group"], []
+                def observed(info):
+                    values = list(original_facts(info))
+                    if values[:2] == list(before[:2]):
+                        if not normalized[0]: values[4] = os.getgid() + 1
+                        if fault == "wrong-owner": values[3] = os.getuid() + 1
+                        if fault == "post" and normalized[0]: values[2] = stat.S_IFDIR | 0o755
+                    return tuple(values)
+                def change(fd, uid, gid):
+                    self.assertIn(fd, fixture.fds)
+                    self.assertEqual(original_facts(os.fstat(fd))[:2], before[:2])
+                    self.assertEqual((uid, gid), (-1, os.getgid()))
+                    calls.append(fd)
+                    if fault == "fchown": raise PermissionError("injected group change refusal")
+                    original_chown(fd, uid, gid)
+                    normalized[0] = True
+                try:
+                    with patch.object(MODULE, "SAVED_VERSION_TEMPORARY", parent), \
+                            patch.object(MODULE, "saved_version_facts", observed), patch.object(MODULE.os, "fchown", change):
+                        if fault not in (None, "same-group"):
+                            with self.assertRaises((MODULE.Refused, PermissionError)):
+                                fixture._directory("", fixture.temporary, root.name, created_root=fault != "existing")
+                            self.assertEqual(fixture.dirs, {})
+                        else:
+                            fd = fixture._directory("", fixture.temporary, root.name, created_root=True)
+                            self.assertEqual(fixture.dirs[""][3], original_facts(os.fstat(fd)))
+                    self.assertEqual(len(calls), int(fault in (None, "fchown", "post")))
+                    self.assertEqual(original_facts(root.stat())[:8], before[:8])
+                    self.assertEqual(os.stat(parent).st_gid, os.getgid())
+                    if fault == "nonempty": self.assertEqual((root / "keep").read_bytes(), b"preserve")
+                finally:
+                    for fd in reversed(fixture.fds): os.close(fd)
+                    os.close(fixture.temporary)
+
     def test_current_saved_version_candidate_context_is_two_source_and_single_journey(self):
         root = MODULE.SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper"
         env = {MODULE.SAVED_VERSION_CURRENT_ENV: MODULE.SAVED_VERSION_CURRENT_SCOPE,
@@ -4700,6 +4750,61 @@ class NormalPhaseDataTests(unittest.TestCase):
                 self.assertNotIn(secret, captured[0][1])
                 self.assertEqual(json.loads(captured[0][1])["originalReturncode"], 65)
 
+    def test_android_private_condition_is_exact_bounded_and_preserves_native_failure(self):
+        method = MODULE.ANDROID_CANDIDATE_METHOD
+        selection = MODULE.ANDROID_CANDIDATE_RESULT
+        unavailable = {"status": "unavailable", "condition": None}
+        swift = SWIFT.read_text()
+        private = b"PRIVATE password keystrokes /private/account credential-value\n"
+        stage = b"MRK_NORMAL_PROJECT_STAGE=android-private-admission;result=failed;laterStages=not-run\n"
+        def record(reason, escaped=False):
+            quote = b'\\"' if escaped else b'"'
+            return (b"NormalAppUITests.swift:4630: error: -[MRKNormalAppUITests.NormalAppUITests "
+                    + method.encode() + b'] : threw error condition(' + quote + reason + quote + b')\n')
+        def observe(body, stderr=b"", selected=selection, mode="test", code=65):
+            return MODULE.normal_failure_diagnostics(mode, selected,
+                subprocess.CompletedProcess(["fixed-original"], code, body, stderr))
+        for reason, label in MODULE.ANDROID_CANDIDATE_CONDITIONS.items():
+            text = reason.decode()
+            self.assertTrue('"' + text + '"' in swift or text.startswith("fixture: ")
+                            and '"' + text.removeprefix("fixture: ") + '"' in swift)
+            for escaped in (False, True):
+                result = observe(stage + record(reason, escaped) + private)
+                self.assertEqual(result["androidCandidateCondition"], {"status": "classified", "condition": label})
+                self.assertEqual(result["androidCandidateProgress"]["firstFailed"], "android-private-admission")
+                self.assertEqual(result["originalReturncode"], 65)
+                self.assertLessEqual(len(MODULE.encoded(result)) + 1, 4096)
+                self.assertNotIn("credential-value", MODULE.encoded(result).decode())
+        good = record(b"fixture: Android private owned directory")
+        for bad in (good + good, good + record(b"PRIVATE unknown"), good.rstrip(b"\n"),
+                    good.replace(method.encode(), method.encode() + b"Other"),
+                    good.replace(b": error:", b": note:"), good.replace(b":4630:", b":65536:"),
+                    good.replace(b"NormalAppUITests.swift:", b"Foreign.swift:"),
+                    good.replace(b"condition(", b"condition(condition("),
+                    b"x" * 4096 + good, record(b"fixture: Android private object shape differs"),
+                    record(b"Android private owned directory"), record(b"PRIVATE" * 50)):
+            self.assertEqual(observe(bad)["androidCandidateCondition"], unavailable)
+        self.assertEqual(observe(b"", good)["androidCandidateCondition"],
+                         {"status": "classified", "condition": "android-private-owned-directory"})
+        self.assertNotIn("androidCandidateCondition", observe(good, selected="test.xcresult"))
+        self.assertNotIn("androidCandidateCondition", observe(good, mode="summary"))
+        with self.assertRaises(MODULE.Refused): observe(b"x" * (1024 * 1024 + 1))
+        with self.assertRaises(MODULE.Refused): observe(good, code=0)
+        # Same existing direct native65 publication, no candidate-helper import/owner.
+        published = []
+        request = dict(phase="test", result=Path("/case") / selection, derived=Path("/case/DerivedData"))
+        original = subprocess.CompletedProcess(["fixed-original"], 65, stage + good + private, b"")
+        def publish(path, body, limit, **kw):
+            published.append((path, body, limit))
+        with patch.object(MODULE, "exclusive_output", side_effect=publish):
+            MODULE.publish_failure_diagnostics(request, original)
+        self.assertEqual(original.returncode, 65)
+        self.assertEqual(len(published), 1)
+        self.assertEqual(published[0][0].name, "android-candidate-inputs-test.failure-diagnostics.json")
+        data = json.loads(published[0][1]); self.assertEqual(data["originalReturncode"], 65)
+        self.assertEqual(data["androidCandidateCondition"]["condition"], "android-private-owned-directory")
+        self.assertNotIn(b"PRIVATE", published[0][1])
+
     def test_android_candidate_failure_diagnostics_keep_private_text_out(self):
         selection = "android-candidate-inputs-test.xcresult"
         method = "testSyntheticProjectAndroidCandidateInputs"
@@ -5267,6 +5372,20 @@ class NormalIOSPendingRecoveryDataTests(unittest.TestCase):
             producer.assert_not_called();self.assertFalse(current.prepared);self.assertFalse(current.fixtures.fds)
 
     def test_pending_fixed_requests_and_original_marker_are_bound_to_both_targets(self):
+        # Pending uses its actual five-original account fixture, not the unrelated
+        # LocalFixture prefix. SOURCE wiring only; next native journey checks AX.
+        swift = SWIFT.read_text()
+        navigation = swift.split('private func goToFolder(', 1)[1].split('let cancels =', 1)[0]
+        self.assertIn('recoveryFixture: IOSRecoveryFixture? = nil', navigation)
+        self.assertIn('recoveryFixture === ownedIOSRecoveryFixture && path == recoveryFixture.projectPath', navigation)
+        self.assertLess(navigation.index('recoveryFixture ==='), navigation.index('try recoveryFixture.post()'))
+        self.assertIn('} else {\n            try require(path.hasPrefix("/private/tmp/mrk-normal-project-")', navigation)
+        pending = swift.split('func testInstalledIOSPendingAccountRecoveryThroughUI()', 1)[1].split('func testSyntheticProjectAndroidSignedBuild()', 1)[0]
+        call = 'try goToFolder(sheet, path: fixture.projectPath, recoveryFixture: fixture); try nativeOpen(sheet)'
+        self.assertEqual(swift.count(call), 1)
+        self.assertLess(pending.index('ownedIOSRecoveryFixture = fixture'), pending.index(call))
+        self.assertLess(pending.index('try fixture.open(.pending)'), pending.index(call))
+        self.assertIn('try fixture.post()', pending.split(call, 1)[1])
         with pending_account_module() as loader:
             for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
                 binding = loader.Binding("a" * 40, "123", "1", target)
@@ -5597,6 +5716,47 @@ class AndroidCandidateProjectTests(unittest.TestCase):
             with self.assertRaises(MODULE.Refused):
                 MODULE.xcode_test_arguments(derived/'Build/Products/test.xctestrun',result,
                     (MODULE.CLASS+method,),900,android_positive=True,android_candidate=candidate)
+
+
+class PanelTopologyDiagnosticTests(unittest.TestCase):
+    def test_closed_panel_rows_preserve_failure_and_never_disclose_labels(self):
+        before = (b"MRK_NORMAL_PANEL_TOPOLOGY=v1;phase=before;waiter=not-run;fields=1;combos=0;search=1;sheets=0;"
+            b"fieldLabel=search;fieldPlaceholder=other;comboLabel=none;comboPlaceholder=none;comboChildren=0;nonAtomic=1\n")
+        after = before.replace(b"phase=before;waiter=not-run",b"phase=after;waiter=completed").replace(b"combos=0",b"combos=1").replace(b"comboLabel=none",b"comboLabel=folder")
+        body = before + after
+        observed = MODULE.panel_topology_diagnostics(body, b"private unrelated error text\n")
+        self.assertEqual(observed["state"], "observed")
+        self.assertEqual([row["phase"] for row in observed["rows"]], ["before", "after"])
+        self.assertTrue(all(row["nonAtomic"] and row["countsCappedAt"] == 5 for row in observed["rows"]))
+        self.assertEqual(observed["rows"][1]["comboLabel"], "folder")
+        self.assertNotIn("private", json.dumps(observed))
+        self.assertEqual(MODULE.panel_topology_diagnostics(before.replace(b"\n",b"\r\n"),b"")["state"],"observed")
+        self.assertEqual(MODULE.panel_topology_diagnostics(b"unrelated private text\n",b"")["state"],"absent")
+        for stdout, stderr in ((b"",before),(after,b""),(before+before,b""),(body+after,b""),
+                (before.replace(b"fields=1",b"fields=6"),b""),
+                (before.replace(b"fieldLabel=search",b"fieldLabel=private-secret"),b""),
+                (before.replace(b"\n",b"\r\r\n"),b""),(before[:-1],b""),
+                (before[:20],b""),(b"prefix "+before,b""),
+                (after.replace(b"phase=after",b"phase=before"),b"")):
+            with self.subTest(stdout=stdout[:30], stderr=bool(stderr)):
+                self.assertEqual(MODULE.panel_topology_diagnostics(stdout,stderr),{"state":"refused","rows":[]})
+        original = subprocess.CompletedProcess(["xcodebuild"],65,body,b"private unrelated error text\n")
+        for selected in MODULE.PANEL_TOPOLOGY_SELECTIONS:
+            diagnostic = MODULE.normal_failure_diagnostics("test",selected,original)
+            self.assertEqual(diagnostic["originalReturncode"],65)
+            self.assertEqual(diagnostic["panelTopology"],observed)
+            self.assertLessEqual(len(MODULE.encoded(diagnostic))+1,4096)
+            self.assertNotIn("private",json.dumps(diagnostic))
+        self.assertNotIn("panelTopology",MODULE.normal_failure_diagnostics("test","project-test.xcresult",original))
+        self.assertNotIn("panelTopology",MODULE.normal_failure_diagnostics("summary",MODULE.PANEL_TOPOLOGY_SELECTIONS[0],original))
+        swift=SWIFT.read_text()
+        helper=swift.split("private func diagnosePanelBaseline(",1)[1].split("private func goToFolder(",1)[0]
+        self.assertIn("min(clock.deadline, outer, started + 5)",helper)
+        self.assertEqual(helper.count('sheet.typeKey("g"'),1)
+        self.assertNotIn("pasteboard",helper.lower());self.assertNotIn(".typeText(",helper)
+        self.assertNotIn(".value",helper);self.assertNotIn(".identifier",helper)
+        panel=swift.split("private func goToFolder(",1)[1].split('sheet.typeKey("g"',1)[0]
+        self.assertLess(panel.index("diagnosePanelBaseline(sheet"),panel.index("try require(initialFields == 0 && initialCombos == 0"))
 
 
 if __name__ == "__main__":

@@ -430,7 +430,7 @@ APPLICATIONS_CONDITIONS = {
 }
 
 
-def applications_condition_diagnostic(stdout, stderr):
+def _selected_condition_diagnostic(stdout, stderr, method, conditions):
     """Best-effort finite explanation of one complete selected XCTest failure."""
     unavailable = {'status': 'unavailable', 'condition': None}
     if (type(stdout) is not bytes or type(stderr) is not bytes
@@ -439,7 +439,7 @@ def applications_condition_diagnostic(stdout, stderr):
     observed = []
     for stream in (stdout, stderr):
         for record in stream.splitlines(keepends=True):
-            if b'testApplicationsLaunchAndQuit' not in record or b'NormalAppUITests.swift:' not in record:
+            if method not in record or b'NormalAppUITests.swift:' not in record:
                 continue
             if b': error:' not in record:
                 continue
@@ -447,18 +447,96 @@ def applications_condition_diagnostic(stdout, stderr):
                 return unavailable
             site = re.search(rb'(?:\A|(?<=[/ \t]))NormalAppUITests\.swift:([1-9][0-9]{0,4})'
                 rb'(?::([1-9][0-9]{0,3}))?:[ \t]{1,8}error:[ \t]{1,8}'
-                rb'-\[MRKNormalAppUITests\.NormalAppUITests testApplicationsLaunchAndQuit\][ \t]{0,8}:', record)
+                rb'-\[MRKNormalAppUITests\.NormalAppUITests ' + re.escape(method) + rb'\][ \t]{0,8}:', record)
             if (site is None or int(site.group(1)) > 65535
                     or site.group(2) is not None and int(site.group(2)) > 4096):
                 return unavailable
             # Same literal/escaped quotation forms as the existing native
             # diagnostic parser. Unknown text is never returned to the caller.
             match = re.search(rb'condition\(("|\\")([^"\\\r\n]{1,240})\1\)', record[site.end():])
-            condition = APPLICATIONS_CONDITIONS.get(match.group(2).decode('ascii', 'replace')) if match else None
+            condition = conditions.get(match.group(2).decode('ascii', 'replace')) if match else None
             if condition is None:
                 return unavailable
             observed.append(condition)
     return {'status': 'classified', 'condition': observed[0]} if len(observed) == 1 else unavailable
+
+
+
+def applications_condition_diagnostic(stdout, stderr):
+    return _selected_condition_diagnostic(stdout, stderr, b'testApplicationsLaunchAndQuit', APPLICATIONS_CONDITIONS)
+
+
+# Fixed public SOURCE reasons only. These labels explain an original failure;
+# they never carry arbitrary XCTest prose, field values or success authority.
+JOURNEY_CONDITIONS = {
+    "ordinary app did not enter the foreground": "payload-foreground",
+    "ordinary app has no visible main window": "window-missing",
+    "ordinary main window is ambiguous": "window-ambiguous",
+    "ordinary main window is not usable": "window-not-hittable",
+    "ordinary first-party renderer is ambiguous": "renderer-ambiguous",
+    "ordinary first-party renderer did not appear": "renderer-missing",
+    "ordinary first-party renderer is missing or ambiguous": "renderer-missing-or-ambiguous",
+    **{reason: APPLICATIONS_CONDITIONS[reason] for reason in (
+        "dashboard heading did not render", "dashboard heading is ambiguous",
+        "ordinary first-party project control is missing or ambiguous", "ordinary project control is not usable",
+        "browser-preview data is not ordinary-app evidence", "an unrelated sheet is already present",
+        "application menu bar is missing or ambiguous", "the application's native menu is unavailable",
+        "the application menu has no unique Quit action", "normal Quit did not present its native sheet",
+        "normal Quit sheet is ambiguous", "unexpected confirmation sheet", "unexpected actions in the normal Quit sheet",
+        "normal Quit has no unique Cancel button", "normal Quit has no unique affirmative button")},
+    "expected UI condition disappeared": "ui-condition-disappeared",
+    "selected synthetic field is disabled": "field-disabled",
+    "typed synthetic field did not retain its exact value": "field-readback",
+    "owned selection menu item is not actionable": "selection-menu-unavailable",
+    "selected value was not observed": "selection-readback",
+}
+SAVED_DIAGNOSTIC_CONDITIONS = {
+    "release-evidence-test": (b"testSyntheticProjectSavedReleaseEvidence", {
+        **JOURNEY_CONDITIONS,
+        "ordinary launch returned no original": "launch-original-missing",
+        "documents-only label missing or ambiguous": "documents-only-label",
+        "declared candidate identity differs": "candidate-identity",
+        "selected evidence folder and stage differ": "evidence-folder-stage",
+        "candidate-only guidance differs": "candidate-guidance",
+        "saved documents warning missing": "documents-warning",
+        "source-project separation was not displayed": "source-project-separation",
+        "a previous observation is still presented as a current document result": "stale-observation",
+        "saved evidence populated a protected-release input": "release-input-separation",
+        "release Prepare missing or ambiguous": "release-prepare-control",
+        "saved evidence enabled disconnected release preparation": "release-prepare-authority",
+        "saved evidence acquired a prepared review or dispatch authority": "release-dispatch-authority",
+        "source project path differs": "project-path",
+        "initial evidence stage is not candidate": "initial-evidence-stage",
+        "choosing a folder synthesized an observation": "selection-result-separation",
+        "an expected saved document is absent from the observation": "document-roster",
+        "shared recovery warning differs": "recovery-warning",
+        "navigation discarded the actual shared candidate observation": "shared-observation",
+        "Inspect control missing": "inspect-control",
+        "a new evidence stage reused the prior selection": "stage-selection-separation",
+        "replacement evidence Cancel unavailable": "picker-cancel",
+        "saved-evidence normal Quit unavailable": "quit-action",
+    }),
+    "diagnostics-test": (b"testSyntheticProjectBuildToolDiagnostics", {
+        **JOURNEY_CONDITIONS,
+        "ordinary diagnostics launch returned no original": "launch-original-missing",
+        "diagnostics project path is not exact": "project-path",
+        "original diagnostics section is missing": "diagnostics-section",
+        "a previous diagnostics report cannot supply this journey": "stale-report",
+        "original diagnostics report or native settlement was not confirmed": "report-settlement",
+        "current acknowledged diagnostics report is missing or ambiguous": "acknowledged-report",
+        "fixed Android diagnostics card is missing or repeated": "android-card-roster",
+        "this is the four-card Android roster, not an iOS Xcode qualification": "android-platform-roster",
+        "original report context changed during readback": "report-context-changed",
+        "same original report did not remain current and settled": "report-finality",
+        "no original core command count was observed": "core-command-count",
+        "normal diagnostics Quit unavailable": "quit-action",
+    }),
+}
+
+
+def saved_condition_diagnostic(stdout, stderr, phase):
+    method, conditions = SAVED_DIAGNOSTIC_CONDITIONS[phase]
+    return _selected_condition_diagnostic(stdout, stderr, method, conditions)
 
 
 def run_phase(normal, owner, book, quota, context, selected, name, clock, verify_sources, *, ios_tools=False, saved_files=False, saved_version=False, entry=False):
@@ -507,6 +585,15 @@ def run_phase(normal, owner, book, quota, context, selected, name, clock, verify
                 NATIVE_DIAGNOSTIC = dict(NATIVE_DIAGNOSTIC or {}, applicationsCondition=diagnosis)
             except BaseException:
                 pass  # A diagnostic error never replaces the original nonzero.
+        if name in SAVED_DIAGNOSTIC_CONDITIONS:
+            try:
+                diagnosis = normal.normal_failure_diagnostics('test', name + '.xcresult', original)
+                condition = saved_condition_diagnostic(original.stdout, original.stderr, name)
+                NATIVE_DIAGNOSTIC = dict(NATIVE_DIAGNOSTIC or {}, selectedJourney={
+                    "progress": diagnosis[normal.SAVED_DIAGNOSTIC_STAGES[name + ".xcresult"][0]],
+                    "condition": condition})
+            except BaseException:
+                pass  # Optional diagnostics cannot change the original refusal.
     resume.need(original.returncode == 0, 'candidate-ui-original-cli-nonzero')
     row_entry, body = quota.call(book, 'file', directory / admission_name(name), 32768, modes=(0o600,))
     row = resume.decode(body)

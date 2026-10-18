@@ -613,7 +613,7 @@ class FixedCarrierResumeData(unittest.TestCase):
                 self.assertEqual(fallback['projectionFailure'],dict(projected,family='project-test.xcresult'))
                 self.assertFalse(fallback['successInferred'])
                 self.assertNotIn(b'synthetic-secret',m.canonical(fallback))
-        self.assertEqual(m.SOURCE_LIMIT,164 << 10)
+        self.assertEqual(m.SOURCE_LIMIT,192 << 10)
         project=dict(schemaVersion=1,scope='normal-macos-ui-failure-diagnostic-only',phase='test',
             selection='project-test.xcresult',originalReturncode=65,status='classified',findingsTruncated=False,
             sourceFailures=[dict(stream='stdout',source='NormalAppUITests.swift',method='testSyntheticProjectLocalEditsAndImages',line=4935,column=None)],
@@ -2264,7 +2264,8 @@ class FixedCarrierResumeData(unittest.TestCase):
                 self.assertEqual(path, image_path)
                 self.assertIs(body, image)
             session = SimpleNamespace(work=work, quota=quota, outer=book, parent=parent,
-                                      private={}, publish_image=published, run_id='2', run_attempt='1')
+                                      private={}, publish_image=published, run_id='2', run_attempt='1',
+                                      image_name='arm64.dmg', mount_path=lambda: m.transport_path_data('2', '1'))
             original_call = quota.call
             def stop_before_transport(owner, method, path, *args, **kwargs):
                 if path != Path('/Volumes'):
@@ -2311,7 +2312,8 @@ class FixedCarrierResumeData(unittest.TestCase):
             other_book = other_quota.book(donor['Originals'])
             other_parent = other_quota.call(other_book, 'directory', work)
             failed = SimpleNamespace(work=work, quota=other_quota, outer=other_book,
-                                     parent=other_parent, private={}, publish_image=published, run_id='2', run_attempt='1')
+                                     parent=other_parent, private={}, publish_image=published, run_id='2', run_attempt='1',
+                                      image_name='arm64.dmg', mount_path=lambda: m.transport_path_data('2', '1'))
             original_other_call = other_quota.call
             def refuse_transport(owner, method, path, *args, **kwargs):
                 if path == Path('/Volumes'):

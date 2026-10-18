@@ -239,6 +239,7 @@ class CandidateResume(resume.Resume):
         self.__predecessor_metadata = None
         self.__nomination = None if nomination is None else MappingProxyType(candidate.candidate_selection_data(nomination))
         self.__binding = None
+        self.__restore_inputs = None
         self.candidate_root = candidate_root
         self.__source_loaded = False
         self.__artifact_admitted = False
@@ -304,7 +305,7 @@ class CandidateResume(resume.Resume):
     def load_sources(self):
         """Actual source paths stay distinct; retain originals across native use."""
         resume.need(not self.__source_loaded, 'candidate-source-once')
-        self.source(CONSUMER_PATH, 64 << 10)
+        self.source(CONSUMER_PATH, 96 << 10)
         self.child_sources = {LEGACY_PATH: self.source(LEGACY_PATH, resume.SOURCE_LIMIT),
                               PARSER_PATH: self.source(PARSER_PATH, PARSER_SOURCE_LIMIT)}
         self.child_bootstrap = (acquisition_bootstrap(self.root, self.child_sources)
@@ -485,8 +486,9 @@ class CandidateResume(resume.Resume):
             signingIdentity=dict(self.signing_identity))
         self.admit_resources(*self._resource_inputs, image_bytes=len(image),
                              package_bytes=len(originals['Install.pkg'][0]))
+        options = {'capture_scripts': self.__capture_restore_scripts} if self.purpose == 'acquire-restore' else {}
         result, inventory = resume.mounted_data(originals, row, self.target, self.stager,
-                                               allocation_budget=self.allocation_budget, candidate=True)
+                                               allocation_budget=self.allocation_budget, candidate=True, **options)
         self.point()
         self.__binding = resume.canonical(row)
         if self.purpose == "acquire-restore": self._restore_originals = originals
@@ -503,8 +505,18 @@ class CandidateResume(resume.Resume):
         # Artifact pins never replace native signature verification.
         return super().install_image(image, preview)
 
-    def decode_fixture_scripts(self, packed, retained):
-        return resume.scripts_archive_data(packed, self.stager, retained, self.allocation_budget)
+    def __capture_restore_scripts(self, inventory, rows, scripts):
+        # Retain only immutable app slices from the already budgeted parse.
+        # No file is written before the mounted producer signature POST.
+        resume.need(self.purpose == 'acquire-restore' and self.__binding is None
+                    and self.__restore_inputs is None and self.fixture_api is not None,
+                    'candidate-restore-capture-order')
+        apps = self.fixture_api.app_rows(rows)
+        selected = {"input/" + name: scripts["input/" + name] for name in apps}
+        resume.need(all(type(value) is tuple and len(value) == 2 and type(value[0]) is bytes
+                        and type(value[1]) is int for value in selected.values()),
+                    'candidate-restore-capture-data')
+        self.__restore_inputs = (inventory, MappingProxyType(selected))
 
     def prepare_readback(self, result, inventory):
         # This hook runs only AFTER actual mounted producer signature POST.
@@ -512,8 +524,14 @@ class CandidateResume(resume.Resume):
             self.acquisition_result = {key: result[key] for key in ('package','descriptor','signature','inventory')}
             self.acquisition_result.update(runtimeManifestSha256=result['release']['runtimeManifestSha256'])
             if self.purpose == 'acquire-restore':
-                self.package_api.candidate_materialize(self, self._restore_originals, inventory)
-                del self._restore_originals
+                resume.need(self.__restore_inputs is not None and self.__restore_inputs[0] is inventory,
+                            'candidate-restore-captured-inventory')
+                try:
+                    self.package_api.candidate_materialize(self, self._restore_originals, inventory,
+                                                          self.__restore_inputs[1])
+                finally:
+                    self.__restore_inputs = None
+                    del self._restore_originals
             return False  # Existing owner detaches without ever entering Installer.
         if self.purpose == 'restore-install':
             self.baseline_post()

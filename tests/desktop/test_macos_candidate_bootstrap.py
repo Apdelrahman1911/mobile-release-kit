@@ -13,7 +13,7 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -222,8 +222,11 @@ class CandidateBootstrapTests(unittest.TestCase):
             owner.publish_owned(work / 'producer-key.pem', b'inert key')
             owner.publish_owned(work / 'producer-message.bin', b'inert domain')
             q.call(outer, 'file', work / 'producer-message.bin', 100)
-            if purpose == 'acquire-restore': owner._restore_originals = {}
-            readback = owner.prepare_readback(mounted_result, b'inert inventory')
+            inventory = b'inert inventory'
+            if purpose == 'acquire-restore':
+                owner._restore_originals = {}
+                owner._CandidateResume__restore_inputs = (inventory, MappingProxyType({}))
+            readback = owner.prepare_readback(mounted_result, inventory)
             if readback is False:
                 mounted.finish(); owner.mount_detached = True
                 effects.append(('acquisition-no-installer',))
@@ -261,7 +264,7 @@ class CandidateBootstrapTests(unittest.TestCase):
         def mkdir(path, *args, **kw):
             path = Path(path) if 'dir_fd' not in kw else next(e['path'] for e in books[0].entries if e['fd'] == kw['dir_fd']) / path
             effects.append(('mkdir',str(path))); dirs.add(path)
-        def materialize(owner, originals, inventory):
+        def materialize(owner, originals, inventory, app_scripts):
             effects.append(('materialize-boundary',owner.quota.reserved,sum(e['fd'] is not None for b in owner.quota.books for e in b.entries)))
             self.assertFalse(owner.installer_entered)
             self.assertTrue(all(q['returned'] and q['capturesSettled'] for q in owner.calls))

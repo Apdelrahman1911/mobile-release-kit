@@ -25,6 +25,7 @@ import struct
 import subprocess
 import sys
 import time
+from types import MappingProxyType
 
 CHECKOUT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
 WORK_PARENT = Path("/Users/runner/work/_temp")
@@ -10262,7 +10263,7 @@ def candidate_carrier_retire(op):
     f.clock(op)
 
 
-def candidate_materialize(session, originals, inventory):
+def candidate_materialize(session, originals, inventory, app_scripts):
     """Thin fixture inputs under the SAME verified acquisition, no native call.
 
     Full P remains byte-identical. Runtime bytes remain in P and its signed
@@ -10285,27 +10286,20 @@ def candidate_materialize(session, originals, inventory):
     rows = stager.observation_inventory_bytes(inventory, selected["inventorySha256"],
         selected["runtimeManifestSha256"], selection=session.selection)
     apps = f.app_rows(rows)
-    members = stager.install_product_members(originals["Install.pkg"][0], allocation_budget=session.allocation_budget)
-    component = (stager.xar_members(members[stager.INSTALL_COMPONENT], allocation_budget=session.allocation_budget)
-        if stager.INSTALL_COMPONENT in members else
-        {key:members[stager.INSTALL_COMPONENT + "/" + key] for key in ("PackageInfo", "Scripts")})
-    del members
-    stager.package_info(component["PackageInfo"], selection=session.selection)
-    packed = component["Scripts"]
-    archive = session.decode_fixture_scripts(packed, sum(len(value) for value in component.values()))
-    scripts = stager.cpio_members(archive, allocation_budget=session.allocation_budget, store_runtime=True)
-    del archive, component, packed
-    need(scripts.get("input/" + stager.INSTALLATION_INVENTORY_NAME) == (inventory, 0o444),
-         "candidate-materialize-inventory")
+    # These references came from the acquisition's one validated CPIO parse.
+    # Recheck the complete app projection without decoding the full product again.
+    need(type(app_scripts) is MappingProxyType and set(app_scripts) == {"input/" + name for name in apps},
+         "candidate-materialize-app-roster")
     expected = {}
     for name, row in apps.items():
-        body, mode = scripts["input/" + name]
+        value = app_scripts["input/" + name]
+        need(type(value) is tuple and len(value) == 2, "candidate-materialize-app-shape")
+        body, mode = value
         need(type(body) is bytes and (len(body), digest(body), mode) ==
              (row["size"], row["sha256"], 0o555 if row["executable"] else 0o444),
              "candidate-materialize-app")
         expected[name] = (body, mode)
     expected[stager.INSTALLATION_INVENTORY_NAME] = (inventory, 0o444)
-    del scripts
     dirs = {"", "runtime"}
     for name in expected:
         parts = name.split("/")

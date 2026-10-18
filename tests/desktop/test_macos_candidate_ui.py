@@ -540,6 +540,95 @@ class CandidateUITests(unittest.TestCase):
         source = (ROOT / 'desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift').read_text()
         self.assertTrue(all('"' + text + '"' in source for text in U.APPLICATIONS_CONDITIONS))
 
+    def test_saved_journey_native_diagnostics_are_selected_bounded_and_private(self):
+        source = (ROOT / 'desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift').read_text()
+        for phase, (method, conditions) in U.SAVED_DIAGNOSTIC_CONDITIONS.items():
+            selection = phase + '.xcresult'
+            key, stages = N.SAVED_DIAGNOSTIC_STAGES[selection]
+            def event(stage, result='started'):
+                return ('MRK_NORMAL_PROJECT_STAGE=' + stage + ';result=' + result
+                        + (';laterStages=not-run' if result == 'failed' else '') + '\n').encode()
+            def record(reason, escaped=False):
+                quote = '\\"' if escaped else '"'
+                return (b'NormalAppUITests.swift:4630: error: -[MRKNormalAppUITests.NormalAppUITests '
+                        + method + b'] : threw error condition(' + quote.encode() + reason.encode()
+                        + quote.encode() + b')\n')
+            def observe(body, err=b'', selected=selection, mode='test'):
+                return N.normal_failure_diagnostics(mode, selected, subprocess.CompletedProcess([], 65, body, err))
+            self.assertTrue(all('"' + text + '"' in source for text in conditions))
+            self.assertTrue(all('stage("' + stage + '")' in source for stage in stages))
+            private = b'private password keystrokes user /private/project credential-value\n'
+            for escaped in (False, True):
+                for reason, label in conditions.items():
+                    body = event(stages[0]) + event(stages[0], 'failed') + record(reason, escaped) + private
+                    diagnosis = observe(body)
+                    self.assertEqual(diagnosis[key], dict(state='observed', firstFailed=stages[0],
+                        lastObserved=dict(stage=stages[0], result='failed')))
+                    self.assertLessEqual(len(N.encoded(diagnosis)) + 1, 4096)
+                    self.assertEqual(U.saved_condition_diagnostic(body, b'', phase),
+                                     dict(status='classified', condition=label))
+                    self.assertNotIn('credential-value', N.encoded(diagnosis).decode())
+            body = record('ordinary first-party renderer did not appear')
+            for bad in (body + body, body.rstrip(b'\n'), body.replace(b': error:', b': note:'),
+                        body.replace(method, method + b'Other'), record('PRIVATE credential-value'),
+                        body + record('unknown'), b'x' * 4096 + body, body.replace(b'condition(', b'condition(condition(')):
+                self.assertEqual(U.saved_condition_diagnostic(bad, b'', phase), dict(status='unavailable', condition=None))
+            for stage in stages:
+                self.assertEqual(observe(event(stage))[key]['lastObserved']['stage'], stage)
+            for bad in (event('launch'), event('private-not-a-stage'), event(stages[0]).rstrip(b'\n'),
+                        event(stages[0]) * 129, event(stages[0]).replace(b'result=started', b'result=failed')):
+                self.assertEqual(observe(bad)[key]['state'], 'refused')
+            self.assertEqual(observe(b'', event(stages[0]))[key]['state'], 'refused')
+            self.assertNotIn(key, observe(b'', selected='test.xcresult'))
+            self.assertNotIn(key, observe(b'', mode='summary'))
+            with self.assertRaises(N.Refused): N.project_stage_diagnostics(b'', b'', android_candidate=True, selection=selection)
+        self.assertEqual(N.project_stage_diagnostics(b'MRK_NORMAL_PROJECT_STAGE=launch;result=started\n', b'')['state'], 'observed')
+        with self.assertRaises(N.Refused): N.project_stage_diagnostics(b'', b'', selection='private')
+
+    def test_saved_journey_owned_nonzero_uses_current_diagnostic_without_changing_source_or_cleanup(self):
+        for target in N.ARM_TARGET, N.INTEL_TARGET:
+            for phase, (method, _) in U.SAVED_DIAGNOSTIC_CONDITIONS.items():
+                for diagnostic_error in (False, True):
+                    flags = dict(saved_files=True) if phase == 'release-evidence-test' else dict(ios_tools=True)
+                    selected, context, _, _, request, _, _ = phase_fixture(phase, target, **flags)
+                    events = []
+                    stage = N.SAVED_DIAGNOSTIC_STAGES[phase + '.xcresult'][1][0]
+                    body = ('MRK_NORMAL_PROJECT_STAGE=' + stage + ';result=failed;laterStages=not-run\n').encode()
+                    body += b'NormalAppUITests.swift:4630: error: -[MRKNormalAppUITests.NormalAppUITests ' + method
+                    body += b'] : threw error condition("ordinary first-party renderer did not appear")\n'
+                    body += b'PRIVATE secure-field input must not be public\n'
+                    class Book:
+                        def __init__(self): self.entries=[]; self.directories={WORK/'normal-ui':{}}
+                        def check(self): events.append('check')
+                        def publish(self, path, data): self.entries.append({'path':path}); events.append(('publish', path.name))
+                        def finish(self): return True
+                    class Owner:
+                        def run_owned(self, argv, **kw):
+                            self.argv=argv; self.kw=kw; events.append('entered')
+                            return subprocess.CompletedProcess(argv, 65, body, b'')
+                    owner=Owner(); quota=R.OriginalQuota(); book=quota.book(Book)
+                    clock=N.PhaseClock(request['phaseSeconds']+180, now=lambda:1, started=1)
+                    U.NATIVE_DIAGNOSTIC=None
+                    with mock.patch.object(N, 'normal_failure_diagnostics', wraps=N.normal_failure_diagnostics,
+                                           side_effect=RuntimeError('PRIVATE parser fault') if diagnostic_error else None):
+                        with self.assertRaisesRegex(R.Refused, 'candidate-ui-original-cli-nonzero'):
+                            U.run_phase(N,owner,book,quota,context,selected,phase,clock,lambda:events.append('source'),**flags)
+                    self.assertEqual(U.NATIVE_STATUS, 65)
+                    self.assertEqual(events.count('source'), 1)
+                    self.assertFalse(any(isinstance(e,tuple) and e[1].endswith('.status') for e in events))
+                    self.assertEqual(owner.kw['timeout'], request['phaseSeconds']+15)
+                    # Saved is the unchanged candidate child; current iOS remains its existing explicit helper route.
+                    expected_root=U.consumer.CANDIDATE_ROOT if phase=='release-evidence-test' else U.consumer.HELPER_ROOT
+                    self.assertEqual(owner.kw['cwd'], expected_root)
+                    self.assertIn(str(expected_root / U.RUNNER), owner.argv)
+                    output=U.failure_data(R.Refused('candidate-ui-original-cli-nonzero'),phase)
+                    self.assertFalse(output['cleanupAuthorized'])
+                    self.assertNotIn('PRIVATE', R.canonical(output).decode())
+                    if diagnostic_error: self.assertNotIn('selectedJourney', U.NATIVE_DIAGNOSTIC or {})
+                    else:
+                        self.assertEqual(U.NATIVE_DIAGNOSTIC['selectedJourney']['progress']['firstFailed'],stage)
+                        self.assertEqual(U.NATIVE_DIAGNOSTIC['selectedJourney']['condition'],dict(status='classified',condition='renderer-missing'))
+
     def test_actual_owned_wrapper_known_nonzero_unknown_and_changed_post_never_publish_status(self):
         for fault in (None,'nonzero','unknown','post','applications'):
             phase = 'applications-test' if fault == 'applications' else 'project-test'

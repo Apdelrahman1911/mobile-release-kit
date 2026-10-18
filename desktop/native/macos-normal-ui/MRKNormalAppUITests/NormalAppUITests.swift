@@ -4823,9 +4823,56 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_NORMAL_PROJECT_NAVIGATION=v1;method=\(method.rawValue);phase=\(phase.rawValue);role=\(role.rawValue);relation=\(relation);unchanged=\(unchanged ? 1 : 0);field=\(selected);fields=\(fields);combos=\(combos);go=\(go);open=\(open);cancel=\(cancel);nonAtomic=1")
     }
 
-    @MainActor private func goToFolder(_ sheet: XCUIElement, path: String) throws {
-        try require(path.hasPrefix("/private/tmp/mrk-normal-project-"),
-                    "native navigation is not the owned synthetic fixture")
+    @MainActor private func diagnosePanelBaseline(_ sheet: XCUIElement, fields: Int, combos: Int) {
+        // Only public role counts and exact fixed classifications leave the runner.
+        // Never read field values or print identifiers, labels, paths or snapshots.
+        guard let clock = caseClock, let outer = journeyDeadline, clock.firstFailure == nil else { return }
+        let started = ProcessInfo.processInfo.systemUptime
+        guard clock.observationAllowed(started, before: outer) else { return }
+        let waitEnd = min(clock.deadline, outer, started + 5)
+        func allowed() -> Bool { clock.observationAllowed(ProcessInfo.processInfo.systemUptime, before: outer) }
+        func category(_ text: String?) -> String {
+            guard let text else { return "none" }
+            if text.isEmpty { return "none" }
+            if ["Search", "Search:", "Search...", "Search…"].contains(text) { return "search" }
+            if ["Go to Folder", "Go to folder", "Go to the folder:", "Folder"].contains(text) { return "folder" }
+            return "other"
+        }
+        func row(_ phase: String, _ waiter: String) {
+            guard allowed() else { return }
+            let fieldQuery = sheet.textFields, comboQuery = sheet.comboBoxes
+            let fieldCount = fieldQuery.count, comboCount = comboQuery.count
+            let searchCount = sheet.searchFields.count, sheetCount = sheet.sheets.count
+            let fieldLabel = fieldCount == 1 ? category(fieldQuery.element(boundBy: 0).label) : fieldCount == 0 ? "none" : "ambiguous"
+            let fieldPlaceholder = fieldCount == 1 ? category(fieldQuery.element(boundBy: 0).placeholderValue) : fieldCount == 0 ? "none" : "ambiguous"
+            let comboLabel = comboCount == 1 ? category(comboQuery.element(boundBy: 0).label) : comboCount == 0 ? "none" : "ambiguous"
+            let comboPlaceholder = comboCount == 1 ? category(comboQuery.element(boundBy: 0).placeholderValue) : comboCount == 0 ? "none" : "ambiguous"
+            let children = comboCount == 1 ? comboQuery.element(boundBy: 0).textFields.count : 0
+            guard allowed() else { return }
+            print("MRK_NORMAL_PANEL_TOPOLOGY=v1;phase=\(phase);waiter=\(waiter);fields=\(min(fieldCount, 5));combos=\(min(comboCount, 5));search=\(min(searchCount, 5));sheets=\(min(sheetCount, 5));fieldLabel=\(fieldLabel);fieldPlaceholder=\(fieldPlaceholder);comboLabel=\(comboLabel);comboPlaceholder=\(comboPlaceholder);comboChildren=\(min(children, 5));nonAtomic=1")
+        }
+        row("before", "not-run")
+        guard allowed(), ProcessInfo.processInfo.systemUptime < waitEnd else { return }
+        sheet.typeKey("g", modifierFlags: [.command, .shift]) // Once; diagnostic branch never pastes/types a path.
+        let now = ProcessInfo.processInfo.systemUptime
+        guard allowed(), now < waitEnd else { return }
+        let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            sheet.textFields.count != fields || sheet.comboBoxes.count != combos
+        }, object: sheet)
+        let returned = XCTWaiter.wait(for: [changed], timeout: waitEnd - now)
+        row("after", returned == .completed ? "completed" : returned == .timedOut ? "timed-out" : "other")
+    }
+
+    @MainActor private func goToFolder(_ sheet: XCUIElement, path: String,
+                                     recoveryFixture: IOSRecoveryFixture? = nil) throws {
+        if let recoveryFixture {
+            try require(recoveryFixture === ownedIOSRecoveryFixture && path == recoveryFixture.projectPath,
+                        "native navigation is not the owned recovery fixture")
+            try recoveryFixture.post()
+        } else {
+            try require(path.hasPrefix("/private/tmp/mrk-normal-project-"),
+                        "native navigation is not the owned synthetic fixture")
+        }
         // A panel container need not expose a mouse hit point. Check an actual
         // always-available control; Open may be disabled until a file is chosen.
         let cancels = sheet.buttons.matching(identifier: "Cancel")
@@ -4838,7 +4885,11 @@ final class NormalAppUITests: XCTestCase {
         // never to a first field elsewhere in the app or the renderer.
         let fields = sheet.textFields
         let combos = sheet.comboBoxes
-        try require(fields.count == 0 && combos.count == 0,
+        let initialFields = fields.count, initialCombos = combos.count
+        if initialFields != 0 || initialCombos != 0 {
+            diagnosePanelBaseline(sheet, fields: initialFields, combos: initialCombos)
+        }
+        try require(initialFields == 0 && initialCombos == 0,
                     "original native panel already has an ambiguous navigation editor", check: .singleton)
         sheet.typeKey("g", modifierFlags: [.command, .shift])
         let targets: NSDictionary = ["field": fields.element(boundBy: 0), "combo": combos.element(boundBy: 0)]
@@ -7267,7 +7318,7 @@ final class NormalAppUITests: XCTestCase {
                 try fixture.post()
                 try press(renderer, "Open project folder", renderer: renderer)
                 let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
-                try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)
+                try goToFolder(sheet, path: fixture.projectPath, recoveryFixture: fixture); try nativeOpen(sheet)
                 _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get ios-recovery-pending ready.")),
                                     in: renderer, failures: ["Static observation unavailable", "Only a partial static observation is available"])
                 _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "recovery selected project differs")

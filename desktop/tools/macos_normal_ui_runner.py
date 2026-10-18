@@ -2319,9 +2319,26 @@ class SavedVersionFixture:
                 if installed: self.runtime_stager.no_xattrs(original)
             self.phase.clock.check()
 
-    def _directory(self, path, parent, name):
+    def _directory(self, path, parent, name, *, created_root=False):
         fd = self._adopt(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent))
         facts = saved_version_facts(os.fstat(fd))
+        if created_root:
+            # Darwin mkdir inherits its parent's group, not the caller's primary
+            # group. Normalize only our just-created empty private root, using
+            # its adopted original FD. Children then inherit the required group.
+            need(path == "" and not self.dirs and parent == self.temporary
+                 and name == self.root.name and self.root.parent == SAVED_VERSION_TEMPORARY
+                 and facts == saved_version_facts(os.stat(name, dir_fd=parent, follow_symlinks=False))
+                 and facts[2] == stat.S_IFDIR | 0o700 and facts[3] == os.getuid() and facts[9] == 0
+                 and os.listdir(fd) == [], "saved-version-fresh-root-original")
+            need(saved_version_facts(os.fstat(fd)) == facts, "saved-version-fresh-root-pre")
+            if facts[4] != os.getgid():
+                os.fchown(fd, -1, os.getgid())
+                after = saved_version_facts(os.fstat(fd))
+                need(after[:4] == facts[:4] and after[4] == os.getgid()
+                     and after[5:8] == facts[5:8] and after[9:] == facts[9:],
+                     "saved-version-fresh-root-group-post")
+                facts = after
         need(facts == saved_version_facts(os.stat(name, dir_fd=parent, follow_symlinks=False))
              and facts[2] == stat.S_IFDIR | 0o700 and facts[3:5] == (os.getuid(), os.getgid()) and facts[9] == 0,
              "saved-version-private-directory")
@@ -2374,7 +2391,7 @@ class SavedVersionFixture:
         self.temporary = self._adopt(open_directory(SAVED_VERSION_TEMPORARY))
         self.root = Path(tempfile.mkdtemp(prefix="mrk-normal-project-", dir=SAVED_VERSION_TEMPORARY))
         need(self.root.parent == SAVED_VERSION_TEMPORARY and re.fullmatch(r"mrk-normal-project-[A-Za-z0-9_-]{6,16}", self.root.name), "saved-version-fresh-root")
-        self._directory("", self.temporary, self.root.name)
+        self._directory("", self.temporary, self.root.name, created_root=True)
         directories = set()
         for path in self.files:
             directories.update(str(parent) for parent in Path(path).parents if str(parent) != ".")
@@ -3736,9 +3753,54 @@ def failure_base(phase, selection, original, *, engineering=False):
         value["projectProgress"] = None
     if not engineering and phase == "test" and selection == ANDROID_CANDIDATE_RESULT:
         value["androidCandidateProgress"] = None
+        value["androidCandidateCondition"] = {"status": "unavailable", "condition": None}
+    if not engineering and phase == "test" and selection in SAVED_DIAGNOSTIC_STAGES:
+        value[SAVED_DIAGNOSTIC_STAGES[selection][0]] = None
     if not engineering and phase == "test" and selection == IOS_UNSIGNED_RESULT:
         value["iosUnsignedStages"] = {"state": "unavailable", "events": []}
+    if not engineering and phase == "test" and selection in PANEL_TOPOLOGY_SELECTIONS:
+        value["panelTopology"] = {"state": "absent", "rows": []}
     return value
+
+
+PANEL_TOPOLOGY_SELECTIONS = ("diagnostics-test.xcresult", "saved-version-recovery-test.xcresult", IOS_PENDING_RESULT)
+
+
+def panel_topology_diagnostics(stdout, stderr):
+    """Only fixed native panel counts/classifications; no field contents."""
+    need(type(stdout) is bytes and type(stderr) is bytes and len(stdout)+len(stderr) <= 1024*1024,
+         "normal-panel-topology-original")
+    namespace = b"MRK_NORMAL_PANEL_TOPOLOGY"
+    category = rb"(none|ambiguous|search|folder|other)"
+    pattern = (re.escape(namespace) + rb"=v1;phase=(before|after);waiter=(not-run|completed|timed-out|other)"
+        + rb";fields=([0-5]);combos=([0-5]);search=([0-5]);sheets=([0-5]);fieldLabel=" + category
+        + rb";fieldPlaceholder=" + category + rb";comboLabel=" + category
+        + rb";comboPlaceholder=" + category + rb";comboChildren=([0-5]);nonAtomic=1")
+    rows = []
+    for stream, body in (("stdout", stdout), ("stderr", stderr)):
+        offset = 0
+        while offset < len(body):
+            end = body.find(b"\n", offset); complete = end != -1
+            if not complete: end = len(body)
+            short = body[offset:end] if end-offset <= 320 else None
+            prefix = body[offset:min(end, offset+len(namespace))]
+            suffix = body[max(offset, end-len(namespace)):end]
+            candidate = (body.find(namespace, offset, end) != -1 or bool(prefix) and namespace.startswith(prefix)
+                or not complete and any(suffix.endswith(namespace[:i]) for i in range(1,len(namespace))))
+            offset = end+1
+            if not candidate: continue
+            record = short[:-1] if short is not None and complete and short.endswith(b"\r") else short
+            match = re.fullmatch(pattern, record) if record is not None and complete and stream == "stdout" else None
+            if match is None or len(rows) == 2: return {"state":"refused", "rows":[]}
+            phase, waiter, fields, combos, search, sheets, field_label, field_placeholder, combo_label, combo_placeholder, children = (
+                part.decode("ascii") for part in match.groups())
+            if phase != ("before" if not rows else "after") or (phase == "before") != (waiter == "not-run"):
+                return {"state":"refused", "rows":[]}
+            rows.append(dict(phase=phase, waiter=waiter, fields=int(fields), combos=int(combos),
+                search=int(search), sheets=int(sheets), fieldLabel=field_label, fieldPlaceholder=field_placeholder,
+                comboLabel=combo_label, comboPlaceholder=combo_placeholder, comboChildren=int(children),
+                countsCappedAt=5, nonAtomic=True))
+    return {"state":"observed" if rows else "absent", "rows":rows}
 
 
 PROJECT_STAGES = tuple('launch fixture project-open android-source-jdk android-source-sdk android-source-gradle android-source-cancel android-source-reselect android-source-refused field-version field-project field-workspace field-metadata field-file-cancel field-directory-cancel field-review quit project-cancel config github text version images-cancel images readback-and-quit'.split())
@@ -3822,10 +3884,17 @@ def project_navigation_diagnostics(stdout, stderr):
 ANDROID_CANDIDATE_STAGES = tuple("android-private-admission android-public-project-and-certificate android-saved-input-read android-separate-installed-service-setup android-source-inspection-without-license-acceptance android-fresh-reviewed-protected-copy android-new-protected-copy-full-readback android-memory-input-assignment android-one-signed-build-original android-known-native-terminal candidate-original-history-review-and-abandon android-output-census-and-normal-quit".split())
 
 
-def project_stage_diagnostics(stdout, stderr, *, android_candidate=False):
+SAVED_DIAGNOSTIC_STAGES = {
+    "release-evidence-test.xcresult": ("releaseEvidenceProgress", tuple("evidence-launch evidence-fixture evidence-project-open evidence-real-picker evidence-original-observation evidence-shared-navigation evidence-stage-and-cancel evidence-readback-and-quit".split())),
+    "diagnostics-test.xcresult": ("diagnosticsProgress", tuple("diagnostics-launch diagnostics-fixture diagnostics-project-open diagnostics-context diagnostics-original-report diagnostics-readback-and-quit".split())),
+}
+
+
+def project_stage_diagnostics(stdout, stderr, *, android_candidate=False, selection=None):
     """Existing selected stdout markers only; no method, order or success claim."""
-    need(type(android_candidate) is bool, "normal-stage-diagnostic-selection")
-    stages = ANDROID_CANDIDATE_STAGES if android_candidate else PROJECT_STAGES
+    need(type(android_candidate) is bool and (selection is None or type(selection) is str and selection in SAVED_DIAGNOSTIC_STAGES)
+         and not (android_candidate and selection is not None), "normal-stage-diagnostic-selection")
+    stages = SAVED_DIAGNOSTIC_STAGES[selection][1] if selection is not None else ANDROID_CANDIDATE_STAGES if android_candidate else PROJECT_STAGES
     namespace = b"MRK_NORMAL_PROJECT_STAGE="
     pattern = re.escape(namespace) + b"(" + b"|".join(s.encode() for s in stages) + rb");result=(started|passed|failed)(;laterStages=not-run)?"
     first_failed = last = None
@@ -3904,6 +3973,117 @@ def ios_unsigned_stage_diagnostics(stdout, stderr):
                 else: finished = True
     if invalid: return {"state": "refused", "events": []}
     return {"state": "observed" if attempted else "absent", "events": events}
+
+
+# Exact public Swift reasons at Android private-input/fixture admission only.
+# LocalFixture.need adds the literal fixture prefix; no suffix/prefix matching.
+ANDROID_CANDIDATE_CONDITIONS = {
+    b'Android fixed source role unavailable': 'android-fixed-source-role-unavailable',
+    b'Android private command roster differs': 'android-private-command-roster-differs',
+    b'Android private credential directory absent': 'android-private-credential-directory-absent',
+    b'Android private digest shape differs': 'android-private-digest-shape-differs',
+    b'Android private enumeration close': 'android-private-enumeration-close',
+    b'Android private enumeration conversion': 'android-private-enumeration-conversion',
+    b'Android private fact shape differs': 'android-private-fact-shape-differs',
+    b'Android private fixed current context absent': 'android-private-fixed-current-context-absent',
+    b'Android private object shape differs': 'android-private-object-shape-differs',
+    b'Android private original close failed': 'android-private-original-close-failed',
+    b'Android private original command differs': 'android-private-original-command-differs',
+    b'Android private original parent absent': 'android-private-original-parent-absent',
+    b'Android private original phase clock differs': 'android-private-original-phase-clock-differs',
+    b'Android private scalar shape differs': 'android-private-scalar-shape-differs',
+    b'Android private scalar unavailable': 'android-private-scalar-unavailable',
+    b'current Android consumer profile is missing or mixed': 'current-android-consumer-profile-is-missing-or-mixed',
+    b'fixture: Android XML original consuming close failed': 'android-xml-original-consuming-close-failed',
+    b'fixture: Android XML original content differs': 'android-xml-original-content-differs',
+    b'fixture: Android XML resource consuming close failed': 'android-xml-resource-consuming-close-failed',
+    b'fixture: Android XML resource content or original changed': 'android-xml-resource-content-or-original-changed',
+    b'fixture: Android XML resource open failed': 'android-xml-resource-open-failed',
+    b'fixture: Android XML resource parent changed': 'android-xml-resource-parent-changed',
+    b'fixture: Android XML resource parent open failed': 'android-xml-resource-parent-open-failed',
+    b'fixture: Android XML resource parent shape or binding': 'android-xml-resource-parent-shape-or-binding',
+    b'fixture: Android XML resource read failed': 'android-xml-resource-read-failed',
+    b'fixture: Android XML resource read limit': 'android-xml-resource-read-limit',
+    b'fixture: Android XML resource shape, binding or exact length': 'android-xml-resource-shape-binding-or-exact-length',
+    b'fixture: Android exact bundled public DATA pin': 'android-exact-bundled-public-data-pin',
+    b'fixture: Android output named binding unavailable': 'android-output-named-binding-unavailable',
+    b'fixture: Android private bounded read': 'android-private-bounded-read',
+    b'fixture: Android private canonical document differs': 'android-private-canonical-document-differs',
+    b'fixture: Android private complete original census differs': 'android-private-complete-original-census-differs',
+    b'fixture: Android private credential roster': 'android-private-credential-roster',
+    b'fixture: Android private credential roster incomplete': 'android-private-credential-roster-incomplete',
+    b'fixture: Android private current context differs': 'android-private-current-context-differs',
+    b'fixture: Android private current leaf differs': 'android-private-current-leaf-differs',
+    b'fixture: Android private directory binding': 'android-private-directory-binding',
+    b'fixture: Android private directory bound': 'android-private-directory-bound',
+    b'fixture: Android private directory open': 'android-private-directory-open',
+    b'fixture: Android private directory shape': 'android-private-directory-shape',
+    b'fixture: Android private enumeration open': 'android-private-enumeration-open',
+    b'fixture: Android private enumeration read': 'android-private-enumeration-read',
+    b'fixture: Android private file POST': 'android-private-file-post',
+    b'fixture: Android private fixed credential path': 'android-private-fixed-credential-path',
+    b'fixture: Android private fixed leaf open': 'android-private-fixed-leaf-open',
+    b'fixture: Android private fixed source path': 'android-private-fixed-source-path',
+    b'fixture: Android private held root facts differ': 'android-private-held-root-facts-differ',
+    b'fixture: Android private key unavailable': 'android-private-key-unavailable',
+    b'fixture: Android private named ancestor changed': 'android-private-named-ancestor-changed',
+    b'fixture: Android private original already consumed': 'android-private-original-already-consumed',
+    b'fixture: Android private original changed': 'android-private-original-changed',
+    b'fixture: Android private original directory changed': 'android-private-original-directory-changed',
+    b'fixture: Android private original file shape': 'android-private-original-file-shape',
+    b'fixture: Android private owned directory': 'android-private-owned-directory',
+    b'fixture: Android private repeated leaf': 'android-private-repeated-leaf',
+    b'fixture: Android private source root differs': 'android-private-source-root-differs',
+    b'fixture: Android public certificate differs': 'android-public-certificate-differs',
+    b'fixture: Android public input census differs': 'android-public-input-census-differs',
+    b'fixture: a consuming file/roster close failed': 'a-consuming-file-roster-close-failed',
+    b'fixture: admitted Android XML pin differs': 'admitted-android-xml-pin-differs',
+    b'fixture: an earlier consuming close failed': 'an-earlier-consuming-close-failed',
+    b'fixture: bounded payload encoding': 'bounded-payload-encoding',
+    b'fixture: bundled DATA changed': 'bundled-data-changed',
+    b'fixture: bundled DATA close failed': 'bundled-data-close-failed',
+    b'fixture: bundled DATA open failed': 'bundled-data-open-failed',
+    b'fixture: bundled DATA read failed': 'bundled-data-read-failed',
+    b'fixture: bundled DATA read limit': 'bundled-data-read-limit',
+    b'fixture: bundled DATA shape/limit': 'bundled-data-shape-limit',
+    b'fixture: bundled fixed DATA absent': 'bundled-fixed-data-absent',
+    b'fixture: candidate Git closed leaf roles': 'candidate-git-closed-leaf-roles',
+    b'fixture: candidate certificate missing': 'candidate-certificate-missing',
+    b'fixture: candidate closed handoff': 'candidate-closed-handoff',
+    b'fixture: candidate handoff ancestor policy': 'candidate-handoff-ancestor-policy',
+    b'fixture: candidate handoff canonical bytes': 'candidate-handoff-canonical-bytes',
+    b'fixture: candidate leaf policy': 'candidate-leaf-policy',
+    b'fixture: candidate original directory census': 'candidate-original-directory-census',
+    b'fixture: candidate owner handoff unavailable': 'candidate-owner-handoff-unavailable',
+    b'fixture: candidate public fixture correspondence': 'candidate-public-fixture-correspondence',
+    b'fixture: candidate retained directory identity': 'candidate-retained-directory-identity',
+    b'fixture: candidate retained leaf identity': 'candidate-retained-leaf-identity',
+    b'fixture: candidate source configuration absent': 'candidate-source-configuration-absent',
+    b'fixture: directory absent': 'directory-absent',
+    b'fixture: directory binding changed': 'directory-binding-changed',
+    b'fixture: directory entry changed': 'directory-entry-changed',
+    b'fixture: directory open failed': 'directory-open-failed',
+    b'fixture: directory original changed': 'directory-original-changed',
+    b'fixture: fixed Android XML original was not admitted': 'fixed-android-xml-original-was-not-admitted',
+    b'fixture: fixed Android XML resource absent or misplaced': 'fixed-android-xml-resource-absent-or-misplaced',
+    b'fixture: fixed DATA inventory mismatch': 'fixed-data-inventory-mismatch',
+    b'fixture: fixed leaf changed during observation': 'fixed-leaf-changed-during-observation',
+    b'fixture: fixed leaf open failed': 'fixed-leaf-open-failed',
+    b'fixture: fixed leaf read failed': 'fixed-leaf-read-failed',
+    b'fixture: fixed leaf read limit': 'fixed-leaf-read-limit',
+    b'fixture: fixture preparation was repeated': 'fixture-preparation-was-repeated',
+    b'fixture: leaf shape/mode/limit': 'leaf-shape-mode-limit',
+    b'fixture: missing fixed parent': 'missing-fixed-parent',
+    b'fixture: not an original directory': 'not-an-original-directory',
+    b'fixture: original descriptor stat failed': 'original-descriptor-stat-failed',
+    b'fixture: owned roster changed during enumeration': 'owned-roster-changed-during-enumeration',
+    b'fixture: owned roster conversion failed': 'owned-roster-conversion-failed',
+    b'fixture: owned roster limit/duplicate': 'owned-roster-limit-duplicate',
+    b'fixture: owned roster open failed': 'owned-roster-open-failed',
+    b'fixture: owned roster read failed': 'owned-roster-read-failed',
+    b'fixture: unexpected registered directory': 'unexpected-registered-directory',
+    b'fixture: whole fixture DATA limit': 'whole-fixture-data-limit',
+}
 
 
 def normal_failure_diagnostics(phase, selection, original, *, engineering=False):
@@ -4213,6 +4393,8 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     output_markers, output_failures = 0, 0
     output_scenario = output_reason = output_site = None
     output_invalid = False
+    android_conditions = []
+    android_condition_invalid = False
 
     def retain(key, finding, maximum, distinct=True):
         if not distinct or finding not in value[key]:
@@ -4243,6 +4425,19 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                 if line <= 65535 and (column is None or column <= 4096):
                     retain("sourceFailures", {"stream": stream, "source": "NormalAppUITests.swift",
                         "method": match.group(3).decode("ascii"), "line": line, "column": column}, 4)
+                    if "androidCandidateCondition" in value:
+                        start = body.rfind(b"\n", 0, match.start()) + 1
+                        end = body.find(b"\n", match.end())
+                        record = body[start:end] if end != -1 and end - start <= 4096 else None
+                        suffix = body[match.end():end] if record is not None else b""
+                        found = re.search(rb'condition\(("|\\")([^"\\\r\n]{1,240})\1\)', suffix)
+                        label = ANDROID_CANDIDATE_CONDITIONS.get(found.group(2)) if found else None
+                        if record is None or record.count(b"condition(") != 1 or label is None:
+                            android_condition_invalid = True
+                        elif len(android_conditions) == 2:
+                            android_condition_invalid = True
+                        else:
+                            android_conditions.append(label)
         offset = 0
         while offset < len(body):
             end = body.find(b"\n", offset)
@@ -4528,11 +4723,23 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         if len(encoded(value)) + 1 > 4096:
             value["iosUnsignedStages"] = {"state": "unavailable", "events": []}
             value["findingsTruncated"] = True
+    if "androidCandidateCondition" in value and not android_condition_invalid and len(android_conditions) == 1:
+        value["androidCandidateCondition"] = {"status": "classified", "condition": android_conditions[0]}
+        if len(encoded(value)) + 1 > 4096:
+            value["androidCandidateCondition"] = {"status": "unavailable", "condition": None}
+            value["findingsTruncated"] = True
     if "androidCandidateProgress" in value:
         value["androidCandidateProgress"] = project_stage_diagnostics(original.stdout, original.stderr, android_candidate=True)
         if len(encoded(value)) + 1 > 4096:
             value["androidCandidateProgress"] = None
             value["findingsTruncated"] = True
+    if selection in SAVED_DIAGNOSTIC_STAGES:
+        key = SAVED_DIAGNOSTIC_STAGES[selection][0]
+        if key in value:
+            value[key] = project_stage_diagnostics(original.stdout, original.stderr, selection=selection)
+            if len(encoded(value)) + 1 > 4096:
+                value[key] = None
+                value["findingsTruncated"] = True
     if "projectProgress" in value:
         value["projectProgress"] = project_stage_diagnostics(original.stdout, original.stderr)
         if len(encoded(value)) + 1 > 4096:
@@ -4546,6 +4753,14 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             value["findingsTruncated"] = True
         if len(encoded(value)) + 1 > 4096:
             del value["projectNavigation"]  # Optional observations never displace original facts.
+    if "panelTopology" in value:
+        value["panelTopology"] = panel_topology_diagnostics(original.stdout, original.stderr)
+        if value["panelTopology"]["state"] == "refused": value["findingsTruncated"] = True
+        if len(encoded(value)) + 1 > 4096:
+            value["panelTopology"] = {"state":"unavailable", "rows":[]}
+            value["findingsTruncated"] = True
+        if len(encoded(value)) + 1 > 4096:
+            del value["panelTopology"]  # Optional observations never displace original failure facts.
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value
 

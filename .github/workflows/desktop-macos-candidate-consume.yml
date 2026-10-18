@@ -22,29 +22,41 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            mode: ordinary-ui
+            mode: ordinary-ios-ui
             runner: macos-26
             python-architecture: arm64
             rust-version: 1.98.1
             rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: x86_64-apple-darwin
-            mode: ordinary-ui
-            runner: macos-26-intel
-            python-architecture: x64
-            rust-version: 1.98.0
-            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
+          - target: aarch64-apple-darwin
+            mode: ordinary-saved-ui
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - target: aarch64-apple-darwin
+            mode: ordinary-saved-version-ui
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
           - target: aarch64-apple-darwin
             mode: ordinary-android-ui
             runner: macos-26
             python-architecture: arm64
             rust-version: 1.98.1
             rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: x86_64-apple-darwin
-            mode: ordinary-android-ui
-            runner: macos-26-intel
-            python-architecture: x64
-            rust-version: 1.98.0
-            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
+          - target: aarch64-apple-darwin
+            mode: ordinary-ios-pending-ui
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - target: aarch64-apple-darwin
+            mode: restore
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:
@@ -71,6 +83,12 @@ jobs:
           test "$RUNNER_TEMP" = /Users/runner/work/_temp
           test "$MRK_CANDIDATE_SOURCE" != 0000000000000000000000000000000000000000
           test "$(/usr/bin/id -u)" != 0
+          # Read-only facts for the removal ancestor-policy failure. Fixed public
+          # system directories only; this neither changes nor qualifies them.
+          /usr/bin/stat -f 'MRK_REMOVAL_SYSTEM_DIRECTORY=role:root;mode:%p;uid:%u;gid:%g;flags:%f' /
+          /usr/bin/stat -f 'MRK_REMOVAL_SYSTEM_DIRECTORY=role:volumes;mode:%p;uid:%u;gid:%g;flags:%f' /Volumes
+          /usr/bin/stat -f 'MRK_REMOVAL_SYSTEM_DIRECTORY=role:library;mode:%p;uid:%u;gid:%g;flags:%f' /Library
+          /usr/bin/stat -f 'MRK_REMOVAL_SYSTEM_DIRECTORY=role:application-support;mode:%p;uid:%u;gid:%g;flags:%f' '/Library/Application Support'
       - name: Check out the actual candidate at the canonical application source root
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

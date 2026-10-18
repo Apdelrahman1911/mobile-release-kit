@@ -219,13 +219,13 @@ class CandidateConsumerTests(unittest.TestCase):
 
     def test_child_source_limits_precede_construction_and_sources_are_explicit(self):
         bodies = {name: (ROOT / name).read_bytes() for name in (C.LEGACY_PATH, C.PARSER_PATH)}
-        self.assertLessEqual(len(bodies[C.LEGACY_PATH]), 164 << 10)
+        self.assertLessEqual(len(bodies[C.LEGACY_PATH]), R.SOURCE_LIMIT)
         source = C.acquisition_bootstrap(C.HELPER_ROOT, bodies)
         self.assertLessEqual(len(source.encode()), C.CHILD_SOURCE_LIMIT)
         # Compile is syntax-only; do not exec the child or make an API request.
         compile(source, '<inert-candidate-bootstrap>', 'exec')
-        for changed in ({C.LEGACY_PATH: b'x' * ((164 << 10) + 1), C.PARSER_PATH: b'x'},
-                        {C.LEGACY_PATH: b'\x00' * (164 << 10), C.PARSER_PATH: b'x'},
+        for changed in ({C.LEGACY_PATH: b'x' * ((R.SOURCE_LIMIT) + 1), C.PARSER_PATH: b'x'},
+                        {C.LEGACY_PATH: b'\x00' * (R.SOURCE_LIMIT), C.PARSER_PATH: b'x'},
                         {C.LEGACY_PATH: b'x'}):
             with self.assertRaises(ValueError): C.acquisition_bootstrap(C.HELPER_ROOT, changed)
         with self.assertRaises(ValueError): C.acquisition_bootstrap(C.CANDIDATE_ROOT, bodies)
@@ -323,6 +323,69 @@ class CandidateConsumerTests(unittest.TestCase):
         stage.cpio_members.assert_called_once_with(b'cpio')
         stage.decode.assert_called_once_with(b'inventory')
         with self.assertRaises(ValueError): R.mounted_data(originals, row, row['target'], stage, candidate=1)
+
+    def test_restore_captures_one_real_cpio_decode_and_never_replaces_inventory(self):
+        import gzip
+        from desktop.tools import stage_macos_installed as codec
+        from desktop.tools import macos_app_absence_fixture as fixture
+        def odc(name, mode, body=b''):
+            name = name.encode('ascii') + b'\0'
+            fields = ((0,6),(1,6),(mode,6),(0,6),(0,6),(1,6),(0,6),(0,11),(len(name),6),(len(body),11))
+            return b'070707' + ''.join(format(v, '0%do' % width) for v,width in fields).encode() + name + body
+        for target in fixture.TARGETS:
+            for bad in (False, True):
+                with self.subTest(target=target, changed_inventory=bad):
+                    originals, row, stage = mounted_fixture(target)
+                    body = b'app bytes'; inventory = b'inventory'
+                    archive = odc('.', stat.S_IFDIR | 0o755)
+                    for name in ('input', 'input/app', 'input/runtime'):
+                        archive += odc(name, stat.S_IFDIR | 0o555)
+                    archive += odc('input/install-inventory.json', stat.S_IFREG | 0o444, inventory)
+                    archive += odc('input/app/program', stat.S_IFREG | 0o555, body)
+                    archive += odc('input/runtime/not-retained', stat.S_IFREG | 0o444, b'runtime bytes')
+                    archive += odc('TRAILER!!!', 0)
+                    stage.install_product_members.return_value = {'component/PackageInfo': b'info',
+                        'component/Scripts': gzip.compress(archive)}
+                    stage.inflate = codec.inflate
+                    stage.cpio_members = mock.Mock(wraps=codec.cpio_members)
+                    stage.observation_inventory_bytes.return_value = {
+                        'app/program': {'size': len(body), 'sha256': R.sha(body), 'executable': True},
+                        'runtime/not-retained': {'size': 13}}
+                    with mock.patch.object(R.Resume, '__init__', return_value=None):
+                        owner = C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'),
+                                                 None, None, nomination=nomination(target), purpose='acquire-restore')
+                    owner.fixture_api = fixture
+                    owner._restore_originals = originals
+                    owner.package_api = SimpleNamespace(candidate_materialize=mock.Mock())
+                    phases = []
+                    def budget(phase, *args):
+                        if phase == 'cpio-window': self.assertNotIn(phase, phases)
+                        phases.append(phase)
+                    result, retained = R.mounted_data(originals, row, target, stage, candidate=True,
+                        allocation_budget=budget, capture_scripts=owner._CandidateResume__capture_restore_scripts)
+                    captured = owner._CandidateResume__restore_inputs
+                    self.assertIs(captured[0], retained)
+                    self.assertEqual(dict(captured[1]), {'input/app/program': (body, 0o555)})
+                    with self.assertRaises(TypeError): captured[1]['other'] = (b'changed', 0o444)
+                    with self.assertRaisesRegex(R.Refused, 'candidate-restore-capture-order'):
+                        owner._CandidateResume__capture_restore_scripts(retained, {}, {})
+                    owner.package_api.candidate_materialize.assert_not_called()
+                    if bad:
+                        with self.assertRaisesRegex(R.Refused, 'candidate-restore-captured-inventory'):
+                            owner.prepare_readback(result, retained + b'changed')
+                        owner.package_api.candidate_materialize.assert_not_called()
+                    else:
+                        # Native signature verification remains the caller's boundary.
+                        self.assertIs(owner.prepare_readback(result, retained), False)
+                        owner.package_api.candidate_materialize.assert_called_once_with(owner, originals, retained, captured[1])
+                        self.assertIsNone(owner._CandidateResume__restore_inputs)
+                    self.assertEqual(phases.count('cpio-window'), 1)
+                    stage.cpio_members.assert_called_once()
+        originals, row, stage = mounted_fixture(fixture.TARGETS[0])
+        capture = mock.Mock()
+        with self.assertRaisesRegex(R.Refused, 'resume-mounted-capture-purpose'):
+            R.mounted_data(originals, row, row['target'], stage, capture_scripts=capture)
+        capture.assert_not_called(); stage.cpio_members.assert_not_called()
 
     def test_ordinary_readback_no_fixed_release_override_and_fresh_only(self):
         owner = instance('x86_64-apple-darwin')

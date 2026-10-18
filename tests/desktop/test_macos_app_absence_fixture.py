@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -295,7 +295,7 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
     def test_candidate_acquisition_materializes_full_p_and_exact_thin_tree(self):
         import sys
         import time
-        for bad in (None, "app", "quote", "close"):
+        for bad in (None, "app", "roster", "mode", "quote", "close"):
             with self.subTest(bad=bad), tempfile.TemporaryDirectory() as tmp:
                 work = Path(tmp); work.chmod(0o700); (work / "resume-carrier").mkdir(mode=0o700)
                 inventory = b"inert full signed inventory of 5001 leaves"
@@ -308,10 +308,11 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
                 origin.update(inventorySha256=hashlib.sha256(inventory).hexdigest(),runtimeManifestSha256="c"*64)
                 stage = SimpleNamespace(INSTALL_COMPONENT="component",INSTALLATION_INVENTORY_NAME="install-inventory.json",MAX_BYTES=512<<20,
                     observation_inventory_bytes=lambda *a,**k:rows,
-                    install_product_members=lambda *a,**k:{"component":b"container"},
-                    xar_members=lambda *a,**k:{"PackageInfo":b"info","Scripts":b"raw cpio"},package_info=lambda *a,**k:None,
-                    cpio_members=lambda *a,**k:{"input/install-inventory.json":(inventory,0o444),
-                        "input/app/Contents/program":(b"changed" if bad=="app" else app,0o555)})
+                    install_product_members=lambda *a,**k: self.fail("duplicate full product decode"),
+                    cpio_members=lambda *a,**k: self.fail("duplicate CPIO window"))
+                scripts = {"input/app/Contents/program": (b"changed" if bad=="app" else app, 0o444 if bad=="mode" else 0o555)}
+                if bad == "roster": scripts["input/runtime/extra"] = (b"x", 0o444)
+                app_scripts = MappingProxyType(scripts)
                 now=time.monotonic_ns()
                 session=SimpleNamespace(purpose="acquire-restore",package_api=HELPER,fixture_api=FIXTURE,stager=stage,
                     acquisition_result={},installer_entered=False,calls=[],point=lambda:None,origin=origin,
@@ -326,11 +327,11 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
                         entry["closed"]=False;op.errors.append(dict(stage="close",type="OSError"))
                 with patch.dict(sys.modules,{HELPER.__name__:HELPER}),patch.object(HELPER.Operation,"close",closing):
                     if bad:
-                        with self.assertRaises(ValueError): HELPER.candidate_materialize(session, originals, inventory)
-                        if bad in ("app","quote"):self.assertEqual(set(p.name for p in work.iterdir()),{"resume-carrier"})
+                        with self.assertRaises(ValueError): HELPER.candidate_materialize(session, originals, inventory, app_scripts)
+                        if bad in ("app","roster","mode","quote"):self.assertEqual(set(p.name for p in work.iterdir()),{"resume-carrier"})
                         if bad=="close":self.assertTrue((work/"android-helper-prepare-app-absence").exists())
                     else:
-                        HELPER.candidate_materialize(session, originals, inventory)
+                        HELPER.candidate_materialize(session, originals, inventory, app_scripts)
                         self.assertEqual((work/"input/install-inventory.json").read_bytes(),inventory)
                         self.assertEqual((work/"input/app/Contents/program").read_bytes(),app)
                         self.assertEqual((work/"input/app/Contents/program").stat().st_mode&0o777,0o555)
