@@ -26,6 +26,21 @@ checks; a signed package or an available download does not prove them.
 These instructions supplement older downloaded guides; they do not change the
 bytes or verification status of an existing artifact.
 
+## Matched update and removal download
+
+A successful positive-update verification run exports a `-preview-` artifact
+containing two folders: `preview/` has **MobileReleaseKit.dmg**, **README.md** and
+**PREVIEW.json**; `remove-preview/` has **MobileReleaseKit-Remove.dmg**,
+**REMOVE.md** and **REMOVAL.json**. Keep each group together. Read the actual run
+results before use: an upload alone is not acceptance. The update summary uses
+`positive-macos-update-distribution` and identifies the exact build/run.
+
+Use the matching installer to update only the predecessor explicitly supported
+by that build. For removal, follow **REMOVE.md**, then open **Remove.pkg** inside
+the matching removal image with its two signed sidecars beside it. Do not mix
+installation/removal images from different builds. Older three-file candidates
+do not gain an uninstaller merely because this guide describes the newer route.
+
 ## Install and open — no terminal needed
 
 1. Open **MobileReleaseKit.dmg** in Finder.

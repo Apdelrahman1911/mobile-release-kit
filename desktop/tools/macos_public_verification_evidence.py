@@ -23,6 +23,8 @@ import sys
 import time
 
 OUTPUT = "public-verification-evidence.json"
+UPDATE_SCOPE = "positive-macos-update-distribution"
+UPDATE_WORKFLOW = "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-positive-update"
 TARGETS = ("aarch64-apple-darwin", "x86_64-apple-darwin")
 PHASES = (
     "prepare", "verify-before", "verify-after", "sign-vault-helper", "sign-desktop-image",
@@ -1664,10 +1666,15 @@ def project_summary(value, context, removal):
     need(value.get("sourceCommit") == context["source"] and value.get("runId") == context["runId"]
          and value.get("runAttempt") == context["runAttempt"])
     need(type(value.get("schemaVersion")) is int and value["schemaVersion"] == (1 if removal else 2))
+    update = context.get("deliveryPurpose", "legacy-preview") == "positive-update-distribution"
+    if update:
+        need(value.get("scope") == UPDATE_SCOPE and value.get("workflowRef") == UPDATE_WORKFLOW)
+    else:
+        need(value.get("scope") != UPDATE_SCOPE and value.get("workflowRef") != UPDATE_WORKFLOW)
     if removal:
         need(value.get("kind") == "mrk-removal-carrier-preview-v1" and value.get("target") == context["target"])
     else:
-        need(value.get("scope") == "normal-macos-early-preview" and value.get("platform") ==
+        need(value.get("scope") == (UPDATE_SCOPE if update else "normal-macos-early-preview") and value.get("platform") ==
              ("macOS26-arm64" if context["target"] == TARGETS[0] else "macOS26-x86_64"))
     result = {"receiptState": "observed", "sourceTree": hex_value(value.get("sourceTree"), 40)}
     result.update({name: optional(value, name, hex_value) for name in SUMMARY_HASHES if name in value})
@@ -2900,11 +2907,11 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
     need(profile in ("installed", "aqua") and target in TARGETS)
     need(removal_case in ("disabled", "ordinary", "abrupt")
          and (removal_case == "disabled" or profile == "installed"))
-    need(type(delivery_purpose) is str and delivery_purpose in ("legacy-preview", "installed-passive-carrier")
+    need(type(delivery_purpose) is str and delivery_purpose in ("legacy-preview", "installed-passive-carrier", "positive-update-distribution")
          and (delivery_purpose == "legacy-preview" or profile == "installed" and removal_case == "disabled"))
     context = {"profile": profile, "source": hex_value(source, 40), "workflowSource": hex_value(workflow_source, 40),
                "runId": identifier(run_id), "runAttempt": identifier(run_attempt), "target": target,
-               "expectedRemovalCase": removal_case}
+               "expectedRemovalCase": removal_case, "deliveryPurpose": delivery_purpose}
     need(source == workflow_source and len(PHASES) <= 20 and len(STATUS_FILES) <= 100
          and len(set(STATUS_FILES)) == len(STATUS_FILES))
     # All fixed attempts count, including absent originals, before any read.

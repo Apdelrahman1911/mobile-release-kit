@@ -7218,6 +7218,14 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             package=package, descriptor=descriptor, signed=signed, expected_descriptor=descriptor,
             final_package_sha="f" * 64, release_body=release_body, profiles=(profile, service))
         self.assertEqual(TOOL.removal_package_receipt_data(TOOL.canonical(successful), **arguments), successful["removalDistribution"])
+        updated = copy.deepcopy(successful)
+        updated["workflow"] = TOOL._UPDATE_FINAL_IMAGE_WORKFLOW
+        self.assertEqual(TOOL.removal_package_receipt_data(TOOL.canonical(updated),
+            **dict(arguments, expected_workflow=TOOL._UPDATE_FINAL_IMAGE_WORKFLOW)), updated["removalDistribution"])
+        with self.assertRaises(TOOL.Refused): TOOL.removal_package_receipt_data(TOOL.canonical(updated), **arguments)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.removal_package_receipt_data(TOOL.canonical(updated),
+                **dict(arguments, expected_workflow=TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW))
         for mutation in ("old-source", "other-run", "install-phase", "pending", "close", "role", "return-bool", "credential", "context", "false-completion", "image-name", "extra"):
             changed = copy.deepcopy(successful)
             if mutation == "old-source": changed["imageSourceCommit"] = "b" * 40
@@ -8256,6 +8264,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     release_body=release_body, profiles=(state.credentials.producer, state.credentials.service,
                         (state.checkout / module.NOTARY_PROFILE).read_bytes()), remove=True)
                 self.assertEqual(TOOL.final_image_receipt_data(TOOL.canonical(removal), **removal_arguments), removal["finalImage"])
+                updated = copy.deepcopy(removal)
+                updated["workflow"] = TOOL._UPDATE_FINAL_IMAGE_WORKFLOW
+                self.assertEqual(TOOL.final_image_receipt_data(TOOL.canonical(updated),
+                    **dict(removal_arguments, expected_workflow=TOOL._UPDATE_FINAL_IMAGE_WORKFLOW)), updated["finalImage"])
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.final_image_receipt_data(TOOL.canonical(updated), **removal_arguments)
                 for mutation in ("phase", "kind", "request", "owner-key", "detach", "mount-retained", "unknown-close",
                                  "old-eleven", "extra-role", "policy-order", "policy-status-false", "policy-assess-false", "policy-missing"):
                     changed = copy.deepcopy(removal)
@@ -11126,7 +11140,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     getgid=mock.Mock(return_value=20),getegid=mock.Mock(return_value=20))):
                 for phase in expected:
                     self.assertEqual(module.admit(selected,target=target,phase=phase),Path(selected["MRK_MACOS_WORK"]))
-                for final_ref in ("refs/heads/verify/desktop-macos-preview", "refs/heads/verify/desktop-macos-installed"):
+                for final_ref in ("refs/heads/verify/desktop-macos-preview", "refs/heads/verify/desktop-macos-installed", module.UPDATE_REF):
                     final_env = dict(selected, GITHUB_REF=final_ref,
                         GITHUB_WORKFLOW_REF="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@" + final_ref)
                     self.assertEqual(module.admit(final_env,target=target,phase="finalize-image"),
@@ -11139,6 +11153,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     else:
                         self.assertEqual(module.admit(final_env,target=target,phase="finalize-remove-image"),
                                          Path(final_env["MRK_MACOS_WORK"]))
+                    if final_ref == module.UPDATE_REF:
+                        for phase in module.REMOVE_PHASES:
+                            self.assertEqual(module.admit(final_env, target=target, phase=phase), Path(final_env["MRK_MACOS_WORK"]))
+                        for wrong in (dict(final_env, MRK_MACOS_REMOVAL_CASE="abrupt"),
+                                      dict(final_env, MRK_MACOS_PACKAGE_ROLE="installed-shell-observation")):
+                            with self.assertRaises(module.Refused): module.admit(wrong, target=target, phase="finalize-image")
+                        with self.assertRaises(module.Refused): module.admit(final_env, target=target, phase="prepare-removal-observers")
                     for changed in (dict(final_env, GITHUB_REF="refs/heads/unrelated"),
                                     dict(final_env, GITHUB_WORKFLOW_SHA="b" * 40),
                                     dict(final_env, GITHUB_WORKFLOW_REF=final_env["GITHUB_WORKFLOW_REF"] + "-foreign")):
@@ -13292,7 +13313,7 @@ class MacInstalledData(unittest.TestCase):
                 raise AssertionError("string subclass must not be inspected")
             def __hash__(self):
                 raise AssertionError("string subclass must not be hashed")
-        self.assertEqual(len(TOOL.CARRIER_REFUSAL_REASONS), 197)
+        self.assertEqual(len(TOOL.CARRIER_REFUSAL_REASONS), 200)
         self.assertTrue(all(re.fullmatch(r"[a-z0-9-]{1,49}", x) for x in TOOL.CARRIER_REFUSAL_REASONS))
         cli = ["preview", "--installed-passive-carrier", "--work", "/inert/work",
                "--expected-source", "a" * 40, "--output", "/inert/carrier"]
@@ -13321,6 +13342,28 @@ class MacInstalledData(unittest.TestCase):
             self.assertEqual(stderr.getvalue(), annotation)
             self.assertTrue(annotation.isascii())
             self.assertLessEqual(len(annotation), 256)
+        for command, method in (("preview", "preview_command"), ("remove-preview", "remove_preview_command")):
+            for reason in ("update-carrier-ci-context", "update-carrier-credential-status", "update-carrier-installer-action",
+                           "/private/credential=value\n::error::private"):
+                primary = TOOL.Refused(reason)
+                def refuse_update(args):
+                    args._carrier_validation_group = "source-binding"
+                    raise primary
+                update_cli = [command, "--positive-update-carrier", "--work", "/inert/work",
+                    "--expected-source", "a" * 40, "--output", "/inert/carrier"]
+                stderr = io.StringIO()
+                with mock.patch.object(TOOL, method, side_effect=refuse_update), contextlib.redirect_stderr(stderr), \
+                        self.assertRaises(TOOL.Refused) as stopped:
+                    TOOL.main(update_cli)
+                self.assertIs(stopped.exception, primary)
+                token = reason if reason.startswith("update-carrier-") else "other"
+                self.assertEqual(stderr.getvalue(), "::error title=MRK carrier refused::group=source-binding;reason=" + token + "\n")
+            for wrong in (False, 1, StringSubclass("yes")):
+                namespace = TOOL.argparse.Namespace(command=command, positive_update_carrier=wrong,
+                    _carrier_validation_group="source-binding")
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr): TOOL.carrier_refusal_annotation(namespace, primary)
+                self.assertEqual(stderr.getvalue(), "")
         primary = TOOL.Refused("final-image-fields")
         for installed in (False, 1, StringSubclass("yes")):
             namespace = TOOL.argparse.Namespace(command="preview", installed_passive_carrier=installed,
@@ -17828,7 +17871,7 @@ def synthetic_android_support(fixture, *, app_seal=None):
         yield relation
 
 
-def normal_cargo_fixture(target=None, *, role="desktop", checkout=None, build_target="aarch64-apple-darwin"):
+def normal_cargo_fixture(target=None, *, role="desktop", checkout=None, build_target="aarch64-apple-darwin", package_version="0.1.2"):
     # Keep the existing ordinary fixture seam, but bind the real image graph.
     target = target or Path("/synthetic-mrk-preview/cargo-target")
     desktop = checkout / "desktop" if checkout is not None else TOOL.DESKTOP
@@ -17850,7 +17893,7 @@ def normal_cargo_fixture(target=None, *, role="desktop", checkout=None, build_ta
         (desktop / "src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", app_features),
         (desktop / "native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native", native_features),
     ):
-        rows.append({"reason": "compiler-artifact", "package_id": "path+" + directory.as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0"),
+        rows.append({"reason": "compiler-artifact", "package_id": "path+" + directory.as_uri() + "#" + package + ("@" + package_version if package == "mobile-release-kit-desktop" else "@0.1.0"),
             "manifest_path": str(directory / "Cargo.toml"), "features": features,
             "target": {"name": name, "kind": ["lib"], "crate_types": ["lib"],
                        "src_path": str(directory / "src/lib.rs"), "edition": "2021"},
@@ -18886,9 +18929,12 @@ class MacNormalPreviewData(unittest.TestCase):
 
     def preview_fixture(self, build_target="aarch64-apple-darwin"):
         work = Path("/synthetic-mrk-preview")
-        target, binary, rows, body = normal_cargo_fixture(work / "cargo-target", build_target=build_target)
+        package = b"synthetic-package-DATA-not-native-Installer-evidence"
+        _profile, _service, selection, _history, descriptor_data = packaging_fixture(build_target, package=package)
+        target, binary, rows, body = normal_cargo_fixture(work / "cargo-target", build_target=build_target,
+                                                        package_version=selection.package_version)
         messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
-        normal = TOOL.image_cargo_artifact(messages, binary, target, body, "desktop", target=build_target, package_version="0.1.2")
+        normal = TOOL.image_cargo_artifact(messages, binary, target, body, "desktop", target=build_target, package_version=selection.package_version)
         facade = entry_macho_fixture(target=build_target)
         binding = {"source": "a" * 40, "workflowSource": "a" * 40, "tree": "b" * 40,
             "scope": "normal-macos-early-preview", "packageRole": "ordinary-image",
@@ -18897,8 +18943,6 @@ class MacNormalPreviewData(unittest.TestCase):
                     "app/" + TOOL.DESKTOP_IMAGE: {"sha256": "9" * 64}, "app/" + TOOL.RESIDENT_IMAGE: {"sha256": "7" * 64},
                     "app/" + TOOL.ANDROID_HELPER: {"sha256": "8" * 64}, "app/" + TOOL.VAULT_HELPER: {"sha256": "6" * 64},
                     "app/" + TOOL.ANDROID_SERVICE_PLIST: {"sha256": "5" * 64}}
-        package = b"synthetic-package-DATA-not-native-Installer-evidence"
-        _profile, _service, selection, _history, descriptor_data = packaging_fixture(build_target, package=package)
         descriptor, signed, image = TOOL.canonical(descriptor_data) + b"\n", b"not a real signature", b"not a real DMG"
         request, invocation = "1" * 32, "2" * 32
         result = {"schemaVersion": 2, "kind": "maintenance-parent-pending-finalization", "invocation": invocation,
@@ -19001,7 +19045,7 @@ class MacNormalPreviewData(unittest.TestCase):
         values.update({work / name: TOOL.canonical(value) for name, value in documents.items()})
         return work, values, documents, expected, selection
 
-    def actual_workflow_binding(self, target, *, installed, candidate=False):
+    def actual_workflow_binding(self, target, *, installed, candidate=False, update=False):
         """Run only the actual passive producer nodes with synthetic public observations."""
         workflow = (Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()
         marker = '"$MRK_PYTHON" -I -S -B - "$root/source-admission.json" <<\'PY\'\n'
@@ -19015,6 +19059,8 @@ class MacNormalPreviewData(unittest.TestCase):
         refs = {"refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview"}
         if candidate:
             refs.add("refs/heads/verify/desktop-macos-candidate")
+        if update:
+            refs.add("refs/heads/verify/desktop-macos-positive-update")
         selected = [node for node in parsed.body if isinstance(node, ast.If)
                     and isinstance(node.test, ast.Compare) and len(node.test.ops) == 1
                     and isinstance(node.test.ops[0], ast.Eq) and len(node.test.comparators) == 1
@@ -19034,7 +19080,7 @@ class MacNormalPreviewData(unittest.TestCase):
         self.assertLessEqual(len(keys), 64)
         self.assertFalse(any(any(sensitive in key for sensitive in ("PASSWORD", "BASE64", "TOKEN")) for key in keys))
         env = {key: "c" * 64 for key in keys}
-        env.update(GITHUB_REF="refs/heads/verify/desktop-macos-candidate" if candidate else
+        env.update(GITHUB_REF="refs/heads/verify/desktop-macos-positive-update" if update else "refs/heads/verify/desktop-macos-candidate" if candidate else
                    "refs/heads/verify/desktop-macos-installed" if installed else "refs/heads/verify/desktop-macos-preview",
                    GITHUB_SHA="a" * 40, GITHUB_WORKFLOW_SHA="a" * 40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1",
                    MRK_MACOS_PACKAGE_ROLE="ordinary-image", MRK_MACOS_TARGET=target, DEVELOPER_DIR="/synthetic-sdk")
@@ -19045,7 +19091,7 @@ class MacNormalPreviewData(unittest.TestCase):
             exec(compile(program, "actual-passive-workflow-binding", "exec"), namespace)
         binding = namespace["value"]
         self.assertIs(binding["instrumented"], False)
-        self.assertEqual(binding["scope"], "current-macos-candidate" if candidate else
+        self.assertEqual(binding["scope"], TOOL._UPDATE_DISTRIBUTION_SCOPE if update else "current-macos-candidate" if candidate else
                          "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only"
                          if installed else "normal-macos-early-preview")
         self.assertFalse(binding["applicationLaunched"] or binding["fullUIQualified"] or binding["distributionQualified"])
@@ -19150,7 +19196,7 @@ class MacNormalPreviewData(unittest.TestCase):
                     binary = work / "cargo-target" / target / "release/libmrk_desktop_image.dylib"
                     documents["app-result.json"]["desktopImageCargoArtifact"] = TOOL.image_cargo_artifact(
                         (work / "normal-build.jsonl").read_bytes(), binary, work / "cargo-target",
-                        binary.read_bytes(), "desktop", target=target, package_version="0.1.2")
+                        binary.read_bytes(), "desktop", target=target, package_version=selection.package_version)
                     (work / "app-result.json").write_bytes(TOOL.canonical(documents["app-result.json"]))
                     env = {"GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
                         "GITHUB_REF": "refs/heads/verify/desktop-macos-installed",
@@ -19254,6 +19300,115 @@ class MacNormalPreviewData(unittest.TestCase):
         self.assertEqual(diagnostic.getvalue(),
             "::error title=MRK carrier refused::group=source-binding;reason=candidate-carrier-ci-context\n")
 
+    def test_update_export_shell_arguments_failure_and_cleanup_selection(self):
+        # Only /bin/bash and a local printf stub run; no native tool or package.
+        import subprocess
+        import textwrap
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/desktop-macos-installed.yml").read_text()
+        stage = workflow_step(workflow, "Stage only the audited normal early-preview deliverables")
+        script = textwrap.dedent(stage.split("        run: |\n", 1)[1])
+        for target in TOOL.MAC_TARGETS:
+            for route in ("preview", "positive-update"):
+                for failure in (0, 17):
+                    with self.subTest(target=target, route=route, failure=failure), tempfile.TemporaryDirectory(prefix="export with spaces ") as directory:
+                        root = Path(directory); stub = root / "python stub"; log = root / "args"
+                        stub.write_text('#!/bin/bash\nprintf "%s\\0" "$@" >> "$ARGS_LOG"\nprintf "END\\0" >> "$ARGS_LOG"\nexit "$FAILURE"\n')
+                        stub.chmod(0o700)
+                        result = subprocess.run(["/bin/bash", "-c", script], cwd=root, timeout=10,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env={"PATH": "/usr/bin:/bin", "MRK_PYTHON": str(stub), "MRK_MACOS_WORK": str(root),
+                                "MRK_MACOS_TARGET": target, "MRK_EXPECTED_SHA": "a" * 40,
+                                "GITHUB_REF": "refs/heads/verify/desktop-macos-" + route,
+                                "ARGS_LOG": str(log), "FAILURE": str(failure)})
+                        self.assertEqual(result.returncode, failure, result.stderr)
+                        calls = log.read_bytes().split(b"END\0")[:-1]
+                        self.assertEqual(len(calls), 1 if failure else 2)
+                        for command, call in zip(("preview", "remove-preview"), calls):
+                            args = call.decode().rstrip("\0").split("\0")
+                            expected = ["-I", "-S", "-B", "desktop/tools/stage_macos_installed.py", command]
+                            if route == "positive-update": expected.append("--positive-update-carrier")
+                            expected += ["--target", target, "--work", str(root), "--expected-source", "a" * 40,
+                                         "--output", str(root / command)]
+                            self.assertEqual(args, expected)
+                        self.assertEqual(b"Matched installation/removal" in result.stdout, failure == 0)
+        # Exercise only the new roster selection, never destructive cleanup or
+        # a mocked native receipt. Existing path/inode/owner guards remain intact.
+        cleanup = workflow_step(workflow, "Remove only this completed preview build's disposable compiler outputs")
+        code = textwrap.dedent(cleanup.split("<<'PY_CLEAN'\n", 1)[1].split("          PY_CLEAN", 1)[0])
+        tree = ast.parse(code)
+        node = next(n for n in tree.body if isinstance(n, ast.If) and "positive-update" in ast.unparse(n.test))
+        selected = compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), "<cleanup-update-selection>", "exec")
+        for route, binding, expected in (("positive-update", {"scope": TOOL._UPDATE_DISTRIBUTION_SCOPE, "instrumented": False}, ("update-p0-bootstrap", "update-p1-resume")),
+                ("preview", {}, ("saved-checks",)), ("positive-update", {"scope": "normal-macos-early-preview", "instrumented": False}, None),
+                ("positive-update", {"scope": TOOL._UPDATE_DISTRIBUTION_SCOPE, "instrumented": True}, None)):
+            namespace = {"os": SimpleNamespace(environ={"GITHUB_REF": "refs/heads/verify/desktop-macos-" + route}),
+                         "binding": binding, "stems": ("saved-checks",)}
+            if expected is None:
+                with self.assertRaises(ValueError): exec(selected, namespace)
+            else:
+                exec(selected, namespace); self.assertEqual(namespace["stems"], expected)
+
+    def test_positive_update_export_requires_current_update_and_closed_credentials(self):
+        # Reuse the existing inert signed/native fixture; this tests actual exporter
+        # logic, not Mac signatures, Installer, Keychain or update qualification.
+        faults = (None, "wrong-ref", "wrong-event", "wrong-scope", "fixture", "mixed-mode",
+                  "old-workflow", "fresh-install", "package-status", "p0-test", "p0-summary", "p1-test", "p1-summary")
+        for target in TOOL.MAC_TARGETS:
+            for fault in faults:
+                with self.subTest(target=target, fault=fault):
+                    work, values, documents, inventory, selection = self.preview_fixture(target)
+                    documents["source-binding.json"] = self.actual_workflow_binding(target, installed=False, update=True)
+                    observed = documents["installation-observation.json"]
+                    observed["originalInstallerResult"]["action"] = "fresh-install" if fault == "fresh-install" else "update"
+                    documents["android-helper-finalize-image.json"]["workflow"] = (
+                        TOOL._PREVIEW_FINAL_IMAGE_WORKFLOW if fault == "old-workflow" else TOOL._UPDATE_FINAL_IMAGE_WORKFLOW)
+                    if fault == "wrong-scope": documents["source-binding.json"]["scope"] = "normal-macos-early-preview"
+                    if fault == "fixture": documents["source-binding.json"]["instrumented"] = True
+                    values.update({work / name: TOOL.canonical(value) for name, value in documents.items()})
+                    if fault == "package-status": values[work / "package-install.status"] = b"1\n"
+                    for segment in ("p0-bootstrap", "p1-resume"):
+                        for phase in ("test", "summary"):
+                            bad = fault == segment[:2] + "-" + phase
+                            values[work / "normal-ui" / ("update-" + segment + "-" + phase + ".status")] = b"1\n" if bad else b"0\n"
+                    env = {"GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "GITHUB_EVENT_NAME": "push",
+                        "GITHUB_REF": "refs/heads/verify/desktop-macos-positive-update",
+                        "GITHUB_WORKFLOW_REF": TOOL._UPDATE_FINAL_IMAGE_WORKFLOW,
+                        "GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                        "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}
+                    if fault == "wrong-ref": env["GITHUB_REF"] = "refs/heads/verify/desktop-macos-preview"
+                    if fault == "wrong-event": env["GITHUB_EVENT_NAME"] = "workflow_dispatch"
+                    args = SimpleNamespace(target=target, work=work, output=work / "preview", expected_source="a" * 40,
+                                           positive_update_carrier=True, candidate_carrier=fault == "mixed-mode")
+                    with (mock.patch.dict(os.environ, env, clear=True),
+                          mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]),
+                          mock.patch.object(TOOL, "source_build_selection", return_value=selection),
+                          mock.patch.object(TOOL, "observation_inventory", return_value=inventory),
+                          mock.patch.object(TOOL, "write_tree") as output):
+                        if fault is None:
+                            result = TOOL.preview_command(args)
+                            files = output.call_args.args[1]
+                            self.assertEqual(set(files), {"MobileReleaseKit.dmg", "PREVIEW.json", "README.md"})
+                            summary = TOOL.decode(files["PREVIEW.json"][0])
+                            self.assertEqual((summary["scope"], summary["workflowRef"]),
+                                             (TOOL._UPDATE_DISTRIBUTION_SCOPE, TOOL._UPDATE_FINAL_IMAGE_WORKFLOW))
+                            self.assertFalse(summary["productReady"] or summary["distributionQualified"] or summary["fullUIQualified"])
+                            self.assertEqual(result["qualification"], "positive-update-carrier-not-product-qualified")
+                        else:
+                            with self.assertRaises(TOOL.Refused): TOOL.preview_command(args)
+                            output.assert_not_called()
+        # Real argparse selection: explicit mode reaches both existing exporters;
+        # mixed candidate/update mode is rejected before an exporter is invoked.
+        for command, method in (("preview", "preview_command"), ("remove-preview", "remove_preview_command")):
+            argv = [command, "--positive-update-carrier", "--work", "/inert/work", "--expected-source", "a" * 40,
+                    "--output", "/inert/output"]
+            with mock.patch.object(TOOL, method, return_value={}) as action, contextlib.redirect_stdout(io.StringIO()):
+                TOOL.main(argv)
+                self.assertIs(action.call_args.args[0].positive_update_carrier, True)
+            if command == "preview":
+                with mock.patch.object(TOOL, method) as action, contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit): TOOL.main(argv + ["--candidate-carrier"])
+                    action.assert_not_called()
+
     def test_candidate_carrier_checks_actual_workflow_and_original_final_image(self):
         # Real bounded original reads/fresh writes. SOURCE/native observations are
         # deliberately inert DATA ports, not signature, Installer or UI evidence.
@@ -19293,7 +19448,7 @@ class MacNormalPreviewData(unittest.TestCase):
                     binary = work / "cargo-target" / target / "release/libmrk_desktop_image.dylib"
                     documents["app-result.json"]["desktopImageCargoArtifact"] = TOOL.image_cargo_artifact(
                         (work / "normal-build.jsonl").read_bytes(), binary, work / "cargo-target", binary.read_bytes(),
-                        "desktop", target=target, package_version="0.1.2")
+                        "desktop", target=target, package_version=selection.package_version)
                     (work / "app-result.json").write_bytes(TOOL.canonical(documents["app-result.json"]))
                     env = {"GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "GITHUB_EVENT_NAME": "push",
                         "GITHUB_REF": "refs/heads/verify/desktop-macos-candidate",

@@ -3103,6 +3103,21 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         with self.assertRaises(DATA.Refused):
             DATA.project_summary(value, CONTEXT, False)
 
+        # Update exports are not legacy previews; both delivery summaries must
+        # agree with the explicit route and same current source/run/target.
+        update_context = {**CONTEXT, "deliveryPurpose": "positive-update-distribution"}
+        for removal in (False, True):
+            summary = {**value, "platform": "macOS26-arm64", "schemaVersion": 1 if removal else 2,
+                "scope": DATA.UPDATE_SCOPE, "workflowRef": DATA.UPDATE_WORKFLOW,
+                "kind": "mrk-removal-carrier-preview-v1", "target": CONTEXT["target"]}
+            self.assertEqual(DATA.project_summary(summary, update_context, removal)["receiptState"], "observed")
+            self.assertNotIn(SENTINEL, json.dumps(DATA.project_summary(summary, update_context, removal)))
+            with self.assertRaises(DATA.Refused): DATA.project_summary(summary, CONTEXT, removal)
+            for change in ({"workflowRef": "wrong"}, {"scope": "normal-macos-early-preview"},
+                           {"sourceCommit": "7" * 40}, {"runId": "124"}, {"runAttempt": "3"}):
+                with self.subTest(removal=removal, change=change), self.assertRaises(DATA.Refused):
+                    DATA.project_summary({**summary, **change}, update_context, removal)
+
         # The actual readonly project/CLI select exactly one public carrier path.
         # This is DATA correspondence, never a qualified native/product receipt.
         base = {"schemaVersion": 2, "scope": "normal-macos-early-preview", "sourceCommit": CONTEXT["source"],
@@ -3110,7 +3125,12 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             "distributionSha256": "5" * 64, "originalImageFinalizationReturnedZero": True,
             "productReady": False, "guide": SENTINEL, "error": SENTINEL}
         for purpose, selected, other in (("legacy-preview", "preview/PREVIEW.json", "p0-carrier-input/PREVIEW.json"),
-                ("installed-passive-carrier", "p0-carrier-input/PREVIEW.json", "preview/PREVIEW.json")):
+                ("installed-passive-carrier", "p0-carrier-input/PREVIEW.json", "preview/PREVIEW.json"),
+                ("positive-update-distribution", "preview/PREVIEW.json", "p0-carrier-input/PREVIEW.json")):
+            base = {**base, "scope": DATA.UPDATE_SCOPE if purpose == "positive-update-distribution" else "normal-macos-early-preview"}
+            if purpose == "positive-update-distribution": base["workflowRef"] = DATA.UPDATE_WORKFLOW
+            else: base.pop("workflowRef", None)
+            expected_context = {**CONTEXT, "deliveryPurpose": purpose}
             for fault in ("valid", "absent", "foreign", "symlink", "hardlink", "oversized"):
                 with self.subTest(purpose=purpose, fault=fault), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
@@ -3134,18 +3154,22 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                     expected = "observed" if fault == "valid" else "absent" if fault == "absent" else "refused"
                     self.assertEqual(result["deliveries"]["preview"]["receiptState"], expected)
                     if expected == "observed":
-                        self.assertEqual(result["deliveries"]["preview"], DATA.project_summary(base, CONTEXT, False))
+                        self.assertEqual(result["deliveries"]["preview"], DATA.project_summary(base, expected_context, False))
                         self.assertEqual(result["deliveries"]["preview"]["distributionSha256"], "5" * 64)
                     self.assertIs(result["productReady"], False)
                     self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
                     self.assertEqual(other_path.read_bytes(), other_original)
                     for path, original in originals.items():
                         self.assertEqual(path.read_bytes(), original)
+        base = {**base, "scope": "normal-macos-early-preview"}; base.pop("workflowRef", None)
         # The optional suffix is fixed, and old14/16 argument forms stay valid.
         for suffix, profile, expected in (([], "installed", 0),
                 (["--removal-case", "disabled"], "installed", 0),
                 (["--delivery-purpose", "legacy-preview"], "installed", 0),
                 (["--delivery-purpose", "installed-passive-carrier"], "installed", 0),
+                (["--delivery-purpose", "positive-update-distribution"], "installed", 0),
+                (["--delivery-purpose", "positive-update-distribution"], "aqua", 1),
+                (["--removal-case", "ordinary", "--delivery-purpose", "positive-update-distribution"], "installed", 1),
                 (["--removal-case", "disabled", "--delivery-purpose", "installed-passive-carrier"], "installed", 0),
                 (["--delivery-purpose", "installed-passive-carrier"], "aqua", 1),
                 (["--removal-case", "ordinary", "--delivery-purpose", "installed-passive-carrier"], "installed", 1),

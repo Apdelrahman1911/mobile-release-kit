@@ -65,7 +65,7 @@ export const installationLocationHelp: HelpContent = {
   label: 'Application location', requiredness: 'optional', requiredWhen: 'Information only; there is no location to configure.',
   what: 'The protected location used by the macOS Installer for this application.',
   why: 'The app and bundled runtime must remain under the protected installation path.',
-  where: 'Use Show in Finder, or Finder → Go → Go to Folder and enter the displayed location.',
+  where: 'Open the app from Finder → Applications → Mobile Release Kit. Show in Finder reveals the protected app location for troubleshooting, not a folder you need to configure.',
   format: 'A fixed folder location, not a project path. Do not move or copy the app to select another runtime.',
   failure: 'A moved or copied app cannot use this installed runtime. This card describes the layout; it does not check installation integrity or signing.',
 };

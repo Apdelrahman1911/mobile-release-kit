@@ -231,6 +231,9 @@ CARRIER_REFUSAL_GROUPS = frozenset({
     'output-write',
 })
 CARRIER_REFUSAL_REASONS = frozenset({
+    'update-carrier-ci-context',
+    'update-carrier-credential-status',
+    'update-carrier-installer-action',
     'absolute-path-required',
     'ancestor-changed',
     'ancestor-close-unknown',
@@ -436,8 +439,12 @@ def carrier_refusal_annotation(args, error):
     if type(args) is not argparse.Namespace:
         return
     fields = vars(args)
-    if type(fields.get("command")) is not str or fields["command"] != "preview" \
-            or not (fields.get("installed_passive_carrier") is True or fields.get("candidate_carrier") is True):
+    command = fields.get("command")
+    update = fields.get("positive_update_carrier") is True
+    if type(command) is not str or not (
+            command == "preview" and (update or fields.get("installed_passive_carrier") is True
+                                     or fields.get("candidate_carrier") is True)
+            or command == "remove-preview" and update):
         return
     group = fields.get("_carrier_validation_group")
     reason = "other"
@@ -2396,7 +2403,7 @@ def remover_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TAR
 
 
 def removal_package_receipt_data(body, *, selection, binding, package, descriptor, signed, expected_descriptor,
-                                 final_package_sha, release_body, profiles):
+                                 final_package_sha, release_body, profiles, expected_workflow=None):
     """Closed prior Remove emission correspondence. Caller retains original0 separately."""
     selection = selected_build(selection)
     source = packaging_signing_data(*profiles)
@@ -2408,7 +2415,8 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
         "passed", "outerFinalityRequired", "androidServiceAuthenticated", "androidRegisteredCopyQualified", "androidBuildQualified",
         "developerIdOrNotarizationQualified", "productReady", "finalPackageReceiptSha256", "removalDistribution", "directStagerIOPending",
         "cleanupErrors", "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"), "remove-owner-fields")
-    workflow = "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview"
+    workflow = _PREVIEW_FINAL_IMAGE_WORKFLOW if expected_workflow is None else expected_workflow
+    need(workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW), "remove-owner-workflow")
     need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["phase"] == "package-remove"
          and value["target"] == selection.target and value["source"] == value["workflowSource"] == binding["source"]
          and maintenance_hex(value["source"], 40) and value["workflow"] == workflow
@@ -2473,6 +2481,8 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
 _PREVIEW_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview'
 _INSTALLED_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed'
 _CANDIDATE_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-candidate'
+_UPDATE_FINAL_IMAGE_WORKFLOW = 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-positive-update'
+_UPDATE_DISTRIBUTION_SCOPE = 'positive-macos-update-distribution'
 _CANDIDATE_GUIDE = b"""# Mobile Release Kit - unqualified macOS candidate
 
 This temporary engineering candidate is NOT READY for production or public release.
@@ -2533,8 +2543,8 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
     """
     need(type(remove) is bool and type(expected_workflow) is str
          and expected_workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _INSTALLED_FINAL_IMAGE_WORKFLOW,
-                                   _CANDIDATE_FINAL_IMAGE_WORKFLOW)
-         and (not remove or expected_workflow == _PREVIEW_FINAL_IMAGE_WORKFLOW),
+                                   _CANDIDATE_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW)
+         and (not remove or expected_workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW)),
          "final-image-receipt-purpose")
     selection = selected_build(selection)
     release = build_release_data(release_body, target=selection.target)
@@ -2630,11 +2640,13 @@ def preview_command(args, *, prepared=None):
     args._carrier_validation_group = 'source-selection'
     installed = getattr(args, "installed_passive_carrier", False)
     candidate = getattr(args, "candidate_carrier", False)
-    need(type(installed) is bool and type(candidate) is bool and not (installed and candidate), "preview-purpose")
+    update = getattr(args, "positive_update_carrier", False)
+    need(all(type(mode) is bool for mode in (installed, candidate, update))
+         and sum((installed, candidate, update)) <= 1, "preview-purpose")
     selection = source_build_selection(command_target(args))
     need(type(args.expected_source) is str and re.fullmatch(r"[0-9a-f]{40}", args.expected_source),
          "preview-source")
-    workflow = (_CANDIDATE_FINAL_IMAGE_WORKFLOW if candidate else
+    workflow = (_UPDATE_FINAL_IMAGE_WORKFLOW if update else _CANDIDATE_FINAL_IMAGE_WORKFLOW if candidate else
                 _INSTALLED_FINAL_IMAGE_WORKFLOW if installed else _PREVIEW_FINAL_IMAGE_WORKFLOW)
     work = Path(args.work)
     need(work.is_absolute(), "preview-work-absolute")
@@ -2642,7 +2654,7 @@ def preview_command(args, *, prepared=None):
     if prepared is None:
         binding = decode(read(work / "source-binding.json", 65536))
         source = decode(read(work / "source-inventory.json", 1024 * 1024))
-        expected_scope = ("current-macos-candidate" if candidate else
+        expected_scope = (_UPDATE_DISTRIBUTION_SCOPE if update else "current-macos-candidate" if candidate else
                           "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only"
                           if installed else "normal-macos-early-preview")
         need(type(binding) is dict and type(source) is dict
@@ -2657,11 +2669,11 @@ def preview_command(args, *, prepared=None):
         # Exact internal cohort type; no caller manifest, changed ordinary
         # workDirectory flag or cross-source candidate admission.
         from desktop.tools.macos_prepared_package import PreparedBinding
-        need(type(prepared) is PreparedBinding and candidate and not installed, "prepared-preview-purpose")
+        need(type(prepared) is PreparedBinding and candidate and not installed and not update, "prepared-preview-purpose")
         binding, source, app, normal = prepared.preview_inputs(sys.modules[__name__], args)
     need(all(type(binding.get(k)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", binding[k])
              for k in ("runId", "runAttempt")), "preview-run-binding")
-    if installed or candidate:
+    if installed or candidate or update:
         # Finite explicit CI context only; never ambient credential/native authority.
         expected_environment = {
             "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
@@ -2670,10 +2682,15 @@ def preview_command(args, *, prepared=None):
             "GITHUB_SHA": args.expected_source, "GITHUB_WORKFLOW_SHA": args.expected_source,
             "GITHUB_RUN_ID": binding["runId"], "GITHUB_RUN_ATTEMPT": binding["runAttempt"],
         }
-        if candidate:
+        if candidate or update:
             expected_environment["GITHUB_EVENT_NAME"] = "push"
         need(all(os.environ.get(key) == expected for key, expected in expected_environment.items()),
-             "candidate-carrier-ci-context" if candidate else "installed-carrier-ci-context")
+             "candidate-carrier-ci-context" if candidate else "update-carrier-ci-context" if update else "installed-carrier-ci-context")
+    if update:
+        for segment in ("update-p0-bootstrap", "update-p1-resume"):
+            for phase in ("test", "summary"):
+                need(read(work / "normal-ui" / (segment + "-" + phase + ".status"), 4) == b"0\n",
+                     "update-carrier-credential-status")
     args._carrier_validation_group = 'build-products'
     if prepared is None:
         need(read(work / "normal-build.status", 4) == b"0\n"
@@ -2735,6 +2752,8 @@ def preview_command(args, *, prepared=None):
          and observed.get("runtimeManifestSha256") == binding.get("runtimeManifestSha256")
          and observed.get("completedPackageSha256") == distribution.get("packageSha256"), "preview-installation-readback")
     result = maintenance_result_data(canonical(observed.get("originalInstallerResult")) + b"\n", request_id)
+    if update:
+        need(result["action"] == "update", "update-carrier-installer-action")
     need(result["invocation"] == observed.get("invocation"), "preview-current-invocation")
     metadata = observed.get("installationMetadata")
     need(type(metadata) is list and 0 < len(metadata) <= 9 and all(type(row) is dict for row in metadata)
@@ -2824,6 +2843,9 @@ def preview_command(args, *, prepared=None):
     if candidate:
         summary.update(scope="current-macos-candidate", workflowRef=workflow,
                        unexecutedReason="candidate-export-before-independent-ui-verification")
+    if update:
+        summary.update(scope=_UPDATE_DISTRIBUTION_SCOPE, workflowRef=workflow,
+                       unexecutedReason="update-export-is-not-complete-product-qualification")
     if prepared is not None:
         summary["preparedProducer"] = prepared.origin
         summary["candidateProducerJob"] = "prepared-installed-" + selection.target
@@ -2836,13 +2858,18 @@ def preview_command(args, *, prepared=None):
     write_tree(args.output, files)
     return {"schemaVersion": 2, "sourceCommit": args.expected_source, "packageSha256": digest(package),
             "distributionSha256": digest(image), "fileCount": len(files),
-            "qualification": "current-candidate-not-consumer-or-product-qualified" if candidate else
+            "qualification": "positive-update-carrier-not-product-qualified" if update else
+                             "current-candidate-not-consumer-or-product-qualified" if candidate else
                              "installed-passive-carrier-not-consumer-or-product-qualified" if installed else
                              "normal-early-preview-not-launched-or-product-qualified"}
 
 def remove_preview_command(args):
     """Stage only the separately completed Remove carrier; never execute removal."""
-    need(getattr(args, "candidate_carrier", False) is False, "preview-purpose")
+    args._carrier_validation_group = "source-binding"
+    update = getattr(args, "positive_update_carrier", False)
+    need(type(update) is bool and getattr(args, "candidate_carrier", False) is False
+         and getattr(args, "installed_passive_carrier", False) is False, "preview-purpose")
+    workflow = _UPDATE_FINAL_IMAGE_WORKFLOW if update else _PREVIEW_FINAL_IMAGE_WORKFLOW
     selection = source_build_selection(command_target(args))
     need(maintenance_hex(args.expected_source, 40) and Path(args.work).is_absolute(), "remove-preview-source")
     work = Path(args.work)
@@ -2852,10 +2879,26 @@ def remove_preview_command(args):
          and binding.get("source") == source_inventory.get("source") == args.expected_source
          and binding.get("workflowSource") == args.expected_source
          and source_inventory.get("tree") == binding.get("tree") and maintenance_hex(source_inventory.get("tree"), 40)
-         and binding.get("scope") == "normal-macos-early-preview" and binding.get("instrumented") is False
+         and binding.get("scope") == (_UPDATE_DISTRIBUTION_SCOPE if update else "normal-macos-early-preview")
+         and binding.get("instrumented") is False
          and binding.get("packageRole") == "ordinary-image", "remove-preview-source-binding")
     need(all(type(binding.get(k)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", binding[k])
              for k in ("runId", "runAttempt")), "remove-preview-run-binding")
+    if update:
+        expected_environment = {"GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
+            "GITHUB_REF": workflow.split("@", 1)[1], "GITHUB_WORKFLOW_REF": workflow,
+            "GITHUB_SHA": args.expected_source, "GITHUB_WORKFLOW_SHA": args.expected_source,
+            "GITHUB_RUN_ID": binding["runId"], "GITHUB_RUN_ATTEMPT": binding["runAttempt"], "GITHUB_EVENT_NAME": "push"}
+        need(all(os.environ.get(key) == value for key, value in expected_environment.items()), "update-carrier-ci-context")
+        for segment in ("update-p0-bootstrap", "update-p1-resume"):
+            for phase in ("test", "summary"):
+                need(read(work / "normal-ui" / (segment + "-" + phase + ".status"), 4) == b"0\n",
+                     "update-carrier-credential-status")
+        args._carrier_validation_group = "installation-readback"
+        installed_observation = decode(read(work / "installation-observation.json", INSTALLER_RESULT_BYTES))
+        result = maintenance_result_data(canonical(installed_observation.get("originalInstallerResult")) + b"\n",
+                                        installed_observation.get("requestId"))
+        need(result["action"] == "update", "update-carrier-installer-action")
     for name in ("remove-package-finalization.status", "package-remove.status", "remove-image-finalization.status"):
         need(read(work / name, 4) == b"0\n", "remove-preview-original-statuses")
     package = read(work / "remove-package-final/Remove.pkg", MAX_BYTES)
@@ -2880,7 +2923,8 @@ def remove_preview_command(args):
     final_package_body = read(work / "android-helper-finalize-remove-package.json", 16384)
     distribution = removal_package_receipt_data(owner_body, selection=selection, binding=binding,
         package=package, descriptor=descriptor, signed=signed, expected_descriptor=expected,
-        final_package_sha=digest(final_package_body), release_body=release_body, profiles=(producer_profile, service_profile))
+        final_package_sha=digest(final_package_body), release_body=release_body, profiles=(producer_profile, service_profile),
+        expected_workflow=workflow)
     original_image = read(work / "remove-distribution/MobileReleaseKit-Remove.dmg", MAX_BYTES)
     need(distribution["userImage"] == {"file": "MobileReleaseKit-Remove.dmg", "bytes": len(original_image), "sha256": digest(original_image)},
          "remove-preview-original-image")
@@ -2889,7 +2933,8 @@ def remove_preview_command(args):
     final = final_image_receipt_data(receipt_body, selection=selection, binding=binding, request=None,
         package=package, descriptor=descriptor, signed=signed, original_image=distribution["userImage"], package_owner=owner_body,
         final_package=final_package_body, release_body=release_body,
-        profiles=(producer_profile, service_profile, read(DESKTOP / "packaging/macos-notary-service.json", 1024)), remove=True)
+        profiles=(producer_profile, service_profile, read(DESKTOP / "packaging/macos-notary-service.json", 1024)), remove=True,
+        expected_workflow=workflow)
     image = read(work / "remove-distribution-final/MobileReleaseKit-Remove.dmg", MAX_BYTES)
     need(len(image) == final["imageBytes"] and digest(image) == final["imageSha256"], "remove-preview-final-image")
     summary = {"schemaVersion": 1, "kind": "mrk-removal-carrier-preview-v1", "sourceCommit": args.expected_source,
@@ -2903,6 +2948,8 @@ def remove_preview_command(args):
         "status": "packaged-and-image-verified", "removalExecuted": False, "installedAppLaunchedByRemovalRoute": False,
         "initialRemovalQualified": False, "interruptedRemovalQualified": False, "distributionQualified": False, "productReady": False}
     guide = read(DESKTOP / "packaging/macos-removal.md", 32768)
+    if update:
+        summary.update(scope=_UPDATE_DISTRIBUTION_SCOPE, workflowRef=workflow)
     write_tree(args.output, {"MobileReleaseKit-Remove.dmg": (image, 0o444), "REMOVE.md": (guide, 0o444),
                             "REMOVAL.json": (canonical(summary) + b"\n", 0o444)})
     return {"schemaVersion": 1, "sourceCommit": args.expected_source, "distributionSha256": digest(image), "fileCount": 3,
@@ -7207,10 +7254,14 @@ def main(argv=None):
                          help="Only closed installed-verification image+descriptor; not preview/removal/publication authority")
     carrier.add_argument("--candidate-carrier", action="store_true",
                         help="Only the fixed candidate build/install/final-image carrier; no UI/removal/product qualification")
+    carrier.add_argument("--positive-update-carrier", action="store_true",
+                         help="Only the finalized ordinary P1 update delivery; not product or public-release approval")
     preview.add_argument("--work", required=True, type=Path)
     preview.add_argument("--expected-source", required=True)
     preview.add_argument("--output", required=True, type=Path)
     remove_preview = commands.add_parser("remove-preview")
+    remove_preview.add_argument("--positive-update-carrier", action="store_true",
+                                help="Only the matching ordinary P1 removal delivery; never execute removal")
     remove_preview.add_argument("--work", required=True, type=Path)
     remove_preview.add_argument("--expected-source", required=True)
     remove_preview.add_argument("--output", required=True, type=Path)

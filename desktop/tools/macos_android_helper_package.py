@@ -4921,7 +4921,8 @@ class Operation:
         distribution = self.stager.removal_package_receipt_data(owner_body, selection=selection, binding=binding,
             package=package, descriptor=descriptor, signed=signed, expected_descriptor=expected,
             final_package_sha=self.receipt["finalPackageReceiptSha256"], release_body=self.read(self.release_entry),
-            profiles=(self.producer_profile, self.service_profile))
+            profiles=(self.producer_profile, self.service_profile),
+            expected_workflow=self.environment["GITHUB_WORKFLOW_REF"])
         image_root = self.directory(self.work_entry, self.image_directory, "final-removal-distribution")
         need(os.listdir(image_root["fd"]) == [self.image_filename], "final-removal-image-roster")
         self.final_image_roots.append((image_root, {self.image_filename}))
@@ -9756,7 +9757,9 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
                          + (NOTARY_KEY_VARIABLE,)), "same-package-fixed-purpose")
     if ref == UPDATE_REF:
         need(scope == "disabled" and phase in APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer",
-             "finalize-package", "package-install", UPDATE_PHASE), "update-fixed-native-route")
+             "finalize-package", "package-install", UPDATE_PHASE, "finalize-image") + REMOVE_PHASES, "update-fixed-native-route")
+        need(environment.get("MRK_MACOS_REMOVAL_CASE", "disabled") == "disabled"
+             and environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image", "update-ordinary-package-only")
     if phase == UPDATE_PHASE:
         need(ref == UPDATE_REF and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
              + (NOTARY_KEY_VARIABLE,)), "update-fixed-credential-free-baseline")
@@ -9776,10 +9779,10 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     elif phase in REMOVAL_OWNER_PHASES:
         raise Refused("removal-fixture-fixed-ref-only")
     if phase == "finalize-image":
-        need(ref in ("refs/heads/verify/desktop-macos-preview", "refs/heads/verify/desktop-macos-installed", CANDIDATE_REF),
+        need(ref in ("refs/heads/verify/desktop-macos-preview", "refs/heads/verify/desktop-macos-installed", CANDIDATE_REF, UPDATE_REF),
              "final-image-preview-ref-only")
     elif (phase in FINAL_IMAGE_PHASES or phase in REMOVE_PHASES) and ref != REMOVAL_REF:
-        need(ref == "refs/heads/verify/desktop-macos-preview", "final-image-preview-ref-only")
+        need(ref in ("refs/heads/verify/desktop-macos-preview", UPDATE_REF), "final-image-preview-ref-only")
     support_phase = phase in SUPPORT_PHASES
     if support_phase or ref == SUPPORT_REF:
         need(support_phase and ref == SUPPORT_REF and target == ARM_TARGET
