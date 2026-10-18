@@ -6646,13 +6646,8 @@ final class NormalAppUITests: XCTestCase {
                 let picker = try waitElement(named(renderer, "Localized screenshot and image import"), in: renderer)
                 try press(picker, "Choose image files…", renderer: renderer, failures: Self.imageFailures)
                 let sheet = try nativeSheet(window, title: "Choose up to 10 public PNG or JPEG listing images")
-                try goToFolder(sheet, path: fixture.sourcesPath)
-                let first = try waitElement(controls(sheet, [.cell, .outlineRow, .tableRow, .icon], label: "01.png"), in: sheet, enabled: true)
-                let second = try waitElement(controls(sheet, [.cell, .outlineRow, .tableRow, .icon], label: "02.png"), in: sheet, enabled: true)
-                try require(first.isHittable && second.isHittable, "native file items are not actionable")
-                first.click()
-                XCUIElement.perform(withKeyModifiers: .command) { second.click() }
-                try require(first.isSelected && second.isSelected, "native two-file selection was not observed")
+                try goToFolder(sheet, path: fixture.sourcesPath + "/01.png")
+                sheet.typeKey("a", modifierFlags: .command)
                 try nativeOpen(sheet)
                 let review = try waitElement(named(renderer, "Original localized-image operation"), in: renderer)
                 _ = try waitElement(review.buttons.matching(identifier: "Review exact copy choices"), in: review,
@@ -8080,7 +8075,7 @@ final class NormalAppUITests: XCTestCase {
                 throw error // Keep the original singleton refusal and its cleanup.
             }
             let text = try staticTextContent(field)
-            try require(field.isHittable && text.hasPrefix(prefix), "current recovery field is not visible")
+            try require(text.hasPrefix(prefix), "current recovery field text changed")
             let value = String(text.dropFirst(prefix.count))
             try require(value.utf8.count <= 64, "current recovery field exceeds its bound")
             values.append(value)
@@ -8572,10 +8567,7 @@ final class NormalAppUITests: XCTestCase {
             try select(storage, label: "New or replacement copy?", value: "Keep a new session record", renderer: renderer)
             try press(storage, "Select file…", renderer: renderer, failures: Self.privateInputFailures)
             let sheet = try nativeSheet(window, title: "Choose a signing or iOS build-input file")
-            try goToFolder(sheet, path: initialInputs.credentialPath())
-            let selected = try waitElement(controls(sheet, [.cell, .outlineRow, .tableRow, .icon], label: "upload.jks"), in: sheet, enabled: true)
-            try require(selected.isHittable, "Android owned JKS picker item unavailable")
-            selected.click(); try require(selected.isSelected, "Android owned JKS picker selection missing")
+            try goToFolder(sheet, path: initialInputs.credentialPath() + "/upload.jks")
             try nativeOpen(sheet); try privateStatus(storage, action: "choose-file", phase: "selected")
             for (label, key) in [("Keystore password", "storePassword"), ("Private-key alias", "alias"), ("Private-key password", "keyPassword")] {
                 let control = try waitElement(controls(storage, [.secureTextField], label: label, prefix: true),

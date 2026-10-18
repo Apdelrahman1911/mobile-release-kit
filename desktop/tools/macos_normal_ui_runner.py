@@ -829,10 +829,13 @@ class PhaseClock:
 
 
 def original_command(value, argv, limit):
-    need(type(value) is subprocess.CompletedProcess and type(value.args) is list and value.args == argv
-         and type(value.returncode) is int and 0 <= value.returncode <= 255
-         and type(value.stdout) is bytes and type(value.stderr) is bytes
-         and len(value.stdout) + len(value.stderr) <= limit, "normal-original-command")
+    # Separate guards keep the same contract and let existing source-site
+    # diagnostics identify a refusal without exporting command or output data.
+    need(type(value) is subprocess.CompletedProcess, "normal-original-command")
+    need(type(value.args) is list and value.args == argv, "normal-original-command")
+    need(type(value.returncode) is int and 0 <= value.returncode <= 255, "normal-original-command")
+    need(type(value.stdout) is bytes and type(value.stderr) is bytes, "normal-original-command")
+    need(len(value.stdout) + len(value.stderr) <= limit, "normal-original-command")
     return value
 
 
@@ -4647,11 +4650,13 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                                                 b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages",
                                                 b"testSyntheticProjectAndroidSourceSelection")
                                             or selection == IOS_PENDING_RESULT and match.group(3) == IOS_PENDING_METHOD.encode("ascii")
+                                            or selection == "release-evidence-test.xcresult" and match.group(3) == b"testSyntheticProjectSavedReleaseEvidence"
                                             or selection == "persistence-test.xcresult" and match.group(3) == b"testSyntheticPersistentCredentials"
                                             or selection == "saved-checks-test.xcresult" and match.group(3) in (
                                                 b"testSyntheticProjectSavedOfflineChecks", b"testSyntheticProjectEmptyBuildInputInspection"))):
                                         stages = SAVED_DIAGNOSTIC_STAGES[selection][1] if selection in (
-                                            "persistence-test.xcresult", "saved-checks-test.xcresult", IOS_PENDING_RESULT) else ()
+                                            "persistence-test.xcresult", "saved-checks-test.xcresult", IOS_PENDING_RESULT,
+                                            "release-evidence-test.xcresult") else ()
                                         if selection == "saved-checks-test.xcresult":
                                             prefix = "offline-" if match.group(3) == b"testSyntheticProjectSavedOfflineChecks" else "recovery-idle-"
                                             stages = tuple(stage for stage in stages if stage.startswith(prefix))

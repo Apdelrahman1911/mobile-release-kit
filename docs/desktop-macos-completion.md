@@ -2,6 +2,44 @@
 
 Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.**
 
+### 2026-10-18: configuration fixture, native selection and focused follow-up
+
+The actual core regression reproduces the bundled configuration expectation bug:
+Rust `serde_json::Value` sends sorted keys; the Python serializer preserves that
+wire order. Only the expected config payload was corrected, with identical values
+and length. Original configuration, unrelated files and exact native readback
+checks are preserved. Old fixture failed; corrected actual capture/prepare/apply
+method passed, as did the remaining fixture-resource method. Obsolete fixture
+whole-file hash/length assertions were removed, not replaced with new hashes.
+
+Native file selection now uses the existing full owned path for Android JKS and
+standard Select All for the two owned public images. Native focus/selection must
+still be verified; both image digests, actual two-source count, consent and exact
+copy/readback remain required. Pending-iOS passive text observations no longer
+require a mouse hit point; exact scoped original content, identity, session,
+operation pairs and actual action/consent checks are unchanged.
+
+`39145392466/1 @eaa7ea89` is still running. Pending iOS passed its complete
+inspection stage before failing a compound passive-field predicate during account
+recovery. Saved evidence passed its original-document observation and then failed
+shared navigation. Neither is a complete journey pass. Persistence stopped at the
+normal runner's compound original-command check, not an established P12 failure.
+Android and saved checks also failed and are being investigated separately.
+
+The original-command predicate is now split into identical sequential checks so
+existing source-site diagnostics can identify the failed boundary. Saved evidence
+uses the existing closed caught-condition decoder; no new schema, raw logs or
+success authority. Two combined focused methods passed (0.677s), including return
+contract boundaries and failure-diagnostic privacy. Independent plan/actual reviews
+accepted all changes. Four distinct local methods passed across this batch; Linux
+is not native Swift or installed-Mac evidence. All local callers are joined and
+scratch projections removed.
+
+Next scope is four ARM rows only: project/config/images, credentials, pending iOS,
+and saved evidence. Existing Restore and unsigned-iOS jobs continue; no duplicate
+of those jobs or renewed app signing/notarization. Android/checks await a justified
+correction. Signed `fcb1aa46` is unchanged. Main/public release remain untouched.
+
 ### 2026-10-18: Restore readback integration and native UI follow-on
 
 `39142153087/1 @a602c26a`: Restore helper build, protected baseline completion,

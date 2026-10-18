@@ -140,15 +140,11 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertTrue(all(len(artifact.findall(ns + "sha256")) == 1
                             and re.fullmatch(r"[0-9a-f]{64}", artifact.find(ns + "sha256").get("value", ""))
                             for artifact in artifacts))
-        # Both old bundled JSON fixtures are unchanged, not repackaged with a
-        # larger decoder or a base64 copy of this XML.
-        for filename, length, expected in (
-            ("normal-project-v1.json", 19560, "ea9b004f0026c053bc1a12607cc70bd0a6f7e07afe9f33cf2a17506de62d512c"),
-            ("normal-persistence-v1.json", 10690, "99965739ae4dedf7de4dbc4c20d519eeea31e7a7eaab59484c5969f8cb03cce4"),
-        ):
+        # Both bundled JSON fixtures remain within the original decoder bounds,
+        # without a base64 copy of this separately admitted XML.
+        for filename in ("normal-project-v1.json", "normal-persistence-v1.json"):
             with self.subTest(fixture=filename):
                 raw = (fixtures / filename).read_bytes()
-                self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (length, expected))
                 self.assertLessEqual(len(raw), 64 * 1024)
                 spec = json.loads(raw)
                 values = [*spec["files"].values(), *[value for stage in spec["stages"].values() for value in stage.values()]]
@@ -2197,11 +2193,16 @@ class NormalPhaseDataTests(unittest.TestCase):
         argv = ["/usr/bin/xcodebuild", "-version"]
         original = subprocess.CompletedProcess(argv, 65, b"ordinary original", b"ordinary stderr")
         self.assertIs(MODULE.original_command(original, argv, 4096), original)
+        at_limit = subprocess.CompletedProcess(argv, 0, b"x" * 4095, b"x")
+        self.assertIs(MODULE.original_command(at_limit, argv, 4096), at_limit)
         for changed in (SimpleNamespace(args=argv, returncode=0, stdout=b"", stderr=b""),
                         subprocess.CompletedProcess(tuple(argv), 0, b"", b""),
+                        subprocess.CompletedProcess(["different-command"], 0, b"", b""),
                         subprocess.CompletedProcess(argv, True, b"", b""),
                         subprocess.CompletedProcess(argv, -1, b"", b""),
+                        subprocess.CompletedProcess(argv, 256, b"", b""),
                         subprocess.CompletedProcess(argv, 0, "text", b""),
+                        subprocess.CompletedProcess(argv, 0, b"", "text"),
                         subprocess.CompletedProcess(argv, 0, b"x" * 4096, b"x")):
             with self.assertRaises(MODULE.Refused):
                 MODULE.original_command(changed, argv, 4096)
@@ -4218,13 +4219,15 @@ class NormalPhaseDataTests(unittest.TestCase):
             (b"static text snapshot tree exceeds its bound", "static-text-tree"),
             (b"static text observation changed during readback", "static-text-changed"),
         )
-        for method in (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages"):
+        for method, result in ((b"testSyntheticProjectPathFields", selected),
+                (b"testSyntheticProjectLocalEditsAndImages", selected),
+                (b"testSyntheticProjectSavedReleaseEvidence", "release-evidence-test.xcresult")):
             for reason, code in reasons:
                 for prefix in (b'caught error: ', b'failed: caught error: '):
                     for quote in (b'"', b'\\"'):
                         message = prefix + b'"condition(' + quote + reason + quote + b')"'
                         raw = site.replace(b"testSyntheticProjectPathFields", method) + message + b"\n"
-                        value = classify(raw)
+                        value = classify(raw, selection=result)
                         self.assertEqual(value["xctestIssues"][0]["condition"], code)
                         self.assertEqual(value["originalReturncode"], 65)
                         self.assertLessEqual(len(MODULE.encoded(value)) + 1, 4096)
@@ -4240,6 +4243,22 @@ class NormalPhaseDataTests(unittest.TestCase):
                 (exact[:-1] + b"x" * 4096 + b"\n", "test", selected)):
             self.assertTrue(all("condition" not in row
                 for row in classify(raw, phase=phase, selection=selection).get("xctestIssues", [])))
+
+        saved_selection = "release-evidence-test.xcresult"
+        saved_site = site.replace(b"testSyntheticProjectPathFields", b"testSyntheticProjectSavedReleaseEvidence")
+        saved_stages = ("evidence-launch", "evidence-fixture", "evidence-project-open", "evidence-real-picker",
+                        "evidence-original-observation", "evidence-shared-navigation", "evidence-stage-and-cancel", "evidence-readback-and-quit")
+        for stage in saved_stages:
+            raw = saved_site + b'caught error: "condition(\\"owned UI did not dismiss in ' + stage.encode() + b'\\")"\n'
+            self.assertEqual(classify(raw, selection=saved_selection)["xctestIssues"][0]["condition"], "ui-not-dismissed")
+        for bad in (raw[:-1], raw[:-1] + b"x" * 4097 + b"\n", raw.replace(stage.encode(), b"persistence-launch"),
+                raw.replace(stage.encode(), private), raw.replace(stage.encode(), stage.encode() + private),
+                raw[:-1] + private + b"\n", raw.replace(b"SavedReleaseEvidence", b"PathFields")):
+            value = classify(bad, selection=saved_selection)
+            self.assertTrue(all("condition" not in row for row in value.get("xctestIssues", [])))
+            self.assertNotIn(private, MODULE.encoded(value))
+        for phase, result in (("summary", saved_selection), ("test", "project-test.xcresult"), ("test", "saved-version-recovery-test.xcresult")):
+            self.assertTrue(all("condition" not in row for row in classify(raw, phase=phase, selection=result).get("xctestIssues", [])))
 
         pending_site = site.replace(b"testSyntheticProjectPathFields", MODULE.IOS_PENDING_METHOD.encode("ascii"))
         for reason, code in reasons + ((b"current account session absent or ambiguous", "account-session-unavailable"),):

@@ -8,6 +8,7 @@ Independent approval of exact source/check commands is required before running.
 """
 from __future__ import annotations
 
+import base64
 import builtins
 import copy
 import hashlib
@@ -344,6 +345,38 @@ class ConfigEditTests(unittest.TestCase):
             self.assertEqual(plan.view["ignoreAdditions"], [])
             self.assertEqual(edit.apply_config_edit(lease, plan).effect, "committed")
             self.assertEqual([payload for _, payload in lease.applies[0]], [serialize_config_data(after), None])
+
+        # The bundled native journey is public DATA, read before the no-IO guard.
+        fixture_path = (Path(__file__).resolve().parents[2] / "desktop/native/macos-normal-ui/"
+                        "MRKNormalAppUITests/Fixtures/normal-project-v1.json")
+        fixture = json.loads(fixture_path.read_bytes())
+        originals = {path: base64.b64decode(value, validate=True) for path, value in fixture["files"].items()}
+        expected = {path: base64.b64decode(value, validate=True)
+                    for path, value in fixture["stages"]["config"].items()}
+        config_path, ignore_path = "project/" + edit.CONFIG_PATH, "project/" + edit.IGNORE_PATH
+        original_config, original_ignore = originals[config_path], originals[ignore_path]
+        proposed = json.loads(original_config)
+        proposed["source"]["candidateBranch"] = "qa-candidate"
+        proposed["metadata"]["androidLocales"].append("fr-FR")
+        # Native serde_json::Value sends recursively sorted object keys. Model
+        # that wire order, not production serialization of the expected fixture.
+        wire_draft = json.loads(json.dumps(proposed, sort_keys=True))
+        self.assertEqual(set(expected), {config_path, ignore_path})
+        with inert_native():
+            lease = InertLease(original_config, original_ignore, release_absent=False)
+            originals_before = lease.originals
+            _, plan = prepare(lease, wire_draft)
+            self.assertEqual([slot["action"] for slot in plan.view["files"]], ["replace", "append"])
+            self.assertTrue(plan.view["rewritesConfigFormatting"])
+            self.assertEqual(plan.view["ignoreAdditions"], list(IGNORE_LINES))
+            self.assertEqual(edit.apply_config_edit(lease, plan),
+                             edit.CoreEditOutcome("committed", "clean", "settled", "none"))
+            self.assertEqual([(item.path, payload) for item, payload in lease.applies[0]],
+                             [(edit.CONFIG_PATH, expected[config_path]), (edit.IGNORE_PATH, expected[ignore_path])])
+            self.assertEqual([item.data for item, _ in lease.applies[0]], [original_config, original_ignore])
+            self.assertIs(lease.originals, originals_before)
+            self.assertEqual(lease.closed, [0, 1, 2])
+            self.assertFalse(lease.active)
 
     def test_config_noop_can_still_have_a_reviewed_ignore_append(self):
         ignored = b"# retained\r\n/.mobile-release/\r\n"
