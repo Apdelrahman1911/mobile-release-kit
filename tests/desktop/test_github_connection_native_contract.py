@@ -134,6 +134,13 @@ class GitHubNativeWiringTests(unittest.TestCase):
         manifest = section(build, "const COMMANDS: &[&str] = &[", "];").split('"')[1::2]
         self.assertTrue(manifest)
         self.assertEqual(len(manifest), len(set(manifest)))
+        # Checking only manifest against grants misses a command omitted from
+        # both. Every registered main-window command needs its explicit grant;
+        # otherwise startup Status fails before the native owner is reached.
+        registered = [command.strip() for command in handlers.split(",") if command.strip()]
+        self.assertTrue(all(command.isascii() and command.isidentifier() for command in registered))
+        self.assertEqual(len(registered), len(set(registered)))
+        self.assertEqual(set(manifest), set(registered))
         expected = {"allow-" + command.replace("_", "-") for command in manifest}
         expected.update(("core:event:allow-listen", "core:event:allow-unlisten"))
         self.assertEqual(len(capability["permissions"]), len(set(capability["permissions"])))
