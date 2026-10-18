@@ -4,6 +4,28 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
+Consumer `39129874451/1` at `4fc7c242` is complete: both ARM UI jobs failed
+after successful installation and harness compilation. Ordinary configuration
+advanced past Candidate branch editing to the Android locales lookup. That
+lookup now selects the actual list group, not its same-named child label.
+Distinct plan and implementation reviews accepted the one-line correction.
+
+Pending iOS again failed the inspection checkbox lookup. A failure-only snapshot
+of that exact review now reports bounded role/name-channel/value counts, never
+private text. The existing original wait and consent criteria are unchanged.
+Android's remaining text-wait failure now reports its original caller line while
+propagating the same error. These diagnostics are independently reviewed, not
+claimed fixes. The JDK picker already supports package directories and both
+`.jdk` and `Contents/Home` roots; no folder-picker change is justified.
+The composed existing privacy regression passed locally (one method, 0.026s,
+zero skips, nonroot/networkless). Its three-file projection was removed; this
+does not substitute for Swift compilation or the actual native journeys.
+
+The next native batch runs ordinary UI, pending-iOS and independent saved-document
+journeys on separate ARM runners, reusing the same signed app. Restore-only
+`39130430795/1` at `29eaef82` continues independently; no duplicate Restore or
+application signing run is requested.
+
 The Restore observer now retains actual positive write progress and compares
 restored raw flags with precisely PRE plus XNU's documented `FWASWRITTEN` bit
 after a positive write. Every other bit must still match; there is no blanket

@@ -22,7 +22,19 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            mode: restore
+            mode: ordinary-ui
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - target: aarch64-apple-darwin
+            mode: ordinary-ios-pending-ui
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - target: aarch64-apple-darwin
+            mode: ordinary-saved-ui
             runner: macos-26
             python-architecture: arm64
             rust-version: 1.98.1
@@ -334,8 +346,9 @@ jobs:
           unset GITHUB_TOKEN GH_TOKEN
           # Each existing helper keeps its original inner and outer deadlines;
           # this containing step/job does not grant a new native clock. Only the
-          # nonshipping XCTest harness builds, once, from the actual candidate
-          # checkout. Application/harness source are never relabeled as helper.
+          # nonshipping XCTest harness builds once from the current helper when
+          # it differs from the candidate. The installed application retains its
+          # actual candidate source; both identities remain explicit.
           case "$MRK_CANDIDATE_MODE" in
             ordinary-ui) cohort=() ;;
             ordinary-entry-ui) cohort=(--entry) ;;

@@ -6155,6 +6155,64 @@ class PanelTopologyDiagnosticTests(unittest.TestCase):
             channels.replace(b'=v3;',b'=v2;'),valid.replace(b'=v2;',b'=v3;')):
             self.assertEqual(MODULE.recovery_field_diagnostics(bad,b''),dict(state='refused',sample=None))
         self.assertEqual(MODULE.recovery_field_diagnostics(b'',channels),dict(state='refused',sample=None))
+        # Pending consent samples expose only fixed-caption counts from one
+        # failed original wait. No native names, values or raw messages escape.
+        consent_keys=("matches","children","nodes","checkboxes","enabled","identifier","title","label","value",
+                      "placeholder","whitespace","nonCheckboxName","unchecked","checked","otherValue")
+        consent=(b'MRK_NORMAL_RECOVERY_CONSENT=v1;phase=inspection;sample=post-wait;waiter=timed-out;rootRole=group;'
+                 +b';'.join(key.encode()+b'='+str(i%6).encode() for i,key in enumerate(consent_keys))+b';nonAtomic=1\n')
+        for phase in (b'inspection',b'account'):
+            for role in (b'group',b'static-text',b'checkbox',b'other'):
+                body=consent.replace(b'phase=inspection',b'phase='+phase).replace(b'rootRole=group',b'rootRole='+role)
+                original=subprocess.CompletedProcess([],65,channels+body+private,b'private stderr')
+                observed=MODULE.normal_failure_diagnostics('test',MODULE.IOS_PENDING_RESULT,original)
+                expected=dict(zip(consent_keys,(i%6 for i in range(len(consent_keys)))),phase=phase.decode(),waiter='timed-out',
+                    rootRole=role.decode(),timing='post-wait',countsCappedAt=5,nonAtomic=True,source='single-review-snapshot',hittability='not-observed')
+                self.assertEqual(observed['recoveryConsent'],dict(state='observed',sample=expected))
+                self.assertEqual(observed['originalReturncode'],65)
+                self.assertLessEqual(len(MODULE.encoded(observed))+1,4096)
+                self.assertNotIn(b'private',MODULE.encoded(observed));self.assertNotIn(b'PRIVATE',MODULE.encoded(observed))
+        for bad in (consent+consent,consent[:-1],b'prefix '+consent,consent.replace(b'group',b'PRIVATE'),
+            consent.replace(b'phase=inspection',b'phase=unknown'),consent.replace(b'matches=0',b'matches=6'),
+            consent.replace(b';otherValue=2',b''),consent.replace(b'nonAtomic=1',b'nonAtomic=0'),
+            consent.replace(b';sample=post-wait',b';sample=pre-wait'),consent.replace(b'timed-out',b'unknown'),
+            consent.replace(b';checked=1',b';checked=private-value')):
+            value=MODULE.normal_failure_diagnostics('test',MODULE.IOS_PENDING_RESULT,subprocess.CompletedProcess([],65,bad+private,b''))
+            self.assertEqual(value['recoveryConsent'],dict(state='refused',sample=None))
+            self.assertTrue(value['findingsTruncated']);self.assertEqual(value['originalReturncode'],65)
+            self.assertNotIn(b'PRIVATE',MODULE.encoded(value));self.assertNotIn(b'private-value',MODULE.encoded(value))
+        self.assertEqual(MODULE.recovery_consent_diagnostics(b'',consent),dict(state='refused',sample=None))
+        self.assertEqual(MODULE.recovery_consent_diagnostics(private,b''),dict(state='absent',sample=None))
+        with self.assertRaises(MODULE.Refused): MODULE.recovery_consent_diagnostics(b'x'*(1024*1024+1),b'')
+        for phase,selected in (('test','project-test.xcresult'),('test','diagnostics-test.xcresult'),('summary',MODULE.IOS_PENDING_RESULT)):
+            value=MODULE.normal_failure_diagnostics(phase,selected,subprocess.CompletedProcess([],65,consent,b''))
+            self.assertNotIn('recoveryConsent',value)
+        encode_consent=MODULE.encoded
+        with patch.object(MODULE,'encoded',side_effect=lambda row: b'x'*4096 if 'recoveryConsent' in row else encode_consent(row)):
+            value=MODULE.normal_failure_diagnostics('test',MODULE.IOS_PENDING_RESULT,subprocess.CompletedProcess([],65,consent,b''))
+        self.assertNotIn('recoveryConsent',value);self.assertTrue(value['findingsTruncated']);self.assertEqual(value['originalReturncode'],65)
+
+        # The new static-wait marker shares the original project source-site
+        # reducer; require/wait duplicates across the same case are refused.
+        methods=('testSyntheticProjectPathFields','testSyntheticProjectLocalEditsAndImages')
+        def wait_row(method,line=65535):
+            return ('MRK_NORMAL_PROJECT_STATIC_WAIT_FAILURE=v1;method='+method+';line='+str(line)+'\n').encode()
+        first=wait_row(methods[0],6321); second=wait_row(methods[1])
+        unrelated=b'MRK_NORMAL_PROJECT_STAGE=config;result=started\n'
+        observed=MODULE.normal_failure_diagnostics('test','project-test.xcresult',subprocess.CompletedProcess([],65,unrelated+first+second+private,b''))
+        self.assertEqual([(r['method'],r['line']) for r in observed['sourceFailures']],list(zip(methods,(6321,65535))))
+        self.assertEqual(observed['originalReturncode'],65);self.assertNotIn(b'PRIVATE',MODULE.encoded(observed))
+        old=first.replace(b'STATIC_WAIT_FAILURE',b'REQUIRE_FAILURE').replace(b'\n',b';check=condition\n')
+        self.assertEqual(MODULE.project_require_source_sites(old+second,b'')[0]['line'],6321)
+        for bad in (first+first,first+old,first[:-1],b'prefix '+first,wait_row('unselected'),wait_row(methods[0],65536),
+            wait_row(methods[0],0),first.replace(b';line=',b';line=0'),first.replace(b'\n',b';check=condition\n'),
+            old.replace(b';check=condition',b''),first+b'MRK_NORMAL_PROJECT_STATIC_WAIT',first+b'x'*193+second):
+            self.assertIsNone(MODULE.project_require_source_sites(bad,b''))
+        self.assertIsNone(MODULE.project_require_source_sites(b'',first))
+        self.assertEqual(MODULE.project_require_source_sites(unrelated,b''),[])
+        for phase,selected in (('test',MODULE.IOS_PENDING_RESULT),('summary','project-test.xcresult')):
+            value=MODULE.normal_failure_diagnostics(phase,selected,subprocess.CompletedProcess([],65,first,b''))
+            self.assertEqual(value['sourceFailures'],[])
         swift=SWIFT.read_text()
         observer=swift.split('private func iosRecoveryFieldDiagnostic(',1)[1].split('private func iosRecoveryObservation(',1)[0]
         self.assertEqual(observer.count('try details.snapshot()'),1)
@@ -6170,7 +6228,7 @@ class PanelTopologyDiagnosticTests(unittest.TestCase):
         self.assertNotIn('label BEGINSWITH',reader)
         caught=reader.split('catch {',1)[1].split('let text =',1)[0]
         self.assertIn('throw error',caught);self.assertNotIn('snapshot()',caught)
-        original=subprocess.CompletedProcess([],65,channels,b'')
+        original=subprocess.CompletedProcess([],65,channels+consent,b'')
         for mode,selection in (('test','project-test.xcresult'),('test','diagnostics-test.xcresult'),('summary',MODULE.IOS_PENDING_RESULT)):
             self.assertNotIn('recoveryField',MODULE.normal_failure_diagnostics(mode,selection,original))
         # Use actual existing publication; failures remain diagnostics, never
@@ -6180,12 +6238,20 @@ class PanelTopologyDiagnosticTests(unittest.TestCase):
             MODULE.publish_failure_diagnostics(request,original)
             published=json.loads((normal/'ios-pending-recovery-test.failure-diagnostics.json').read_bytes())
             self.assertEqual(published['originalReturncode'],65);self.assertEqual(published['recoveryField']['state'],'observed')
+            self.assertEqual(published['recoveryConsent']['state'],'observed')
             fallback=normal/'fallback';fallback.mkdir()
             request=dict(request,result=fallback/MODULE.IOS_PENDING_RESULT,derived=fallback/'DerivedData')
             with patch.object(MODULE,'recovery_field_diagnostics',side_effect=RuntimeError('PRIVATE parser fault')):
                 MODULE.publish_failure_diagnostics(request,original)
             body=(fallback/'ios-pending-recovery-test.failure-diagnostics.json').read_bytes()
             self.assertEqual(json.loads(body)['recoveryField'],dict(state='absent',sample=None))
+            self.assertNotIn(b'PRIVATE',body);self.assertEqual(original.returncode,65)
+            consent_fault=normal/'consent-fault';consent_fault.mkdir()
+            request=dict(request,result=consent_fault/MODULE.IOS_PENDING_RESULT,derived=consent_fault/'DerivedData')
+            with patch.object(MODULE,'recovery_consent_diagnostics',side_effect=RuntimeError('PRIVATE consent parser fault')):
+                MODULE.publish_failure_diagnostics(request,original)
+            body=(consent_fault/'ios-pending-recovery-test.failure-diagnostics.json').read_bytes()
+            self.assertEqual(json.loads(body)['recoveryConsent'],dict(state='absent',sample=None))
             self.assertNotIn(b'PRIVATE',body);self.assertEqual(original.returncode,65)
             with self.assertRaises(MODULE.Refused):
                 MODULE.normal_failure_diagnostics('test',MODULE.IOS_PENDING_RESULT,subprocess.CompletedProcess([],0,valid,b''))

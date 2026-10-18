@@ -4800,6 +4800,17 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func waitStaticTexts(_ root: XCUIElement, matching selectors: [StaticTextMatch],
                                             ready: [XCUIElementQuery] = [], timeout: TimeInterval = 5,
                                             failures: [String] = [], line: UInt = #line) throws -> [XCUIElement] {
+        let firstFailureAbsent = caseClock?.firstFailure == nil
+        var succeeded = false
+        defer {
+            // The caller's existing SOURCE line, only while unwinding the
+            // unchanged error. No AX read, clock mutation or new assertion.
+            if !succeeded, firstFailureAbsent, let method = projectRequireDiagnosticMethod,
+               !projectRequireDiagnosticEmitted, line >= 1 && line <= 65535 {
+                projectRequireDiagnosticEmitted = true
+                print("MRK_NORMAL_PROJECT_STATIC_WAIT_FAILURE=v1;method=\(method.rawValue);line=\(line)")
+            }
+        }
         guard let clock = caseClock, let wholeEnd = journeyDeadline, ready.count <= 4 else {
             throw Refusal.condition("original static text wait context missing")
         }
@@ -4847,6 +4858,7 @@ final class NormalAppUITests: XCTestCase {
                     try check()
                 }
                 try check()
+                succeeded = true
                 return selected
             }
             // Existing main-run-loop progress; this ONE absolute end never renews.
@@ -5024,7 +5036,8 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func waitElement(_ query: XCUIElementQuery, in root: XCUIElement,
                                        enabled: Bool = false, timeout: TimeInterval = 5,
-                                       failures: [String] = [], snapshotObservation: Bool = false, line: UInt = #line) throws -> XCUIElement {
+                                       failures: [String] = [], snapshotObservation: Bool = false,
+                                       consentObservation: IOSRecoveryConsentPhase? = nil, line: UInt = #line) throws -> XCUIElement {
         let first = query.element(boundBy: 0)
         let failed = root.staticTexts.matching(NSPredicate(format: "label IN %@ OR title IN %@ OR value IN %@", failures, failures, failures))
         let targets: NSDictionary = ["ready": first, "failed": failed.element(boundBy: 0)]
@@ -5037,6 +5050,9 @@ final class NormalAppUITests: XCTestCase {
             // Same original wait, before its existing refusal. Finite public
             // facts only; exhausted observation budget cannot replace its error.
             observeSnapshotState(root, waiter: result)
+        }
+        if let phase = consentObservation, failureCount > 0 || result != .completed || matchCount != 1 {
+            observeRecoveryConsent(root, phase: phase, waiter: result, matches: matchCount)
         }
         if failureCount > 0 {
             diagnostic(root)
@@ -6330,7 +6346,7 @@ final class NormalAppUITests: XCTestCase {
             try require(candidate.value as? String == "main", "saved candidate branch was not loaded")
             try replace(candidate, with: "qa-candidate", renderer: renderer)
             try press(renderer, "Metadata", renderer: renderer)
-            let locales = try waitElement(named(renderer, "Android locales"), in: renderer)
+            let locales = try waitElement(controls(renderer, [.group], label: "Android locales"), in: renderer)
             try press(locales, "Add entry", renderer: renderer)
             try replace(field(locales, "Android locales, entry 2"), with: "fr-FR", renderer: renderer)
             // The SAME unsaved configuration must survive page navigation.
@@ -7769,6 +7785,75 @@ final class NormalAppUITests: XCTestCase {
         var fields: [String: String] { ["operationId": operationID, "ownerGeneration": ownerGeneration,
                                       "phase": phase, "outcome": outcome, "reason": reason] }
     }
+    private enum IOSRecoveryConsentPhase: String {
+        case inspection, account
+        var text: String {
+            switch self {
+            case .inspection: return "I authorize one local inspection of the account signing and selected project build-input recovery controls. Inspection does not recover or erase retained state."
+            case .account: return "I confirm this macOS account and signing services are idle and authorize ordinary restoration of only this inspected account session’s owned state. Do not override conflicts or treat my confirmation as worker finality."
+            }
+        }
+    }
+    @MainActor private func observeRecoveryConsent(_ review: XCUIElement, phase: IOSRecoveryConsentPhase,
+                                                   waiter: XCTWaiter.Result, matches: Int) {
+        guard let clock = caseClock else { return }
+        let end = min(clock.deadline, journeyDeadline ?? clock.deadline)
+        let start = ProcessInfo.processInfo.systemUptime
+        guard clock.observationAllowed(start, before: end) else { return }
+        var last = start
+        // One failure-only snapshot of the original review, never an AX dump.
+        // Bounds constrain our traversal, not XCTest's internal allocation.
+        let captured: any XCUIElementSnapshot
+        do { captured = try review.snapshot() } catch { return }
+        var pending: [(node: any XCUIElementSnapshot, depth: Int)] = [(captured, 0)]
+        var visited = 0, childrenCount = 0, boxes = 0, enabled = 0, whitespace = 0, otherNames = 0
+        var unchecked = 0, checked = 0, otherValue = 0
+        var names = [Int](repeating: 0, count: 5)
+        var rootRole = "other"
+        while let (node, depth) = pending.popLast() {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now >= last, clock.observationAllowed(now, before: end), depth <= 16 else { return }
+            last = now
+            visited += 1
+            guard visited <= 64 else { return }
+            let role = node.elementType, rawValue = node.value
+            let values = [node.identifier, node.title, node.label, rawValue as? String ?? "", node.placeholderValue ?? ""]
+            guard values.allSatisfy({ $0.utf8.count <= 4096 }) else { return }
+            if visited == 1 {
+                rootRole = role == .group ? "group" : role == .staticText ? "static-text" : role == .checkBox ? "checkbox" : "other"
+            }
+            let exact = values.map { $0 == phase.text }
+            if role == .checkBox {
+                boxes += 1
+                if node.isEnabled { enabled += 1 }
+                for i in names.indices where exact[i] { names[i] = min(names[i] + 1, 5) }
+                if values.contains(where: { $0.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ") == phase.text }) {
+                    whitespace += 1
+                }
+                if let text = rawValue as? String {
+                    if text == "0" { unchecked += 1 } else if text == "1" { checked += 1 } else { otherValue += 1 }
+                } else if let number = rawValue as? NSNumber {
+                    if number == NSNumber(value: 0) { unchecked += 1 }
+                    else if number == NSNumber(value: 1) { checked += 1 } else { otherValue += 1 }
+                } else { otherValue += 1 }
+            } else if exact.contains(true) { otherNames += 1 }
+            let children = node.children
+            if visited == 1 { childrenCount = children.count }
+            guard children.count <= 64 - visited - pending.count,
+                  children.isEmpty || depth < 16 else { return }
+            pending.append(contentsOf: children.map { ($0, depth + 1) })
+        }
+        let finish = ProcessInfo.processInfo.systemUptime
+        guard finish >= last, clock.observationAllowed(finish, before: end) else { return }
+        let status = waiter == .completed ? "completed" : waiter == .timedOut ? "timed-out" : "other"
+        let keys = ["matches", "children", "nodes", "checkboxes", "enabled", "identifier", "title", "label", "value", "placeholder", "whitespace", "nonCheckboxName", "unchecked", "checked", "otherValue"]
+        let counts = [matches, childrenCount, visited, boxes, enabled] + names + [whitespace, otherNames, unchecked, checked, otherValue]
+        let fields = zip(keys, counts).map { "\($0.0)=\(min($0.1, 5))" }.joined(separator: ";")
+        let emission = ProcessInfo.processInfo.systemUptime
+        guard emission >= finish, clock.observationAllowed(emission, before: end) else { return }
+        print("MRK_NORMAL_RECOVERY_CONSENT=v1;phase=\(phase.rawValue);sample=post-wait;waiter=\(status);rootRole=\(rootRole);\(fields);nonAtomic=1")
+    }
+
     @MainActor private func iosRecoveryFieldDiagnostic(_ details: XCUIElement, phase: String,
                                                         field: String, prefix: String) -> String? {
         guard ["awaiting-consent", "terminal"].contains(phase),
@@ -7941,9 +8026,8 @@ final class NormalAppUITests: XCTestCase {
                 try press(renderer, "Review local recovery inspection", renderer: renderer, failures: failures)
                 let review = try waitElement(named(renderer, "Confirm this exact local recovery action"), in: renderer, failures: failures)
                 let pair = try iosRecoveryObservation(renderer, phase: "awaiting-consent")
-                let consent = try waitElement(review.checkBoxes.matching(identifier:
-                    "I authorize one local inspection of the account signing and selected project build-input recovery controls. Inspection does not recover or erase retained state."),
-                    in: review, enabled: true, failures: failures)
+                let consent = try waitElement(review.checkBoxes.matching(identifier: IOSRecoveryConsentPhase.inspection.text),
+                    in: review, enabled: true, failures: failures, consentObservation: .inspection)
                 try reveal(consent, in: renderer)
                 try require(consentChecked(consent, expected: false), "inspection consent must begin unchecked")
                 inspectUnchecked = true
@@ -7970,9 +8054,8 @@ final class NormalAppUITests: XCTestCase {
                 try require(pair.operationID != inspected.operationID && pair.ownerGeneration != inspected.ownerGeneration,
                             "account recovery requires a fresh original pair")
                 try require(try iosRecoverySession(review, review: true) == session, "account recovery review session differs")
-                let consent = try waitElement(review.checkBoxes.matching(identifier:
-                    "I confirm this macOS account and signing services are idle and authorize ordinary restoration of only this inspected account session’s owned state. Do not override conflicts or treat my confirmation as worker finality."),
-                    in: review, enabled: true, failures: failures)
+                let consent = try waitElement(review.checkBoxes.matching(identifier: IOSRecoveryConsentPhase.account.text),
+                    in: review, enabled: true, failures: failures, consentObservation: .account)
                 try reveal(consent, in: renderer)
                 try require(consentChecked(consent, expected: false), "account recovery consent must begin unchecked")
                 recoverUnchecked = true

@@ -3760,6 +3760,7 @@ def failure_base(phase, selection, original, *, engineering=False):
         value["snapshotState"] = {"state": "absent", "samples": []}
     if not engineering and phase == "test" and selection == IOS_PENDING_RESULT:
         value["recoveryField"] = {"state": "absent", "sample": None}
+        value["recoveryConsent"] = {"state": "absent", "sample": None}
     if not engineering and phase == "test" and selection == ANDROID_CANDIDATE_RESULT:
         value["androidCandidateProgress"] = None
         value["androidCandidateCondition"] = {"status": "unavailable", "condition": None}
@@ -3807,6 +3808,28 @@ def snapshot_state_diagnostics(stdout, stderr):
             samples.append(dict(zip(fields, map(int, match.groups()[1:-1])), waiter=match.group(1).decode("ascii"),
                                 firstKnownReason=match.groups()[-1].decode("ascii"), reasonSelection="first-observed-fixed-order", timing="post-wait", countsCappedAt=5, nonAtomic=True))
     return {"state": "observed" if samples else "absent", "samples": samples}
+
+
+def recovery_consent_diagnostics(stdout, stderr):
+    """One failed pending-consent wait; only fixed-caption snapshot counts."""
+    need(type(stdout) is bytes and type(stderr) is bytes and len(stdout)+len(stderr) <= 1024*1024,
+         "normal-recovery-consent-original")
+    namespace = b"MRK_NORMAL_RECOVERY_CONSENT"
+    keys = ("matches", "children", "nodes", "checkboxes", "enabled", "identifier", "title", "label", "value",
+            "placeholder", "whitespace", "nonCheckboxName", "unchecked", "checked", "otherValue")
+    pattern = (re.escape(namespace) + rb"=v1;phase=(inspection|account);sample=post-wait;waiter=(completed|timed-out|other);rootRole=(group|static-text|checkbox|other)"
+               + b"".join(b";"+key.encode("ascii")+rb"=([0-5])" for key in keys) + rb";nonAtomic=1\r?\n")
+    sample = None
+    for stream, body in (("stdout", stdout), ("stderr", stderr)):
+        for row in body.splitlines(keepends=True):
+            if namespace not in row: continue
+            match = re.fullmatch(pattern, row) if stream == "stdout" else None
+            if match is None or sample is not None: return {"state": "refused", "sample": None}
+            phase, waiter, role, *counts = match.groups()
+            sample = dict(zip(keys, map(int, counts)), phase=phase.decode("ascii"), waiter=waiter.decode("ascii"),
+                          rootRole=role.decode("ascii"), timing="post-wait", countsCappedAt=5, nonAtomic=True,
+                          source="single-review-snapshot", hittability="not-observed")
+    return {"state": "observed" if sample is not None else "absent", "sample": sample}
 
 
 def recovery_field_diagnostics(stdout, stderr):
@@ -3907,10 +3930,11 @@ def project_wait_condition(message):
 
 def project_require_source_sites(stdout, stderr):
     """First-latched SOURCE sites for two project cases; no arbitrary error prose."""
-    namespace = b"MRK_NORMAL_PROJECT_REQUIRE_FAILURE"
+    namespace = b"MRK_NORMAL_PROJECT_"
     methods = (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages")
-    pattern = (re.escape(namespace) + rb"=v1;method=(" + b"|".join(methods)
-               + rb");line=([1-9][0-9]{0,4});check=(condition|singleton|actionable)")
+    pattern = (re.escape(namespace) + rb"(REQUIRE_FAILURE|STATIC_WAIT_FAILURE)=v1;method=(" + b"|".join(methods)
+               + rb");line=([1-9][0-9]{0,4})(?:;check=(condition|singleton|actionable))?")
+    namespaces = (namespace+b"REQUIRE_FAILURE", namespace+b"STATIC_WAIT_FAILURE")
     sites, seen = [], set()
     for stream, body in (("stdout", stdout), ("stderr", stderr)):
         offset = 0
@@ -3919,19 +3943,19 @@ def project_require_source_sites(stdout, stderr):
             complete = end != -1
             if not complete: end = len(body)
             short = body[offset:end] if end-offset <= 192 else None
-            prefix = body[offset:min(end, offset+len(namespace))]
-            suffix = body[max(offset, end-len(namespace)):end]
-            candidate = (body.find(namespace, offset, end) != -1
-                or bool(prefix) and namespace.startswith(prefix)
-                or not complete and any(suffix.endswith(namespace[:i]) for i in range(1,len(namespace))))
+            candidate = any(body.find(name, offset, end) != -1
+                or end > offset and name.startswith(body[offset:min(end, offset+len(name))])
+                or not complete and any(body[max(offset,end-len(name)):end].endswith(name[:i]) for i in range(1,len(name)))
+                for name in namespaces)
             offset = end+1
             if not candidate: continue
             record = short[:-1] if short is not None and complete and short.endswith(b"\r") else short
             match = re.fullmatch(pattern, record) if (record is not None and complete and stream == "stdout") else None
-            if match is None or int(match.group(2)) > 65535 or match.group(1) in seen: return None
-            seen.add(match.group(1))
+            if (match is None or int(match.group(3)) > 65535 or match.group(2) in seen
+                    or (match.group(1) == b"REQUIRE_FAILURE") != (match.group(4) is not None)): return None
+            seen.add(match.group(2))
             sites.append({"stream":"stdout", "source":"NormalAppUITests.swift",
-                "method":match.group(1).decode("ascii"), "line":int(match.group(2)), "column":None})
+                "method":match.group(2).decode("ascii"), "line":int(match.group(3)), "column":None})
     return sites
 
 
@@ -4911,6 +4935,12 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         if value["recoveryField"]["state"] == "refused": value["findingsTruncated"] = True
         if len(encoded(value)) + 1 > 4096:
             del value["recoveryField"]
+            value["findingsTruncated"] = True
+    if "recoveryConsent" in value:
+        value["recoveryConsent"] = recovery_consent_diagnostics(original.stdout, original.stderr)
+        if value["recoveryConsent"]["state"] == "refused": value["findingsTruncated"] = True
+        if len(encoded(value)) + 1 > 4096:
+            del value["recoveryConsent"]
             value["findingsTruncated"] = True
     if "panelTopology" in value:
         value["panelTopology"] = panel_topology_diagnostics(original.stdout, original.stderr)
