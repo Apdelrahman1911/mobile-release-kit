@@ -1,4 +1,4 @@
-"""Select core CI by changed paths, not by source hashes or test receipts."""
+"""Select affected CI checks by paths, not source hashes or test receipts."""
 from __future__ import annotations
 
 import os
@@ -19,8 +19,25 @@ def affects_core(path: bytes) -> bool:
                     b"Gemfile", b"Gemfile.lock", b".python-version", b".ruby-version"}
 
 
+def affects_desktop_native(path: bytes) -> bool:
+    """Skip compilation only for known non-product inputs; unknowns build."""
+    # Shared JSON fixtures and tests/native_desktop* are compiled into Rust.
+    # Only the standalone JS cases and ordinary Python suites can skip native.
+    if path.startswith(b"desktop/tests/") and path.endswith(b".test.mjs"):
+        return False
+    if path.startswith((b"docs/", b"tests/desktop/", b"tests/unit/", b"tests/workflow/",
+                        b"desktop/native/macos-normal-ui/")):
+        return False
+    if path in {b"README.md", b"CONTRIBUTING.md", b"SECURITY.md", b"AGENTS.md"}:
+        return False
+    return True
+
+
 def main() -> None:
     event, base, head = (os.environ[key] for key in ("CI_EVENT", "CI_BASE", "CI_HEAD"))
+    scope = os.environ.get("CI_SCOPE", "core")
+    if scope not in {"core", "desktop"}:
+        raise ValueError("Unsupported CI scope")
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         raise ValueError("Invalid event commit")
     if event not in {"pull_request", "push", "workflow_dispatch"}:
@@ -40,11 +57,16 @@ def main() -> None:
             "git", "-c", "core.fsmonitor=false", "diff", "--no-ext-diff",
             "--no-textconv", "--no-renames", "--name-only", "-z", base, head,
         ], timeout=30).split(b"\0")
-        changed = any(affects_core(path) for path in paths if path)
+        selector = affects_desktop_native if scope == "desktop" else affects_core
+        changed = any(selector(path) for path in paths if path)
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-        output.write(f"core={'true' if changed else 'false'}\n")
-    print("Core inputs changed; running core verification." if changed else
-          "No core input changes; retaining the required status without rerunning core verification.")
+        output.write(f"{'native' if scope == 'desktop' else 'core'}={'true' if changed else 'false'}\n")
+    if scope == "desktop":
+        print("Product or unknown inputs changed; running native checks." if changed else
+              "Only known test/documentation inputs changed; fast tests still run, native builds are not repeated.")
+    else:
+        print("Core inputs changed; running core verification." if changed else
+              "No core input changes; retaining the required status without rerunning core verification.")
 
 
 if __name__ == "__main__":

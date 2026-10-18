@@ -2,6 +2,38 @@
 
 Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.**
 
+### 2026-10-18: functional-first delivery supersedes GUI-gating plan
+
+The owner now performs detailed UI/UX testing. UI-only run `39146532814/1` was
+cancelled; no result is counted as a pass. Run `39145392466/1` finished failed,
+including Restore and unsigned iOS. Do not continue the selector-repair cohorts
+described in older entries below.
+
+Three obsolete GUI workflows, their pure layout assertions and the prepared
+package's post-upload XCTest tail were removed. Candidate reuse now retains
+only the real non-UI Restore regression. Routine CI uses ordinary business and
+controller tests, affected native tests/builds, and separate release packaging.
+Signing/notary/install/credential/data-integrity requirements are not waived.
+
+Seven existing business modules passed **129 tests** locally; the affected-path
+selector passed **9 tests**. Four edited workflows parsed, all 153 retained shell
+blocks passed `bash -n`, and changed Python files parsed. These checks neither
+execute the workflows nor establish real Mac operations. Independent plan and
+implementation reviews resolved two real simplification mistakes before
+acceptance: required Restore Python setup and Rust-embedded fixture selection.
+The final inline-selector/APFS workflow revision also passed YAML/shell checks.
+An existing ARM APFS storage lifecycle test is now explicitly wired into native
+CI, reusing its library build and a private disposable directory. Its execution
+is still pending; it is not a Keychain/import/restart test.
+
+Reuse the signed/notarized `fcb1aa46` ARM/Intel artifacts: this batch changes no
+application/runtime code. See [manual trial/download guide](desktop-macos-manual-test-guide.md),
+[actual functional coverage and gaps](desktop-macos-functional-coverage.md) and
+[current CI policy](desktop-ci.md). Remaining real gaps include complete native
+credential import/replacement/restart, mobile build/sign/export, interrupted
+Restore and ordinary removal/update preservation. A matching remover is not in
+the current trial download. Main/public delivery still requires owner approval.
+
 ### 2026-10-18: configuration fixture, native selection and focused follow-up
 
 The actual core regression reproduces the bundled configuration expectation bug:

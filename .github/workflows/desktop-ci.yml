@@ -14,6 +14,7 @@ on:
       - Gemfile.lock
       - pyproject.toml
       - .github/workflows/desktop-ci.yml
+      - .github/scripts/ci_changes.py
   push:
     branches: [main]
     paths:
@@ -28,7 +29,14 @@ on:
       - Gemfile.lock
       - pyproject.toml
       - .github/workflows/desktop-ci.yml
+      - .github/scripts/ci_changes.py
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Native checks to run (automatic product checks use all platforms)
+        type: choice
+        default: macos
+        options: [macos, macos-arm, macos-intel, linux, windows, all]
 
 permissions:
   contents: read
@@ -44,6 +52,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       artifact-id: ${{ steps.frontend.outputs.artifact-id }}
+      native: ${{ steps.changed.outputs.native }}
     defaults:
       run:
         working-directory: desktop
@@ -52,6 +61,16 @@ jobs:
         id: checkout
         with:
           persist-credentials: false
+          fetch-depth: 2
+      - name: Select affected native checks without another runner
+        id: changed
+        working-directory: .
+        env:
+          CI_SCOPE: desktop
+          CI_EVENT: ${{ github.event_name }}
+          CI_BASE: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          CI_HEAD: ${{ github.sha }}
+        run: python3 -I -B .github/scripts/ci_changes.py
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
@@ -64,15 +83,16 @@ jobs:
           PYTHONPATH: src:tests:tests/desktop
         run: |
           python -B -m unittest \
-            test_api test_credential_guide test_credential_policy test_environment \
+            test_api test_config_edit test_credential_guide test_credential_policy test_environment \
             test_github_connection test_github_connection_transport \
             test_github_preflight test_github_preflight_frames test_github_release \
-            test_github_setup test_github_setup_variables \
-            test_metadata_text test_metadata_text_protocol \
-            test_metadata_images test_metadata_images_protocol test_release_version \
+            test_github_setup test_github_setup_variables test_github_workflow_edit \
+            test_metadata_text test_metadata_text_protocol test_metadata_text_edit \
+            test_metadata_images test_metadata_images_protocol test_release_version test_release_version_edit \
+            test_saved_text_recovery_engine test_android_build_operation test_ios_archive \
             test_workflow_edit_protocol test_workflow_recovery_engine \
             test_offline_preflight test_project_recovery test_macos_workflow_admission \
-            test_macos_android_ui_result test_local_release_intent test_local_store_intent test_local_ios_store_data test_local_ios_prepared_intent_data test_local_store_receipt test_local_release_source test_local_release_candidate \
+            test_local_release_intent test_local_store_intent test_local_ios_store_data test_local_ios_prepared_intent_data test_local_store_receipt test_local_release_source test_local_release_candidate \
             test_local_candidate_composition test_local_candidate_create test_local_ios_candidate test_local_ios_candidate_protocol test_local_ios_candidate_facts test_local_output_freshness test_local_release_metadata test_local_release_journal test_local_store_stages
           # Own process for the finite private-input/stdio failure fixtures;
           # explicit module names avoid the historical native/package suite.
@@ -83,7 +103,7 @@ jobs:
             test_local_store_prepare test_local_ios_store_prepare test_local_ios_store_execute test_local_ios_store_reconcile test_local_store_execute test_local_store_reconcile test_local_recovery_settlement test_local_reconcile_review test_local_release_history test_local_candidate_inputs test_local_ios_candidate_control test_local_ios_candidate_create test_local_ios_candidate_history test_local_prepared_review test_local_execution_review test_local_store_metadata \
             unit.test_android_current_tools_macos unit.test_android_upload_validation unit.test_ios_current_tools_macos \
             test_macos_store_consumer test_macos_store_paths \
-            test_macos_candidate_consumer test_macos_candidate_bootstrap test_macos_candidate_ui test_ci_xcode_preparation test_ios_resolver_capture \
+            test_macos_candidate_consumer test_macos_candidate_bootstrap test_ci_xcode_preparation test_ios_resolver_capture \
             test_macos_notary_submit_diagnostic \
             test_macos_launcher_packaging test_macos_launcher_staging \
             test_macos_app_absence_fixture.ThinRestoreProjectionData \
@@ -98,6 +118,7 @@ jobs:
       - run: npm run build
       - name: Share this run's frontend with native builds
         id: frontend
+        if: steps.changed.outputs.native == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-frontend-${{ github.sha }}-${{ github.run_attempt }}
@@ -108,21 +129,23 @@ jobs:
         if: always() && steps.checkout.outcome == 'success'
         env:
           FRONTEND_UPLOADED: ${{ steps.frontend.outcome == 'success' }}
+          NATIVE_REQUIRED: ${{ steps.changed.outputs.native }}
         run: |
           rm -rf -- node_modules
-          if [ "$FRONTEND_UPLOADED" = true ]; then
+          if [ "$FRONTEND_UPLOADED" = true ] || [ "$NATIVE_REQUIRED" = false ]; then
             rm -rf -- dist
           fi
 
   native:
     name: Native tests and build (${{ matrix.os }})
     needs: frontend
+    if: needs.frontend.outputs.native == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-26, macos-26-intel, windows-2025]
+        os: ${{ fromJSON('{"all":["ubuntu-24.04","macos-26","macos-26-intel","windows-2025"],"macos":["macos-26","macos-26-intel"],"macos-arm":["macos-26"],"macos-intel":["macos-26-intel"],"linux":["ubuntu-24.04"],"windows":["windows-2025"]}')[inputs.platform || 'all'] }}
     defaults:
       run:
         shell: bash
@@ -155,8 +178,43 @@ jobs:
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
       - name: Run native library tests
         run: cargo test --locked --lib --no-default-features
-      - name: Build the development shell
-        run: cargo build --locked --bin mobile-release-kit-desktop --no-default-features --features desktop-shell,development-runtime
+      - name: Test the credential-free private APFS vault lifecycle (ARM)
+        if: matrix.os == 'macos-26'
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          umask 077
+          test_name=vault_store::macos::tests::native_apfs_storage_lifecycle
+          # Prove this exact ignored test exists; do not accept a zero-test pass.
+          cargo test --locked --lib --no-default-features "$test_name" -- --exact --ignored --list |
+            grep -Fx "$test_name: test"
+          temp_root="$(cd -P -- "$RUNNER_TEMP" && pwd -P)"
+          fixture="$(mktemp -d "$temp_root/mrk-vault-storage.XXXXXX")"
+          fixture_identity=''
+          cleanup() {
+            status=$?
+            trap - EXIT
+            cleanup_status=0
+            if [[ -n "$fixture_identity" && -d "$fixture" && ! -L "$fixture" &&
+                  "$(cd -P -- "$fixture" && pwd -P)" == "$fixture" &&
+                  "$(/usr/bin/stat -f '%d:%i:%u:%Lp' "$fixture")" == "$fixture_identity" ]]; then
+              rm -rf -- "$fixture" || cleanup_status=$?
+            else
+              printf '%s\n' 'Private APFS fixture identity changed; leave it for disposable-host teardown.' >&2
+              cleanup_status=1
+            fi
+            if (( status == 0 )); then status=$cleanup_status; fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          [[ -d "$fixture" && ! -L "$fixture" && "$(cd -P -- "$fixture" && pwd -P)" == "$fixture" ]]
+          [[ "$(/usr/bin/stat -f '%u:%Lp' "$fixture")" == "$(id -u):700" ]]
+          fixture_identity="$(/usr/bin/stat -f '%d:%i:%u:%Lp' "$fixture")"
+          # Only this empty private tree is used; no Keychain or real credential input.
+          MRK_MACOS_VAULT_FIXTURE_ROOT="$fixture" cargo test --locked --lib --no-default-features \
+            "$test_name" -- --exact --ignored --test-threads=1
+      - name: Typecheck the distinct development-runtime configuration without a second link
+        run: cargo check --locked --bin mobile-release-kit-desktop --no-default-features --features desktop-shell,development-runtime
       - name: Build the embedded-frontend shell
         run: cargo build --locked --bin mobile-release-kit-desktop --no-default-features --features desktop-shell,custom-protocol
       - name: Remove only this job's build and downloaded frontend outputs

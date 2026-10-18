@@ -38,7 +38,7 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, ui-build, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
+        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
       architecture:
         description: Architecture for Store, iOS tools, package probe and Xcode files; other components use both
         type: choice
@@ -1438,76 +1438,8 @@ jobs:
     # timeout/failure preserve root state for disposable-host teardown; killing
     # an Installer client does not prove PackageKit service finality.
 
-  ui-build:
-    # Compile the existing external XCTest target, never run it or build its app.
-    if: github.event_name == 'workflow_dispatch' && inputs.component == 'ui-build'
-    name: Compile external UI tests (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
-    env:
-      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        include:
-          - runner: macos-26
-            arch: arm64
-          - runner: macos-26-intel
-            arch: x86_64
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Allocate one task-owned XCTest compiler directory
-        id: work
-        shell: bash
-        env:
-          COMPONENT_ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          umask 077
-          [[ "$RUNNER_OS" == macOS && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
-          [[ "$(/usr/bin/uname -m)" == "$COMPONENT_ARCH" && "$(/usr/bin/id -u)" != 0 ]] || exit 1
-          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-ui-build.XXXXXXXX")
-          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
-          /bin/mkdir -m 700 "$root/tmp"
-      - name: Build only the existing XCTest runner with the native Xcode SDK
-        timeout-minutes: 6
-        shell: bash
-        env:
-          COMPONENT_ARCH: ${{ matrix.arch }}
-          WORK_ROOT: ${{ steps.work.outputs.root }}
-        run: |
-          set -euo pipefail
-          umask 077
-          destination=platform=macOS
-          build_settings=(COMPILER_INDEX_STORE_ENABLE=NO)
-          case "$COMPONENT_ARCH" in
-            arm64) destination=platform=macOS,arch=arm64 ;;
-            x86_64) build_settings+=(ARCHS=x86_64) ;;
-            *) exit 1 ;;
-          esac
-          # Existing project ad-hoc signing settings stay unchanged; no identity
-          # import, app-under-test dependency, package/install action or test run.
-          TMPDIR="$WORK_ROOT/tmp/" /usr/bin/xcodebuild build-for-testing \
-            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
-            -configuration Debug -destination "$destination" -destination-timeout 15 \
-            -derivedDataPath "$WORK_ROOT/DerivedData" -jobs 2 -disableAutomaticPackageResolution \
-            "${build_settings[@]}"
-      - name: Remove only this job's XCTest compiler outputs
-        if: always() && steps.work.outputs.root != ''
-        shell: bash
-        env:
-          WORK_ROOT: ${{ steps.work.outputs.root }}
-        run: |
-          set -euo pipefail
-          [[ "$WORK_ROOT" == "$RUNNER_TEMP"/mrk-ui-build.???????? && -d "$WORK_ROOT" && ! -L "$WORK_ROOT" ]] || exit 1
-          [[ "$(/usr/bin/stat -f '%u:%Lp' "$WORK_ROOT")" == "$(/usr/bin/id -u):700" ]] || exit 1
-          /bin/rm -rf -- "$WORK_ROOT"
-
 # No production Installer/Remover main, app launch, distribution signing or
 # notarization runs. The explicit package probe alone installs/removes its fixed
-# inert synthetic carrier; it does not execute the Xcode setup helper. XCTest uses its existing ad-hoc project signing. The explicit Store job only verifies already-signed code
+# inert synthetic carrier; it does not execute the Xcode setup helper. The explicit Store job only verifies already-signed code
 # and executes the network-denied CRC32/Fastlane loader smoke, never a Store lane.
 # Installation/update/removal behavior still requires native integration tests.

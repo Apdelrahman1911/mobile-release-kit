@@ -1386,39 +1386,12 @@ class ShellCompileContractTests(unittest.TestCase):
                          ("GITHUB_EVENT_NAME", "workflow_dispatch")):
             with self.subTest(engineering_binding=key), self.assertRaises(helper.CheckFailure):
                 helper.compile_workflow_binding({**engineering, key: bad, "MRK_EXPECTED_SHA": "1" * 40}, helper.ENGINEERING_COMPILE_SCOPE)
-        # Actual new workflow source is also nominated, not a synthetic manifest.
-        engineering_workflow = (HELPER.parents[2] / helper.ENGINEERING_COMPILE_WORKFLOW).read_text(encoding="utf-8")
-        self.assertEqual([line.strip() for line in engineering_workflow.splitlines() if line.lstrip().startswith("branches:")],
-                         ["branches: [verify/desktop-macos-engineering-ui, verify/desktop-macos-xctest-compile]"])
-        self.assertIn("  engineering-main:\n    if: github.ref == 'refs/heads/verify/desktop-macos-engineering-ui'\n", engineering_workflow)
-        self.assertIn('[[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-engineering-ui ]] || exit 1', engineering_workflow)
-        # A shared workflow trigger does not grant the ordinary engineering job
-        # to the compile-only ref; its actual helper binding is still exact.
+        # Retired engineering-UI workflow no longer has layout assertions.
+        # Keep the actual compiler binding's rejection of an unrelated ref.
         compile_only = {**engineering, "GITHUB_REF": "refs/heads/verify/desktop-macos-xctest-compile",
                         "GITHUB_WORKFLOW_REF": "fictional/project/.github/workflows/desktop-macos-engineering-ui.yml@refs/heads/verify/desktop-macos-xctest-compile"}
         with self.assertRaises(helper.CheckFailure):
             helper.compile_workflow_binding(compile_only, helper.ENGINEERING_COMPILE_SCOPE)
-        self.assertIn("environment: macos-engineering", engineering_workflow)
-        self.assertIn("runs-on: macos-26", engineering_workflow)
-        self.assertIn("MRK_DESKTOP_HOSTED_CHECKS: macos-engineering-ui-compile-v1", engineering_workflow)
-        self.assertNotIn("secrets.", engineering_workflow)
-        self.assertNotIn("macos-26-intel", engineering_workflow)
-        self.assertNotIn("--configured-signing", engineering_workflow)
-        self.assertNotIn("workflow_dispatch:", engineering_workflow)
-        upload = engineering_workflow.split("      - name: Retain only bounded compiler and engineering evidence", 1)[1].split("      - name: Dispose only", 1)[0]
-        self.assertNotIn("*.stdout", upload)
-        self.assertNotIn("*.stderr", upload)
-        self.assertIn("/normal-ui/engineering-smoke.json", upload)
-        self.assertIn("/normal-ui/engineering-summary.status", upload)
-        self.assertNotIn("/normal-ui/*", upload)
-        self.assertEqual(engineering_workflow.count('--work "$MRK_MACOS_WORK"'), 3)
-        self.assertIn('--expected-source "$MRK_CURRENT_SOURCE" --expected-manifest "$MRK_CURRENT_MANIFEST"', engineering_workflow)
-        self.assertIn("set -o noclobber", engineering_workflow)
-        self.assertEqual(engineering_workflow.count("ci_foundation.py compile'"), 1)
-        self.assertIn("--engineering-main-test", engineering_workflow)
-        self.assertIn("--engineering-main-summary", engineering_workflow)
-        self.assertIn("engineering-summary.status", engineering_workflow)
-        self.assertLess(engineering_workflow.index("--engineering-main-summary"), engineering_workflow.index("ci_foundation.py clean'"))
 
         fixed = source_slots_environment()
         binding = helper.compile_workflow_binding(fixed, helper.SOURCE_SLOTS_SCOPE)

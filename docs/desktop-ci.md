@@ -1,5 +1,34 @@
 # Desktop CI
 
+## Functional-first policy (2026-10-18)
+
+Detailed GUI interaction is owner-tested manually, not a delivery gate. Do not
+repair selectors or repeat signed builds to make obsolete XCTest journeys green.
+Use [the manual trial guide](desktop-macos-manual-test-guide.md) for the existing
+signed ARM/Intel candidates and [functional coverage](desktop-macos-functional-coverage.md)
+for what each automated suite really proves. Failed or unexecuted operations
+remain unresolved; retiring an assertion does not turn them into passes.
+
+Routine path: **fast business/controller tests → affected native tests/build →
+package only when release inputs change → owner-approved distribution**.
+
+- Test/docs-only changes still run fast checks when the workflow is triggered,
+  but do not rebuild native shells. Shared Rust fixtures, native test inputs,
+  product inputs and unknown paths conservatively select native checks.
+  Selection runs inside the existing fast job, not on another VM.
+- Manual Desktop CI can select macOS, ARM, Intel, Linux, Windows or all. Automatic
+  product checks retain all supported platforms. Use local Linux checks first;
+  do not dispatch the all-platform workflow just to validate a YAML change.
+- Reuse a passed package only for the same application/runtime/configuration
+  inputs and valid signature. A changed test helper is not a changed application.
+  Existing artifact/run/source identities remain; no new receipt framework.
+- On failure inspect the failed step first. Rerun only affected failed jobs;
+  retain valid independent results and cancel only our redundant work. Signing,
+  notarization and Store actions are never routine unit-test operations.
+- Keep real credential, transaction, recovery, installation/update and package
+  checks. Mixed legacy native workflows retain their integrity tests until
+  equivalent direct checks exist; their remaining UI dependencies are not passes.
+
 ## Current Mac candidate package
 
 The fixed `verify/desktop-macos-candidate` branch selects a package-only route
@@ -45,10 +74,9 @@ Only after the main package checks pass does it retain `MobileReleaseKit.dmg`,
 the package requires its authenticated sibling files on the mounted image.
 This internal candidate is **not installed-UI-qualified or production-ready**.
 Testing the emitted carrier must not rebuild/re-sign it just to run UI checks.
-After retaining the candidate, one external XCTest checks the same installation's
-Applications launch, settings navigation and normal quit. This compiles only the
-test harness, not the application. Failure does not erase the candidate or turn
-its unqualified descriptor into a readiness claim.
+The post-upload Applications/Android XCTest tail is removed. Candidate retention
+does not qualify every feature; ordinary launch/quit and detailed UI interaction
+are recorded separately, with the latter now assigned to manual testing.
 The package helper's existing bounded failure diagnostics appear directly in
 the job log; raw signing/notary captures and credentials do not.
 Rejected payload, package and image submissions now include bounded known issue
@@ -66,9 +94,10 @@ archive and preserves the preview's unqualified status. ZIP metadata allocation
 is bounded before parsing, including rejection of ZIP64 limit overrides.
 Seven focused local methods passed, followed by the targeted ZIP64 regression;
 independent implementation review accepted the slice. The existing old ARM
-origin and execution route are unchanged. Fresh candidate acquisition, installation and reuse of the existing
-UI harness are integrated, but their nomination remains inactive until a genuine
-final candidate exists. They are not installed-qualified by source review.
+origin and execution route are unchanged. The separate candidate-consume workflow
+now runs only the existing non-UI interrupted-Restore regression, using the
+explicitly nominated candidate. It does not rebuild or re-sign that application.
+An observer fix or source review does not establish a successful Restore.
 No signed carrier was downloaded locally for this preparation.
 
 Installed/Aqua builds install the exact numbered Rust toolchain with standard
@@ -85,9 +114,17 @@ The routine desktop pipeline is `.github/workflows/desktop-ci.yml`:
    GitHub, metadata, protocol, and recovery behavior using synthetic inputs.
    Then run `npm ci --ignore-scripts`, `npm test`, and `npm run build` on Linux.
    The build script runs the TypeScript check once before building assets.
-2. After those pass, run `cargo test --locked --lib --no-default-features` and
-   build both the development and embedded-frontend shells on Linux, macOS ARM,
-   macOS Intel, and Windows.
+2. When native inputs changed, run `cargo test --locked --lib --no-default-features`,
+   `cargo check` for the distinct development-runtime configuration, and one
+   embedded-frontend shell build on the selected native platforms. Automatic
+   product checks use Linux, macOS ARM, macOS Intel, and Windows.
+
+The ARM job also selects the existing ignored private-APFS vault lifecycle test:
+real storage create/read/replace/delete and failure cases in a fresh owned
+directory, without Keychain or real credentials. It reuses the compiled library,
+checks the exact test exists, and cleans that directory after return. The new
+selection is syntax-reviewed but **not yet executed on Mac**; Intel and actual
+credential import/restart continuity are not covered by this step.
 
 The jobs use the existing package scripts and Cargo features directly. They do
 not generate source receipts or select special verification branches. The only
@@ -125,8 +162,11 @@ frontend outputs.
 
 | Previous workflow | Replacement or reason |
 | --- | --- |
-| `desktop-session-compile.yml` | Frontend build, headless library test build/execution, and `cargo build --features desktop-shell,development-runtime` in Desktop CI. |
-| `desktop-macos-panel-probe.yml` | Retired one-off panel reachability diagnostic, not an application test. Actual project navigation remains a separate native UI obligation. |
+| `desktop-session-compile.yml` | Frontend build, headless library tests, development-runtime typecheck and embedded shell build in Desktop CI. |
+| `desktop-macos-panel-probe.yml` | Retired one-off panel reachability diagnostic, not an application test. Detailed project navigation is manually tested. |
+| `desktop-macos-engineering-ui.yml` | Retired selector-driven GUI journeys; functional tests remain and detailed UI is manual. |
+| `desktop-macos-fixed-carrier-resume.yml` | Retired duplicated fixed-carrier GUI orchestration; reuse the retained candidate for manual trials. |
+| `desktop-macos-normal-ui-build-intel.yml` | Retired UI-runner-only compilation, not an application build. |
 | `desktop-macos-installer-chain.yml` | Retired comparison of three fixed public certificate files. Package signature and trust verification remain in the package pipeline. |
 | `desktop-macos-intel-os-providers.yml` | Retired provisional inspection of three system images; it did not establish supplier authority. |
 | `desktop-macos-notary-admission.yml` | Retired one-off notary tool admission observation. Actual notarization and verification remain in the package pipeline. |
@@ -139,17 +179,14 @@ was not a product build target. The notary diagnostic adapters remain for now:
 their tests also exercise real package-parser and tool-trust behavior, which
 must be retained when those tests are moved off the adapters.
 
-The fixed-carrier workflow now invokes its checked-out Python helper directly,
-instead of five duplicated source-hash/read/compile wrappers. The normal
-Android UI result reader was also extracted from a large YAML heredoc into
-`desktop/tools/macos_android_ui_result.py`. Both trust the selected checkout
-for executable code rather than hard-coded copies of that code's digest.
-Actual carrier, package, certificate, profile, and TLS integrity checks remain.
-These changes do not authorize an old package as a new build or establish a
-successful native UI operation.
+Pure workflow-shape tests for the retired GUI workflows were removed. Existing
+helpers are retained where they share real native/package safety logic. Carrier,
+package, certificate, profile and TLS integrity checks remain; no old package is
+authorized as a new build.
 
 Routine jobs remove their own disposable outputs after their final consumer:
-frontend `node_modules`, `dist` after successful same-run upload, and each native
+frontend `node_modules`, `dist` after successful same-run upload or when no native
+consumer is required, and each native
 job's dedicated `desktop/.ci-target` plus downloaded `dist`. Shared Cargo/npm
 caches are not deleted. These cleanup steps also run after ordinary failures;
 forced runner termination can prevent any final step from executing. The pure
