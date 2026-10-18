@@ -10773,7 +10773,8 @@ def candidate_removal_phase(consumer, context, phase, bootstrap):
               "desktop/macos-installed-inputs/remove-postinstall", "desktop/packaging/macos-removal.md")
     helper_files = tuple(dict.fromkeys((*helper_files, *shared)))
     if phase == "package-remove":
-        helper_files += ("desktop/src-tauri/examples/macos_remove_producer.rs",)
+        helper_files += ("desktop/src-tauri/examples/macos_remove_producer.rs",
+                         "desktop/src-tauri/examples/macos_producer_common/mod.rs")
     product_files = tuple(dict.fromkeys((consumer.STAGER_PATH, *shared)))
     nomination = None
 

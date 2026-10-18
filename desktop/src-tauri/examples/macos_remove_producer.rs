@@ -213,6 +213,9 @@ mod emitter {
                 (("b",0),("a",7),("a",7,true),true)] {
                 assert_eq!(program_binding_data(own,installed,inventory,observer),Err("installed-remover-binding"));
             }
+            // The signed donor uses the shipping inventory DATA bound.
+            let inventory_limit=mobile_release_desktop::macos_install_record::INVENTORY_LIMIT as u64;
+            assert_eq!(ReadRole::Inventory.policy(),(inventory_limit,true,false));
             let admitted=native_allocation_data([ProducerVerifier::project_owned_upper_bound(),
                 RemovalProgramVerifier::project_owned_upper_bound(),RemovalProducerSigner::project_owned_upper_bound(),
                 RemovalProducerVerifier::project_owned_upper_bound()]).unwrap();
@@ -253,7 +256,7 @@ mod emitter {
             }
             assert_eq!(INPUTS[..5].iter().map(|v|v.0).collect::<Vec<_>>(),
                 ["remove-descriptor-input.json","producer.json","producer.sig","install-inventory.json","mrk-macos-remove"]);
-            assert_eq!(INPUTS[..5].iter().map(|v|v.1.policy().0).collect::<Vec<_>>(),[16384,65536,512,1048576,67108864]);
+            assert_eq!(INPUTS[..5].iter().map(|v|v.1.policy().0).collect::<Vec<_>>(),[16384,65536,512,inventory_limit,67108864]);
             assert_eq!(INPUTS.len(),if cfg!(feature="macos-remove-observer-producer") {6} else {5});
             #[cfg(feature="macos-remove-observer-producer")]
             assert_eq!(INPUTS[5],("installed-mrk-macos-remove",ReadRole::Program));
@@ -262,9 +265,11 @@ mod emitter {
             let count=2*(32+1)+1+INPUTS.len()+2+4;
             assert_eq!(count,if cfg!(feature="macos-remove-observer-producer") {79} else {78});
             assert!(count<=ORIGINAL_LIMIT);
-            assert!(3*PACKAGE_LIMIT+6*ReadRole::Program.policy().0+3*(16384+65536+512+1048576)
+            // Three complete source reads, optional observer program and
+            // sidecar readbacks including EOF stay within the existing budget.
+            assert!(3*PACKAGE_LIMIT+6*ReadRole::Program.policy().0+3*(16384+65536+512+inventory_limit)
                 +2*(16384+512)+128<READ_LIMIT);
-            assert!(3*PACKAGE_LIMIT+3*ReadRole::Program.policy().0+3*(16384+65536+512+1048576)+2*(16384+512)+64<READ_LIMIT);
+            assert!(3*PACKAGE_LIMIT+3*ReadRole::Program.policy().0+3*(16384+65536+512+inventory_limit)+2*(16384+512)+64<READ_LIMIT);
             assert!(final_ready_data(false,false,true,&[State::Closed,State::Absent]));
             for state in [State::Reserved,State::Acquiring,State::Owned,State::Closing,State::Unknown] {
                 assert!(!final_ready_data(false,false,true,&[state]));

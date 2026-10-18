@@ -376,6 +376,11 @@ jobs:
           body = (work / "candidate-acquisition.json").read_bytes()
           assert 0 < len(body) <= 65536
           value = json.loads(body)
+          # Public count only, useful for diagnosing supported inventory limits.
+          # Never print donor contents, local paths or credential data.
+          inventory_bytes = value["inventory"]["bytes"]
+          assert type(inventory_bytes) is int and 0 < inventory_bytes <= 12 * 1024 * 1024
+          print(f"MRK_REMOVAL_INVENTORY_BYTES={inventory_bytes}")
           donor = value["removalDonor"]
           version = donor["sourcePackageVersion"]
           assert isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)

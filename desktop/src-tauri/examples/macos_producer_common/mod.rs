@@ -17,7 +17,8 @@ impl ReadRole {
     pub(super) fn policy(self)->(u64,bool,bool) {match self {
         Self::Package=>(PACKAGE_LIMIT,false,true),Self::InstallDescriptor=>(65536,true,false),
         Self::RemoveDescriptor=>(16384,true,false),Self::Signature=>(512,true,false),
-        Self::Inventory=>(1048576,true,false),Self::Program=>(67108864,false,false),
+        Self::Inventory=>(mobile_release_desktop::macos_install_record::INVENTORY_LIMIT as u64,true,false),
+        Self::Program=>(67108864,false,false),
     }}
 }
 
