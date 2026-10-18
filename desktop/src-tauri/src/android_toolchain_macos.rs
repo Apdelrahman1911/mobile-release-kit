@@ -18,7 +18,7 @@ fn current_native_profile() -> Result<crate::android_build_protocol::Profile> {
     crate::android_build_protocol::Profile::current()
         .filter(|profile| policy::native_catalog_supports(*profile)).ok_or(Failure::Inventory)
 }
-pub(super) const LIVE_FDS: usize = 64; // Separate tool budget; never widens runtime's 48.
+pub(super) const LIVE_FDS: usize = 64; // Separate tool budget; never widens the runtime budget.
 const ORIGINALS: usize = policy::ENTRY_LIMIT + 256;
 const READ_LIMIT: u64 = 2 * policy::TOTAL_LIMIT + 2 * (policy::MANIFEST_LIMIT + policy::RECORD_LIMIT + policy::PROVIDER_LIMIT) as u64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

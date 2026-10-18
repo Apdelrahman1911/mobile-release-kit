@@ -204,11 +204,11 @@ function RecoveryDetails({ state }: { state: IOSArchiveState }) {
       consent.binding.requestGeneration !== state.requestGeneration)) return null;
   return <div className="save-note" role="group" aria-label="Recovery details">
     <p><strong>Recovery request details.</strong> These IDs help support distinguish inspection from recovery. They do not authorize another action or prove that every worker finished cleanup.</p>
-    <p>Recovery operation ID: {op.operationId}</p>
-    <p>Recovery owner generation: {op.ownerGeneration}</p>
-    <p>Recovery phase: {op.phase}</p>
-    <p>Recovery outcome: {op.outcome ?? 'not-observed'}</p>
-    <p>Recovery reason: {op.reason}</p>
+    <p>{`Recovery operation ID: ${op.operationId}`}</p>
+    <p>{`Recovery owner generation: ${op.ownerGeneration}`}</p>
+    <p>{`Recovery phase: ${op.phase}`}</p>
+    <p>{`Recovery outcome: ${op.outcome ?? 'not-observed'}`}</p>
+    <p>{`Recovery reason: ${op.reason}`}</p>
   </div>;
 }
 

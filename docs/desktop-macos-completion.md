@@ -4,24 +4,50 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
-Two concrete application defects were corrected after the previous final package:
-16 registered history/Store commands lacked their explicit main-window Tauri
-permissions, blocking project selection at startup; the Android UI also called
-an unregistered toolchain-recovery command. The current source restores only
-those intended permissions and connects recovery to the existing original owner.
-Native admission, explicit consent and separate Recover/Choose/Build remain
-unchanged. Independent reviews and focused Linux regressions passed. Source
-`cafb4f9887938cbe21df698dc79abdcd87c72a96` is being rebuilt for both Mac targets in
-run `39094572546/1`; native success is **not yet established**. Earlier signed
-`8800fd3e` packages contain the startup defect and are not usable predecessors.
+The current signed candidate is `cafb4f9887938cbe21df698dc79abdcd87c72a96`
+(run `39094572546/1`). Both Apple Silicon and Intel application/Installer signing,
+notarization, stapling and final disk-image packaging passed. ARM Applications
+launch passed. These results **do not establish complete installed usability**.
+Earlier `8800fd3e` packages contain startup permission defects and are not usable
+predecessors. No main changes or public release are authorized.
 
-The next installed checks reuse each corrected final signed application rather
-than rebuild it per feature: ordinary launch/project/configuration/GitHub Apply,
-metadata/images/version and credential persistence; saved evidence and recovery;
-unsigned iOS archive; pending-operation recovery; and interrupted installation
-restoration. Android is not repeated if its same-source producer test passes.
-The existing two-generation update and removal checks remain separate unfinished
-obligations. No predecessor enrollment follows merely from a signed artifact.
+Installed consumers reuse those exact applications: helper-only changes do not
+rebuild or re-sign them. Run `39112277383/1` failed ordinary project UI, pending
+iOS recovery and Restore. The first two failed in text/diagnostic queries; the
+Restore fixture built successfully but its native baseline failed. Reviewed
+helper changes `60dde135` use typed text waits, a single public failure snapshot,
+and fixed private-safe diagnostic categories (three focused Linux methods pass).
+Run `39115467696/1` failed both affected ARM UI cohorts. The ordinary app
+reported `mac-runtime-inspection` after two completed snapshot observations:
+installed runtime admission blocks project access; the exact failure category
+was not available in that application. Pending recovery exposed separate AXValue
+nodes for the caption and IDs, not the expected complete text node.
+
+The next reviewed product batch fixes a source-proven descriptor shortfall:
+allowed runtime paths can require 51 originals against the former 48 limit;
+the bounded, compositional limit is now 67 with ownership/cleanup unchanged.
+It also preserves the nine static runtime inspection failure categories and
+renders each recovery-detail paragraph as one React string child. The portable
+budget regression passes (the former limit fails), the focused diagnostic parser
+passes, and the affected TSX transpiles without diagnostics. None of these local
+checks establishes the installed Mac cause or complete recovery. Both-architecture
+native compilation and the existing 73 contracts plus the new budget regression
+must pass before one coherent signed application rebuild.
+
+A source-proven Restore transport mismatch is corrected in `383b363a`: the
+candidate fixture now mounts under separately held protected `/Volumes` parents,
+not the runner-owned home directory that native admission rejects. Ownership,
+ACL, filesystem, original-byte, namespace and cleanup requirements are unchanged.
+Two focused real-descriptor tests pass; run `39115537239/1` is the independent
+ARM Restore check, not yet a pass. The obsolete legacy simultaneous-mount
+verification route is not fixed or qualified by this candidate-only change.
+
+Still required: actual installed project/configuration/GitHub Apply,
+metadata/images/version and credentials; Android, unsigned iOS, saved evidence
+and interrupted-operation recovery; corresponding Intel coverage; ordinary and
+interrupted removal; and a genuine usable P0→P1 update with Keychain continuity.
+No predecessor enrollment follows merely from signing or entry smoke. Finish
+with fresh feature/readiness acceptance and an installer handoff.
 
 **Positive iOS IPA export needs genuine mobile signing inputs.** The available
 Mac Developer ID and notarization credentials cannot substitute for an Apple
@@ -39,7 +65,8 @@ are implemented; older chronological notes below describe their earlier gaps.
 They are **not yet verified in an installed final application**.
 
 - Actual affected Mac native contracts: 73 passed on each architecture in
-  run `39013642063/1`. The integrated native source is unchanged from that run.
+  run `39013642063/1`. The new runtime-budget and error-category changes require a fresh affected check;
+  those changes are not covered by that earlier run.
 - Signed Ruby/runtime Store regressions: 204 passed on each architecture in
   run `39013105410/1`. A later local-altool invocation correction affects two
   SDK bridge cases; those are rechecked separately, not credited from the old run.

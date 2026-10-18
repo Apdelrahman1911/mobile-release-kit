@@ -32,7 +32,9 @@ pub(crate) const LOCAL_CANDIDATE_ANDROID_FDS:usize=MAC_RUNTIME_FDS+android_tools
 // original Store/tool/shared-reader caps, not Android build authority.
 pub(crate) const LOCAL_EXECUTE_ORIGINAL_FDS:usize=MAC_RUNTIME_FDS+android_tools::LIVE_FDS+crate::android_shared_lease_macos::LIVE_READ_FDS;
 
-const MAC_RUNTIME_FDS:usize=48;
+#[path = "macos_runtime_budget.rs"]
+mod budget;
+const MAC_RUNTIME_FDS:usize=budget::LIVE_FDS;
 pub(crate) use android_tools::AndroidToolchainSlots;
 #[cfg(not(feature = "macos-android-registration-helper"))]
 #[path = "android_leased_toolchain_macos.rs"]
@@ -271,6 +273,21 @@ fn installed_code_layout() -> Result<crate::macos_install_record::CodeLayout> {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionFailure { Stopped, Deadline, Bounds, Native, Ownership, Inventory, Identity, AlreadyUsed, Unknown }
+// Public fixed categories only: no path, request, syscall prose or credential.
+// Report the returned inspection category without changing its owner/finality.
+fn runtime_inspection_error(failure: AdmissionFailure) -> BridgeError {
+    BridgeError::unavailable(match failure {
+        AdmissionFailure::Stopped => "Installed Mac runtime inspection stopped before completion.",
+        AdmissionFailure::Deadline => "Installed Mac runtime inspection exceeded its deadline.",
+        AdmissionFailure::Bounds => "Installed Mac runtime inspection exceeded its resource limit.",
+        AdmissionFailure::Native => "Installed Mac runtime native or data inspection could not finish.",
+        AdmissionFailure::Ownership => "Installed Mac runtime ownership or filesystem protections could not be verified.",
+        AdmissionFailure::Inventory => "Installed Mac runtime inventory could not be verified.",
+        AdmissionFailure::Identity => "Installed Mac runtime original file identity could not be confirmed.",
+        AdmissionFailure::AlreadyUsed => "Installed Mac runtime inspection was already used.",
+        AdmissionFailure::Unknown => "Installed Mac runtime original custody could not be confirmed.",
+    })
+}
 type Result<T> = std::result::Result<T, AdmissionFailure>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CloseOutcome { Settled, Unknown }
@@ -768,7 +785,7 @@ impl Book {
     }
     fn fd(&self, index: usize) -> Result<&OwnedFd> { self.records.get(index).and_then(|r| r.fd.as_ref()).ok_or(AdmissionFailure::Unknown) }
     fn reserve(&mut self, parent: Option<usize>, name: &str) -> Result<usize> {
-        if self.records.len() >= crate::macos_install_record::RUNTIME_RECORD_LIMIT || self.records.iter().filter(|r| r.fd.is_some()).count() >= MAC_RUNTIME_FDS { return Err(AdmissionFailure::Bounds); }
+        if self.records.len() >= crate::macos_install_record::RUNTIME_RECORD_LIMIT || !budget::admits_next(self.records.iter().filter(|r| r.fd.is_some()).count()) { return Err(AdmissionFailure::Bounds); }
         let i = self.records.len(); self.records.push(Record { state: State::Reserved, fd: None, parent, name: name.into(), identity: None, android_flags: None }); Ok(i)
     }
     fn filesystem(&self, index: usize, identity: Identity, stopped: &mut dyn FnMut() -> bool) -> Result<()> {
@@ -918,7 +935,7 @@ impl Book {
     }
     fn walk(&mut self, parent: usize, relative: &str, files: &BTreeMap<String, PayloadFile>, directories: &BTreeSet<String>,
         observed: &mut BTreeSet<String>, selection: &VerifiedRuntime, depth: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
-        if depth > 16 { return Err(AdmissionFailure::Bounds); }
+        if depth > budget::WALK_DEPTH { return Err(AdmissionFailure::Bounds); }
         let mut buffer = [0u8; 65536]; let mut local = BTreeSet::new();
         loop {
             self.point(end, stop)?;
@@ -1267,7 +1284,7 @@ macro_rules! slots {
                 self.selection = Some(profile.selection()?);
                 let selection = self.selection.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
                 let book = self.inspection.as_mut().ok_or_else(BridgeError::cleanup_unknown)?;
-                book.inspect(selection, end, stop).map_err(|_| BridgeError::unavailable("The installed Mac runtime failed original custody inspection."))?;
+                book.inspect(selection, end, stop).map_err(runtime_inspection_error)?;
                 Ok(VerifiedRuntime { python: selection.python.clone(), bootstrap: selection.bootstrap.clone(), core: selection.core.clone(), cwd: selection.cwd.clone() })
             }
             pub(crate) fn transfer_once(&mut self) -> Result<()> {

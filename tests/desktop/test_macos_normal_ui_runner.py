@@ -2949,10 +2949,19 @@ class NormalPhaseDataTests(unittest.TestCase):
         # original-custody message; keep the observer and closed decoder paired.
         for code,text in (
             ('mac-runtime-inspection','The installed Mac runtime failed original custody inspection.'),
+            ('mac-inspection-stopped','Installed Mac runtime inspection stopped before completion.'),
+            ('mac-inspection-deadline','Installed Mac runtime inspection exceeded its deadline.'),
+            ('mac-inspection-bounds','Installed Mac runtime inspection exceeded its resource limit.'),
+            ('mac-inspection-native','Installed Mac runtime native or data inspection could not finish.'),
+            ('mac-inspection-ownership','Installed Mac runtime ownership or filesystem protections could not be verified.'),
+            ('mac-inspection-inventory','Installed Mac runtime inventory could not be verified.'),
+            ('mac-inspection-identity','Installed Mac runtime original file identity could not be confirmed.'),
+            ('mac-inspection-reused','Installed Mac runtime inspection was already used.'),
+            ('mac-inspection-unknown','Installed Mac runtime original custody could not be confirmed.'),
             ('mac-runtime-profile','This Mac method is outside its passive profile or original document-bound signing-input assessment profile.'),
         ):
             self.assertIn('("'+code+'", "'+text+'")',SWIFT.read_text())
-        for reason in (b'none',b'query-timeout',b'android-2',b'images-3',b'mac-runtime-inspection',b'mac-runtime-profile'):
+        for reason in (b'none',b'query-timeout',b'android-2',b'images-3',b'mac-runtime-inspection',b'mac-runtime-profile',b'mac-inspection-stopped',b'mac-inspection-deadline',b'mac-inspection-bounds',b'mac-inspection-native',b'mac-inspection-ownership',b'mac-inspection-inventory',b'mac-inspection-identity',b'mac-inspection-reused',b'mac-inspection-unknown'):
             row=MODULE.snapshot_state_diagnostics(snapshot.replace(b'runtime-inspection',reason),b'')['samples'][0]
             self.assertEqual(row['firstKnownReason'],reason.decode())
         pair=MODULE.normal_failure_diagnostics('test','project-test.xcresult',subprocess.CompletedProcess([],65,snapshot*2+valid+private,b''))

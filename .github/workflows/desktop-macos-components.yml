@@ -683,6 +683,7 @@ jobs:
           # Store/History/material contracts, never the native Xcode Book fixture.
           rustup run 1.98.1 cargo test --locked --no-default-features \
             --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
+            installed_runtime::budget::tests::admitted_deep_paths_fit_after_retained_siblings_without_unbounded_growth \
             asset_session::local_history::tests::local_release_history_needs_registered_project_not_credential_context \
             local_release_history_protocol::tests::local_release_history_real_decoder_requires_complete_closed_phase_sequence \
             local_release_history_protocol::tests::local_release_history_original_nonce_replay_and_truncated_terminal_refuse \
@@ -757,7 +758,7 @@ jobs:
             saved_command_owner::local_history::reconcile_route_tests::local_external_readiness_route_needs_third_actual_ack_and_preserves_pending_failure \
             saved_command_owner::local_history::native::reconcile_tests::local_external_readiness_final_original_join_alone_selects_cleanup_not_success \
             --exact --test-threads=1 | tee "$WORK_ROOT/store-contract-tests.log"
-          grep -Eq '^test result: ok\. 73 passed; 0 failed; 0 ignored;' "$WORK_ROOT/store-contract-tests.log"
+          grep -Eq '^test result: ok\. 74 passed; 0 failed; 0 ignored;' "$WORK_ROOT/store-contract-tests.log"
       - name: Bound successful compiler cache publication
         id: cache-size
         if: success() && steps.cargo-cache.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true'
