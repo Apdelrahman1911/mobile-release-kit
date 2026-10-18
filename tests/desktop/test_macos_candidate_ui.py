@@ -167,8 +167,15 @@ class CandidateUITests(unittest.TestCase):
         cases += [(name, N.ARM_TARGET) for name in ('build-fails', 'inputs-fails', 'test-fails',
             'summary-fails', 'build-status-fails', 'inputs-status-fails', 'test-status-fails',
             'test-and-status-fail', 'missing-install', 'missing-context')]
-        for scenario, target in cases:
-            with self.subTest(scenario=scenario, target=target), tempfile.TemporaryDirectory() as temporary:
+        cases = [(scenario, target, 'ordinary-android-ui') for scenario, target in cases]
+        cases += [('success', target, 'ordinary-ios-pending-ui') for target in (N.ARM_TARGET, N.INTEL_TARGET)]
+        cases += [(scenario, N.ARM_TARGET, 'ordinary-ios-pending-ui') for scenario in
+                  ('build-fails', 'test-fails', 'summary-fails', 'build-status-fails', 'test-status-fails',
+                   'test-and-status-fail', 'missing-install', 'missing-context', 'inputs-forbidden', 'wrong-mode')]
+        for scenario, target, mode in cases:
+            pending = mode == 'ordinary-ios-pending-ui'
+            stem = 'ios-pending-recovery' if pending else 'android-candidate-inputs'
+            with self.subTest(scenario=scenario, target=target, mode=mode), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary); workspace = root / 'workspace'; work = root / 'work'
                 helper = workspace / '.candidate-consumer-helper'
                 (helper / 'desktop/tools').mkdir(parents=True)
@@ -186,7 +193,13 @@ class CandidateUITests(unittest.TestCase):
                     assert os.environ['GITHUB_SHA'] == os.environ['GITHUB_WORKFLOW_SHA'] == 'b' * 40
                     assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE'] == 'a' * 40
                     assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE'] == 'b' * 40
-                    assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE'] == 'current-candidate-android-candidate-only-v1'
+                    if {pending!r}:
+                        assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_CURRENT_IOS_PENDING'] == 'current-candidate-ios-pending-only-v1'
+                        assert not any('ANDROID' in key for key in os.environ)
+                        assert phase != 'inputs'
+                    else:
+                        assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE'] == 'current-candidate-android-candidate-only-v1'
+                        assert 'TEST_RUNNER_MRK_NORMAL_UI_CURRENT_IOS_PENDING' not in os.environ
                     assert os.environ['GITHUB_REF'] == 'refs/heads/verify/desktop-macos-candidate-consume'
                     assert pathlib.Path.cwd() == pathlib.Path(os.environ['GITHUB_WORKSPACE']) / '.candidate-consumer-helper'
                     assert os.environ['GITHUB_RUN_ID'] == '123' and os.environ['GITHUB_RUN_ATTEMPT'] == '1'
@@ -194,14 +207,15 @@ class CandidateUITests(unittest.TestCase):
                     assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB'] == ('github-hosted-macos26-arm64' if target == 'aarch64-apple-darwin' else 'github-hosted-macos26-x86_64')
                     if phase != 'inputs':
                         assert sys.argv[1:3] == ['--target', target]
+                        assert sys.argv[-1] == ('--normal-build' if phase == 'build' else '--normal-' + {stem!r} + '-' + phase)
                     normal = pathlib.Path(os.environ['TMPDIR']).parent
                     with (normal / 'tmp/calls.txt').open('a') as stream:
                         stream.write(phase + '\\n')
                     scenario = {scenario!r}
                     status_phase = {{'build-status-fails': 'build', 'inputs-status-fails': 'inputs',
                         'test-status-fails': 'test', 'test-and-status-fail': 'test'}}.get(scenario)
-                    label = {{'build': 'build', 'inputs': 'android-inputs', 'test': 'android-candidate-inputs-test',
-                             'summary': 'android-candidate-inputs-summary'}}[phase]
+                    label = {{'build': 'build', 'inputs': 'android-inputs', 'test': {stem!r} + '-test',
+                             'summary': {stem!r} + '-summary'}}[phase]
                     if phase == status_phase:
                         (normal / (label + '.status')).mkdir()
                     if scenario == phase + '-fails' or scenario == 'test-and-status-fail' and phase == 'test':
@@ -210,7 +224,7 @@ class CandidateUITests(unittest.TestCase):
                 for name in ('macos_normal_ui_runner.py', 'macos_android_dependency_preparation.py'):
                     (helper / 'desktop/tools' / name).write_text(child)
                 env = dict(PATH='/usr/bin:/bin', MRK_MACOS_WORK=str(work), GITHUB_WORKSPACE=str(workspace),
-                    MRK_MACOS_TARGET=target, MRK_CANDIDATE_SOURCE='a'*40, MRK_CANDIDATE_MODE='ordinary-android-ui',
+                    MRK_MACOS_TARGET=target, MRK_CANDIDATE_SOURCE='a'*40, MRK_CANDIDATE_MODE='unrecognized' if scenario == 'wrong-mode' else mode,
                     GITHUB_SHA='b'*40, GITHUB_WORKFLOW_SHA='b'*40, GITHUB_EVENT_NAME='push',
                     GITHUB_REF='refs/heads/verify/desktop-macos-candidate-consume',
                     GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit',
@@ -220,7 +234,9 @@ class CandidateUITests(unittest.TestCase):
                     SHOULD_NOT_REACH_NATIVE='inert-ambient-value', GITHUB_TOKEN='inert-not-a-real-token')
                 if scenario == 'missing-context':
                     del env['GITHUB_WORKFLOW_SHA']
-                for phase in ('build', 'inputs', 'test'):
+                phases = ('build', 'test') if pending else ('build', 'inputs', 'test')
+                if scenario == 'inputs-forbidden': phases = ('build', 'inputs')
+                for phase in phases:
                     actual = subprocess.run(['/bin/bash', '--noprofile', '--norc', '-c', script],
                         cwd=workspace, env=dict(env, MRK_ANDROID_CONSUMER_PHASE=phase), capture_output=True, timeout=10)
                     if actual.returncode:
@@ -234,10 +250,12 @@ class CandidateUITests(unittest.TestCase):
                     self.assertEqual(actual.returncode, expected, actual.stderr.decode(errors='replace'))
                 calls = work / 'normal-ui/tmp/calls.txt'
                 observed = calls.read_text().splitlines() if calls.exists() else []
-                stop = (0 if scenario in ('missing-install', 'missing-context') else
-                        1 if scenario.startswith('build-') else 2 if scenario.startswith('inputs-') else
-                        3 if scenario.startswith('test-') else 4)
-                self.assertEqual(observed, ['build', 'inputs', 'test', 'summary'][:stop])
+                wanted = ['build', 'test', 'summary'] if pending else ['build', 'inputs', 'test', 'summary']
+                stop = (0 if scenario in ('missing-install', 'missing-context', 'wrong-mode') else
+                        1 if scenario.startswith('build-') or scenario == 'inputs-forbidden' else
+                        2 if scenario.startswith('inputs-') else
+                        wanted.index('test') + 1 if scenario.startswith('test-') else len(wanted))
+                self.assertEqual(observed, wanted[:stop])
                 self.assertFalse((work / 'candidate-ui-result.json').exists(), 'no synthesized UI qualification')
 
 

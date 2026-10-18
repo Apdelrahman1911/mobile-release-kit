@@ -646,6 +646,8 @@ IOS_PENDING_RESULT = "ios-pending-recovery-test.xcresult"
 IOS_PENDING_PREFIX = b"MRK_MACOS_UI_IOS_PENDING_RECOVERY="
 IOS_PENDING_RUN = "TEST_RUNNER_MRK_NORMAL_UI_IOS_RECOVERY_RUN_ID"
 IOS_PENDING_ATTEMPT = "TEST_RUNNER_MRK_NORMAL_UI_IOS_RECOVERY_RUN_ATTEMPT"
+IOS_PENDING_CURRENT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_CURRENT_IOS_PENDING"
+IOS_PENDING_CURRENT_SCOPE = "current-candidate-ios-pending-only-v1"
 IOS_UNSIGNED_METHOD = "testSyntheticProjectUnsignedIOSArchive"
 IOS_UNSIGNED_RESULT = "ios-unsigned-archive-test.xcresult"
 IOS_UNSIGNED_STAGES = ("ios-unsigned-fixture", "ios-unsigned-launch", "ios-unsigned-project",
@@ -1905,7 +1907,10 @@ class NormalIOSRecoveryFixture:
             self.check_sources()
             self.fixtures.prepare()
             need(self.fixtures.account_home == self.phase.environment["HOME"] == "/Users/runner", "ios-pending-same-account-home")
-            self.fixtures.admit_normal_account_runtime(self.phase.root, self.request["derived"].parent.parent)
+            self.fixtures.admit_normal_account_runtime(
+                SAVED_VERSION_CANDIDATE_ROOT if IOS_PENDING_CURRENT_ENV in self.phase.environment else self.phase.root,
+                self.request["derived"].parent.parent,
+                application_source=self.phase.environment["TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE"])
             self.stager = sys.modules.get("_mrk_shipping_gate_stager")
             need(self.stager is not None, "ios-pending-stager-original")
             self.prepared = True
@@ -3679,8 +3684,8 @@ def execute_normal_phase(phase, request, source, file_limit):
     elif FIXED_RESUME_ENV in phase.environment:
         facts.update(fixedCarrierResumeScope=FIXED_RESUME_SCOPE, applicationSourceCommit=FIXED_RESUME_SOURCE,
                      currentProductQualified=False, p0Qualified=False, intelQualified=False)
-    if any(key in phase.environment for key in (SAVED_VERSION_CURRENT_ENV, IOS_TOOLS_CURRENT_ENV, ANDROID_CURRENT_ENV)):
-        facts.update(currentCandidateScope=ANDROID_CURRENT_SCOPE if ANDROID_CURRENT_ENV in phase.environment else IOS_TOOLS_CURRENT_SCOPE if IOS_TOOLS_CURRENT_ENV in phase.environment else SAVED_VERSION_CURRENT_SCOPE,
+    if any(key in phase.environment for key in (SAVED_VERSION_CURRENT_ENV, IOS_TOOLS_CURRENT_ENV, ANDROID_CURRENT_ENV, IOS_PENDING_CURRENT_ENV)):
+        facts.update(currentCandidateScope=IOS_PENDING_CURRENT_SCOPE if IOS_PENDING_CURRENT_ENV in phase.environment else ANDROID_CURRENT_SCOPE if ANDROID_CURRENT_ENV in phase.environment else IOS_TOOLS_CURRENT_SCOPE if IOS_TOOLS_CURRENT_ENV in phase.environment else SAVED_VERSION_CURRENT_SCOPE,
             applicationSourceCommit=phase.environment["TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE"])
     facts.update(target=target, sourceCommit=source, sourceRosterSha256=sha(encoded(before)), sourcePrePostMatched=True,
                  originalCommandReturned=True, commands=phase.records, fileLimitBytes=list(file_limit),
@@ -4927,7 +4932,7 @@ def saved_version_candidate_context(request, environment, root):
         return {}
     app = environment.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE", "")
     harness = environment.get("TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE", "")
-    need(ANDROID_CURRENT_ENV not in environment and IOS_TOOLS_CURRENT_ENV not in environment
+    need(ANDROID_CURRENT_ENV not in environment and IOS_TOOLS_CURRENT_ENV not in environment and IOS_PENDING_CURRENT_ENV not in environment
          and marker == SAVED_VERSION_CURRENT_SCOPE and re.fullmatch(r"[0-9a-f]{40}", app)
          and re.fullmatch(r"[0-9a-f]{40}", harness) and app != harness
          and FIXED_RESUME_ENV not in environment and FIXED_NORMAL_BATCH_ENV not in environment
@@ -4946,7 +4951,7 @@ def ios_tools_candidate_context(request, environment, root):
     app = environment.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE", "")
     harness = environment.get("TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE", "")
     result = None if request["result"] is None else Path(request["result"]).name
-    need(marker == IOS_TOOLS_CURRENT_SCOPE and ANDROID_CURRENT_ENV not in environment and SAVED_VERSION_CURRENT_ENV not in environment
+    need(marker == IOS_TOOLS_CURRENT_SCOPE and ANDROID_CURRENT_ENV not in environment and SAVED_VERSION_CURRENT_ENV not in environment and IOS_PENDING_CURRENT_ENV not in environment
          and re.fullmatch(r"[0-9a-f]{40}", app) and re.fullmatch(r"[0-9a-f]{40}", harness)
          and app != "0" * 40 and harness != "0" * 40 and app != harness
          and FIXED_RESUME_ENV not in environment and FIXED_NORMAL_BATCH_ENV not in environment
@@ -4969,7 +4974,7 @@ def android_candidate_consumer_context(request, environment, root):
     result = None if request["result"] is None else Path(request["result"]).name
     need(marker == ANDROID_CURRENT_SCOPE
          and all(re.fullmatch(r"[0-9a-f]{40}", value) and value != "0" * 40 for value in (app, harness))
-         and not any(key in environment for key in (SAVED_VERSION_CURRENT_ENV, IOS_TOOLS_CURRENT_ENV,
+         and not any(key in environment for key in (SAVED_VERSION_CURRENT_ENV, IOS_TOOLS_CURRENT_ENV, IOS_PENDING_CURRENT_ENV,
                                                     FIXED_RESUME_ENV, FIXED_NORMAL_BATCH_ENV))
          and Path(root) == SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper"
          and ((request["phase"] == "build" and result is None and not request.get("androidCandidate") and not request.get("androidPositive"))
@@ -4978,6 +4983,25 @@ def android_candidate_consumer_context(request, environment, root):
          and not any(request.get(key) for key in ("credentialUpdate", "outputData", "iosUnsigned", "iosPending")),
          "android-current-candidate-context")
     return {ANDROID_CURRENT_ENV: marker}
+
+
+def ios_pending_candidate_context(request, environment, root):
+    marker = environment.get(IOS_PENDING_CURRENT_ENV)
+    if marker is None:
+        return {}
+    app = environment.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE", "")
+    harness = environment.get("TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE", "")
+    result = None if request["result"] is None else Path(request["result"]).name
+    need(marker == IOS_PENDING_CURRENT_SCOPE
+         and all(re.fullmatch(r"[0-9a-f]{40}", value) and value != "0"*40 for value in (app, harness))
+         and not any(key in environment for key in (SAVED_VERSION_CURRENT_ENV, IOS_TOOLS_CURRENT_ENV, ANDROID_CURRENT_ENV,
+                                                    FIXED_RESUME_ENV, FIXED_NORMAL_BATCH_ENV))
+         and Path(root) == SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper"
+         and ((request["phase"] == "build" and result is None and not request.get("iosPending"))
+              or (request["phase"] in ("test", "summary") and result == IOS_PENDING_RESULT and request.get("iosPending") is True))
+         and not any(request.get(key) for key in ("credentialUpdate", "outputData", "iosUnsigned", "androidPositive", "androidCandidate")),
+         "ios-pending-current-candidate-context")
+    return {IOS_PENDING_CURRENT_ENV: marker}
 
 
 def normal_context(request, *, diagnostics=None):
@@ -4989,7 +5013,8 @@ def normal_context(request, *, diagnostics=None):
     current_saved = saved_version_candidate_context(request, os.environ, root)
     current_ios = ios_tools_candidate_context(request, os.environ, root)
     current_android = android_candidate_consumer_context(request, os.environ, root)
-    current_candidate = current_saved or current_ios or current_android
+    current_pending = ios_pending_candidate_context(request, os.environ, root)
+    current_candidate = current_saved or current_ios or current_android or current_pending
     need(re.fullmatch(r"[0-9a-f]{40}", source)
          and (resume or current_candidate or os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE") == source)
          and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB") == hosted_job,
@@ -5021,17 +5046,17 @@ def normal_context(request, *, diagnostics=None):
          "LC_ALL": "en_US.UTF-8", "TZ": "UTC"}.items()), "normal-clean-environment")
     environment.update(resume_environment)
     environment.update(current_candidate)
-    if current_android or request.get("androidPositive") is True or request.get("iosPending") is True:
+    if current_android or current_pending or request.get("androidPositive") is True or request.get("iosPending") is True:
         env = os.environ
-        expected_ref = ANDROID_CONSUMER_REF if current_android else ANDROID_CANDIDATE_REF if request.get("androidCandidate") is True else ANDROID_REF
-        expected_workflow = ANDROID_CONSUMER_WORKFLOW if current_android else ANDROID_WORKFLOW
+        expected_ref = ANDROID_CONSUMER_REF if current_android or current_pending else ANDROID_CANDIDATE_REF if request.get("androidCandidate") is True else ANDROID_REF
+        expected_workflow = ANDROID_CONSUMER_WORKFLOW if current_android or current_pending else ANDROID_WORKFLOW
         need(sys.version_info[:3] == (3, 14, 7)
              and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
              and env.get("GITHUB_REPOSITORY") == "Apdelrahman1911/mobile-release-kit"
              and env.get("GITHUB_EVENT_NAME") == "push" and env.get("GITHUB_REF") == expected_ref
              and env.get("GITHUB_SHA") == source == env.get("GITHUB_WORKFLOW_SHA")
              and env.get("GITHUB_WORKFLOW_REF") == "Apdelrahman1911/mobile-release-kit/" + expected_workflow + "@" + expected_ref
-             and env.get("GITHUB_WORKSPACE") == str(SAVED_VERSION_CANDIDATE_ROOT if current_android else root) and env.get("RUNNER_ENVIRONMENT") == "github-hosted"
+             and env.get("GITHUB_WORKSPACE") == str(SAVED_VERSION_CANDIDATE_ROOT if current_android or current_pending else root) and env.get("RUNNER_ENVIRONMENT") == "github-hosted"
              and env.get("RUNNER_OS") == "macOS" and env.get("RUNNER_ARCH") == ("ARM64" if request["target"] == ARM_TARGET else "X64")
              and all(re.fullmatch(r"[1-9][0-9]{0,19}", env.get(k, "")) for k in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
              "android-signed-fixed-installed-context")

@@ -4498,6 +4498,7 @@ class Fixtures:
         self.account_produced = self.account_app_returned = self.account_readback = False
         self.normal_account_original = self.normal_account_observation_sha = None
         self.normal_stager_registrations = []
+        self.normal_runtime_policy, self.normal_runtime_roster = {}, None
         self.account_attempts = {"produce": False, "observe": False}
         self.account_producer_attestation = self.account_readback_attestation = self.account_lease = None
         self.account_fds, self.account_directories = set(), {}
@@ -4921,7 +4922,11 @@ class Fixtures:
         return result
 
     def _recovery_read(self, parent, name, owner, limit, mode=None, *, retain=False, collect=False):
-        need(type(retain) is bool and type(collect) is bool and (not collect or type(limit) is int and 0 < limit <= 1024*1024), "recovery-runtime-collect-bound")
+        # Only the fixed normal installed metadata roles need retained bodies above1MiB.
+        metadata = parent is not None and owner == 0 and mode == 0o444 and name in (
+            "manifest.json", "install-inventory.json", "installation-v1.json")
+        need(type(retain) is bool and type(collect) is bool and (not collect or type(limit) is int
+             and 0 < limit <= (12*1024*1024 if metadata else 1024*1024)), "recovery-runtime-collect-bound")
         before = signature(os.stat(name, dir_fd=parent, follow_symlinks=False))
         need(stat.S_ISREG(before[2]) and before[3] == owner and before[5] == 1 and 0 < before[6] <= limit
              and before[2] & 0o022 == 0 and (mode is None or before[2] == stat.S_IFREG | mode), "recovery-runtime-file")
@@ -4998,6 +5003,20 @@ class Fixtures:
         need(list(entries) == sorted(entries) and {"core.zip", "python/bin/python3"} <= entries.keys()
              and sum(row["size"] for row in entries.values()) <= 512*1024*1024
              and manifest["coreSha256"] == entries["core.zip"]["sha256"], "recovery-current-runtime-roster")
+        installed, parents = self._recovery_runtime_directories(release)
+        runtime = parents[str(installed)]
+        _, actual, _ = self._recovery_read(runtime, "manifest.json", 0, 12*1024*1024, 0o444, retain=True)
+        need(actual == manifest_sha, "recovery-installed-current-manifest")
+        for relative in ("core.zip", "python/bin/python3"):
+            parent, _, name = relative.rpartition("/")
+            info, sha, _ = self._recovery_read(parents[str(installed / parent)] if parent else runtime, name, 0,
+                512*1024*1024, 0o555 if relative.endswith("python3") else 0o444, retain=True)
+            need(info[6] == entries[relative]["size"] and sha == entries[relative]["sha256"], "recovery-installed-current-file")
+        self.recovery_runtime = (str(installed / "python/bin/python3"), str(installed / "core.zip"))
+        self.recovery_runtime_paths()
+
+    def _recovery_runtime_directories(self, release):
+        """Same fixture originals for legacy supplier and current installed readers."""
         installed = Path("/Library/Application Support/MobileReleaseKit/versions") / release / "runtime"
         current = self._open("/", directory=True)
         before = signature(os.fstat(current))
@@ -5011,22 +5030,25 @@ class Fixtures:
             need(original == signature(os.stat(part, dir_fd=parent, follow_symlinks=False)) and stat.S_ISDIR(original[2])
                  and original[3] == 0 and original[2] & 0o022 == 0, "recovery-runtime-ancestor")
             self.recovery_runtime_originals.append((parent, part, current, original)); parents[str(path)] = current
-        runtime = parents[str(installed)]
-        _, actual, _ = self._recovery_read(runtime, "manifest.json", 0, 12*1024*1024, 0o444, retain=True)
-        need(actual == manifest_sha, "recovery-installed-current-manifest")
-        for relative in ("core.zip", "python/bin/python3"):
-            parent, _, name = relative.rpartition("/")
-            info, sha, _ = self._recovery_read(parents[str(installed / parent)] if parent else runtime, name, 0,
-                512*1024*1024, 0o555 if relative.endswith("python3") else 0o444, retain=True)
-            need(info[6] == entries[relative]["size"] and sha == entries[relative]["sha256"], "recovery-installed-current-file")
-        self.recovery_runtime = (str(installed / "python/bin/python3"), str(installed / "core.zip"))
-        self.recovery_runtime_paths()
+        return installed, parents
+
+    def _normal_runtime_post(self):
+        if self.normal_runtime_roster is None:
+            return
+        stager, release_fd, names = self.normal_runtime_roster
+        need(set(os.listdir(release_fd)) == names, "normal-account-runtime-release-roster")
+        for fd, mode in self.normal_runtime_policy.items():
+            actual = os.fstat(fd)
+            need(actual.st_uid == actual.st_gid == 0 and actual.st_mode == mode
+                 and getattr(actual, "st_flags", None) == 0, "normal-account-runtime-policy")
+            stager.no_xattrs(fd)
 
     def recovery_runtime_paths(self):
         need(self.recovery_runtime is not None and not self.inflight and self.recovery_runtime_originals, "recovery-runtime-unadmitted")
         for parent, name, fd, original in self.recovery_runtime_originals:
             need(signature(os.fstat(fd)) == original and signature(os.stat(name, dir_fd=parent, follow_symlinks=False)) == original,
                  "recovery-runtime-original-changed")
+        self._normal_runtime_post()
         return self.recovery_runtime
 
     def _account_open(self, name, parent=None, *, directory=False):
@@ -5182,43 +5204,59 @@ class Fixtures:
             self._account_hash(self.account_private_file)
 
 
-    def admit_normal_account_runtime(self, source, work):
-        """Current signed installed route; never relabel the old Aqua supplier."""
+    def admit_normal_account_runtime(self, source, work, *, application_source):
+        """Same-job installed originals, not a fabricated producer/supplier result."""
         need(self.cases == (IOS_ACCOUNT_CASE,) and not self.inflight and self.recovery_runtime is None,
              "normal-account-runtime-order")
         need(isinstance(source, Path) and source == Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
              and isinstance(work, Path) and work.parent == Path("/Users/runner/work/_temp")
-             and re.fullmatch(r"mrk-macos-installed\.[A-Za-z0-9]{8}", work.name), "normal-account-runtime-context")
+             and re.fullmatch(r"mrk-macos-installed\.[A-Za-z0-9]{8}", work.name)
+             and type(application_source) is str and re.fullmatch(r"[0-9a-f]{40}", application_source)
+             and application_source != "0"*40, "normal-account-runtime-context")
         self.binding.checked()
         stager, release = _gate_load_stager(self, source, target=self.binding.target, registrations=self.normal_stager_registrations)
-        pins = (
-            ("desktop/macos-installed-inputs/python-signed-runtime-binding.json", 1503,
-             "fefbf7789ac1d8bed71e42456073423399d45e7f70d701964fc3bd51c7e82b61"),
-            ("desktop/packaging/macos-install-producer-signing.profile", 488,
-             "2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2"),
-            ("desktop/packaging/macos-android-service-signing.profile", 219,
-             "7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663"),
-        )
-        bodies = []
-        for name, size, expected in pins:
-            body, original = _gate_file(self, str(source / name), None, size)
-            need(len(body) == size and original["sha256"] == expected, "normal-account-runtime-source")
-            bodies.append(body)
-        chosen = stager.signed_runtime_binding_data(*bodies, target=self.binding.target)
-        _, _, raw = self._recovery_read(None, str(work / "runtime-result.json"), self.uid, 16384, retain=True, collect=True)
-        result = json.loads(raw, object_pairs_hook=_pairs)
-        _, manifest_sha, manifest_body = self._recovery_read(None, str(work / "runtime/manifest.json"), self.uid,
-                                                           stager.MANIFEST_BYTES, retain=True, collect=True)
-        need(type(result) is dict and type(result.get("schemaVersion")) is int and result["schemaVersion"] == 1
-             and result.get("release") == release.release and result.get("target") == self.binding.target
-             and result.get("qualification") == "current-source-staged-no-native-execution"
-             and result.get("sourceInputsSha256") == chosen["sourceInputsSha256"]
-             and result.get("successorManifestSha256") == manifest_sha == chosen["runtimeManifestSha256"]
-             and result.get("signedRuntimeBindingSha256") == digest(bodies[0])
-             and all(result.get(key) == chosen[key] for key in ("signedPythonSha256", "signingReceiptSha256",
-                    "signingSourceCommit", "signingRunId", "signingRunAttempt", "signingArtifactId")),
-             "normal-account-current-signed-runtime")
-        self._admit_recovery_runtime_files(result, manifest_sha, manifest_body, release.release)
+        installed, parents = self._recovery_runtime_directories(release.release)
+        root_fd = parents[str(stager.INSTALL_ROOT)]
+        release_fd, runtime_fd = parents[str(installed.parent)], parents[str(installed)]
+        names = {"runtime", stager.INSTALLATION_INVENTORY_NAME, stager.INSTALLATION_RECORD_NAME}
+        self.normal_runtime_roster = (stager, release_fd, names)
+        for path in (stager.INSTALL_ROOT, stager.INSTALL_ROOT / "versions", installed.parent):
+            fd = parents[str(path)]
+            self.normal_runtime_policy[fd] = stat.S_IFDIR | 0o755
+            stager.installation_directory_data(os.fstat(fd))
+        for path in (installed, installed / "python", installed / "python/bin"):
+            self.normal_runtime_policy[parents[str(path)]] = stat.S_IFDIR | 0o555
+        self._normal_runtime_post()
+        def metadata(parent, name, limit):
+            before, hashed, body = self._recovery_read(parent, name, 0, limit, 0o444, retain=True, collect=True)
+            self.normal_runtime_policy[self.recovery_runtime_originals[-1][2]] = stat.S_IFREG | 0o444
+            self._normal_runtime_post()
+            return body, hashed
+        inventory_body, inventory_sha = metadata(release_fd, stager.INSTALLATION_INVENTORY_NAME, stager.INVENTORY_BYTES)
+        record_body, _ = metadata(release_fd, stager.INSTALLATION_RECORD_NAME, stager.INSTALLATION_RECORD_LIMIT)
+        manifest_body, manifest_sha = metadata(runtime_fd, "manifest.json", stager.MANIFEST_BYTES)
+        # The actual protected record joins current release/source/M/inventory to
+        # these held directories. Its instance is DATA, never old finality proof.
+        raw_record = stager.decode(record_body)
+        need(type(raw_record) is dict, "normal-account-runtime-record")
+        stager.installation_record_data(record_body, inventory_body, application_source, manifest_sha,
+            stager.installation_directory_data(os.fstat(root_fd)),
+            stager.installation_directory_data(os.fstat(release_fd)), raw_record.get("instance"), selection=release)
+        inventory = stager.observation_inventory_bytes(inventory_body, inventory_sha, manifest_sha, selection=release)
+        manifest, entries = stager.manifest_files(manifest_body, manifest_sha, current=True, target=self.binding.target)
+        need(inventory["runtime/manifest.json"]["size"] == len(manifest_body), "normal-account-runtime-manifest-size")
+        # Manifest has no self-hash row; core and interpreter join BOTH lists.
+        for relative in ("core.zip", "python/bin/python3"):
+            row = entries[relative]
+            expected = dict(row, path="runtime/" + relative, executable=relative == "python/bin/python3")
+            need(inventory.get("runtime/" + relative) == expected, "normal-account-runtime-inventory-file")
+            parent, _, name = relative.rpartition("/")
+            info, hashed, _ = self._recovery_read(parents[str(installed / parent)] if parent else runtime_fd, name,
+                0, stager.MAX_BYTES, 0o555 if relative.endswith("python3") else 0o444, retain=True)
+            self.normal_runtime_policy[self.recovery_runtime_originals[-1][2]] = stat.S_IFREG | (0o555 if relative.endswith("python3") else 0o444)
+            need(info[6] == row["size"] and hashed == row["sha256"], "normal-account-installed-runtime-file")
+        self.recovery_runtime = (str(installed / "python/bin/python3"), str(installed / "core.zip"))
+        self.recovery_runtime_paths()
         for original in self.gate_files:
             need(_gate_file_read(original)[1] == original["sha256"], "normal-account-runtime-source-post")
 

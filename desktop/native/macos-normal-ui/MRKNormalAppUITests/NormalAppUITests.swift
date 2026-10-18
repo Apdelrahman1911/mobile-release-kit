@@ -1184,7 +1184,7 @@ final class NormalAppUITests: XCTestCase {
     }
     // End engineering main fixture; ordinary installed cases below are unchanged.
 
-    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap, currentCandidateSavedVersion, currentCandidateIOSTools, currentCandidateAndroid }
+    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap, currentCandidateSavedVersion, currentCandidateIOSTools, currentCandidateAndroid, currentCandidateIOSPending }
 
     private static func androidConsumerContext(_ env: [String: String], candidate: Bool) throws -> Bool {
         guard let marker = env["MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE"] else { return false }
@@ -1193,11 +1193,25 @@ final class NormalAppUITests: XCTestCase {
         guard candidate && marker == "current-candidate-android-candidate-only-v1"
               && [application, harness].allSatisfy({ $0.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
                                                    && $0 != String(repeating: "0", count: 40) })
-              && ["MRK_NORMAL_UI_CURRENT_IOS_TOOLS", "MRK_NORMAL_UI_CURRENT_SAVED_VERSION",
+              && ["MRK_NORMAL_UI_CURRENT_IOS_TOOLS", "MRK_NORMAL_UI_CURRENT_SAVED_VERSION", "MRK_NORMAL_UI_CURRENT_IOS_PENDING",
                   "MRK_NORMAL_UI_FIXED_CARRIER_RESUME", "MRK_NORMAL_UI_FIXED_NORMAL_BATCH"].allSatisfy({ env[$0] == nil }) else {
             throw Refusal.condition("current Android consumer profile is missing or mixed")
         }
         return true // Application identity comes from the same-job original install, not this marker.
+    }
+
+    private static func iosPendingConsumerContext(_ env: [String: String]) throws -> Bool {
+        guard let marker = env["MRK_NORMAL_UI_CURRENT_IOS_PENDING"] else { return false }
+        let application = env["MRK_NORMAL_UI_APPLICATION_SOURCE"] ?? ""
+        let harness = env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? ""
+        guard marker == "current-candidate-ios-pending-only-v1"
+              && [application, harness].allSatisfy({ $0.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
+                                                   && $0 != String(repeating: "0", count: 40) })
+              && ["MRK_NORMAL_UI_CURRENT_IOS_TOOLS", "MRK_NORMAL_UI_CURRENT_SAVED_VERSION", "MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE",
+                  "MRK_NORMAL_UI_FIXED_CARRIER_RESUME", "MRK_NORMAL_UI_FIXED_NORMAL_BATCH"].allSatisfy({ env[$0] == nil }) else {
+            throw Refusal.condition("current iOS pending consumer profile is missing or mixed")
+        }
+        return true // Separate fixture/helper source, not app-image or previous-Installer authority.
     }
 
     private let fixedNormalBatches: [String: Set<String>] = [
@@ -1276,10 +1290,15 @@ final class NormalAppUITests: XCTestCase {
         try require(applicationSource.utf8.count == 40 && applicationSource.unicodeScalars.allSatisfy(hexadecimal.contains)
                     && harnessSource.utf8.count == 40 && harnessSource.unicodeScalars.allSatisfy(hexadecimal.contains),
                     "exact application and harness source bindings are required")
+        if context["MRK_NORMAL_UI_CURRENT_IOS_PENDING"] != nil {
+            try require(profile == .currentCandidateIOSPending, "pending consumer marker cannot relabel another journey")
+        }
         if context["MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE"] != nil {
             try require(profile == .currentCandidateAndroid, "Android consumer marker cannot relabel another journey")
         }
         switch profile {
+        case .currentCandidateIOSPending:
+            try require(Self.iosPendingConsumerContext(context), "iOS pending consumer profile required")
         case .currentCandidateAndroid:
             try require(Self.androidConsumerContext(context, candidate: true), "Android consumer profile required")
         case .sameBuild:
@@ -1863,8 +1882,9 @@ final class NormalAppUITests: XCTestCase {
                 return (1...20).contains(bytes.count) && bytes[0] >= 49 && bytes[0] <= 57
                     && bytes.allSatisfy { (48...57).contains($0) }
             }
+            let consumer = try NormalAppUITests.iosPendingConsumerContext(context)
             try need(source.utf8.count == 40 && source.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
-                && context["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source && decimal(run) && decimal(attempt),
+                && (consumer || context["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source) && decimal(run) && decimal(attempt),
                 "recovery fixture exact same-build context unavailable")
             let task = "mrk-macos-aqua-\(source)-\(run)-\(attempt)"
             projectPath = "/private/tmp/" + task + "/" + profile.rawValue
@@ -7233,14 +7253,16 @@ final class NormalAppUITests: XCTestCase {
         try beginCase(seconds: 525, iosRecovery: true)
         guard let clock = caseClock else { throw Refusal.condition("recovery original case clock missing") }
         journeyDeadline = clock.deadline - 10 // 515s work including Quit, then only original reporting reserve.
+        let currentConsumer = try Self.iosPendingConsumerContext(ProcessInfo.processInfo.environment)
+        let profile: SourceProfile = currentConsumer ? .currentCandidateIOSPending : .sameBuild
         let fixture = IOSRecoveryFixture(clock: clock)
         ownedIOSRecoveryFixture = fixture // Includes partial-admission consuming closes in teardown.
         do {
             try stage("ios-recovery-admission") {
-                _ = try admitHostedAccount()
+                _ = try admitHostedAccount(profile)
                 try fixture.open(.pending)
             }
-            let (app, window, renderer) = try launchForJourney()
+            let (app, window, renderer) = try launchForJourney(profile: profile)
             try stage("ios-recovery-project") {
                 try fixture.post()
                 try press(renderer, "Open project folder", renderer: renderer)

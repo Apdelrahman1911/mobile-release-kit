@@ -4928,6 +4928,227 @@ def pending_account_data(loader, binding, uid, gid):
 
 
 class NormalIOSPendingRecoveryDataTests(unittest.TestCase):
+    def test_pending_consumer_context_and_summary_keep_separate_sources(self):
+        import resource, pwd
+        helper = MODULE.SAVED_VERSION_CANDIDATE_ROOT / '.candidate-consumer-helper'
+        normal = Path('/Users/runner/work/_temp/mrk-macos-installed.abcdefgh/normal-ui')
+        env = dict(PATH='/usr/bin:/bin:/usr/sbin:/sbin', HOME='/Users/runner', USER='runner', LOGNAME='runner',
+            TMPDIR=str(normal/'tmp')+'/', LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8', TZ='UTC', DEVELOPER_DIR=MODULE.DEVELOPER,
+            TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE='a'*40, TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE='b'*40,
+            TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB='github-hosted-macos26-arm64',
+            GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit', GITHUB_EVENT_NAME='push',
+            GITHUB_REF=MODULE.ANDROID_CONSUMER_REF, GITHUB_SHA='b'*40, GITHUB_WORKFLOW_SHA='b'*40,
+            GITHUB_WORKFLOW_REF='Apdelrahman1911/mobile-release-kit/'+MODULE.ANDROID_CONSUMER_WORKFLOW+'@'+MODULE.ANDROID_CONSUMER_REF,
+            GITHUB_WORKSPACE=str(MODULE.SAVED_VERSION_CANDIDATE_ROOT), GITHUB_RUN_ID='42', GITHUB_RUN_ATTEMPT='1',
+            RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='macOS', RUNNER_ARCH='ARM64')
+        env[MODULE.IOS_PENDING_CURRENT_ENV] = MODULE.IOS_PENDING_CURRENT_SCOPE
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(MODULE,'__file__',str(helper/'desktop/tools/macos_normal_ui_runner.py')))
+            stack.enter_context(patch.object(MODULE.sys,'platform','darwin'))
+            stack.enter_context(patch.object(MODULE.sys,'version_info',(3,14,7)))
+            stack.enter_context(patch.object(MODULE.sys,'flags',SimpleNamespace(isolated=1,no_site=1)))
+            stack.enter_context(patch.object(MODULE.sys,'dont_write_bytecode',True))
+            stack.enter_context(patch.object(MODULE.platform,'mac_ver',return_value=('26.6.2',(),'')))
+            stack.enter_context(patch.object(pwd,'getpwuid',return_value=SimpleNamespace(pw_uid=1000,pw_gid=1000,pw_name='runner',pw_dir='/Users/runner')))
+            for function in ('getuid','geteuid','getgid','getegid'):
+                stack.enter_context(patch.object(MODULE.os,function,return_value=1000))
+            stack.enter_context(patch.object(MODULE.os,'stat',return_value=SimpleNamespace(st_uid=1000)))
+            stack.enter_context(patch.object(MODULE.Path,'cwd',return_value=helper))
+            for target, machine, arch, hosted in ((MODULE.ARM_TARGET,'arm64','ARM64','github-hosted-macos26-arm64'),
+                                                (MODULE.INTEL_TARGET,'x86_64','X64','github-hosted-macos26-x86_64')):
+                for application in ('a'*40,'b'*40):
+                    for flag in ('--normal-build','--normal-ios-pending-recovery-test','--normal-ios-pending-recovery-summary'):
+                        request=MODULE.normal_request(['--target',target,flag],str(normal/'tmp')+'/')
+                        actual=dict(env,RUNNER_ARCH=arch,TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=hosted,
+                                    TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=application)
+                        cap=32*1024**3 if request['phase']=='build' else 1024**3
+                        with patch.object(MODULE.platform,'machine',return_value=machine),patch.dict(MODULE.os.environ,actual,clear=True),patch.object(resource,'getrlimit',return_value=(cap,cap)):
+                            root,source,forwarded,_=MODULE.normal_context(request)
+                        self.assertEqual((root,source),(helper,'b'*40))
+                        self.assertEqual(forwarded[MODULE.IOS_PENDING_CURRENT_ENV],MODULE.IOS_PENDING_CURRENT_SCOPE)
+                        self.assertEqual(forwarded['TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE'],application)
+                        if request['phase']!='build':
+                            self.assertEqual(forwarded[MODULE.IOS_PENDING_RUN],'42')
+                            self.assertEqual(forwarded[MODULE.IOS_PENDING_ATTEMPT],'1')
+                            self.assertNotIn(MODULE.ANDROID_INPUT_ENV,forwarded)
+                        self.assertNotIn('GITHUB_SHA',forwarded)
+            request=MODULE.normal_request(['--normal-ios-pending-recovery-test'],str(normal/'tmp')+'/')
+            for key,bad in [('GITHUB_REF',MODULE.ANDROID_CANDIDATE_REF),('GITHUB_WORKFLOW_REF','other'),
+                ('GITHUB_WORKSPACE',str(helper)),('GITHUB_EVENT_NAME','workflow_dispatch'),('GITHUB_SHA','a'*40),
+                (MODULE.IOS_PENDING_CURRENT_ENV,'other'),(MODULE.IOS_TOOLS_CURRENT_ENV,MODULE.IOS_TOOLS_CURRENT_SCOPE),
+                ('TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE','0'*40)]:
+                with self.subTest(field=key),patch.object(MODULE.platform,'machine',return_value='arm64'),patch.dict(MODULE.os.environ,dict(env,**{key:bad}),clear=True),patch.object(resource,'getrlimit',return_value=(1024**3,1024**3)),self.assertRaises(MODULE.Refused):
+                    MODULE.normal_context(request)
+            for flag in ('--normal-android-signed-build-test','--normal-ios-unsigned-archive-test'):
+                request=MODULE.normal_request([flag],str(normal/'tmp')+'/')
+                with self.assertRaises(MODULE.Refused): MODULE.ios_pending_candidate_context(request,env,helper)
+        # The actual existing summary path publishes helper SOURCE and a separate
+        # app label, while retaining original native0/source POST and strict counts.
+        for failure in (None,'native','post'):
+            with tempfile.TemporaryDirectory() as temporary:
+                normal=Path(temporary)/'normal-ui';normal.mkdir();result=normal/MODULE.IOS_PENDING_RESULT;result.mkdir()
+                request=MODULE.normal_request(['--normal-ios-pending-recovery-summary'],str(normal/'tmp')+'/')
+                counts=MODULE.encoded(dict(totalTestCount=1,passedTests=1,failedTests=0,skippedTests=0,expectedFailures=0))
+                original=subprocess.CompletedProcess([],65 if failure=='native' else 0,counts,b'')
+                phase=MODULE.NormalPhase(SimpleNamespace(run_owned=lambda argv,**kw:subprocess.CompletedProcess(argv,original.returncode,original.stdout,original.stderr)),
+                    env,helper,MODULE.PhaseClock(90))
+                with patch.object(MODULE,'normal_source_state',side_effect=[{'same':True},{} if failure=='post' else {'same':True}]):
+                    if failure=='post':
+                        with self.assertRaisesRegex(MODULE.Refused,'normal-ui-source-pre-post'):
+                            MODULE.execute_normal_phase(phase,request,'b'*40,(1024**3,1024**3))
+                        self.assertFalse((normal/'ios-pending-recovery-summary.command-admission.json').exists())
+                    else:
+                        returned=MODULE.execute_normal_phase(phase,request,'b'*40,(1024**3,1024**3))
+                        self.assertEqual(returned.returncode,original.returncode)
+                        row=json.loads((normal/'ios-pending-recovery-summary.command-admission.json').read_bytes())
+                        self.assertEqual((row['sourceCommit'],row['applicationSourceCommit']),('b'*40,'a'*40))
+                        self.assertEqual(row['currentCandidateScope'],MODULE.IOS_PENDING_CURRENT_SCOPE)
+                        self.assertEqual(row['originalReturncode'],original.returncode)
+                        self.assertEqual('iosPendingRecoveryTestCounts' in row,failure is None)
+
+
+    def test_pending_installed_runtime_uses_actual_record_manifest_and_originals_without_producer_files(self):
+        # Real parsers and real tiny file descriptors; root ownership/flags and
+        # canonical system path are explicit inert adapters, never native proof.
+        from tests.desktop.test_macos_installed_staging import TOOL as stage
+        original_stat, original_fstat, original_close = os.stat, os.fstat, os.close
+        app_source, helper_source = 'a'*40, 'b'*40
+        for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+            selection = stage.source_build_selection(target)
+            for fault in (None, 'same-source', 'large-manifest', 'record-source', 'record-release', 'record-identity',
+                          'record-manifest', 'record-inventory', 'core-bytes', 'python-mode', 'core-hardlink',
+                          'post-replace', 'post-flags', 'unknown-close'):
+                with self.subTest(target=target,fault=fault), pending_account_module() as loader, tempfile.TemporaryDirectory() as tmp:
+                    root=Path(tmp); install=root/str(stage.INSTALL_ROOT).lstrip('/')
+                    release=install/'versions'/selection.release;runtime=release/'runtime'
+                    (runtime/'python/bin').mkdir(parents=True)
+                    for path in (install,install/'versions',release):path.chmod(0o755)
+                    for path in (runtime,runtime/'python',runtime/'python/bin'):path.chmod(0o555)
+                    # Temporarily writable task-only runtime so synthetic files can be prepared.
+                    runtime.chmod(0o755);(runtime/'python/bin').chmod(0o755)
+                    core,python=b'non-executable synthetic core bytes',b'non-executable interpreter fixture'
+                    entries={name:dict(path=name,sha256=stage.digest(b'x'),size=1) for name in stage.CURRENT_BOOTSTRAPS|{'github-ca.pem'}}
+                    for name,body in (('core.zip',core),('python/bin/python3',python)):
+                        entries[name]=dict(path=name,sha256=stage.digest(body),size=len(body))
+                    if fault=='large-manifest':
+                        for index in range(10000):
+                            name='python/lib/metadata-bound-%05d.py'%index
+                            entries[name]=dict(path=name,sha256=stage.digest(b''),size=0)
+                    rows=[entries[name] for name in sorted(entries)]
+                    manifest=dict(schemaVersion=1,protocol=1,coreVersion='0.1.2',target=target,
+                        coreSha256=entries['core.zip']['sha256'],protocolSha256=stage.CURRENT_PROTOCOL,
+                        inventorySha256=stage.digest(stage.canonical(rows)),files=rows)
+                    manifest_body=stage.canonical(manifest);manifest_sha=stage.digest(manifest_body)
+                    if fault=='large-manifest':self.assertTrue(1024*1024<len(manifest_body)<=stage.MANIFEST_BYTES)
+                    all_rows={ 'runtime/'+name:dict(row,path='runtime/'+name,executable=name=='python/bin/python3') for name,row in entries.items() }
+                    all_rows['runtime/manifest.json']=dict(path='runtime/manifest.json',sha256=manifest_sha,size=len(manifest_body),executable=False)
+                    for name in (stage.ENTRY_BINARY,stage.APP_BINARY,stage.VAULT_HELPER,'Contents/Info.plist',stage.PAYLOAD_INFO):
+                        path='app/'+name;all_rows[path]=dict(path=path,size=1,sha256=stage.digest(b'x'),executable=name in (stage.ENTRY_BINARY,stage.APP_BINARY,stage.VAULT_HELPER))
+                    inventory=stage.canonical(dict(schemaVersion=1,release=selection.release,runtimeManifestSha256=manifest_sha,
+                        files=[all_rows[name] for name in sorted(all_rows)]))
+                    def protected(value,*,flags=0):
+                        data={name:getattr(value,name) for name in dir(value) if name.startswith('st_')}
+                        data.update(st_uid=0,st_gid=0,st_flags=flags)
+                        return SimpleNamespace(**data)
+                    record=dict(schemaVersion=1,basis='protected-recorded-installation-inventory',phase='inventory-recorded',kind='ordinary',
+                        instance='1'*32,packageIdentifier=stage.PACKAGE_ID,packageVersion=selection.package_version,bundleIdentifier=stage.BUNDLE_ID,
+                        release=selection.release,sourceCommit=app_source,protocolSha256=stage.CURRENT_PROTOCOL,runtimeManifestSha256=manifest_sha,
+                        inventory=dict(name=stage.INSTALLATION_INVENTORY_NAME,bytes=len(inventory),sha256=stage.digest(inventory)),
+                        policy='fixed-root-wheel-readonly-v1',installRoot=stage.installation_directory_data(protected(original_stat(install))),
+                        releaseDirectory=stage.installation_directory_data(protected(original_stat(release))))
+                    if fault=='record-source':record['sourceCommit']='c'*40
+                    if fault=='record-release':record['release']+='-wrong'
+                    if fault=='record-identity':record['installRoot']['inode']+=1
+                    if fault=='record-manifest':record['runtimeManifestSha256']='f'*64
+                    if fault=='record-inventory':record['inventory']['sha256']='e'*64
+                    files=((release/stage.INSTALLATION_RECORD_NAME,stage.canonical(record),0o444),
+                        (release/stage.INSTALLATION_INVENTORY_NAME,inventory,0o444),(runtime/'manifest.json',manifest_body,0o444),
+                        (runtime/'core.zip',core+b'!' if fault=='core-bytes' else core,0o444),
+                        (runtime/'python/bin/python3',python,0o444 if fault=='python-mode' else 0o555))
+                    for path,body,mode in files:path.write_bytes(body);path.chmod(mode)
+                    if fault=='core-hardlink':os.link(runtime/'core.zip',runtime/'other-core')
+                    runtime.chmod(0o555);(runtime/'python/bin').chmod(0o555)
+                    binding=loader.Binding(app_source if fault=='same-source' else helper_source,'42','1',target)
+                    fixtures=loader.Fixtures(binding,os.getuid(),os.getgid(),loader.IOS_ACCOUNT_CASE)
+                    native_open=fixtures._open;post_flags=[False];admitted=False
+                    def open_original(name,parent=None,**kw):return native_open(str(root) if name=='/' and parent is None else name,parent,**kw)
+                    def named(name,*args,**kw):
+                        value=original_stat(str(root) if name=='/' and kw.get('dir_fd') is None else name,*args,**kw)
+                        return protected(value,flags=1 if post_flags[0] else 0)
+                    def held(fd):return protected(original_fstat(fd),flags=1 if post_flags[0] else 0)
+                    with ExitStack() as stack:
+                        stack.enter_context(patch.object(fixtures,'_open',side_effect=open_original))
+                        source=stack.enter_context(patch.object(loader,'_gate_load_stager',return_value=(stage,selection)))
+                        stack.enter_context(patch.object(loader.os,'stat',side_effect=named))
+                        stack.enter_context(patch.object(loader.os,'fstat',side_effect=held))
+                        try:
+                            if fault in ('record-source','record-release','record-identity','record-manifest','record-inventory',
+                                         'core-bytes','python-mode','core-hardlink'):
+                                with self.assertRaises((loader.Refused,stage.Refused)):
+                                    fixtures.admit_normal_account_runtime(MODULE.SAVED_VERSION_CANDIDATE_ROOT,
+                                        Path('/Users/runner/work/_temp/mrk-macos-installed.abcdefgh'),application_source=app_source)
+                                self.assertFalse(fixtures.account_produced)
+                            else:
+                                fixtures.admit_normal_account_runtime(MODULE.SAVED_VERSION_CANDIDATE_ROOT,
+                                    Path('/Users/runner/work/_temp/mrk-macos-installed.abcdefgh'),application_source=app_source)
+                                admitted=True
+                                self.assertEqual(fixtures.recovery_runtime_paths(),(str(stage.INSTALL_ROOT/'versions'/selection.release/'runtime/python/bin/python3'),
+                                    str(stage.INSTALL_ROOT/'versions'/selection.release/'runtime/core.zip')))
+                                self.assertEqual(len(fixtures.fds),14) # Nine fixed directory originals + five actual leaves.
+                                source.assert_called_once_with(fixtures,MODULE.SAVED_VERSION_CANDIDATE_ROOT,target=target,registrations=[])
+                                self.assertNotEqual(manifest_sha,json.loads((ROOT/'desktop/macos-installed-inputs/python-signed-runtime-binding.json').read_bytes())['targets'][target]['runtimeManifestSha256'])
+                                if fault=='post-replace':
+                                    (runtime/'core.zip').chmod(0o644);(runtime/'core.zip').write_bytes(core+b'!')
+                                    with self.assertRaises(loader.Refused):fixtures.recovery_runtime_paths()
+                                if fault=='post-flags':
+                                    post_flags[0]=True
+                                    with self.assertRaises(loader.Refused):fixtures.recovery_runtime_paths()
+                            self.assertFalse((root/'runtime-result.json').exists())
+                            self.assertFalse(fixtures.inflight)
+                        finally:
+                            observed=list(fixtures.fds)
+                            if fault=='unknown-close':
+                                first=observed[0]
+                                def close_once(fd):
+                                    original_close(fd)
+                                    if fd==first:raise OSError('inert consumed close failure')
+                                with patch.object(loader.os,'close',side_effect=close_once),self.assertRaises(OSError):fixtures.close()
+                                self.assertIsNotNone(fixtures.first_close_error)
+                            else:fixtures.close()
+                            for fd in observed:
+                                with self.assertRaises(OSError):original_fstat(fd)
+                    # Task-owned fixtures only; reopen modes for TemporaryDirectory removal.
+                    for path in (runtime,runtime/'python',runtime/'python/bin'):path.chmod(0o755)
+
+    def test_pending_retained_metadata_collection_is_role_bounded_and_admission_failure_does_not_start_producer(self):
+        with pending_account_module() as loader,tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp);body=b'x'*(1024*1024+1);(path/'manifest.json').write_bytes(body);(path/'manifest.json').chmod(0o444)
+            fixture=loader.Fixtures(loader.Binding('a'*40,'42','1'),os.getuid(),os.getgid(),loader.IOS_ACCOUNT_CASE)
+            parent=fixture._open(str(path),directory=True)
+            real_stat,real_fstat=os.stat,os.fstat
+            def protected(value):
+                data={name:getattr(value,name) for name in dir(value) if name.startswith('st_')};data['st_uid']=0
+                return SimpleNamespace(**data)
+            try:
+                with patch.object(loader.os,'stat',side_effect=lambda *a,**k:protected(real_stat(*a,**k))),patch.object(loader.os,'fstat',side_effect=lambda *a,**k:protected(real_fstat(*a,**k))):
+                    _,hashed,actual=fixture._recovery_read(parent,'manifest.json',0,12*1024*1024,0o444,retain=True,collect=True)
+                    self.assertEqual((actual,hashed),(body,loader.digest(body)))
+                    for name,cap in (('manifest.json',12*1024*1024+1),('core.zip',12*1024*1024),('private.json',12*1024*1024)):
+                        with self.assertRaisesRegex(loader.Refused,'collect-bound'):fixture._recovery_read(parent,name,0,cap,0o444,retain=True,collect=True)
+            finally:fixture.close()
+            env={MODULE.IOS_PENDING_RUN:'42',MODULE.IOS_PENDING_ATTEMPT:'1','HOME':'/Users/runner',
+                MODULE.IOS_PENDING_CURRENT_ENV:MODULE.IOS_PENDING_CURRENT_SCOPE,
+                'TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE':'c'*40}
+            phase=MODULE.NormalPhase(None,env,ROOT,MODULE.PhaseClock(1080))
+            current=MODULE.NormalIOSRecoveryFixture(phase,'a'*40,MODULE.normal_request(['--normal-ios-pending-recovery-test'],str(path/'normal-ui/tmp')+'/'))
+            producer=unittest.mock.Mock()
+            with patch.object(current.fixtures,'prepare',side_effect=lambda:setattr(current.fixtures,'account_home','/Users/runner')),\
+                 patch.object(current.fixtures,'admit_normal_account_runtime',side_effect=loader.Refused('actual runtime refused')) as admit,\
+                 patch.object(loader,'_run_ios_account_child',producer),self.assertRaisesRegex(loader.Refused,'actual runtime refused'):
+                current.__enter__()
+            admit.assert_called_once_with(MODULE.SAVED_VERSION_CANDIDATE_ROOT,current.request['derived'].parent.parent,application_source='c'*40)
+            producer.assert_not_called();self.assertFalse(current.prepared);self.assertFalse(current.fixtures.fds)
+
     def test_pending_fixed_requests_and_original_marker_are_bound_to_both_targets(self):
         with pending_account_module() as loader:
             for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
