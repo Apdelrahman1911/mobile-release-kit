@@ -31,15 +31,24 @@ renders each recovery-detail paragraph as one React string child. The portable
 budget regression passes (the former limit fails), the focused diagnostic parser
 passes, and the affected TSX transpiles without diagnostics. None of these local
 checks establishes the installed Mac cause or complete recovery. Both-architecture
-native compilation and the existing 73 contracts plus the new budget regression
-must pass before one coherent signed application rebuild.
+native compilation and all 74 selected contracts passed in `39116453156/1`
+(source `fcb1aa46`; zero failed or ignored on either architecture). One coherent
+signed application rebuild is running as `39116948396/1`. Intel compilation
+remained mandatory while packaging was scheduled in parallel after ARM passed;
+packaging progress is not installed qualification.
 
 A source-proven Restore transport mismatch is corrected in `383b363a`: the
 candidate fixture now mounts under separately held protected `/Volumes` parents,
 not the runner-owned home directory that native admission rejects. Ownership,
 ACL, filesystem, original-byte, namespace and cleanup requirements are unchanged.
-Two focused real-descriptor tests pass; run `39115537239/1` is the independent
-ARM Restore check, not yet a pass. The obsolete legacy simultaneous-mount
+Two focused real-descriptor tests pass. Independent ARM Restore run
+`39115537239/1` built its fixture successfully, then failed again at the baseline
+Installer (return 1), before application installation or any recovery cuts.
+The earlier invalid-parent condition is fixed in source, but the actual first
+native refusal remains unknown; no additional permission relaxation is justified.
+The next helper now projects existing bounded Installer/ACL diagnostics from the
+same settled failed fixture capture. Three focused methods pass; no native calls,
+new log collector, signing changes or success/cleanup criteria were added. The obsolete legacy simultaneous-mount
 verification route is not fixed or qualified by this candidate-only change.
 
 Still required: actual installed project/configuration/GitHub Apply,

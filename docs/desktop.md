@@ -2,11 +2,16 @@
 
 ## Status and scope
 
-The desktop application is **under development**. This branch introduces the
-passive foundation and gated typed-edit implementations, not a production
-release or a complete alternative to the CLI yet. A visible screen is not proof
-that its future operations are available.
-Unimplemented operations are explicitly disabled.
+The desktop application is **under development, not production-ready**. macOS
+has packaged Apple Silicon and Intel test builds and broader implemented native
+flows, but installed feature, recovery and update verification remains incomplete.
+Start with the [macOS first-use/test-build guide](../desktop/packaging/macos-preview.md) and
+[current Mac verification status](desktop-macos-completion.md). A signed package,
+visible screen or source implementation is not proof that an operation works.
+
+The foundation notes and table below retain older, partly Linux-specific scope;
+they are not the current macOS installation guide or a complete Mac feature list.
+Unavailable operations remain gated; the CLI remains supported.
 
 The intended application uses **Tauri 2 / Rust → application services → the
 existing Mobile Release Kit core → platform and Store integrations**, with a

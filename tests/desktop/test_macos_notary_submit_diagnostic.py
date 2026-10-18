@@ -319,7 +319,8 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
         op.__dict__.update(phase='package-install', prepared_binding=None, prepared_staging=False, credential_known=lambda: True,
             credential_failed=False, credential_active=None, removal_final_active=lambda: False,
             errors=[], stager_io_pending=None, android_support=None, store_signing=None,
-            app_absence=None, update=None, removal=False, removal_recorded_role=lambda role: role,
+            app_absence=None, update=None, removal=False, setup_verify=False, setup_package=False,
+            removal_recorded_role=lambda role: role,
             owner=SimpleNamespace(run_owned=owned), work=Path('/synthetic-unopened-work'),
             checkout=Path('/synthetic-unopened-source'), publish=publish,
             calls=[{'role': role, 'entered': True, 'returned': True, 'capturesSettled': True, 'returncode': 0}
@@ -330,6 +331,73 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
 
     def invoke(self, op, role='installer'):
         return HELPER.Operation.call(op, role, ['fixed-' + role], {}, cwd=op.work, timeout=20, limit=256*1024)
+
+    def test_fixture_original_capture_is_private_and_later_outcomes_supersede_it(self):
+        from unittest import mock
+        def fixture_operation(*, code=1):
+            op = self.operation(code=code)
+            op.phase = 'candidate-baseline'
+            op.calls = []
+            op.app_absence = {}
+            # The real call/capture/diagnostic boundary, with inert native ports.
+            op.app_absence_module = SimpleNamespace(dispatch=lambda *_: None,
+                cut_role_data=lambda *_: False, cut_return_data=lambda *_: False,
+                returned=lambda *_: None)
+            return op
+
+        op = fixture_operation()
+        with self.assertRaisesRegex(HELPER.Refused, '^original-nonzero-app-absence-baseline$'):
+            self.invoke(op, 'app-absence-baseline')
+        self.assertEqual(self.invocations, [('fixed-app-absence-baseline',)])
+        self.assertTrue(op.calls[0]['capturesSettled'])
+        self.assertIn('installerMarkers', op.calls[0])
+        projected = HELPER.failure_diagnostic(HELPER.Refused('original-nonzero-app-absence-baseline'), operation=op)
+        observed = projected['fixtureInstall']
+        self.assertEqual((observed['role'], observed['index'], observed['returncode']), ('app-absence-baseline', 1, 1))
+        self.assertEqual(observed['markers']['acl'][0]['phase'], 'acl-entry-present')
+        self.assertFalse(observed['systemServiceExitClaimed'])
+        self.assertIsNone(projected['packageInstall'])
+        self.assertNotIn(PRIVATE.decode(), json.dumps(projected))
+        before = copy.deepcopy(op.calls)
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            HELPER.emit_failure_diagnostic(HELPER.Refused('original-nonzero-app-absence-baseline'),
+                phase=op.phase, target=HELPER.ARM_TARGET, operation=op)
+        self.assertEqual(json.loads(output.getvalue())['fixtureInstall'], observed)
+        self.assertLessEqual(len(output.getvalue()), 4096)
+        self.assertEqual(op.calls, before)
+
+        for changes in ({'returncode': 0}, {'returncode': True}, {'returned': False},
+                        {'capturesSettled': False}, {'entered': False}):
+            rows = [dict(before[0], role='app-absence-cut-app-write'),
+                    dict(before[0], role='app-absence-recovery-cut-1', **changes)]
+            self.assertIsNone(HELPER.fixture_installer_diagnostic('app-absence-restore', rows))
+        # No role-prefix grant and no raw/malformed nested marker passthrough.
+        self.assertIsNone(HELPER.fixture_installer_diagnostic('candidate-baseline',
+            [dict(before[0], role='app-absence-build')]))
+        bad = copy.deepcopy(before)
+        bad[0]['installerMarkers']['acl'][0]['role'] = PRIVATE.decode()
+        bad[0]['installerErrors'] = {'raw': PRIVATE.decode()}
+        sanitized = HELPER.fixture_installer_diagnostic('candidate-baseline', bad)
+        self.assertIsNone(sanitized['markers']); self.assertIsNone(sanitized['errors'])
+        self.assertNotIn(PRIVATE.decode(), json.dumps(sanitized))
+
+        op = fixture_operation(code=0)
+        self.invoke(op, 'app-absence-baseline')
+        self.assertNotIn('installerMarkers', op.calls[0])
+        self.assertIsNone(HELPER.fixture_installer_diagnostic(op.phase, op.calls))
+        op = fixture_operation()
+        with mock.patch.object(HELPER, 'installer_markers', side_effect=KeyboardInterrupt):
+            with self.assertRaisesRegex(HELPER.Refused, '^original-nonzero-app-absence-baseline$'):
+                self.invoke(op, 'app-absence-baseline')
+        self.assertTrue(op.calls[0]['capturesSettled'])
+        self.assertNotIn('installerMarkers', op.calls[0])
+        op = fixture_operation()
+        op.publish = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('fixture-publication-failed'))
+        with self.assertRaisesRegex(RuntimeError, '^fixture-publication-failed$'):
+            self.invoke(op, 'app-absence-baseline')
+        self.assertFalse(op.calls[0]['capturesSettled'])
+        self.assertNotIn('installerMarkers', op.calls[0])
 
     def test_actual_installer_and_diagnostic_statuses_stay_distinct(self):
         for code in (0, 1):

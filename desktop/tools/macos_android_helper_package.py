@@ -1926,6 +1926,43 @@ _FAILURE_FIXTURE_ROLES = (
 ) + tuple("app-absence-cut-" + cut + suffix
           for cut in ("app-write", "own-attempt", "stage-move")
           for suffix in ("", "-build", "-adhoc", "-verify-code", "-pkgbuild", "-tar", "-xar"))
+# Only these existing roles invoke Installer; build/mount/sign roles do not.
+_FIXTURE_INSTALLER_ROLES = {
+    "candidate-baseline": ("app-absence-baseline",),
+    "package-install": ("app-absence-baseline",),
+    "app-absence-restore": (
+        "app-absence-withdraw", "app-absence-install", "app-absence-verify",
+        "app-absence-cut-app-write", "app-absence-cut-own-attempt", "app-absence-cut-stage-move",
+        "app-absence-recovery-cut-1", "app-absence-recovery-cut-2", "app-absence-recovery-cut-3",
+        "app-absence-recovered",
+    ),
+}
+
+
+def fixture_installer_diagnostic(phase, calls):
+    """Last fixture Installer observation, not a terminal-cause/finality claim.
+
+    An injected interruption can intentionally return nonzero. Never resurrect
+    that earlier row after a later successful or unsettled Installer call.
+    """
+    roles = _FIXTURE_INSTALLER_ROLES.get(phase, ()) if type(phase) is str else ()
+    if not roles or type(calls) is not list or len(calls) > 4096:
+        return None
+    selected = next(((i, row) for i, row in reversed(list(enumerate(calls)))
+                     if type(row) is dict and row.get("role") in roles), None)
+    if selected is None:
+        return None
+    index, row = selected
+    if (any(row.get(key) is not True for key in ("entered", "returned", "capturesSettled"))
+            or type(row.get("returncode")) is not int or not -65536 <= row["returncode"] <= 65535
+            or row["returncode"] == 0):
+        return None
+    return {"role": row["role"], "index": index + 1, "returncode": row["returncode"],
+            "markers": installer_markers_data(row.get("installerMarkers")),
+            "errors": installer_errors_data(row.get("installerErrors")),
+            "systemServiceExitClaimed": False}
+
+
 _FAILURE_SETUP_STAGES = ("setup-verification-input", "setup-verification-cleanup") + _FAILURE_SETUP_ROLES + tuple(role + "-adoption" for role in XCODE_SETUP_MUTATION_ROLES) + (
     "sign-xcode-setup", "sign-xcode-setup-verify", "setup-carrier", "setup-scripts-original", "setup-scripts-final",
     "setup-input-root", "setup-presentation", "setup-packager-directory", "setup-original-component-audit",
@@ -2424,6 +2461,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
         "phase": token(phase, phases), "target": token(target, (ARM_TARGET, INTEL_TARGET)),
         "mainStage": token(main_stage, _FAILURE_MAIN_STAGES), "terminal": failure_exception(error, stager),
         "packageInstall": package, "setupInstall": setup,
+        "fixtureInstall": fixture_installer_diagnostic(state.get("phase"), state.get("calls")),
         "compiler": compiler_diagnostic_data(state.get("compiler_failure")),
         "notaryIssues": notary_failure_summary_data(state.get("notary_issue_diagnostic")),
         "originalFailure": {
@@ -2477,7 +2515,7 @@ def emit_failure_diagnostic(error, **context):
         package = value["packageInstall"]
         installer = package["calls"]["installer"] if package is not None else None
         capture = package["calls"]["installer-log-capture"] if package is not None else None
-        for original in (installer, capture):
+        for original in (installer, capture, value["fixtureInstall"]):
             markers = original.get("markers") if original is not None else None
             if markers is not None:
                 for key in ("acl", "parent", "phases", "refusals"):
@@ -2485,7 +2523,7 @@ def emit_failure_diagnostic(error, **context):
                         markers[key].pop()
                         markers["omitted"] = True
                         body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
-        for original in (installer, capture):
+        for original in (installer, capture, value["fixtureInstall"]):
             errors = original.get("errors") if original is not None else None
             if errors is not None:
                 while len(body) > 4096 and errors["rows"]:
@@ -3359,7 +3397,8 @@ class Operation:
                     record[key] = parser(result.stdout, result.stderr)
                 except BaseException:
                     pass
-        if self.phase == "package-install" and role == "installer" and result.returncode != 0:
+        if result.returncode != 0 and (self.phase == "package-install" and role == "installer"
+                or self.app_absence is not None and role in _FIXTURE_INSTALLER_ROLES.get(self.phase, ())):
             try:
                 record["installerMarkers"] = installer_markers(result.stdout, result.stderr)
                 record["installerErrors"] = installer_errors(result.stdout, result.stderr)
