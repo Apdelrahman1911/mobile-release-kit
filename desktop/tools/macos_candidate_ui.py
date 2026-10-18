@@ -458,8 +458,8 @@ def main():
                        GIT_NO_REPLACE_OBJECTS='1', GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0')
         source_phase = normal.NormalPhase(owner, git_env, consumer.CANDIDATE_ROOT, clock)
         tool_uid = os.stat('/usr/bin/git', follow_symlinks=False).st_uid
-        resume.need(tool_uid in (0, os.getuid()), 'candidate-ui-git-owner')
-        quota.call(book, 'file', Path('/usr/bin/git'), 64 << 20, uid=tool_uid, modes=(0o555, 0o755))
+        resume.need(tool_uid == 0, 'candidate-ui-git-owner')
+        quota.call(book, 'file', Path('/usr/bin/git'), 64 << 20, uid=0, modes=(0o555, 0o755), system_tool=True)
         def verify_sources():
             quota.check(); clock.check()
             for root, source, tree in ((consumer.HELPER_ROOT, context['helperSource'], install['helperTree']),

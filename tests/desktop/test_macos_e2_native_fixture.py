@@ -539,6 +539,84 @@ class BindingAndOriginalTests(unittest.TestCase):
         self.assertFalse(second["closed"])
         self.assertTrue(first["closed"])
 
+    def test_system_tool_hardlinks_keep_private_policy_and_original_change_checks(self):
+        # Real tiny files/read/link counts; only canonical directory and root UID
+        # are inert ports. This does not qualify macOS permissions or execution.
+        with tempfile.TemporaryDirectory(prefix="mrk-system-links-") as temporary:
+            root = Path(temporary)
+            leaf = root / "git"
+            leaf.write_bytes(b"inert tool")
+            leaf.chmod(0o755)
+            for index in range(77): fixture.os.link(leaf, root / ("alias" + str(index)))
+            inode = fixture.os.stat(leaf).st_ino
+            real_stat, real_fstat = fixture.os.stat, fixture.os.fstat
+            overrides = {}
+            def mapped(info):
+                if info.st_ino != inode: return info
+                values = {key: getattr(info, key) for key in (
+                    "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")}
+                values.update(st_uid=0)
+                values.update(overrides)
+                return SimpleNamespace(**values)
+            def opened_book():
+                book = fixture.Originals()
+                fd = fixture.os.open(root, fixture.READ_FLAGS | fixture.os.O_DIRECTORY)
+                entry = book.register(fd, root, "directory")
+                entry.update(identity=fixture.signature(real_fstat(fd))[:5], parent=None)
+                return book, entry
+            with patch.object(fixture.os, "stat", side_effect=lambda *a, **kw: mapped(real_stat(*a, **kw))), \
+                    patch.object(fixture.os, "fstat", side_effect=lambda fd: mapped(real_fstat(fd))):
+                for mode in ("system", "default", "alias", "nonroot", "writable", "zero-links"):
+                    overrides.clear()
+                    if mode == "nonroot": overrides["st_uid"] = 501
+                    if mode == "writable": overrides["st_mode"] = 0o100775
+                    if mode == "zero-links": overrides["st_nlink"] = 0
+                    book, parent = opened_book()
+                    try:
+                        with self.subTest(mode=mode), patch.object(book, "directory", return_value=parent):
+                            options = dict(uid=0, modes=(0o755,), system_tool=mode not in ("default", "alias"), alias=mode == "alias")
+                            if mode == "system":
+                                entry, body = book.file(Path("/usr/bin/git"), 64, **options)
+                                self.assertEqual(body, b"inert tool")
+                                self.assertEqual(entry["identity"][5], 78)
+                                book.check()
+                                fixture.os.link(leaf, root / "late-alias")
+                                with self.assertRaisesRegex(fixture.Refused, "original-changed"): book.check()
+                                fixture.os.unlink(root / "late-alias")
+                            else:
+                                with self.assertRaisesRegex(fixture.Refused, "file-original-policy"):
+                                    book.file(Path("/usr/bin/git"), 64, **options)
+                    finally: self.assertTrue(book.finish())
+                overrides.clear()
+                for index in range(77): fixture.os.unlink(root / ("alias" + str(index)))
+                for system in (False, True):
+                    book, parent = opened_book()
+                    try:
+                        with patch.object(book, "directory", return_value=parent):
+                            entry, body = book.file(Path("/usr/bin/git"), 64, uid=0, modes=(0o755,), system_tool=system)
+                            self.assertEqual(entry["identity"][5], 1)
+                            self.assertEqual(body, b"inert tool")
+                    finally: self.assertTrue(book.finish())
+                leaf.unlink()
+                leaf.symlink_to(root / "missing")
+                book, parent = opened_book()
+                try:
+                    with patch.object(book, "directory", return_value=parent), self.assertRaises(OSError):
+                        book.file(Path("/usr/bin/git"), 64, uid=0, modes=(0o755,), system_tool=True)
+                finally: self.assertTrue(book.finish())
+
+    def test_system_tool_opt_in_is_closed_before_open(self):
+        valid = dict(uid=0, modes=(0o555, 0o755), system_tool=True)
+        for path, change in (("/tmp/git", {}), ("/usr/local/bin/git", {}),
+                ("/usr/bin/git", {"uid": 501}), ("/usr/bin/git", {"uid": False}),
+                ("/usr/bin/git", {"alias": True}), ("/usr/bin/git", {"system_tool": 1}),
+                ("/usr/bin/git", {"modes": None}), ("/usr/bin/git", {"modes": (0o777,)}),
+                ("/usr/bin/git", {"modes": ()})):
+            with self.subTest(path=path, change=change), patch.object(fixture.os, "open") as opened:
+                with self.assertRaisesRegex(fixture.Refused, "system-tool-selection"):
+                    fixture.Originals().file(Path(path), 64, **dict(valid, **change))
+                opened.assert_not_called()
+
     def test_original_owner_result_contract_is_not_a_fabricated_receipt(self):
         argv = ["/fixed/synthetic"]
         good = subprocess.CompletedProcess(argv, 0, b"data", b"")

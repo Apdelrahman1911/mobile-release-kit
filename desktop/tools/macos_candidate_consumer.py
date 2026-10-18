@@ -12,8 +12,9 @@ import re
 import stat
 import sys
 import time
-from types import MappingProxyType
+from types import MappingProxyType, ModuleType, FunctionType
 
+_SYSTEM_TOOL_FAILURE = None  # One diagnostic slot; never grants original custody.
 STARTED_NS = time.monotonic_ns()
 ROOT = Path(__file__).absolute().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -828,8 +829,27 @@ def bind_host():
             'runId': context['runId'], 'runAttempt': context['runAttempt']}
 
 
+
+def _admit_system_tool(session, role, tool):
+    try:
+        uid = os.stat(tool, follow_symlinks=False).st_uid
+        resume.need(uid == 0, 'candidate-tool-owner')
+        _entry, body = session.quota.call(session.outer, 'file', Path(tool), 64 << 20, uid=0,
+            modes=(0o555, 0o755, 0o4555, 0o4755), system_tool=True)
+        resume.need(body, 'candidate-tool-original')
+    except BaseException as error:
+        try:
+            global _SYSTEM_TOOL_FAILURE
+            _SYSTEM_TOOL_FAILURE = (error, role, type(session.outer))
+        except BaseException:
+            pass  # Diagnostics must not replace this identical original failure.
+        raise
+
+
 def main(purpose="install"):
-    """Hosted acquire/install only. No workflow currently activates this entry."""
+    """Hosted fixed acquisition/install and explicit reuse only."""
+    global _SYSTEM_TOOL_FAILURE
+    _SYSTEM_TOOL_FAILURE = None
     resume.need(type(purpose) is str and purpose in PURPOSES, 'candidate-purpose')
     context = entry_context(() if purpose == "install" else (purpose,))
     clock = resume.Deadline(started=STARTED_NS)
@@ -881,13 +901,10 @@ def main(purpose="install"):
         python_entries = [entry for entry in session.outer.entries if entry['kind'] == 'file'
                           and entry['path'] == Path(session.python) and not entry['closed']]
         resume.need(len(python_entries) == 1 and python_entries[0]['identity'][6] > 0, 'candidate-host-python-original')
-        for tool in ('/usr/bin/git', '/usr/bin/hdiutil', '/usr/bin/vm_stat', '/usr/bin/openssl',
-                     '/usr/bin/codesign', '/usr/sbin/installer'):
-            uid = os.stat(tool, follow_symlinks=False).st_uid
-            resume.need(uid in (0, os.getuid()), 'candidate-tool-owner')
-            _entry, body = quota.call(session.outer, 'file', Path(tool), 64 << 20, uid=uid,
-                                      modes=(0o555, 0o755, 0o4555, 0o4755))
-            resume.need(body, 'candidate-tool-original')
+        for role, tool in (('git', '/usr/bin/git'), ('hdiutil', '/usr/bin/hdiutil'),
+                           ('vm_stat', '/usr/bin/vm_stat'), ('openssl', '/usr/bin/openssl'),
+                           ('codesign', '/usr/bin/codesign'), ('installer', '/usr/sbin/installer')):
+            _admit_system_tool(session, role, tool)
         sudo = quota.book(lambda: resume.FixedSudoOriginals(session.host_module, session.host, clock, os.getuid()))
         sudo.acquire(quota)
         session.load_sources()
@@ -933,22 +950,52 @@ def failure_data(error):
     # Only these already-loaded module globals and their actual compile paths
     # are eligible. A matching basename or forged traceback filename is not enough.
     origins = ((globals(), __file__), (vars(resume), resume.__file__), (vars(candidate), candidate.__file__))
+    captured, donor, boundary_seen, donor_seen = _SYSTEM_TOOL_FAILURE, None, False, False
+    if (type(captured) is tuple and len(captured) == 3 and captured[0] is error
+            and type(captured[1]) is str and captured[1] in ('git', 'hdiutil', 'vm_stat', 'openssl', 'codesign', 'installer')):
+        module = sys.modules.get('_mrk_p0_originals')
+        path = str(HELPER_ROOT / 'desktop/tools/macos_e2_native_fixture.py')
+        if (type(module) is ModuleType and vars(module).get('__file__') == path
+                and type(captured[2]) is type and captured[2] is vars(module).get('Originals')):
+            function = vars(captured[2]).get('file')
+            if type(function) is FunctionType and function.__globals__ is vars(module) and function.__code__.co_filename == path:
+                donor = (vars(module), path)
+                origins += (donor,)
     frames = []
     tb = BaseException.__traceback__.__get__(error)
     for _ in range(32):
         if tb is None:
             break
         code = tb.tb_frame.f_code
+        boundary_seen |= code is _admit_system_tool.__code__ and tb.tb_frame.f_globals is globals()
         for namespace, path in origins:
             if (tb.tb_frame.f_globals is namespace and code.co_filename == path
                 and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', code.co_name)
                 and type(tb.tb_lineno) is int and 0 < tb.tb_lineno < 1000000):
+                donor_seen |= donor is not None and namespace is donor[0]
                 frames.append({'file': Path(path).name, 'function': code.co_name, 'line': tb.tb_lineno})
                 frames = frames[-8:]
                 break
         tb = tb.tb_next
+    system_tool, error_class = None, classes.get(type(error), 'other')
+    if donor is not None and boundary_seen:
+        original = donor_seen and type(error) is donor[0].get('Refused')
+        native = type(error) in (OSError, FileNotFoundError, PermissionError)
+        local = type(error) is resume.Refused
+        if original or native or local:
+            system_tool = {'role': captured[1], 'errno': None}
+            if native:
+                number = OSError.errno.__get__(error)
+                if type(number) is int and 0 <= number <= 65535: system_tool['errno'] = number
+            if original:
+                error_class = 'Refused'
+                labels = {'system-tool-selection', 'directory-spelling', 'directory-owner-mode', 'original-handle-bound',
+                    'original-unbound', 'original-changed', 'file-original-policy', 'original-short-read', 'original-grew'}
+                reason = parts[0] if len(parts) == 1 and type(parts[0]) is str and parts[0] in labels else 'unavailable'
+            elif local and len(parts) == 1 and type(parts[0]) is str and parts[0] in ('candidate-tool-owner', 'candidate-tool-original'):
+                reason = parts[0]
     return {'scope': 'candidate-consumer-failure-only', 'reason': reason,
-        'exceptionClass': classes.get(type(error), 'other'), 'sourceFrames': frames,
+        'exceptionClass': error_class, 'sourceFrames': frames, 'systemTool': system_tool,
         'rawOutputExported': False, 'cleanupAuthorized': False}
 
 

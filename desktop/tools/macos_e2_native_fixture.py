@@ -3692,15 +3692,25 @@ class Originals:
         need(signature(os.fstat(entry["fd"]))[:length] == entry["identity"]
              and signature(named)[:length] == entry["identity"], "original-changed")
 
-    def file(self, path, limit, *, uid=None, modes=None, alias=False):
+    def file(self, path, limit, *, uid=None, modes=None, alias=False, system_tool=False):
         path = Path(path)
+        # Apple's protected system tools can be hard-linked multiplexers (git
+        # has 78 names on macOS26). Private/task files still require one link.
+        need(type(system_tool) is bool, "system-tool-selection")
+        if system_tool:
+            need(path in (Path("/usr/bin/git"), Path("/usr/bin/hdiutil"), Path("/usr/bin/vm_stat"),
+                          Path("/usr/bin/openssl"), Path("/usr/bin/codesign"), Path("/usr/sbin/installer"))
+                 and type(uid) is int and uid == 0 and alias is False
+                 and type(modes) is tuple and bool(modes)
+                 and all(type(mode) is int and mode in (0o555, 0o755, 0o4555, 0o4755) for mode in modes),
+                 "system-tool-selection")
         parent = self.directory(path.parent)
         fd = os.open(path.name, READ_FLAGS, dir_fd=parent["fd"])
         entry = self.register(fd, path, "file")
         entry["parent"] = parent
         info = os.fstat(fd)
         need(stat.S_ISREG(info.st_mode) and info.st_uid == (os.getuid() if uid is None else uid)
-             and info.st_nlink in ((1, 2) if alias else (1,))
+             and (info.st_nlink > 0 if system_tool else info.st_nlink in ((1, 2) if alias else (1,)))
              and 0 <= info.st_size <= limit and not info.st_mode & 0o022
              and (modes is None or stat.S_IMODE(info.st_mode) in modes), "file-original-policy")
         entry["identity"] = signature(info)

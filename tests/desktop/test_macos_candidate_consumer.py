@@ -428,6 +428,106 @@ class CandidateConsumerTests(unittest.TestCase):
         self.assertTrue(all(set(row) == {'file', 'function', 'line'} and row['line'] > 0
                             and '/' not in row['file'] for row in value['sourceFrames']))
 
+    def test_system_tool_original_failures_keep_bound_donor_labels_and_errno(self):
+        import errno
+        import os
+        import tempfile
+        from types import FunctionType
+        private = 'PRIVATE-SYNTHETIC-NEVER-EXPORTED'
+        old_module = sys.modules.pop('_mrk_p0_originals', None)
+        previous = C._SYSTEM_TOOL_FAILURE
+        try:
+            donor = R.load_module('_mrk_p0_originals', ROOT / 'desktop/tools/macos_e2_native_fixture.py',
+                (ROOT / 'desktop/tools/macos_e2_native_fixture.py').read_bytes())
+            with tempfile.TemporaryDirectory() as name, mock.patch.object(C, 'HELPER_ROOT', ROOT):
+                path = Path(name) / 'tool'; path.write_bytes(b'inert tool data'); path.chmod(0o600)
+                originals = []
+                for missing in (False, True):
+                    book = donor.Originals()
+                    try:
+                        book.file(path.with_name('missing') if missing else path, 1024, modes=(0o755,))
+                    except (donor.Refused, FileNotFoundError) as error:
+                        original = error
+                    else:
+                        self.fail('expected actual donor refusal')
+                    finally:
+                        self.assertTrue(book.finish())
+                    quota = SimpleNamespace(call=mock.Mock(side_effect=original))
+                    session = SimpleNamespace(outer=book, quota=quota)
+                    with mock.patch.object(C.os, 'stat', return_value=SimpleNamespace(st_uid=0)):
+                        try: C._admit_system_tool(session, 'git', '/usr/bin/git')
+                        except BaseException as raised: self.assertIs(raised, original)
+                        else: self.fail('original failure was swallowed')
+                    quota.call.assert_called_once_with(book, 'file', Path('/usr/bin/git'), 64 << 20,
+                        uid=0, modes=(0o555, 0o755, 0o4555, 0o4755), system_tool=True)
+                    value = C.failure_data(original)
+                    self.assertEqual(value['reason'], 'unavailable' if missing else 'file-original-policy')
+                    self.assertEqual(value['exceptionClass'], 'FileNotFoundError' if missing else 'Refused')
+                    self.assertEqual(value['systemTool'], {'role': 'git', 'errno': errno.ENOENT if missing else None})
+                    self.assertTrue(any(row['file'] == 'macos_e2_native_fixture.py' for row in value['sourceFrames']))
+                    self.assertNotIn(name, R.canonical(value).decode())
+                    originals.append(original)
+
+                C._SYSTEM_TOOL_FAILURE = (originals[1], 'git', donor.Originals)
+                for bad_errno in (True, -1, 65536, private):
+                    originals[1].errno = bad_errno
+                    value = C.failure_data(originals[1])
+                    self.assertEqual(value['systemTool'], {'role': 'git', 'errno': None})
+                    self.assertNotIn(private, R.canonical(value).decode())
+                originals[1].errno = errno.ENOENT
+
+                # Exact class and original traceback are necessary, not just
+                # a matching name/message/filename or a stale prior capture.
+                class Refused(ValueError): pass
+                for error in (Refused('file-original-policy'), donor.Refused(private)):
+                    quota = SimpleNamespace(call=mock.Mock(side_effect=error))
+                    with mock.patch.object(C.os, 'stat', return_value=SimpleNamespace(st_uid=0)):
+                        try: C._admit_system_tool(SimpleNamespace(outer=book, quota=quota), 'git', '/usr/bin/git')
+                        except BaseException as raised: self.assertIs(raised, error)
+                        else: self.fail('original failure was swallowed')
+                    value = C.failure_data(error)
+                    self.assertEqual(value['reason'], 'unavailable')
+                    self.assertIsNone(value['systemTool'])
+                    self.assertNotIn(private, R.canonical(value).decode())
+                code = compile('def forged():\n    raise original\n', donor.__file__, 'exec')
+                fake = FunctionType(next(c for c in code.co_consts if hasattr(c, 'co_code')),
+                    {'original': donor.Refused('file-original-policy')})
+                try: fake()
+                except donor.Refused as error: forged = error
+                C._SYSTEM_TOOL_FAILURE = (forged, 'git', donor.Originals)
+                self.assertIsNone(C.failure_data(forged)['systemTool'])
+                self.assertEqual(C.failure_data(forged)['sourceFrames'], [])
+                for role, kind in (('foreign', donor.Originals), ('git', type('Originals', (), {}))):
+                    C._SYSTEM_TOOL_FAILURE = (originals[0], role, kind)
+                    self.assertIsNone(C.failure_data(originals[0])['systemTool'])
+                C._SYSTEM_TOOL_FAILURE = (originals[0], 'git', donor.Originals)
+                self.assertIsNone(C.failure_data(RuntimeError(private))['systemTool'])
+
+                # Recording itself can fail: re-raise the identical primary,
+                # and do not replace it with a diagnostic access exception.
+                class CaptureFault:
+                    accesses = 0
+                    quota = SimpleNamespace(call=mock.Mock(side_effect=originals[0]))
+                    @property
+                    def outer(self):
+                        self.accesses += 1
+                        if self.accesses > 1: raise RuntimeError(private)
+                        return book
+                C._SYSTEM_TOOL_FAILURE = None
+                with mock.patch.object(C.os, 'stat', return_value=SimpleNamespace(st_uid=0)):
+                    with self.assertRaises(donor.Refused) as raised:
+                        C._admit_system_tool(CaptureFault(), 'git', '/usr/bin/git')
+                self.assertIs(raised.exception, originals[0])
+                self.assertIsNone(C._SYSTEM_TOOL_FAILURE)
+                C._SYSTEM_TOOL_FAILURE = (originals[0], 'git', donor.Originals)
+                with mock.patch.dict(C.os.environ, {}, clear=True):
+                    with self.assertRaises(R.Refused): C.main()
+                self.assertIsNone(C._SYSTEM_TOOL_FAILURE)
+        finally:
+            C._SYSTEM_TOOL_FAILURE = previous
+            sys.modules.pop('_mrk_p0_originals', None)
+            if old_module is not None: sys.modules['_mrk_p0_originals'] = old_module
+
     def test_source_git_blob_join_rejects_changed_missing_duplicate_and_foreign_bytes(self):
         import hashlib
         files = {'desktop/tools/current.py': b'current source\n', 'desktop/macos-installed-inputs/build-release.json': b'{}\n'}

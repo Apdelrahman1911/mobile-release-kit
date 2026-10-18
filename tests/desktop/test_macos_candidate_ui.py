@@ -595,6 +595,10 @@ class CandidateUIMainTests(unittest.TestCase):
                 return self.directories[path]
             def file(self,path,limit,**kw):
                 path=Path(path);self.directory(path.parent)
+                if path == Path('/usr/bin/git'):
+                    assert kw == {'uid': 0, 'modes': (0o555, 0o755), 'system_tool': True}
+                elif kw.get('system_tool'):
+                    raise AssertionError('system-tool mode applied to a private/source file')
                 if len(files[path])>limit:raise R.Refused('inert cap')
                 if 'modes' in kw and stat.S_IMODE(info(path).st_mode) not in kw['modes']:raise R.Refused('inert mode')
                 entry=dict(path=path,kind='file',identity=R.identity(info(path)),fd=len(self.entries)+100,closed=False)
