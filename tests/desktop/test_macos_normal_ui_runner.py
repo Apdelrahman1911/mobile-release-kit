@@ -3946,6 +3946,23 @@ class NormalPhaseDataTests(unittest.TestCase):
             return MODULE.normal_failure_diagnostics(phase, selection,
                 subprocess.CompletedProcess([], 65, raw, b""))
         old = classify(site + b"unknown " + private + b"\n")
+        wait = b"MRK_NORMAL_WAIT=v1;line=6748;waiter=completed;matches=2;failures=0;nonAtomic=1\n"
+        row = {"kind":"wait", "stream":"stdout", "line":6748, "waiter":"completed",
+               "matches":2, "failures":0, "nonAtomic":True}
+        self.assertEqual(classify(private+b'\n'+wait)['queryObservations'], [row])
+        for raw in (wait[:-1], b'prefix '+wait, wait.replace(b'6748', b'65536'),
+                    wait.replace(b'matches=2', b'matches=6'), wait.replace(b'completed', private),
+                    wait.replace(b'matches=2', b'matches=1')):
+            value=classify(raw); self.assertEqual(value['queryObservations'], [])
+            self.assertNotIn(private, MODULE.encoded(value))
+        for raw in (wait.replace(b'completed', b'timed-out'), wait.replace(b'matches=2', b'matches=0'),
+                    wait.replace(b'failures=0', b'failures=1')):
+            self.assertEqual(len(classify(raw)['queryObservations']), 1)
+        capped=classify(wait*5); self.assertEqual(len(capped['queryObservations']), 4)
+        self.assertTrue(capped['findingsTruncated']); self.assertLessEqual(len(MODULE.encoded(capped))+1,4096)
+        self.assertEqual(classify(wait,'build',None)['queryObservations'], [])
+        self.assertEqual(MODULE.normal_failure_diagnostics('test',selected,
+            subprocess.CompletedProcess([],65,b'',wait))['queryObservations'], [])
         field = b"MRK_NORMAL_PROJECT_FIELD=v1;field=project;clamped=1;waiter=timed-out;matches=0;fields=1;relation=empty;nonAtomic=1\n"
         row = {"kind":"project-field", "stream":"stdout", "field":"project", "allowanceClamped":True,
             "waiter":"timed-out", "matches":0, "fields":1, "relation":"empty", "nonAtomic":True}

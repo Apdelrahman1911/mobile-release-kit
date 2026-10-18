@@ -4836,6 +4836,13 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                 break  # Incomplete records may veto dashboard pairing, never become query observations.
             if engineering:
                 continue  # Do not import ordinary query observations into this separate fixture.
+            wait = re.fullmatch(rb"MRK_NORMAL_WAIT=v1;line=([1-9][0-9]{0,4});waiter=(completed|timed-out|other);matches=([0-5]);failures=([0-5]);nonAtomic=1", record)
+            if wait and phase == "test" and stream == "stdout" and int(wait[1]) <= 65535:
+                if wait[2] != b"completed" or wait[3] != b"1" or wait[4] != b"0":
+                    retain("queryObservations", {"kind": "wait", "stream": "stdout", "line": int(wait[1]),
+                        "waiter": wait[2].decode("ascii"), "matches": int(wait[3]), "failures": int(wait[4]),
+                        "nonAtomic": True}, 4, distinct=False)
+                continue
             match = re.fullmatch(query, record)
             if match is None:
                 continue

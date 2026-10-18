@@ -5084,6 +5084,11 @@ final class NormalAppUITests: XCTestCase {
         let allowance = try remaining(timeout)
         let result = XCTWaiter.wait(for: [expected], timeout: allowance)
         let failureCount = failed.count, matchCount = query.count
+        if failureCount > 0 || result != .completed || matchCount != 1 {
+            let waiter = result == .completed ? "completed" : result == .timedOut ? "timed-out" : "other"
+            // Reuse original observations only; no extra accessibility query.
+            print("MRK_NORMAL_WAIT=v1;line=\(line);waiter=\(waiter);matches=\(min(matchCount, 5));failures=\(min(failureCount, 5));nonAtomic=1")
+        }
         if snapshotObservation && (failureCount > 0 || result != .completed || matchCount != 1) {
             // Same original wait, before its existing refusal. Finite public
             // facts only; exhausted observation budget cannot replace its error.
@@ -8096,10 +8101,16 @@ final class NormalAppUITests: XCTestCase {
                 try require(consentChecked(consent, expected: false), "inspection consent must begin unchecked")
                 inspectUnchecked = true
                 consent.click()
+                // Reuse the original Start readiness wait before reading React's published acknowledgement.
+                let starts = review.buttons.matching(identifier: "Inspect local state once")
+                let start = try waitElement(starts, in: review, enabled: true, failures: failures)
                 try require(consentChecked(consent, expected: true), "inspection explicit consent not observed")
                 try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair, "inspection review changed before Start")
                 try fixture.post()
-                try press(review, "Inspect local state once", renderer: renderer, failures: failures) // One actual Start.
+                try reveal(start, in: renderer)
+                try require(starts.count == 1 && start.exists && start.isEnabled && start.isHittable,
+                            "inspection original Start changed before its one click")
+                start.click() // One actual Start, only after the original acknowledgement and fixture POST.
                 _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery phase: terminal"), in: renderer,
                                     timeout: 210, failures: failures)
                 let observed = try iosRecoveryObservation(renderer, phase: "terminal")
@@ -8124,11 +8135,17 @@ final class NormalAppUITests: XCTestCase {
                 try require(consentChecked(consent, expected: false), "account recovery consent must begin unchecked")
                 recoverUnchecked = true
                 consent.click()
+                // Reuse the original Start readiness wait before reading React's published acknowledgement.
+                let starts = review.buttons.matching(identifier: "Recover inspected account session")
+                let start = try waitElement(starts, in: review, enabled: true, failures: failures)
                 try require(consentChecked(consent, expected: true), "account recovery explicit consent not observed")
                 try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair
                             && iosRecoverySession(review, review: true) == session, "account recovery review changed before Start")
                 try fixture.post()
-                try press(review, "Recover inspected account session", renderer: renderer, failures: failures) // One actual Start.
+                try reveal(start, in: renderer)
+                try require(starts.count == 1 && start.exists && start.isEnabled && start.isHittable,
+                            "account recovery original Start changed before its one click")
+                start.click() // One actual Start, only after the original acknowledgement and fixture POST.
                 _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery phase: terminal"), in: renderer,
                                     timeout: 240, failures: failures)
                 let observed = try iosRecoveryObservation(renderer, phase: "terminal")

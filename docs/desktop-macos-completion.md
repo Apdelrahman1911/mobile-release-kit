@@ -4,12 +4,26 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
+Independent persistence/offline consumer `39137951683/1` (`295889ae`) is
+running separately. The next batch contains only the two completed failing ARM
+recovery/evidence cohorts, not another full run. iOS consent now waits on the
+**existing** exact Start-enabled gate before reading the published checkbox
+state; same original IDs, fixture checks and one Start remain required. Distinct
+plan/implementation reviews accepted it. The common wait diagnostic now records
+only already-sampled waiter/count/caller-line facts, without another AX query or
+wait. Its privacy regression passes (0.482s, zero skips); this is standalone
+candidate diagnostic output, not acceptance by the legacy public-evidence schema.
+Subset CLI failure diagnostics also retain their actual four-argument phase.
+No new native success is inferred from these changes.
+
 Consumer `39137375131/1` (`8ac2f3c7`) now establishes **ARM saved-version
 rollback: 1 test passed, zero failures/skips, positive harness cleanup** against
 the unchanged signed `fcb1aa46` app. This uses a real core-created interrupted
 save; interruption of an actual GUI save, Intel recovery and full readiness are
 not inferred. Pending iOS failed its checked-value observation after one click;
-saved evidence still failed its outcome wait. Other jobs continue independently.
+saved evidence still failed its outcome wait. Other jobs continue independently. ARM project fields exhausted their300s case
+budget after the six Android source-selection journeys; a proper independent
+method split is being prepared instead of dropping coverage or extending clocks.
 
 To stop project-test failure suppressing unrelated checks, the next consumer
 selects only existing **persistence** and **saved-checks** cohorts on fresh ARM

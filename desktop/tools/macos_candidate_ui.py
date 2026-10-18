@@ -941,6 +941,6 @@ if __name__ == '__main__':
     try:
         result = main()
     except BaseException as error:
-        sys.stderr.buffer.write(resume.canonical(failure_data(error, sys.argv[-1] if len(sys.argv) in (2, 3) else None)) + b'\n')
+        sys.stderr.buffer.write(resume.canonical(failure_data(error, sys.argv[-1] if len(sys.argv) in (2, 3, 4) else None)) + b'\n')
         raise SystemExit(1) from None
     sys.stdout.buffer.write(resume.canonical(result) + b'\n')
