@@ -20,19 +20,14 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        target: [aarch64-apple-darwin, x86_64-apple-darwin]
-        mode: [ordinary-ui, ordinary-ios-ui, ordinary-saved-ui, ordinary-saved-version-ui]
+        target: [aarch64-apple-darwin]
+        mode: [ordinary-ui]
         include:
           - runner: macos-26
             target: aarch64-apple-darwin
             python-architecture: arm64
             rust-version: 1.98.1
             rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - runner: macos-26-intel
-            target: x86_64-apple-darwin
-            python-architecture: x64
-            rust-version: 1.98.0
-            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:
@@ -42,7 +37,7 @@ jobs:
       # All routes stay inactive until this and candidate-carrier-selection.json
       # name the same genuine retained candidate. No guessed/latest artifact.
       # This is checkout routing, not artifact/source admission authority.
-      MRK_CANDIDATE_SOURCE: '0000000000000000000000000000000000000000'
+      MRK_CANDIDATE_SOURCE: '8800fd3e2e242b5d48df409168c10164fee531b2'
       MRK_MACOS_TARGET: ${{ matrix.target }}
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
@@ -703,7 +698,7 @@ jobs:
           # No account baseline/control, Keychain data, raw captures or xcresult.
 
       - name: Retain only existing sanitized native failure diagnostics
-        if: failure() && (env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-pending-ui')
+        if: failure() && (env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-pending-ui')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-native-failure-${{ matrix.target }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -711,6 +706,14 @@ jobs:
             ${{ env.MRK_MACOS_WORK }}/normal-ui/toolchain.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/build.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/build.settings-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/applications-test.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/applications-summary.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/project-test.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/project-summary.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/persistence-test.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/persistence-summary.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/saved-checks-test.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/saved-checks-summary.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs.failure.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/ios-pending-recovery-test.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/ios-pending-recovery-summary.failure-diagnostics.json

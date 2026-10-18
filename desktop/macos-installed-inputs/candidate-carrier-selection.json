@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "aarch64-apple-darwin": {
+      "source": "8800fd3e2e242b5d48df409168c10164fee531b2",
+      "tree": "2d496e008819a6ff0386daf0b1d020e184b75590",
+      "target": "aarch64-apple-darwin",
+      "runId": "39079740209",
+      "runAttempt": "1",
+      "jobId": "117549066806",
+      "artifactId": "12120527756",
+      "artifactBytes": 110492840,
+      "artifactSha256": "aab506816f913bf81a74f20b902dae3bc308a5176c99c0131b74ecf1bbf814db"
+    },
+    "x86_64-apple-darwin": {
+      "source": "8800fd3e2e242b5d48df409168c10164fee531b2",
+      "tree": "2d496e008819a6ff0386daf0b1d020e184b75590",
+      "target": "x86_64-apple-darwin",
+      "runId": "39079740209",
+      "runAttempt": "1",
+      "jobId": "117549066817",
+      "artifactId": "12120761738",
+      "artifactBytes": 113011266,
+      "artifactSha256": "eff2fe7f1f8f8a14ba71d24fe92ea40fa3648fd9d80fdb782c124d0e8420a60f"
+    }
+  }
+}
