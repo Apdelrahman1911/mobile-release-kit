@@ -428,6 +428,66 @@ class CandidateConsumerTests(unittest.TestCase):
         self.assertTrue(all(set(row) == {'file', 'function', 'line'} and row['line'] > 0
                             and '/' not in row['file'] for row in value['sourceFrames']))
 
+    def test_resource_failure_projection_requires_actual_origin_and_finite_observation(self):
+        from types import FunctionType
+        private = 'PRIVATE-RESOURCE-DO-NOT-EXPORT'
+        errors = []
+        # Actual admission functions; only native sampling/command ports are inert.
+        # No measured host capacity, resource reservation or native action claimed.
+        for allocation, memory, disk, reason in (
+                (False, 0, 1 << 40, 'candidate-resource-admission'),
+                (True, 0, 1 << 40, 'resume-resource-memory-admission'),
+                (True, 1 << 40, 0, 'resume-resource-disk-admission')):
+            owner = instance()
+            owner.sources, owner.child_bootstrap = [], ''
+            owner.clock, owner.host, owner.parent = SimpleNamespace(check=lambda: None), object(), {'fd': 7}
+            owner.command = mock.Mock(return_value=SimpleNamespace(stdout=b'', stderr=b'', returncode=0))
+            owner.memory_base, owner.required_disk = 1, 1
+            owner.allocation_samples, owner.cpio_window = 0, None
+            with mock.patch.dict(R.STATE, resourceAdmission=None), \
+                    mock.patch.object(R, 'host_memory_data', return_value=(4096, 1 << 40)), \
+                    mock.patch.object(R, 'memory_data', return_value={'availableEstimateBytes': memory}), \
+                    mock.patch.object(C.os, 'fstatvfs', return_value=SimpleNamespace(f_bavail=disk, f_frsize=1)):
+                try:
+                    if allocation: owner.allocation_budget('xar-toc', 0, 0, 1)
+                    else: owner.admit_resources(0, 0)
+                except R.Refused as error:
+                    errors.append(error)
+                    value = C.failure_data(error)
+                else:
+                    self.fail('original resource admission must refuse')
+                self.assertEqual(value['reason'], reason)
+                self.assertEqual(value['resourceAdmission'], R.STATE['resourceAdmission'])
+                self.assertFalse(value['cleanupAuthorized'] or value['rawOutputExported'])
+                self.assertEqual(value['resourceAdmission']['availableMemoryEstimateBytes'], memory)
+                self.assertEqual(value['resourceAdmission']['availableDiskBytes'], disk)
+                self.assertLess(len(R.canonical(value)), 4096)
+                facts = dict(R.STATE['resourceAdmission'])
+                for invalid in (None, dict(facts, private=private), dict(facts, requiredMemoryBytes=True),
+                                dict(facts, memorySufficient=not facts['memorySufficient']),
+                                dict(facts, availableDiskBytes=1 << 53)):
+                    R.STATE['resourceAdmission'] = invalid
+                    reduced = C.failure_data(errors[-1])
+                    self.assertIsNone(reduced['resourceAdmission'])
+                    self.assertEqual(reduced['reason'], reason)
+                    self.assertNotIn(private, R.canonical(reduced).decode())
+                R.STATE['resourceAdmission'] = facts
+                with mock.patch.object(R, 'resource_projection_data', side_effect=RuntimeError(private)):
+                    reduced = C.failure_data(errors[-1])
+                    self.assertIsNone(reduced['resourceAdmission'])
+                    self.assertEqual(reduced['reason'], reason)
+                self.assertEqual(errors[-1].args, (reason,))
+                # Stale facts do not attach to an unentered/impostor failure.
+                for error in (R.Refused(reason), RuntimeError(private)):
+                    self.assertIsNone(C.failure_data(error)['resourceAdmission'])
+                code = compile('def admit_resources():\n    raise Refused("' + reason + '")\n', C.__file__, 'exec')
+                for namespace in ({'Refused': R.Refused}, dict(vars(C), Refused=R.Refused)):
+                    function = FunctionType(next(q for q in code.co_consts if hasattr(q, 'co_code')), namespace)
+                    try: function()
+                    except R.Refused as error:
+                        self.assertIsNone(C.failure_data(error)['resourceAdmission'])
+            owner.command.assert_called_once_with('memory', ['/usr/bin/vm_stat'], 10)
+
     def test_system_tool_original_failures_keep_bound_donor_labels_and_errno(self):
         import errno
         import os

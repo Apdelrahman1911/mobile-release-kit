@@ -1,184 +1,109 @@
-# Mobile Release Kit — macOS early preview
+# Try Mobile Release Kit on macOS
 
-**This is a limited, normal application preview, not the completed Desktop product.**
-It is not an observer/test executable. The package uses the ordinary
-C entry → ordinary Rust `src/main.rs → shell::run()` route with bundled UI assets,
-Mobile Release Kit core and Python runtime. The nested payload keeps the existing
-product identity and app-data namespace; you still open the outer named app. You do not need to install Python,
-Rust, Node.js or the CLI to try the application.
+**Internal test candidate, not a production-ready or publicly released app.**
+Use a disposable Mac installation and a synthetic mobile project. Installed UI,
+update, recovery and complete release journeys still need their own successful
+checks; a signed package or an available download does not prove them.
 
-## Before installing
+## Choose the correct download
 
-- **Verification targets:** Apple Silicon (ARM64) and Intel (x86_64), macOS 26.
-  The workflow checks separate architecture-specific packages; a configured
-  target or running job is not a supported-delivery claim. Use only the exact
-  target whose required completed checks and distribution evidence are accepted.
-  Older macOS releases, upgrades and moving the installation remain unqualified.
-- Use a disposable/synthetic mobile project. Do not provide production signing
-  material, live Store credentials or private release data for this early test.
-- **Ordinary V2 installation requires the configured, SOURCE-selected producer
-  identity:** its genuine Developer ID Application certificate/key, completed
-  package signature and the native app-purpose checks. The public Application,
-  Installer and notary configurations are enrolled. Current-package Installer-key,
-  notarization and installed-preview verification remain pending; configuration
-  is not native qualification. Credential-free engineering fixtures do **not** satisfy
-  this requirement; an unsigned/ad-hoc fixture is not an ordinary V2 package.
-- This delivery route additionally requires the separate SOURCE-selected
-  Developer ID Installer identity and Apple notary authentication. It admits
-  only the finalized payload, Installer package and user DMG after their own
-  actual signing/notary/stapler checks; unavailable credentials mean no preview.
-  The original user DMG is retained unchanged. Only a separate finalized copy
-  whose read-only mount contains the exact `Install.pkg`, `producer.json` and
-  `producer.sig` can be exported; there is no fallback to the unstapled image.
-- Downloaded-image/Installer interaction and Gatekeeper qualification remain
-  separate, required distribution evidence; an Accepted notary result alone
-  does not prove those checks or application/worker lifecycle completion.
-  Do not disable Gatekeeper, strip quarantine or change security settings to
-  force installation/open. Report a refusal rather than treating it as a pass.
-- Installer requires normal macOS administrator approval to place protected
-  application/runtime files. The app itself must run as your normal user.
-- The V2 installer checks existing linked installation records before a
-  same-package no-op, missing-app restore or explicitly SOURCE-authorized
-  update. Missing/unknown records, unlisted predecessors or retained failures
-  are refused, not repaired by deleting files. These paths still need genuine
-  native qualification; no old-version pruning is provided. Removal uses the
-  separate removal disk image and its accompanying guide; its execution and recovery
-  remain unqualified here.
+- Current verification targets are **macOS 26**, with separate **Apple Silicon
+  (ARM64)** and **Intel (x86_64)** packages. Check About This Mac and the target in
+  `PREVIEW.json`. Older or future macOS versions and Rosetta substitution are not
+  qualified by these builds.
+- In the reviewed GitHub Actions run, open **Artifacts** and download the matching
+  `mobile-release-kit-macos26-<target>-candidate-<source>-<run-id>-<run-attempt>`.
+  `<target>` is `aarch64-apple-darwin` or `x86_64-apple-darwin`.
+  A legacy preview run uses `-preview-` instead of `-candidate-`; do not mix them.
+- Extract the downloaded archive. Keep `MobileReleaseKit.dmg`, `PREVIEW.json`
+  and `README.md` together. Candidate artifacts expire after **14 days**. Ask for
+  a current reviewed build if the artifact is unavailable; do not substitute an
+  older package or infer that a missing check passed.
+- Read the actual run/check results supplied with the build. Downloads can exist
+  even when later UI tests fail. `PREVIEW.json` identifies the build and its
+  completed packaging/installation observations, not full application readiness.
 
-The adjacent **PREVIEW.json** identifies the exact source commit/tree,
-GitHub workflow/run/attempt, DMG/package/producer-sidecar SHA-256 values,
-request-correlated installed inventory and runtime SHA-256. Its results
-distinguish normal build, original Installer status and V2 readback from UI,
-signing-account or complete distribution acceptance. Its final-carrier fields
-bind the raw preceding receipt, original/final image hashes, original0 and
-scoped native verification/mount observations. They do not turn synthetic DATA
-checks into native notarization, downloaded-install or Gatekeeper evidence.
+These instructions supplement older downloaded guides; they do not change the
+bytes or verification status of an existing artifact.
 
-## Retrieve the matching temporary artifacts
+## Install and open — no terminal needed
 
-In GitHub Actions, open the exact reviewed run and attempt, then its **Artifacts**.
-Use `<target>` = `aarch64-apple-darwin` for Apple Silicon or
-`x86_64-apple-darwin` for Intel, matching the actual package and reviewed job.
-Neither target is qualified merely because its artifact exists.
-Download the two separate artifacts with the same target, full source commit,
-run ID and run attempt:
+1. Open **MobileReleaseKit.dmg** in Finder.
+2. Open **Install.pkg inside the mounted image** and follow macOS Installer.
+   Keep **producer.json** and **producer.sig** beside it. Do not copy only the
+   package to Downloads, rename its siblings, or drag an app from the image.
+3. Approve the normal macOS administrator prompt if you intend to install this
+   reviewed build. The Desktop application itself runs as your ordinary user.
+4. Open **Applications → Mobile Release Kit**. This installed launcher opens the
+   protected application; it is not a movable copy of the app or its runtime.
 
-- `mobile-release-kit-macos26-<target>-preview-<source>-<run-id>-<run-attempt>`
-  contains the delivery, guide and **PREVIEW.json**.
-- `desktop-macos-installed-<target>-<source>-<run-id>-<run-attempt>`
-  contains **public-verification-evidence.json**, not raw local logs or native results.
+The actual app remains at
+`/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app`.
+Do not move it, its versioned runtime, or its maintenance files. If installation
+or launch is refused, preserve the result and report it. **Do not disable
+Gatekeeper, remove quarantine, change permissions or delete installation state.**
+Launch is still an independently required check; these directions are not a claim
+that the current candidate has passed it.
 
-Keep both reports together and check their source/workflow, run/attempt and target
-bindings. Do not substitute another target, run, attempt or removal-lifecycle artifact.
-These temporary artifacts have **14-day retention** and can expire or be unavailable;
-missing evidence is not a pass or permission to use an older package.
-The delivery can be uploaded before later GUI checks complete: review the actual
-completed job and check outcomes, not just artifact availability.
-Preserve downloaded-file quarantine and macOS security policy while extracting
-and opening the files; report any refusal without removing quarantine or bypassing it.
+## What you need to provide
 
-## Install and open without a terminal
+Python, Rust, Node.js, Ruby and the CLI do **not** need a separate installation to
+use the packaged app. Mobile build tools and your own release credentials are
+separate prerequisites:
 
-1. Once an exact build has the required genuine qualification, open
-   **MobileReleaseKit.dmg** in Finder. Inside that read-only image, open
-   **Install.pkg** and follow macOS Installer. Keep the adjacent **producer.json**
-   and **producer.sig** in place: do not rename, move or separate the three files.
-   An arbitrary standalone package copied to writable Downloads is unsupported.
-2. In Finder choose **Go → Go to Folder…** and enter:
-   `/Library/Application Support/MobileReleaseKit`
-3. Double-click **Mobile Release Kit.app**.
+- **Android:** install a compatible JDK, Android SDK and extracted Gradle
+  distribution. Use **Releases → Android build → Set up Android tools** and the
+  three **Browse** controls. The UI explains service approval, inspection,
+  vendor-license acknowledgment and the separate protected-copy confirmation.
+  Selecting a folder alone does not register tools or prove compatibility.
+  Required bundletool/AAPT2 support is supplied by the app, not a fourth folder.
+- **iOS:** install compatible full Xcode from Apple and finish Apple's first-run
+  setup yourself. If the reviewed release includes **Prepare Xcode.pkg**, run
+  that separate matching-architecture companion with macOS Installer, then reopen
+  the app. It prepares a protected Xcode copy; it does not download Xcode, accept
+  Apple's licenses, modify your original Xcode or change global `xcode-select`.
+  The app prefers that managed copy when present and checks it before operations.
+  Environment version observations alone are not build/signing eligibility.
+- **Signing:** you do not supply the Desktop publisher's Developer ID or notary
+  credentials to install or open this app. Signing your own iOS app instead needs
+  your **Apple Distribution** P12/private key/password and matching App Store
+  provisioning profile. Android needs your upload keystore and its values.
+  Store access has separate Google Play or App Store Connect credentials; an
+  Apple Distribution certificate is not a Store API key.
 
-Keep the app in that protected location: the runtime is installed beside it
-under a versioned directory. Do not move the app to Applications or elsewhere.
-No Applications shortcut, drag-install or relocation support is claimed.
+For this early trial, use synthetic inputs, not production signing material or
+live Store accounts. Credential assessment is not proof that a password, signing
+identity or account works. Use native pickers; do not copy private files into the
+project or the app's installation folder.
 
-The package-export receipt is intentionally a **build/Installer/readback
-snapshot**: its automatic-open and normal-Quit fields remain unexecuted at that
-stage. The same hosted job subsequently runs one external XCTest scenario
-against the exact ordinary app, without instrumentation: launch through the
-entry, render, open/Cancel the real project picker, Cancel the genuine Quit sheet,
-navigate safely, then genuinely Quit. One permanent-gate observation checks
-exclusion while the app/picker is live and availability after observed Quit. Look for the
-matching **public-verification-evidence.json** in the separate evidence artifact.
-Its `normal-ui/test.status` and `normal-ui/summary.status` are scalar original-return
-observations, not the original XCTest counts or full UI proof. A zero scalar status
-alone does not establish the narrow UI observation: the actual completed check and
-its exact-source qualification still require review. Raw native results are not
-published in that artifact. A missing, failed or skipped check is not a pass.
+## Find the main controls
 
-This check does not prove POSIX exit status or every worker's finality, direct
-payload pre-main exclusion, Finder/Installer interaction, Gatekeeper or full
-feature journeys. The root maintenance gate is permanent; never remove or replace
-it as troubleshooting. Update/restore evidence and the separate removal
-carrier's execution/recovery remain separate obligations. Physical/manual observations of this exact
-distribution and the checklist below remain separate.
+Start at **Dashboard** to choose a project. **Project settings** handles the
+configuration draft and reviewed saves; **Environment** explains prerequisites
+and offers explicit checks. **Credentials** handles selected inputs and available
+encrypted storage; **Metadata** handles localized text and images. **GitHub**
+previews configuration/workflow changes before Apply. **Releases**, **Artifacts**
+and **Recovery** expose their supported operations and current restrictions.
+Use each field's help and the separate preview/confirmation buttons. A visible
+control is not a promise that its native operation is qualified on this build.
+Do not dispatch release workflows, upload to a Store or publish during this trial.
+Quit normally from the application menu when finished.
 
-## What this source currently exposes on macOS
+## Updates, interrupted installation and removal
 
-Subject to the existing per-request runtime, document and ownership checks:
+There is no automatic updater or arbitrary drag-and-replace upgrade. Only a
+matching verified installer with an explicitly authorized predecessor may update
+this installation. Preserve projects, credentials and interrupted-operation state;
+do not uninstall or delete files to force an update or restore.
 
-- Project-folder selection.
-- Read-only project/configuration information, configuration validation,
-  suggestions and change previews, environment requirements, GitHub setup
-  proposals, and saved release-version observation.
-- Configuration review/Save through its existing transaction owner.
-- Local GitHub workflow preview/Apply, metadata/localization text editing and
-  release-version editing through the existing scoped transaction owners.
-- Evidence-folder selection and session-only GitHub read-only integration.
-- Supported session-only signing-input selection/assessment.
-- The Android build/source-selection and unsigned iOS archive paths. Android
-  still requires its admitted external toolchain, license acknowledgments and
-  signing inputs; iOS requires a compatible Xcode/build environment. All existing
-  admission checks and journey-specific native qualification remain required.
+The current candidate download **does not include an uninstaller**. If a separate
+matching **MobileReleaseKit-Remove.dmg** is supplied and its checks are accepted,
+follow its removal guide and open **Remove.pkg on that image**, with both signed
+sidecars left beside it. Removal is not initiated by the Environment location
+card. The supported remover preserves project/signing/user credential data; a
+failed or unexecuted removal/recovery check remains unresolved. Do not substitute
+moving the launcher to Trash for removal of the protected installation.
 
-This is source-selected scope, **not acceptance of those journeys on this new
-normal binary**. External Android/iOS build tools are not bundled; tool
-requirements and native qualification still apply.
-
-The paths above still need real normal-app journey verification; source
-integration and Linux checks are not Mac acceptance. Source also contains gated
-candidates for project-relative field-picker journeys, image selection/import,
-persistent credentials, build-tool diagnostics, offline preflight and project
-recovery. These implemented paths remain unqualified for this delivery; their
-presence does not establish an accepted UI journey or permission to bypass a refusal.
-Authenticated release dispatch, signed iOS export and iOS recovery are not
-claimed by this preview. No Store mutation, public release, promotion, complete
-Android/iOS lifecycle or full feature parity is claimed.
-
-## Small manual acceptance checklist
-
-Use a synthetic project and retain PREVIEW.json with your observations.
-
-- Does the normal app open? Note the macOS version and any exact error category.
-- Is the selected-project state understandable?
-- Select a synthetic project folder, then try canceling a folder selection.
-  Verify cancel does not silently change the selected project.
-- Open configuration, validate it and inspect a change preview.
-- Optional: deliberately save a harmless change in that synthetic project.
-  Confirm only the previewed change was saved and unrelated files survived.
-- Quit normally with the application menu. Does the window close without a
-  stuck process or a false completion message?
-
-A failed or unexecuted item stays unresolved. Do not send credentials, signing
-files, private project contents or raw local logs with a report.
-
-## Verification scope
-
-The hosted preview keeps the ordinary native package-format audit, exact normal
-Cargo target gate, SOURCE-selected signing and separate producer verification,
-the original standard Installer and request-correlated nonroot V2 readback.
-Only known original returns, current readback and clean detachment can complete
-the owned package group; unknown mounts/writers are retained, never forced away.
-The same completed app/runtime input is
-also used for the fixed eight-case Installer fixture before ordinary install.
-Its isolated fixture roots are not user installations; only actual successful
-fixture execution/readback establishes those outcomes. It does **not** repeat
-the separate old ACL probe or five headless regressions. Their unchanged
-engineering route remains available; their historical status is not upgraded
-by this preview.
-
-The separate project-field Aqua observer failure is preserved and unresolved.
-It does not prove an ordinary human picker failed, and the preview does not
-resolve it. Desktop remains **NOT READY / undelivered** until the required
-capability, lifecycle, native, distribution and complete-product gates have real
-accepted evidence.
+Report the build's `PREVIEW.json`, Mac architecture/version and concise actions
+and error categories. Never send credentials, private project contents or raw
+local logs. A failed, skipped or unexecuted check is not a pass.

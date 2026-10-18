@@ -2492,6 +2492,30 @@ application/runtime files or delete maintenance state to work around a refusal.
 
 Preserve quarantine, Gatekeeper and macOS security settings. A refusal is a failed
 observation, not permission to bypass them. If the app opens, use its normal Quit.
+The app bundles its Python/core and other non-SDK runtime helpers; no separate
+Python, Rust, Node.js, Ruby or CLI installation is needed. Android still requires
+compatible JDK/SDK/Gradle sources: use Releases -> Android build and its Browse
+controls, then review service, license and protected-copy setup. iOS requires full
+compatible Xcode from Apple. If supplied separately, the matching Prepare Xcode.pkg
+prepares a managed copy without changing your original Xcode or global selection;
+finish Apple's first-run setup yourself. Environment observations are not signing
+or build eligibility. Native operation checks and unresolved UI checks still apply.
+
+The publisher's Developer ID/notary credentials are NOT your mobile signing inputs.
+Your iOS app needs its own Apple Distribution P12 and matching provisioning profile;
+Android needs its own upload keystore. Store API credentials are separate. Use only
+synthetic inputs for this trial and the app's native file pickers, not manual copies
+into the project or installation folder.
+
+Dashboard selects a project; Project settings reviews configuration; Credentials,
+Metadata and GitHub handle their respective guided inputs/previews. Releases,
+Artifacts and Recovery show supported operations and current restrictions. A visible
+control does not establish installed feature qualification. No automatic updater or
+arbitrary replacement is supported: use only a reviewed installer authorized for
+your predecessor. This download contains no uninstaller; a separately supplied
+matching removal image has its own guide and checks. Never delete protected state
+or move only the Applications launcher to Trash to force removal or recovery.
+
 Keep PREVIEW.json with architecture, macOS version and concise observations; never
 send credentials, private project content or raw logs. No Remove carrier or Store
 mutation authority is included, and this candidate does not qualify live releases.

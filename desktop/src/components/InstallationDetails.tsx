@@ -45,7 +45,7 @@ export function InstallationDetails({ info, api, preview, loading, onHelp }: {
       <div className="button-row"><button type="button" className="button secondary" disabled={!available || pending} onClick={() => void reveal()}>{pending ? 'Requesting Finder…' : 'Show in Finder'}</button></div>
       {!available && <p className="save-note">{loading ? 'Wait for the current connection to finish loading.' : 'Finder requests are unavailable in the current native runtime profile.'}</p>}
       <p>To open the installed app manually, use Finder → Go → Go to Folder, enter the location above, then open Mobile Release Kit.</p>
-      <p><strong>A verified Installer package is required.</strong> The package checks whether it can install, leave the same installation unchanged, restore the missing app at its fixed location, or apply an explicitly authorized update. This screen does not select or authorize those actions. Keep partial-installation evidence and unknown files; do not delete the protected tree to bypass a refusal. Uninstall is not yet available.</p>
+      <p><strong>A verified Installer package is required.</strong> The package checks whether it can install, leave the same installation unchanged, restore the missing app at its fixed location, or apply an explicitly authorized update. This screen does not select or authorize those actions. Keep partial-installation evidence and unknown files; do not delete the protected tree to bypass a refusal. This screen does not uninstall the app; removal requires a separately supplied, matching verified removal image and its guide. The current candidate download does not include it.</p>
       <p className="save-note">Your projects, signing originals and credential data are separate from this location card. The location description alone does not check files. The separate read-only check below performs no maintenance and does not verify signing, notarization or release readiness.</p>
     </> : <p>{preview ? 'Browser preview cannot observe an installation or request Finder.' : 'Installation location information is not available in this runtime profile. This does not mean the application is missing.'}</p>}
     <InstallationCheckPanel api={api} enabled={!preview && !loading && !!api && description !== null} onHelp={onHelp} />
@@ -150,6 +150,6 @@ function InstallationPreparationPanel({ api, enabled, onHelp }: {
       {status.operationId && <p className="save-note">Preparation #{status.generation} · {status.newWorkClosed ? 'New work closed' : 'No maintenance closure retained'}. The status is not proof that the app has exited.</p>}
     </div>}
     {view.error && <ErrorNotice error={view.error} title="Preparation not confirmed" />}
-    <p className="save-note">Preparing to quit does not authorize installation changes. A separate verified Installer package must check any update or fixed-location restore. Uninstall is not yet available; keep partial installations and unknown files intact.</p>
+    <p className="save-note">Preparing to quit does not authorize installation changes. A separate verified Installer package must check any update or fixed-location restore. Removal requires a separate matching verified removal image, not this button; keep partial installations and unknown files intact.</p>
   </div>;
 }

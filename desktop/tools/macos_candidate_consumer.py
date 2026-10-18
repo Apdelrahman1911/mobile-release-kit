@@ -186,11 +186,7 @@ def candidate_transport_path(run, attempt, nomination):
 
 
 def candidate_resource_requirements(nomination, retained, host_bytes, *, image_bytes=None):
-    """Before parsing PREVIEW reserve its full image cap, not the old ARM image.
-
-    The post-acquisition quote credits ZIP copies only after parse+held POST has
-    returned. Codec envelopes remain subject to Resume's actual vm_stat checks.
-    """
+    """Full image cap before PREVIEW; ZIP credit only after parse and original POST."""
     row = candidate.candidate_selection_data(nomination)
     resume.need(type(retained) is int and 0 <= retained <= 1 << 30
                 and type(host_bytes) is int and 0 <= host_bytes <= 1 << 30,
@@ -238,9 +234,7 @@ def acquisition_bootstrap(helper_root, bodies):
 class CandidateResume(resume.Resume):
     """Internal owner; no nomination is read from carrier bytes or ambient env.
 
-    Host/process admission and the two checkout service bindings are deliberately
-    not replaced by this constructor. main supplies their original bootstrap;
-    no workflow currently activates this entry.
+    main retains host/process and both checkout bindings before this adapter.
     """
     command_roles = (*resume.Resume.command_roles, 'helper-source', 'candidate-source')
 
@@ -961,12 +955,14 @@ def failure_data(error):
             if type(function) is FunctionType and function.__globals__ is vars(module) and function.__code__.co_filename == path:
                 donor = (vars(module), path)
                 origins += (donor,)
-    frames = []
+    frames, resource_seen = [], False
     tb = BaseException.__traceback__.__get__(error)
     for _ in range(32):
         if tb is None:
             break
         code = tb.tb_frame.f_code
+        resource_seen |= any(code is fn.__code__ and tb.tb_frame.f_globals is fn.__globals__
+            for fn in (CandidateResume.admit_resources, resume.Resume.allocation_budget))
         boundary_seen |= code is _admit_system_tool.__code__ and tb.tb_frame.f_globals is globals()
         for namespace, path in origins:
             if (tb.tb_frame.f_globals is namespace and code.co_filename == path
@@ -994,7 +990,13 @@ def failure_data(error):
                 reason = parts[0] if len(parts) == 1 and type(parts[0]) is str and parts[0] in labels else 'unavailable'
             elif local and len(parts) == 1 and type(parts[0]) is str and parts[0] in ('candidate-tool-owner', 'candidate-tool-original'):
                 reason = parts[0]
-    return {'scope': 'candidate-consumer-failure-only', 'reason': reason,
+    resource = None
+    if type(error) is resume.Refused and resource_seen and len(parts) == 1 and type(parts[0]) is str and parts in (
+            ('candidate-resource-admission',), ('resume-resource-memory-admission',), ('resume-resource-disk-admission',)):
+        reason = parts[0]
+        try: resource = resume.resource_projection_data(resume.STATE.get('resourceAdmission'))
+        except Exception: pass
+    return {'scope': 'candidate-consumer-failure-only', 'reason': reason, 'resourceAdmission': resource,
         'exceptionClass': error_class, 'sourceFrames': frames, 'systemTool': system_tool,
         'rawOutputExported': False, 'cleanupAuthorized': False}
 
