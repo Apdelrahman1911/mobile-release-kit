@@ -845,6 +845,75 @@ class RestoreChainFixtureData(unittest.TestCase):
             op = inert_operation(phase); op.environment['GITHUB_REF'] = ref
             self.assertFalse(FIXTURE.cut_return_data(op,role,code))
 
+    def test_native_fixture_outputs_admit_private_umask_without_relaxing_original_policy(self):
+        # Real private files/FDs and actual Operation.original + retained/hash.
+        # No pkgbuild/tar/xar/hdiutil execution or native output-mode claim.
+        with tempfile.TemporaryDirectory(prefix="mrk-fixture-native-modes-") as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            op = HELPER.Operation(SimpleNamespace(), root, root, FIXTURE.PREPARE,
+                {"GITHUB_SHA":"a"*40, "GITHUB_WORKFLOW_SHA":"a"*40,
+                 "GITHUB_WORKFLOW_REF":"inert-source", "GITHUB_RUN_ID":"123",
+                 "GITHUB_RUN_ATTEMPT":"1", "MRK_MACOS_PACKAGE_ROLE":"ordinary-image"}, FIXTURE.TARGETS[0])
+            op.app_absence, op.app_absence_api = state(), HELPER
+            body = b"bounded synthetic package bytes\n"
+            modes = (0o600, 0o644, 0o444)
+            def create(name, mode=0o600, content=body):
+                previous = os.umask(0o077)
+                try:
+                    fd = os.open(root/name, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o666)
+                finally:
+                    os.umask(previous)
+                try:
+                    self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o600)
+                    self.assertEqual(os.write(fd, content), len(content))
+                    os.fchmod(fd, mode)
+                finally:
+                    os.close(fd)
+            try:
+                fd = os.open(root, HELPER.READ_FLAGS|os.O_DIRECTORY)
+                op.work_entry = op.register(fd, "work-root", "directory")
+                op.work_entry["identity"] = HELPER.directory_identity(os.fstat(fd))
+                with patch.object(FIXTURE, "clock", return_value=NOW):
+                    for mode in modes:
+                        name = "native-" + str(mode) + ".pkg"
+                        create(name, mode)
+                        item, sha = FIXTURE.retained(op, op.work_entry, name, len(body), modes)
+                        self.assertEqual(op.read(item), body)
+                        self.assertEqual(sha, hashlib.sha256(body).hexdigest())
+                        self.assertEqual(stat.S_IMODE(item["identity"][2]), mode)
+                        self.assertEqual(FIXTURE.original_hash(op, item), sha)
+                        op.close(item)
+                        self.assertTrue(item["closed"])
+                    create("source.py")
+                    with self.assertRaisesRegex(HELPER.Refused, "^file-original-shape$"):
+                        op.source_original("source.py", "SOURCE-test", len(body))
+                    for name, mode, content, limit in (
+                            ("executable", 0o700, body, len(body)),
+                            ("shared-write", 0o620, body, len(body)),
+                            ("empty", 0o600, b"", len(body)),
+                            ("oversized", 0o600, body, len(body)-1)):
+                        create(name, mode, content)
+                        with self.assertRaisesRegex(HELPER.Refused, "^file-original-shape$"):
+                            FIXTURE.retained(op, op.work_entry, name, limit, modes)
+                    create("linked")
+                    os.link(root/"linked", root/"linked-other")
+                    with self.assertRaisesRegex(HELPER.Refused, "^file-original-shape$"):
+                        FIXTURE.retained(op, op.work_entry, "linked", len(body), modes)
+                    os.symlink("source.py", root/"alias")
+                    with self.assertRaises(OSError):
+                        FIXTURE.retained(op, op.work_entry, "alias", len(body), modes)
+                    create("changed")
+                    item, _ = FIXTURE.retained(op, op.work_entry, "changed", len(body), modes)
+                    os.chmod(root/"changed", 0o644)
+                    with self.assertRaisesRegex(ValueError, "^app-absence-original-post$"):
+                        FIXTURE.original_hash(op, item)
+            finally:
+                for item in reversed(op.entries):
+                    op.close(item)
+            self.assertFalse(op.errors)
+            self.assertTrue(all(item["closed"] and item["fd"] is None for item in op.entries))
+
     def test_actual_shared_cut_builder_selects_fixed_image_script_and_clears_observer_tuple(self):
         # Whole shared prepare_one + genuine Cargo artifact reducer. Compiler,
         # signing/archive, and filesystem effects are inert boundaries here.
@@ -861,7 +930,11 @@ class RestoreChainFixtureData(unittest.TestCase):
                     def entry(name): return {'name':name,'identity':identity[:],'closed':False,'fd':55}
                     op.app_absence_api=SimpleNamespace(build_environment=lambda *a,**k:op.environment.copy(),
                         direct_rust_tools=lambda _:('/inert/cargo',),signature=lambda _:identity[:],directory_identity=lambda _:(1,2))
-                    op.descend=lambda *a: {};op.original=lambda parent,name,*a,**k:entry(name)
+                    original_modes = {}
+                    def original(parent, name, role, limit, modes, **kwargs):
+                        original_modes[name] = modes
+                        return entry(name)
+                    op.descend=lambda *a: {};op.original=original
                     op.read=lambda e:b'program';op.close=lambda e:e.update(closed=True)
                     op.package_directory=lambda name:entry(name)
                     digest='4'*64; package_digest='5'*64
@@ -885,7 +958,8 @@ class RestoreChainFixtureData(unittest.TestCase):
                         return SimpleNamespace(stdout=b'')
                     def copy_file(_op,old,parent,name,*a,**k):
                         e=entry(name);op.app_absence['outputs'].append((e,digest));return e
-                    def retained(_op,parent,name,*a,**k):
+                    def retained(_op,parent,name,limit,modes=(0o444,0o600)):
+                        original_modes[name] = modes
                         e=entry(name);sha=digest if name=='mrk-macos-install' else package_digest
                         op.app_absence['outputs'].append((e,sha));return e,sha
                     def output(_op,parent,name,body,**kwargs): written.append((name,body))
@@ -904,6 +978,9 @@ class RestoreChainFixtureData(unittest.TestCase):
                         data=FIXTURE.prepare_one(op,cut)
                     self.assertEqual([role for role,_,_ in commands],[prefix+'-'+r for r in ('build','adhoc','verify-code','pkgbuild','tar','xar')])
                     self.assertEqual(commands[0][1][commands[0][1].index('--features')+1],'macos-installed-restore-'+cut+'-fixture')
+                    for name in (prefix+'-original.pkg', 'Scripts', 'fixture.pkg'):
+                        self.assertEqual(original_modes[name], (0o600,0o644,0o444))
+                    self.assertEqual(original_modes['mrk-macos-install'], (0o555,))
                     for index in (1,2): self.assertEqual(commands[index][1][-1],str(op.work/(prefix+'-prepared')/'mrk-macos-install'))
                     self.assertIn(('postinstall',FIXTURE.CUT_POSTINSTALL),written)
                     self.assertIsNone(data['pureDataTests']);self.assertFalse(data['productReady'])

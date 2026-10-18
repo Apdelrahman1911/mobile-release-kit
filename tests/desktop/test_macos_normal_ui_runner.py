@@ -2771,6 +2771,25 @@ class NormalPhaseDataTests(unittest.TestCase):
         config=json.loads(base64.b64decode(fixture['files']['project/release/mobile-release.json'],validate=True))
         self.assertFalse(config['ios']['enabled']);self.assertNotIn('bundleId',config['ios'])
         self.assertEqual(config['android']['applicationId'],'org.fixture.app')
+        # Typed content readers keep the original subtree/count/order/grammar.
+        # This is SOURCE/bound coverage; actual AX runs in the existing journey.
+        displayed=swift.split('private func displayed(',1)[1].split('private func inventory(',1)[0]
+        self.assertIn('item.staticTexts.count == 1',displayed)
+        self.assertIn('try staticTextContent(item.staticTexts.element(boundBy: 0))',displayed)
+        self.assertIn('value == normalized',displayed)
+        for name,end in (('savedOperationComplete','savedOfflineCounts'),('savedOfflineCounts','testSyntheticProjectSavedOfflineChecks')):
+            reader=swift.split('func '+name+'(',1)[1].split('func '+end+'(',1)[0]
+            self.assertIn('try staticTextContent($0)',reader);self.assertNotIn('$0.label',reader)
+        refusal=swift.split('func testSyntheticProjectManagedWorkflowRefusal()',1)[1].split('func savedOperationComplete(',1)[0]
+        self.assertIn('texts.count <= 128',refusal);self.assertIn('factTexts.count == 8',refusal)
+        self.assertIn('try staticTextContent($0, limit: 64)',refusal);self.assertNotIn('$0.label',refusal)
+        # Complete fixed previews and added diffs fit the existing4096 reader;
+        # do not increase the generic fixture32KiB or content limits.
+        for path,encoded in fixture['stages']['workflows'].items():
+            text=base64.b64decode(encoded,validate=True).decode('utf8');lines=text.removesuffix('\n').split('\n')
+            shown=path.removeprefix('project/')
+            diff=f'--- /dev/null\n+++ {shown}\n@@ -0,0 +1,{len(lines)} @@\n'+''.join('+'+line+'\n' for line in lines)
+            self.assertLessEqual(len(text.encode('utf8')),4096);self.assertLessEqual(len(diff.encode('utf8')),4096)
         self.assertNotIn('"Not configured"',helper);self.assertNotIn('"Needs attention"',helper)
         wait=swift.split('@MainActor private func waitElement(',1)[1].split('@MainActor private func waitForSnapshotIdentity(',1)[0]
         self.assertIn('timeout: TimeInterval = 5',wait)
@@ -2848,7 +2867,7 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertNotIn('projectIdentity',MODULE.normal_failure_diagnostics('test','test.xcresult',original))
         self.assertNotIn('projectIdentity',MODULE.normal_failure_diagnostics('summary','project-test.xcresult',original))
         with self.assertRaises(MODULE.Refused): MODULE.project_identity_diagnostics(b'x'*(1024*1024+1),b'')
-        snapshot=b'MRK_NORMAL_SNAPSHOT_STATE=v1;sample=post-wait;waiter=timed-out;error=0;partial=0;unread=1;loading=0;empty=1;unsupported=1;invalid=0;missing=0;runtime=0;protocol=0;nonAtomic=1\n'
+        snapshot=b'MRK_NORMAL_SNAPSHOT_STATE=v2;sample=post-wait;waiter=timed-out;error=0;partial=0;unread=1;loading=0;empty=1;unsupported=1;invalid=0;missing=0;runtime=0;protocol=0;engineDisabled=0;engineUnavailable=1;firstKnownReason=runtime-inspection;nonAtomic=1\n'
         for selection in ('project-test.xcresult',MODULE.ANDROID_CANDIDATE_RESULT):
             original=subprocess.CompletedProcess(['fixed-original'],65,snapshot+private,b'')
             diagnostic=MODULE.normal_failure_diagnostics('test',selection,original)
@@ -2856,11 +2875,18 @@ class NormalPhaseDataTests(unittest.TestCase):
             sample=diagnostic['snapshotState']['samples'][0]
             self.assertEqual((sample['unread'],sample['empty'],sample['unsupported']),(1,1,1))
             self.assertEqual((sample['timing'],sample['waiter']),('post-wait','timed-out'))
+            self.assertEqual((sample['engineUnavailable'],sample['firstKnownReason'],sample['reasonSelection']), (1,'runtime-inspection','first-observed-fixed-order'))
             self.assertNotIn(b'PRIVATE',MODULE.encoded(diagnostic));self.assertLessEqual(len(MODULE.encoded(diagnostic))+1,4096)
         # Two existing project methods may fail separately. Preserve both fixed
         # observations, never infer they were atomic or a single method's state.
         self.assertEqual(len(MODULE.snapshot_state_diagnostics(snapshot*2,b'')['samples']),2)
-        for a,b in ((snapshot*3,b''),(snapshot[:-1],b''),(b'prefix '+snapshot,b''),(snapshot.replace(b'error=0',b'error=6'),b''),(b'',snapshot),(snapshot.replace(b'post-wait',b'PRIVATE'),b'')):
+        for reason in (b'none',b'query-timeout',b'android-2',b'images-3'):
+            row=MODULE.snapshot_state_diagnostics(snapshot.replace(b'runtime-inspection',reason),b'')['samples'][0]
+            self.assertEqual(row['firstKnownReason'],reason.decode())
+        pair=MODULE.normal_failure_diagnostics('test','project-test.xcresult',subprocess.CompletedProcess([],65,snapshot*2+valid+private,b''))
+        self.assertEqual(len(pair['snapshotState']['samples']),2)
+        self.assertLessEqual(len(MODULE.encoded(pair))+1,4096)
+        for a,b in ((snapshot*3,b''),(snapshot[:-1],b''),(b'prefix '+snapshot,b''),(snapshot.replace(b'error=0',b'error=6'),b''),(b'',snapshot),(snapshot.replace(b'post-wait',b'PRIVATE'),b''),(snapshot.replace(b'runtime-inspection',b'PRIVATE'),b''),(snapshot.replace(b'engineDisabled=0',b'engineDisabled=6'),b'')):
             self.assertEqual(MODULE.snapshot_state_diagnostics(a,b)['state'],'refused')
         self.assertNotIn('snapshotState',MODULE.normal_failure_diagnostics('summary','project-test.xcresult',original))
         with self.assertRaises(MODULE.Refused): MODULE.snapshot_state_diagnostics(b'x'*(1024*1024+1),b'')
@@ -5497,10 +5523,24 @@ class NormalIOSPendingRecoveryDataTests(unittest.TestCase):
         # Native Foundation cases run inside the existing journey before any
         # private fixture admission; this Linux test proves wiring, not AX results.
         self.assertLess(pending.index('try Self.exerciseStaticTextContentData()'),pending.index('try fixture.open(.pending)'))
-        content=swift.split('private static func staticTextContent(value:',1)[1].split('private static func staticTextPrefixPredicate(',1)[0]
+        content=swift.split('private static func staticTextContent(value:',1)[1].split('@MainActor private func staticTextPrefix(',1)[0]
         self.assertIn('(value as? String) ?? label',content)
         self.assertIn('element.elementType == .staticText',content)
         self.assertNotIn('String(describing:',content)
+        prefix=swift.split('@MainActor private func staticTextPrefix(',1)[1].split('private static func exerciseStaticTextContentData()',1)[0]
+        self.assertIn('check: () throws -> Void',prefix)
+        self.assertLess(prefix.index('guard count <= 256'),prefix.index('query.allElementsBoundByIndex'))
+        self.assertIn('guard elements.count <= 256',prefix)
+        self.assertIn('element.elementType == .staticText',prefix)
+        self.assertIn('Self.staticTextContent(value: value, label: label).hasPrefix(prefix)',prefix)
+        self.assertNotIn('NSPredicate',prefix);self.assertNotIn('require(',prefix);self.assertNotIn('remaining(',prefix)
+        data=swift.split('private static func exerciseStaticTextContentData()',1)[1].split('@MainActor private func androidCurrentBuildIdentity',1)[0]
+        self.assertNotIn('evaluate(',data);self.assertIn('NSNumber(value: 4)',data)
+        self.assertIn('([noMatch], 0)',data);self.assertIn('([oneMatch, oneMatch], 2)',data)
+        cleanup=swift.split('private func settleFailedIOSArchive(',1)[1].split('func testSyntheticProjectUnsignedIOSArchive()',1)[0]
+        self.assertIn('try staticTextPrefix(details, prefix, check: check)',cleanup)
+        self.assertIn('try need(fields.count == 1)',cleanup)
+        self.assertIn('try require(fields.count == 1, "current recovery field missing or repeated", check: .singleton)',swift)
         for name,end in (('androidCurrentBuildIdentity','testPositiveAndroidOutputCustodyData'),
                          ('iosCurrentArchiveIdentity','iosPublicText'),('iosRecoveryObservation','iosRecoverySession'),
                          ('iosRecoveryAccount','testInstalledIOSPendingAccountRecoveryThroughUI')):

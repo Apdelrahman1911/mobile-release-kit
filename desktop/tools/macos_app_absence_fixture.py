@@ -791,7 +791,9 @@ def prepare_one(op, cut=None):
     call(op, prefix + "-pkgbuild", ["/usr/bin/pkgbuild", "--nopayload", "--scripts", str(op.work / (prefix + "-scripts")),
         "--identifier", op.stager.PACKAGE_ID + "-app-absence-fixture", "--version", selected(op).package_version,
         "--install-location", "/", str(original_path)])
-    original, original_sha = retained(op, op.work_entry, original_path.name, PRODUCT_LIMIT, (0o644, 0o444))
+    # Native outputs inherit the caller's private umask; owner-only0600 is
+    # valid here, without changing SOURCE or general original-file admission.
+    original, original_sha = retained(op, op.work_entry, original_path.name, PRODUCT_LIMIT, (0o600, 0o644, 0o444))
     args = SimpleNamespace(target=op.target, restore_cut=cut, scripts=op.work / (prefix + "-scripts"), original_package=original_path,
         package=op.work / (prefix + "-prepared") / "fixture.pkg", expected_program=program_sha,
         expected_inventory=op.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"])
@@ -805,11 +807,11 @@ def prepare_one(op, cut=None):
     allocation("archive")
     call(op, prefix + "-tar", ["/usr/bin/tar", "-c", "-z", "-f", str(op.work / (prefix + "-prepared") / "Scripts"),
         "--format=odc", "--uid=0", "--gid=0", "--uname=root", "--gname=wheel", "."], maximum=60, cwd=op.work / (prefix + "-scripts"))
-    retained(op, prepared, "Scripts", PRODUCT_LIMIT, (0o644, 0o444))
+    retained(op, prepared, "Scripts", PRODUCT_LIMIT, (0o600, 0o644, 0o444))
     allocation("fixture")
     call(op, prefix + "-xar", ["/usr/bin/xar", "-cf", str(args.package), "--compression=none", "PackageInfo", "Scripts"],
          cwd=op.work / (prefix + "-prepared"))
-    fixture = op.original(prepared, "fixture.pkg", "app-absence-fixture-package", PRODUCT_LIMIT, (0o644, 0o444))
+    fixture = op.original(prepared, "fixture.pkg", "app-absence-fixture-package", PRODUCT_LIMIT, (0o600, 0o644, 0o444))
     os.fchmod(fixture["fd"], 0o444); fixture["identity"] = api.signature(os.fstat(fixture["fd"]))
     fixture_sha = original_hash(op, fixture)
     op.app_absence["outputs"].append((fixture, fixture_sha))
@@ -1015,7 +1017,7 @@ def image_prepare(op, producer):
     path = op.work / "app-absence-fixture.dmg"
     call(op, "app-absence-image-create", ["/usr/bin/hdiutil", "create", "-srcfolder", str(op.work / "app-absence-carrier"),
         "-volname", "MRK App Absence Fixture", "-fs", "HFS+", "-format", "UDZO", str(path)], maximum=180)
-    entry = op.original(op.work_entry, path.name, "app-absence-image", FIXTURE_IMAGE_LIMIT, (0o644, 0o444))
+    entry = op.original(op.work_entry, path.name, "app-absence-image", FIXTURE_IMAGE_LIMIT, (0o600, 0o644, 0o444))
     os.fchmod(entry["fd"], 0o444); entry["identity"] = op.app_absence_api.signature(os.fstat(entry["fd"]))
     image_sha = original_hash(op, entry)
     op.app_absence["outputs"].append((entry, image_sha))

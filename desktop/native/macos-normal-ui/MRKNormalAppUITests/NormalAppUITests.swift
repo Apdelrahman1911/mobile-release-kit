@@ -4700,26 +4700,50 @@ final class NormalAppUITests: XCTestCase {
         let value = element.value
         return try Self.staticTextContent(value: value, label: value is String ? "" : element.label, limit: limit)
     }
-    private static func staticTextPrefixPredicate(_ prefix: String) -> NSPredicate {
-        NSPredicate(format: "label BEGINSWITH %@ OR title BEGINSWITH %@ OR value BEGINSWITH %@", prefix, prefix, prefix)
-    }
-    @MainActor private func staticTextPrefix(_ root: XCUIElement, _ prefix: String) -> XCUIElementQuery {
-        root.staticTexts.matching(Self.staticTextPrefixPredicate(prefix))
+    @MainActor private func staticTextPrefix(_ root: XCUIElement, _ prefix: String,
+                                              check: () throws -> Void) throws -> [XCUIElement] {
+        // Only the failed-iOS caller supplies its SAME cleanup clock/owner check.
+        // No mixed-type remote String predicate, waiting, or sibling text joins.
+        try check()
+        let query = root.staticTexts
+        let count = query.count
+        try check()
+        guard count <= 256 else { throw Refusal.condition("static text prefix collection exceeds its bound") }
+        let elements = query.allElementsBoundByIndex
+        try check()
+        guard elements.count <= 256 else { throw Refusal.condition("static text prefix collection exceeds its bound") }
+        var matches: [XCUIElement] = []
+        for element in elements {
+            try check()
+            guard element.elementType == .staticText else { throw Refusal.condition("static text prefix role differs") }
+            try check()
+            let value = element.value
+            try check()
+            let label: String
+            if value is String { label = "" } else { label = element.label; try check() }
+            if try Self.staticTextContent(value: value, label: label).hasPrefix(prefix) { matches.append(element) }
+        }
+        try check()
+        return matches
     }
     private static func exerciseStaticTextContentData() throws {
         let prefix = "Recovery operation ID: ", identifier = String(repeating: "a", count: 32)
         let complete = prefix + identifier
-        let cases: [([String: Any], Bool)] = [
-            (["label": "", "title": "", "value": complete], true),
-            (["label": complete, "title": ""], true),
-            (["label": "Heading", "title": "Heading", "value": NSNumber(value: 4)], false),
-            (["label": complete, "title": complete, "value": NSNumber(value: 4)], true),
-            (["label": "", "title": "", "value": ""], false),
-            (["label": "Unrelated", "title": "", "value": "Unrelated"], false),
+        let cases: [(Any?, String, Bool)] = [
+            (complete, "", true), (nil, complete, true),
+            (NSNumber(value: 4), "Heading", false), (NSNumber(value: 4), complete, true),
+            ("", complete, false), ("Unrelated", complete, false),
         ]
-        for (attributes, expected) in cases {
-            guard staticTextPrefixPredicate(prefix).evaluate(with: attributes as NSDictionary) == expected else {
-                throw Refusal.condition("static text predicate DATA differs")
+        for (value, label, expected) in cases {
+            guard try staticTextContent(value: value, label: label).hasPrefix(prefix) == expected else {
+                throw Refusal.condition("static text typed prefix DATA differs")
+            }
+        }
+        let noMatch = try staticTextContent(value: "", label: complete)
+        let oneMatch = try staticTextContent(value: complete, label: "")
+        for (texts, expected) in [([noMatch], 0), ([noMatch, oneMatch], 1), ([oneMatch, oneMatch], 2)] {
+            guard texts.filter({ $0.hasPrefix(prefix) }).count == expected else {
+                throw Refusal.condition("static text prefix singleton DATA differs")
             }
         }
         guard try staticTextContent(value: complete, label: "other") == complete,
@@ -4729,6 +4753,13 @@ final class NormalAppUITests: XCTestCase {
               try !staticTextContent(value: "other", label: complete).hasPrefix(prefix) else {
             throw Refusal.condition("static text content DATA differs")
         }
+        guard try staticTextContent(value: String(repeating: "x", count: 64), label: "", limit: 64).utf8.count == 64 else {
+            throw Refusal.condition("static text scalar bound DATA differs")
+        }
+        var scalarRefused = false
+        do { _ = try staticTextContent(value: String(repeating: "x", count: 65), label: "", limit: 64) }
+        catch { scalarRefused = true }
+        guard scalarRefused else { throw Refusal.condition("static text scalar bound DATA differs") }
         var overlongRefused = false
         do { _ = try staticTextContent(value: String(repeating: "x", count: 4097), label: "") }
         catch { overlongRefused = true }
@@ -4742,8 +4773,9 @@ final class NormalAppUITests: XCTestCase {
                                  "current Android Build details missing or repeated")
         var values: [String] = []
         for prefix in ["Build operation ID: ", "Build owner generation: "] {
-            let field = try unique(staticTextPrefix(details, prefix),
-                                   "current Android build identity field missing or repeated")
+            let fields = try staticTextPrefix(details, prefix) { _ = try remaining(1) }
+            try require(fields.count == 1, "current Android build identity field missing or repeated", check: .singleton)
+            let field = fields[0]
             let label = try staticTextContent(field)
             try require(field.isHittable && label.hasPrefix(prefix), "current Android build identity is not visible")
             let value = String(label.dropFirst(prefix.count))
@@ -4894,7 +4926,8 @@ final class NormalAppUITests: XCTestCase {
             ("empty", "No observation loaded"),
             ("unsupported", "Static snapshots are unavailable on this platform/profile."),
             ("invalid", "config.invalid"), ("missing", "config.missing"),
-            ("runtime", "runtime_unavailable"), ("protocol", "protocol_error")
+            ("runtime", "runtime_unavailable"), ("protocol", "protocol_error"),
+            ("engineDisabled", "The engine is disabled"), ("engineUnavailable", "Bundled engine unavailable")
         ]
         var fields: [String] = []
         for (key, text) in expectations {
@@ -4903,10 +4936,86 @@ final class NormalAppUITests: XCTestCase {
             last = now
             fields.append("\(key)=\(min(root.staticTexts.matching(identifier: text).count, 5))")
         }
+        // First observed exact public message in this fixed order, not proof
+        // of the sole/actual refresh owner. Duplicate displays are harmless;
+        // none means no listed message observed. Never export accessible text.
+        let knownReasons = [
+            ("runtime-inventory", "The packaged runtime is absent, incompatible, or fails its trusted inventory."),
+            ("runtime-inspection", "The passive installed runtime failed original-custody inspection."),
+            ("runtime-custody", "The original installed Mac native custody was refused."),
+            ("runtime-start", "The selected isolated core could not start."),
+            ("runtime-acl", "The original Mac ACL inspection could not be armed."),
+            ("query-timeout", "The read-only query exceeded its operation deadline."),
+            ("cleanup-unknown", "Original query cleanup is unconfirmed. Further queries are disabled; the owner is retained."),
+            ("protocol", "The core returned an invalid or incomplete response."),
+            ("engine-exit", "The isolated core exited unsuccessfully."),
+            ("output-limit", "The core exceeded a bounded output channel."),
+            ("output-io", "An original core output channel failed."),
+            ("request-io", "The bounded request channel failed."),
+            ("query-busy", "Two read-only queries already own the available slots."),
+            ("query-owner", "The asynchronous query owner is unavailable."),
+            ("native-profile", "This function is not available in the current desktop runtime profile."),
+            ("core-profile", "Static snapshots are unavailable on this platform/profile."),
+            ("method-absent", "This operation is not available in the current engine."),
+            ("capabilities-absent", "Application capabilities have not been loaded."),
+            ("runtime-absent", "The bundled engine is unavailable."),
+            ("history-1", "A local release-history intent or operation is retained. Cancel or finish it before other work."),
+            ("store-readback-1", "A local Store readback intent or operation is retained. Cancel or finish it before other work."),
+            ("store-execute-1", "A local Store execution intent or operation is retained. Cancel or finish it before other work."),
+            ("store-prepare-1", "A local Store preparation intent or operation is retained. Cancel or finish it before other work."),
+            ("store-check-1", "A local Store access-check intent or operation is retained. Cancel or finish it before other work."),
+            ("artifact-1", "Artifact-inspection ownership or finality is unverified. Keep the original status; conflicting work is disabled."),
+            ("artifact-2", "Artifact inspection hold the original intent or execution slot. Cancel or settle that original operation before conflicting work."),
+            ("artifact-3", "The original artifact-inspection status is unverified. Check retained status before conflicting work."),
+            ("offline-1", "Offline-check ownership or finality is unverified. Keep the original status; conflicting work is disabled."),
+            ("offline-2", "Saved offline checks hold the original intent or execution slot. Cancel or settle that original operation before conflicting work."),
+            ("offline-3", "The original offline-check status is unverified. Check retained status before conflicting work."),
+            ("android-1", "Android-build ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled."),
+            ("android-2", "The original Android service action is active or unconfirmed. Keep its Status and Cancel; do not repeat registration."),
+            ("android-3", "The original Android source inspection or protected registration is active or unconfirmed. Keep its Status and Cancel; do not repeat copy."),
+            ("android-4", "An original source review is retained. Register that exact review or explicitly discard it before conflicting work."),
+            ("android-5", "The original Android tool picker or folder check is active or unconfirmed. Keep tool-selection Status and Cancel before conflicting work."),
+            ("android-6", "The original Android tool catalog is still reading, stopping or unconfirmed. Keep catalog Status and Cancel before conflicting work."),
+            ("android-7", "The Android build holds its original consent or execution slot. Cancel or settle that original operation before conflicting work."),
+            ("android-8", "The original Android-build status is unverified. Check retained Status before conflicting work."),
+            ("ios-1", "iOS-archive ownership or finality is unverified. Keep original Status and Cancel; conflicting work is disabled."),
+            ("ios-2", "The iOS archive holds its original consent or execution slot. Cancel or settle that original operation before conflicting work."),
+            ("ios-3", "The original iOS-archive status is unverified. Check retained Status before conflicting work."),
+            ("recovery-1", "Project-recovery ownership or finality is unverified. Keep the original status; conflicting work is disabled."),
+            ("recovery-2", "Project build-input recovery holds the original intent or execution slot. Cancel or settle that original operation before conflicting work."),
+            ("recovery-3", "The original project-recovery status is unverified. Check retained status before conflicting work."),
+            ("github-history-1", "The original authenticated History read is running or unverified. Keep its local Status and settle it before conflicting work."),
+            ("github-publication-1", "The original setup-publication action is running or unverified. Read local Status before starting another operation."),
+            ("github-setup-1", "The original repository-settings action is running or unverified. Read local Status before starting another operation."),
+            ("github-preflight-1", "The original GitHub preflight action is running or unverified. Read its local Status before starting another operation."),
+            ("github-release-1", "The original protected release workflow action is running or unverified. Read its local Status before starting another operation."),
+            ("path-1", "The original project-path outcome or cleanup is unverified. Conflicting native operations remain blocked."),
+            ("path-2", "Finish the original project-path selection. Changing drafts or projects does not cancel it."),
+            ("initialization-1", "Initialization edit ownership is unverified. Observe the original native status; do not open a competing operation."),
+            ("initialization-2", "A local initialization edit is still owned or awaiting settlement. Finish or close that original session before preparing a configuration save."),
+            ("initialization-3", "This project needs separate initialization transaction recovery. A configuration edit cannot clear its journal or bypass the block."),
+            ("version-1", "Saved-version edit ownership is unverified. Keep its original operation and do not retry."),
+            ("version-2", "A saved-version edit is still owned. Close or finish that original session before another operation."),
+            ("version-3", "This project needs separately authorized saved-version recovery. No other edit can clear that journal."),
+            ("images-1", "Original image ownership or cleanup is unverified. Observe that original operation; do not start a competing one."),
+            ("images-2", "An original image selection or local-copy review is retained. Finish or stop that operation first."),
+            ("images-3", "This project needs a separate image recovery inspection. Another edit cannot bypass its journal.")
+        ]
+        var firstKnownReason = "none"
+        for (key, text) in knownReasons {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now >= last, clock.observationAllowed(now, before: end) else { return }
+            last = now
+            let count = root.staticTexts.matching(identifier: text).count
+            let after = ProcessInfo.processInfo.systemUptime
+            guard after >= last, clock.observationAllowed(after, before: end) else { return }
+            last = after
+            if count > 0 { firstKnownReason = key; break }
+        }
         let finish = ProcessInfo.processInfo.systemUptime
         guard finish >= last, clock.observationAllowed(finish, before: end) else { return }
         let state = waiter == .completed ? "completed" : waiter == .timedOut ? "timed-out" : "other"
-        print("MRK_NORMAL_SNAPSHOT_STATE=v1;sample=post-wait;waiter=\(state);\(fields.joined(separator: ";"));nonAtomic=1")
+        print("MRK_NORMAL_SNAPSHOT_STATE=v2;sample=post-wait;waiter=\(state);\(fields.joined(separator: ";"));firstKnownReason=\(firstKnownReason);nonAtomic=1")
     }
     @MainActor private func waitGone(_ element: XCUIElement, timeout: TimeInterval = 5, line: UInt = #line) throws {
         let wait = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
@@ -4966,7 +5075,7 @@ final class NormalAppUITests: XCTestCase {
         // guessed/truncated snapshots. CR/LF byte proof comes from file readback.
         let value: String?
         if let direct = item.value as? String, !direct.isEmpty { value = direct }
-        else if item.staticTexts.count == 1 { value = item.staticTexts.element(boundBy: 0).label }
+        else if item.staticTexts.count == 1 { value = try staticTextContent(item.staticTexts.element(boundBy: 0)) }
         else { value = nil }
         let normalized = expected.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         try require(value == normalized, "complete reviewed public text unavailable or different: " + label)
@@ -6538,9 +6647,8 @@ final class NormalAppUITests: XCTestCase {
             _ = try unique(review.staticTexts.matching(identifier: "existing_workflow_differs"),
                            "the final refusal is not the exact customized-caller conflict")
             let texts = review.staticTexts.allElementsBoundByIndex
-            try require(!texts.isEmpty && texts.count <= 128
-                && texts.allSatisfy { $0.label.utf8.count <= 4096 }, "workflow refusal presentation exceeds its bound")
-            let labels = texts.map { $0.label.trimmingCharacters(in: .whitespacesAndNewlines) }
+            try require(!texts.isEmpty && texts.count <= 128, "workflow refusal presentation exceeds its bound")
+            let labels = try texts.map { try staticTextContent($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             let headings = labels.indices.filter { labels[$0] == "Observed differing callers · no Apply token" }
             let endings = labels.indices.filter {
                 labels[$0] == "Only summaries actually obtained by the original capture are shown. Existing YAML is not exposed; no subset, force or overwrite option is available."
@@ -6558,9 +6666,8 @@ final class NormalAppUITests: XCTestCase {
             let facts = try waitElement(named(review, "Independent native workflow outcome facts"), in: review,
                                         failures: refusalFailures)
             let factTexts = facts.staticTexts.allElementsBoundByIndex
-            try require(factTexts.count == 8 && factTexts.allSatisfy { $0.label.utf8.count <= 64 },
-                        "the four named native workflow outcome pairs are missing")
-            let pairs = factTexts.map { $0.label.trimmingCharacters(in: .whitespacesAndNewlines) }
+            try require(factTexts.count == 8, "the four named native workflow outcome pairs are missing")
+            let pairs = try factTexts.map { try staticTextContent($0, limit: 64).trimmingCharacters(in: .whitespacesAndNewlines) }
             try require(pairs == ["Transaction effect", "not_started", "Journal", "not_created",
                                   "Core resources", "settled", "Native finality", "settled"],
                         "the named original effect/journal/resource/finality facts are not settled refusal")
@@ -6595,8 +6702,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func savedOperationComplete(_ panel: XCUIElement) throws {
         let texts = panel.staticTexts.allElementsBoundByIndex
         try require(!texts.isEmpty && texts.count <= 512, "saved-operation presentation exceeds its finite bound")
-        try require(texts.allSatisfy { $0.label.utf8.count <= 4096 }, "saved-operation text exceeds its finite bound")
-        let labels = texts.map { $0.label.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let labels = try texts.map { try staticTextContent($0).trimmingCharacters(in: .whitespacesAndNewlines) }
         let anchors = labels.indices.filter { labels[$0].hasPrefix("Outcome:") }
         try require(anchors.count == 1, "original saved-operation outcome is missing or ambiguous")
         let start = anchors[0]
@@ -6615,8 +6721,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func savedOfflineCounts(_ report: XCUIElement) throws -> [String: Int] {
         let texts = report.staticTexts.allElementsBoundByIndex
         try require(!texts.isEmpty && texts.count <= 512, "offline report exceeds its finite presentation bound")
-        try require(texts.allSatisfy { $0.label.utf8.count <= 4096 }, "offline report text exceeds its finite bound")
-        let labels = texts.map { $0.label.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let labels = try texts.map { try staticTextContent($0).trimmingCharacters(in: .whitespacesAndNewlines) }
         let statuses = ["PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE"]
         let starts = labels.indices.filter { start in
             start + statuses.count * 2 <= labels.count
@@ -7157,8 +7262,9 @@ final class NormalAppUITests: XCTestCase {
                                  "current unsigned Archive details missing or repeated")
         var values: [String] = []
         for prefix in ["Archive operation ID: ", "Archive owner generation: "] {
-            let field = try unique(staticTextPrefix(details, prefix),
-                                   "current unsigned archive identity absent or ambiguous")
+            let fields = try staticTextPrefix(details, prefix) { _ = try remaining(1) }
+            try require(fields.count == 1, "current unsigned archive identity absent or ambiguous", check: .singleton)
+            let field = fields[0]
             let text = try staticTextContent(field)
             try require(field.isHittable && text.hasPrefix(prefix), "current unsigned archive identity not visible")
             values.append(String(text.dropFirst(prefix.count)))
@@ -7227,7 +7333,9 @@ final class NormalAppUITests: XCTestCase {
             let status = try only(panel.descendants(matching: .any).matching(identifier: "Original iOS archive status"))
             let details = try only(status.descendants(matching: .group).matching(identifier: "Archive details"))
             for (prefix, expected) in [("Archive operation ID: ", identity.operationID), ("Archive owner generation: ", identity.ownerGeneration)] {
-                let field = try only(staticTextPrefix(details, prefix))
+                let fields = try staticTextPrefix(details, prefix, check: check)
+                try need(fields.count == 1)
+                let field = fields[0]
                 try need(field.elementType == .staticText)
                 let value = field.value
                 try need(try Self.staticTextContent(value: value, label: value is String ? "" : field.label) == prefix + expected)
@@ -7469,7 +7577,7 @@ final class NormalAppUITests: XCTestCase {
         var values: [String] = []
         for (role, prefix) in [("operation-id", "Recovery operation ID: "), ("owner-generation", "Recovery owner generation: "),
                                ("phase", "Recovery phase: "), ("outcome", "Recovery outcome: "), ("reason", "Recovery reason: ")] {
-            let query = staticTextPrefix(details, prefix)
+            let fields = try staticTextPrefix(details, prefix) { _ = try remaining(1) }
             // Fixed caption counts before the original singleton check. No
             // observed identifiers/values or new AX queries after its failure.
             let trimmed = String(prefix.dropLast())
@@ -7487,7 +7595,10 @@ final class NormalAppUITests: XCTestCase {
             let allDescendants = min(details.descendants(matching: .any).count, 5)
             let rendererPrefix = min(renderer.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).count, 5)
             let field: XCUIElement
-            do { field = try unique(query, "current recovery field missing or repeated") }
+            do {
+                try require(fields.count == 1, "current recovery field missing or repeated", check: .singleton)
+                field = fields[0]
+            }
             catch {
                 if phase == "awaiting-consent" || phase == "terminal" {
                     print("MRK_NORMAL_RECOVERY_FIELD=v2;phase=\(phase);field=\(role);sample=pre-check;exactPrefix=\(exactPrefix);trimmedPrefix=\(trimmedPrefix);captionOnly=\(captionOnly);anyPrefix=\(anyPrefix);role=\(selectedRole);children=\(directChildren);descendants=\(allDescendants);rendererPrefix=\(rendererPrefix);nonAtomic=1")
@@ -7525,8 +7636,9 @@ final class NormalAppUITests: XCTestCase {
         let group = try unique(named(renderer, "Account signing recovery state"), "current account report missing or repeated")
         try reveal(group, in: renderer)
         let prefix = "Account signing state · "
-        let heading = try unique(staticTextPrefix(group, prefix),
-                                 "current account state missing or repeated")
+        let headings = try staticTextPrefix(group, prefix) { _ = try remaining(1) }
+        try require(headings.count == 1, "current account state missing or repeated", check: .singleton)
+        let heading = headings[0]
         let text = try staticTextContent(heading)
         try require(heading.isHittable && text == prefix + status && (status == "pending" || status == "recovered"),
                     "current account state differs")
