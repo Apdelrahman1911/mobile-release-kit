@@ -151,6 +151,72 @@ class CandidateConsumerTests(unittest.TestCase):
                     self.assertFalse(owner._CandidateResume__artifact_admitted)
                 self.assertEqual(owner.command.call_count, 3 if mode == 'pass' else 2)
 
+    def test_package_memory_credit_follows_complete_reads_and_precedes_codecs(self):
+        image = b'image'
+        for fault in ('pass', 'read', 'before', 'after'):
+            originals, row, stage = mounted_fixture('aarch64-apple-darwin')
+            with mock.patch.object(R.Resume, '__init__', return_value=None):
+                owner = C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'), None, None,
+                                         nomination=nomination())
+            owner._CandidateResume__artifact_admitted = True
+            owner._CandidateResume__members_document = R.canonical(row['members'])
+            owner.selection = stage.source_build_selection(owner.target)
+            stage.PRODUCER_DESCRIPTOR_BYTES = stage.PRODUCER_SIGNATURE_BYTES = 65536
+            owner.stager, owner.signing_identity = stage, row['signingIdentity']
+            owner._resource_inputs, owner.sources, owner.child_bootstrap = (0, 0), [], ''
+            owner.clock, owner.host, owner.parent = SimpleNamespace(check=lambda: None), object(), {'fd': 7}
+            owner.point = lambda: None
+            owner.command = mock.Mock(return_value=SimpleNamespace(stdout=b'', stderr=b'', returncode=0))
+            quote = C.candidate_resource_requirements(nomination(), 0, 0, image_bytes=len(image))
+            package = len(originals['Install.pkg'][0])
+            fixed = quote['postAcquisitionMemory'] - 5 * len(image) + 2 * 65536
+            before, after = fixed + 6 * package, fixed + package
+            owner.memory_base = quote['postAcquisitionMemory']
+            calls = []
+            def read(book, operation, path, *args, **kwargs):
+                self.assertEqual(owner.memory_base, before)
+                calls.append(path.name)
+                if fault == 'read' and path.name == 'producer.sig': raise OSError('inert-read')
+                return {}, originals[path.name][0]
+            owner.quota = SimpleNamespace(call=read)
+            preview = {key + 'Sha256': row[key]['sha256'] for key in ('package', 'descriptor', 'signature')}
+            preview.update(packageSize=package, installerInventorySha256=row['inventorySha256'],
+                           runtimeManifestSha256=row['runtimeManifestSha256'])
+            def parse(*args, **kwargs):
+                self.assertEqual(owner.memory_base, after)
+                self.assertEqual(calls, list(originals))
+                return {}, b'inventory'
+            with self.subTest(fault=fault), mock.patch.dict(R.STATE), \
+                    mock.patch.object(R, 'host_memory_data', return_value=(4096, 1 << 40)), \
+                    mock.patch.object(R, 'memory_data', side_effect=[
+                        {'availableEstimateBytes': 0 if fault == 'before' else 1 << 40},
+                        {'availableEstimateBytes': 0 if fault == 'after' else 1 << 40}]), \
+                    mock.patch.object(C.os, 'fstatvfs', return_value=SimpleNamespace(f_bavail=1 << 40, f_frsize=1)), \
+                    mock.patch.object(C.os, 'stat', side_effect=lambda name, **kw: SimpleNamespace(
+                        st_mode=stat.S_IFREG | 0o444, st_size=len(originals[name][0]),
+                        st_uid=C.os.getuid(), st_gid=C.os.getgid())), \
+                    mock.patch.object(R, 'mounted_data', side_effect=parse) as parser:
+                if fault == 'pass':
+                    owner.read_mounted(object(), {'fd': 8}, Path('/inert'), image, preview)
+                    parser.assert_called_once()
+                    self.assertEqual(owner.memory_base, after)
+                    self.assertEqual(owner.allocation_samples, 0)
+                else:
+                    with self.assertRaises((OSError, R.Refused)):
+                        owner.read_mounted(object(), {'fd': 8}, Path('/inert'), image, preview)
+                    parser.assert_not_called()
+                    self.assertIsNone(owner._CandidateResume__binding)
+                    self.assertEqual(owner.memory_base, quote['postAcquisitionMemory'] if fault == 'before' else before)
+                    if fault == 'before': self.assertEqual(calls, [])
+            self.assertEqual(owner.command.call_count, 1 if fault in ('read', 'before') else 2)
+        # Invalid stage combinations fail before sampling native capacity.
+        for options in ({'reading': True}, {'reading': 1}, {'package_bytes': True},
+                        {'package_bytes': 1, 'acquiring': True}, {'package_bytes': R.LIMIT + 1}):
+            owner.command.reset_mock()
+            with self.assertRaises(R.Refused):
+                owner.admit_resources(0, 0, image_bytes=1, **options)
+            owner.command.assert_not_called()
+
     def test_child_source_limits_precede_construction_and_sources_are_explicit(self):
         bodies = {name: (ROOT / name).read_bytes() for name in (C.LEGACY_PATH, C.PARSER_PATH)}
         self.assertLessEqual(len(bodies[C.LEGACY_PATH]), 164 << 10)
@@ -315,6 +381,10 @@ class CandidateConsumerTests(unittest.TestCase):
             patches.enter_context(mock.patch.object(R.os, 'listdir', return_value=['Install.pkg', 'producer.json', 'producer.sig']))
             patches.enter_context(mock.patch.object(R, 'mount_data'))
             patches.enter_context(mock.patch.object(R, 'transport_transition_data'))
+            # Transport ports stay inert; complete real-FD image comparison has
+            # its own bounded corruption/deadline/POST regression below.
+            patches.enter_context(mock.patch.object(R, 'retained_image_post', side_effect=lambda book, entry, expected, clock:
+                R.need(book.read(entry) == expected, 'resume-image-retained-post')))
             with self.assertRaisesRegex(ValueError, 'resume-original-release-provenance'):
                 R.Resume.install_image(owner, image, {})
         self.assertEqual(calls, ['attach', 'producer-key', 'producer-signature', 'detach'])
@@ -362,6 +432,10 @@ class CandidateConsumerTests(unittest.TestCase):
             patches.enter_context(mock.patch.object(R.os, 'listdir', return_value=['Install.pkg', 'producer.json', 'producer.sig']))
             patches.enter_context(mock.patch.object(R, 'mount_data'))
             patches.enter_context(mock.patch.object(R, 'transport_transition_data'))
+            # Transport ports stay inert; complete real-FD image comparison has
+            # its own bounded corruption/deadline/POST regression below.
+            patches.enter_context(mock.patch.object(R, 'retained_image_post', side_effect=lambda book, entry, expected, clock:
+                R.need(book.read(entry) == expected, 'resume-image-retained-post')))
             R.Resume.install_image(owner, image, {})
             self.assertEqual(owner.acquisition_result['runtimeManifestSha256'],'5'*64)
             self.assertEqual(calls, ['attach','producer-key','producer-signature','detach'])

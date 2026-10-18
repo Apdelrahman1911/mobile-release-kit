@@ -46,6 +46,51 @@ class FixedCarrierResumeData(unittest.TestCase):
                                       "head_branch": run["head_branch"]})
         return run, job, artifact
 
+    def test_retained_image_post_streams_and_rejects_content_eof_identity_and_deadline(self):
+        m = ADAPTER
+        image = b'public-synthetic-image' * 7000
+        for fault in ('pass', 'content', 'short', 'extra', 'identity-post', 'deadline'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / 'image'
+                body = (b'X' + image[1:] if fault == 'content' else image[:-1] if fault == 'short'
+                        else image + b'X' if fault == 'extra' else image)
+                path.write_bytes(body)
+                fd = m.os.open(path, m.os.O_RDONLY | m.os.O_NOFOLLOW)
+                try:
+                    initial = m.identity(m.os.fstat(fd))
+                    checks, ticks, reads = [], [], []
+                    def check(entry):
+                        checks.append(entry)
+                        m.need(m.identity(m.os.fstat(fd)) == initial == m.identity(path.stat()), 'synthetic-original-post')
+                    def tick():
+                        ticks.append(1)
+                        if fault == 'deadline' and len(ticks) == 3: raise m.Refused('synthetic-deadline')
+                    original = m.os.pread
+                    def read(held, count, offset):
+                        self.assertEqual(held, fd)
+                        self.assertLessEqual(count, 65536)
+                        reads.append((count, offset))
+                        result = original(held, count, offset)
+                        if fault == 'identity-post' and offset == len(image): path.chmod(0o444)
+                        return result
+                    book, entry = SimpleNamespace(check_one=check), {'fd': fd}
+                    with mock.patch.object(m.os, 'pread', side_effect=read):
+                        if fault == 'pass':
+                            m.retained_image_post(book, entry, image, SimpleNamespace(check=tick))
+                            self.assertEqual(len(checks), 2)
+                            self.assertEqual(reads[-1], (1, len(image)))
+                            self.assertEqual(sum(count for count, _ in reads[:-1]), len(image))
+                        else:
+                            reason = ('synthetic-original-post' if fault == 'identity-post' else
+                                      'synthetic-deadline' if fault == 'deadline' else
+                                      'resume-image-retained-eof' if fault == 'extra' else 'resume-image-retained-post')
+                            with self.assertRaisesRegex(m.Refused, reason):
+                                m.retained_image_post(book, entry, image, SimpleNamespace(check=tick))
+                    self.assertEqual(m.os.lseek(fd, 0, m.os.SEEK_CUR), 0)
+                    m.os.fstat(fd)  # Borrowed FD remains caller-owned on every outcome.
+                finally:
+                    m.os.close(fd)
+
     def test_fixed_origin_stage_and_artifact_admission_preserves_failed_job(self):
         m = ADAPTER
         original = self.metadata()

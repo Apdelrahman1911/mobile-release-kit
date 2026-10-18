@@ -1,8 +1,4 @@
-"""One fixed ce644 ARM carrier -> fresh Installer/readback owner. No compiler, signing, re-notary, history/P0 enrollment or generic cache.
-
-Transport/codec/custody portions are authenticated copies of accepted P0 originals;
-this is a separate FIRST two-source diagnostic profile, never P0 qualification.
-"""
+"""Fixed-carrier Installer/readback and shared candidate transport; not P0 qualification."""
 import ctypes
 import hashlib
 import importlib.util
@@ -968,8 +964,7 @@ def acquisition_main(*, candidate=None):
 
 
 def original_release_readback_data(mounted, inventory, *, target):
-    # Called only after the fixed held carrier/member and native signature
-    # owners succeeded. This DATA record is neither P0 nor signature authority.
+    # Native signature already checked; this record is not P0 authority.
     need(type(mounted) is dict and target == TARGETS[0] == mounted.get('target')
          and all(mounted.get(key) == ORIGIN[key] for key in ('source', 'tree', 'runId', 'runAttempt', 'jobId',
                  'artifactId', 'artifactSha256', 'package', 'descriptor', 'signature')),
@@ -1063,6 +1058,21 @@ def mounted_data(originals, row, target, stager, *, allocation_budget=None, cand
             'nativeQualificationInferred': False, 'updateActivated': False, 'productReady': False}
     if not candidate: result['qualificationEvidenceSha256'] = row['qualificationEvidenceSha256']
     return result, inventory
+
+def retained_image_post(book, entry, image, clock):
+    """Compare the complete original image without making another image copy."""
+    need(type(image) is bytes and 0 < len(image) <= LIMIT, 'resume-image-post-bound')
+    clock.check(); book.check_one(entry)
+    view = memoryview(image)
+    for offset in range(0, len(image), 65536):
+        clock.check()
+        count = min(65536, len(image) - offset)
+        block = os.pread(entry['fd'], count, offset)
+        need(len(block) == count and block == view[offset:offset + count], 'resume-image-retained-post')
+    clock.check()
+    need(os.pread(entry['fd'], 1, len(image)) == b'', 'resume-image-retained-eof')
+    book.check_one(entry); clock.check()
+
 
 def producer_message_data(descriptor):
     # Native install_producer.m and Rust message_data sign the domain (one NUL)
@@ -1199,9 +1209,7 @@ class Resume:
 
 
     def publish_image(self, path, image):
-        # Donor publish's 128 MiB public-output cap is deliberately unchanged.
-        # This fixed owned DMG alone uses the same prequoted original book,
-        # exact register/read/close semantics and bounded streaming copy.
+        # Owned DMG only; donor public-output cap and custody stay unchanged.
         need(path in (self.work / 'arm64.dmg', self.work / 'intel.dmg')
              and type(image) is bytes and 0 < len(image) <= LIMIT, 'p0-image-copy-admission')
         parent = self.quota.call(self.outer, 'directory', path.parent)
@@ -1387,7 +1395,7 @@ class Resume:
                      'resume-transport-retained-parents')
                 need(identity(os.stat(mount.name, dir_fd=volumes['fd'], follow_symlinks=False)) == identity(held)
                      and set(os.listdir(directory['fd'])) == {'Install.pkg', 'producer.json', 'producer.sig'}, 'resume-mounted-original-roster')
-                need(self.outer.read(image_entry) == image, 'resume-image-retained-post')
+                retained_image_post(self.outer, image_entry, image, self.clock)
                 return facts
             facts = post()
             originals, row, result, inventory = self.read_mounted(mounted, directory, mount, image, preview)
@@ -2431,8 +2439,7 @@ def cleanup_main():
         def post():
             for fd,path,before in fds:need(identity(os.fstat(fd))[:len(before)]==before==identity(os.stat(path,follow_symlinks=False))[:len(before)],'resume-cleanup-parent-post')
         post()
-        # Same standard fd-based shutil primitive used in the original installed
-        # workflow, narrowed to this consumer's three known settled output roots.
+        # Retire only these known settled task outputs.
         for name in ('DerivedData','ios-unsigned-archive-test.xcresult','tmp'):
             info=os.stat(name,dir_fd=nfd,follow_symlinks=False)
             need(stat.S_ISDIR(info.st_mode)and info.st_uid==os.getuid()and info.st_dev==wbefore[0],'resume-cleanup-directory')
@@ -2484,8 +2491,7 @@ def normal_cleanup_main():
         def post():
             for fd,path,before in fds:need(identity(os.fstat(fd))[:len(before)]==before==identity(os.stat(path,follow_symlinks=False))[:len(before)],'resume-cleanup-parent-post')
         post()
-        # Same standard fd-based shutil primitive used in the original installed
-        # workflow, narrowed to this consumer's three known settled output roots.
+        # Retire only these known settled task outputs.
         for name in ('DerivedData',*[row[0] for row in NORMAL_FAMILIES[batch]],'tmp'):
             info=os.stat(name,dir_fd=nfd,follow_symlinks=False)
             need(stat.S_ISDIR(info.st_mode)and info.st_uid==os.getuid()and info.st_dev==wbefore[0],'resume-cleanup-directory')

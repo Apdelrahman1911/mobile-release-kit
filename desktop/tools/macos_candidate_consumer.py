@@ -1,10 +1,4 @@
-"""Detached candidate acquisition/install owner; no workflow activation.
-
-Both real checkout roots and the original hosted Python/native process owner
-are admitted before acquiring a carrier. A claimed commit alone is not enough.
-It reuses Resume's actual native install, request census, readback, held inputs,
-producer verification, detach and retirement rather than interpreting old status.
-"""
+"""Candidate owner reusing original source, signature, install and cleanup checks."""
 import os
 from pathlib import Path
 import platform
@@ -354,15 +348,22 @@ class CandidateResume(resume.Resume):
         self.host = host_module.DarwinAPI(self.clock, target=self.target)
         self.host.waitable_sigchld()
 
-    def admit_resources(self, retained, host_bytes, *, image_bytes=None, acquiring=False):
+    def admit_resources(self, retained, host_bytes, *, image_bytes=None, acquiring=False, package_bytes=None, reading=False):
         resume.need(type(retained) is int and retained >= sum(len(body) for _, body in self.sources)
                     + len(self.child_bootstrap.encode('utf-8')), 'candidate-retained-source-budget')
         quote = candidate_resource_requirements(self.nomination, retained, host_bytes, image_bytes=image_bytes)
+        required = quote['acquisitionMemory' if image_bytes is None or acquiring else 'postAcquisitionMemory']
+        resume.need(type(reading) is bool and (package_bytes is not None or not reading), 'candidate-package-stage')
+        if package_bytes is not None:
+            resume.need(not acquiring and image_bytes is not None and type(package_bytes) is int
+                        and 0 < package_bytes <= resume.LIMIT, 'candidate-package-bound')
+            # Initial image copies have returned. Fund the package read peak,
+            # then its retained bytes separately from every codec allocation.
+            required += -5 * image_bytes + (6 if reading else 1) * package_bytes + 2 * 65536
         call = self.command('memory', ['/usr/bin/vm_stat'], 10)
         page_size, physical = resume.host_memory_data(self.host, self.clock)
         memory = resume.memory_data(call.stdout, call.stderr, call.returncode, page_size=page_size, physical_bytes=physical)
         disk = os.fstatvfs(self.parent['fd'])
-        required = quote['acquisitionMemory' if image_bytes is None or acquiring else 'postAcquisitionMemory']
         facts = resume.resource_admission_data(memory['availableEstimateBytes'], required,
                                               disk.f_bavail * disk.f_frsize, quote['requiredDisk'])
         resume.STATE['resourceAdmission'] = facts
@@ -464,6 +465,8 @@ class CandidateResume(resume.Resume):
         resume.need(self.__binding is None and self.__artifact_admitted, 'candidate-mounted-once')
         resume.need(self.stager.source_build_selection(self.target) == self.selection, 'candidate-source-selection-post')
         self.point()
+        self.admit_resources(*self._resource_inputs, image_bytes=len(image),
+                             package_bytes=preview['packageSize'], reading=True)
         originals, selected = {}, {}
         for key, name, cap in (('package', 'Install.pkg', preview['packageSize']),
                               ('descriptor', 'producer.json', self.stager.PRODUCER_DESCRIPTOR_BYTES),
@@ -480,6 +483,8 @@ class CandidateResume(resume.Resume):
             members=resume.decode(self.__members_document),
             inventorySha256=preview['installerInventorySha256'], runtimeManifestSha256=preview['runtimeManifestSha256'],
             signingIdentity=dict(self.signing_identity))
+        self.admit_resources(*self._resource_inputs, image_bytes=len(image),
+                             package_bytes=len(originals['Install.pkg'][0]))
         result, inventory = resume.mounted_data(originals, row, self.target, self.stager,
                                                allocation_budget=self.allocation_budget, candidate=True)
         self.point()
@@ -495,8 +500,7 @@ class CandidateResume(resume.Resume):
         resume.need(resume.canonical(preview) == self.__preview_document
                     and (len(image), resume.sha(image)) == (preview['distributionBytes'], preview['distributionSha256']),
                     'candidate-install-image-binding')
-        # load_sources pinned SOURCE and independent G2 identity; parser-bound
-        # artifact pins do not replace the native signature checks in this body.
+        # Artifact pins never replace native signature verification.
         return super().install_image(image, preview)
 
     def decode_fixture_scripts(self, packed, retained):
@@ -565,20 +569,11 @@ class CandidateResume(resume.Resume):
         resume.need(set(os.listdir(self.parent['fd'])) == keep, 'candidate-retained-handoff-roster')
 
     def consume(self, retained, host_bytes):
-        """One attempt after the external original source/host bootstrap.
-
-        Caller retains the original endpoint; this does not renew a clock or
-        provide UI authority. Failure keeps the existing Resume unknown-state
-        preservation rules and always attempts each original final close.
-        """
+        """One attempt under the original endpoint and final-close rules."""
         primary = None
         try:
             resume.need(self.__source_loaded, 'candidate-source-not-loaded')
-            # Exact remaining original acquisitions in the reused body: child3,
-            # ZIP1, image publish/read2, Volumes1, mounted directory+files4,
-            # producer key/message/read3, input directory/inventory/status3 and
-            # the three transport iterators. These are lifetime cells, not live
-            # FD credits; every later acquisition still uses OriginalQuota.
+            # Lifetime original cells, never live-FD credits.
             pending = 17 if self.purpose in ('restore-install','acquire','acquire-restore') else 20
             resume.need(self.quota.reserved + pending <= resume.MAX_ORIGINALS, 'candidate-original-ledger-capacity')
             self._resource_inputs = (retained, host_bytes)
