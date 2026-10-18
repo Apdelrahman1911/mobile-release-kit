@@ -39,6 +39,12 @@ def fixture(target=R.TARGETS[0]):
     return selected, context, install
 
 
+def entry_body():
+    method = '-[MRKNormalAppUITests.NormalAppUITests testLaunchCancelAndQuit]'
+    return ('\n'.join(["Test Case '" + method + "' started.", N.ORIGINAL_MARKER, N.ENTRY_MARKER,
+        N.UI_MARKER, "Test Case '" + method + "' passed (1.0 seconds).", ''])).encode()
+
+
 def persistence_body():
     method='-[MRKNormalAppUITests.NormalAppUITests testSyntheticPersistentCredentials]'
     return ('\n'.join(["Test Case '"+method+"' started.",
@@ -109,11 +115,11 @@ def saved_version_recovery(target):
     return value
 
 
-def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False, saved_files=False, saved_version=False, current_ios=False):
+def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False, saved_files=False, saved_version=False, current_ios=False, entry=False):
     selected, context, install=fixture(target)
-    args, req=U.phase_request(N,name,target,WORK,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version)
+    args, req=U.phase_request(N,name,target,WORK,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,entry=entry)
     mode=req['phase']; result=None if req['result'] is None else req['result'].name
-    out=(saved_version_body() if name=='saved-version-recovery-test' else saved_document_body(name) if name in ('release-evidence-test','workflow-refusal-test') else diagnostics_body() if name=='diagnostics-test' else ios_body(context['helperSource'] if current_ios else selected['source']) if name=='ios-unsigned-archive-test' else
+    out=(entry_body() if name=='test' else saved_version_body() if name=='saved-version-recovery-test' else saved_document_body(name) if name in ('release-evidence-test','workflow-refusal-test') else diagnostics_body() if name=='diagnostics-test' else ios_body(context['helperSource'] if current_ios else selected['source']) if name=='ios-unsigned-archive-test' else
          persistence_body() if name=='persistence-test' else saved_checks_body() if name=='saved-checks-test' else
          R.canonical(dict(totalTestCount=2 if name in ('project-summary','saved-checks-summary') else 1,
             passedTests=2 if name in ('project-summary','saved-checks-summary') else 1,failedTests=0,skippedTests=0,expectedFailures=0))
@@ -275,6 +281,52 @@ class CandidateUITests(unittest.TestCase):
                     lambda v: v['predecessorMetadata'].update(signingPolicy={'secret': 'not public output'})):
                 changed=deepcopy(value); change(changed)
                 with self.assertRaises(R.Refused):U.install_admission_data(changed,selected,context)
+
+    def test_entry_existing_smoke_requests_and_exact_original_markers(self):
+        self.assertEqual(U.selected_phases(entry=True), ('build', 'test', 'summary'))
+        for other in ('ios_tools', 'saved_files', 'saved_version'):
+            with self.assertRaises(R.Refused): U.selected_phases(entry=True, **{other: True})
+        with self.assertRaises(R.Refused): U.selected_phases(entry=1)
+        for argv in (['test'], ['summary'], ['--entry', 'applications-test'],
+                     ['--entry', '--ios-tools', 'test']):
+            with mock.patch.object(sys, 'argv', ['candidate-ui', *argv]), mock.patch.object(U.consumer, 'entry_context') as entered:
+                with self.assertRaisesRegex(R.Refused, 'candidate-ui-fixed-command'): U.main()
+                entered.assert_not_called()
+        for target in (N.ARM_TARGET, N.INTEL_TARGET):
+            for phase, seconds in (('build', 450), ('test', 345), ('summary', 90)):
+                selected, _, _, args, request, row, body = phase_fixture(phase, target, entry=True)
+                self.assertEqual(request, N.normal_request(args, str(WORK/'normal-ui/tmp')+'/'))
+                self.assertEqual(request['phaseSeconds'], seconds)
+                self.assertEqual(U.phase_admission_data(row, request, selected['source'], body, b'', normal=N, entry=True), 'f'*64)
+                if phase == 'test':
+                    self.assertEqual([v for v in args if v.startswith('-only-testing:')],
+                                     ['-only-testing:'+N.CLASS+'testLaunchCancelAndQuit'])
+                    self.assertEqual((request['allowance'], request['timeout']), (60, 180))
+                    with self.assertRaises(R.Refused):
+                        U.phase_admission_data(row, request, selected['source'], body, b'', normal=N)
+                    with self.assertRaises(R.Refused):
+                        U.phase_admission_data(row, request, selected['source'], body, b'', normal=N,
+                                               entry=True, helper_source='d'*40)
+                    mutants = [body.replace(N.ORIGINAL_MARKER.encode(), b''),
+                        body.replace(N.ENTRY_MARKER.encode(), N.ENTRY_MARKER.encode()+b'\n'+N.ENTRY_MARKER.encode()),
+                        body.replace(N.UI_MARKER.encode(), b'MRK_MACOS_NORMAL_UI=unknown'),
+                        body.replace(b'testLaunchCancelAndQuit', b'testPackagedEntryLaunchCancelAndQuit'),
+                        body.replace(N.ORIGINAL_MARKER.encode(), b'MRK_MACOS_UI_FAILURE_CLEANUP=1'),
+                        body.replace(b'passed', b'skipped'), body+body,
+                        body.replace(N.ENTRY_MARKER.encode(), b'')+N.ENTRY_MARKER.encode()+b'\n']
+                    for wrong_body in mutants:
+                        bad = deepcopy(row); original = bad['commands'][-2]
+                        original.update(stdoutBytes=len(wrong_body), stdoutSha256=R.sha(wrong_body))
+                        with self.assertRaises(R.Refused):
+                            U.phase_admission_data(bad, request, selected['source'], wrong_body, b'', normal=N, entry=True)
+                elif phase == 'summary':
+                    self.assertEqual(args[-2:], ['--normal-summary', 'test.xcresult'])
+                    self.assertEqual(U.admission_name(phase), 'summary.command-admission.json')
+                    bad_body = R.canonical(dict(totalTestCount=1, passedTests=0, failedTests=0, skippedTests=1, expectedFailures=0))
+                    bad = deepcopy(row); bad['commands'][1].update(stdoutBytes=len(bad_body), stdoutSha256=R.sha(bad_body))
+                    with self.assertRaises(R.Refused):
+                        U.phase_admission_data(bad, request, selected['source'], bad_body, b'', normal=N, entry=True)
+            with self.assertRaises(R.Refused): U.phase_request(N, 'applications-test', target, WORK, entry=True)
 
     def test_only_existing_same_source_phases_targets_and_clean_environment(self):
         for target in (N.ARM_TARGET,N.INTEL_TARGET):
@@ -566,7 +618,7 @@ class CandidateUITests(unittest.TestCase):
 
 
 class CandidateUIMainTests(unittest.TestCase):
-    def exercise(self, name, target, unknown_close=False, *, ios_tools=False, saved_files=False, saved_version=False, native_fault=None, same_source=False):
+    def exercise(self, name, target, unknown_close=False, *, ios_tools=False, saved_files=False, saved_version=False, native_fault=None, same_source=False, entry=False):
         import os, stat
         selected,context,install=fixture(target)
         if same_source:
@@ -609,15 +661,21 @@ class CandidateUIMainTests(unittest.TestCase):
         snapshot,_=R.host_snapshot(host,lambda p:(R.identity(info(p)),children(p)),lambda p,n:(R.identity(info(p)),files[p]))
         files[host/'host-binding.json']=R.canonical(dict(schemaVersion=1,source=context['helperSource'],runId='31',runAttempt='1',
             base=basevalue,prefix=str(host),basePrefix='/inert-base',baseExecutable=str(base),**snapshot,retainedUntilHostedTeardown=True))
-        phases=U.selected_phases(ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version)
-        arguments=['candidate-ui',*(['--saved-version'] if saved_version else ['--saved-files'] if saved_files else ['--ios-tools'] if ios_tools else []),name]
+        phases=U.selected_phases(ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,entry=entry)
+        arguments=['candidate-ui',*(['--entry'] if entry else ['--saved-version'] if saved_version else ['--saved-files'] if saved_files else ['--ios-tools'] if ios_tools else []),name]
         previous=phases if name=='result' else phases[:phases.index(name)]
         if name!='build':directories.add(WORK/'normal-ui');directories.add(WORK/'normal-ui/tmp')
         for phase in previous:
-            _,_,_,_,_,row,out=phase_fixture(phase,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,current_ios=current_ios)
+            _,_,_,_,_,row,out=phase_fixture(phase,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,current_ios=current_ios,entry=entry)
             for suffix,body in (('.status',b'0\n'),('.stdout',out),('.stderr',b'')):
                 files[WORK/'normal-ui'/(phase+suffix)]=body
             files[WORK/'normal-ui'/U.admission_name(phase)]=R.canonical(row)
+        if native_fault == 'prior-status':
+            files[WORK/'normal-ui'/(previous[-1]+'.status')] = b'86\n'
+        elif native_fault == 'prior-source':
+            path = WORK/'normal-ui'/U.admission_name(previous[-1])
+            wrong = R.decode(files[path]); wrong['sourceCommit'] = '0'*40
+            files[path] = R.canonical(wrong)
         class Book:
             def __init__(self):self.entries=[];self.directories={};self.attempts=[];books.append(self)
             def directory(self,path):
@@ -661,7 +719,7 @@ class CandidateUIMainTests(unittest.TestCase):
                 child_root=root if helper_source is not None else U.consumer.CANDIDATE_ROOT
                 assert argv[4]==str(child_root/U.RUNNER) and kw['cwd']==child_root
                 assert kw['environ']==U.clean_environment(N,selected,WORK,helper_source=helper_source,ios_tools=ios_tools)
-                _,_,_,_,_,row,out=phase_fixture(name,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,current_ios=current_ios)
+                _,_,_,_,_,row,out=phase_fixture(name,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,current_ios=current_ios,entry=entry)
                 if native_fault=='unknown':raise RuntimeError('inert unknown native original')
                 files[WORK/'normal-ui'/U.admission_name(name)]=R.canonical(row)
                 return subprocess.CompletedProcess(argv,86 if native_fault=='nonzero' else 0,out,b'')
@@ -697,6 +755,26 @@ class CandidateUIMainTests(unittest.TestCase):
         self.assertEqual(len(books[0].attempts),len(set(books[0].attempts)))
         self.assertFalse(any(p.name==name+'.status' for p in files if name not in previous))
         return value,effects,quotas[0].reserved
+
+    def test_actual_entry_main_both_targets_69_originals_and_failure_barriers(self):
+        for target in (N.ARM_TARGET, N.INTEL_TARGET):
+            for phase in (*U.ENTRY_PHASES, 'result'):
+                value, effects, count = self.exercise(phase, target, entry=True)
+                self.assertEqual(value['cohort'], 'entry')
+                self.assertEqual((value['applicationSource'], value['harnessSource']), ('a'*40, 'a'*40))
+                self.assertEqual(value['helperSource'], 'd'*40)
+                self.assertEqual(effects, [] if phase == 'result' else ['native-cli'])
+                self.assertFalse(value['applicationsEntryQualified'] or value['p0Qualified'] or value['productReady'])
+                if phase == 'result':
+                    self.assertEqual((count, value['totalTests'], value['ordinaryEntryTests']), (69, 1, 1))
+                    self.assertTrue(value['nativePickerCancelObserved'] and value['normalQuitCancelObserved'])
+                    self.assertNotIn('applicationsLaunchObservations', value)
+            value, effects, _ = self.exercise('summary', target, entry=True, unknown_close=True)
+            self.assertIsNone(value); self.assertEqual(effects, ['native-cli'])
+            for fault in ('unknown', 'nonzero', 'post', 'prior-status', 'prior-source'):
+                value, effects, _ = self.exercise('test', target, entry=True, native_fault=fault)
+                self.assertIsNone(value)
+                self.assertEqual(effects, [] if fault.startswith('prior-') else ['native-cli'])
 
     def test_actual_main_both_targets_first_and_full_result_with_lifetime_quota(self):
         for target in (N.ARM_TARGET,N.INTEL_TARGET):
@@ -779,6 +857,20 @@ class CandidateUICleanupTests(unittest.TestCase):
             self.assertNotIn('PRIVATE_SENTINEL',R.canonical(data).decode())
         self.assertEqual(U.failure_data(R.Refused('candidate-ui-original-cli-nonzero'),'project-test')['reason'],
                          'candidate-ui-original-cli-nonzero')
+
+    def test_real_entry_cleanup_preserves_other_cohorts_and_finite_diagnostics(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)/'normal-ui'; root.mkdir(mode=0o700)
+            for name in ('DerivedData', 'tmp', 'test.xcresult'):
+                (root/name).mkdir(); (root/name/'inert').write_bytes(b'DATA')
+            for phase in U.ENTRY_PHASES:
+                for suffix in ('.stdout', '.stderr'): (root/(phase+suffix)).write_bytes(b'inert')
+            retained = ('applications-test.xcresult', 'test.failure-diagnostics.json',
+                        'summary.failure-diagnostics.json', 'test.runner-admission.json', 'summary.command-admission.json')
+            for name in retained: (root/name).write_bytes(b'retained')
+            U.cleanup_outputs(root, R.identity(root.stat())[:5], N.PhaseClock(30), entry=True)
+            self.assertEqual(sorted(p.name for p in root.iterdir()), sorted(retained))
 
     def test_real_ios_cohort_cleanup_retires_only_its_original_harness_outputs(self):
         import tempfile
