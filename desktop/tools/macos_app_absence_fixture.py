@@ -17,12 +17,20 @@ PHASE_NAMES = (
 )
 CARRIER_NAMES = ("Install.pkg", "producer.json", "producer.sig") + PHASE_NAMES
 TARGETS = ("aarch64-apple-darwin", "x86_64-apple-darwin")
-POSTINSTALL = (
-    b"#!/bin/sh\n"
-    b"set -eu\n"
-    b'd="${0%/*}"\n'
-    b'exec "$d/mrk-macos-app-absence-fixture" "$d/input" "$1"\n'
+POSTINSTALL_ENTRY = (
+    b'#!/bin/sh\n'
+    b'set -eu\n'
+    b'umask 077\n'
+    b'[ "${3:-}" = / ] || exit 1\n'
+    b'case "${1:-}" in /*) ;; *) exit 1 ;; esac\n'
+    b'case "$0" in\n'
+    b'    ./postinstall) scripts=. ;;\n'
+    b'    /*/postinstall) scripts=${0%/*} ;;\n'
+    b'    *) exit 1 ;;\n'
+    b'esac\n'
+    b'cd -P "$scripts" 2>/dev/null || exit 1\n'
 )
+POSTINSTALL = POSTINSTALL_ENTRY + b'exec ./mrk-macos-app-absence-fixture "$PWD/input" "$1"\n'
 
 
 def need(condition, reason):
@@ -217,8 +225,7 @@ RECOVERY_REF = "refs/heads/verify/desktop-macos-restore-chain-fixture"
 CUTS = ("app-write", "own-attempt", "stage-move")
 CUT_PACKAGES = ("MRK-Restore-AppWrite.pkg", "MRK-Restore-OwnAttempt.pkg", "MRK-Restore-StageMove.pkg")
 RECOVERY_PHASES = ("recovery-cut-1", "recovery-cut-2", "recovery-cut-3", "recovered")
-CUT_POSTINSTALL = (b'#!/bin/sh\nset -eu\nd="${0%/*}"\np="${1%/*}/Install.pkg"\n'
-                   b'exec "$d/mrk-macos-install" "$d/input" "$p"\n')
+CUT_POSTINSTALL = POSTINSTALL_ENTRY + b'p="${1%/*}/Install.pkg"\nexec ./mrk-macos-install "$PWD/input" "$p"\n'
 
 
 def recovery_mode(op):
@@ -591,7 +598,7 @@ def script_quote(rows, program_bytes, inventory_bytes):
     need(type(rows) is dict and 0 < len(rows) <= 4096 and type(program_bytes) is int and 0 < program_bytes <= 64*MIB
          and type(inventory_bytes) is int and 0 < inventory_bytes <= PRODUCT_LIMIT,
          "app-absence-script-quote")
-    payload = sum(row["size"] for row in rows.values()) + program_bytes + len(POSTINSTALL) + inventory_bytes
+    payload = sum(row["size"] for row in rows.values()) + program_bytes + max(len(POSTINSTALL), len(CUT_POSTINSTALL)) + inventory_bytes
     odc = payload + (len(rows) * 3 + 16) * 1200
     quote = odc + odc // 1000 + 65536 + 4*MIB
     need(quote <= PRODUCT_LIMIT, "app-absence-fixture-ineligible")

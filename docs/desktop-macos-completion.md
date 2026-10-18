@@ -4,6 +4,27 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
+Latest consumer `39126901753/1` at helper `3dc97ec6` failed both ARM ordinary
+Applications and pending-iOS at Open-project readiness, before project journeys.
+Both pre-wait samples saw the control disabled and hittable; neither identifies
+an internal owner or loading reason. Earlier Applications success remains valid
+for its run, but repeatability is not established. The settings-role and later
+clock-error fixes were not reached; do not count them as native passes.
+
+Restore `39125144371/1` reached a completed native `input-type` refusal before
+producer verification. Its nonshipping hooks passed logical/relative script
+paths into the strict nofollow walker, unlike the shipping physical-directory
+hook. Both fixture hooks now adopt the shipping `cd -P` preparation, retaining
+target, fixed entry, absolute package, type/link and ownership checks. Exact
+script admission and the conservative source-byte quote agree. Independent
+review accepted this correction; the one affected existing regression passed
+with twelve real inert shell invocations (0.959s, no skips). This proves the
+source-path correction, not the identity of the original failing native leaf.
+The next consumer selects Restore only, reusing the signed app. Startup is
+being investigated independently rather than rerunning the same failing UI.
+
+Earlier observations below are source/run-specific history:
+
 Focused consumer `39125144371/1` at helper `8bae2e1c` passed ARM installation,
 Applications launch/dashboard/quit and its summary against the unchanged signed
 `fcb1aa46` app. Its two project journeys then failed: local edits at configuration

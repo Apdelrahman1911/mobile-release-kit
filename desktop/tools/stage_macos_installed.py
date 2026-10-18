@@ -3793,11 +3793,24 @@ def app_absence_scripts_data(scripts, expected_program, expected_inventory, *, r
     need(restore_cut is None or restore_cut in ("app-write", "own-attempt", "stage-move"), "restore-chain-script-purpose")
     """One nonshipping role, never arbitrary scripts or an ordinary parser exception."""
     need(type(scripts) is dict and sha(expected_program) and sha(expected_inventory), "app-absence-scripts-shape")
-    fixed = b'#!/bin/sh\nset -eu\nd="${0%/*}"\nexec "$d/mrk-macos-app-absence-fixture" "$d/input" "$1"\n'
+    entry = (
+        b'#!/bin/sh\n'
+        b'set -eu\n'
+        b'umask 077\n'
+        b'[ "${3:-}" = / ] || exit 1\n'
+        b'case "${1:-}" in /*) ;; *) exit 1 ;; esac\n'
+        b'case "$0" in\n'
+        b'    ./postinstall) scripts=. ;;\n'
+        b'    /*/postinstall) scripts=${0%/*} ;;\n'
+        b'    *) exit 1 ;;\n'
+        b'esac\n'
+        b'cd -P "$scripts" 2>/dev/null || exit 1\n'
+    )
+    fixed = entry + b'exec ./mrk-macos-app-absence-fixture "$PWD/input" "$1"\n'
     program_name = "mrk-macos-app-absence-fixture"
     if restore_cut is not None:
         program_name = "mrk-macos-install"
-        fixed = b'#!/bin/sh\nset -eu\nd="${0%/*}"\np="${1%/*}/Install.pkg"\nexec "$d/mrk-macos-install" "$d/input" "$p"\n'
+        fixed = entry + b'p="${1%/*}/Install.pkg"\nexec ./mrk-macos-install "$PWD/input" "$p"\n'
     need(scripts.get("postinstall") == (fixed, 0o555)
          and set(name for name in scripts if not name.startswith("input/")) == {"postinstall", program_name},
          "app-absence-scripts-roster")

@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 from types import MappingProxyType, SimpleNamespace
 import unittest
@@ -793,6 +794,58 @@ class RestoreChainFixtureData(unittest.TestCase):
         for cut in (None, 'any', True):
             with self.assertRaises(stager.Refused):
                 stager.app_absence_scripts_data(rows, FIXTURE.digest(program), FIXTURE.digest(inventory), restore_cut=cut)
+
+        observer = dict(rows)
+        observer['postinstall'] = (FIXTURE.POSTINSTALL, 0o555)
+        del observer['mrk-macos-install']
+        observer[FIXTURE.FIXTURE_EXECUTABLE] = (program, 0o555)
+        stager.app_absence_scripts_data(observer, FIXTURE.digest(program), FIXTURE.digest(inventory))
+        for script, base_rows, cut in ((FIXTURE.POSTINSTALL, observer, None),
+                                      (FIXTURE.CUT_POSTINSTALL, rows, FIXTURE.CUTS[0])):
+            wrong = dict(base_rows)
+            wrong['postinstall'] = (script.replace(b'cd -P "$scripts"', b'cd "$scripts"'), 0o555)
+            with self.assertRaises(stager.Refused):
+                stager.app_absence_scripts_data(wrong, FIXTURE.digest(program), FIXTURE.digest(inventory), restore_cut=cut)
+
+        # Real shell, inert helper only: physical input spelling and unchanged
+        # package derivation precede the unchanged native nofollow/type policy.
+        with tempfile.TemporaryDirectory(prefix="mrk-app-absence-hook-") as directory:
+            root = Path(directory).resolve()
+            physical = root / "physical scripts"; physical.mkdir()
+            alias = root / "logical scripts"; alias.symlink_to(physical, target_is_directory=True)
+            (physical / "input").mkdir()
+            stub = (b'#!/bin/sh\n[ "$#" -eq 2 ] || exit 98\n'
+                    b'printf "%s\\n" "$1" "$2"\numask\nexit 23\n')
+            environment = {"PATH": "/usr/bin:/bin"}
+            for script, executable, package, expected in (
+                    (FIXTURE.POSTINSTALL, FIXTURE.FIXTURE_EXECUTABLE,
+                     "/Volumes/Fixed Carrier/MRK-AppAbsence-Baseline.pkg",
+                     "/Volumes/Fixed Carrier/MRK-AppAbsence-Baseline.pkg"),
+                    (FIXTURE.CUT_POSTINSTALL, "mrk-macos-install",
+                     "/Volumes/Fixed Carrier/MRK-Restore-AppWrite.pkg", "/Volumes/Fixed Carrier/Install.pkg")):
+                hook = physical / "postinstall"; hook.write_bytes(script); hook.chmod(0o555)
+                helper = physical / executable; helper.write_bytes(stub); helper.chmod(0o555)
+                for invocation, cwd in ((str(alias / "postinstall"), root), ("./postinstall", alias)):
+                    returned = subprocess.run(["/bin/sh", invocation, package, "/", "/"],
+                        cwd=cwd, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        timeout=5, check=False)
+                    self.assertEqual(returned.returncode, 23)
+                    self.assertEqual(returned.stderr, b"")
+                    lines = returned.stdout.splitlines()
+                    self.assertEqual(lines[:2], [str(physical / "input").encode(), expected.encode()])
+                    self.assertEqual(len(lines), 3)
+                    self.assertEqual(int(lines[2], 8), 0o077)
+                wrong_entry = physical / "other"; wrong_entry.write_bytes(script); wrong_entry.chmod(0o555)
+                for invocation, arguments in (
+                        (str(wrong_entry), [package, "/", "/"]),
+                        (str(hook), [package, "/", "/not-root"]),
+                        (str(hook), ["relative.pkg", "/", "/"]),
+                        (str(hook), [])):
+                    returned = subprocess.run(["/bin/sh", invocation, *arguments], cwd=root,
+                        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False)
+                    self.assertEqual(returned.returncode, 1)
+                    self.assertEqual((returned.stdout, returned.stderr), (b"", b""))
+                hook.unlink(); helper.unlink(); wrong_entry.unlink()
 
     def test_whole_fixed_chain_requires_each_observer_and_preserves_ambiguous_failure(self):
         # Actual adapter order/dispatch/return/proof/finish functions. Only the
