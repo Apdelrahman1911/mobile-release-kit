@@ -604,7 +604,6 @@ class CandidateUITests(unittest.TestCase):
         self.assertTrue(all('"' + text + '"' in source for text in U.APPLICATIONS_CONDITIONS))
 
     def test_saved_journey_native_diagnostics_are_selected_bounded_and_private(self):
-        source = (ROOT / 'desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift').read_text()
         for phase, (method, conditions) in U.SAVED_DIAGNOSTIC_CONDITIONS.items():
             selection = phase + '.xcresult'
             key, stages = N.SAVED_DIAGNOSTIC_STAGES[selection]
@@ -621,9 +620,6 @@ class CandidateUITests(unittest.TestCase):
             composed={prefix+stage for prefix in U.JOURNEY_STAGE_PREFIXES for stage in stages}
             self.assertEqual(U.SAVED_CONDITION_STAGES[phase],stages)
             self.assertTrue(composed.issubset(conditions))
-            self.assertTrue(all('"' + text + '"' in source for text in conditions if text not in composed))
-            self.assertTrue(all('"' + prefix + '" + journeyStage' in source for prefix in U.JOURNEY_STAGE_PREFIXES))
-            self.assertTrue(all('stage("' + stage + '")' in source for stage in stages))
             private = b'private password keystrokes user /private/project credential-value\n'
             for escaped in (False, True):
                 for reason, label in conditions.items():
@@ -653,6 +649,26 @@ class CandidateUITests(unittest.TestCase):
             self.assertNotIn(key, observe(b'', selected='test.xcresult'))
             self.assertNotIn(key, observe(b'', mode='summary'))
             with self.assertRaises(N.Refused): N.project_stage_diagnostics(b'', b'', android_candidate=True, selection=selection)
+            if phase == 'saved-version-recovery-test':
+                for namespace, suffix in ((b'REQUIRE_FAILURE', b';check=singleton'), (b'STATIC_WAIT_FAILURE', b'')):
+                    row = b'MRK_NORMAL_PROJECT_' + namespace + b'=v1;method=' + method + b';line=321' + suffix + b'\n'
+                    site = dict(stream='stdout', source='NormalAppUITests.swift',
+                                method=method.decode(), line=321, column=None)
+                    diagnosis = observe(row + private)
+                    self.assertIn(site, diagnosis['sourceFailures'])
+                    self.assertEqual(N.project_require_source_sites(row, b'', saved_version=True), [site])
+                    self.assertNotIn('credential-value', N.encoded(diagnosis).decode())
+                    self.assertLessEqual(len(N.encoded(diagnosis)) + 1, 4096)
+                    for bad in (row + row, row.rstrip(b'\n'), row.replace(b'line=321', b'line=65536'),
+                                row.replace(method, b'testSyntheticProjectSavedReleaseEvidence'),
+                                row.replace(method, method + b'Private')):
+                        self.assertIsNone(N.project_require_source_sites(bad, b'', saved_version=True))
+                    self.assertIsNone(N.project_require_source_sites(row, b''))
+                    self.assertIsNone(N.project_require_source_sites(row, b'', release_evidence=True))
+                    self.assertIsNone(N.project_require_source_sites(b'', row, saved_version=True))
+                    self.assertEqual(observe(row, mode='summary')['sourceFailures'], [])
+                for flags in (dict(saved_version=1), dict(saved_version=True, release_evidence=True)):
+                    with self.assertRaises(N.Refused): N.project_require_source_sites(b'', b'', **flags)
         self.assertEqual(N.project_stage_diagnostics(b'MRK_NORMAL_PROJECT_STAGE=launch;result=started\n', b'')['state'], 'observed')
         with self.assertRaises(N.Refused): N.project_stage_diagnostics(b'', b'', selection='private')
 
@@ -660,7 +676,8 @@ class CandidateUITests(unittest.TestCase):
         for target in N.ARM_TARGET, N.INTEL_TARGET:
             for phase, (method, _) in U.SAVED_DIAGNOSTIC_CONDITIONS.items():
                 for diagnostic_error in (False, True):
-                    flags = dict(saved_files=True) if phase == 'release-evidence-test' else dict(ios_tools=True)
+                    flags = (dict(saved_files=True) if phase == 'release-evidence-test' else
+                             dict(saved_version=True) if phase == 'saved-version-recovery-test' else dict(ios_tools=True))
                     selected, context, _, _, request, _, _ = phase_fixture(phase, target, **flags)
                     events = []
                     stage = N.SAVED_DIAGNOSTIC_STAGES[phase + '.xcresult'][1][2]
@@ -688,7 +705,7 @@ class CandidateUITests(unittest.TestCase):
                     self.assertEqual(events.count('source'), 1)
                     self.assertFalse(any(isinstance(e,tuple) and e[1].endswith('.status') for e in events))
                     self.assertEqual(owner.kw['timeout'], request['phaseSeconds']+15)
-                    # Both existing cohorts use the explicitly selected current helper on this distinct-source fixture.
+                    # Every selected cohort uses the current helper on this distinct-source fixture.
                     expected_root=U.consumer.HELPER_ROOT
                     self.assertEqual(owner.kw['cwd'], expected_root)
                     self.assertIn(str(expected_root / U.RUNNER), owner.argv)

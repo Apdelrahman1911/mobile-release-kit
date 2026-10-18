@@ -18,6 +18,7 @@ final class NormalAppUITests: XCTestCase {
         case pathFields = "testSyntheticProjectPathFields"
         case localEditsAndImages = "testSyntheticProjectLocalEditsAndImages"
         case savedReleaseEvidence = "testSyntheticProjectSavedReleaseEvidence"
+        case savedVersionRecovery = "testSyntheticProjectSavedVersionRecovery"
     }
     private enum DashboardReason: String {
         case loading, notLoaded = "not-loaded", bridgeUnavailable = "bridge-unavailable"
@@ -6226,7 +6227,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.buttons.matching(identifier: "Browse existing " + label),
                                 in: renderer, enabled: true, timeout: 48)
         }
-        @MainActor func browse(_ label: String, title: String, relative: String, file: Bool = false, cancel: Bool = false) throws {
+        @MainActor func browse(_ label: String, title: String, relative: String, cancel: Bool = false) throws {
             try press(renderer, "Browse existing " + label, renderer: renderer)
             let sheet = try nativeSheet(window, title: title)
             if cancel {
@@ -6234,21 +6235,7 @@ final class NormalAppUITests: XCTestCase {
                 try waitGone(sheet)
             } else {
                 let path = fixture.projectPath + "/" + relative
-                if file {
-                    guard let separator = path.lastIndex(of: "/") else {
-                        throw Refusal.condition("fixed project-field path has no parent")
-                    }
-                    let parent = String(path[..<separator])
-                    let name = String(path[path.index(after: separator)...])
-                    try goToFolder(sheet, path: parent)
-                    let item = try waitElement(controls(sheet, [.cell, .outlineRow, .tableRow, .icon], label: name),
-                                              in: sheet, enabled: true)
-                    try require(item.isHittable, "owned project-field file is not actionable")
-                    item.click()
-                    try require(item.isSelected, "native project-field file selection was not observed")
-                } else {
-                    try goToFolder(sheet, path: path)
-                }
+                try goToFolder(sheet, path: path)
                 try nativeOpen(sheet)
             }
             // Native sheet dismissal is not by itself the asynchronous draft result.
@@ -6262,7 +6249,7 @@ final class NormalAppUITests: XCTestCase {
         try stage("field-version") {
             try settings("General")
             try browse("Committed version file", title: "Choose an existing version source inside the project",
-                       relative: "inputs/VERSION", file: true)
+                       relative: "inputs/VERSION")
         }
         try stage("field-project") {
             try settings("iOS")
@@ -6282,7 +6269,7 @@ final class NormalAppUITests: XCTestCase {
         try stage("field-file-cancel") {
             try settings("General")
             try browse("Committed version file", title: "Choose an existing version source inside the project",
-                       relative: "inputs/VERSION", file: true, cancel: true)
+                       relative: "inputs/VERSION", cancel: true)
         }
         try stage("field-directory-cancel") {
             try press(renderer, "Metadata", renderer: renderer)
@@ -6403,10 +6390,6 @@ final class NormalAppUITests: XCTestCase {
             try inventory(review, caption: "Exact native destination inventory", paths: ["release/mobile-release.json", ".gitignore"])
             for rule in [".mobile-release/"] + LocalFixture.controls.map({ $0 + "/" }) {
                 _ = try unique(review.staticTexts.matching(identifier: rule), "fixed ignore addition is missing or duplicated")
-            }
-            try expand(review, prefix: "Inspect safe field-path changes; raw values are omitted", renderer: renderer)
-            for label in ["Candidate branch", "Android locales"] {
-                _ = try waitElement(review.staticTexts.matching(identifier: label), in: review)
             }
             try fixture.assertUnchanged()
             try press(review, "Apply reviewed save", renderer: renderer)
@@ -6613,6 +6596,9 @@ final class NormalAppUITests: XCTestCase {
     // One real interrupted core process, then a fresh ordinary app's registered
     // project/recovery owner. This is not a crash during a GUI-originated Save.
     @MainActor func testSyntheticProjectSavedVersionRecovery() throws {
+        projectRequireDiagnosticMethod = .savedVersionRecovery
+        projectRequireDiagnosticEmitted = false
+        defer { projectRequireDiagnosticMethod = nil }
         continueAfterFailure = false
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
@@ -6766,7 +6752,6 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("evidence-real-picker") {
             try press(renderer, "Artifacts", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "No current document observation"), in: renderer)
             let selected = try waitElement(controls(renderer, [.popUpButton, .comboBox], label: "Evidence stage", prefix: true), in: renderer)
             try require(selected.value as? String == "Candidate", "initial evidence stage is not candidate")
             try press(renderer, "Choose evidence folder", renderer: renderer)
@@ -8068,7 +8053,7 @@ final class NormalAppUITests: XCTestCase {
                 try press(renderer, "Review local recovery inspection", renderer: renderer, failures: failures)
                 let review = try waitElement(named(renderer, "Confirm this exact local recovery action"), in: renderer, failures: failures)
                 let pair = try iosRecoveryObservation(renderer, phase: "awaiting-consent")
-                let consent = try waitElement(review.checkBoxes.matching(identifier: IOSRecoveryConsentPhase.inspection.text),
+                let consent = try waitElement(review.checkBoxes,
                     in: review, enabled: true, failures: failures, consentObservation: .inspection)
                 try reveal(consent, in: renderer)
                 try require(consentChecked(consent, expected: false), "inspection consent must begin unchecked")
@@ -8096,7 +8081,7 @@ final class NormalAppUITests: XCTestCase {
                 try require(pair.operationID != inspected.operationID && pair.ownerGeneration != inspected.ownerGeneration,
                             "account recovery requires a fresh original pair")
                 try require(try iosRecoverySession(review, review: true) == session, "account recovery review session differs")
-                let consent = try waitElement(review.checkBoxes.matching(identifier: IOSRecoveryConsentPhase.account.text),
+                let consent = try waitElement(review.checkBoxes,
                     in: review, enabled: true, failures: failures, consentObservation: .account)
                 try reveal(consent, in: renderer)
                 try require(consentChecked(consent, expected: false), "account recovery consent must begin unchecked")

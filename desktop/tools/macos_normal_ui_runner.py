@@ -3928,11 +3928,13 @@ def project_wait_condition(message):
     return None
 
 
-def project_require_source_sites(stdout, stderr, *, release_evidence=False):
+def project_require_source_sites(stdout, stderr, *, release_evidence=False, saved_version=False):
     """First-latched SOURCE sites for the exact selected cohort, never error prose."""
-    need(type(release_evidence) is bool, "source-site-selection")
+    need(type(release_evidence) is bool and type(saved_version) is bool
+         and not (release_evidence and saved_version), "source-site-selection")
     namespace = b"MRK_NORMAL_PROJECT_"
-    methods = ((b"testSyntheticProjectSavedReleaseEvidence",) if release_evidence else
+    methods = ((b"testSyntheticProjectSavedVersionRecovery",) if saved_version else
+               (b"testSyntheticProjectSavedReleaseEvidence",) if release_evidence else
                (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages"))
     pattern = (re.escape(namespace) + rb"(REQUIRE_FAILURE|STATIC_WAIT_FAILURE)=v1;method=(" + b"|".join(methods)
                + rb");line=([1-9][0-9]{0,4})(?:;check=(condition|singleton|actionable))?")
@@ -4010,6 +4012,7 @@ ANDROID_CANDIDATE_STAGES = tuple("android-private-admission android-public-proje
 
 
 SAVED_DIAGNOSTIC_STAGES = {
+    "saved-version-recovery-test.xcresult": ("savedVersionProgress", tuple("saved-version-fixture saved-version-launch saved-version-project-open saved-version-inspect-close saved-version-reinspect-confirm saved-version-reload saved-version-readback-and-quit".split())),
     "release-evidence-test.xcresult": ("releaseEvidenceProgress", tuple("evidence-launch evidence-fixture evidence-project-open evidence-real-picker evidence-original-observation evidence-shared-navigation evidence-stage-and-cancel evidence-readback-and-quit".split())),
     "diagnostics-test.xcresult": ("diagnosticsProgress", tuple("diagnostics-launch diagnostics-fixture diagnostics-project-open diagnostics-context diagnostics-original-report diagnostics-readback-and-quit".split())),
 }
@@ -4543,9 +4546,10 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             else:
                 value["findingsTruncated"] = True
 
-    if "projectProgress" in value or "releaseEvidenceProgress" in value:
+    if "projectProgress" in value or "releaseEvidenceProgress" in value or "savedVersionProgress" in value:
         sites = project_require_source_sites(original.stdout, original.stderr,
-                                             release_evidence="releaseEvidenceProgress" in value)
+                                             release_evidence="releaseEvidenceProgress" in value,
+                                             saved_version="savedVersionProgress" in value)
         if sites is None:
             require_invalid = True
         else:

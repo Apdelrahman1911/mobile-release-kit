@@ -4,6 +4,43 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
+Consumer `39133256502/1` (`dacf5e9a`) completed all four ARM UI jobs with
+failures. The revised harness compiled and Android source-selection advanced
+through its retained/cancel/reselect/refused cases to the version-file picker.
+Configuration reached its prepared save preview and exact destination inventory.
+Neither whole project journey passed. The separate Restore job remains running;
+there is no duplicate Restore request in the next batch.
+
+The next UI batch removes two redundant presentation assertions: an empty-view
+heading and supplemental configuration field-label disclosure. Their native
+presentation interactions are deliberately **not qualified**, not marked passed.
+The actual preview inventory, chosen-stage identity, unchanged files, fresh
+consent and exact saved-result checks remain. Recovery now requires the single
+checkbox in the exact original review rather than matching its entire accessible
+caption; enabled, unchecked→one click→checked, original pair/session and specific
+Start checks remain unchanged. The native file picker uses its existing Go-to
+path editor and real Open action, then verifies the exact asynchronous relative
+field and unchanged files, avoiding a brittle table-cell accessibility selector.
+These are independently reviewed test changes, not demonstrated native fixes.
+
+Saved-version recovery previously lost its already-emitted stage/condition.
+The existing bounded diagnostic path now includes that exact cohort and method;
+no new observation framework. Two affected existing behavioral methods pass
+(the amended privacy method 0.182s, no skips); the obsolete source-literal
+assertion that first failed was removed, not replaced with an application change.
+A separate old partial-AST import in public failure tests was reproduced broken
+and simplified to the real passive module. Its actual changed classifier/receipt/
+privacy subsection passes; the whole legacy method was not rerun. Every local
+projection was removed and caller joined.
+
+Next native selection: four affected ARM UI cohorts and the existing Intel
+Applications-entry cohort, against the same signed `fcb1aa46` candidates. No
+application rebuild/signing/notarization. The prior standalone Restore continues
+at its original source. Installation alone is not full UI, update or readiness
+acceptance; no main change or public release is authorized.
+
+### Previous source-specific checkpoint
+
 The signed `fcb1aa46` application is unchanged. Consumer `39131604738/1`
 (`16ae7af7`) completed with all three selected ARM jobs failing. Ordinary
 Applications launch/quit passed before project tests. Configuration reached an

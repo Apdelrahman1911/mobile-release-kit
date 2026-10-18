@@ -522,6 +522,28 @@ JOURNEY_CONDITIONS = {
     "selected value was not observed": "selection-readback",
 }
 SAVED_DIAGNOSTIC_CONDITIONS = {
+    "saved-version-recovery-test": (b"testSyntheticProjectSavedVersionRecovery", {
+        **JOURNEY_CONDITIONS,
+        "ordinary recovery launch returned no original": "launch-original-missing",
+        "recovery selected project differs": "project-path",
+        "exact rollback action absent": "rollback-action",
+        "version recovery effect differs": "recovery-effect",
+        "recovery review digest differs": "review-digest",
+        "recovery byte/mode facts unavailable": "review-byte-mode",
+        "recovery private cleanup scope differs": "cleanup-scope",
+        "closed original recovery review still permits Apply": "closed-review-apply",
+        "confirmation journal is not the original": "confirmation-journal",
+        "recovery Apply is ambiguous": "apply-control",
+        "recovery Apply began enabled without consent": "apply-consent",
+        "recovery consent started checked": "consent-initial",
+        "recovery typed confirmation was not required": "typed-confirmation",
+        "fresh saved version is not the restored original": "saved-version-readback",
+        "fresh saved build is not the restored original": "saved-build-readback",
+        "normal affirmative Quit unavailable": "quit-action-unavailable",
+        "review inventory row count differs": "review-inventory-count",
+        "fixed review path is missing or repeated": "review-inventory-path",
+    }),
+
     "release-evidence-test": (b"testSyntheticProjectSavedReleaseEvidence", {
         **JOURNEY_CONDITIONS,
         "ordinary launch returned no original": "launch-original-missing",
@@ -575,6 +597,7 @@ JOURNEY_STAGE_PREFIXES = {
     "unexpected original native sheet title in ": "native-sheet-title",
 }
 SAVED_CONDITION_STAGES = {
+    "saved-version-recovery-test": tuple("saved-version-fixture saved-version-launch saved-version-project-open saved-version-inspect-close saved-version-reinspect-confirm saved-version-reload saved-version-readback-and-quit".split()),
     "release-evidence-test": tuple("evidence-launch evidence-fixture evidence-project-open evidence-real-picker evidence-original-observation evidence-shared-navigation evidence-stage-and-cancel evidence-readback-and-quit".split()),
     "diagnostics-test": tuple("diagnostics-launch diagnostics-fixture diagnostics-project-open diagnostics-context diagnostics-original-report diagnostics-readback-and-quit".split()),
 }
