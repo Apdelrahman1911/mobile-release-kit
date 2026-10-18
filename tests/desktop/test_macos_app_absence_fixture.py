@@ -294,14 +294,18 @@ class ThinRestoreProjectionData(unittest.TestCase):
 class MacAppAbsenceFixtureData(unittest.TestCase):
     def test_candidate_acquisition_materializes_full_p_and_exact_thin_tree(self):
         import sys
+        import io
+        import resource
         import time
-        for bad in (None, "app", "roster", "mode", "quote", "close"):
+        for bad in (None, "deep84", "deep96", "unlimited", "app", "roster", "mode", "quote", "external", "unknown", "book-error", "os-limit", "close"):
             with self.subTest(bad=bad), tempfile.TemporaryDirectory() as tmp:
                 work = Path(tmp); work.chmod(0o700); (work / "resume-carrier").mkdir(mode=0o700)
                 inventory = b"inert full signed inventory of 5001 leaves"
                 app = b"inert application leaf"
+                app_path = "app/" + "d/" * 14 + "program" if bad in ("deep84", "deep96") else "app/Contents/program"
+                successful = bad in (None, "deep84", "deep96", "unlimited")
                 rows = {"runtime/store/gem/f" + str(i):dict(size=1,sha256="f"*64,executable=False) for i in range(5000)}
-                rows["app/Contents/program"] = dict(size=len(app),sha256=hashlib.sha256(app).hexdigest(),executable=True)
+                rows[app_path] = dict(size=len(app),sha256=hashlib.sha256(app).hexdigest(),executable=True)
                 originals = {name:(body,0o444) for name,body in (("Install.pkg",b"unchanged signed P"),("producer.json",b"descriptor"),("producer.sig",b"signature"))}
                 origin = {key:dict(name=name,bytes=len(originals[name][0]),sha256=hashlib.sha256(originals[name][0]).hexdigest())
                           for key,name in (("package","Install.pkg"),("descriptor","producer.json"),("signature","producer.sig"))}
@@ -310,7 +314,7 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
                     observation_inventory_bytes=lambda *a,**k:rows,
                     install_product_members=lambda *a,**k: self.fail("duplicate full product decode"),
                     cpio_members=lambda *a,**k: self.fail("duplicate CPIO window"))
-                scripts = {"input/app/Contents/program": (b"changed" if bad=="app" else app, 0o444 if bad=="mode" else 0o555)}
+                scripts = {"input/" + app_path: (b"changed" if bad=="app" else app, 0o444 if bad=="mode" else 0o555)}
                 if bad == "roster": scripts["input/runtime/extra"] = (b"x", 0o444)
                 app_scripts = MappingProxyType(scripts)
                 now=time.monotonic_ns()
@@ -319,25 +323,52 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
                     selection=SimpleNamespace(),allocation_budget=lambda *a:None,decode_fixture_scripts=lambda body,live:body,candidate_root=work,
                     work=work/"resume-carrier",helper_source="a"*40,run_id="1",run_attempt="1",target=FIXTURE.TARGETS[0],
                     clock=SimpleNamespace(started=now,check=lambda:time.monotonic_ns()),
-                    quota=SimpleNamespace(reserved=70,books=[SimpleNamespace(entries=[dict(fd=1) for _ in range(90 if bad=="quote" else 60)])]))
+                    quota=SimpleNamespace(reserved=24575 if bad=="quote" else 96,
+                        books=[SimpleNamespace(errors=["inert error"] if bad=="book-error" else [],
+                            entries=[dict(fd=1,closed=False) for _ in range(97 if bad=="external" else 96 if bad=="deep96" else 84 if bad=="deep84" else 60)])]))
+                if bad == "unknown": session.quota.books[0].entries[0].update(fd=None,closed=False)
+                register=HELPER.Operation.register
+                peak=[0]
+                def registering(op,*args,**kwargs):
+                    entry=register(op,*args,**kwargs)
+                    peak[0]=max(peak[0],len([row for row in op.entries if row["fd"] is not None]))
+                    return entry
+                diagnostic=io.StringIO()
                 close=HELPER.Operation.close
                 def closing(op,entry):
                     close(op,entry)
                     if bad=="close" and entry.get("name")=="program":
                         entry["closed"]=False;op.errors.append(dict(stage="close",type="OSError"))
-                with patch.dict(sys.modules,{HELPER.__name__:HELPER}),patch.object(HELPER.Operation,"close",closing):
-                    if bad:
+                with patch.dict(sys.modules,{HELPER.__name__:HELPER}),patch.object(HELPER.Operation,"close",closing), \
+                        patch.object(HELPER.Operation,"register",registering), \
+                        patch.object(resource,"getrlimit",return_value=(-1,-1) if bad=="unlimited" else (159,256) if bad=="os-limit" else (256,256)), \
+                        contextlib.redirect_stderr(diagnostic):
+                    if not successful:
                         with self.assertRaises(ValueError): HELPER.candidate_materialize(session, originals, inventory, app_scripts)
-                        if bad in ("app","roster","mode","quote"):self.assertEqual(set(p.name for p in work.iterdir()),{"resume-carrier"})
+                        if bad in ("app","roster","mode","quote","external","unknown","book-error","os-limit"):self.assertEqual(set(p.name for p in work.iterdir()),{"resume-carrier"})
                         if bad=="close":self.assertTrue((work/"android-helper-prepare-app-absence").exists())
                     else:
                         HELPER.candidate_materialize(session, originals, inventory, app_scripts)
                         self.assertEqual((work/"input/install-inventory.json").read_bytes(),inventory)
-                        self.assertEqual((work/"input/app/Contents/program").read_bytes(),app)
-                        self.assertEqual((work/"input/app/Contents/program").stat().st_mode&0o777,0o555)
+                        self.assertEqual((work/"input"/app_path).read_bytes(),app)
+                        self.assertEqual((work/"input"/app_path).stat().st_mode&0o777,0o555)
                         self.assertEqual(list((work/"input/runtime").iterdir()),[])
                         for name,(body,_) in originals.items():self.assertEqual((work/"candidate-producer"/name).read_bytes(),body)
                         self.assertFalse((work/"android-helper-prepare-app-absence").exists())
+                        self.assertLessEqual(peak[0],19)
+                        if bad in ("deep84","deep96"):
+                            self.assertEqual(peak[0],19)
+                            self.assertGreater(peak[0]+len(session.quota.books[0].entries),96)
+                if bad in ("quote","os-limit"):
+                    line=diagnostic.getvalue()
+                    self.assertTrue(line.startswith("MRK_CANDIDATE_MATERIALIZE_ADMISSION="))
+                    facts=json.loads(line.split("=",1)[1])
+                    self.assertEqual(facts["liveLimit"],128)
+                    self.assertEqual(facts["lifetimeLimit"],24576)
+                    self.assertEqual(facts["osRequired"],160)
+                    self.assertTrue(all(type(value) is int for value in facts.values()))
+                    self.assertNotIn(str(work),line)
+                else: self.assertEqual(diagnostic.getvalue(),"")
                 # This test owns all small inert data, including refused output.
                 for path in work.rglob("*"):
                     if path.is_dir():path.chmod(0o700)

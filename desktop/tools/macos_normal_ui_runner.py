@@ -3755,6 +3755,8 @@ def failure_base(phase, selection, original, *, engineering=False):
     if not engineering and phase == "test" and selection == "project-test.xcresult":
         value["projectProgress"] = None
         value["projectIdentity"] = {"state": "absent", "sample": None}
+    if not engineering and phase == "test" and selection == IOS_PENDING_RESULT:
+        value["recoveryField"] = {"state": "absent", "sample": None}
     if not engineering and phase == "test" and selection == ANDROID_CANDIDATE_RESULT:
         value["androidCandidateProgress"] = None
         value["androidCandidateCondition"] = {"status": "unavailable", "condition": None}
@@ -3783,6 +3785,23 @@ def project_identity_diagnostics(stdout, stderr):
             if match is None or found: return {"state": "refused", "sample": None}
             found.append(dict(zip(("staticText", "anyRole", "androidCaption", "iosCaption"), map(int, match.groups()))))
     return {"state": "observed", "sample": dict(found[0], timing="pre-wait", countsCappedAt=5, nonAtomic=True)} if found else {"state": "absent", "sample": None}
+
+
+def recovery_field_diagnostics(stdout, stderr):
+    """Pending-only fixed-caption counts; no accessible field values."""
+    need(type(stdout) is bytes and type(stderr) is bytes and len(stdout)+len(stderr) <= 1024*1024,
+         "normal-recovery-field-original")
+    prefix = b"MRK_NORMAL_RECOVERY_FIELD"
+    sample = None
+    for stream, body in (("stdout", stdout), ("stderr", stderr)):
+        for record in body.splitlines(keepends=True):
+            if prefix not in record: continue
+            match = re.fullmatch(re.escape(prefix) + rb"=v1;phase=(awaiting-consent|terminal);field=(operation-id|owner-generation|phase|outcome|reason);sample=pre-check;exactPrefix=([0-5]);trimmedPrefix=([0-5]);captionOnly=([0-5]);anyPrefix=([0-5]);nonAtomic=1\r?\n", record) if stream == "stdout" else None
+            if match is None or sample is not None: return {"state": "refused", "sample": None}
+            phase, field, *counts = match.groups()
+            sample = dict(zip(("exactPrefix", "trimmedPrefix", "captionOnly", "anyPrefix"), map(int, counts)),
+                          phase=phase.decode("ascii"), field=field.decode("ascii"), timing="pre-check", countsCappedAt=5, nonAtomic=True)
+    return {"state": "observed", "sample": sample} if sample is not None else {"state": "absent", "sample": None}
 
 
 def panel_topology_diagnostics(stdout, stderr):
@@ -4777,6 +4796,12 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         if value["projectIdentity"]["state"] == "refused": value["findingsTruncated"] = True
         if len(encoded(value)) + 1 > 4096:
             del value["projectIdentity"]
+            value["findingsTruncated"] = True
+    if "recoveryField" in value:
+        value["recoveryField"] = recovery_field_diagnostics(original.stdout, original.stderr)
+        if value["recoveryField"]["state"] == "refused": value["findingsTruncated"] = True
+        if len(encoded(value)) + 1 > 4096:
+            del value["recoveryField"]
             value["findingsTruncated"] = True
     if "panelTopology" in value:
         value["panelTopology"] = panel_topology_diagnostics(original.stdout, original.stderr)

@@ -540,6 +540,24 @@ SAVED_DIAGNOSTIC_CONDITIONS = {
 }
 
 
+# Exact SOURCE-composed reasons: finite stages only, never a prefix allowance.
+JOURNEY_STAGE_PREFIXES = {
+    "original case deadline missing in ": "original-case-clock-missing",
+    "terminal UI refusal in ": "terminal-ui-refusal",
+    "missing or ambiguous expected control in ": "expected-control-missing-or-ambiguous",
+    "owned UI did not dismiss in ": "owned-ui-dismissal",
+    "expected renderer control could not be revealed in ": "renderer-control-reveal",
+    "unexpected original native sheet title in ": "native-sheet-title",
+}
+SAVED_CONDITION_STAGES = {
+    "release-evidence-test": tuple("evidence-launch evidence-fixture evidence-project-open evidence-real-picker evidence-original-observation evidence-shared-navigation evidence-stage-and-cancel evidence-readback-and-quit".split()),
+    "diagnostics-test": tuple("diagnostics-launch diagnostics-fixture diagnostics-project-open diagnostics-context diagnostics-original-report diagnostics-readback-and-quit".split()),
+}
+for _phase, _stages in SAVED_CONDITION_STAGES.items():
+    SAVED_DIAGNOSTIC_CONDITIONS[_phase][1].update({prefix + stage: label
+        for prefix, label in JOURNEY_STAGE_PREFIXES.items() for stage in _stages})
+
+
 def saved_condition_diagnostic(stdout, stderr, phase):
     method, conditions = SAVED_DIAGNOSTIC_CONDITIONS[phase]
     return _selected_condition_diagnostic(stdout, stderr, method, conditions)

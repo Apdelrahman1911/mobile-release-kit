@@ -558,7 +558,11 @@ class CandidateUITests(unittest.TestCase):
                         + quote.encode() + b')\n')
             def observe(body, err=b'', selected=selection, mode='test'):
                 return N.normal_failure_diagnostics(mode, selected, subprocess.CompletedProcess([], 65, body, err))
-            self.assertTrue(all('"' + text + '"' in source for text in conditions))
+            composed={prefix+stage for prefix in U.JOURNEY_STAGE_PREFIXES for stage in stages}
+            self.assertEqual(U.SAVED_CONDITION_STAGES[phase],stages)
+            self.assertTrue(composed.issubset(conditions))
+            self.assertTrue(all('"' + text + '"' in source for text in conditions if text not in composed))
+            self.assertTrue(all('"' + prefix + '" + journeyStage' in source for prefix in U.JOURNEY_STAGE_PREFIXES))
             self.assertTrue(all('stage("' + stage + '")' in source for stage in stages))
             private = b'private password keystrokes user /private/project credential-value\n'
             for escaped in (False, True):
@@ -571,6 +575,10 @@ class CandidateUITests(unittest.TestCase):
                     self.assertEqual(U.saved_condition_diagnostic(body, b'', phase),
                                      dict(status='classified', condition=label))
                     self.assertNotIn('credential-value', N.encoded(diagnosis).decode())
+            other_stage='diagnostics-project-open' if phase=='release-evidence-test' else 'evidence-project-open'
+            for prefix in U.JOURNEY_STAGE_PREFIXES:
+                for bad in (prefix+'PRIVATE-secret',prefix+stages[2]+' PRIVATE',prefix+other_stage):
+                    self.assertEqual(U.saved_condition_diagnostic(record(bad),b'',phase),dict(status='unavailable',condition=None))
             body = record('ordinary first-party renderer did not appear')
             for bad in (body + body, body.rstrip(b'\n'), body.replace(b': error:', b': note:'),
                         body.replace(method, method + b'Other'), record('PRIVATE credential-value'),
@@ -595,10 +603,10 @@ class CandidateUITests(unittest.TestCase):
                     flags = dict(saved_files=True) if phase == 'release-evidence-test' else dict(ios_tools=True)
                     selected, context, _, _, request, _, _ = phase_fixture(phase, target, **flags)
                     events = []
-                    stage = N.SAVED_DIAGNOSTIC_STAGES[phase + '.xcresult'][1][0]
+                    stage = N.SAVED_DIAGNOSTIC_STAGES[phase + '.xcresult'][1][2]
                     body = ('MRK_NORMAL_PROJECT_STAGE=' + stage + ';result=failed;laterStages=not-run\n').encode()
                     body += b'NormalAppUITests.swift:4630: error: -[MRKNormalAppUITests.NormalAppUITests ' + method
-                    body += b'] : threw error condition("ordinary first-party renderer did not appear")\n'
+                    body += b'] : threw error condition("missing or ambiguous expected control in ' + stage.encode() + b'")\n'
                     body += b'PRIVATE secure-field input must not be public\n'
                     class Book:
                         def __init__(self): self.entries=[]; self.directories={WORK/'normal-ui':{}}
@@ -630,7 +638,7 @@ class CandidateUITests(unittest.TestCase):
                     if diagnostic_error: self.assertNotIn('selectedJourney', U.NATIVE_DIAGNOSTIC or {})
                     else:
                         self.assertEqual(U.NATIVE_DIAGNOSTIC['selectedJourney']['progress']['firstFailed'],stage)
-                        self.assertEqual(U.NATIVE_DIAGNOSTIC['selectedJourney']['condition'],dict(status='classified',condition='renderer-missing'))
+                        self.assertEqual(U.NATIVE_DIAGNOSTIC['selectedJourney']['condition'],dict(status='classified',condition='expected-control-missing-or-ambiguous'))
 
     def test_actual_owned_wrapper_known_nonzero_unknown_and_changed_post_never_publish_status(self):
         for fault in (None,'nonzero','unknown','post','applications'):

@@ -3016,8 +3016,12 @@ class Operation:
         if self.app_absence is not None or self.update is not None:
             external = getattr(self, "candidate_external_originals", None)
             extra = 0 if external is None else external()
-            need(type(extra) is int and extra >= 0 and len(self.entries) + getattr(self, "candidate_bootstrap_originals", 0) + (24 if getattr(self, "candidate_restore_context", None) is not None else 0) <= 24576
-                 and extra + sum(e["fd"] is not None for e in self.entries) <= 96,
+            # The candidate materializer coexists with the acquisition's original
+            # owner (up to96) and its bounded DFS writer (up to19). Other owners
+            # retain their existing96 limit. Unknown closes never free a slot.
+            live_limit = 96 if external is None else 128
+            need(type(extra) is int and 0 <= extra <= 96 and len(self.entries) + getattr(self, "candidate_bootstrap_originals", 0) + (24 if getattr(self, "candidate_restore_context", None) is not None else 0) <= 24576
+                 and extra + sum(e["fd"] is not None or not e["closed"] for e in self.entries) <= live_limit,
                  "app-absence-original-ledger-bound")
         if self.store_signing is not None:
             need(len(self.entries) <= self.store_signing_module.ORIGINAL_LIMIT
@@ -10339,16 +10343,58 @@ def candidate_materialize(session, originals, inventory, app_scripts):
         need(len(parts) <= 16, "candidate-materialize-depth")
         dirs.update("/".join(parts[:i]) for i in range(1, len(parts)))
     def external():
-        return sum(entry["fd"] is not None for book in session.quota.books for entry in book.entries)
+        count = 0
+        for book in session.quota.books:
+            need(not book.errors, "candidate-materialize-originals-known")
+            for entry in book.entries:
+                fd = entry["fd"]
+                if type(entry) is dict:
+                    need((fd is not None and entry["closed"] is False)
+                         or (fd is None and entry["closed"] is True),
+                         "candidate-materialize-originals-known")
+                else:
+                    # FixedSudoEntry is a live view of its donor's original node,
+                    # not a dictionary and not a second descriptor owner.
+                    need(book.ready and not book.failed and not book.finished
+                         and not book.close_uncertain and fd is not None
+                         and entry.node.close_state == "owned",
+                         "candidate-materialize-originals-known")
+                count += fd is not None
+        need(count <= 96, "candidate-materialize-originals-bound")
+        return count
     depth = max((name.count("/") for name in expected), default=0)
-    need(session.quota.reserved + 3 * (len(expected) + len(dirs)) + 16 <= 24576
-         and external() + max(depth + 4, 7) <= 96, "candidate-materialize-whole-original-quote")
+    # Work+target+input consume3, a deepest DFS leaf consumes depth+1;
+    # the later retained producer directory/files peak at7. Acquisition's
+    # lifetime96 budget is unchanged; these are two simultaneous owners.
+    import resource
+    soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    quote = dict(acquisitionReserved=session.quota.reserved, acquisitionLive=external(),
+                 files=len(expected), directories=len(dirs), depth=depth,
+                 materializerLive=max(depth + 4, 7), liveLimit=128, lifetimeLimit=24576,
+                 osLimit=-1 if soft_limit == resource.RLIM_INFINITY else min(soft_limit, 1000000),
+                 osRequired=160)
+    for valid, reason in (
+            (quote["acquisitionReserved"] + 3 * (len(expected) + len(dirs)) + 16 <= 24576,
+             "candidate-materialize-lifetime-quote"),
+            (quote["acquisitionLive"] + quote["materializerLive"] <= 128,
+             "candidate-materialize-live-quote"),
+            (soft_limit == resource.RLIM_INFINITY or soft_limit >= 160,
+             "candidate-materialize-os-fd-limit")):
+        if not valid:
+            # Fixed numerical resource facts only. Never inventory names/bytes,
+            # private paths, exception text or a new acceptance receipt.
+            try:
+                sys.stderr.write("MRK_CANDIDATE_MATERIALIZE_ADMISSION=" + json.dumps(quote, sort_keys=True) + "\n")
+            except BaseException:
+                pass  # A diagnostic write cannot replace the original refusal.
+            need(False, reason)
     environment = dict(GITHUB_SHA=session.helper_source, GITHUB_WORKFLOW_SHA=session.helper_source,
         GITHUB_RUN_ID=session.run_id, GITHUB_RUN_ATTEMPT=session.run_attempt,
         GITHUB_WORKFLOW_REF="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-consume.yml@refs/heads/verify/desktop-macos-candidate-consume")
     op = Operation(None, session.candidate_root, session.work.parent, f.PREPARE, environment, stager, target=session.target)
     op.app_absence_module, op.app_absence_api = f, sys.modules[__name__]
     op.candidate_external_originals = external
+    op.candidate_bootstrap_originals = session.quota.reserved
     op.app_absence = dict(started=session.clock.started, observed=session.clock.check(), workSeconds=540, hardSeconds=600,
         pendingRoot=None, pendingCut=None, mount=None, roots=[], outputs=[], complete=False)
     original_ids = {}

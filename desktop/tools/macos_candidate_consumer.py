@@ -943,6 +943,9 @@ def failure_data(error):
     """Useful public failure locations, never exception text or frame locals."""
     allowed = {'candidate-hosted-context', 'candidate-source-identity', 'candidate-source-tree',
         'candidate-original-ledger-capacity', 'candidate-materialize-whole-original-quote',
+        'candidate-materialize-lifetime-quote', 'candidate-materialize-live-quote',
+        'candidate-materialize-os-fd-limit', 'candidate-materialize-originals-known',
+        'candidate-materialize-originals-bound',
         'candidate-bootstrap-original-post', 'candidate-fixture-entry', 'candidate-fixture-terminal',
         'candidate-native-original-quote', 'candidate-source-query-quote', 'candidate-carrier-close-unknown',
         'candidate-baseline-original-binding', 'restore-chain-complete-original-quote',

@@ -7406,10 +7406,24 @@ final class NormalAppUITests: XCTestCase {
         let details = try unique(named(renderer, "Recovery details"), "current recovery details missing or repeated")
         try reveal(details, in: renderer)
         var values: [String] = []
-        for prefix in ["Recovery operation ID: ", "Recovery owner generation: ", "Recovery phase: ",
-                       "Recovery outcome: ", "Recovery reason: "] {
-            let field = try unique(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)),
-                                   "current recovery field missing or repeated")
+        for (role, prefix) in [("operation-id", "Recovery operation ID: "), ("owner-generation", "Recovery owner generation: "),
+                               ("phase", "Recovery phase: "), ("outcome", "Recovery outcome: "), ("reason", "Recovery reason: ")] {
+            let query = details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix))
+            // Fixed caption counts before the original singleton check. No
+            // observed identifiers/values or new AX queries after its failure.
+            let trimmed = String(prefix.dropLast())
+            let exactPrefix = min(query.count, 5)
+            let trimmedPrefix = min(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", trimmed)).count, 5)
+            let captionOnly = min(details.staticTexts.matching(NSPredicate(format: "label == %@", trimmed)).count, 5)
+            let anyPrefix = min(details.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).count, 5)
+            let field: XCUIElement
+            do { field = try unique(query, "current recovery field missing or repeated") }
+            catch {
+                if phase == "awaiting-consent" || phase == "terminal" {
+                    print("MRK_NORMAL_RECOVERY_FIELD=v1;phase=\(phase);field=\(role);sample=pre-check;exactPrefix=\(exactPrefix);trimmedPrefix=\(trimmedPrefix);captionOnly=\(captionOnly);anyPrefix=\(anyPrefix);nonAtomic=1")
+                }
+                throw error // Keep the original singleton refusal and its cleanup.
+            }
             try require(field.isHittable && field.label.hasPrefix(prefix), "current recovery field is not visible")
             let value = String(field.label.dropFirst(prefix.count))
             try require(value.utf8.count <= 64, "current recovery field exceeds its bound")

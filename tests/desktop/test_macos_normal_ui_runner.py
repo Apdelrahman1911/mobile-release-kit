@@ -5809,6 +5809,46 @@ class AndroidCandidateProjectTests(unittest.TestCase):
 
 
 class PanelTopologyDiagnosticTests(unittest.TestCase):
+    def test_pending_recovery_field_rows_are_closed_and_failure_only(self):
+        def row(phase='awaiting-consent',field='operation-id'):
+            return ('MRK_NORMAL_RECOVERY_FIELD=v1;phase='+phase+';field='+field+
+                ';sample=pre-check;exactPrefix=0;trimmedPrefix=1;captionOnly=1;anyPrefix=0;nonAtomic=1\n').encode()
+        private=b'PRIVATE operation values, account paths and secure text\n'
+        for phase in ('awaiting-consent','terminal'):
+            for field in ('operation-id','owner-generation','phase','outcome','reason'):
+                original=subprocess.CompletedProcess(['original'],65,row(phase,field)+private,b'')
+                value=MODULE.normal_failure_diagnostics('test',MODULE.IOS_PENDING_RESULT,original)
+                self.assertEqual(value['originalReturncode'],65)
+                self.assertEqual(value['recoveryField'],dict(state='observed',sample=dict(phase=phase,field=field,
+                    timing='pre-check',countsCappedAt=5,nonAtomic=True,exactPrefix=0,trimmedPrefix=1,captionOnly=1,anyPrefix=0)))
+                self.assertNotIn(b'PRIVATE',MODULE.encoded(value));self.assertLessEqual(len(MODULE.encoded(value))+1,4096)
+        valid=row()
+        for stdout,stderr in ((valid+valid,b''),(b'',valid),(valid[:-1],b''),(b'prefix '+valid,b''),
+            (row('PRIVATE'),b''),(row(field='PRIVATE'),b''),(valid.replace(b'exactPrefix=0',b'exactPrefix=6'),b''),
+            (valid.replace(b'nonAtomic=1',b'nonAtomic=0'),b'')):
+            self.assertEqual(MODULE.recovery_field_diagnostics(stdout,stderr),dict(state='refused',sample=None))
+        self.assertEqual(MODULE.recovery_field_diagnostics(private,b''),dict(state='absent',sample=None))
+        with self.assertRaises(MODULE.Refused): MODULE.recovery_field_diagnostics(b'x'*(1024*1024+1),b'')
+        original=subprocess.CompletedProcess([],65,valid,b'')
+        for mode,selection in (('test','project-test.xcresult'),('test','diagnostics-test.xcresult'),('summary',MODULE.IOS_PENDING_RESULT)):
+            self.assertNotIn('recoveryField',MODULE.normal_failure_diagnostics(mode,selection,original))
+        # Use actual existing publication; failures remain diagnostics, never
+        # change native65 or turn malformed data into a completion receipt.
+        with tempfile.TemporaryDirectory() as temporary:
+            normal=Path(temporary);request=dict(phase='test',result=normal/MODULE.IOS_PENDING_RESULT,derived=normal/'DerivedData')
+            MODULE.publish_failure_diagnostics(request,original)
+            published=json.loads((normal/'ios-pending-recovery-test.failure-diagnostics.json').read_bytes())
+            self.assertEqual(published['originalReturncode'],65);self.assertEqual(published['recoveryField']['state'],'observed')
+            fallback=normal/'fallback';fallback.mkdir()
+            request=dict(request,result=fallback/MODULE.IOS_PENDING_RESULT,derived=fallback/'DerivedData')
+            with patch.object(MODULE,'recovery_field_diagnostics',side_effect=RuntimeError('PRIVATE parser fault')):
+                MODULE.publish_failure_diagnostics(request,original)
+            body=(fallback/'ios-pending-recovery-test.failure-diagnostics.json').read_bytes()
+            self.assertEqual(json.loads(body)['recoveryField'],dict(state='absent',sample=None))
+            self.assertNotIn(b'PRIVATE',body);self.assertEqual(original.returncode,65)
+            with self.assertRaises(MODULE.Refused):
+                MODULE.normal_failure_diagnostics('test',MODULE.IOS_PENDING_RESULT,subprocess.CompletedProcess([],0,valid,b''))
+
     def test_closed_panel_rows_preserve_failure_and_never_disclose_labels(self):
         before = (b"MRK_NORMAL_PANEL_TOPOLOGY=v1;phase=before;waiter=not-run;fields=1;combos=0;search=1;sheets=0;"
             b"fieldLabel=search;fieldPlaceholder=other;comboLabel=none;comboPlaceholder=none;comboChildren=0;nonAtomic=1\n")
