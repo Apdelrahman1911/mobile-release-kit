@@ -916,6 +916,42 @@ def main(purpose="install"):
             BaseException.add_note(primary, 'candidate-original-final-closes')
 
 
+def failure_data(error):
+    """Useful public failure locations, never exception text or frame locals."""
+    allowed = {'candidate-hosted-context', 'candidate-source-identity', 'candidate-source-tree',
+        'candidate-original-ledger-capacity', 'candidate-materialize-whole-original-quote',
+        'candidate-bootstrap-original-post', 'candidate-fixture-entry', 'candidate-fixture-terminal',
+        'candidate-native-original-quote', 'candidate-source-query-quote', 'candidate-carrier-close-unknown',
+        'candidate-baseline-original-binding', 'restore-chain-complete-original-quote',
+        'app-absence-original-deadline', 'candidate-restore-native-status-original'}
+    parts = BaseException.args.__get__(error)
+    reason = parts[0] if len(parts) == 1 and type(parts[0]) is str and parts[0] in allowed else 'unavailable'
+    classes = {resume.Refused: 'Refused', OSError: 'OSError', FileNotFoundError: 'FileNotFoundError',
+        PermissionError: 'PermissionError', ValueError: 'ValueError', TypeError: 'TypeError',
+        RuntimeError: 'RuntimeError', KeyError: 'KeyError', AttributeError: 'AttributeError',
+        ImportError: 'ImportError', KeyboardInterrupt: 'KeyboardInterrupt', SystemExit: 'SystemExit'}
+    # Only these already-loaded module globals and their actual compile paths
+    # are eligible. A matching basename or forged traceback filename is not enough.
+    origins = ((globals(), __file__), (vars(resume), resume.__file__), (vars(candidate), candidate.__file__))
+    frames = []
+    tb = BaseException.__traceback__.__get__(error)
+    for _ in range(32):
+        if tb is None:
+            break
+        code = tb.tb_frame.f_code
+        for namespace, path in origins:
+            if (tb.tb_frame.f_globals is namespace and code.co_filename == path
+                and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', code.co_name)
+                and type(tb.tb_lineno) is int and 0 < tb.tb_lineno < 1000000):
+                frames.append({'file': Path(path).name, 'function': code.co_name, 'line': tb.tb_lineno})
+                frames = frames[-8:]
+                break
+        tb = tb.tb_next
+    return {'scope': 'candidate-consumer-failure-only', 'reason': reason,
+        'exceptionClass': classes.get(type(error), 'other'), 'sourceFrames': frames,
+        'rawOutputExported': False, 'cleanupAuthorized': False}
+
+
 if __name__ == '__main__':
     try:
         arguments = sys.argv[1:]
@@ -924,14 +960,9 @@ if __name__ == '__main__':
                   main(arguments[0]) if len(arguments) == 1 and arguments[0] in PURPOSES[1:] else main())
     except BaseException as error:
         # Exact public labels only; never arbitrary exception text/captures.
-        allowed = {'candidate-hosted-context', 'candidate-source-identity', 'candidate-source-tree',
-            'candidate-original-ledger-capacity', 'candidate-materialize-whole-original-quote',
-            'candidate-bootstrap-original-post', 'candidate-fixture-entry', 'candidate-fixture-terminal',
-            'candidate-native-original-quote', 'candidate-source-query-quote', 'candidate-carrier-close-unknown',
-            'candidate-baseline-original-binding', 'restore-chain-complete-original-quote',
-            'app-absence-original-deadline', 'candidate-restore-native-status-original'}
-        parts = BaseException.args.__get__(error)
-        reason = parts[0] if type(parts) is tuple and len(parts) == 1 and type(parts[0]) is str and parts[0] in allowed else 'unavailable'
-        sys.stderr.write('candidate-consumer-refused reason=' + reason + '\n')
+        try:
+            sys.stderr.buffer.write(resume.canonical(failure_data(error)) + b'\n')
+        except BaseException:
+            sys.stderr.write('candidate-consumer-refused reason=unavailable\n')
         raise SystemExit(1) from None
     sys.stdout.buffer.write(resume.canonical(result) + b'\n')

@@ -376,6 +376,58 @@ class CandidateConsumerTests(unittest.TestCase):
             value['targets'][target]['target'] = 'other'
             with self.assertRaises(ValueError): C.selection_data(json.dumps(value).encode(), target)
 
+    def test_failure_locations_do_not_export_private_exception_data(self):
+        from types import FunctionType
+        private = 'PRIVATE-SYNTHETIC-TEXT-NOT-FOR-LOGS'
+        try:
+            C.context_data({'MRK_MACOS_TARGET': 'aarch64-apple-darwin'}, C.HELPER_ROOT, 'arm64')
+        except R.Refused as error:
+            value = C.failure_data(error)
+        else:
+            self.fail('expected actual context refusal')
+        self.assertEqual(value['reason'], 'candidate-hosted-context')
+        self.assertEqual(value['exceptionClass'], 'Refused')
+        self.assertTrue(any(row['file'] == 'macos_candidate_consumer.py' and row['function'] == 'context_data'
+                            for row in value['sourceFrames']))
+        self.assertFalse(value['rawOutputExported'] or value['cleanupAuthorized'])
+        self.assertLessEqual(len(value['sourceFrames']), 8)
+        class PrivateError(ValueError):
+            def __str__(self):
+                raise AssertionError('exception text must not be requested')
+        for error in (R.Refused(private), ValueError(private), PrivateError(private)):
+            value = C.failure_data(error)
+            self.assertEqual(value['reason'], 'unavailable')
+            self.assertEqual(value['sourceFrames'], [])
+            self.assertNotIn(private, R.canonical(value).decode())
+            if type(error) is PrivateError:
+                self.assertEqual(value['exceptionClass'], 'other')
+        # A trusted filename with foreign globals, and trusted globals with a
+        # foreign filename, must both be excluded. These tiny functions only raise.
+        for path, namespace in ((C.__file__, {}), ('/private/' + private, vars(C))):
+            code = compile('def synthetic_private_frame():\n    raise ValueError("' + private + '")\n', path, 'exec')
+            function = FunctionType(next(item for item in code.co_consts if hasattr(item, 'co_code')), namespace)
+            try:
+                function()
+            except ValueError as error:
+                value = C.failure_data(error)
+            self.assertEqual(value['sourceFrames'], [])
+            self.assertNotIn(private, R.canonical(value).decode())
+        # Repeated real trusted frames stay bounded without traversing arbitrary
+        # cause/context chains or reading locals.
+        try:
+            C.context_data({'MRK_MACOS_TARGET': 'aarch64-apple-darwin'}, C.HELPER_ROOT, 'arm64')
+        except R.Refused as error:
+            from types import TracebackType
+            original = error.__traceback__.tb_next
+            repeated = None
+            for _ in range(64):
+                repeated = TracebackType(repeated, original.tb_frame, original.tb_lasti, original.tb_lineno)
+            error.__traceback__ = repeated
+            value = C.failure_data(error)
+        self.assertEqual(len(value['sourceFrames']), 8)
+        self.assertTrue(all(set(row) == {'file', 'function', 'line'} and row['line'] > 0
+                            and '/' not in row['file'] for row in value['sourceFrames']))
+
     def test_source_git_blob_join_rejects_changed_missing_duplicate_and_foreign_bytes(self):
         import hashlib
         files = {'desktop/tools/current.py': b'current source\n', 'desktop/macos-installed-inputs/build-release.json': b'{}\n'}
