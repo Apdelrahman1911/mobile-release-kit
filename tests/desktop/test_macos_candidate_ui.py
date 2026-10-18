@@ -795,7 +795,7 @@ class CandidateUITests(unittest.TestCase):
 
 
 class CandidateUIMainTests(unittest.TestCase):
-    def exercise(self, name, target, unknown_close=False, *, ios_tools=False, saved_files=False, saved_version=False, native_fault=None, same_source=False, entry=False):
+    def exercise(self, name, target, unknown_close=False, *, ios_tools=False, saved_files=False, saved_version=False, native_fault=None, same_source=False, entry=False, ordinary_case=None):
         import os, stat
         selected,context,install=fixture(target)
         if same_source:
@@ -840,8 +840,8 @@ class CandidateUIMainTests(unittest.TestCase):
         snapshot,_=R.host_snapshot(host,lambda p:(R.identity(info(p)),children(p)),lambda p,n:(R.identity(info(p)),files[p]))
         files[host/'host-binding.json']=R.canonical(dict(schemaVersion=1,source=context['helperSource'],runId='31',runAttempt='1',
             base=basevalue,prefix=str(host),basePrefix='/inert-base',baseExecutable=str(base),**snapshot,retainedUntilHostedTeardown=True))
-        phases=U.selected_phases(ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,entry=entry)
-        arguments=['candidate-ui',*(['--entry'] if entry else ['--saved-version'] if saved_version else ['--saved-files'] if saved_files else ['--ios-tools'] if ios_tools else []),name]
+        phases=U.selected_phases(ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,entry=entry,ordinary_case=ordinary_case)
+        arguments=['candidate-ui',*(['--ordinary-case',ordinary_case] if ordinary_case is not None else ['--entry'] if entry else ['--saved-version'] if saved_version else ['--saved-files'] if saved_files else ['--ios-tools'] if ios_tools else []),name]
         previous=phases if name=='result' else phases[:phases.index(name)]
         if name!='build':directories.add(WORK/'normal-ui');directories.add(WORK/'normal-ui/tmp')
         for phase in previous:
@@ -934,6 +934,45 @@ class CandidateUIMainTests(unittest.TestCase):
         self.assertEqual(len(books[0].attempts),len(set(books[0].attempts)))
         self.assertFalse(any(p.name==name+'.status' for p in files if name not in previous))
         return value,effects,quotas[0].reserved
+
+    def test_independent_ordinary_cases_keep_exact_requests_and_original_failure_barriers(self):
+        for case, count in (('persistence', 1), ('saved-checks', 2)):
+            phases = ('build', case + '-test', case + '-summary')
+            self.assertEqual(U.selected_phases(ordinary_case=case), phases)
+            for target in (N.ARM_TARGET, N.INTEL_TARGET):
+                for phase in phases:
+                    self.assertEqual(U.phase_request(N, phase, target, WORK, ordinary_case=case),
+                                     U.phase_request(N, phase, target, WORK))
+                for same_source in (False, True):
+                    for phase in (*phases, 'result'):
+                        value, effects, _ = self.exercise(phase, target, ordinary_case=case, same_source=same_source)
+                        self.assertEqual(value['cohort'], 'ordinary-' + case)
+                        self.assertEqual(value['ordinaryCase'], case)
+                        self.assertEqual(effects, [] if phase == 'result' else ['native-cli'])
+                        self.assertFalse(value['p0Qualified']); self.assertFalse(value['productReady'])
+                        self.assertFalse(value['applicationsEntryQualified'])
+                        self.assertNotIn('applicationsLaunchObservations', value)
+                        self.assertNotIn('projectEditingTests', value)
+                        if phase == 'result':
+                            self.assertEqual((value['totalTests'], value['failedTests'], value['skippedTests']), (count, 0, 0))
+                            self.assertEqual(value['harnessSource'] == value['applicationSource'], same_source)
+                for fault in ('prior-status', 'prior-source', 'nonzero', 'unknown', 'post'):
+                    value, effects, _ = self.exercise(case + '-test', target, ordinary_case=case, native_fault=fault)
+                    self.assertIsNone(value)
+                    self.assertEqual(effects, [] if fault.startswith('prior-') else ['native-cli'])
+                self.assertIsNone(self.exercise('result', target, ordinary_case=case, unknown_close=True)[0])
+            for other in ('ios_tools', 'saved_files', 'saved_version', 'entry'):
+                with self.assertRaises(R.Refused): U.selected_phases(ordinary_case=case, **{other: True})
+            for phase in set(U.PHASES) - set(phases):
+                with self.assertRaises(R.Refused): U.phase_request(N, phase, N.ARM_TARGET, WORK, ordinary_case=case)
+        for case in ('', 'all', 'project', True, 1, []):
+            with self.assertRaises(R.Refused): U.selected_phases(ordinary_case=case)
+        for arguments in (['--ordinary-case'], ['--ordinary-case', 'persistence'],
+                          ['--ordinary-case', 'persistence', 'project-test'],
+                          ['--entry', '--ordinary-case', 'persistence', 'build']):
+            with mock.patch.object(sys, 'argv', ['candidate-ui', *arguments]), mock.patch.object(U.consumer, 'entry_context') as enter:
+                with self.assertRaises(R.Refused): U.main()
+                enter.assert_not_called()
 
     def test_current_ordinary_main_preserves_six_tests_and_source_boundaries(self):
         for target in (N.ARM_TARGET,N.INTEL_TARGET):
@@ -1072,6 +1111,21 @@ class CandidateUICleanupTests(unittest.TestCase):
             self.assertNotIn('PRIVATE_SENTINEL',R.canonical(data).decode())
         self.assertEqual(U.failure_data(R.Refused('candidate-ui-original-cli-nonzero'),'project-test')['reason'],
                          'candidate-ui-original-cli-nonzero')
+
+    def test_real_independent_case_cleanup_keeps_other_results_and_controls(self):
+        import tempfile
+        for case in U.ORDINARY_CASES:
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)/'normal-ui'; root.mkdir(mode=0o700)
+                for name in ('DerivedData', 'tmp', case + '-test.xcresult'):
+                    (root/name).mkdir(); (root/name/'inert').write_bytes(b'DATA')
+                for phase in U.selected_phases(ordinary_case=case):
+                    for suffix in ('.stdout', '.stderr'): (root/(phase+suffix)).write_bytes(b'inert')
+                retained = ('project-test.xcresult', 'consumer-result.json', case + '-test.status',
+                            case + '-test.failure-diagnostics.json')
+                for name in retained: (root/name).write_bytes(b'keep')
+                U.cleanup_outputs(root, R.identity(root.stat())[:5], N.PhaseClock(30), ordinary_case=case)
+                self.assertEqual(sorted(p.name for p in root.iterdir()), sorted(retained))
 
     def test_real_entry_cleanup_preserves_other_cohorts_and_finite_diagnostics(self):
         import tempfile

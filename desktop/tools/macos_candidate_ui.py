@@ -26,6 +26,7 @@ SAVED_FILE_PHASES = ('build', 'release-evidence-test', 'release-evidence-summary
                      'workflow-refusal-test', 'workflow-refusal-summary')
 SAVED_VERSION_PHASES = ('build', 'saved-version-recovery-test', 'saved-version-recovery-summary')
 ENTRY_PHASES = ('build', 'test', 'summary')
+ORDINARY_CASES = ('persistence', 'saved-checks')
 SAVED_VERSION_SCOPE = 'current-candidate-saved-version-only-v1'
 IOS_TOOLS_SCOPE = 'current-candidate-ios-tools-only-v1'
 ORDINARY_SCOPE = 'current-candidate-ordinary-only-v1'
@@ -73,15 +74,19 @@ def install_admission_data(value, selected, context):
     return dict(value)
 
 
-def selected_phases(*, ios_tools=False, saved_files=False, saved_version=False, entry=False):
+def selected_phases(*, ios_tools=False, saved_files=False, saved_version=False, entry=False, ordinary_case=None):
     resume.need(all(type(v) is bool for v in (ios_tools, saved_files, saved_version, entry))
                 and sum((ios_tools, saved_files, saved_version, entry)) <= 1,
                 'candidate-ui-cohort')
+    if ordinary_case is not None:
+        resume.need(type(ordinary_case) is str and ordinary_case in ORDINARY_CASES
+                    and not any((ios_tools, saved_files, saved_version, entry)), 'candidate-ui-cohort')
+        return ('build', ordinary_case + '-test', ordinary_case + '-summary')
     return ENTRY_PHASES if entry else SAVED_VERSION_PHASES if saved_version else SAVED_FILE_PHASES if saved_files else IOS_TOOL_PHASES if ios_tools else PHASES
 
 
-def phase_request(normal, name, target, work, *, ios_tools=False, saved_files=False, saved_version=False, entry=False):
-    phases = selected_phases(ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry)
+def phase_request(normal, name, target, work, *, ios_tools=False, saved_files=False, saved_version=False, entry=False, ordinary_case=None):
+    phases = selected_phases(ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry, ordinary_case=ordinary_case)
     resume.need(type(name) is str and name in phases, 'candidate-ui-phase')
     machine, _ = normal.normal_target_data(target)
     root = work / 'normal-ui'
@@ -382,11 +387,11 @@ def admission_name(name):
             name + '.command-admission.json' if name == 'summary' or name.endswith('-summary') else name + '.runner-admission.json')
 
 
-def read_phase(read, normal, name, selected, work, *, helper_source=None, ios_tools=False, saved_files=False, saved_version=False, entry=False):
+def read_phase(read, normal, name, selected, work, *, helper_source=None, ios_tools=False, saved_files=False, saved_version=False, entry=False, ordinary_case=None):
     ordinary = not (ios_tools or saved_files or saved_version or entry)
     resume.need((not saved_version or helper_source is not None)
                 and (helper_source is None or saved_version or ios_tools or ordinary or saved_files), 'candidate-ui-cohort')
-    _, request = phase_request(normal, name, selected['target'], work, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry)
+    _, request = phase_request(normal, name, selected['target'], work, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry, ordinary_case=ordinary_case)
     root = work / 'normal-ui'
     resume.need(read(root / (name + '.status'), 16) == b'0\n', 'candidate-ui-prior-caller-zero')
     row = resume.decode(read(root / admission_name(name), 32768))
@@ -611,7 +616,7 @@ def saved_condition_diagnostic(stdout, stderr, phase):
     return _selected_condition_diagnostic(stdout, stderr, method, conditions)
 
 
-def run_phase(normal, owner, book, quota, context, selected, name, clock, verify_sources, *, ios_tools=False, saved_files=False, saved_version=False, entry=False):
+def run_phase(normal, owner, book, quota, context, selected, name, clock, verify_sources, *, ios_tools=False, saved_files=False, saved_version=False, entry=False, ordinary_case=None):
     """One fixed existing CLI under the existing owned-process API.
 
     Outer success requires inner zero, its exact original native records, POST,
@@ -620,7 +625,7 @@ def run_phase(normal, owner, book, quota, context, selected, name, clock, verify
     """
     global STAGE, NATIVE_STATUS, NATIVE_DIAGNOSTIC
     work = context['work'].parent; directory = work / 'normal-ui'
-    args, request = phase_request(normal, name, selected['target'], work, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry)
+    args, request = phase_request(normal, name, selected['target'], work, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry, ordinary_case=ordinary_case)
     ordinary = not (ios_tools or saved_files or saved_version or entry)
     helper_source = context['helperSource'] if saved_version or ((ios_tools or ordinary or saved_files) and context['helperSource'] != selected['source']) else None
     env = clean_environment(normal, selected, work, helper_source=helper_source, ios_tools=ios_tools, ordinary=ordinary or saved_files)
@@ -684,8 +689,10 @@ def main():
     saved_files = len(arguments) == 2 and arguments[0] == '--saved-files'
     saved_version = len(arguments) == 2 and arguments[0] == '--saved-version'
     entry = len(arguments) == 2 and arguments[0] == '--entry'
-    name = arguments[1] if ios_tools or saved_files or saved_version or entry else arguments[0] if len(arguments) == 1 else None
-    phases = selected_phases(ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry)
+    ordinary_case = arguments[1] if len(arguments) == 3 and arguments[0] == '--ordinary-case' else None
+    name = (arguments[2] if ordinary_case is not None else arguments[1]
+            if ios_tools or saved_files or saved_version or entry else arguments[0] if len(arguments) == 1 else None)
+    phases = selected_phases(ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry, ordinary_case=ordinary_case)
     resume.need(name in (*phases, 'result', 'cleanup'), 'candidate-ui-fixed-command')
     context = consumer.entry_context(arguments)
     resume.need(ROOT == consumer.HELPER_ROOT and Path.cwd() == consumer.CANDIDATE_ROOT,
@@ -718,7 +725,7 @@ def main():
         runner_body = read(consumer.CANDIDATE_ROOT / RUNNER, 1 << 20, source=True, mode=0o644)
         normal = resume.load_module('_mrk_candidate_ui_owner', consumer.HELPER_ROOT / RUNNER,
                                     sources[consumer.HELPER_ROOT / RUNNER])
-        _, request = phase_request(normal, name if name in phases else phases[-1], selected['target'], work, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry)
+        _, request = phase_request(normal, name if name in phases else phases[-1], selected['target'], work, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry, ordinary_case=ordinary_case)
         # Exact existing inner budget plus bounded admission/source/final closes;
         # never restarted on cancellation, a late result or another native call.
         clock = normal.PhaseClock(request['phaseSeconds'] + 180, started=consumer.STARTED_NS)
@@ -772,7 +779,7 @@ def main():
         resume.need(held_directory['identity'][2:] == (0o40700, os.getuid(), os.getgid()), 'candidate-ui-private-root')
         STAGE = 'predecessors'
         previous = phases if name in ('result', 'cleanup') else phases[:phases.index(name)]
-        rosters = [read_phase(lambda p, n: read(p, n), normal, phase, selected, work, helper_source=helper_source, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry) for phase in previous]
+        rosters = [read_phase(lambda p, n: read(p, n), normal, phase, selected, work, helper_source=helper_source, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry, ordinary_case=ordinary_case) for phase in previous]
         resume.need(not rosters or len(set(rosters)) == 1, 'candidate-ui-same-harness-roster')
         if name in phases:
             # All sources/host/prior result originals have been quoted before the
@@ -780,7 +787,7 @@ def main():
             # No in-process success status: only the enclosing workflow may record
             # its actual returned caller status after this final close/clock.
             resume.need(quota.reserved + 3 <= resume.MAX_ORIGINALS, 'candidate-ui-original-capacity')
-            roster = run_phase(normal, owner, book, quota, context, selected, name, clock, verify_sources, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry)
+            roster = run_phase(normal, owner, book, quota, context, selected, name, clock, verify_sources, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry, ordinary_case=ordinary_case)
             resume.need(not rosters or roster == rosters[0], 'candidate-ui-same-harness-roster')
         else:
             verify_sources(); quota.check(); clock.check()
@@ -797,9 +804,20 @@ def main():
             'artifactId': selected['artifactId'], 'artifactSha256': selected['artifactSha256'],
             'originalClosesKnown': True, 'productReady': False, 'allApplicationWorkerFinality': 'unavailable',
             'applicationsEntryQualified': False, 'p0Qualified': False}
-        if entry or ios_tools or saved_files or saved_version:
+        if ordinary_case is not None:
+            value.update(cohort='ordinary-' + ordinary_case, ordinaryCase=ordinary_case)
+        elif entry or ios_tools or saved_files or saved_version:
             value['cohort'] = 'entry' if entry else 'saved-version' if saved_version else 'saved-files' if saved_files else 'ios-tools'
-        if name in ('result', 'cleanup') and entry:
+        if name in ('result', 'cleanup') and ordinary_case is not None:
+            count = 1 if ordinary_case == 'persistence' else 2
+            value.update(totalTests=count, failedTests=0, skippedTests=0,
+                         sameInstalledApplication=True, sourceRosterSha256=rosters[0])
+            if ordinary_case == 'persistence':
+                value['syntheticPersistenceRestartTests'] = 1
+            else:
+                value.update(savedOfflineChecksTests=1, emptyBuildInputInspectionTests=1,
+                             storeEntryRefusalObserved=True)
+        elif name in ('result', 'cleanup') and entry:
             value.update(ordinaryEntryTests=1, totalTests=1, failedTests=0, skippedTests=0,
                 sameInstalledApplication=True, nativePickerCancelObserved=True, normalQuitCancelObserved=True,
                 sourceRosterSha256=rosters[0])
@@ -822,7 +840,7 @@ def main():
                          sourceRosterSha256=rosters[0])
         if name == 'cleanup':
             STAGE = 'cleanup'
-            cleanup_outputs(directory, held_directory['identity'], clock, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry)
+            cleanup_outputs(directory, held_directory['identity'], clock, ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry, ordinary_case=ordinary_case)
             value.update(taskHarnessOutputsRetired=True, installedApplicationRetained=True,
                          syntheticPrivateFixturesRetainedForHostedTeardown=True)
         clock.finish()
@@ -843,9 +861,9 @@ def main():
             BaseException.add_note(primary, 'candidate-ui-original-final-closes')
 
 
-def cleanup_outputs(directory, expected, clock, *, ios_tools=False, saved_files=False, saved_version=False, entry=False):
+def cleanup_outputs(directory, expected, clock, *, ios_tools=False, saved_files=False, saved_version=False, entry=False, ordinary_case=None):
     """Only known settled harness outputs; no app/vault/shared services removed."""
-    phases = selected_phases(ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry)
+    phases = selected_phases(ios_tools=ios_tools, saved_files=saved_files, saved_version=saved_version, entry=entry, ordinary_case=ordinary_case)
     import shutil
     import stat
     resume.need(shutil.rmtree.avoids_symlink_attacks, 'candidate-ui-cleanup-primitive')
@@ -860,10 +878,7 @@ def cleanup_outputs(directory, expected, clock, *, ios_tools=False, saved_files=
                 and expected[2:] == (stat.S_IFDIR | 0o700, os.getuid(), os.getgid()),
                 'candidate-ui-cleanup-root')
         post()
-        results = (('test.xcresult',) if entry else ('saved-version-recovery-test.xcresult',) if saved_version else
-                   ('release-evidence-test.xcresult', 'workflow-refusal-test.xcresult') if saved_files else
-                   ('diagnostics-test.xcresult', 'ios-unsigned-archive-test.xcresult') if ios_tools else
-                   ('applications-test.xcresult', 'project-test.xcresult', 'persistence-test.xcresult', 'saved-checks-test.xcresult'))
+        results = tuple(phase + '.xcresult' for phase in phases if phase == 'test' or phase.endswith('-test'))
         for name in ('DerivedData', 'tmp', *results):
             info = os.stat(name, dir_fd=fd, follow_symlinks=False)
             resume.need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and info.st_dev == expected[0],

@@ -22,49 +22,13 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            mode: ordinary-ui
+            mode: ordinary-persistence-ui
             runner: macos-26
             python-architecture: arm64
             rust-version: 1.98.1
             rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
           - target: aarch64-apple-darwin
-            mode: ordinary-ios-pending-ui
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: aarch64-apple-darwin
-            mode: ordinary-saved-ui
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: aarch64-apple-darwin
-            mode: ordinary-saved-version-ui
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: x86_64-apple-darwin
-            mode: ordinary-ui
-            runner: macos-26-intel
-            python-architecture: x64
-            rust-version: 1.98.0
-            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
-          - target: aarch64-apple-darwin
-            mode: ordinary-android-ui
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: aarch64-apple-darwin
-            mode: ordinary-ios-ui
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: aarch64-apple-darwin
-            mode: restore
+            mode: ordinary-checks-ui
             runner: macos-26
             python-architecture: arm64
             rust-version: 1.98.1
@@ -88,7 +52,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          case "$MRK_CANDIDATE_MODE" in restore|ordinary-ui|ordinary-entry-ui|ordinary-ios-ui|ordinary-saved-ui|ordinary-saved-version-ui|ordinary-android-ui|ordinary-ios-pending-ui) ;; *) exit 1 ;; esac
+          case "$MRK_CANDIDATE_MODE" in restore|ordinary-ui|ordinary-entry-ui|ordinary-persistence-ui|ordinary-checks-ui|ordinary-ios-ui|ordinary-saved-ui|ordinary-saved-version-ui|ordinary-android-ui|ordinary-ios-pending-ui) ;; *) exit 1 ;; esac
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$RUNNER_OS" = macOS
           test "$GITHUB_WORKSPACE" = /Users/runner/work/mobile-release-kit/mobile-release-kit
@@ -307,7 +271,7 @@ jobs:
           compression-level: 0
 
       - name: Show only public system-tool metadata before candidate admission
-        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-entry-ui'
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-entry-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-persistence-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-checks-ui'
         timeout-minutes: 1
         shell: bash
         run: |
@@ -331,7 +295,7 @@ jobs:
 
       - name: Install the exact final candidate once without rebuilding or signing it
         id: ordinary_install
-        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-entry-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-pending-ui'
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-entry-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-persistence-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-checks-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-pending-ui'
         timeout-minutes: 12
         shell: bash
         env:
@@ -362,7 +326,7 @@ jobs:
           # permits the next existing UI helper to admit its same-job handoff.
       - name: Observe existing ordinary UI journeys on that same installed candidate
         id: ordinary_ui
-        if: (env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-entry-ui') && steps.ordinary_install.outcome == 'success'
+        if: (env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-entry-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-persistence-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-checks-ui') && steps.ordinary_install.outcome == 'success'
         timeout-minutes: 100
         shell: bash
         env:
@@ -382,6 +346,8 @@ jobs:
           case "$MRK_CANDIDATE_MODE" in
             ordinary-ui) cohort=() ;;
             ordinary-entry-ui) cohort=(--entry) ;;
+            ordinary-persistence-ui) cohort=(--ordinary-case persistence) ;;
+            ordinary-checks-ui) cohort=(--ordinary-case saved-checks) ;;
             *) exit 1 ;;
           esac
           ui() {
@@ -411,6 +377,12 @@ jobs:
             # Existing one-method native picker/quit smoke, not ordinary6/P0.
             ui test
             ui summary
+          elif [[ "$MRK_CANDIDATE_MODE" == ordinary-persistence-ui ]]; then
+            ui persistence-test
+            ui persistence-summary
+          elif [[ "$MRK_CANDIDATE_MODE" == ordinary-checks-ui ]]; then
+            ui saved-checks-test
+            ui saved-checks-summary
           else
             ui applications-test
             ui applications-summary
@@ -786,7 +758,7 @@ jobs:
           # No account baseline/control, Keychain data, raw captures or xcresult.
 
       - name: Retain only existing sanitized native failure diagnostics
-        if: failure() && (env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-entry-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-pending-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui')
+        if: failure() && (env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-entry-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-persistence-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-checks-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-pending-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-native-failure-${{ matrix.target }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -829,7 +801,7 @@ jobs:
           # Missing diagnostics never imply success. No raw logs/private inputs.
 
       - name: Retain only the bounded ordinary UI observation and positive cleanup
-        if: ((env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-entry-ui') && steps.ordinary_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' && steps.ordinary_ios_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' && steps.ordinary_saved_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui' && steps.ordinary_saved_version_ui.outcome == 'success')
+        if: ((env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-entry-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-persistence-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-checks-ui') && steps.ordinary_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' && steps.ordinary_ios_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' && steps.ordinary_saved_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui' && steps.ordinary_saved_version_ui.outcome == 'success')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate-${{ env.MRK_CANDIDATE_MODE }}-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -840,5 +812,5 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
-          # Selected cohort only: entry1, ordinary6, unsigned-iOS/Android-diagnostics2 saved-documents2 or current saved-version1. No raw captures, xcresult,
+          # Selected cohort only: entry1, ordinary6, persistence1, saved-checks2, unsigned-iOS/Android-diagnostics2 saved-documents2 or current saved-version1. No raw captures, xcresult,
           # credential fixtures, signed carrier or full-feature readiness claim.

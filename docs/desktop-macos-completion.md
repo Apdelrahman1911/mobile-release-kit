@@ -4,6 +4,24 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
+Consumer `39137375131/1` (`8ac2f3c7`) now establishes **ARM saved-version
+rollback: 1 test passed, zero failures/skips, positive harness cleanup** against
+the unchanged signed `fcb1aa46` app. This uses a real core-created interrupted
+save; interruption of an actual GUI save, Intel recovery and full readiness are
+not inferred. Pending iOS failed its checked-value observation after one click;
+saved evidence still failed its outcome wait. Other jobs continue independently.
+
+To stop project-test failure suppressing unrelated checks, the next consumer
+selects only existing **persistence** and **saved-checks** cohorts on fresh ARM
+runners. Each reuses the same XCTest methods, owners and signed candidate;
+results report only their actual 1 or 2 tests, never ordinary6/Applications/P0.
+Independent plan and implementation reviews accepted the small selection change.
+Four focused local tests pass in 3.638s, zero skips, including original failure
+barriers, real task-output cleanup and unchanged full-ordinary behavior. Syntax,
+workflow parsing and all 22 shell-step syntax checks pass; local scratch retired.
+
+### Prior completed consumer and helper corrections
+
 Consumer `39135234657/1` (`2456d860`) finished with all five selected jobs
 failing. The version-file native picker now advances; the next project-field
 failure is Xcode-project draft readback. Configuration reaches its confirmation
