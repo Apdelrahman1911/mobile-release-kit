@@ -491,6 +491,17 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
         split=dict(binding,productSource="2"*40)
         self.assertEqual(FIXTURE.binding_data(split),split)
         self.assertEqual(FIXTURE.baseline_name_data(split),FIXTURE.baseline_name_data(binding))
+        for target, arch in zip(FIXTURE.TARGETS, ("arm64", "intel")):
+            full = dict(split, target=target, runId="9"*20, runAttempt="8"*10)
+            for phase in ("baseline", "withdraw") + FIXTURE.RECOVERY_PHASES:
+                name = FIXTURE.completion_name_data(full, phase)
+                self.assertEqual(name, "MobileReleaseKit-AppAbsenceCompletion-v1-" + "1"*40 + "-" + "2"*40
+                    + "-" + "9"*20 + "-" + "8"*10 + "-" + arch + "-" + phase + ".json")
+                self.assertLessEqual(len(name), 255)
+                self.assertNotEqual(name, FIXTURE.completion_name_data(dict(full, fixtureSource="3"*40), phase))
+                self.assertNotEqual(name, FIXTURE.completion_name_data(dict(full, productSource="3"*40), phase))
+        for phase in ("verify", "recovery-cut-4", "../baseline", None):
+            with self.assertRaises(ValueError): FIXTURE.completion_name_data(split, phase)
         legacy=dict(GITHUB_SHA=binding['fixtureSource'],MRK_MACOS_INSTALL_SOURCE_COMMIT=binding['productSource'],
             GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1')
         self.assertEqual(FIXTURE.source_binding(legacy,FIXTURE.TARGETS[0]),binding)
@@ -565,6 +576,52 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
             duplicate = line.replace(b'"schemaVersion":1', b'"schemaVersion":1,"schemaVersion":1')
             with self.assertRaises(ValueError):
                 FIXTURE.phase_observation(op, SimpleNamespace(returncode=0, stdout=duplicate, stderr=b""), phase)
+
+        # File transport ignores even repeated/noisy stdout ONLY on the selected
+        # Restore route, after the exact original Installer returned/settled0.
+        for phase in ("baseline", "withdraw") + FIXTURE.RECOVERY_PHASES:
+            for fault in (None, "nonzero", "unentered", "unreturned", "unsettled", "pending", "missing", "malformed", "late"):
+                with self.subTest(file_phase=phase, fault=fault):
+                    op, value = phase_value("baseline" if phase == "baseline" else "withdraw")
+                    op.phase = "candidate-baseline"
+                    value["phase"] = phase
+                    if phase in FIXTURE.RECOVERY_PHASES:
+                        step = FIXTURE.RECOVERY_PHASES.index(phase)
+                        value["proof"] = dict(step=step, initialHistoryPreserved=True, runtimeUnchanged=True,
+                            withdrawnAppVerified=True, partialAppConserved=True, recordReadback=True,
+                            ordinaryRetryComplete=step == 3, originalOuterExitRequired=True)
+                        op.app_absence["pendingCut"] = step if step < 3 else None
+                    prior = op.app_absence["pendingCut"]
+                    row = call_row("app-absence-" + phase, entered=True)
+                    if fault in ("unentered", "unreturned", "unsettled"):
+                        row[{"unentered":"entered", "unreturned":"returned", "unsettled":"capturesSettled"}[fault]] = False
+                    if fault == "pending": op.app_absence["pendingRoot"] = row["role"]
+                    if fault == "nonzero": row["returncode"] = 1
+                    op.calls = [row]
+                    body = marker(value).split(b"=", 1)[1]
+                    if fault == "malformed": body = body.replace(b'"schemaVersion":1', b'"schemaVersion":true')
+                    missing = FileNotFoundError("fixed completion absent")
+                    reads = []
+                    def read(owner, selected):
+                        self.assertIs(owner, op); self.assertEqual(selected, phase); reads.append(selected)
+                        if fault == "missing": raise missing
+                        return body
+                    result = SimpleNamespace(returncode=row["returncode"], stdout=marker(value)*2, stderr=b"irrelevant installer noise")
+                    with patch.object(FIXTURE,"reserve"), patch.object(FIXTURE,"call",return_value=result), \
+                         patch.object(FIXTURE,"mounted_path",return_value=Path("/fixed/mounted")), \
+                         patch.object(FIXTURE,"completion_read",side_effect=read), \
+                         patch.object(FIXTURE.time,"monotonic_ns",side_effect=lambda: NOW + (11_000_000_000 if fault == "late" and reads else 0)), \
+                         patch.object(FIXTURE,"phase_observation") as legacy:
+                        if fault:
+                            with self.assertRaises((ValueError,FileNotFoundError)) as caught: FIXTURE.root_call(op,phase)
+                            if fault == "missing": self.assertIs(caught.exception,missing)
+                            self.assertEqual(op.app_absence["pendingCut"],prior)
+                        else:
+                            self.assertEqual(FIXTURE.root_call(op,phase),value)
+                            self.assertIsNone(op.app_absence["pendingCut"])
+                        legacy.assert_not_called()
+                    self.assertEqual(reads, [] if fault in ("nonzero","unentered","unreturned","unsettled","pending") else [phase])
+                    self.assertEqual(op.stager_io_pending, "app-absence-completion-read" if fault in ("missing","late") else None)
 
     def test_original_order_failure_pending_and_original_deadlines(self):
         with patch.object(FIXTURE.time, "monotonic_ns", return_value=NOW):
@@ -711,7 +768,7 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
         def identity_stat(row):
             return SimpleNamespace(st_dev=row["device"], st_ino=row["inode"],
                 st_mode=row["mode"], st_uid=row["uid"], st_gid=row["gid"])
-        def read(candidate, *, parent_after=None):
+        def read(candidate, *, parent_after=None, wrong_digest=False, close_failure=False):
             body = json.dumps(candidate, separators=(",", ":")).encode("ascii") + b"\n"
             before = SimpleNamespace(st_dev=9, st_ino=12, st_mode=stat.S_IFREG | 0o444,
                 st_nlink=1, st_uid=0, st_gid=0, st_size=len(body), st_mtime_ns=1, st_ctime_ns=2)
@@ -721,15 +778,19 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
                 events.append("entered")
                 try:
                     yield 73, "MobileReleaseKit"
-                finally:
+                except BaseException:
                     events.append("closed")
+                    raise  # Existing protected parent preserves the active failure.
+                else:
+                    events.append("closed")
+                    if close_failure: raise OSError("inert parent close failure")
             op.stager = SimpleNamespace(INSTALL_ROOT="inert-system-path", installer_channel_parent=channel,
                 read_at=lambda fd, name, limit: (body, before),
                 maintenance_json=lambda data, limit: HELPER.tool_json(data))
             with patch.object(FIXTURE.os, "stat", return_value=before), \
                     patch.object(FIXTURE.os, "fstat", side_effect=(identity_stat(parent), identity_stat(parent_after or parent))):
                 try:
-                    result = FIXTURE.baseline_read(op, hashlib.sha256(body).hexdigest())
+                    result = FIXTURE.baseline_read(op, "f"*64 if wrong_digest else hashlib.sha256(body).hexdigest())
                 finally:
                     self.assertEqual(events, ["entered", "closed"])
             self.assertEqual(set(result), {"bytes", "sha256", "identity"})
@@ -744,6 +805,69 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
                 read(candidate)
         with self.assertRaisesRegex(ValueError, "baseline-original-post"):
             read(value, parent_after=dict(parent, inode=13))
+        with self.assertRaisesRegex(OSError, "inert parent close failure"):
+            read(value, close_failure=True)
+        with self.assertRaisesRegex(ValueError, "baseline-original-post"):
+            read(value, wrong_digest=True, close_failure=True)
+
+        # Real tiny file/open/read/EOF/close path; only protected-parent admission
+        # and Darwin root IDs are inert ports. No system directory is accessed.
+        stager = load_tool("completion_stager", "stage_macos_installed.py")
+        op.phase = "candidate-baseline"
+        body = marker(observed).split(b"=",1)[1]
+        for fault in (None,"missing","symlink","mode","owner","group","links","oversize","short","post","parent","close"):
+            with self.subTest(completion=fault), tempfile.TemporaryDirectory(prefix="mrk-completion-") as directory:
+                path = Path(directory)/FIXTURE.completion_name_data(op.app_absence["binding"],"baseline")
+                if fault != "missing":
+                    path.write_bytes(body if fault != "oversize" else b"x"*4097);path.chmod(0o444)
+                if fault == "symlink":
+                    path.rename(path.with_suffix(".other"));path.symlink_to(path.with_suffix(".other").name)
+                if fault == "mode":path.chmod(0o644)
+                if fault == "links":os.link(path,path.with_suffix(".other"))
+                events=[]; original_stat=os.stat;original_fstat=os.fstat;original_read=os.read
+                parent_fd=[None];parent_reads=[0]
+                def metadata(info, *, parent=False):
+                    values={name:getattr(info,name) for name in dir(info) if name.startswith("st_")}
+                    values.update(st_uid=501 if fault=="owner" and not parent else 0,
+                        st_gid=80 if parent or fault=="group" else 0)
+                    if parent and fault=="parent" and parent_reads[0]>1:values["st_ino"]+=1
+                    return SimpleNamespace(**values)
+                def stated(name,*args,**kwargs):return metadata(original_stat(name,*args,**kwargs))
+                def fstated(fd):
+                    parent=fd==parent_fd[0]
+                    if parent:parent_reads[0]+=1
+                    return metadata(original_fstat(fd),parent=parent)
+                close_error=OSError("inert consuming parent close failure")
+                @contextlib.contextmanager
+                def channel(root):
+                    self.assertEqual(root,stager.INSTALL_ROOT)
+                    fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY);parent_fd[0]=fd;events.append("open")
+                    try:yield fd,"MobileReleaseKit"
+                    finally:
+                        os.close(fd);events.append("close")
+                        if fault=="close":raise close_error
+                def read_at(fd,name,limit):
+                    self.assertEqual(name,path.name);self.assertEqual(limit,4096)
+                    result=stager.read_at(fd,name,limit)
+                    if fault=="post":
+                        values=vars(result[1]).copy();values["st_ino"]+=1
+                        return result[0],SimpleNamespace(**values)
+                    return result
+                op.stager=SimpleNamespace(INSTALL_ROOT=stager.INSTALL_ROOT,installer_channel_parent=channel,read_at=read_at)
+                op.stager_io_pending=None
+                with patch.object(FIXTURE.os,"stat",side_effect=stated),patch.object(FIXTURE.os,"fstat",side_effect=fstated), \
+                     patch.object(FIXTURE.os,"read",side_effect=(lambda fd,n:b"" if fault=="short" else original_read(fd,n))), \
+                     patch.object(FIXTURE.time,"monotonic_ns",return_value=NOW):
+                    if fault:
+                        with self.assertRaises((ValueError,stager.Refused,OSError)) as caught:
+                            FIXTURE.io(op,"completion-read",FIXTURE.completion_read,op,"baseline")
+                        if fault=="close":self.assertIs(caught.exception,close_error)
+                        self.assertEqual(op.stager_io_pending,"app-absence-completion-read")
+                    else:
+                        actual=FIXTURE.io(op,"completion-read",FIXTURE.completion_read,op,"baseline")
+                        self.assertEqual(FIXTURE.phase_observation_data(op,actual,"baseline"),observed)
+                        self.assertIsNone(op.stager_io_pending)
+                self.assertEqual(events,["open","close"])
 
 class RestoreChainFixtureData(unittest.TestCase):
     def test_fixed_cut_artifact_graphs_and_nine_file_quote_both_targets(self):
@@ -1008,7 +1132,7 @@ class RestoreChainFixtureData(unittest.TestCase):
                         self.assertEqual(argv, ["/usr/bin/hdiutil","detach","/dev/disk-test"])
                     code = int((name == "app-absence-baseline" and fault == "native-one")
                                or (name.endswith("-detach") and fault == "detach-one"))
-                    op.calls.append(call_row(name, returncode=code))
+                    op.calls.append(call_row(name, returncode=code, entered=True))
                     if code: raise HELPER.Refused("original-nonzero-" + name)
                     if name.endswith("-detach"):
                         for leaf in rows: (own/leaf).unlink()
@@ -1018,7 +1142,8 @@ class RestoreChainFixtureData(unittest.TestCase):
                     return SimpleNamespace(returncode=0,stdout=b"inert",stderr=b"")
                 op.package_call = native
                 with patch.object(FIXTURE,"clock",return_value=NOW), patch.object(FIXTURE,"reserve"), \
-                     patch.object(FIXTURE,"phase_observation",side_effect=lambda o,r,p: captured.append(p)), \
+                     patch.object(FIXTURE,"completion_read",return_value=b"inert"), \
+                     patch.object(FIXTURE,"phase_observation_data",side_effect=lambda o,r,p: captured.append(p)), \
                      patch.object(HELPER.os,"open",side_effect=opened), patch.object(HELPER.os,"stat",side_effect=stated), \
                      patch.object(HELPER.os,"lstat",side_effect=lstated), patch.object(HELPER.os,"fstat",side_effect=fstated), \
                      patch.object(HELPER.os,"fstatvfs",return_value=SimpleNamespace(f_flag=os.ST_RDONLY)):

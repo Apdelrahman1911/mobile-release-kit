@@ -2,6 +2,45 @@
 
 Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.**
 
+### 2026-10-18: protected Restore completion and real native dropdowns
+
+Run `39140262622/1 @982392a5` completed with **seven failed jobs, no whole-cohort passes**.
+The new unsigned-iOS selection did enter its intended XCTest; it and credentials
+failed at the same `select()` menu lookup. Android failed before build at a
+checkbox lookup for an actual optional-boolean dropdown. These are concrete
+harness mismatches, not established failures of the app's underlying operations.
+
+The reviewed correction queries the sole menu of the already-owned payload after
+clicking the exact selected control; it never launches another app or searches
+other processes. Exact item, enabled/hittable state, dismissal and original value
+readback remain required. Android reads `Enabled / Yes` from the real dropdown;
+it never enables project policy on the user's behalf. Native behavior is still
+pending, including these menu assumptions.
+
+Restore `39137375131/1`, job `117704542094`, returned Installer0 with settled
+captures, but **no completion frame** in stdout/stderr. One physical install.log
+marker is diagnostic only. The accepted Python/Rust correction uses six fixed,
+protected completion files only for the Restore observer. Existing native owners
+must settle/close before exclusive export, independent readback and consuming
+closes under the original deadline. Exact prior phase records are authenticated
+before census exclusion; collisions, future records, missing/late output and
+unknown finality still refuse. No log fallback, extra native command or renewed
+clock. Review also prevented an export failure from emitting a misleading
+Install-only all-originals-closed diagnostic.
+
+Five affected existing Python methods passed locally; the final legacy
+baseline-digest/close-precedence amendment additionally passed its affected reader
+method. Native Rust parsing passed, **not typechecking or Mac execution**. All
+local callers joined and task projections were removed. Existing six native
+fixture tests remain in the Restore build route; no new qualification framework.
+
+Next scope: **four ARM jobs only** — Restore, credentials, unsigned iOS and Android.
+They reuse the unchanged signed `fcb1aa46` app; only the nonshipping Restore helper
+is rebuilt. No repeat notarization or unrelated failed job rerun. Project fields,
+evidence, saved checks, pending-iOS and Intel remain unresolved, not waived.
+Required native/installed lifecycle verification and production readiness remain
+incomplete. Main/public releases remain unchanged and require owner approval.
+
 ### Current Mac verification checkpoint
 
 Signed ARM/Intel application `fcb1aa46` remains unchanged; no repeated application

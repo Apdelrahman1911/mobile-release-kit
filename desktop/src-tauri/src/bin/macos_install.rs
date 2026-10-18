@@ -338,22 +338,22 @@ mod installer {
     // Exactly four original descriptors, entirely separate from Install's
     // immutable completed books. No new installation, retry, cleanup or clock.
     struct Export { originals: Vec<Original>, end: Instant, unknown: bool,
-        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer",feature="macos-installed-restore-chain-observer"))]
         fixture_readback:bool,
     }
     impl Export {
         fn new(end: Instant) -> Self { Self { originals: Vec::with_capacity(4), end, unknown: false,
-            #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+            #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer",feature="macos-installed-restore-chain-observer"))]
             fixture_readback:false,
         } }
         fn original_limit(&self)->usize {
-            #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+            #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer",feature="macos-installed-restore-chain-observer"))]
             if self.fixture_readback {return 5;}
             4
         }
-        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer",feature="macos-installed-restore-chain-observer"))]
         fn new_fixture(end:Instant)->Self {Self{originals:Vec::with_capacity(5),end,unknown:false,fixture_readback:true}}
-        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer",feature="macos-installed-restore-chain-observer"))]
         fn fixture_write_readback(&mut self,name:&str,bytes:&[u8])->Result<()> {
             check(self.fixture_readback && self.originals.is_empty(),"removal-fixture-export-once")?;
             self.write(name,bytes)?;
@@ -15233,7 +15233,7 @@ mod installer {
             serde_json::to_writer(&mut out,value).map_err(|_|"removal-fixture-export-json")?;
             out.bytes.push(b'\n');Ok(out.bytes)
         }
-        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer",feature="macos-installed-restore-chain-observer"))]
         fn removal_fixture_export(book:&Install,name:&str,bytes:&[u8])->Result<()> {
             check(book.originals.iter().all(|r|r.fd.is_none() && matches!(r.state,State::Closed|State::NoHandle))
                 && !book.unknown,"removal-fixture-export-originals")?;

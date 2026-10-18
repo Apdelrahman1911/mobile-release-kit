@@ -5338,14 +5338,20 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func select(_ root: XCUIElement, label: String, value: String,
                                   renderer: XCUIElement, line: UInt = #line) throws {
         let control = try waitElement(controls(root, [.popUpButton, .comboBox], label: label, prefix: true),
-                                     in: root, enabled: true)
+                                     in: root, enabled: true, line: line)
         try reveal(control, in: renderer, line: line)
+        // WebKit presents an AppKit NSMenu on a transient view, not as a
+        // descendant of the HTML select. Monitor the already-owned payload;
+        // this never launches or adopts another application.
+        let app = XCUIApplication(url: OrdinaryLaunch.payloadURL)
+        try require(app.menus.count == 0, "an unrelated application menu is already open", line: line)
         control.click()
-        // Native/web popup's own menu only, never the app's unrelated menus.
-        let item = try waitElement(control.menuItems.matching(identifier: value), in: control, enabled: true)
-        try require(item.isHittable, "owned selection menu item is not actionable")
+        let menu = try waitElement(app.menus, in: app, line: line)
+        let item = try waitElement(menu.menuItems.matching(identifier: value), in: menu, enabled: true, line: line)
+        try require(item.isHittable, "owned selection menu item is not actionable", line: line)
         item.click()
-        try require(control.value as? String == value, "selected value was not observed")
+        try waitGone(menu, line: line)
+        try require(control.value as? String == value, "selected value was not observed", line: line)
     }
     @MainActor private func expand(_ root: XCUIElement, prefix: String, renderer: XCUIElement,
                                   line: UInt = #line) throws {
@@ -8315,8 +8321,9 @@ final class NormalAppUITests: XCTestCase {
                 try press(renderer,"Project settings",renderer:renderer)
                 let settings=try waitElement(named(renderer,"Settings section"),in:renderer)
                 try settingsTab(settings,"General",renderer:renderer)
-                let local=try waitElement(controls(renderer, [.checkBox], label: "Allow local Store release preparation", prefix: true),in:renderer)
-                try require((local.value as? String)=="1" || (local.value as? NSNumber)?.intValue==1,"candidate saved local policy not enabled")
+                // Optional booleans preserve the unset state through a select, not a checkbox.
+                let local=try waitElement(controls(renderer, [.popUpButton, .comboBox], label: "Allow local Store release preparation", prefix: true),in:renderer)
+                try require(local.value as? String == "Enabled / Yes","candidate saved local policy not enabled")
                 try fixture.prepareCandidateJournalObservation {_ = try self.remaining(5)}
                 let enrolled=try candidateHistoryAction(renderer,action:"enroll",checkpoint:1)
                 try require(try androidPublicText(enrolled).contains("No release operations recorded."),"candidate enrollment not empty")

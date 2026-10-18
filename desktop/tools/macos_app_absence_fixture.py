@@ -84,6 +84,16 @@ def baseline_name_data(binding):
             + "-" + value["runAttempt"] + "-" + target + "-baseline.json")
 
 
+def completion_name_data(binding, phase):
+    binding_data(binding)
+    need(type(phase) is str and phase in ("baseline", "withdraw") + RECOVERY_PHASES, "app-absence-completion-phase")
+    arch = "arm64" if binding["target"] == TARGETS[0] else "intel"
+    name = "MobileReleaseKit-AppAbsenceCompletion-v1-{}-{}-{}-{}-{}-{}.json".format(
+        binding["fixtureSource"], binding["productSource"], binding["runId"], binding["runAttempt"], arch, phase)
+    need(len(name) <= 255, "app-absence-completion-name")
+    return name
+
+
 def private_name_data(binding, root_nonce):
     value = binding_data(binding)
     need(nonzero_hex_data(root_nonce, 32), "fixture-root-nonce")
@@ -1244,8 +1254,15 @@ def phase_observation(op, result, phase):
                  and all(32 <= byte < 127 or byte == 9 for byte in prefix), "app-absence-phase-marker-shape")
             found.append(body)
     need(len(found) == 1, "app-absence-phase-marker-count")
-    value = op.app_absence_api.tool_json(found[0])
-    need(json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode("ascii") + b"\n" == found[0],
+    return phase_observation_data(op, found[0], phase)
+
+
+def phase_observation_data(op, body, phase):
+    recovery_step = RECOVERY_PHASES.index(phase) if phase in RECOVERY_PHASES and recovery_mode(op) else None
+    need((phase in PROOFS or recovery_step is not None) and type(body) is bytes
+         and 0 < len(body) <= 4096 and body.endswith(b"\n"), "app-absence-phase-output-bound")
+    value = op.app_absence_api.tool_json(body)
+    need(json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode("ascii") + b"\n" == body,
          "app-absence-phase-canonical-json")
     need(type(value) is dict and set(value) == set(BINDING_FIELDS) | {"schemaVersion", "kind", "phase", "baselineSha256", "recordSha256",
          "proof", "originalOuterExitRequired", "systemServiceExitClaimed", "productReady"}
@@ -1274,20 +1291,32 @@ def phase_observation(op, result, phase):
     return value
 
 
-def baseline_read(op, expected_sha):
-    name = baseline_name_data(op.app_absence["binding"])
+def protected_record_read(op, name, limit, reason, *, expected_sha=None):
     with op.stager.installer_channel_parent(op.stager.INSTALL_ROOT) as (fd, _root_name):
         parent_before = os.fstat(fd)
         parent_identity = {"device": parent_before.st_dev, "inode": parent_before.st_ino, "mode": parent_before.st_mode,
                            "uid": parent_before.st_uid, "gid": parent_before.st_gid}
         before = os.stat(name, dir_fd=fd, follow_symlinks=False)
         need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == before.st_gid == 0
-             and stat.S_IMODE(before.st_mode) == 0o444 and 0 < before.st_size <= RECORD_LIMIT, "app-absence-baseline-original")
-        body, actual = op.stager.read_at(fd, name, RECORD_LIMIT)
+             and stat.S_IMODE(before.st_mode) == 0o444 and 0 < before.st_size <= limit, reason)
+        body, actual = op.stager.read_at(fd, name, limit)
         parent_after = os.fstat(fd)
-        need(op.app_absence_api.signature(before) == op.app_absence_api.signature(actual) and digest(body) == expected_sha
+        need(op.app_absence_api.signature(before) == op.app_absence_api.signature(actual)
+             and (expected_sha is None or digest(body) == expected_sha)
              and parent_identity == {"device": parent_after.st_dev, "inode": parent_after.st_ino, "mode": parent_after.st_mode,
-                                     "uid": parent_after.st_uid, "gid": parent_after.st_gid}, "app-absence-baseline-original-post")
+                                     "uid": parent_after.st_uid, "gid": parent_after.st_gid}, reason + "-post")
+    return body, actual, parent_identity
+
+
+def completion_read(op, phase):
+    return protected_record_read(op, completion_name_data(op.app_absence["binding"], phase),
+        4096, "app-absence-completion-original")[0]
+
+
+def baseline_read(op, expected_sha):
+    need(expected_sha is not None, "app-absence-baseline-original-post")
+    body, actual, parent_identity = protected_record_read(op, baseline_name_data(op.app_absence["binding"]),
+        RECORD_LIMIT, "app-absence-baseline-original", expected_sha=expected_sha)
     value = op.stager.maintenance_json(body, RECORD_LIMIT)
     baseline_value_data(value, op.app_absence["nativeBinding"], parent_identity)
     return {"bytes": len(body), "sha256": expected_sha, "identity": list(op.app_absence_api.signature(actual))}
@@ -1555,6 +1584,16 @@ def root_call(op, phase):
     reserve(op)
     result = call(op, role, ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg",
         str(mounted_path(op) / PHASE_NAMES[index]), "-target", "/", "-dumplog", "-verboseR"], maximum=123, limit=256*1024)
+    if recovery_mode(op):
+        need(type(result.returncode) is int and result.returncode == 0
+             and type(result.stdout) is bytes and type(result.stderr) is bytes
+             and len(result.stdout) + len(result.stderr) <= 256*1024 and op.calls
+             and op.calls[-1].get("role") == role
+             and type(op.calls[-1].get("returncode")) is int and op.calls[-1]["returncode"] == 0
+             and all(op.calls[-1].get(k) is True for k in ("entered", "returned", "capturesSettled"))
+             and op.app_absence["pendingRoot"] is None, "app-absence-completion-installer")
+        body = io(op, "completion-read", completion_read, op, phase)
+        return phase_observation_data(op, body, phase)
     return phase_observation(op, result, phase)
 
 

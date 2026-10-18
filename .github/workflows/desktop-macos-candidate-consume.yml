@@ -22,13 +22,7 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            mode: ordinary-ui
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: aarch64-apple-darwin
-            mode: ordinary-saved-ui
+            mode: restore
             runner: macos-26
             python-architecture: arm64
             rust-version: 1.98.1
@@ -40,19 +34,7 @@ jobs:
             rust-version: 1.98.1
             rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
           - target: aarch64-apple-darwin
-            mode: ordinary-checks-ui
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: aarch64-apple-darwin
             mode: ordinary-ios-archive-ui
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: aarch64-apple-darwin
-            mode: ordinary-ios-pending-ui
             runner: macos-26
             python-architecture: arm64
             rust-version: 1.98.1

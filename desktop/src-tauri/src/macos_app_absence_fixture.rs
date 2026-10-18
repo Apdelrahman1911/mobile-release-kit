@@ -4,6 +4,8 @@ use super::*;
 const EXECUTABLE: &str = "mrk-macos-app-absence-fixture";
 const RECORD_LIMIT: usize = 64 * 1024;
 const OUTPUT_MARKER:&[u8]=b"MRK_MACOS_APP_ABSENCE_RESULT=";
+#[cfg(feature="macos-installed-restore-chain-observer")]
+const COMPLETION_PHASES:[&str;6]=["baseline","withdraw","recovery-cut-1","recovery-cut-2","recovery-cut-3","recovered"];
 const FIXTURE_PACKAGE_LIMIT: u64 = 640 * 1024 * 1024;
 const FIXTURE_IMAGE_LIMIT: u64 = 2560 * 1024 * 1024;
 const PHASE_NAMES: [&str; 3] = ["MRK-AppAbsence-Baseline.pkg", "MRK-AppAbsence-Withdraw.pkg", "MRK-AppAbsence-Verify.pkg"];
@@ -69,6 +71,14 @@ impl<'a> BindingData<'a> {
     fn baseline_name(&self) -> String {
         let target = if self.target == "aarch64-apple-darwin" { "arm64" } else { "intel" };
         format!("MobileReleaseKit-AppAbsence-{}-{}-{}-{target}-baseline.json", &self.source[..12], self.run, self.attempt)
+    }
+    #[cfg(feature="macos-installed-restore-chain-observer")]
+    fn completion_name(&self,index:usize)->Result<String> {
+        let phase=COMPLETION_PHASES.get(index).ok_or("app-absence-completion-phase")?;
+        let arch=if self.target=="aarch64-apple-darwin" {"arm64"} else {"intel"};
+        let name=format!("MobileReleaseKit-AppAbsenceCompletion-v1-{}-{}-{}-{}-{arch}-{phase}.json",
+            self.source,self.product_source,self.run,self.attempt);
+        check(name.len()<=255,"app-absence-completion-name")?;Ok(name)
     }
     fn private_name(&self, nonce: &str) -> Result<String> {
         check(nonzero_hex_data(nonce,32),"app-absence-root-nonce")?;
@@ -306,17 +316,61 @@ fn observation_data(binding:&Value,phase:PhaseData,baseline:&str,record:&str)->R
     out.insert("originalOuterExitRequired".into(),json!(true));out.insert("systemServiceExitClaimed".into(),json!(false));
     out.insert("productReady".into(),json!(false));json_bytes_data(&value,4096)?;Ok(value)
 }
+#[cfg(feature="macos-installed-restore-chain-observer")]
+fn completion_observation_data(binding:&Value,index:usize,baseline:&str,record:&str)->Result<Value> {
+    check(index<6,"app-absence-completion-phase")?;
+    let phase=if index==0 {PhaseData::Baseline} else if index==1 {PhaseData::Withdraw} else {PhaseData::Verify};
+    let mut value=observation_data(binding,phase,baseline,record)?;
+    if index>=2 {
+        let step=index-2;
+        value["phase"]=json!(COMPLETION_PHASES[index]);
+        value["proof"]=json!({"step":step,"initialHistoryPreserved":true,"runtimeUnchanged":true,"withdrawnAppVerified":true,
+            "partialAppConserved":true,"recordReadback":true,"ordinaryRetryComplete":step==3,"originalOuterExitRequired":true});
+    }
+    Ok(value)
+}
+#[cfg(feature="macos-installed-restore-chain-observer")]
+fn completion_bytes_data(value:&Value)->Result<Vec<u8>> {
+    let mut bytes=json_bytes_data(value,4096)?;bytes.push(b'\n');Ok(bytes)
+}
+#[cfg(feature="macos-installed-restore-chain-observer")]
+fn completion_record_data(value:&Value,bytes:&[u8],binding:&Value,index:usize,baseline:&str)->Result<()> {
+    let record=value["recordSha256"].as_str().ok_or("app-absence-completion-record")?;
+    check(index!=0 || record==baseline,"app-absence-completion-record")?;
+    check(*value==completion_observation_data(binding,index,baseline,record)?
+        && bytes==completion_bytes_data(value)?,"app-absence-completion-binding")
+}
+#[cfg(feature="macos-installed-restore-chain-observer")]
+fn completion_prefix_data(phase:PhaseData,names:&BTreeSet<&str>)->Result<usize> {
+    if phase==PhaseData::Withdraw {check(names.is_empty(),"app-absence-private-roster")?;return Ok(1);}
+    check(phase==PhaseData::Verify,"app-absence-completion-phase")?;
+    let step=RECOVERY_RECORDS.iter().take_while(|name|names.contains(**name)).count();
+    check(step<4,"restore-chain-already-complete")?;
+    let mut expected=BTreeSet::from(["app","withdrawn.json"]);expected.extend(RECOVERY_RECORDS[..step].iter().copied());
+    check(*names==expected,"app-absence-private-roster")?;Ok(2+step)
+}
+#[cfg(feature="macos-installed-restore-chain-observer")]
+fn completion_budget_data(used:usize,live:usize,extra:usize,prior:usize)->Result<()> {
+    // Five exporter originals are sequential, AFTER the Install book closes.
+    // Prior completion readers remain live and are never recycled or discounted.
+    check(prior<=5 && used.checked_add(prior).and_then(|v|v.checked_add(5))
+        .is_some_and(|v|v<=installation_record::ORIGINAL_LIMIT)
+        && live.checked_add(extra).and_then(|v|v.checked_add(prior)).is_some_and(|v|v<=96),
+        "app-absence-completion-original-bound")
+}
 struct HeldRecord {original:usize,bytes:Vec<u8>,value:Value,digest:String}
 impl HeldRecord {
-    fn read(book:&mut Install,parent:usize,name:&str)->Result<Self> {
+    fn read(book:&mut Install,parent:usize,name:&str)->Result<Self> {Self::read_limit(book,parent,name,RECORD_LIMIT)}
+    fn read_limit(book:&mut Install,parent:usize,name:&str,limit:usize)->Result<Self> {
+        check(matches!(limit,4096|RECORD_LIMIT),"app-absence-record-bound")?;
         let original=book.open(Some(parent),name,false)?;
         book.protected(original,false,Some(0o444))?;
         native::no_xattrs(book.fd(original)?.as_fd()).map_err(|_|"app-absence-record-attributes")?;
         check(stat::fstat(book.fd(original)?).map_err(|_|"app-absence-record-stat")?.st_flags==0,"app-absence-record-flags")?;
         let size=usize::try_from(book.identity(original)?.size).map_err(|_|"app-absence-record-bound")?;
-        check(size>0 && size<=RECORD_LIMIT,"app-absence-record-bound")?;
+        check(size>0 && size<=limit,"app-absence-record-bound")?;
         let (digest,bytes)=book.read(original,size as u64,true)?;
-        let value=packet(&bytes,RECORD_LIMIT)?;
+        let value=packet(&bytes,limit)?;
         let held=Self{original,bytes,value,digest};held.post(book)?;Ok(held)
     }
     fn write(book:&mut Install,parent:usize,name:&str,value:Value)->Result<Self> {
@@ -458,11 +512,20 @@ fn same_renamed_data(before:&Value,after:&Value)->bool {
     ["device","inode","mode","uid","gid","links","bytes","mtime","mtimeNanos"]
         .iter().all(|key|!before[*key].is_null() && before[*key]==after[*key])
 }
-struct Baseline {support:usize,private:usize,record:HeldRecord}
+struct Baseline {support:usize,private:usize,record:HeldRecord,
+    #[cfg(feature="macos-installed-restore-chain-observer")]
+    completions:Vec<(String,HeldRecord)>,
+}
 impl Baseline {
     fn create(book:&mut Install,binding:&Value)->Result<Self> {
         let b=compiled_binding_data()?;let support=book.support_root()?;
         book.absent(support,"MobileReleaseKit")?;book.absent(support,&b.baseline_name())?;
+        #[cfg(feature="macos-installed-restore-chain-observer")]
+        {
+            completion_budget_data(book.originals.len(),book.originals.iter().filter(|r|r.fd.is_some()).count(),
+                EXTRA_LIVE+book.removal_live_reserved,0)?;
+            for index in 0..6 {book.absent(support,&b.completion_name(index)?)?;}
+        }
         let (census,count)=sibling_census(book,support,&[])?;
         book.clock()?;let mut raw=[0u8;16];getrandom::fill(&mut raw).map_err(|_|"app-absence-root-nonce")?;book.clock()?;
         let nonce=raw.iter().map(|b|format!("{b:02x}")).collect::<String>();let name=b.private_name(&nonce)?;
@@ -474,9 +537,12 @@ impl Baseline {
             "parentIdentity":stable_identity_data(book.identity(support)?),"privateIdentity":stable_identity_data(book.identity(private)?),
             "siblingCensusSha256":census,"siblingCount":count,"rootAbsent":true,"transportState":"pending-original-exit"});
         let record=HeldRecord::write_baseline(book,support,&b.baseline_name(),value)?;
-        let baseline=Self{support,private,record};baseline.post(book,false)?;Ok(baseline)
+        let baseline=Self{support,private,record,
+            #[cfg(feature="macos-installed-restore-chain-observer")]
+            completions:Vec::new(),
+        };baseline.post(book,false)?;Ok(baseline)
     }
-    fn read(book:&mut Install,binding:&Value)->Result<Self> {
+    fn read(book:&mut Install,binding:&Value,_phase:PhaseData)->Result<Self> {
         let b=compiled_binding_data()?;let support=book.support_root()?;
         let record=HeldRecord::read(book,support,&b.baseline_name())?;let value=&record.value;
         object(value,&BASELINE_FIELDS)?;object(&value["binding"],&BINDING_FIELDS)?;
@@ -490,15 +556,43 @@ impl Baseline {
         check(stable_identity_data(book.identity(support)?)==value["parentIdentity"]
             && stable_identity_data(book.identity(private)?)==value["privateIdentity"]
             && book.identity(support)?.dev==book.identity(private)?.dev,"app-absence-baseline-originals")?;
-        let baseline=Self{support,private,record};baseline.post(book,true)?;Ok(baseline)
+        #[cfg(feature="macos-installed-restore-chain-observer")]
+        let completions={
+            let roster=maintenance::roster_now(book,private)?;
+            let count=completion_prefix_data(_phase,&roster.keys().map(String::as_str).collect())?;
+            completion_budget_data(book.originals.len(),book.originals.iter().filter(|r|r.fd.is_some()).count(),
+                EXTRA_LIVE+book.removal_live_reserved,count)?;
+            let mut prior=Vec::with_capacity(count);
+            for index in 0..count {
+                let name=b.completion_name(index)?;
+                let completion=HeldRecord::read_limit(book,support,&name,4096)?;
+                completion_record_data(&completion.value,&completion.bytes,binding,index,&record.digest)?;
+                prior.push((name,completion));
+            }
+            prior
+        };
+        let baseline=Self{support,private,record,
+            #[cfg(feature="macos-installed-restore-chain-observer")]
+            completions,
+        };baseline.post(book,true)?;Ok(baseline)
+    }
+    #[cfg(feature="macos-installed-restore-chain-observer")]
+    fn completion_matches(&self,index:usize,record:&HeldRecord)->Result<()> {
+        let old=&self.completions.get(index).ok_or("app-absence-completion-prefix")?.1;
+        check(old.value["recordSha256"]==record.digest,"app-absence-completion-record")
     }
     fn post(&self,book:&mut Install,root_present:bool)->Result<()> {
         self.record.post(book)?;protected_private(book,self.private)?;support_post(book,self.support)?;
         check(stable_identity_data(book.identity(self.support)?)==self.record.value["parentIdentity"]
             && stable_identity_data(book.identity(self.private)?)==self.record.value["privateIdentity"],"app-absence-baseline-originals")?;
         let b=compiled_binding_data()?;let name=b.private_name(self.record.value["rootNonce"].as_str().ok_or("app-absence-root-nonce")?)?;
-        let public=b.baseline_name();let exclusions=if root_present {vec![name.as_str(),public.as_str(),"MobileReleaseKit"]}
+        let public=b.baseline_name();let mut exclusions=if root_present {vec![name.as_str(),public.as_str(),"MobileReleaseKit"]}
             else {book.absent(self.support,"MobileReleaseKit")?;vec![name.as_str(),public.as_str()]};
+        #[cfg(feature="macos-installed-restore-chain-observer")]
+        {
+            for (name,completion) in &self.completions {completion.post(book)?;exclusions.push(name.as_str());}
+            for index in self.completions.len()..6 {book.absent(self.support,&b.completion_name(index)?)?;}
+        }
         let (digest,count)=sibling_census(book,self.support,&exclusions)?;
         check(self.record.value["siblingCensusSha256"]==digest && self.record.value["siblingCount"]==count,"app-absence-census-changed")
     }
@@ -526,7 +620,7 @@ fn observe_current(book:&mut Install,admission:&mut Admission,baseline:&Baseline
 fn pending_record_proof_data(phase:PhaseData)->Value {
     let mut proof=proof_data(phase);
     // This document is serialized BEFORE its own original write/readback.
-    // Only the later stdout observation may report returned recordReadback.
+    // Only the later observation may report returned recordReadback.
     if let Some(map)=proof.as_object_mut() {map.remove("recordReadback");}
     proof
 }
@@ -634,7 +728,9 @@ pub(in crate::installer) fn entry()->i32 {
     let started=match monotonic(){Ok(v)=>v,Err(_)=>return 1};
     let deadline=match Deadline::from_entry(started){Ok(v)=>v,Err(_)=>return 1};
     let mut book=Install::with_worker_deadline(deadline,false);let mut admission=None;
-    let result=(|| {
+    #[cfg(feature="macos-installed-restore-chain-observer")]
+    let mut completion=None;
+    let mut result=(|| {
         let args=entry_arguments_data(std::env::args_os())?;
         check(args.len()==3,"app-absence-fixed-arguments")?;
         admission=Some(Admission::prepare(&mut book,&args[1],&args[2])?);
@@ -646,16 +742,20 @@ pub(in crate::installer) fn entry()->i32 {
                 admitted.post(&mut book,true)?;baseline.post(&mut book,false)?;
                 observation_data(&binding,PhaseData::Baseline,&baseline.record.digest,&baseline.record.digest)?
             },
-            PhaseData::Withdraw=>{let baseline=Baseline::read(&mut book,&binding)?;withdraw(&mut book,admitted,&binding,&baseline)?},
-            PhaseData::Verify=>{let baseline=Baseline::read(&mut book,&binding)?;
+            PhaseData::Withdraw=>{let baseline=Baseline::read(&mut book,&binding,admitted.phase)?;withdraw(&mut book,admitted,&binding,&baseline)?},
+            PhaseData::Verify=>{let baseline=Baseline::read(&mut book,&binding,admitted.phase)?;
                 #[cfg(feature="macos-installed-restore-chain-observer")]
                 { recovery_verify(&mut book,admitted,&binding,&baseline)? }
                 #[cfg(not(feature="macos-installed-restore-chain-observer"))]
                 { verify(&mut book,admitted,&binding,&baseline)? }
             },
         };
-        // This line says only pre-exit facts. Parent MUST require our actual0.
-        emit_observation(&book,&output)
+        #[cfg(feature="macos-installed-restore-chain-observer")]
+        {completion=Some(output);Ok(())}
+        #[cfg(not(feature="macos-installed-restore-chain-observer"))]
+        { // Legacy transport remains pre-exit; parent still requires actual0.
+            emit_observation(&book,&output)
+        }
     })();
     let native=admission.as_mut().is_none_or(|a|a.settle(&book));
     if !native {
@@ -664,7 +764,25 @@ pub(in crate::installer) fn entry()->i32 {
         std::mem::forget(admission);std::mem::forget(book);return 1;
     }
     let closed=book.settle_originals();
-    let timely=book.shared_deadline().and_then(Deadline::check_total).is_ok();
+    let mut timely=book.shared_deadline().and_then(Deadline::check_total).is_ok();
+    #[cfg(feature="macos-installed-restore-chain-observer")]
+    if result.is_ok() && closed && timely && !book.unknown {
+        let mut export_attempted=false;
+        result=(|| {
+            completion_budget_data(book.originals.len(),0,0,0)?;
+            let output=completion.take().ok_or("app-absence-completion-missing")?;
+            let index=COMPLETION_PHASES.iter().position(|phase|output["phase"]==*phase)
+                .ok_or("app-absence-completion-phase")?;
+            let name=compiled_binding_data()?.completion_name(index)?;
+            let bytes=completion_bytes_data(&output)?;
+            export_attempted=true;
+            removal_fixture_export(&book,&name,&bytes)
+        })();
+        timely=book.shared_deadline().and_then(Deadline::check_total).is_ok();
+        // The advisory formatter below describes only the Install book. An
+        // Export refusal may have unknown closes in its separate original set.
+        if export_attempted && result.is_err() {return 1;}
+    }
     let exit=if result.is_ok() && closed && timely && !book.unknown {0}else{1};
     if let Some(line)=completed_failure_line_data(result.err(),exit,closed,
         admission.is_some() && native,timely,book.unknown,native) {
@@ -684,6 +802,19 @@ mod tests {
         for target in ["aarch64-apple-darwin","x86_64-apple-darwin"] {
             let binding=BindingData::new(&source,&source,"123","1",target).unwrap();
             assert!(binding.baseline_name().len()<255);
+            #[cfg(feature="macos-installed-restore-chain-observer")]
+            {
+                let names=(0..6).map(|i|binding.completion_name(i).unwrap()).collect::<BTreeSet<_>>();
+                assert_eq!(names.len(),6);assert!(names.iter().all(|n|n.len()<=255));
+                let arch=if target=="aarch64-apple-darwin" {"arm64"} else {"intel"};
+                assert_eq!(binding.completion_name(0).unwrap(),format!(
+                    "MobileReleaseKit-AppAbsenceCompletion-v1-{source}-{source}-123-1-{arch}-baseline.json"));
+                assert!(binding.completion_name(6).is_err());
+                let changed=BindingData::new(&source,&"2".repeat(40),"123","1",target).unwrap().completion_name(0).unwrap();
+                assert_ne!(binding.completion_name(0).unwrap(),changed);
+                let longest=BindingData::new(&source,&source,&"9".repeat(20),&"9".repeat(10),target).unwrap()
+                    .completion_name(4).unwrap();assert!(longest.len()<=255);
+            }
             assert!(binding.private_name(&"2".repeat(32)).unwrap().len()<255);
             for bad in ["0".repeat(32),"A".repeat(32),"../other".into()] {assert!(binding.private_name(&bad).is_err());}
         }
@@ -735,6 +866,32 @@ mod tests {
     }
     #[test]
     fn output_quote_and_original_exit_finality_are_separate() {
+        #[cfg(feature="macos-installed-restore-chain-observer")]
+        {
+            let limit=installation_record::ORIGINAL_LIMIT;
+            assert!(completion_budget_data(limit-10,87,4,5).is_ok());
+            assert!(completion_budget_data(limit-9,87,4,5).is_err());
+            assert!(completion_budget_data(0,88,4,5).is_err());
+            assert!(completion_budget_data(0,0,0,6).is_err());
+            assert!(completion_budget_data(usize::MAX,0,0,0).is_err());
+            assert!(completion_budget_data(0,usize::MAX,1,0).is_err());
+            assert!(completion_budget_data(limit-5,0,0,0).is_ok());
+            assert!(completion_budget_data(limit-4,0,0,0).is_err());
+            assert_eq!(completion_prefix_data(PhaseData::Withdraw,&BTreeSet::new()).unwrap(),1);
+            assert!(completion_prefix_data(PhaseData::Withdraw,&BTreeSet::from(["app"])).is_err());
+            assert!(completion_prefix_data(PhaseData::Baseline,&BTreeSet::new()).is_err());
+            for step in 0..4 {
+                let mut names=BTreeSet::from(["app","withdrawn.json"]);
+                names.extend(RECOVERY_RECORDS[..step].iter().copied());
+                assert_eq!(completion_prefix_data(PhaseData::Verify,&names).unwrap(),2+step);
+                let mut extra=names.clone();extra.insert("unrelated.json");
+                assert!(completion_prefix_data(PhaseData::Verify,&extra).is_err());
+                if step<3 {names.insert(RECOVERY_RECORDS[step+1]);
+                    assert!(completion_prefix_data(PhaseData::Verify,&names).is_err());}
+            }
+            let mut completed=BTreeSet::from(["app","withdrawn.json"]);completed.extend(RECOVERY_RECORDS);
+            assert!(completion_prefix_data(PhaseData::Verify,&completed).is_err());
+        }
         // Exact raw-bit behavior, including an unrelated unnamed bit. Neither
         // first-write bookkeeping nor restoration may hide another flag change.
         for old in [1,1|4,1|0x0001_0000,1|0x2000_0000] {
@@ -944,6 +1101,46 @@ mod tests {
             }
             assert_eq!(value["proof"],proof_data(phase));
         }
+        #[cfg(feature="macos-installed-restore-chain-observer")]
+        {
+            let baseline="2".repeat(64);
+            for index in 0..6 {
+                let record=if index==0 {baseline.clone()} else {"3".repeat(64)};
+                let value=completion_observation_data(&binding,index,&baseline,&record).unwrap();
+                let bytes=completion_bytes_data(&value).unwrap();
+                assert!(bytes.len()<=4096 && bytes.ends_with(b"\n"));
+                assert_eq!(value.as_object().unwrap().len(),21);
+                assert_eq!(value["phase"],COMPLETION_PHASES[index]);
+                assert_eq!(packet(&bytes,4096).unwrap(),value);
+                assert!(completion_record_data(&value,&bytes,&binding,index,&baseline).is_ok());
+                for bad in [bytes[..bytes.len()-1].to_vec(),[bytes.as_slice(),b"\n"].concat(),
+                    serde_json::to_vec_pretty(&value).unwrap()] {
+                    assert!(completion_record_data(&value,&bad,&binding,index,&baseline).is_err());
+                }
+                for key in ["fixtureSource","productSource","runId","runAttempt","target","baselineSha256",
+                    "packageSha256","phase","proof","productReady","originalOuterExitRequired"] {
+                    let mut changed=value.clone();changed[key]=Value::Null;
+                    let raw=completion_bytes_data(&changed).unwrap();
+                    assert!(completion_record_data(&changed,&raw,&binding,index,&baseline).is_err());
+                }
+                let mut extra=value.clone();extra["privatePath"]=json!("never-exported");
+                assert!(completion_record_data(&extra,&completion_bytes_data(&extra).unwrap(),&binding,index,&baseline).is_err());
+                assert!(completion_record_data(&value,&bytes,&binding,(index+1)%6,&baseline).is_err());
+                let duplicate=[b"{\"phase\":\"baseline\",".as_slice(),&bytes[1..]].concat();
+                assert!(packet(&duplicate,4096).is_err());
+                let held=HeldRecord{original:0,bytes:bytes.clone(),value:value.clone(),digest:digest_data(&bytes)};
+                let private=HeldRecord{original:0,bytes:vec![],value:Value::Null,digest:record.clone()};
+                let baseline_object=Baseline{support:0,private:0,record:HeldRecord{original:0,bytes:vec![],value:Value::Null,digest:baseline.clone()},
+                    completions:vec![("fixed".into(),held)]};
+                assert!(baseline_object.completion_matches(0,&private).is_ok());
+                assert!(baseline_object.completion_matches(1,&private).is_err());
+                let wrong=HeldRecord{digest:"4".repeat(64),..private};
+                assert!(baseline_object.completion_matches(0,&wrong).is_err());
+            }
+            let bad=completion_observation_data(&binding,0,&baseline,&"3".repeat(64)).unwrap();
+            assert!(completion_record_data(&bad,&completion_bytes_data(&bad).unwrap(),&binding,0,&baseline).is_err());
+            assert!(completion_bytes_data(&json!("x".repeat(4096))).is_err());
+        }
         let record=private_record_data(&binding,&"2".repeat(64),&snapshot_fixture(),&snapshot_fixture()["app"],PhaseData::Withdraw).unwrap();
         assert!(!record["proof"].as_object().unwrap().contains_key("recordReadback"));
         assert_eq!(record["transportState"],"pending-original-exit");assert_eq!(record["renameReturned"],"known-success");
@@ -1036,6 +1233,7 @@ fn recovery_verify(book:&mut Install,admission:&mut Admission,binding:&Value,bas
         &&withdrawn.value["binding"]==*binding&&withdrawn.value["baselineSha256"]==baseline.record.digest
         &&withdrawn.value["renameReturned"]=="known-success"&&withdrawn.value["proof"]==pending_record_proof_data(PhaseData::Withdraw)
         &&withdrawn.value["transportState"]=="pending-original-exit","restore-chain-withdrawal")?;
+    baseline.completion_matches(1,&withdrawn)?;
     let mut prior=Vec::with_capacity(3);let mut previous_sha=withdrawn.digest.clone();
     for (index,name) in RECOVERY_RECORDS[..step].iter().enumerate() {
         let record=HeldRecord::read(book,baseline.private,name)?;
@@ -1046,6 +1244,7 @@ fn recovery_verify(book:&mut Install,admission:&mut Admission,binding:&Value,bas
             &&record.value["previousSha256"]==previous_sha&&record.value["transportState"]=="pending-original-exit",
             "restore-chain-record-binding")?;
         recovery_step_data(&withdrawn.value["snapshot"],prior.last().map(|r:&HeldRecord|&r.value["snapshot"]),&record.value["snapshot"],index)?;
+        baseline.completion_matches(index+2,&record)?;
         previous_sha=record.digest.clone();prior.push(record);
     }
     let observed=observe_current(book,admission,baseline)?;
@@ -1060,9 +1259,5 @@ fn recovery_verify(book:&mut Install,admission:&mut Admission,binding:&Value,bas
     check(maintenance::restore_chain_snapshot(book,&observed)?==snapshot,"restore-chain-final-post")?;
     baseline.post(book,true)?;withdrawn.post(book)?;for old in &prior {old.post(book)?;}record.post(book)?;
     admission.post(book,true)?;book.check_name(retained,true)?;
-    let mut output=observation_data(binding,PhaseData::Verify,&baseline.record.digest,&record.digest)?;
-    output["phase"]=json!(["recovery-cut-1","recovery-cut-2","recovery-cut-3","recovered"][step]);
-    output["proof"]=json!({"step":step,"initialHistoryPreserved":true,"runtimeUnchanged":true,"withdrawnAppVerified":true,
-        "partialAppConserved":true,"recordReadback":true,"ordinaryRetryComplete":step==3,"originalOuterExitRequired":true});
-    json_bytes_data(&output,4096)?;Ok(output)
+    completion_observation_data(binding,step+2,&baseline.record.digest,&record.digest)
 }
