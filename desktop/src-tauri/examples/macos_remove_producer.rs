@@ -278,8 +278,14 @@ mod emitter {
 fn main()->std::process::ExitCode {
     #[cfg(all(feature="macos-remove-producer",target_os="macos",target_pointer_width="64",
         any(target_arch="aarch64",target_arch="x86_64")))]
-    {match emitter::run() {Ok(())=>std::process::ExitCode::SUCCESS,Err(_)=>{
-        eprintln!("remove-producer-refused");std::process::ExitCode::from(78)}}}
+    {match emitter::run() {Ok(())=>std::process::ExitCode::SUCCESS,Err(reason)=>{
+        // Existing static source refusal only; no paths, native errors or custody claim.
+        // Reporting failure must never replace the original unsuccessful exit.
+        use std::io::Write;
+        if !reason.is_empty()&&reason.len()<=64&&reason.bytes().all(|c|c.is_ascii_lowercase()||c==b'-') {
+            let _=writeln!(std::io::stderr().lock(),"MRK_MACOS_REMOVE_PRODUCER_REFUSED={reason}");
+        }
+        std::process::ExitCode::from(78)}}}
     #[cfg(not(all(feature="macos-remove-producer",target_os="macos",target_pointer_width="64",
         any(target_arch="aarch64",target_arch="x86_64"))))]
     {eprintln!("remove-producer-unavailable");std::process::ExitCode::from(78)}

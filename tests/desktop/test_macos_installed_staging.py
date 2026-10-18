@@ -6946,6 +6946,18 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             remove_rows[0].update(executable=str(remove_binary), filenames=[str(remove_binary)])
             for row in remove_rows[:2]: row["features"] = ["macos-remove-producer"]
             self.assertEqual(module.producer_artifact(self.encoded(remove_rows), checkout, target, build_target, remove=True, package_version="0.1.2"), remove_binary)
+            helper_root = checkout / ".candidate-consumer-helper"
+            helper_rows = json.loads(json.dumps(remove_rows).replace(str(checkout), str(helper_root)))
+            helper_rows[2]["profile"]["opt_level"] = "0"
+            self.assertEqual(module.producer_artifact(self.encoded(helper_rows), helper_root, target, build_target,
+                remove=True, candidate_removal=True, package_version="0.1.2"), remove_binary)
+            for wrong in (None, 1, "candidate"):
+                with self.assertRaises(module.Refused):
+                    module.producer_artifact(self.encoded(helper_rows), helper_root, target, build_target,
+                        remove=True, candidate_removal=wrong, package_version="0.1.2")
+            with self.assertRaises(module.Refused):
+                module.producer_artifact(self.encoded(helper_rows), helper_root, target, build_target,
+                    remove=True, package_version="0.1.2")
             observer_rows = copy.deepcopy(remove_rows)
             for row in observer_rows[:2]: row["features"] = ["macos-remove-observer-producer", "macos-remove-producer"]
             self.assertEqual(module.producer_artifact(self.encoded(observer_rows), checkout, target, build_target,
@@ -7179,6 +7191,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 output = b""
                 if role == "producer-build":
                     testcase.assertEqual(argv[-5:], ["--features", "macos-remove-producer", "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"])
+                    compiler_root = self.checkout / ".candidate-consumer-helper" if self.candidate_removal_context is not None else self.checkout
+                    testcase.assertEqual(argv[argv.index("--manifest-path") + 1], str(compiler_root / "desktop/src-tauri/Cargo.toml"))
+                    testcase.assertEqual(options["cwd"], compiler_root / "desktop/src-tauri")
+                    testcase.assertEqual("profile.release.opt-level=0" in argv, self.candidate_removal_context is not None)
                     testcase.assertEqual(options["timeout"], 480)
                     testcase.assertEqual(options["environment"]["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"], "c" * 64)
                     testcase.assertEqual(options["environment"]["MRK_MACOS_INSTALL_SOURCE_COMMIT"], "a" * 40)
@@ -7186,6 +7202,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     # The real strict graph parser still executes below.
                     old = "/inert/work/android-helper-target"
                     graph = json.loads(json.dumps(graph).replace(old, str(self.work / self.target_name)).replace(TOOL.INTEL_TARGET, target))
+                    if self.candidate_removal_context is not None and self.fault != "product-emitter-graph":
+                        graph = json.loads(json.dumps(graph).replace(str(self.checkout), str(compiler_root)))
+                    if self.candidate_removal_context is not None and self.fault != "optimized-emitter-graph":
+                        graph[2]["profile"]["opt_level"] = "0"
                     output = testcase.encoded(graph)
                     self.values[self.target_name + "/" + target + "/release/examples/macos_remove_producer"] = program
                 elif role == "producer-emitter":
@@ -7301,7 +7321,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         self.assertEqual(operation.saved["directStagerIOPending"], "remove-input")
                         self.assertFalse(operation.saved["targetRetired"] or operation.saved["originalClosesKnown"])
             self.assertFalse(operation.installer_zero or operation.installation_readback or operation.mount_entered)
-        for fault in (None,"donor-changed","source-changed","input-unknown","credential-unknown"):
+        for fault in (None,"donor-changed","source-changed","input-unknown","credential-unknown","product-emitter-graph","optimized-emitter-graph"):
             operation=RemovePorts(fault,candidate=True)
             with self.subTest(candidateRemove=fault), mock.patch.object(module.time,"monotonic_ns",side_effect=lambda:operation.now[0]), mock.patch.object(module.os,"listdir",side_effect=lambda original:list(operation.rosters[original])):
                 if fault is None:
@@ -7313,6 +7333,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     with self.assertRaises((module.Refused,RuntimeError)):operation.execute()
                     self.assertFalse(operation.saved["passed"])
                     if fault=="donor-changed":self.assertEqual(operation.dispatched,[])
+                    if fault in ("product-emitter-graph","optimized-emitter-graph"):self.assertEqual(operation.dispatched,["producer-build"])
             self.assertFalse(operation.installer_entered or operation.mount_entered)
         self.assertEqual(len(successful["originalCalls"]), 6)
         self.assertEqual(len(successful["credentialOriginals"]), 41)

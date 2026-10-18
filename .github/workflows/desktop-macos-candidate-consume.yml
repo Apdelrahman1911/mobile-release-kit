@@ -343,7 +343,7 @@ jobs:
           /usr/bin/env -i PATH="$toolbin:/usr/bin:/bin:/usr/sbin:/sbin" HOME=/Users/runner \
             CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup RUSTC="$toolbin/rustc" \
             RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
-            "$toolbin/cargo" fetch --manifest-path "$GITHUB_WORKSPACE/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
+            "$toolbin/cargo" fetch --manifest-path "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
       - name: Reuse and authenticate the signed candidate without installing it
         timeout-minutes: 12
         shell: bash

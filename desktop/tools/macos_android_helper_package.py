@@ -2481,6 +2481,49 @@ def failure_exception(error, stager=None):
     return {"type": kind, "reason": reason, "errno": number}
 
 
+# Static nonshipping emitter/common-Book reasons. Never accept an arbitrary
+# native error line just because its characters happen to look like a token.
+_REMOVE_PRODUCER_REASONS = (
+    'arguments', 'clock', 'completed-package-magic', 'created-root-original', 'deadline', 'file-finality',
+    'final-input-post', 'final-package-post', 'final-report-bound', 'final-report-deadline', 'final-report-flush',
+    'final-report-write', 'fixed-remover-name', 'installed-current-source', 'installed-data',
+    'installed-inventory', 'installed-inventory-index', 'installed-remover-binding', 'installed-remover-missing',
+    'installed-signature-finality', 'installed-signature-verification', 'observer-input-roster', 'ordinary-user',
+    'original-limit', 'original-name', 'original-no-handle', 'original-not-owned', 'original-open',
+    'original-pending', 'original-post', 'original-slot', 'original-stat', 'original-type', 'original-unbound',
+    'original-unknown', 'parent-protection', 'path-components', 'path-encoding', 'path-shape', 'platform',
+    'private-acl', 'private-attributes', 'private-file', 'private-program', 'private-root', 'program-finality',
+    'program-purpose', 'read-budget', 'read-extent', 'read-limit', 'read-original', 'read-short', 'read-size',
+    'remove-data', 'remove-emission-binding', 'remove-native-allocation-bound', 'remove-signature-not-created',
+    'remove-signature-verification', 'remove-signer-finality', 'remove-verification-finality', 'root-roster',
+    'root-roster-bound', 'root-roster-close', 'root-roster-eof', 'root-roster-member', 'root-roster-name',
+    'root-roster-record', 'roster-original', 'separate-private-roots', 'sidecar-created', 'sidecar-mode',
+    'sidecar-persist', 'sidecar-readback', 'sidecar-root-persist', 'sidecar-sealed-original', 'sidecar-shape',
+    'sidecar-write', 'sidecar-write-bound', 'sidecar-written-original', 'signed-input-post',
+    'signed-package-post', 'source-current-unavailable', 'source-runtime-unavailable', 'source-signer-unavailable'
+)
+
+
+def remove_producer_refusal(stdout, stderr):
+    if type(stdout) is not bytes or stdout != b"" or type(stderr) is not bytes or not 0 < len(stderr) <= 128:
+        return None
+    match = re.fullmatch(rb"MRK_MACOS_REMOVE_PRODUCER_REFUSED=([a-z][a-z-]{0,63})\n", stderr)
+    if match is None:
+        return None
+    reason = match[1].decode("ascii")
+    return reason if reason in _REMOVE_PRODUCER_REASONS else None
+
+
+def remove_producer_refusal_data(phase, record):
+    if (phase == "package-remove" and type(record) is dict and record.get("role") == "producer-emitter"
+            and record.get("entered") is True and record.get("returned") is True
+            and record.get("capturesSettled") is True and type(record.get("returncode")) is int
+            and record["returncode"] == 78 and type(record.get("removeProducerReason")) is str
+            and record["removeProducerReason"] in _REMOVE_PRODUCER_REASONS):
+        return record["removeProducerReason"]
+    return None
+
+
 def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, operation=None, stager=None):
     """Bounded passive DATA; no owner callbacks, file reads, or state changes."""
     def row(value):
@@ -2587,6 +2630,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
             "errno": integer(captured.get("errno", original.get("errno")), 1, 65535),
         },
         "lastRecordedNative": {
+            "removeProducerReason": remove_producer_refusal_data(state.get("phase"), native),
             "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES + notary_roles(True) + _PACKAGE_DIAGNOSTIC_ROLES + _FAILURE_SETUP_ROLES + _FAILURE_FIXTURE_ROLES),
             **{key: flag(native.get(key)) for key in ("entered", "returned", "capturesSettled", "dispatched", "contained", "cleanup_complete")},
             "returncode": integer(native.get("returncode"), -65536, 65535),
@@ -2712,12 +2756,14 @@ def producer_tests_result(stdout):
     need(finish is not None and int(finish[2]) * 100 + int(finish[3]) <= 48000, "producer-tests-result")
 
 
-def producer_artifact(messages, checkout, target_root, target, *, package_version, remove=False, observer=False):
+def producer_artifact(messages, checkout, target_root, target, *, package_version, remove=False, observer=False, candidate_removal=False):
     """One explicit nonshipping example graph; no packaged code is rebuilt."""
     need(type(package_version) is str and len(package_version) <= 32
          and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", package_version) is not None,
          "compiler-application-version")
     need(type(remove) is bool and type(observer) is bool and (not observer or remove), "producer-compiler-purpose")
+    need(type(candidate_removal) is bool and (not candidate_removal or remove and not observer
+         and checkout.name == ".candidate-consumer-helper"), "producer-compiler-purpose")
     build_profile(target)
     need(type(messages) is bytes and 0 < len(messages) <= 4 * 1024 * 1024
          and messages.endswith(b"\n"), "producer-compiler-bound")
@@ -2766,7 +2812,7 @@ def producer_artifact(messages, checkout, target_root, target, *, package_versio
              and row["target"].get("edition") == "2021" and "executable" in row and row["executable"] == executable
              and type(row.get("fresh")) is bool and type(profile) is dict and profile.get("test") is False
              and profile.get("debug_assertions") is False
-             and profile.get("opt_level") == ("0" if package == "mobile-release-kit-desktop" else "3"), "producer-exact-feature-graph")
+             and profile.get("opt_level") == ("0" if candidate_removal or package == "mobile-release-kit-desktop" else "3"), "producer-exact-feature-graph")
         if executable is not None:
             need(row["filenames"] == [executable], "producer-executable-path")
         chosen.append(row)
@@ -3507,6 +3553,11 @@ class Operation:
         if self.phase == "package-install" and role == "installer":
             self.publish("installer-output.txt", result.stdout + result.stderr)
         record["capturesSettled"] = True  # All original output/readback/closes returned.
+        if self.phase == "package-remove" and role == "producer-emitter" and result.returncode == 78:
+            try:
+                record["removeProducerReason"] = remove_producer_refusal(result.stdout, result.stderr)
+            except BaseException:
+                pass  # Diagnostics never replace the original unsuccessful command.
         if self.setup_verify and role in XCODE_SETUP_VERIFY_ROLES[2:4] and result.returncode != 0:
             # All three consume only this returned original after its captures
             # positively settled. A diagnostic failure cannot replace its exit.
@@ -9380,14 +9431,16 @@ class Operation:
         environment.update(CARGO_TARGET_DIR=str(self.work / self.target_name), TMPDIR=str(self.work / self.target_name / "tmp"),
                            MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=manifest_hash)
         if candidate:
-            # Compile the unchanged P producer; workflow/receipt identity remains H.
+            # H's nonshipping emitter still authenticates the unchanged P product.
             environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"] = self.image_source
-        compiled = self.package_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(self.checkout / "desktop/src-tauri/Cargo.toml"),
-            "--locked", "--offline", "--release", "--config", PRODUCER_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target, "--no-default-features",
+        compiler_root = self.checkout / ".candidate-consumer-helper" if candidate else self.checkout
+        compiled = self.package_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(compiler_root / "desktop/src-tauri/Cargo.toml"),
+            "--locked", "--offline", "--release", "--config", PRODUCER_CARGO_OVERRIDE,
+            *(["--config", "profile.release.opt-level=0"] if candidate else []), "--jobs", "1", "--target", self.target, "--no-default-features",
             "--features", "macos-remove-producer", "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"],
-            environment=environment, cwd=self.checkout / "desktop/src-tauri", timeout=480, limit=4 * 1024 * 1024)
-        binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target,
-            package_version=self.image_package_version, remove=True)
+            environment=environment, cwd=compiler_root / "desktop/src-tauri", timeout=480, limit=4 * 1024 * 1024)
+        binary = producer_artifact(compiled.stdout, compiler_root, self.work / self.target_name, self.target,
+            package_version=self.image_package_version, remove=True, candidate_removal=candidate)
         binary_dir = self.descend(self.target_entry, (self.target, "release", "examples"))
         executable = self.original(binary_dir, binary.name, "remove-producer-compiled-example", 64 * 1024 * 1024, (0o700, 0o755), alias=True)
         executable_body = self.read(executable)
@@ -10719,6 +10772,8 @@ def candidate_removal_phase(consumer, context, phase, bootstrap):
     shared = ("desktop/macos-installed-inputs/build-release.json", op.release_input, PROFILE, PRODUCER_PROFILE, INSTALLER_PROFILE, NOTARY_PROFILE,
               "desktop/macos-installed-inputs/remove-postinstall", "desktop/packaging/macos-removal.md")
     helper_files = tuple(dict.fromkeys((*helper_files, *shared)))
+    if phase == "package-remove":
+        helper_files += ("desktop/src-tauri/examples/macos_remove_producer.rs",)
     product_files = tuple(dict.fromkeys((consumer.STAGER_PATH, *shared)))
     nomination = None
 

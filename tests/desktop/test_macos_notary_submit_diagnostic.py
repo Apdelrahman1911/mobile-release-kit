@@ -362,7 +362,7 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
                 raise RuntimeError('synthetic-publication-failure')
             self.publications[name] = body
         op = object.__new__(HELPER.Operation)
-        op.__dict__.update(phase='package-install', prepared_binding=None, prepared_staging=False, credential_known=lambda: True,
+        op.__dict__.update(phase='package-install', candidate_removal_context=None, prepared_binding=None, prepared_staging=False, credential_known=lambda: True,
             credential_failed=False, credential_active=None, removal_final_active=lambda: False,
             errors=[], stager_io_pending=None, android_support=None, store_signing=None,
             app_absence=None, update=None, removal=False, setup_verify=False, setup_package=False,
@@ -377,6 +377,72 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
 
     def invoke(self, op, role='installer'):
         return HELPER.Operation.call(op, role, ['fixed-' + role], {}, cwd=op.work, timeout=20, limit=256*1024)
+
+    def test_remove_producer_reason_requires_original_settled_exit_and_closed_static_data(self):
+        from unittest import mock
+        marker = b'MRK_MACOS_REMOVE_PRODUCER_REFUSED=private-acl\n'
+        original = HELPER.Refused('original-nonzero-producer-emitter')
+        def operation(code=78, stdout=b'', stderr=marker, phase='package-remove'):
+            op = self.operation(); op.phase = phase; op.calls = []; op.removal = True
+            def owned(argv, **kwargs):
+                self.invocations.append(tuple(argv))
+                return subprocess.CompletedProcess(argv, code, stdout, stderr)
+            op.owner.run_owned = owned
+            return op
+        def projected(op):
+            return HELPER.failure_diagnostic(original, phase=op.phase, operation=op)['lastRecordedNative']['removeProducerReason']
+
+        op = operation()
+        with self.assertRaisesRegex(HELPER.Refused, '^original-nonzero-producer-emitter$'):
+            self.invoke(op, 'producer-emitter')
+        self.assertEqual(self.invocations, [('fixed-producer-emitter',)])
+        self.assertEqual((op.calls[0]['returned'], op.calls[0]['capturesSettled'], op.calls[0]['returncode']), (True, True, 78))
+        self.assertEqual(projected(op), 'private-acl')
+        before = copy.deepcopy(op.calls)
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            HELPER.emit_failure_diagnostic(original, phase=op.phase, target=HELPER.ARM_TARGET, operation=op)
+        self.assertEqual(json.loads(output.getvalue())['lastRecordedNative']['removeProducerReason'], 'private-acl')
+        self.assertLessEqual(len(output.getvalue()), 4096)
+        self.assertNotIn(PRIVATE.decode(), output.getvalue()); self.assertEqual(op.calls, before)
+        for reason in HELPER._REMOVE_PRODUCER_REASONS:
+            self.assertEqual(HELPER.remove_producer_refusal(b'', b'MRK_MACOS_REMOVE_PRODUCER_REFUSED=' + reason.encode() + b'\n'), reason)
+        for stdout, stderr in ((PRIVATE, marker), (b'', marker + marker), (b'', marker[:-1]),
+                (b'', PRIVATE + marker), (b'', marker + PRIVATE), (b'', b'x' * 129),
+                (b'', b'MRK_MACOS_REMOVE_PRODUCER_REFUSED=unknown-private-name\n'),
+                (b'', b'MRK_MACOS_REMOVE_PRODUCER_REFUSED=Private-acl\n'), (b'', PRIVATE), (b'', ''), ('', marker)):
+            self.assertIsNone(HELPER.remove_producer_refusal(stdout, stderr))
+        for key, value in (('entered', False), ('returned', False), ('capturesSettled', False),
+                ('returncode', 0), ('returncode', 1), ('returncode', True), ('returncode', -9),
+                ('role', 'build'), ('removeProducerReason', PRIVATE.decode())):
+            self.assertIsNone(HELPER.remove_producer_refusal_data('package-remove', dict(before[0], **{key: value})))
+        self.assertIsNone(HELPER.remove_producer_refusal_data('prepare', before[0]))
+        op.calls.append(dict(role='distribution-sign', entered=True, returned=True, capturesSettled=True, returncode=0))
+        self.assertIsNone(projected(op))  # Earlier diagnostics never label a later original.
+
+        for code, phase, role in ((0, 'package-remove', 'producer-emitter'), (1, 'package-remove', 'producer-emitter'),
+                (78, 'package-remove', 'producer-build'), (78, 'package-install', 'producer-emitter')):
+            op = operation(code=code, phase=phase)
+            if code == 0:
+                self.invoke(op, role)
+            else:
+                with self.assertRaisesRegex(HELPER.Refused, '^original-nonzero-' + role + '$'):
+                    self.invoke(op, role)
+            self.assertIsNone(projected(op))
+        op = operation()
+        with mock.patch.object(HELPER, 'remove_producer_refusal', side_effect=KeyboardInterrupt):
+            with self.assertRaisesRegex(HELPER.Refused, '^original-nonzero-producer-emitter$'):
+                self.invoke(op, 'producer-emitter')
+        self.assertTrue(op.calls[0]['capturesSettled']); self.assertIsNone(projected(op))
+        for fault in ('publication', 'unknown'):
+            op = operation(); primary = RuntimeError(PRIVATE.decode())
+            def fail(*args, **kwargs): raise primary
+            if fault == 'publication': op.publish = fail
+            else: op.owner.run_owned = fail
+            with self.assertRaises(RuntimeError) as caught:
+                self.invoke(op, 'producer-emitter')
+            self.assertIs(caught.exception, primary)
+            self.assertFalse(op.calls[0]['capturesSettled']); self.assertIsNone(projected(op))
 
     def test_fixture_original_capture_is_private_and_later_outcomes_supersede_it(self):
         from unittest import mock
