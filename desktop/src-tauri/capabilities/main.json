@@ -21,7 +21,7 @@
     "allow-artifact-inspection-pick", "allow-artifact-inspection-prepare", "allow-artifact-inspection-start",
     "allow-artifact-inspection-cancel", "allow-artifact-inspection-status", "allow-artifact-inspection-discard",
     "allow-prepare-android-build", "allow-start-android-build", "allow-android-build-status", "allow-cancel-android-build",
-    "allow-android-toolchain-catalog-status", "allow-refresh-android-toolchain-catalog", "allow-select-android-toolchain", "allow-cancel-android-toolchain-catalog",
+    "allow-android-toolchain-catalog-status", "allow-refresh-android-toolchain-catalog", "allow-recover-android-toolchain", "allow-select-android-toolchain", "allow-cancel-android-toolchain-catalog",
     "allow-android-tool-sources-status", "allow-choose-android-tool-source", "allow-cancel-android-tool-source",
     "allow-android-tool-registration-status", "allow-inspect-android-tool-sources", "allow-register-android-tool-sources", "allow-cancel-android-tool-registration",
     "allow-android-tool-service-status", "allow-check-android-tool-service", "allow-request-android-tool-service-registration", "allow-open-android-tool-service-approval-settings", "allow-cancel-android-tool-service",

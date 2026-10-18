@@ -3090,6 +3090,13 @@ impl DocumentBinding {
         // No native read/ACL call begins while the original document is locked.
         drop(state);admitted.release()
     }
+    pub(crate) fn recover_android_toolchain(&self,input:crate::android_toolchain_catalog::Recover) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
+        let admitted_at=Instant::now(); // Keep the original recovery deadline before document admission.
+        let state=self.lock();
+        let admitted=self.inner.bridge.android_build.recover_catalog(&self.inner.session_identity,admitted_at,input,self.android_build_gate(&state))?;
+        // The same native recovery owner must not begin while the document is locked.
+        drop(state);admitted.release()
+    }
     pub(crate) fn select_android_toolchain(&self,input:crate::android_toolchain_catalog::Select) -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
         let state=self.lock();
         self.inner.bridge.android_build.select_catalog(input,self.android_build_gate(&state))

@@ -631,6 +631,13 @@ async fn refresh_android_toolchain_catalog(webview: Webview, request: tauri::ipc
     state.document.refresh_android_toolchain_catalog()
 }
 #[tauri::command]
+async fn recover_android_toolchain(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_toolchain_catalog::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_toolchain_catalog::invalid())?;
+    let input=crate::android_toolchain_catalog::Recover::parse(android_catalog_request_body(request.body())?)?;
+    state.document.recover_android_toolchain(input)
+}
+#[tauri::command]
 async fn select_android_toolchain(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_toolchain_catalog::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview).map_err(|_| crate::android_toolchain_catalog::invalid())?;
@@ -3940,7 +3947,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             prepare_local_store_reconcile, start_local_store_reconcile, local_store_reconcile_status, cancel_local_store_reconcile,
             prepare_offline_preflight, start_offline_preflight, offline_preflight_status, cancel_offline_preflight,
             prepare_android_build, start_android_build, android_build_status, cancel_android_build,
-            android_toolchain_catalog_status, refresh_android_toolchain_catalog, select_android_toolchain, cancel_android_toolchain_catalog,
+            android_toolchain_catalog_status, refresh_android_toolchain_catalog, recover_android_toolchain, select_android_toolchain, cancel_android_toolchain_catalog,
             android_tool_sources_status, choose_android_tool_source, cancel_android_tool_source,
             android_tool_registration_status, inspect_android_tool_sources, register_android_tool_sources, cancel_android_tool_registration,
             android_tool_service_status, check_android_tool_service, request_android_tool_service_registration, open_android_tool_service_approval_settings, cancel_android_tool_service,

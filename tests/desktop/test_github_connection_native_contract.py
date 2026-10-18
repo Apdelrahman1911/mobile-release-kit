@@ -28,6 +28,22 @@ def section(text, start, end):
 
 
 class GitHubNativeWiringTests(unittest.TestCase):
+    def test_android_tool_recovery_uses_current_document_and_original_admission(self):
+        shell = source("desktop/src-tauri/src/shell.rs")
+        body = section(shell, "async fn recover_android_toolchain(", "\n}")
+        ordered = ("fixture_command!(state, Forbidden", "edit_window(&webview)",
+                   "Recover::parse(android_catalog_request_body(request.body())?)?",
+                   "state.document.recover_android_toolchain(input)")
+        positions = [body.index(value) for value in ordered]
+        self.assertEqual(positions, sorted(positions))
+        document = section(source("desktop/src-tauri/src/asset_session.rs"),
+                           "pub(crate) fn recover_android_toolchain(", "\n    }")
+        ordered = ("let admitted_at=Instant::now()", "let state=self.lock()",
+                   "recover_catalog(&self.inner.session_identity,admitted_at,input,self.android_build_gate(&state))?",
+                   "drop(state)", "admitted.release()")
+        positions = [document.index(value) for value in ordered]
+        self.assertEqual(positions, sorted(positions))
+
     def test_installed_mapping_observer_cannot_block_the_request_that_loads_ssl(self):
         supervisor = source("desktop/src-tauri/src/supervisor.rs")
         drive = section(supervisor, "async fn drive(", "\n}")

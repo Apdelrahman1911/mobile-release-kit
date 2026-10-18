@@ -118,6 +118,7 @@ function harness(t, { initial = status(), initialCatalog = catalogStatus(), init
     },
     androidToolchainCatalogStatus: async () => clone(catalogRegistry),
     refreshAndroidToolchainCatalog: () => { const call = { kind: 'catalog-refresh', ...deferred() }; catalogCalls.push(call); return call.promise; },
+    recoverAndroidToolchain: (input) => { const call = { kind: 'catalog-recover', input: clone(input), ...deferred() }; catalogCalls.push(call); return call.promise; },
     selectAndroidToolchain: (input) => { const call = { kind: 'catalog-select', input: clone(input), ...deferred() }; catalogCalls.push(call); return call.promise; },
     cancelAndroidToolchainCatalog: (input) => { const call = { kind: 'catalog-cancel', input: clone(input), ...deferred() }; catalogCalls.push(call); return call.promise; },
     subscribeAndroidBuild: async (callback) => {
@@ -662,6 +663,66 @@ test('Mac tool selection is explicit DATA and changing it retires the saved buil
   assert.deepEqual(h.calls.at(-1).input, { operationId: op.operationId, ownerGeneration: op.ownerGeneration });
   h.reply(h.calls.at(-1), status(4, terminal(op))); await flush();
   assert.equal(h.state.pending, null);
+});
+
+test('Mac metadata Refresh requires explicit matching Recover before separate Choose; refusal or mismatch never selects', async (t) => {
+  for (const outcome of ['matching', 'refused', 'mismatch']) {
+    const h = harness(t, { initialCatalog: catalogStatus({ availability: 'available' }) }); await h.ready;
+    const refreshing = h.controller.refreshCatalog(), refresh = h.catalogCalls.at(-1);
+    assert.equal(refresh.kind, 'catalog-refresh');
+    const metadata = catalogStatus({ statusRevision: 1, catalogGeneration: 1, operationId: '7'.repeat(32),
+      availability: 'available', phase: 'ready', reason: 'none', entries: [toolEntry(TOOL_A, false)] });
+    assert.ok(parseAndroidToolchainCatalogStatus(metadata));
+    h.replyCatalog(refresh, metadata); await refreshing;
+    assert.equal(h.state.catalogStatus.selected, null);
+    await h.controller.selectToolchain(TOOL_A.instance, TOOL_A.recordSha256);
+    await h.controller.recoverToolchain(TOOL_A.instance, '9'.repeat(64));
+    assert.equal(h.catalogCalls.length, 1, 'Neither metadata Choose nor a stale comparison invokes native work');
+
+    const recovering = h.controller.recoverToolchain(TOOL_A.instance, TOOL_A.recordSha256);
+    const recovery = h.catalogCalls.at(-1);
+    assert.equal(recovery.kind, 'catalog-recover');
+    assert.deepEqual(recovery.input, { schemaVersion: 1, catalogGeneration: 1, instance: TOOL_A.instance,
+      recordSha256: TOOL_A.recordSha256, inventorySha256: TOOL_A.inventorySha256, osProviderSha256: TOOL_A.osProviderSha256 });
+    assert.equal(h.state.catalogPending, 'recover'); assert.equal(h.state.catalogUnconfirmed, true);
+    const verified = { ...TOOL_A, catalogGeneration: 2 };
+    const response = catalogStatus({ statusRevision: 2, catalogGeneration: 2, operationId: '8'.repeat(32),
+      availability: 'available', phase: 'ready', reason: 'none', entries: [toolEntry(verified, true)] });
+    if (outcome === 'refused') {
+      recovery.reject({ code: 'android_catalog_invalid', message: 'inert private error must not be displayed' });
+    } else if (outcome === 'mismatch') {
+      response.entries[0].selection.inventorySha256 = '9'.repeat(64);
+      assert.ok(parseAndroidToolchainCatalogStatus(response), 'Well-shaped foreign comparison is not the requested recovery');
+      h.replyCatalog(recovery, response);
+    } else {
+      assert.ok(parseAndroidToolchainCatalogStatus(response));
+      h.emitCatalog(response);
+      await h.controller.selectToolchain(TOOL_A.instance, TOOL_A.recordSha256);
+      assert.equal(h.catalogCalls.length, 2, 'A terminal event cannot replace the still-pending original Recover reply');
+      assert.equal(h.state.catalogUnconfirmed, true);
+      h.replyCatalog(recovery, response);
+    }
+    await recovering;
+    assert.equal(h.state.catalogStatus.selected, null, 'Recover never performs Choose');
+    if (outcome !== 'matching') {
+      assert.ok(h.controller.catalogActionReason());
+      assert.equal(h.state.catalogIssue, true);
+      if (outcome === 'mismatch') assert.equal(h.state.integrityFailed, true);
+      await h.controller.selectToolchain(TOOL_A.instance, TOOL_A.recordSha256);
+      assert.equal(h.catalogCalls.length, 2); assert.equal(h.calls.length, 0);
+      continue;
+    }
+    assert.equal(h.state.catalogPending, null); assert.equal(h.state.catalogUnconfirmed, false);
+    assert.equal(h.controller.catalogActionReason(), null);
+    const choosing = h.controller.selectToolchain(TOOL_A.instance, TOOL_A.recordSha256);
+    const choose = h.catalogCalls.at(-1);
+    assert.equal(choose.kind, 'catalog-select');
+    assert.deepEqual(choose.input, { ...recovery.input, catalogGeneration: 2 });
+    h.replyCatalog(choose, { ...response, statusRevision: 3, selected: verified }); await choosing;
+    assert.deepEqual(h.state.catalogStatus.selected, verified);
+    assert.equal(h.state.catalogPending, null); assert.equal(h.state.catalogUnconfirmed, false);
+    assert.equal(h.calls.length, 0, 'Explicit tool recovery and selection never starts a build');
+  }
 });
 
 test('lost catalog reply and Unknown retain the original observer, cancel target and application exclusion', async (t) => {

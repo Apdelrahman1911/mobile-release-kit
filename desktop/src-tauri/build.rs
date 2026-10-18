@@ -290,7 +290,7 @@ fn main() {
             "artifact_inspection_pick", "artifact_inspection_prepare", "artifact_inspection_start",
             "artifact_inspection_cancel", "artifact_inspection_status", "artifact_inspection_discard",
             "prepare_android_build", "start_android_build", "android_build_status", "cancel_android_build",
-            "android_toolchain_catalog_status", "refresh_android_toolchain_catalog", "select_android_toolchain", "cancel_android_toolchain_catalog",
+            "android_toolchain_catalog_status", "refresh_android_toolchain_catalog", "recover_android_toolchain", "select_android_toolchain", "cancel_android_toolchain_catalog",
             "android_tool_sources_status", "choose_android_tool_source", "cancel_android_tool_source",
             "android_tool_registration_status", "inspect_android_tool_sources", "register_android_tool_sources", "cancel_android_tool_registration",
             "android_tool_service_status", "check_android_tool_service", "request_android_tool_service_registration", "open_android_tool_service_approval_settings", "cancel_android_tool_service",
