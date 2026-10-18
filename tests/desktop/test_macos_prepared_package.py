@@ -173,6 +173,66 @@ class PreparedPackageData(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'prepared-packager-identity'):
                 P.original_scripts_data(tool,original,wrong)
 
+    def test_export_passes_held_version_to_actual_build_parser_before_publication(self):
+        T, tool, _helper = real_modules()
+        for target in P.TARGETS:
+            for version, stale in (('0.1.2', False), ('0.1.3', False), ('0.1.3', True)):
+                with self.subTest(target=target, version=version, stale=stale):
+                    origin = dict(source='1'*40, tree='2'*40, target=target, runId='41', runAttempt='1', jobId='42')
+                    work = Path('/inert/prepared-version')
+                    directory, binary, rows, image = T.normal_cargo_fixture(work/'cargo-target', build_target=target)
+                    if not stale:
+                        rows[1]['package_id'] = rows[1]['package_id'].replace('@0.1.2', '@'+version)
+                    build = dict(schemaVersion=1, packageVersion=version,
+                        release=('macos26-arm64-' if target == tool.ARM_TARGET else 'macos26-x86_64-')+'desktop-03')
+                    final, original = b'INERT final package', b'INERT original package'
+                    facade = T.entry_macho_fixture(target=target)
+                    # Actual original-build parser plus actual manifest reducer;
+                    # package/native/original ownership ports are explicitly inert.
+                    source = P.canonical(dict(source=origin['source'], tree=origin['tree']))
+                    bound = P.canonical(dict(source=origin['source'], tree=origin['tree'], workflowSource=origin['source'],
+                        runId='41', runAttempt='1', scope='current-macos-candidate', instrumented=False, packageRole='ordinary-image'))
+                    compiled = tool.image_cargo_artifact(T.cargo_lines(*rows, {'reason':'build-finished','success':True}),
+                        binary, directory, image, 'desktop', target=target, package_version='0.1.2' if stale else version)
+                    app = dict(packageRole='ordinary-image', desktopImageCargoArtifact=compiled,
+                        desktopImageSha256BeforeSigning=P.sha(image), appBinarySha256BeforeSigning=P.sha(facade))
+                    bodies = {'package-final/MobileReleaseKit.pkg': final, 'MobileReleaseKit-original.pkg':original,
+                        'android-helper-finalize-package.json': b'{}\n', 'package-finalization.status':b'0\n',
+                        'release':P.canonical(build), 'normal-build.status':b'0\n', 'source-inventory.json':source,
+                        'source-binding.json':bound, 'normal-build.jsonl':T.cargo_lines(*rows, {'reason':'build-finished','success':True}),
+                        str(binary.relative_to(work)):image, 'mobile-release-kit-desktop':facade,
+                        'app-result.json':P.canonical(app)}
+                    published = {}
+                    def original_file(parent, name, *args):
+                        path = str(Path(parent)/name) if parent else name
+                        return {'path':path, 'identity':(0,0,0,0,0,0,len(bodies[path]))}
+                    audit = dict(packageSha256=P.sha(final), packageSize=len(final),
+                        originalPackageSha256=P.sha(original), packageInfoSha256='a'*64, scriptFileCount=3)
+                    op = SimpleNamespace(prepared_binding=None, target=target, work=work, stager=tool,
+                        work_entry='', release_entry={'path':'release'}, package_outputs=[], package_roots=[],
+                        environment={'GITHUB_SHA':origin['source'], 'GITHUB_RUN_ID':'41', 'GITHUB_RUN_ATTEMPT':'1',
+                            'MRK_MACOS_INSTALL_INVENTORY_SHA256':'3'*64, 'MRK_BUNDLED_RUNTIME_MANIFEST_SHA256':'4'*64},
+                        directory=lambda parent,name,*args: str(Path(parent)/name), original=original_file,
+                        descend=lambda parent,parts: str(Path(parent).joinpath(*parts)) if parts else parent,
+                        read=lambda entry:bodies[entry['path']], package_finalization_input=lambda *_:audit,
+                        package_stager_io=lambda *_:audit, package_directory=lambda name:name,
+                        package_file=lambda root,name,body:published.__setitem__(name,body), package_post=lambda:None)
+                    with mock.patch.object(P, 'initialize_staging'), mock.patch.object(P, 'ResourceGuard'), \
+                            mock.patch.object(P, 'original_scripts_data'), mock.patch.object(P, 'finish_staging') as finish:
+                        if stale:
+                            with self.assertRaises(tool.Refused): P.export_checkpoint(op, origin)
+                            self.assertFalse(published)
+                            self.assertIsNotNone(finish.call_args.args[1])
+                        else:
+                            result = P.export_checkpoint(op, origin)
+                            self.assertEqual(result['packageVersion'], version)
+                            self.assertEqual(result['normalBuild'], {'appBinarySha256BeforeSigning':P.sha(facade),
+                                'desktopImageSha256BeforeSigning':P.sha(image)})
+                            self.assertEqual(P.decode(published['PREPARED.json'], P.RECEIPT_LIMIT), result)
+                            self.assertEqual(len(published),5)
+                            self.assertIsNone(finish.call_args.args[1])
+                        finish.assert_called_once()
+
     def test_actual_prepared_preview_keeps_current_closures_and_refuses_cross_source(self):
         T, tool, helper=real_modules()
         with mock.patch.object(T,'TOOL',tool), mock.patch.dict(sys.modules,{'desktop.tools.macos_prepared_package':P}):

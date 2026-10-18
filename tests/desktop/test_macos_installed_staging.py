@@ -5851,8 +5851,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         "ticketContents": [{"path": "MobileReleaseKit.dmg", "digestAlgorithm": "SHA-1", "cdhash": "c" * 40, "arch": None}]}
                     if failure == "log-sha": value["sha256"] = "f" * 64
                     if failure == "nested-null-annotation":
-                        # The exact embedded Install.pkg container is allowed;
-                        # a nested executable still cannot claim null arch.
+                        # Nullable architecture is informational even for a nested
+                        # path; independent signature/staple checks still run.
                         value["ticketContents"][0]["path"] += "/Install.pkg/Contents/MacOS/MobileReleaseKit"
                     output = TOOL.canonical(value)
             elif role in ("final-image-staple", "final-image-validate"):
@@ -6556,7 +6556,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         module = ANDROID_HELPER
         checkout, target = Path("/inert/source"), Path("/inert/work/android-helper-target")
         rows = self.cargo_rows(checkout, target)
-        self.assertEqual(module.artifact(self.encoded(rows), checkout, target), target / "aarch64-apple-darwin/release" / module.RESIDENT_IMAGE)
+        self.assertEqual(module.artifact(self.encoded(rows), checkout, target, package_version="0.1.2"), target / "aarch64-apple-darwin/release" / module.RESIDENT_IMAGE)
         for failure in ("extra-executable", "manifest", "features", "native-role", "source", "test", "finish",
                         "renamed-bin", "crate-type", "filenames", "after-finish", "missing-app", "missing-native"):
             changed = json.loads(json.dumps(rows))
@@ -6574,44 +6574,53 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             elif failure == "missing-app": del changed[1]
             elif failure == "missing-native": del changed[2]
             with self.subTest(failure=failure), self.assertRaises(module.Refused):
-                module.artifact(self.encoded(changed), checkout, target)
+                module.artifact(self.encoded(changed), checkout, target, package_version="0.1.2")
 
         # The declared target must match the exact compiler-output location;
         # a valid opposite-architecture graph cannot choose its own selector.
         for selected, opposite in (("aarch64-apple-darwin", "x86_64-apple-darwin"),
                                    ("x86_64-apple-darwin", "aarch64-apple-darwin")):
             paired = self.cargo_rows(checkout, target, build_target=selected)
-            self.assertEqual(module.artifact(self.encoded(paired), checkout, target, build_target=selected),
+            self.assertEqual(module.artifact(self.encoded(paired), checkout, target, build_target=selected, package_version="0.1.2"),
                              target / selected / "release" / module.RESIDENT_IMAGE)
             with self.subTest(selected=selected), self.assertRaisesRegex(module.Refused, "^helper-package-artifact$"):
-                module.artifact(self.encoded(paired), checkout, target, build_target=opposite)
+                module.artifact(self.encoded(paired), checkout, target, build_target=opposite, package_version="0.1.2")
+            current = copy.deepcopy(paired)
+            current[1]["package_id"] = current[1]["package_id"].replace("@0.1.2", "@0.1.3")
+            self.assertEqual(module.artifact(self.encoded(current), checkout, target, build_target=selected,
+                package_version="0.1.3"), target / selected / "release" / module.RESIDENT_IMAGE)
+            for index, version in ((1, "0.1.2"), (0, "0.1.3"), (2, "0.1.3")):
+                changed = copy.deepcopy(current)
+                changed[index]["package_id"] = changed[index]["package_id"].rsplit("@", 1)[0] + "@" + version
+                with self.subTest(target=selected, versionRow=index), self.assertRaises(module.Refused):
+                    module.artifact(self.encoded(changed), checkout, target, build_target=selected, package_version="0.1.3")
             # The two validators agree on the one Intel resident shared-package override.
             _, binary, _, body = normal_cargo_fixture(target, role="resident", checkout=checkout, build_target=selected)
             with mock.patch.object(TOOL, "DESKTOP", checkout / "desktop"):
                 self.assertEqual(TOOL.image_cargo_artifact(self.encoded(paired), binary, target, body,
-                                                         "resident", target=selected)["target"], selected)
+                                                         "resident", target=selected, package_version="0.1.2")["target"], selected)
                 for index, wrong in ((0, "2"), (1, "2"), (1, "3" if selected == module.INTEL_TARGET else "1"), (2, "2")):
                     changed = copy.deepcopy(paired); changed[index]["profile"]["opt_level"] = wrong
                     with self.subTest(target=selected, profileRow=index), self.assertRaises(module.Refused):
-                        module.artifact(self.encoded(changed), checkout, target, build_target=selected)
+                        module.artifact(self.encoded(changed), checkout, target, build_target=selected, package_version="0.1.2")
                     with self.assertRaises(TOOL.Refused):
-                        TOOL.image_cargo_artifact(self.encoded(changed), binary, target, body, "resident", target=selected)
+                        TOOL.image_cargo_artifact(self.encoded(changed), binary, target, body, "resident", target=selected, package_version="0.1.2")
                 if selected == module.INTEL_TARGET:
                     # The ordinary Intel Desktop must still require shared release3.
                     _, desktop_binary, desktop_rows, desktop_body = normal_cargo_fixture(
                         target, role="desktop", checkout=checkout, build_target=selected)
                     desktop_messages = desktop_rows + [{"reason": "build-finished", "success": True}]
                     self.assertEqual(TOOL.image_cargo_artifact(self.encoded(desktop_messages), desktop_binary,
-                        target, desktop_body, "desktop", target=selected)["imageRole"], "desktop")
+                        target, desktop_body, "desktop", target=selected, package_version="0.1.2")["imageRole"], "desktop")
                     desktop_messages[1]["profile"]["opt_level"] = "2"
                     with self.assertRaises(TOOL.Refused):
                         TOOL.image_cargo_artifact(self.encoded(desktop_messages), desktop_binary,
-                            target, desktop_body, "desktop", target=selected)
+                            target, desktop_body, "desktop", target=selected, package_version="0.1.2")
         class TargetSubclass(str):
             pass
         for invalid in (None, True, [], {}, "x86_64h-apple-darwin", "x86_64-apple-darwin ", TargetSubclass("x86_64-apple-darwin")):
             with self.subTest(invalid=repr(invalid)), self.assertRaisesRegex(module.Refused, "^closed-build-target$"):
-                module.artifact(self.encoded(rows), checkout, target, build_target=invalid)
+                module.artifact(self.encoded(rows), checkout, target, build_target=invalid, package_version="0.1.2")
 
         # Bind the real headless workspace too: a copied UI lock plus a new
         # helper root can satisfy every synthetic compiler-artifact assertion.
@@ -6673,25 +6682,39 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 artifact_row("desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native", "src/lib.rs",
                              ["default", "package-producer-signing"], ["lib"], None),
                 {"reason": "build-finished", "success": True}]
-            self.assertEqual(module.producer_artifact(self.encoded(producer_rows), checkout, target, build_target), binary)
+            self.assertEqual(module.producer_artifact(self.encoded(producer_rows), checkout, target, build_target, package_version="0.1.2"), binary)
             remove_rows = copy.deepcopy(producer_rows)
             remove_binary = target / build_target / "release/examples/macos_remove_producer"
             remove_rows[0]["target"].update(name="macos_remove_producer", src_path=str(checkout / "desktop/src-tauri/examples/macos_remove_producer.rs"))
             remove_rows[0].update(executable=str(remove_binary), filenames=[str(remove_binary)])
             for row in remove_rows[:2]: row["features"] = ["macos-remove-producer"]
-            self.assertEqual(module.producer_artifact(self.encoded(remove_rows), checkout, target, build_target, remove=True), remove_binary)
+            self.assertEqual(module.producer_artifact(self.encoded(remove_rows), checkout, target, build_target, remove=True, package_version="0.1.2"), remove_binary)
             observer_rows = copy.deepcopy(remove_rows)
             for row in observer_rows[:2]: row["features"] = ["macos-remove-observer-producer", "macos-remove-producer"]
             self.assertEqual(module.producer_artifact(self.encoded(observer_rows), checkout, target, build_target,
-                                                     remove=True, observer=True), remove_binary)
+                                                     remove=True, observer=True, package_version="0.1.2"), remove_binary)
+            for base_rows, removing, observing, expected in ((producer_rows, False, False, binary),
+                    (remove_rows, True, False, remove_binary), (observer_rows, True, True, remove_binary)):
+                current = copy.deepcopy(base_rows)
+                for item in current[:2]: item["package_id"] = item["package_id"].replace("@0.1.2", "@0.1.3")
+                self.assertEqual(module.producer_artifact(self.encoded(current), checkout, target, build_target,
+                    remove=removing, observer=observing, package_version="0.1.3"), expected)
+                for fault in ("stale", "mixed", "native-version"):
+                    changed = copy.deepcopy(current)
+                    if fault == "stale": changed = copy.deepcopy(base_rows)
+                    elif fault == "mixed": changed[1]["package_id"] = base_rows[1]["package_id"]
+                    else: changed[2]["package_id"] = changed[2]["package_id"].replace("@0.1.0", "@0.1.3")
+                    with self.subTest(target=build_target, remove=removing, observer=observing, versionFault=fault), self.assertRaises(module.Refused):
+                        module.producer_artifact(self.encoded(changed), checkout, target, build_target,
+                            remove=removing, observer=observing, package_version="0.1.3")
             for index, bad in ((0, "3"), (1, "3"), (2, "0"), (0, 0), (2, 3)):
                 changed = copy.deepcopy(producer_rows); changed[index]["profile"]["opt_level"] = bad
                 with self.subTest(profileRow=index, bad=bad), self.assertRaises(module.Refused):
-                    module.producer_artifact(self.encoded(changed), checkout, target, build_target)
-            with self.assertRaises(module.Refused): module.producer_artifact(self.encoded(remove_rows), checkout, target, build_target)
-            with self.assertRaises(module.Refused): module.producer_artifact(self.encoded(producer_rows), checkout, target, build_target, remove=True)
+                    module.producer_artifact(self.encoded(changed), checkout, target, build_target, package_version="0.1.2")
+            with self.assertRaises(module.Refused): module.producer_artifact(self.encoded(remove_rows), checkout, target, build_target, package_version="0.1.2")
+            with self.assertRaises(module.Refused): module.producer_artifact(self.encoded(producer_rows), checkout, target, build_target, remove=True, package_version="0.1.2")
             for wrong in (None, 1, "remove"):
-                with self.assertRaises(module.Refused): module.producer_artifact(self.encoded(remove_rows), checkout, target, build_target, remove=wrong)
+                with self.assertRaises(module.Refused): module.producer_artifact(self.encoded(remove_rows), checkout, target, build_target, remove=wrong, package_version="0.1.2")
 
             for mutation in ("wrong-target", "feature-union", "native-role", "main", "test", "finish", "missing", "duplicate", "extra-bin"):
                 changed = copy.deepcopy(producer_rows)
@@ -6707,7 +6730,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     extra = copy.deepcopy(changed[0]); extra["target"].update(name="unexpected", kind=["bin"])
                     changed.insert(0, extra)
                 with self.subTest(target=build_target, mutation=mutation), self.assertRaises(module.Refused):
-                    module.producer_artifact(self.encoded(changed), checkout, target, build_target)
+                    module.producer_artifact(self.encoded(changed), checkout, target, build_target, package_version="0.1.2")
 
 
         # Genuine compiler sequence, not a replacement orchestration method.
@@ -6742,6 +6765,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     def __init__(self):
                         self.target, self.checkout, self.work = selected_target, checkout, target.parent
                         self.target_name = target.name
+                        self.image_package_version = "0.1.2"
                         self.package_endpoint, self.now, self.dispatched = 1_000_000_000_000, 10_000_000_000, []
                     def package_clock(self): return self.now
                     def package_call(self, role, argv, **options):
@@ -6826,6 +6850,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             def image_binding(self):
                 self.release_entry = self.source_original(self.release_input)
                 self.image_source, self.image_release = "a" * 40, selected.release
+                self.image_package_version = selected.package_version
                 self.receipt.update(imageSourceCommit="a" * 40, imageReleaseId=selected.release,
                                     imageReleaseSourceSha256=TOOL.digest(release_body))
                 return release_body
@@ -6927,7 +6952,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         for phase, prefix in (("package-install", "android-helper-"), ("package-remove", "android-helper-package-remove-")):
             port = module.Operation(SimpleNamespace(run_owned=lambda argv, **_: CompletedProcess(argv, 0, b"DATA", b"")),
                                     Path("/inert/source"), Path("/inert/work"), phase, environment, TOOL)
-            with mock.patch.object(port, "publish", side_effect=lambda name, body: captures.append((name, body))):
+            def publish(name, body, *, parent=None):
+                self.assertIsNone(parent)
+                captures.append((name, body))
+            with mock.patch.object(port, "publish", side_effect=publish):
                 port.call("producer-build", ["INERT"], {}, cwd=port.work, timeout=1, limit=32)
             self.assertEqual([name for name, _body in captures[-3:]],
                              [prefix + "producer-build." + suffix for suffix in ("stdout", "stderr", "status")])
@@ -9513,7 +9541,18 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         self.assertTrue(operation.notary_mutation_pending)
                         self.assertFalse(operation.receipt["targetRetired"])
 
-        for failure in ("submit-json", "submit-name", "log-sha", "nested-null-annotation", "invalid", "invalid-log-failure",
+        # Published nullable ticket annotations do not replace the original
+        # signature/staple/mount gates; exercise their complete real sequence.
+        with tempfile.TemporaryDirectory() as directory:
+            state = self.final_image_fixture(Path(directory), failure="nested-null-annotation")
+            with self.final_image_fixture_call(state): state.operation.execute()
+            self.assertEqual([row[0] for row in state.observations], list(module.FINAL_IMAGE_ROLES))
+            self.assertTrue(state.operation.receipt["passed"])
+            self.assertTrue(state.operation.receipt["originalClosesKnown"])
+            self.assertIn("finalImage", state.operation.receipt)
+            self.assertTrue((state.work / "distribution-final").is_dir())
+
+        for failure in ("submit-json", "submit-name", "log-sha", "invalid", "invalid-log-failure",
                         "ticket-oversize", "ticket-mode", "mounted-bytes", "mounted-extra"):
             with self.subTest(finalImageRefusal=failure), tempfile.TemporaryDirectory() as directory:
                 state = self.final_image_fixture(Path(directory), failure=failure)
@@ -9908,7 +9947,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertTrue(value["diagnosticOnly"])
         self.assertFalse(value["productReady"])
         self.assertEqual(value["originalFailure"],
-            {"recorded": True, "stage": "unclassified", "type": "other", "reason": "unclassified", "errno": None})
+            {"recorded": True, "stage": "unclassified", "type": "other", "reason": "unclassified", "errno": None, "stagerLine": None})
         self.assertEqual(value["lastRecordedNative"]["originalFailure"],
             {"available": True, "ownerErrorType": "ProcessOutcomeUnknown", "classification": "cleanup-unconfirmed"})
         self.assertFalse(value["lastRecordedNative"]["returned"] or value["lastRecordedNative"]["capturesSettled"])
@@ -10067,6 +10106,20 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(module.compiler_diagnostic(self.encoded([message]), b"", source)["rows"], rust["rows"])
         message["manifest_path"] = source + "/" + native_root + "/Cargo.toml"
         self.assertIsNone(module.compiler_diagnostic(self.encoded([message]), b"", source)["rows"][0]["source"])
+        # Version-bearing app diagnostics use only the already admitted version;
+        # helper/native versions and private-text suppression stay unchanged.
+        for expected_version in (None, "0.1.2", "0.1.3"):
+            for reported_version in ("0.1.2", "0.1.3"):
+                message = compiler_message(root="desktop/src-tauri")
+                message["package_id"] = "path+file://" + source + "/desktop/src-tauri#mobile-release-kit-desktop@" + reported_version
+                stderr = ("warning: mobile-release-kit-desktop@" + reported_version + ": src/lib.rs:43:7: error: private\n"
+                    "error: failed to run custom build command for `mobile-release-kit-desktop v" + reported_version + "`\n"
+                    "thread 'main' panicked at build.rs:43:7:\nprivate\n").encode()
+                value = module.compiler_diagnostic(self.encoded([message]), stderr, source, package_version=expected_version)
+                expected_paths = (["desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/build.rs"]
+                                  if expected_version == reported_version else [None, None, None])
+                self.assertEqual([row["source"] for row in value["rows"]], expected_paths)
+                self.assertNotIn("private", json.dumps(value))
         invalid = compiler_message(line=True, column=65536, code="E12345")
         row = module.compiler_diagnostic(self.encoded([invalid]), b"", source)["rows"][0]
         self.assertEqual((row["code"], row["line"], row["column"]), (None, None, None))
@@ -10136,7 +10189,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     return returned
                 owner.run_owned = command
                 operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
-                def inspect(stdout_body, stderr_body, actual_checkout):
+                def inspect(stdout_body, stderr_body, actual_checkout, *, package_version=None):
+                    self.assertEqual(package_version, "0.1.2")
                     parser_calls.append(True)
                     self.assertIs(stdout_body, captured_stdout)
                     self.assertIs(stderr_body, captured_stderr)
@@ -10145,7 +10199,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                                       operation.calls[-1]["capturesSettled"]), (101, True, True))
                     if kind == "parser-error":
                         raise PrivateError(private)
-                    return actual_parser(stdout_body, stderr_body, actual_checkout)
+                    return actual_parser(stdout_body, stderr_body, actual_checkout, package_version=package_version)
                 with mock.patch.object(module, "compiler_diagnostic", side_effect=inspect):
                     if kind == "success":
                         operation.execute()
@@ -17103,8 +17157,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
                          ["github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-image-compile'"])
         self.assertIn("    runs-on: macos-26\n    timeout-minutes: 35\n", shipping)
         self.assertEqual(re.findall(r"^        timeout-minutes: ([0-9]+)$", shipping, re.M), ["1", "2", "4", "24", "2"])
-        for anchor in ("mrk_installed_source_inventory", "mrk_installed_direct_rust"):
-            self.assertEqual(actual_shipping.count("        run: &" + anchor + " |\n"), 1)
+        for anchor, scalar in (("mrk_installed_source_inventory", "|"),
+                               ("mrk_installed_direct_rust", "/bin/bash desktop/tools/macos_installed_direct_rust.sh")):
+            self.assertEqual(actual_shipping.count("        run: &" + anchor + " " + scalar + "\n"), 1)
             self.assertEqual(shipping.count("        run: *" + anchor + "\n"), 1)
         for forbidden in ("secrets.", "    environment:", "/usr/sbin/installer", "xcodebuild", "codesign", "notarytool", "package-install"):
             self.assertNotIn(forbidden, shipping)
@@ -18007,11 +18062,11 @@ class MacNormalPreviewData(unittest.TestCase):
                 if role == "ordinary-image":
                     expected[TOOL.DESKTOP_IMAGE] = (artifact_body, 0o755)
                     self.assertEqual(result["desktopImageCargoArtifact"],
-                                     TOOL.image_cargo_artifact(messages, artifact, target, artifact_body, "desktop", target=build_target))
+                                     TOOL.image_cargo_artifact(messages, artifact, target, artifact_body, "desktop", target=build_target, package_version="0.1.2"))
                     self.assertNotIn("observerCargoArtifact", result)
                 else:
                     self.assertEqual(result["observerCargoArtifact"],
-                                     TOOL.observer_cargo_artifact(messages, artifact, target, artifact_body, target=build_target))
+                                     TOOL.observer_cargo_artifact(messages, artifact, target, artifact_body, target=build_target, package_version="0.1.2"))
                     self.assertNotIn("desktopImageCargoArtifact", result)
                 self.assertEqual(TOOL.tree(output), expected)
                 seal = {TOOL.GITHUB_SEAL: (helper_body, 0o555), TOOL.GITHUB_SEAL_NOTICE: (b"inert notice DATA", 0o644)}
@@ -18024,7 +18079,7 @@ class MacNormalPreviewData(unittest.TestCase):
                 self.assertEqual(result["vaultHelperSha256"], TOOL.digest(helper_body))
                 self.assertEqual(result["removerSha256"], TOOL.digest(remover_body))
                 self.assertEqual(result["removerCargoArtifact"], TOOL.remover_cargo_artifact(
-                    remover_messages, remover, remover_target, remover_body, target=build_target))
+                    remover_messages, remover, remover_target, remover_body, target=build_target, package_version="0.1.2"))
                 missing = SimpleNamespace(**{key: value for key, value in vars(args).items() if key != "remover"})
                 missing.output = work / "missing-remover-app"
                 with synthetic_android_support(support, app_seal={}), self.assertRaisesRegex(TOOL.Refused, "package-role-remover-required"):
@@ -18098,7 +18153,7 @@ class MacNormalPreviewData(unittest.TestCase):
         target, binary, rows, image_body = normal_cargo_fixture()
         body, resident = entry_macho_fixture(), image_macho_fixture("resident")
         messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
-        result = TOOL.image_cargo_artifact(messages, binary, target, image_body, "desktop")
+        result = TOOL.image_cargo_artifact(messages, binary, target, image_body, "desktop", package_version="0.1.2")
         self.assertEqual(result["binarySha256"], TOOL.digest(image_body))
         self.assertEqual(result["cargoMessagesSha256"], TOOL.digest(messages))
         self.assertEqual((result["entrypoint"], result["targetKind"], result["imageRole"]), ("src/lib.rs", "cdylib", "desktop"))
@@ -18159,24 +18214,24 @@ class MacNormalPreviewData(unittest.TestCase):
             (rows[0] if section is None else rows[0][section])[field] = value
             messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
             with self.subTest(section=section, field=field, value=value), self.assertRaises(TOOL.Refused):
-                TOOL.image_cargo_artifact(messages, binary, target, body, "desktop")
+                TOOL.image_cargo_artifact(messages, binary, target, body, "desktop", package_version="0.1.2")
         for position in (1, 2):
             for field, value in (("features", []), ("features", ["default", "installed-observation"]),
                                  ("manifest_path", "/foreign/Cargo.toml"), ("executable", str(binary))):
                 rows = TOOL.decode(TOOL.canonical(original)); rows[position][field] = value
                 with self.subTest(library=position, field=field), self.assertRaises(TOOL.Refused):
                     TOOL.image_cargo_artifact(cargo_lines(*rows, {"reason": "build-finished", "success": True}),
-                                             binary, target, body, "desktop")
+                                             binary, target, body, "desktop", package_version="0.1.2")
         # A second image role, even with another filename/name, is not a
         # legitimate dependency of the isolated desktop image root.
         other = normal_cargo_fixture(target, role="resident")[2][0]
         with self.assertRaises(TOOL.Refused):
             TOOL.image_cargo_artifact(cargo_lines(*original, other, {"reason": "build-finished", "success": True}),
-                                     binary, target, body, "desktop")
+                                     binary, target, body, "desktop", package_version="0.1.2")
         for build_target, other_target in ((TOOL.ARM_TARGET, TOOL.INTEL_TARGET), (TOOL.INTEL_TARGET, TOOL.ARM_TARGET)):
             observer_target, observer, rows, executable = observer_cargo_fixture(build_target=build_target)
             messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
-            result = TOOL.observer_cargo_artifact(messages, observer, observer_target, executable, target=build_target)
+            result = TOOL.observer_cargo_artifact(messages, observer, observer_target, executable, target=build_target, package_version="0.1.2")
             self.assertEqual(result["target"], build_target)
             self.assertTrue(result["instrumented"])
             for index, section, field, value in (
@@ -18189,30 +18244,30 @@ class MacNormalPreviewData(unittest.TestCase):
                 (changed[index] if section is None else changed[index][section])[field] = value
                 with self.subTest(target=build_target, observer=(index, section, field)), self.assertRaises(TOOL.Refused):
                     TOOL.observer_cargo_artifact(cargo_lines(*changed, {"reason": "build-finished", "success": True}),
-                                                observer, observer_target, executable, target=build_target)
+                                                observer, observer_target, executable, target=build_target, package_version="0.1.2")
             for wrong_body in (image_macho_fixture(target=build_target),
                                observer_cargo_fixture(build_target=other_target)[3]):
                 with self.subTest(target=build_target, wrong_body=TOOL.digest(wrong_body)), self.assertRaises(TOOL.Refused):
-                    TOOL.observer_cargo_artifact(messages, observer, observer_target, wrong_body, target=build_target)
+                    TOOL.observer_cargo_artifact(messages, observer, observer_target, wrong_body, target=build_target, package_version="0.1.2")
             foreign = observer_target / other_target / "debug/deps" / observer.name
             with self.subTest(target=build_target, wrong_path=True), self.assertRaises(TOOL.Refused):
-                TOOL.observer_cargo_artifact(messages, foreign, observer_target, executable, target=build_target)
+                TOOL.observer_cargo_artifact(messages, foreign, observer_target, executable, target=build_target, package_version="0.1.2")
             changed = TOOL.decode(TOOL.canonical(rows))
             changed[0]["executable"] = str(foreign)
             changed[0]["filenames"] = [str(foreign)]
             with self.subTest(target=build_target, wrong_record=True), self.assertRaises(TOOL.Refused):
                 TOOL.observer_cargo_artifact(cargo_lines(*changed, {"reason": "build-finished", "success": True}),
-                                            observer, observer_target, executable, target=build_target)
+                                            observer, observer_target, executable, target=build_target, package_version="0.1.2")
             for refused_target in (other_target, "arm64-apple-darwin", "x86_64h-apple-darwin"):
                 with self.subTest(target=build_target, selected=refused_target), self.assertRaises(TOOL.Refused):
-                    TOOL.observer_cargo_artifact(messages, observer, observer_target, executable, target=refused_target)
+                    TOOL.observer_cargo_artifact(messages, observer, observer_target, executable, target=refused_target, package_version="0.1.2")
 
         # The remover is a distinct source-selected standalone, never an
         # installer with renamed bytes or a signing-enabled library graph.
         for selected_target in TOOL.MAC_TARGETS:
             target, binary, rows, body = remover_cargo_fixture(build_target=selected_target)
             final = {"reason": "build-finished", "success": True}
-            result = TOOL.remover_cargo_artifact(cargo_lines(*rows, final), binary, target, body, target=selected_target)
+            result = TOOL.remover_cargo_artifact(cargo_lines(*rows, final), binary, target, body, target=selected_target, package_version="0.1.2")
             self.assertEqual(result["features"], ["macos-installed-remover"])
             self.assertEqual(result["binaryRole"], "mrk-macos-remove")
             for index, key, value in ((0, "features", ["macos-installed-installer"]),
@@ -18220,14 +18275,48 @@ class MacNormalPreviewData(unittest.TestCase):
                 (2, "features", ["default", "package-producer-signing"]), (0, "executable", "/foreign/remover")):
                 changed = copy.deepcopy(rows); changed[index][key] = value
                 with self.assertRaises(TOOL.Refused):
-                    TOOL.remover_cargo_artifact(cargo_lines(*changed, final), binary, target, body, target=selected_target)
+                    TOOL.remover_cargo_artifact(cargo_lines(*changed, final), binary, target, body, target=selected_target, package_version="0.1.2")
             for chosen in (rows[:1], rows + rows[:1]):
                 with self.assertRaises(TOOL.Refused):
-                    TOOL.remover_cargo_artifact(cargo_lines(*chosen, final), binary, target, body, target=selected_target)
+                    TOOL.remover_cargo_artifact(cargo_lines(*chosen, final), binary, target, body, target=selected_target, package_version="0.1.2")
             with self.assertRaises(TOOL.Refused):
-                TOOL.remover_cargo_artifact(cargo_lines(*rows), binary, target, body, target=selected_target)
+                TOOL.remover_cargo_artifact(cargo_lines(*rows), binary, target, body, target=selected_target, package_version="0.1.2")
             with self.assertRaises(TOOL.Refused):
-                TOOL.remover_cargo_artifact(cargo_lines(*rows, final), binary.with_name("mrk-macos-install"), target, body, target=selected_target)
+                TOOL.remover_cargo_artifact(cargo_lines(*rows, final), binary.with_name("mrk-macos-install"), target, body, target=selected_target, package_version="0.1.2")
+
+    def test_selected_application_version_keeps_native_and_helper_crates_fixed(self):
+        final = {"reason": "build-finished", "success": True}
+        for build_target in TOOL.MAC_TARGETS:
+            graphs = []
+            for role in ("desktop", "resident"):
+                directory, binary, rows, body = normal_cargo_fixture(role=role, build_target=build_target)
+                graphs.append((role, TOOL.image_cargo_artifact, (role,), {}, directory, binary, rows, body))
+            for role, parser, fixture in (("observer", TOOL.observer_cargo_artifact, observer_cargo_fixture),
+                                          ("remover", TOOL.remover_cargo_artifact, remover_cargo_fixture)):
+                directory, binary, rows, body = fixture(build_target=build_target)
+                graphs.append((role, parser, (), {}, directory, binary, rows, body))
+            if build_target == TOOL.ARM_TARGET:
+                for role, feature in TOOL.REMOVAL_FIXTURE_FEATURES.items():
+                    directory, binary, rows, body = remover_cargo_fixture(build_target=build_target)
+                    for row in rows[:2]: row["features"] = sorted(["macos-installed-remover", feature])
+                    graphs.append((role, TOOL.removal_fixture_cargo_artifact, (), {"role": role}, directory, binary, rows, body))
+            for role, parser, positional, keywords, directory, binary, old, body in graphs:
+                app = [i for i, row in enumerate(old) if "#mobile-release-kit-desktop@" in row["package_id"]]
+                native = [i for i in range(len(old)) if i not in app]
+                self.assertTrue(app and native)
+                for version in ("0.1.2", "0.1.3"):
+                    rows = copy.deepcopy(old)
+                    for index in app: rows[index]["package_id"] = rows[index]["package_id"].rsplit("@", 1)[0] + "@" + version
+                    def parse(selected):
+                        return parser(cargo_lines(*selected, final), binary, directory, body, *positional,
+                                      target=build_target, package_version=version, **keywords)
+                    with self.subTest(target=build_target, role=role, version=version):
+                        self.assertEqual(parse(rows)["binarySha256"], TOOL.digest(body))
+                        for index in app + native:
+                            changed = copy.deepcopy(rows)
+                            wrong = ("0.1.2" if version == "0.1.3" else "0.1.3") if index in app else version
+                            changed[index]["package_id"] = changed[index]["package_id"].rsplit("@", 1)[0] + "@" + wrong
+                            with self.subTest(row=index), self.assertRaises(TOOL.Refused): parse(changed)
 
     def test_original_terminal_success_is_unique_and_not_a_log_hint(self):
         target, binary, rows, body = normal_cargo_fixture()
@@ -18240,15 +18329,15 @@ class MacNormalPreviewData(unittest.TestCase):
                cargo_lines(rows[0], end), cargo_lines(rows[0], rows[1], end), cargo_lines(rows[0], rows[2], end)]
         for messages in bad:
             with self.subTest(messages=messages[-80:]), self.assertRaises((TOOL.Refused, ValueError)):
-                TOOL.image_cargo_artifact(messages, binary, target, body, "desktop")
+                TOOL.image_cargo_artifact(messages, binary, target, body, "desktop", package_version="0.1.2")
         with self.assertRaises(TOOL.Refused):
-            TOOL.image_cargo_artifact(cargo_lines(*rows, end), target / "debug" / binary.name, target, body, "desktop")
+            TOOL.image_cargo_artifact(cargo_lines(*rows, end), target / "debug" / binary.name, target, body, "desktop", package_version="0.1.2")
         with self.assertRaises(TOOL.Refused):
-            TOOL.image_cargo_artifact(cargo_lines(*rows, end), binary, Path("relative"), body, "desktop")
+            TOOL.image_cargo_artifact(cargo_lines(*rows, end), binary, Path("relative"), body, "desktop", package_version="0.1.2")
         observer_target, observer, observer_rows, observer_body = observer_cargo_fixture()
         for selected in (observer_rows[:1], observer_rows[:2], observer_rows + [observer_rows[0]]):
             with self.subTest(observer_graph=len(selected)), self.assertRaises(TOOL.Refused):
-                TOOL.observer_cargo_artifact(cargo_lines(*selected, end), observer, observer_target, observer_body)
+                TOOL.observer_cargo_artifact(cargo_lines(*selected, end), observer, observer_target, observer_body, package_version="0.1.2")
 
     def test_optional_gate_is_paired_and_failure_precedes_any_app_write(self):
         # Historical selector; the gate is mandatory now and has no old-bin,
@@ -18603,7 +18692,7 @@ class MacNormalPreviewData(unittest.TestCase):
         work = Path("/synthetic-mrk-preview")
         target, binary, rows, body = normal_cargo_fixture(work / "cargo-target", build_target=build_target)
         messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
-        normal = TOOL.image_cargo_artifact(messages, binary, target, body, "desktop", target=build_target)
+        normal = TOOL.image_cargo_artifact(messages, binary, target, body, "desktop", target=build_target, package_version="0.1.2")
         facade = entry_macho_fixture(target=build_target)
         binding = {"source": "a" * 40, "workflowSource": "a" * 40, "tree": "b" * 40,
             "scope": "normal-macos-early-preview", "packageRole": "ordinary-image",
@@ -18865,7 +18954,7 @@ class MacNormalPreviewData(unittest.TestCase):
                     binary = work / "cargo-target" / target / "release/libmrk_desktop_image.dylib"
                     documents["app-result.json"]["desktopImageCargoArtifact"] = TOOL.image_cargo_artifact(
                         (work / "normal-build.jsonl").read_bytes(), binary, work / "cargo-target",
-                        binary.read_bytes(), "desktop", target=target)
+                        binary.read_bytes(), "desktop", target=target, package_version="0.1.2")
                     (work / "app-result.json").write_bytes(TOOL.canonical(documents["app-result.json"]))
                     env = {"GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
                         "GITHUB_REF": "refs/heads/verify/desktop-macos-installed",
@@ -19008,7 +19097,7 @@ class MacNormalPreviewData(unittest.TestCase):
                     binary = work / "cargo-target" / target / "release/libmrk_desktop_image.dylib"
                     documents["app-result.json"]["desktopImageCargoArtifact"] = TOOL.image_cargo_artifact(
                         (work / "normal-build.jsonl").read_bytes(), binary, work / "cargo-target", binary.read_bytes(),
-                        "desktop", target=target)
+                        "desktop", target=target, package_version="0.1.2")
                     (work / "app-result.json").write_bytes(TOOL.canonical(documents["app-result.json"]))
                     env = {"GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "GITHUB_EVENT_NAME": "push",
                         "GITHUB_REF": "refs/heads/verify/desktop-macos-candidate",

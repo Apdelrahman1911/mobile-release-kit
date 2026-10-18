@@ -5983,7 +5983,11 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             return values[0]
         for filename in ("desktop-macos-installed.yml", "desktop-macos-aqua.yml"):
             source = (PATH.parents[2] / ".github/workflows" / filename).read_text()
-            direct = program(source, "PY_DIRECT_RUST")
+            direct_source = source
+            if filename == "desktop-macos-installed.yml":
+                script = (PATH.parents[2] / "desktop/tools/macos_installed_direct_rust.sh").read_text()
+                direct_source = ''.join('          ' + line for line in script.splitlines(keepends=True))
+            direct = program(direct_source, "PY_DIRECT_RUST")
             stages = [("direct", [
                 (need_predicate(direct, "direct-rust-version-host"),
                  "lines[0].startswith(tool + ' ') and [line for line in lines if line.partition(':')[0].strip() == 'release'] == ['release: ' + rust_release] and [line for line in lines if line.partition(':')[0].strip() == 'host'] == ['host: ' + build_target]", False, False),
@@ -9300,61 +9304,78 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                         loaded.assert_not_called(); completion.assert_not_called()
                     self.assertEqual(closed, [True]); self.assertEqual(events[-1], (missing, limit))
 
-            # The actual fixed loader holds ALL THREE SOURCE originals through
-            # import/use, selects Intel from its already captured bytes, and
-            # neither closes originals early nor calls source_build_selection.
+            # Current candidate release DATA is independent of this helper's
+            # version. This is an inert read adapter using the REAL parsers and
+            # import, not evidence of installed files or candidate provenance.
             previous = dict(sys.modules)
-            with patch.dict(sys.modules):
-                held, posts = [], []
-                def source_file(fixture, name, parent, limit):
-                    relative = Path(name).relative_to(PATH.parents[2]).as_posix()
-                    self.assertIsNone(parent)
-                    self.assertEqual(limit, 1024 * 1024 if relative == 'desktop/tools/stage_macos_installed.py' else 256 * 1024)
-                    raw = Path(name).read_bytes()
-                    self.assertLessEqual(len(raw), limit)
-                    row = {'name': name, 'sha256': M.digest(raw)}; held.append(row)
-                    return raw, row
-                def post(row, capture=False):
-                    self.assertTrue(any(row is original for original in held)); posts.append(row)
-                    return b'', row['sha256']
-                with patch.object(M, '_gate_file', source_file), patch.object(M, '_gate_file_read', post):
-                    loaded, selected = M._gate_load_stager(SimpleNamespace(), PATH.parents[2], target=M.INTEL_TARGET)
-                self.assertEqual(selected.target, M.INTEL_TARGET)
-                self.assertTrue(selected.release.startswith('macos26-x86_64-'))
-                self.assertEqual([row['name'] for row in held], [str(PATH.parents[2] / name) for name in ('desktop/tools/stage_macos_installed.py', *M.SHIPPING_GATE_DATA_PINS)])
-                self.assertEqual(len(held), 3); self.assertEqual(posts, held)
-                self.assertIs(sys.modules['_mrk_shipping_gate_stager'], loaded)
-            self.assertEqual(set(sys.modules), set(previous))
-            self.assertTrue(all(sys.modules[name] is original for name, original in previous.items()))
-
-            # Release DATA still requires its reviewed digest before import;
-            # changed code originals after import still veto the loaded stager.
-            for changed in M.SHIPPING_GATE_DATA_PINS:
-                held, posts = [], []
-                def changed_data_file(fixture, name, parent, limit):
-                    raw, row = source_file(fixture, name, parent, limit)
-                    if Path(name).relative_to(PATH.parents[2]).as_posix() == changed:
-                        return bytes([raw[0] ^ 1]) + raw[1:], row
-                    return raw, row
-                with patch.dict(sys.modules), patch.object(M, '_gate_file', changed_data_file), \
-                     patch.object(importlib.util, 'spec_from_file_location') as attempted_import:
-                    with self.assertRaisesRegex(M.Refused, '^gate-stager-data-pin$'):
-                        M._gate_load_stager(SimpleNamespace(), PATH.parents[2], target=M.INTEL_TARGET)
-                    attempted_import.assert_not_called()
-                self.assertEqual(len(held), 2 + list(M.SHIPPING_GATE_DATA_PINS).index(changed))
-                self.assertEqual(posts, [])
+            release_inputs = dict(M.SHIPPING_GATE_RELEASE_INPUTS)
+            all_names = ('desktop/tools/stage_macos_installed.py', *release_inputs.values())
+            raw_releases = {}
             held, posts = [], []
-            def changed_source_post(row, capture=False):
-                body, _digest = post(row, capture)
-                return body, '0' * 64
-            with patch.dict(sys.modules), patch.object(M, '_gate_file', source_file), \
-                 patch.object(M, '_gate_file_read', changed_source_post):
-                with self.assertRaisesRegex(M.Refused, '^gate-stager-source-changed$'):
-                    M._gate_load_stager(SimpleNamespace(), PATH.parents[2], target=M.INTEL_TARGET)
-                self.assertIn('_mrk_shipping_gate_stager', sys.modules)
-            self.assertEqual(len(held), 3); self.assertEqual(posts, held[:1])
-            self.assertEqual(set(sys.modules), set(previous))
-            self.assertTrue(all(sys.modules[name] is original for name, original in previous.items()))
+            def source_file(fixture, name, parent, limit):
+                relative = Path(name).relative_to(PATH.parents[2]).as_posix()
+                self.assertIsNone(parent)
+                self.assertEqual(limit, 1024 * 1024 if relative == all_names[0] else 4096)
+                raw = raw_releases.get(relative)
+                if raw is None: raw = Path(name).read_bytes()
+                self.assertLessEqual(len(raw), limit)
+                row = {'name': name, 'sha256': M.digest(raw)}; held.append(row)
+                return raw, row
+            def post(row, capture=False):
+                self.assertTrue(any(row is original for original in held)); posts.append(row)
+                return b'', row['sha256']
+            for version in ('0.1.2', '0.1.3'):
+                raw_releases = {relative: stage.canonical({
+                    'schemaVersion': 1, 'packageVersion': version,
+                    'release': M.target_data(selected_target)['releasePrefix'] + 'desktop-' + version[-1]})
+                    for selected_target, relative in release_inputs.items()}
+                for selected_target in release_inputs:
+                    held, posts, registrations = [], [], []
+                    with self.subTest(version=version, target=selected_target), patch.dict(sys.modules), \
+                         patch.object(M, '_gate_file', source_file), patch.object(M, '_gate_file_read', post):
+                        loaded, selected = M._gate_load_stager(SimpleNamespace(), PATH.parents[2],
+                            target=selected_target, registrations=registrations)
+                        self.assertEqual(selected.target, selected_target)
+                        self.assertEqual(selected.package_version, version)
+                        self.assertEqual(selected.release, json.loads(raw_releases[release_inputs[selected_target]])['release'])
+                        self.assertEqual([row['name'] for row in held], [str(PATH.parents[2] / name) for name in all_names])
+                        self.assertEqual(len(held), 3); self.assertEqual(posts, held)
+                        self.assertEqual(registrations, [loaded])
+                        self.assertIs(sys.modules['_mrk_shipping_gate_stager'], loaded)
+                    self.assertEqual(set(sys.modules), set(previous))
+                    self.assertTrue(all(sys.modules[name] is original for name, original in previous.items()))
+
+            # Both selected AND other-target DATA must satisfy the existing
+            # candidate parser. No corrupt version can hide in the unused input.
+            valid_releases = dict(raw_releases)
+            for selected_target in release_inputs:
+                for changed in release_inputs.values():
+                    for bad in (b'{', stage.canonical({'schemaVersion': 1, 'packageVersion': '0.1.3-private',
+                                'release': json.loads(valid_releases[changed])['release']})):
+                        held, posts, registrations = [], [], []
+                        raw_releases = {**valid_releases, changed: bad}
+                        with self.subTest(target=selected_target, changed=changed, bad=bad), patch.dict(sys.modules), \
+                             patch.object(M, '_gate_file', source_file), patch.object(M, '_gate_file_read', post):
+                            with self.assertRaisesRegex(Exception, '^build-release-(shape|version)$') as caught:
+                                M._gate_load_stager(SimpleNamespace(), PATH.parents[2], target=selected_target,
+                                    registrations=registrations)
+                            self.assertEqual(len(registrations), 1)  # Original import custody survives refusal.
+                            self.assertIs(type(caught.exception), registrations[0].Refused)
+                        self.assertEqual(len(held), 3); self.assertEqual(posts, [])
+            raw_releases = valid_releases
+            for changed in all_names:
+                held, posts = [], []
+                def changed_source_post(row, capture=False):
+                    body, actual_digest = post(row, capture)
+                    return body, '0' * 64 if row['name'] == str(PATH.parents[2] / changed) else actual_digest
+                with self.subTest(changed=changed), patch.dict(sys.modules), patch.object(M, '_gate_file', source_file), \
+                     patch.object(M, '_gate_file_read', changed_source_post):
+                    with self.assertRaisesRegex(M.Refused, '^gate-stager-source-changed$'):
+                        M._gate_load_stager(SimpleNamespace(), PATH.parents[2], target=M.INTEL_TARGET)
+                    self.assertIn('_mrk_shipping_gate_stager', sys.modules)
+                self.assertEqual(len(held), 3); self.assertEqual(posts, held[:all_names.index(changed) + 1])
+                self.assertEqual(set(sys.modules), set(previous))
+                self.assertTrue(all(sys.modules[name] is original for name, original in previous.items()))
 
             # The real reader enforces a general code bound, not an obsolete
             # version's exact byte count. Inert DATA is never imported here.

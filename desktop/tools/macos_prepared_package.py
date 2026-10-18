@@ -322,7 +322,7 @@ def export_checkpoint(op, origin):
         need(values['package-finalization.status'] == b'0\n', 'prepared-export-caller-zero')
         op.package_outputs.extend(((final, sha(package)), (original, sha(old))))
         selection = op.stager.build_release_data(op.read(op.release_entry), target=op.target)
-        normal = original_build_facts(op, origin)
+        normal = original_build_facts(op, origin, package_version=selection['packageVersion'])
         manifest = dict(schemaVersion=1, scope=SCOPE, origin=origin, packageRole='ordinary-image',
             packageVersion=selection['packageVersion'], release=selection['release'],
             packagerUid=os.getuid(), packagerGid=os.getgid(),
@@ -394,7 +394,7 @@ def hydrate_checkpoint(op, values, binding):
     return binding
 
 
-def original_build_facts(op, origin):
+def original_build_facts(op, origin, *, package_version):
     """Two finite pre-signing facts from the actual original build, not P bytes."""
     def retained(name, limit, modes=(0o400, 0o444, 0o600, 0o644)):
         entry = op.original(op.descend(op.work_entry, Path(name).parts[:-1]), Path(name).name,
@@ -412,7 +412,7 @@ def original_build_facts(op, origin):
          and bound.get('instrumented') is False and bound.get('packageRole') == 'ordinary-image', 'prepared-build-source')
     path = 'cargo-target/' + op.target + '/release/libmrk_desktop_image.dylib'
     normal = op.stager.image_cargo_artifact(retained('normal-build.jsonl', 8 * MIB), op.work / path,
-        op.work / 'cargo-target', retained(path, PACKAGE_LIMIT, (0o444, 0o555, 0o644, 0o755)), 'desktop', target=op.target)
+        op.work / 'cargo-target', retained(path, PACKAGE_LIMIT, (0o444, 0o555, 0o644, 0o755)), 'desktop', target=op.target, package_version=package_version)
     facade = retained('mobile-release-kit-desktop', MIB, (0o555, 0o755))
     op.stager.entry_macho(facade, target=op.target)
     app = decode(retained('app-result.json', RECEIPT_LIMIT), RECEIPT_LIMIT)

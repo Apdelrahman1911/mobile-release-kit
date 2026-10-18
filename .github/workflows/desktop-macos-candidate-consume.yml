@@ -253,6 +253,29 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+      - name: Show only public system-tool metadata before candidate admission
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          /usr/bin/python3 -I -B - <<'PY_SYSTEM_TOOLS'
+          import json, os, stat
+          tools = (('git', '/usr/bin/git'), ('hdiutil', '/usr/bin/hdiutil'),
+                   ('vm_stat', '/usr/bin/vm_stat'), ('openssl', '/usr/bin/openssl'),
+                   ('codesign', '/usr/bin/codesign'), ('installer', '/usr/sbin/installer'))
+          for role, path in tools:
+              try:
+                  info = os.lstat(path)
+                  value = dict(role=role, kind=stat.S_IFMT(info.st_mode), mode=stat.S_IMODE(info.st_mode),
+                               uid=info.st_uid, gid=info.st_gid, links=info.st_nlink, bytes=info.st_size,
+                               flags=getattr(info, 'st_flags', 0))
+              except OSError as error:
+                  value = dict(role=role, errno=error.errno)
+              print(json.dumps(dict(scope='public-system-tool-metadata-only', admissionChanged=False, **value)))
+          PY_SYSTEM_TOOLS
+          # Diagnostic only: no source, private files, token, or tool execution.
+          # Actual original-file admission below remains unchanged and required.
+
       - name: Install the exact final candidate once without rebuilding or signing it
         id: ordinary_install
         if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-pending-ui'

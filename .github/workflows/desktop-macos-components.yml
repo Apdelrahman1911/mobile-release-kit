@@ -101,7 +101,9 @@ jobs:
           loader = package.load_data(root, "macos_aqua_qualification.py", "_resident_diagnostic_loader")
           owner = loader.load_owner(root)
           target = package.INTEL_TARGET
-          release = json.loads((root / "desktop/macos-installed-inputs/build-release-intel.json").read_bytes())["release"]
+          stager = package.load_data(root, "stage_macos_installed.py", "_resident_diagnostic_stager")
+          selection = stager.build_release_data((root / "desktop/macos-installed-inputs/build-release-intel.json").read_bytes(), target=target)
+          release = selection["release"]
           environment = package.build_environment({"HOME": "/Users/runner",
               "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0",
               "GITHUB_SHA": os.environ["GITHUB_SHA"]}, work, release, target=target)
@@ -135,7 +137,8 @@ jobs:
               if result.returncode != 0:
                   raise SystemExit(result.returncode)
               if role == "build":
-                  package.artifact(result.stdout, root, work / "android-helper-target", build_target=target)
+                  package.artifact(result.stdout, root, work / "android-helper-target",
+                      package_version=selection["packageVersion"], build_target=target)
           PY_RESIDENT
       - name: Retire only this returned build's compiler and outputs
         if: always() && steps.compile.outputs.returned == 'true'

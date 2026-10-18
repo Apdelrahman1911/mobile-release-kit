@@ -5765,7 +5765,10 @@ def shipping_gate_compiler_argv(target=ARM_TARGET):
     return argv
 
 
-SHIPPING_GATE_DATA_PINS = {'desktop/macos-installed-inputs/build-release.json': 'c871b579f036e8776f1ae2e4e53f4772fee4b8a8bdbffe9031a438a27f57c6a2', 'desktop/macos-installed-inputs/build-release-intel.json': '4e48a8eac28bd21164b22d1d69976bdc638af2bafc23a628028cf8d204ac1b7b'}
+SHIPPING_GATE_RELEASE_INPUTS = (
+    (ARM_TARGET, 'desktop/macos-installed-inputs/build-release.json'),
+    (INTEL_TARGET, 'desktop/macos-installed-inputs/build-release-intel.json'),
+)
 SHIPPING_GATE_REPORT = "shipping-gate-control.receipt.json"
 SHIPPING_GATE_STATUS = "shipping-gate-control.status"
 
@@ -6090,14 +6093,15 @@ def _gate_recheck(fixtures):
 def _gate_load_stager(fixtures, checkout, *, target=ARM_TARGET, registrations=None):
     import importlib.util
     need(registrations is None or type(registrations) is list and not registrations, "gate-stager-registry-custody")
-    target_row = target_data(target)
+    target_data(target)
     # Code comes from the fixed trusted checkout, not a second static codehash
     # authority. Retain its original bytes/descriptor through the same POST.
     _, stager_original = _gate_file(fixtures, str(checkout / "desktop/tools/stage_macos_installed.py"), None, 1024 * 1024)
     selected, bodies = [stager_original], {}
-    for relative, expected in SHIPPING_GATE_DATA_PINS.items():
-        body, original = _gate_file(fixtures, str(checkout / relative), None, 256 * 1024)
-        need(digest(body) == expected, "gate-stager-data-pin")
+    for _target, relative in SHIPPING_GATE_RELEASE_INPUTS:
+        # Current candidate SOURCE chooses the release, not this helper's old
+        # version digest. Both fixed DATA originals remain held through POST.
+        body, original = _gate_file(fixtures, str(checkout / relative), None, 4096)
         selected.append(original)
         bodies[relative] = body
     name = "_mrk_shipping_gate_stager"
@@ -6112,7 +6116,9 @@ def _gate_load_stager(fixtures, checkout, *, target=ARM_TARGET, registrations=No
     # remain in this same book; no second source_build_selection filesystem read.
     # No Installer, protected-installation readback or payload command is called.
     spec.loader.exec_module(module)
-    release = module.build_release_data(bodies["desktop/macos-installed-inputs/" + target_row["releaseInput"]], target=target)
+    releases = {selected_target: module.build_release_data(bodies[relative], target=selected_target)
+                for selected_target, relative in SHIPPING_GATE_RELEASE_INPUTS}
+    release = releases[target]
     selection = module.BuildSelection(target, release["packageVersion"], release["release"])
     for original in selected:
         need(_gate_file_read(original)[1] == original["sha256"], "gate-stager-source-changed")

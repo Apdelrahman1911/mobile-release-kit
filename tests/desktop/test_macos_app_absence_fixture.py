@@ -454,7 +454,14 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
         for target in FIXTURE.TARGETS:
             rows = cargo_rows(checkout, target_root, target)
             expected = target_root / target / "release" / FIXTURE.FIXTURE_EXECUTABLE
-            self.assertEqual(FIXTURE.artifact_data(encoded_rows(rows), checkout, target_root, target), expected)
+            self.assertEqual(FIXTURE.artifact_data(encoded_rows(rows), checkout, target_root, target, package_version="0.1.2"), expected)
+            current = copy.deepcopy(rows)
+            for row in current[:2]: row["package_id"] = row["package_id"].replace("@0.1.2", "@0.1.3")
+            self.assertEqual(FIXTURE.artifact_data(encoded_rows(current), checkout, target_root, target,
+                package_version="0.1.3"), expected)
+            for stale in (rows, [current[0], rows[1], current[2]]):
+                with self.assertRaises(ValueError):
+                    FIXTURE.artifact_data(encoded_rows(stale), checkout, target_root, target, package_version="0.1.3")
             mutations = []
             for where, key, value in ((0, "features", ["macos-installed-entry"]),
                                       (0, "executable", "/unrelated/fixture"),
@@ -470,11 +477,11 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
             mutations.append(rows[:-1] + [extra, rows[-1]])
             for changed in mutations:
                 with self.subTest(target=target, changed=changed), self.assertRaises(ValueError):
-                    FIXTURE.artifact_data(encoded_rows(changed), checkout, target_root, target)
+                    FIXTURE.artifact_data(encoded_rows(changed), checkout, target_root, target, package_version="0.1.2")
             for body in (encoded_rows(rows).rstrip(b"\n"),
                          encoded_rows(rows).replace(b'"success":true', b'"success":true,"success":true')):
                 with self.assertRaises(ValueError):
-                    FIXTURE.artifact_data(body, checkout, target_root, target)
+                    FIXTURE.artifact_data(body, checkout, target_root, target, package_version="0.1.2")
 
     def test_phase_marker_is_unique_complete_bound_and_pending_outer_exit(self):
         for phase in FIXTURE.PROOFS:
@@ -697,12 +704,19 @@ class RestoreChainFixtureData(unittest.TestCase):
                 rows[0]['target']['name'] = program
                 expected = target_root / target / 'release' / program
                 rows[0]['executable'] = str(expected); rows[0]['filenames'] = [str(expected)]
-                self.assertEqual(FIXTURE.artifact_data(encoded_rows(rows), checkout, target_root, target, cut=cut, recovery=True), expected)
+                self.assertEqual(FIXTURE.artifact_data(encoded_rows(rows), checkout, target_root, target, cut=cut, recovery=True, package_version="0.1.2"), expected)
+                current = copy.deepcopy(rows)
+                for row in current[:2]: row['package_id'] = row['package_id'].replace('@0.1.2', '@0.1.3')
+                self.assertEqual(FIXTURE.artifact_data(encoded_rows(current), checkout, target_root, target,
+                    cut=cut, recovery=True, package_version='0.1.3'), expected)
+                with self.assertRaises(ValueError):
+                    FIXTURE.artifact_data(encoded_rows(rows), checkout, target_root, target,
+                        cut=cut, recovery=True, package_version='0.1.3')
                 for wrong in (['macos-installed-installer'], features + ['desktop-shell'], ['macos-installed-app-absence-fixture']):
                     changed = copy.deepcopy(rows); changed[0]['features'] = wrong
                     with self.assertRaises(ValueError):
-                        FIXTURE.artifact_data(encoded_rows(changed), checkout, target_root, target, cut=cut, recovery=True)
-                with self.assertRaises(ValueError): FIXTURE.artifact_data(encoded_rows(rows), checkout, target_root, target)
+                        FIXTURE.artifact_data(encoded_rows(changed), checkout, target_root, target, cut=cut, recovery=True, package_version="0.1.2")
+                with self.assertRaises(ValueError): FIXTURE.artifact_data(encoded_rows(rows), checkout, target_root, target, package_version="0.1.2")
         rows = [{'name': n, 'bytes': 100, 'sha256': '5'*64, 'mode': 0o444, 'links': 1}
                 for n in FIXTURE.CARRIER_NAMES + FIXTURE.CUT_PACKAGES]
         self.assertEqual(FIXTURE.transport_layout_data(rows, recovery=True)['fileCount'], 9)

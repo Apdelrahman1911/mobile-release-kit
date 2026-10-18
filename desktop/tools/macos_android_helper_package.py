@@ -1364,8 +1364,11 @@ def entrypoint(argv):
     return argv[1], target
 
 
-def artifact(messages, checkout, target, *, build_target=ARM_TARGET):
-    """One real resident cdylib graph; no executable can stand in for the image."""
+def artifact(messages, checkout, target, *, package_version, build_target=ARM_TARGET):
+    """One real resident cdylib graph; version comes from checked build selection."""
+    need(type(package_version) is str and len(package_version) <= 32
+         and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", package_version) is not None,
+         "compiler-application-version")
     build_profile(build_target)
     need(type(messages) is bytes and 0 < len(messages) <= 4 * 1024 * 1024
          and messages.endswith(b"\n"), "compiler-bound")
@@ -1420,7 +1423,7 @@ def artifact(messages, checkout, target, *, build_target=ARM_TARGET):
         libraries = [item for item in records if item["target"].get("name") == name]
         need(len(libraries) == 1, "helper-one-library")
         library = libraries[0]
-        need(library.get("package_id") == "path+" + (checkout / directory).as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")
+        need(library.get("package_id") == "path+" + (checkout / directory).as_uri() + "#" + package + ("@" + package_version if package == "mobile-release-kit-desktop" else "@0.1.0")
              and library.get("manifest_path") == str(checkout / directory / "Cargo.toml")
              and library.get("features") == features
              and library["target"].get("src_path") == str(checkout / directory / "src/lib.rs")
@@ -2061,7 +2064,7 @@ _FAILURE_OWNER_REASONS = (
 # Only these SOURCE crate identities can disambiguate relative compiler spans.
 _COMPILER_PACKAGES = {
     "mrk-android-register": ("desktop/helpers/macos-android-register", "0.1.0"),
-    "mobile-release-kit-desktop": ("desktop/src-tauri", "0.1.2"),
+    "mobile-release-kit-desktop": ("desktop/src-tauri", None),
     "mrk-macos-installed-native": ("desktop/native/macos-installed-native", "0.1.0"),
 }
 _COMPILER_ROOTS = tuple(value[0] for value in _COMPILER_PACKAGES.values()) + ("desktop/native/macos-installed-entry",)
@@ -2112,8 +2115,12 @@ def compiler_source(path, checkout, package=None):
                       and any(result.startswith(root + "/") for root in _COMPILER_ROOTS)) else None
 
 
-def compiler_diagnostic(stdout, stderr, checkout):
+def compiler_diagnostic(stdout, stderr, checkout, *, package_version=None):
     """Sanitize SAME failed Cargo captures. Never export messages or commands."""
+    packages = {name: pair for name, pair in _COMPILER_PACKAGES.items() if pair[1] is not None}
+    if (type(package_version) is str and len(package_version) <= 32
+            and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", package_version) is not None):
+        packages["mobile-release-kit-desktop"] = ("desktop/src-tauri", package_version)
     result = {"rows": [], "rowsOmitted": False, "scanComplete": True,
               "rustMessages": 0, "clangErrors": 0, "buildScriptPanics": 0, "classifications": []}
     if (type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > 4 * 1024 * 1024
@@ -2171,7 +2178,7 @@ def compiler_diagnostic(stdout, stderr, checkout):
                     continue
                 result["rustMessages"] += 1
                 context = ""  # Unknown/contradictory package is not the helper cwd.
-                for name, (root, version) in _COMPILER_PACKAGES.items():
+                for name, (root, version) in packages.items():
                     manifest = checkout + "/" + root + "/Cargo.toml"
                     prefix = "path+file://" + checkout + "/" + root + "#"
                     identities = (prefix + name + "@" + version, prefix + version)
@@ -2207,14 +2214,14 @@ def compiler_diagnostic(stdout, stderr, checkout):
                 package = ""
                 heading = re.match(r"error: failed to run custom build command for `([A-Za-z0-9_-]+) v([0-9.]+)(?: |`)", text)
                 if heading:
-                    pair = _COMPILER_PACKAGES.get(heading[1])
+                    pair = packages.get(heading[1])
                     if pair is not None and heading[2] == pair[1]:
                         package = pair[0]
             if ("linking with" in lower and "failed" in lower) or "linker command failed" in lower: classes.add("linker-failed")
             line_package = package
             warning = re.match(r"warning: ([A-Za-z0-9_-]+)@([0-9.]+):", text)
             if warning:
-                pair = _COMPILER_PACKAGES.get(warning[1])
+                pair = packages.get(warning[1])
                 line_package = pair[0] if pair is not None and warning[2] == pair[1] else ""
             clang = re.search(r"(?<![A-Za-z0-9_./+:-])([A-Za-z0-9_./+-]{1,4096}):([1-9][0-9]{0,6})(?::([1-9][0-9]{0,4}))?: (?:fatal )?error:", text)
             if clang:
@@ -2535,8 +2542,11 @@ def producer_tests_result(stdout):
     need(finish is not None and int(finish[2]) * 100 + int(finish[3]) <= 48000, "producer-tests-result")
 
 
-def producer_artifact(messages, checkout, target_root, target, *, remove=False, observer=False):
+def producer_artifact(messages, checkout, target_root, target, *, package_version, remove=False, observer=False):
     """One explicit nonshipping example graph; no packaged code is rebuilt."""
+    need(type(package_version) is str and len(package_version) <= 32
+         and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", package_version) is not None,
+         "compiler-application-version")
     need(type(remove) is bool and type(observer) is bool and (not observer or remove), "producer-compiler-purpose")
     build_profile(target)
     need(type(messages) is bytes and 0 < len(messages) <= 4 * 1024 * 1024
@@ -2579,7 +2589,7 @@ def producer_artifact(messages, checkout, target_root, target, *, remove=False, 
         need(len(matches) == 1, "producer-one-target")
         row, root = matches[0], checkout / directory
         profile = row.get("profile")
-        need(row.get("package_id") == "path+" + root.as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")
+        need(row.get("package_id") == "path+" + root.as_uri() + "#" + package + ("@" + package_version if package == "mobile-release-kit-desktop" else "@0.1.0")
              and row.get("manifest_path") == str(root / "Cargo.toml") and row.get("features") == features
              and row["target"].get("src_path") == str(root / source)
              and row["target"].get("kind") == kinds and row["target"].get("crate_types") == crates
@@ -2912,7 +2922,7 @@ class Operation:
         self.same_package_complete = False
         self.same_package_case = None
         self.entry_sha256 = self.desktop_facade_sha256 = self.resident_image_sha256 = None
-        self.image_release = self.image_source = self.release_entry = None
+        self.image_release = self.image_source = self.image_package_version = self.release_entry = None
         self.receipt = {"schemaVersion": 1, "phase": phase, "target": target, "source": environment["GITHUB_SHA"],
                         "packageRole": environment.get("MRK_MACOS_PACKAGE_ROLE"),
                         "workflowSource": environment["GITHUB_WORKFLOW_SHA"],
@@ -3332,7 +3342,8 @@ class Operation:
                 pass  # Never replace the same nonzero original or affect cleanup.
         if self.phase == "prepare" and role == "build" and result.returncode != 0:
             try:
-                self.compiler_failure = compiler_diagnostic(result.stdout, result.stderr, str(self.checkout))
+                self.compiler_failure = compiler_diagnostic(result.stdout, result.stderr, str(self.checkout),
+                    package_version=self.image_package_version)
             except BaseException:
                 pass  # No diagnostic failure may replace the SAME nonzero result.
         diagnostic = (self.phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
@@ -6469,6 +6480,7 @@ class Operation:
              and source == self.environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"]
              and type(release) is str and 0 < len(release) < 64 and release.isascii(), "source-image-binding")
         self.image_source, self.image_release = source, release
+        self.image_package_version = value["packageVersion"]
         self.receipt.update(imageSourceCommit=source, imageReleaseId=release, imageReleaseSourceSha256=digest(body))
         return body
 
@@ -6488,7 +6500,8 @@ class Operation:
                            "--lib", "--message-format=json-render-diagnostics"],
                            build_environment(self.environment, self.work, self.image_release, target=self.target),
                            cwd=self.checkout / WORKSPACE, timeout=720 if self.target == INTEL_TARGET else 480, limit=4 * 1024 * 1024)
-        artifact(result.stdout, self.checkout, self.work / self.target_name, build_target=self.target)
+        artifact(result.stdout, self.checkout, self.work / self.target_name,
+            package_version=self.image_package_version, build_target=self.target)
         self.stage = "compiler-original-copy"
         release = self.descend(self.target_entry, (self.target, "release"))
         original = self.original(release, RESIDENT_IMAGE, "compiler-artifact", MAX_HELPER, (0o700, 0o755), alias=True)
@@ -6822,7 +6835,7 @@ class Operation:
                                  (0o700, 0o755), alias=True)
         body = self.read(original)
         self.stager.removal_fixture_cargo_artifact(self.read(messages), self.work / "removal-observer-target" / self.target / "release" / self.stager.REMOVER_NAME,
-            self.work / "removal-observer-target", body, role="observer", target=self.target)
+            self.work / "removal-observer-target", body, role="observer", target=self.target, package_version=self.image_package_version)
         copied_root = self.package_directory("removal-observer-program")
         self.removal_prepare_io("program-copy", self.stager.write_tree,
             self.work / "removal-observer-program" / "signed", {self.stager.REMOVER_NAME: (body, 0o555)},
@@ -6882,7 +6895,8 @@ class Operation:
             "--target", self.target, "--no-default-features", "--features", "macos-remove-observer-producer",
             "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"],
             maximum=480, limit=4 * 1024 * 1024, cwd=self.checkout / "desktop/src-tauri", environment=environment)
-        binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target, remove=True, observer=True)
+        binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target,
+            package_version=self.image_package_version, remove=True, observer=True)
         directory = self.descend(self.target_entry, (self.target, "release", "examples"))
         executable = self.original(directory, binary.name, "observer-producer-compiler", 64 * 1024 * 1024, (0o700, 0o755), alias=True)
         body = self.read(executable)
@@ -8105,7 +8119,8 @@ class Operation:
             PRODUCER_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target, "--no-default-features", "--features",
             "macos-package-producer", "--example", "macos_package_producer", "--message-format=json-render-diagnostics"],
             environment=environment, cwd=self.checkout / "desktop/src-tauri", timeout=remaining, limit=4 * 1024 * 1024)
-        binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target)
+        binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target,
+            package_version=self.image_package_version)
         package_timeout_data(self.package_clock(), endpoint, 480)
         return binary
 
@@ -9109,7 +9124,8 @@ class Operation:
             "--locked", "--offline", "--release", "--config", PRODUCER_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target, "--no-default-features",
             "--features", "macos-remove-producer", "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"],
             environment=environment, cwd=self.checkout / "desktop/src-tauri", timeout=480, limit=4 * 1024 * 1024)
-        binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target, remove=True)
+        binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target,
+            package_version=self.image_package_version, remove=True)
         binary_dir = self.descend(self.target_entry, (self.target, "release", "examples"))
         executable = self.original(binary_dir, binary.name, "remove-producer-compiled-example", 64 * 1024 * 1024, (0o700, 0o755), alias=True)
         executable_body = self.read(executable)
@@ -10453,6 +10469,7 @@ def candidate_fixture_phase(consumer, context, purpose, started, bootstrap):
         need(op.stager.DESKTOP == op.checkout/"desktop", "candidate-fixture-product-source")
         selection = op.stager.source_build_selection(op.target)
         op.image_source,op.image_release = nomination["source"],selection.release
+        op.image_package_version = selection.package_version
         op.release_entry = originals[(False,op.release_input)]
         op.candidate_fixture_source_original = originals[(False,"desktop/src-tauri/src/macos_app_absence_fixture.rs")]
         host = module("macos_xcode_host_preparation.py", "_mrk_candidate_fixture_host")

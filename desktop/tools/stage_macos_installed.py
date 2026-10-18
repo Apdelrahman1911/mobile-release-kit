@@ -2247,11 +2247,11 @@ def cargo_features(row, expected):
          and sorted(features) == sorted(expected), "image-cargo-exact-features")
 
 
-def cargo_library(records, directory, package, name, features, *, test, opt_level="3"):
+def cargo_library(records, directory, package, name, features, *, package_version, test, opt_level="3"):
     selected = [row for row in records if row["target"].get("name") == name]
     need(len(selected) == 1, "image-cargo-one-library")
     row = selected[0]
-    need(row.get("package_id") == "path+" + directory.as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")
+    need(row.get("package_id") == "path+" + directory.as_uri() + "#" + package + "@" + package_version
          and row.get("manifest_path") == str(directory / "Cargo.toml")
          and row["target"].get("kind") == ["lib"] and row["target"].get("crate_types") == ["lib"]
          and row["target"].get("src_path") == str(directory / "src/lib.rs")
@@ -2261,7 +2261,7 @@ def cargo_library(records, directory, package, name, features, *, test, opt_leve
     cargo_features(row, features)
 
 
-def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM_TARGET):
+def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM_TARGET, package_version):
     target = mac_target(target)
     need(role in ("desktop", "resident"), "image-cargo-role")
     name = "mrk_desktop_image" if role == "desktop" else "mrk_resident_image"
@@ -2292,9 +2292,9 @@ def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM
                        else ["android-registration-helper", "default", "resident-image"])
     cargo_library(records, DESKTOP / "src-tauri", "mobile-release-kit-desktop",
                   "mobile_release_desktop", app_features, test=False,
-                  opt_level="1" if role == "resident" and target == INTEL_TARGET else "3")
+                  opt_level="1" if role == "resident" and target == INTEL_TARGET else "3", package_version=package_version)
     cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
-                  "mrk_macos_installed_native", native_features, test=False)
+                  "mrk_macos_installed_native", native_features, test=False, package_version="0.1.0")
     need(not any(item["target"].get("kind") in (["bin"], ["test"], ["example"], ["bench"])
                  or item is not row and item["target"].get("kind") == ["cdylib"]
                  for item in records), "image-cargo-no-executable-role")
@@ -2306,7 +2306,7 @@ def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM
             "instrumented": False, "qualification": "actual-cdylib-data-not-launched"}
 
 
-def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TARGET):
+def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TARGET, package_version):
     target = mac_target(target)
     root, name = DESKTOP / "src-tauri", "installed-shell-observation"
     binary, target_dir = Path(binary), Path(target_dir)
@@ -2321,7 +2321,7 @@ def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TA
     row = selected[0]
     cargo_target = row["target"]
     features = ["custom-protocol", "desktop-shell", "macos-installed-observation"]
-    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.2"
+    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@" + package_version
          and row.get("manifest_path") == str(root / "Cargo.toml")
          and cargo_target.get("name") == name and cargo_target.get("kind") == ["test"]
          and cargo_target.get("crate_types") == ["bin"]
@@ -2340,7 +2340,7 @@ def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TA
     ):
         need(len(selected_library) == 1, "observer-cargo-one-library")
         item = selected_library[0]
-        need(item.get("package_id") == "path+" + directory.as_uri() + "#" + package + ("@0.1.2" if package == "mobile-release-kit-desktop" else "@0.1.0")
+        need(item.get("package_id") == "path+" + directory.as_uri() + "#" + package + ("@" + package_version if package == "mobile-release-kit-desktop" else "@0.1.0")
              and item.get("manifest_path") == str(directory / "Cargo.toml")
              and item["target"].get("src_path") == str(directory / "src/lib.rs")
              and item["target"].get("kind") == ["lib"] and item["target"].get("crate_types") == ["lib"]
@@ -2361,7 +2361,7 @@ def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TA
             "instrumented": True, "qualification": "observer-executable-data-not-image-or-launched"}
 
 
-def remover_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TARGET):
+def remover_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TARGET, package_version):
     """Actual fixed remover graph DATA; not signing, execution or install authority."""
     target = mac_target(target)
     root = DESKTOP / "src-tauri"
@@ -2376,16 +2376,16 @@ def remover_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TAR
     need(len(selected) == 1, "remover-cargo-one-binary")
     row = selected[0]
     role = row["target"]
-    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.2"
+    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@" + package_version
          and row.get("manifest_path") == str(root / "Cargo.toml") and role.get("name") == REMOVER_NAME
          and role.get("kind") == ["bin"] and role.get("crate_types") == ["bin"]
          and role.get("src_path") == str(root / "src/bin/macos_install.rs") and role.get("edition") == "2021"
          and row.get("executable") == str(binary) and row.get("filenames") == [str(binary)], "remover-cargo-source")
     cargo_profile(row, test=False)
     cargo_features(row, ["macos-installed-remover"])
-    cargo_library(records, root, "mobile-release-kit-desktop", "mobile_release_desktop", ["macos-installed-remover"], test=False)
+    cargo_library(records, root, "mobile-release-kit-desktop", "mobile_release_desktop", ["macos-installed-remover"], test=False, package_version=package_version)
     cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
-                  "mrk_macos_installed_native", ["default"], test=False)
+                  "mrk_macos_installed_native", ["default"], test=False, package_version="0.1.0")
     need(not any(item is not row and item["target"].get("kind") in
                  (["bin"], ["test"], ["example"], ["bench"], ["cdylib"]) for item in records), "remover-cargo-no-mixed-role")
     macho(body, target=target)
@@ -2657,7 +2657,7 @@ def preview_command(args, *, prepared=None):
              and read(work / "package-install.status", 4) == b"0\n", "preview-original-statuses")
         original = work / "cargo-target" / selection.target / "release/libmrk_desktop_image.dylib"
         normal = image_cargo_artifact(read(work / "normal-build.jsonl", 8 * 1024 * 1024),
-                                     original, work / "cargo-target", read(original), "desktop", target=selection.target)
+                                     original, work / "cargo-target", read(original), "desktop", target=selection.target, package_version=selection.package_version)
         facade = read(work / "mobile-release-kit-desktop", 1024 * 1024)
         entry_macho(facade, target=selection.target)
         app = decode(read(work / "app-result.json", 16384))
@@ -3326,10 +3326,10 @@ def app_with_github_seal(args, seal):
         need(sha(args.expected_desktop_image) and digest(desktop_body) == args.expected_desktop_image,
              "desktop-image-original-compiler-digest")
         compiled = image_cargo_artifact(read(args.desktop_image_cargo_messages, 8 * 1024 * 1024),
-                                       args.desktop_image, args.desktop_image_cargo_target_dir, desktop_body, "desktop", target=target)
+                                       args.desktop_image, args.desktop_image_cargo_target_dir, desktop_body, "desktop", target=target, package_version=selection.package_version)
     else:
         compiled = observer_cargo_artifact(read(args.observer_cargo_messages, 8 * 1024 * 1024),
-                                          args.binary, args.observer_cargo_target_dir, body, target=target)
+                                          args.binary, args.observer_cargo_target_dir, body, target=target, package_version=selection.package_version)
     need(all(getattr(args, key, None) is not None for key in
              ("remover", "expected_remover", "remover_cargo_messages", "remover_cargo_target_dir")), "package-role-remover-required")
     remover = read(args.remover, REMOVER_BYTES)
@@ -3339,10 +3339,10 @@ def app_with_github_seal(args, seal):
          "app-removal-fixture-role")
     if abrupt:
         remover_compiled = removal_fixture_cargo_artifact(read(args.remover_cargo_messages, 4 * 1024 * 1024),
-            args.remover, args.remover_cargo_target_dir, remover, role="abrupt", target=target)
+            args.remover, args.remover_cargo_target_dir, remover, role="abrupt", target=target, package_version=selection.package_version)
     else:
         remover_compiled = remover_cargo_artifact(read(args.remover_cargo_messages, 8 * 1024 * 1024),
-                                                args.remover, args.remover_cargo_target_dir, remover, target=target)
+                                                args.remover, args.remover_cargo_target_dir, remover, target=target, package_version=selection.package_version)
     helper = read(args.vault_helper, 32 * 1024 * 1024)
     need(sha(args.expected_vault_helper) and digest(helper) == args.expected_vault_helper,
          "helper-final-signed-digest")
@@ -4691,7 +4691,7 @@ def removal_fixture_script_data(role, *, correlation=None, target=None, selectio
     return body
 
 
-def removal_fixture_cargo_artifact(messages, binary, target_dir, body, *, role, target=ARM_TARGET):
+def removal_fixture_cargo_artifact(messages, binary, target_dir, body, *, role, target=ARM_TARGET, package_version):
     """Actual compiled fixed feature graph; no signing/execution authority."""
     need(target == ARM_TARGET and role in REMOVAL_FIXTURE_FEATURES, "removal-fixture-cargo-role")
     root, binary, target_dir = DESKTOP / "src-tauri", Path(binary), Path(target_dir)
@@ -4705,16 +4705,16 @@ def removal_fixture_cargo_artifact(messages, binary, target_dir, body, *, role, 
     need(len(matches) == 1, "removal-fixture-cargo-one-binary")
     row, features = matches[0], sorted(["macos-installed-remover", REMOVAL_FIXTURE_FEATURES[role]])
     kind = row["target"]
-    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.2"
+    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@" + package_version
          and row.get("manifest_path") == str(root / "Cargo.toml") and kind.get("name") == REMOVER_NAME
          and kind.get("kind") == ["bin"] and kind.get("crate_types") == ["bin"]
          and kind.get("src_path") == str(root / "src/bin/macos_install.rs") and kind.get("edition") == "2021"
          and row.get("executable") == str(binary) and row.get("filenames") == [str(binary)], "removal-fixture-cargo-source")
     cargo_profile(row, test=False)
     cargo_features(row, features)
-    cargo_library(records, root, "mobile-release-kit-desktop", "mobile_release_desktop", features, test=False)
+    cargo_library(records, root, "mobile-release-kit-desktop", "mobile_release_desktop", features, test=False, package_version=package_version)
     cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
-                  "mrk_macos_installed_native", ["default"], test=False)
+                  "mrk_macos_installed_native", ["default"], test=False, package_version="0.1.0")
     need(not any(item is not row and item["target"].get("kind") in
                  (["bin"], ["test"], ["example"], ["bench"], ["cdylib"]) for item in records), "removal-fixture-no-mixed-graph")
     macho(body, target=target)

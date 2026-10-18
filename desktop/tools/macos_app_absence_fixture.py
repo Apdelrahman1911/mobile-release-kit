@@ -501,7 +501,7 @@ def finish_ready(op):
             and (mount is None or not mount["entered"] or mount["detached"]) )
 
 
-def artifact_data(body, checkout, root, target, *, cut=None, recovery=False):
+def artifact_data(body, checkout, root, target, *, cut=None, recovery=False, package_version):
     need(cut is None or cut in CUTS, "restore-chain-fixed-cut")
     need(type(recovery) is bool and (cut is None or recovery), "restore-chain-artifact-purpose")
     program = FIXTURE_EXECUTABLE if cut is None else "mrk-macos-install"
@@ -534,7 +534,7 @@ def artifact_data(body, checkout, root, target, *, cut=None, recovery=False):
         need(len(matched) == 1, "app-absence-cargo-one-target")
         row = matched[0]; target_row = row["target"]; profile = row.get("profile")
         package_root = checkout / "desktop/src-tauri"
-        need(row.get("package_id") == "path+" + package_root.as_uri() + "#mobile-release-kit-desktop@0.1.2"
+        need(row.get("package_id") == "path+" + package_root.as_uri() + "#mobile-release-kit-desktop@" + package_version
              and row.get("manifest_path") == str(package_root / "Cargo.toml")
              and row.get("features") == features
              and target_row.get("kind") == target_row.get("crate_types") == kind
@@ -742,7 +742,7 @@ def prepare_one(op, cut=None):
         str(op.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--jobs", "1", "--target", op.target,
         "--no-default-features", "--features", feature, "--bin", program_name,
         "--message-format=json-render-diagnostics"], maximum=1440, limit=4*MIB, environment=environment, cwd=op.checkout / "desktop/src-tauri")
-    binary_path = artifact_data(result.stdout, op.checkout, op.work / op.target_name, op.target, cut=cut, recovery=recovery_mode(op))
+    binary_path = artifact_data(result.stdout, op.checkout, op.work / op.target_name, op.target, cut=cut, recovery=recovery_mode(op), package_version=selected(op).package_version)
     release = op.descend(op.target_entry, (op.target, "release"))
     binary = op.original(release, program_name, "app-absence-compiler-binary", 64*MIB, (0o700, 0o755), alias=True)
     program = op.read(binary)

@@ -296,7 +296,9 @@ class MacFreshPythonConsumerData(unittest.TestCase):
                 with self.subTest(action=action.__name__), self.assertRaisesRegex(TOOL.Refused, "unqualified-intel-route"):
                     action(options)
             with self.assertRaises(TOOL.Refused): TOOL.runtime_tree(Path("/unused"), "a"*64, target=intel)
-            with self.assertRaises(TOOL.Refused): TOOL.observer_cargo_artifact(None, None, None, None, target=intel)
+            with self.assertRaisesRegex(TOOL.Refused, "image-cargo-messages-bound"):
+                TOOL.observer_cargo_artifact(None, Path("/unused") / intel / "debug/deps/installed_shell_observation-a",
+                    Path("/unused"), None, target=intel, package_version="0.1.2")
             with self.assertRaises(TOOL.Refused):
                 TOOL.installation_metadata_readback(SimpleNamespace(target=intel), Path("/unused"), {}, fixture=True)
 

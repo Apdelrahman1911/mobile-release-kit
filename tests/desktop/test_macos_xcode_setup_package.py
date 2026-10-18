@@ -58,6 +58,20 @@ def _command_failure(work, repo, argv, sequence, *, returncode=None, timed_out=F
 
 
 class XcodeSetupProbeDiagnostics(unittest.TestCase):
+    def test_managed_native_script_requires_closed_phase_and_workflow_size(self):
+        # Invalid selections must exit before any native command; the workflow
+        # size regression previously prevented even unrelated jobs from starting.
+        repo = Path(__file__).resolve().parents[2]
+        workflow = repo / ".github/workflows/desktop-macos-installed.yml"
+        self.assertLess(len(workflow.read_bytes()), 500_000)
+        script = repo / "desktop/tools/macos_xcode_native_admission.sh"
+        for arguments in ((), ("unknown",), ("compile", "extra"), ("verify", "extra")):
+            with self.subTest(arguments=arguments):
+                observed = subprocess.run(["/bin/bash", str(script), *arguments],
+                    cwd=repo, env={"PATH": "/usr/bin:/bin"}, capture_output=True, timeout=5)
+                self.assertEqual(observed.returncode, 64)
+                self.assertEqual((observed.stdout, observed.stderr), (b"", b""))
+
     def test_setup_hook_diagnostics_preserve_refusal_and_helper_exit(self):
         # Ordinary shell with a task-local inert helper, never PackageKit/root.
         source = Path(__file__).resolve().parents[2] / "desktop/macos-xcode-setup-inputs"
