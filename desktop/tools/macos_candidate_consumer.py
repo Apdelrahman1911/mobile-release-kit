@@ -186,18 +186,18 @@ def candidate_transport_path(run, attempt, nomination):
 
 
 def candidate_resource_requirements(nomination, retained, host_bytes, *, image_bytes=None):
-    """Full image cap before PREVIEW; ZIP credit only after parse and original POST."""
+    """Fund ZIP first, then its checked image before decode; retain disk cap."""
     row = candidate.candidate_selection_data(nomination)
     resume.need(type(retained) is int and 0 <= retained <= 1 << 30
                 and type(host_bytes) is int and 0 <= host_bytes <= 1 << 30,
                 'candidate-resource-bound')
     resume.need(image_bytes is None or type(image_bytes) is int and 0 < image_bytes <= resume.LIMIT,
                 'candidate-image-bound')
-    image = resume.LIMIT if image_bytes is None else image_bytes
+    image = 0 if image_bytes is None else image_bytes
     memory = 6 * (row['artifactBytes'] + image) + (16 << 20) + retained + (512 << 20) + (1 << 30)
     # Include both the retained transport and its actual published image. Keep
     # the original installation/codec/disk reserve without crediting old bytes.
-    disk = (3 << 30) + 2 * row['artifactBytes'] + 2 * image + host_bytes
+    disk = (3 << 30) + 2 * row['artifactBytes'] + 2 * (resume.LIMIT if image_bytes is None else image) + host_bytes
     return {'acquisitionMemory': memory, 'postAcquisitionMemory': memory - 6 * row['artifactBytes'],
             'requiredDisk': disk}
 
@@ -232,10 +232,7 @@ def acquisition_bootstrap(helper_root, bodies):
 
 
 class CandidateResume(resume.Resume):
-    """Internal owner; no nomination is read from carrier bytes or ambient env.
-
-    main retains host/process and both checkout bindings before this adapter.
-    """
+    """Candidate adapter with separate held helper/application sources."""
     command_roles = (*resume.Resume.command_roles, 'helper-source', 'candidate-source')
 
     def __init__(self, helper_root, candidate_root, work, clock, factory, *, nomination=None, quota=None, purpose="install"):
@@ -357,7 +354,7 @@ class CandidateResume(resume.Resume):
         self.host = host_module.DarwinAPI(self.clock, target=self.target)
         self.host.waitable_sigchld()
 
-    def admit_resources(self, retained, host_bytes, *, image_bytes=None):
+    def admit_resources(self, retained, host_bytes, *, image_bytes=None, acquiring=False):
         resume.need(type(retained) is int and retained >= sum(len(body) for _, body in self.sources)
                     + len(self.child_bootstrap.encode('utf-8')), 'candidate-retained-source-budget')
         quote = candidate_resource_requirements(self.nomination, retained, host_bytes, image_bytes=image_bytes)
@@ -365,7 +362,7 @@ class CandidateResume(resume.Resume):
         page_size, physical = resume.host_memory_data(self.host, self.clock)
         memory = resume.memory_data(call.stdout, call.stderr, call.returncode, page_size=page_size, physical_bytes=physical)
         disk = os.fstatvfs(self.parent['fd'])
-        required = quote['acquisitionMemory' if image_bytes is None else 'postAcquisitionMemory']
+        required = quote['acquisitionMemory' if image_bytes is None or acquiring else 'postAcquisitionMemory']
         facts = resume.resource_admission_data(memory['availableEstimateBytes'], required,
                                               disk.f_bavail * disk.f_frsize, quote['requiredDisk'])
         resume.STATE['resourceAdmission'] = facts
@@ -374,7 +371,6 @@ class CandidateResume(resume.Resume):
         self.allocation_samples, self.cpio_window = 0, None
 
     def acquire_fixed(self):
-        # No accidental fallback to the historical carrier from a base caller.
         return self.acquire_candidate()
 
     def acquire_candidate(self):
@@ -400,7 +396,9 @@ class CandidateResume(resume.Resume):
         name = target_names(self.target) + '-candidate.zip'
         entry, body = self.quota.call(self.outer, 'file', self.work / name, selected['artifactBytes'], modes=(0o600,))
         self.private[name] = entry['identity']
-        values = candidate.candidate_members(body, selected, self.clock)
+        def before_image(size):
+            self.admit_resources(*self._resource_inputs, image_bytes=size, acquiring=True)
+        values = candidate.candidate_members(body, selected, self.clock, before_image=before_image)
         resume.need(self.outer.read(entry) == body, 'candidate-acquisition-original-post')
         self.preview_bytes, self.preview_sha = len(values['PREVIEW.json']), resume.sha(values['PREVIEW.json'])
         self.__preview_document = resume.canonical(candidate.candidate_preview_data(values['PREVIEW.json'], selected))
@@ -583,6 +581,7 @@ class CandidateResume(resume.Resume):
             # FD credits; every later acquisition still uses OriginalQuota.
             pending = 17 if self.purpose in ('restore-install','acquire','acquire-restore') else 20
             resume.need(self.quota.reserved + pending <= resume.MAX_ORIGINALS, 'candidate-original-ledger-capacity')
+            self._resource_inputs = (retained, host_bytes)
             self.admit_resources(retained, host_bytes)
             artifact = self.reuse_candidate() if self.purpose == 'restore-install' else self.acquire_candidate()
             preview = candidate.candidate_preview_data(artifact['PREVIEW.json'], self.nomination)

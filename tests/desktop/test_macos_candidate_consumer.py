@@ -93,13 +93,63 @@ class CandidateConsumerTests(unittest.TestCase):
             row = nomination(target)
             before = C.candidate_resource_requirements(row, 4096, 2048)
             after = C.candidate_resource_requirements(row, 4096, 2048, image_bytes=17)
-            self.assertEqual(before['acquisitionMemory'] - after['acquisitionMemory'], 6 * (R.LIMIT - 17))
+            self.assertEqual(after['acquisitionMemory'] - before['acquisitionMemory'], 6 * 17)
+            self.assertEqual(before['acquisitionMemory'], 6 * row['artifactBytes'] + (16 << 20) + 4096 + (512 << 20) + (1 << 30))
+            self.assertEqual(before['requiredDisk'], (3 << 30) + 2 * row['artifactBytes'] + 2 * R.LIMIT + 2048)
             self.assertEqual(after['acquisitionMemory'] - after['postAcquisitionMemory'], 6 * row['artifactBytes'])
             self.assertEqual(after['requiredDisk'], (3 << 30) + 2 * row['artifactBytes'] + 34 + 2048)
             larger = C.candidate_resource_requirements(dict(row, artifactBytes=R.LIMIT), 4096, 2048, image_bytes=17)
             self.assertEqual(larger['acquisitionMemory'] - after['acquisitionMemory'], 6 * (R.LIMIT - row['artifactBytes']))
         for retained, host, image in ((True, 0, None), (0, -1, None), (0, 0, True), (0, 0, R.LIMIT + 1)):
             with self.assertRaises(ValueError): C.candidate_resource_requirements(nomination(), retained, host, image_bytes=image)
+
+    def test_staged_image_read_retains_zip_allowance_until_original_post(self):
+        import json
+        from tests.desktop.test_macos_candidate_carrier import fixture, archive
+        row, preview, *_ = fixture()
+        body, selected = archive(row, [('MobileReleaseKit.dmg', b'DATA'),
+            ('PREVIEW.json', json.dumps(preview).encode()), ('README.md', b'Guide\n')])
+        initial = C.candidate_resource_requirements(selected, 0, 0)['acquisitionMemory']
+        full = C.candidate_resource_requirements(selected, 0, 0, image_bytes=4)
+        for mode in ('pass', 'capacity', 'post'):
+            with mock.patch.object(R.Resume, '__init__', return_value=None):
+                owner = C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'), None, None, nomination=selected)
+            owner.work, owner.private, owner._resource_inputs = Path('/inert'), {}, (0, 0)
+            owner.sources, owner.child_bootstrap = [], ''
+            owner.clock, owner.host, owner.parent = SimpleNamespace(check=lambda: None), object(), {'fd': 7}
+            owner.command = mock.Mock(return_value=SimpleNamespace(stdout=b'', stderr=b'', returncode=0))
+            entry = {'identity': (1, 2, 3)}  # Explicit inert filesystem ports.
+            owner.quota = SimpleNamespace(call=mock.Mock(return_value=(entry, body)))
+            events = []
+            def post(_):
+                events.append('post')
+                self.assertEqual(owner.memory_base, full['acquisitionMemory'])
+                return b'changed' if mode == 'post' else body
+            owner.outer = SimpleNamespace(read=post)
+            actual = C.candidate.zip_data
+            def decode(*args):
+                events.append('decode')
+                self.assertEqual(owner.memory_base, full['acquisitionMemory'])
+                return actual(*args)
+            with self.subTest(mode=mode), mock.patch.dict(R.STATE), \
+                    mock.patch.object(R, 'host_memory_data', return_value=(4096, 1 << 40)), \
+                    mock.patch.object(R, 'memory_data', return_value={'availableEstimateBytes': initial + 1 if mode == 'capacity' else 1 << 40}), \
+                    mock.patch.object(C.os, 'fstatvfs', return_value=SimpleNamespace(f_bavail=1 << 40, f_frsize=1)), \
+                    mock.patch.object(C.candidate, 'zip_data', side_effect=decode):
+                owner.admit_resources(0, 0)
+                self.assertEqual(owner.memory_base, initial)
+                if mode == 'pass':
+                    self.assertEqual(owner.read_candidate_zip()['MobileReleaseKit.dmg'], b'DATA')
+                    self.assertEqual(events, ['decode', 'post'])
+                    owner.admit_resources(0, 0, image_bytes=4)
+                    self.assertEqual(owner.memory_base, full['postAcquisitionMemory'])
+                    self.assertEqual(full['acquisitionMemory'] - owner.memory_base, 6 * selected['artifactBytes'])
+                else:
+                    with self.assertRaisesRegex(R.Refused, 'candidate-resource-admission' if mode == 'capacity' else 'candidate-acquisition-original-post'):
+                        owner.read_candidate_zip()
+                    self.assertEqual(events, [] if mode == 'capacity' else ['decode', 'post'])
+                    self.assertFalse(owner._CandidateResume__artifact_admitted)
+                self.assertEqual(owner.command.call_count, 3 if mode == 'pass' else 2)
 
     def test_child_source_limits_precede_construction_and_sources_are_explicit(self):
         bodies = {name: (ROOT / name).read_bytes() for name in (C.LEGACY_PATH, C.PARSER_PATH)}

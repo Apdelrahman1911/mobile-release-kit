@@ -142,6 +142,33 @@ class CandidateCarrierData(unittest.TestCase):
             self.assertEqual(M.zip_data(legacy, dict(kind='carrier', bytes=len(legacy), sha256=M.sha(legacy),
                 members=wanted[:2]), CLOCK), dict(entries[:2]))
 
+    def test_image_admission_precedes_decompression_and_declared_sizes_agree(self):
+        row, preview, *_ = fixture()
+        for mode in ('pass', 'refuse', 'late', 'wrong-size'):
+            events, late = [], [False]
+            def point():
+                if late[0]: raise ValueError('deadline')
+            def admit(size):
+                self.assertEqual(size, 4)
+                events.append('admit')
+                if mode == 'refuse': raise ValueError('capacity')
+                if mode == 'late': late[0] = True
+            value = dict(preview, distributionBytes=5) if mode == 'wrong-size' else preview
+            entries = [('MobileReleaseKit.dmg', b'DATA'), ('PREVIEW.json', json.dumps(value).encode()), ('README.md', b'Guide\n')]
+            body, selected = archive(row, entries)
+            actual = M.zip_data
+            def decode(*args):
+                events.append('decode')
+                return actual(*args)
+            with self.subTest(mode=mode), mock.patch.object(M, 'zip_data', side_effect=decode):
+                if mode == 'pass':
+                    self.assertEqual(M.candidate_members(body, selected, SimpleNamespace(check=point), before_image=admit), dict(entries))
+                    self.assertEqual(events, ['admit', 'decode'])
+                else:
+                    with self.assertRaises(ValueError):
+                        M.candidate_members(body, selected, SimpleNamespace(check=point), before_image=admit)
+                    self.assertEqual(events, [] if mode == 'wrong-size' else ['admit'])
+
     def test_central_allocation_is_bounded_before_zipfile_construction(self):
         row, preview, *_ = fixture()
         entries = [('MobileReleaseKit.dmg', b'DATA'), ('PREVIEW.json', json.dumps(preview).encode()), ('README.md', b'Guide\n')]

@@ -109,7 +109,7 @@ def candidate_preview_data(body, nomination):
     return value
 
 
-def candidate_members(body, nomination, clock):
+def candidate_members(body, nomination, clock, *, before_image=None):
     """Authenticate a candidate's exact three members; never extract or execute."""
     row = candidate_selection_data(nomination)
     need(type(body) is bytes and len(body) == row['artifactBytes'] and sha(body) == row['artifactSha256'],
@@ -127,6 +127,12 @@ def candidate_members(body, nomination, clock):
                     small[info.filename] = member.read(CANDIDATE_MEMBERS[info.filename] + 1)
                     need(len(small[info.filename]) == info.file_size and member.read(1) == b'', 'candidate-member-bound')
         preview = candidate_preview_data(small['PREVIEW.json'], row)
+        image = next(info for info in infos if info.filename == 'MobileReleaseKit.dmg')
+        need(image.file_size == preview['distributionBytes'], 'candidate-image-declared-size')
+        if before_image is not None:
+            clock.check()
+            before_image(preview['distributionBytes'])
+            clock.check()
         wanted = [{'name': name, 'bytes': len(content), 'sha256': sha(content)} for name, content in small.items()]
         wanted.append({'name': 'MobileReleaseKit.dmg', 'bytes': preview['distributionBytes'],
                        'sha256': preview['distributionSha256']})
