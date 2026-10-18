@@ -1916,7 +1916,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         # SOURCE fragment; no Operation admission, process, signing or mount.
         helper_path = ROOT / "desktop/tools/macos_android_helper_package.py"
         helper_tree = ast.parse(helper_path.read_bytes())
-        names = {"Refused", "DISTRIBUTION_STAGER_REASONS", "_FAILURE_REASONS", "failure_exception"}
+        names = {"Refused", "DISTRIBUTION_STAGER_REASONS", "_APP_ABSENCE_BASELINE_REASONS", "_FAILURE_REASONS", "failure_exception"}
         nodes = [node for node in helper_tree.body if
                  isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names or
                  isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)

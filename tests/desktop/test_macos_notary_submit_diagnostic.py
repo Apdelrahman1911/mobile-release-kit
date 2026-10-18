@@ -82,6 +82,51 @@ class NotarySubmitDiagnosticTests(unittest.TestCase):
         self.assertEqual(HELPER.failure_exception(ValueError("applications-launcher-file"), stager)["reason"],
                          "unclassified")
 
+        # A successful Installer is not a successful observation/readback.
+        # Keep only the fixed baseline ValueError guard, without rendering it.
+        for reason in (
+            "app-absence-phase-output-bound", "app-absence-phase-marker-count",
+            "app-absence-phase-marker-shape", "app-absence-phase-canonical-json",
+            "app-absence-phase-observation", "app-absence-phase-proof",
+            "app-absence-baseline-original", "app-absence-baseline-original-post",
+            "app-absence-baseline-binding", "app-absence-baseline-identity",
+            "app-absence-baseline-parent-original", "app-absence-baseline-volume",
+        ):
+            error = ValueError(reason)
+            captured = HELPER.failure_exception(error, stager)
+            self.assertEqual(captured, {"type": "value-error", "reason": reason, "errno": None})
+            op = object.__new__(HELPER.Operation)
+            op.__dict__.update(receipt={"failure": {"stage": "owned-directory-admission"},
+                "originalClosesKnown": False, "targetRetired": False},
+                diagnostic_failure=captured, calls=[{"role": "app-absence-baseline",
+                    "returncode": 0, "entered": True, "returned": True, "capturesSettled": True}])
+            before = copy.deepcopy(op.__dict__)
+            output = io.StringIO()
+            with contextlib.redirect_stderr(output):
+                HELPER.emit_failure_diagnostic(error, operation=op, phase="candidate-baseline", stager=stager)
+            value = json.loads(output.getvalue())
+            self.assertEqual(value["terminal"], captured)
+            self.assertEqual(value["originalFailure"]["reason"], reason)
+            self.assertEqual(value["lastRecordedNative"]["returncode"], 0)
+            self.assertFalse(value["productReady"])
+            self.assertFalse(value["cleanup"]["originalClosesKnown"])
+            self.assertFalse(value["cleanup"]["targetRetired"])
+            self.assertLessEqual(len(output.getvalue().encode()), 4096)
+            self.assertEqual(op.__dict__, before)
+            self.assertEqual(error.args, (reason,))
+        class PrivateArgument:
+            def __str__(self): raise AssertionError("private argument rendered")
+        class ForeignValueError(ValueError):
+            def __str__(self): raise AssertionError("private exception rendered")
+        class TextSubclass(str): pass
+        reason = "app-absence-phase-marker-count"
+        for error in (ValueError(PRIVATE.decode()), ValueError(reason + PRIVATE.decode()),
+                      ValueError(PrivateArgument()), ValueError(reason, PRIVATE.decode()),
+                      ValueError(TextSubclass(reason)), ForeignValueError(reason), TypeError(reason)):
+            value = HELPER.failure_exception(error, stager)
+            self.assertEqual(value["reason"], "unclassified")
+            self.assertNotIn(PRIVATE.decode(), json.dumps(value))
+
     def test_bounded_lexical_facts_keep_unknown_conflict_and_private_text(self):
         cases = ((b"", "empty", "none", "unclassified"),
             (b"HTTP status code: 401", "bounded-utf8", "single-known", "http-authentication"),

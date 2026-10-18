@@ -17,6 +17,7 @@ final class NormalAppUITests: XCTestCase {
     private enum ProjectRequireMethod: String {
         case pathFields = "testSyntheticProjectPathFields"
         case localEditsAndImages = "testSyntheticProjectLocalEditsAndImages"
+        case savedReleaseEvidence = "testSyntheticProjectSavedReleaseEvidence"
     }
     private enum DashboardReason: String {
         case loading, notLoaded = "not-loaded", bridgeUnavailable = "bridge-unavailable"
@@ -4746,32 +4747,65 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func staticTextSelections(_ root: XCUIElement, matching selectors: [StaticTextMatch],
                                                  check: () throws -> Void) throws -> [[XCUIElement]] {
-        // Same held subtree and bounded typed reads, never remote String predicates.
         guard (1...2).contains(selectors.count) else { throw Refusal.condition("static text selector count differs") }
         try check()
-        let query = root.staticTexts
-        let count = query.count
+        // One standard subtree snapshot instead of one remote snapshot per text.
+        // Snapshot data only nominates text; it never supplies a live UI result.
+        let captured = try root.snapshot()
         try check()
-        guard count <= 256 else { throw Refusal.condition("static text prefix collection exceeds its bound") }
-        let elements = query.allElementsBoundByIndex
+        let children = captured.children
+        guard children.count <= 1024 else { throw Refusal.condition("static text snapshot tree exceeds its bound") }
+        var pending: [(node: any XCUIElementSnapshot, depth: Int)] = children.reversed().map { ($0, 1) }
+        var visited = 0, textCount = 0
+        var counts: [String: Int] = [:], order: [String] = []
+        while let (node, depth) = pending.popLast() {
+            try check()
+            visited += 1
+            guard visited <= 1024 && depth <= 32 else { throw Refusal.condition("static text snapshot tree exceeds its bound") }
+            if node.elementType == .staticText {
+                textCount += 1
+                guard textCount <= 256 else { throw Refusal.condition("static text prefix collection exceeds its bound") }
+                let value = node.value
+                let text = try Self.staticTextContent(value: value, label: value is String ? "" : node.label)
+                if selectors.contains(where: { $0.accepts(text) }) {
+                    if counts[text] == nil { order.append(text) }
+                    counts[text, default: 0] += 1
+                }
+            }
+            let next = node.children
+            guard next.count <= 1024 - visited - pending.count,
+                  next.isEmpty || depth < 32 else { throw Refusal.condition("static text snapshot tree exceeds its bound") }
+            pending.append(contentsOf: next.reversed().map { ($0, depth + 1) })
+        }
         try check()
-        guard elements.count <= 256 else { throw Refusal.condition("static text prefix collection exceeds its bound") }
         var matches = [[XCUIElement]](repeating: [], count: selectors.count)
-        for element in elements {
+        for text in order {
             try check()
-            // One attributes snapshot per original indexed element, rather
-            // than separate live role/value/label resolutions. Keep that same
-            // XCUIElement for the caller's existing final live validation.
-            let snapshot = try element.snapshot()
+            // Equality is safe for mixed AXValue types. Do not pair snapshot
+            // traversal indexes with live query indexes or choose the first
+            // duplicate. Immediate readers can legitimately require >1 match.
+            let query = root.staticTexts.matching(NSPredicate(format: "value == %@ OR label == %@", text, text))
+            let count = query.count
             try check()
-            guard snapshot.elementType == .staticText else { throw Refusal.condition("static text prefix role differs") }
+            guard count <= 256 else { throw Refusal.condition("static text prefix collection exceeds its bound") }
+            let originals = query.allElementsBoundByIndex
             try check()
-            let value = snapshot.value
-            try check()
-            let label: String
-            if value is String { label = "" } else { label = snapshot.label; try check() }
-            let text = try Self.staticTextContent(value: value, label: label)
-            for index in selectors.indices where selectors[index].accepts(text) { matches[index].append(element) }
+            guard originals.count == count else { throw Refusal.condition("static text observation changed during readback") }
+            var decoded: [XCUIElement] = []
+            for element in originals {
+                try check()
+                let current = try element.snapshot()
+                try check()
+                guard current.elementType == .staticText else { throw Refusal.condition("static text prefix role differs") }
+                let value = current.value
+                let actual = try Self.staticTextContent(value: value, label: value is String ? "" : current.label)
+                // The broad query can also find a label whose String value
+                // differs. Apply the original value-first decoder, retaining
+                // every genuine duplicate rather than trusting that label.
+                if actual == text { decoded.append(element) }
+            }
+            guard decoded.count == counts[text] else { throw Refusal.condition("static text observation changed during readback") }
+            for index in selectors.indices where selectors[index].accepts(text) { matches[index].append(contentsOf: decoded) }
         }
         try check()
         return matches
@@ -5221,7 +5255,7 @@ final class NormalAppUITests: XCTestCase {
         try require(XCTWaiter.wait(for: [wait], timeout: try remaining(timeout)) == .completed,
                     "owned UI did not dismiss in " + journeyStage, line: line)
     }
-    @MainActor private func reveal(_ element: XCUIElement, in renderer: XCUIElement) throws {
+    @MainActor private func reveal(_ element: XCUIElement, in renderer: XCUIElement, line: UInt = #line) throws {
         // Scroll only the original renderer; never an arbitrary screen position,
         // another application or a filesystem/default-location setter.
         for direction in [-1.0, 1.0] {
@@ -5231,13 +5265,13 @@ final class NormalAppUITests: XCTestCase {
                 renderer.scroll(byDeltaX: 0, deltaY: CGFloat(direction * 550))
             }
         }
-        try require(element.isHittable, "expected renderer control could not be revealed in " + journeyStage)
+        try require(element.isHittable, "expected renderer control could not be revealed in " + journeyStage, line: line)
     }
     @MainActor private func press(_ root: XCUIElement, _ label: String, renderer: XCUIElement,
                                  failures: [String] = [], timeout: TimeInterval = 5, line: UInt = #line) throws {
         let item = try waitElement(root.buttons.matching(identifier: label), in: root, enabled: true,
                                    timeout: timeout, failures: failures, line: line)
-        try reveal(item, in: renderer)
+        try reveal(item, in: renderer, line: line)
         item.click()
     }
     @MainActor private func settingsTab(_ root: XCUIElement, _ label: String, renderer: XCUIElement,
@@ -5247,25 +5281,26 @@ final class NormalAppUITests: XCTestCase {
         // Keep the original Settings section scope and exact singleton label.
         let item = try waitElement(root.checkBoxes.matching(identifier: label), in: root,
                                    enabled: true, line: line)
-        try reveal(item, in: renderer)
+        try reveal(item, in: renderer, line: line)
         item.click()
     }
     @MainActor private func field(_ root: XCUIElement, _ label: String, multiline: Bool = false) throws -> XCUIElement {
         try waitElement(controls(root, [multiline ? .textView : .textField], label: label, prefix: true), in: root)
     }
-    @MainActor private func replace(_ input: XCUIElement, with text: String, renderer: XCUIElement) throws {
+    @MainActor private func replace(_ input: XCUIElement, with text: String, renderer: XCUIElement,
+                                   line: UInt = #line) throws {
         try require(input.isEnabled, "selected synthetic field is disabled")
-        try reveal(input, in: renderer)
+        try reveal(input, in: renderer, line: line)
         input.click()
         input.typeKey("a", modifierFlags: .command)
         input.typeText(text)
         try require(input.value as? String == text, "typed synthetic field did not retain its exact value")
     }
     @MainActor private func select(_ root: XCUIElement, label: String, value: String,
-                                  renderer: XCUIElement) throws {
+                                  renderer: XCUIElement, line: UInt = #line) throws {
         let control = try waitElement(controls(root, [.popUpButton, .comboBox], label: label, prefix: true),
                                      in: root, enabled: true)
-        try reveal(control, in: renderer)
+        try reveal(control, in: renderer, line: line)
         control.click()
         // Native/web popup's own menu only, never the app's unrelated menus.
         let item = try waitElement(control.menuItems.matching(identifier: value), in: control, enabled: true)
@@ -5273,9 +5308,10 @@ final class NormalAppUITests: XCTestCase {
         item.click()
         try require(control.value as? String == value, "selected value was not observed")
     }
-    @MainActor private func expand(_ root: XCUIElement, prefix: String, renderer: XCUIElement) throws {
+    @MainActor private func expand(_ root: XCUIElement, prefix: String, renderer: XCUIElement,
+                                  line: UInt = #line) throws {
         let item = try waitElement(controls(root, [.disclosureTriangle, .button], label: prefix, prefix: true), in: root, enabled: true)
-        try reveal(item, in: renderer)
+        try reveal(item, in: renderer, line: line)
         item.click() // Each fixed details element starts closed in this journey.
     }
     @MainActor private func displayed(_ root: XCUIElement, label: String, equals expected: String) throws {
@@ -5297,20 +5333,21 @@ final class NormalAppUITests: XCTestCase {
         }
     }
     @MainActor private func confirmedDialog(_ renderer: XCUIElement, title: String,
-                                           action: String, checkbox: String, typedLabel: String? = nil) throws {
+                                           action: String, checkbox: String, typedLabel: String? = nil,
+                                           line: UInt = #line) throws {
         let dialog = try waitElement(renderer.dialogs.matching(identifier: title), in: renderer)
         let apply = try unique(dialog.buttons.matching(identifier: action), "local affirmative action is ambiguous")
         try require(!apply.isEnabled, "sensitive local action began enabled without fresh consent")
-        let checked = try waitElement(dialog.checkBoxes.matching(NSPredicate(format: "label BEGINSWITH %@", checkbox)), in: dialog, enabled: true)
-        try require((checked.value as? String) == "0" || (checked.value as? NSNumber)?.intValue == 0,
+        let checked = try waitElement(controls(dialog, [.checkBox], label: checkbox, prefix: true), in: dialog, enabled: true)
+        try require((checked.value as? String) == "0" || (checked.value as? NSNumber) == NSNumber(value: 0),
                     "local consent started checked")
-        try reveal(checked, in: renderer); checked.click()
+        try reveal(checked, in: renderer, line: line); checked.click()
         if let typedLabel {
             try require(!apply.isEnabled, "typed confirmation was not required")
-            try replace(field(dialog, typedLabel), with: "SAVE", renderer: renderer)
+            try replace(field(dialog, typedLabel), with: "SAVE", renderer: renderer, line: line)
         }
         let ready = try waitElement(dialog.buttons.matching(identifier: action), in: dialog, enabled: true)
-        try reveal(ready, in: renderer); ready.click() // Exactly one Apply.
+        try reveal(ready, in: renderer, line: line); ready.click() // Exactly one Apply.
         try waitGone(dialog)
     }
     @MainActor private func nativeSheet(_ window: XCUIElement, title: String,
@@ -6117,7 +6154,9 @@ final class NormalAppUITests: XCTestCase {
         @MainActor func androidStatus(_ phase: String, reason: String) throws {
             let failures = ["No new folder-selection outcome was confirmed",
                             "Original folder cleanup could not be confirmed."]
-            _ = try waitStaticText(renderer, matching: .contains(phase), timeout: 48, failures: failures)
+            // React renders the fixed phase and its trailing period as separate
+            // children. Accept that whole phase leaf or the prior joined text.
+            _ = try waitStaticText(renderer, matching: .equalOrContains(phase, phase + "."), timeout: 48, failures: failures)
             _ = try waitStaticText(renderer, matching: .contains(reason), timeout: 48, failures: failures)
         }
         @MainActor func androidBrowse(_ role: String, title: String, relative: String,
@@ -6130,7 +6169,7 @@ final class NormalAppUITests: XCTestCase {
             if cancel {
                 try click(sheet.buttons.matching(identifier: "Cancel"), "owned Android source Cancel unavailable")
                 try waitGone(sheet)
-                try androidStatus("Folder selection cancelled.",
+                try androidStatus("Folder selection cancelled",
                                   reason: "The native folder dialog was closed without selecting a folder.")
             } else {
                 try goToFolder(sheet, path: fixture.rootPath + "/" + relative)
@@ -6138,10 +6177,10 @@ final class NormalAppUITests: XCTestCase {
                 if refused {
                     // Mac source parts rejects the 128th normal component
                     // before SourceBook.begin. Other outcomes must fail.
-                    try androidStatus("Folder selection could not be used.",
+                    try androidStatus("Folder selection could not be used",
                         reason: "Choose a real, readable local folder, not an alias or archive. This check does not inspect the tools inside it.")
                 } else {
-                    try androidStatus("Original folder selection retained.",
+                    try androidStatus("Original folder selection retained",
                         reason: "Folder selection alone is not supplier inspection or a protected copy. Check the separate original registration Status.")
                     guard let name = relative.split(separator: "/").last else {
                         throw Refusal.condition("fixed Android source leaf is absent")
@@ -6672,6 +6711,9 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor func testSyntheticProjectSavedReleaseEvidence() throws {
+        projectRequireDiagnosticMethod = .savedReleaseEvidence
+        projectRequireDiagnosticEmitted = false
+        defer { projectRequireDiagnosticMethod = nil }
         continueAfterFailure = false
         executionTimeAllowance = 300
         try beginCase(seconds: 300)

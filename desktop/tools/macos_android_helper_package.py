@@ -2083,7 +2083,18 @@ _FAILURE_PRODUCT_REASONS = (
     'install-product-output-roster',
 )
 
-_FAILURE_REASONS = frozenset((*_FAILURE_SETUP_REASONS, *_FAILURE_PRODUCT_REASONS, *("original-nonzero-" + role for role in _FAILURE_SETUP_ROLES + _FAILURE_FIXTURE_ROLES),
+# Fixed fixture guard names only, never arbitrary ValueError text. These remain
+# diagnostic observations and cannot qualify the original Installer/readback.
+_APP_ABSENCE_BASELINE_REASONS = frozenset((
+    "app-absence-phase-output-bound", "app-absence-phase-marker-count",
+    "app-absence-phase-marker-shape", "app-absence-phase-canonical-json",
+    "app-absence-phase-observation", "app-absence-phase-proof",
+    "app-absence-baseline-original", "app-absence-baseline-original-post",
+    "app-absence-baseline-binding", "app-absence-baseline-identity",
+    "app-absence-baseline-parent-original", "app-absence-baseline-volume",
+))
+
+_FAILURE_REASONS = frozenset((*_APP_ABSENCE_BASELINE_REASONS, *_FAILURE_SETUP_REASONS, *_FAILURE_PRODUCT_REASONS, *("original-nonzero-" + role for role in _FAILURE_SETUP_ROLES + _FAILURE_FIXTURE_ROLES),
     "candidate-fixture-terminal", "candidate-fixture-helper-source", "candidate-fixture-build-selection", "candidate-fixture-source-finality",
     *_FAILURE_NOTARY_REASONS, *FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
     *( 'original-nonzero-' + role for role in _PACKAGE_DIAGNOSTIC_ROLES),
@@ -2430,6 +2441,11 @@ def failure_exception(error, stager=None):
                  (UnicodeEncodeError, "unicode-error"), (json.JSONDecodeError, "json-error"),
                  (KeyboardInterrupt, "keyboard-interrupt"), (SystemExit, "system-exit"))
         kind = next((label for cls, label in known if selected is cls), "other")
+        if selected is ValueError:
+            values = BaseException.args.__get__(error)
+            if (type(values) is tuple and len(values) == 1 and type(values[0]) is str
+                    and len(values[0]) <= 96 and values[0] in _APP_ABSENCE_BASELINE_REASONS):
+                reason = values[0]
         if any(selected is cls for cls in (OSError, PermissionError, FileNotFoundError, FileExistsError, IsADirectoryError,
                   NotADirectoryError, InterruptedError, BlockingIOError, TimeoutError,
                   ChildProcessError, BrokenPipeError, ConnectionError, ConnectionAbortedError,

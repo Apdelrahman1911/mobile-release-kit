@@ -1662,7 +1662,6 @@ class NormalPhaseDataTests(unittest.TestCase):
                         del sys.modules[name]
 
     def test_admission_exception_projection_is_closed_and_preserves_main_failure(self):
-        import ast
         private = "private-synthetic-credential-or-path"
         try:
             MODULE.need(False, private)
@@ -1682,13 +1681,6 @@ class NormalPhaseDataTests(unittest.TestCase):
         # The original owner wait callsite used to disappear from the bounded
         # first+last3 traceback. Preserve only its exact SOURCE/qualname, not locals.
         command_source = ROOT / "src/mobile_release/_command_process.py"
-        command_tree = ast.parse(command_source.read_bytes())
-        outer = next(node for node in command_tree.body if isinstance(node, ast.ClassDef) and node.name == "_Outer")
-        body = next(node for node in outer.body if isinstance(node, ast.FunctionDef) and node.name == "body")
-        waits = [node for node in ast.walk(body) if isinstance(node, ast.Call)
-                 and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
-                 and node.func.value.id == "self" and node.func.attr == "_until"]
-        self.assertEqual([node.lineno for node in waits], [3307, 3314, 3331, 3336])
         normal_source = str(ROOT / "desktop/tools/macos_normal_ui_runner.py")
         def trace(specs):
             following = None
@@ -1729,6 +1721,37 @@ class NormalPhaseDataTests(unittest.TestCase):
         with_commands = dict(value, commands=[command])
         selected = MODULE.classify_normal_admission_failure(MODULE.encoded(with_commands))
         self.assertEqual(selected["commands"], [{"role": "normal-ui-build", "returncode": 65, "stdoutBytes": 32, "stderrBytes": 12}])
+        # Real existing record emitters, inert process port: these seven fixed
+        # returned roles must not erase an unrelated original exception.
+        for role in ('ios-account-produce','ios-account-observe','candidate-fixture-git-init','candidate-fixture-git-add',
+                     'candidate-fixture-git-commit','candidate-fixture-git-identity','candidate-fixture-git-clean'):
+            for code in (0,1):
+                def returned(argv,**kwargs):
+                    return subprocess.CompletedProcess(argv,code,private.encode(),b'private stderr')
+                clock=SimpleNamespace(allowance=lambda cap:cap,check=lambda:None)
+                phase=MODULE.NormalPhase(SimpleNamespace(run_owned=returned),{},ROOT,clock,retain_nonzero=True)
+                argv=['inert-never-executed',private]
+                if role.startswith('ios-account-'):
+                    mode=role.removeprefix('ios-account-');cap,limit=(180,16384) if mode=='produce' else (90,2048)
+                    fixture=object.__new__(MODULE.NormalIOSRecoveryFixture);fixture.phase=phase
+                    original=fixture._account_original(argv,{},ROOT,cap,limit,mode)
+                else:
+                    original=phase.call(role,argv,15,65536)
+                try: MODULE.need(False,private)
+                except MODULE.Refused as error:
+                    failure=MODULE.normal_admission_failure('execute',error,None,phase.records)
+                projected=MODULE.classify_normal_admission_failure(MODULE.encoded(failure))
+                self.assertEqual(projected['status'],'observed-exception-only')
+                self.assertEqual(projected['commands'],[dict(role=role,returncode=code,stdoutBytes=len(private),stderrBytes=14)])
+                self.assertEqual(projected['sourceFrames'],failure['sourceFrames'])
+                self.assertEqual(projected['ownerFailure'],failure['ownerFailure'])
+                self.assertFalse(projected['nativeSuccessInferred']);self.assertTrue(projected['unknownStateRetained'])
+                self.assertIs(phase.first_nonzero,original if code else None)
+                self.assertEqual(original.returncode,code);self.assertNotIn(private.encode(),MODULE.encoded(projected))
+                self.assertNotIn(b'private stderr',MODULE.encoded(projected));self.assertLessEqual(len(MODULE.encoded(projected))+1,4096)
+                for unknown in ('ios-account-delete','candidate-fixture-git-fetch'):
+                    bad=dict(failure,commands=[dict(phase.records[0],role=unknown)])
+                    self.assertEqual(MODULE.classify_normal_admission_failure(MODULE.encoded(bad))['status'],'unavailable')
         mutations = []
         for key, bad in (("schemaVersion", True), ("productReady", True), ("stage", "private-stage"),
                          ("exceptionClass", private), ("sourceFrames", [{"source": "/private/macos_normal_ui_runner.py", "line": 1}]),
@@ -4073,6 +4096,38 @@ class NormalPhaseDataTests(unittest.TestCase):
         for phase,selected in (('test','test.xcresult'),('summary','project-test.xcresult')):
             other=MODULE.normal_failure_diagnostics(phase,selected,subprocess.CompletedProcess([],65,first,b''))
             self.assertEqual(other['sourceFailures'],[])
+
+        # Saved evidence shares the literal marker grammar, never the project
+        # method authorization. Both old forms keep their selected source site.
+        saved_method='testSyntheticProjectSavedReleaseEvidence'
+        saved=marker(saved_method,5310,'actionable')
+        saved_wait=saved.replace(b'REQUIRE_FAILURE',b'STATIC_WAIT_FAILURE').replace(b';check=actionable',b'')
+        for body in (saved,saved_wait):
+            original=subprocess.CompletedProcess([],65,body+b'PRIVATE saved bytes or paths\n',b'')
+            observed=MODULE.normal_failure_diagnostics('test','release-evidence-test.xcresult',original)
+            self.assertEqual(observed['sourceFailures'],[dict(source='NormalAppUITests.swift',method=saved_method,
+                line=5310,column=None,stream='stdout')])
+            self.assertEqual(observed['originalReturncode'],65)
+            self.assertNotIn(b'PRIVATE',MODULE.encoded(observed));self.assertLessEqual(len(MODULE.encoded(observed))+1,4096)
+            self.assertIsNone(MODULE.project_require_source_sites(body,b''))
+            for phase,selection in (('test','project-test.xcresult'),('summary','release-evidence-test.xcresult'),
+                                    ('test','diagnostics-test.xcresult'),('test',MODULE.IOS_PENDING_RESULT)):
+                self.assertEqual(MODULE.normal_failure_diagnostics(phase,selection,original)['sourceFailures'],[])
+        for bad in (saved+saved,saved+saved_wait,saved+first,first,saved[:-1],b'prefix '+saved,
+                    saved.replace(b'5310',b'65536'),saved.replace(b'actionable',b'PRIVATE')):
+            self.assertIsNone(MODULE.project_require_source_sites(bad,b'',release_evidence=True))
+        self.assertIsNone(MODULE.project_require_source_sites(b'',saved,release_evidence=True))
+        with self.assertRaises(MODULE.Refused): MODULE.project_require_source_sites(saved,b'',release_evidence=1)
+        with self.assertRaises(MODULE.Refused):
+            MODULE.normal_failure_diagnostics('test','release-evidence-test.xcresult',subprocess.CompletedProcess([],0,saved,b''))
+        saved_request=MODULE.normal_request(normal_arguments('release-evidence-test.xcresult'),
+            '/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui/tmp/')
+        saved_published=[]
+        with patch.object(MODULE,'exclusive_output',side_effect=lambda path,body,cap:saved_published.append((path,body,cap))):
+            MODULE.publish_failure_diagnostics(saved_request,subprocess.CompletedProcess([],65,saved_wait,b''))
+        self.assertEqual(saved_published[0][0].name,'release-evidence-test.failure-diagnostics.json')
+        self.assertEqual(json.loads(saved_published[0][1])['sourceFailures'][0]['line'],5310)
+        self.assertEqual(saved_published[0][2],4096)
 
         # The two genuine project methods reuse stages; observations are not a
         # single case FSM, and an absent marker cannot prove work not attempted.

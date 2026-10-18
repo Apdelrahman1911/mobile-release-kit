@@ -4,6 +4,40 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
+The signed `fcb1aa46` application is unchanged. Consumer `39131604738/1`
+(`16ae7af7`) completed with all three selected ARM jobs failing. Ordinary
+Applications launch/quit passed before project tests. Configuration reached an
+unhittable-control check, Android reached its first retained-selection phase
+wait, and saved evidence failed during its real-picker stage. Pending-iOS's
+artifact could not classify admission; it does not establish whether UI ran.
+
+The next focused batch integrates the independently reviewed single-subtree
+text reader (with live typed/multiplicity checks), native checkbox naming,
+complete Android phase leaf/coalesced-text alternatives, and existing original
+caller diagnostics. It adds only seven missing diagnostic command-role names;
+no execution permission or success criterion changes. An obsolete absolute
+source-line assertion was removed, retaining actual traceback/privacy tests.
+The two affected existing diagnostic methods pass; only the admission method
+was rerun after the test-only correction (0.021s, no skips).
+
+Restore `39130430795/1` (`29eaef82`) passed all six actual Darwin observer tests,
+including the three real pipe cases. Baseline Installer returned zero with
+settled captures, then Python observation/readback failed with an unclassified
+ValueError. No detach or recovery cut was reached. A twelve-literal diagnostic
+now identifies known phase/readback guards without exporting exception text or
+changing the original failure. Its existing privacy regression passes locally
+(0.138s, no skips); two prior projection-preparation errors occurred before
+assertions and were fixed without changing source behavior. Temporary test
+projections were removed and all local callers joined.
+
+Next native selection: ordinary UI, pending iOS, saved evidence, saved-version
+recovery (existing multi-match behavior), and Restore, on separate ARM runners.
+These reuse the same signed application; no application rebuild/sign/notary.
+Unexecuted native changes are not passes. Intel functionality, remaining feature
+journeys, removal/update continuity and final readiness acceptance remain open.
+
+### Earlier checkpoints (historical, not current results)
+
 Consumer `39129874451/1` at `4fc7c242` is complete: both ARM UI jobs failed
 after successful installation and harness compilation. Ordinary configuration
 advanced past Candidate branch editing to the Android locales lookup. That

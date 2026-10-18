@@ -3928,10 +3928,12 @@ def project_wait_condition(message):
     return None
 
 
-def project_require_source_sites(stdout, stderr):
-    """First-latched SOURCE sites for two project cases; no arbitrary error prose."""
+def project_require_source_sites(stdout, stderr, *, release_evidence=False):
+    """First-latched SOURCE sites for the exact selected cohort, never error prose."""
+    need(type(release_evidence) is bool, "source-site-selection")
     namespace = b"MRK_NORMAL_PROJECT_"
-    methods = (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages")
+    methods = ((b"testSyntheticProjectSavedReleaseEvidence",) if release_evidence else
+               (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages"))
     pattern = (re.escape(namespace) + rb"(REQUIRE_FAILURE|STATIC_WAIT_FAILURE)=v1;method=(" + b"|".join(methods)
                + rb");line=([1-9][0-9]{0,4})(?:;check=(condition|singleton|actionable))?")
     namespaces = (namespace+b"REQUIRE_FAILURE", namespace+b"STATIC_WAIT_FAILURE")
@@ -4541,8 +4543,9 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             else:
                 value["findingsTruncated"] = True
 
-    if "projectProgress" in value:
-        sites = project_require_source_sites(original.stdout, original.stderr)
+    if "projectProgress" in value or "releaseEvidenceProgress" in value:
+        sites = project_require_source_sites(original.stdout, original.stderr,
+                                             release_evidence="releaseEvidenceProgress" in value)
         if sites is None:
             require_invalid = True
         else:
@@ -5055,6 +5058,8 @@ ADMISSION_OWNER_REASONS = {
 ADMISSION_COMMAND_ROLES = ("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary", "normal-build-settings",
     "saved-version-source-roster", "saved-version-core-interrupt",
     "verify-generated-runner", "generated-runner-entitlements", "one-admitted-ui-test", "normal-ui-test-tree",
+    "ios-account-produce", "ios-account-observe", "candidate-fixture-git-init", "candidate-fixture-git-add",
+    "candidate-fixture-git-commit", "candidate-fixture-git-identity", "candidate-fixture-git-clean",
     *("normal-toolchain-" + key for key, _, _ in TOOLCHAIN_QUERIES))
 
 
