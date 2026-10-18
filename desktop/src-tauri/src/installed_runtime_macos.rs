@@ -2364,6 +2364,53 @@ mod ios_upload_tools_tests {
         assert!(tools.upload_binding_data().is_err());
         assert_eq!(tools.settle_originals(&mut |_|false),CloseOutcome::Settled);
     }
+    // Same production owner against a genuine companion-created tree. This
+    // test never prepares /Applications, executes Xcode, or claims an archive.
+    #[test]
+    #[ignore = "requires successful companion first/repeat on this same disposable Mac"]
+    fn ios_managed_archive_actual_tools_pre_post_and_positive_consume() {
+        assert!(!unistd::getuid().is_root() && !unistd::geteuid().is_root());
+        let end = Instant::now() + std::time::Duration::from_secs(30);
+        let (_audit_sender, audit) = watch::channel(end);
+        let (_stop_sender, stop) = watch::channel(false);
+        let mut tools = IOSXcodeSlots::new(audit);
+        let mut stage = "acl-arm";
+        let observed = (|| -> Result<usize> {
+            tools.arm_acl_once(end, &stop)?;
+            stage = "managed-archive-inspection";
+            tools.inspect_once(end, &stop)?;
+            stage = "managed-original-projection";
+            if !matches!(tools.managed, Some(IOSManagedSelection::Present { .. }))
+                || tools.alias.is_some()
+                || tools.developer_path.as_deref() != Some(Path::new(crate::ios_toolchain::MANAGED_DEVELOPER))
+            { return Err(AdmissionFailure::Inventory); }
+            let count = tools.retained_original_count().ok_or(AdmissionFailure::Unknown)?;
+            if count != 14 { return Err(AdmissionFailure::Inventory); }
+            let binding = tools.binding_data()?;
+            let data = serde_json::to_value(&binding).map_err(native_error)?;
+            let sdk = tools.sdk_path.as_ref().and_then(|path| path.to_str()).ok_or(AdmissionFailure::Inventory)?;
+            let sdk_parent = Path::new(crate::ios_toolchain::MANAGED_DEVELOPER)
+                .join("Platforms/iPhoneOS.platform/Developer/SDKs");
+            if data.get("developerDir").and_then(|value| value.as_str()) != Some(crate::ios_toolchain::MANAGED_DEVELOPER)
+                || data.get("sdk").and_then(|value| value.as_str()) != Some(sdk)
+                || Path::new(sdk).parent() != Some(sdk_parent.as_path())
+                || tools.executable.is_none() || tools.sdk.is_none()
+                || tools.upload_binding_data().is_ok() || tools.signing_binding_data().is_ok()
+                || tools.validation_binding_data().is_ok() || tools.recovery_binding_data().is_ok()
+            { return Err(AdmissionFailure::Inventory); }
+            stage = "pre";
+            tools.check_before_spawn(end, &stop)?;
+            stage = "post";
+            tools.check_after_use(end)?;
+            Ok(count)
+        })();
+        // Every entered original is independently consumed before reporting a
+        // failed predicate. The original senders and endpoint remain alive.
+        let closed = tools.settle_originals(&mut |_| Instant::now() >= end);
+        assert_eq!(closed, CloseOutcome::Settled, "stage={stage} cleanup=unconfirmed");
+        assert!(tools.settled(), "stage={stage} cleanup=unconfirmed");
+        assert!(observed.is_ok(), "stage={stage} cleanup=closed reason={:?}", observed.err());
+    }
     // Actual Mac filesystem/ACL originals only. No process, Keychain, Store,
     // code signing, selected-tool execution or SDK lookup occurs in this test.
     #[test]
