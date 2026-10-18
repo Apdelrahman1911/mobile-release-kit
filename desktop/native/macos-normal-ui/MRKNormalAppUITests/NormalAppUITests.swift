@@ -5009,8 +5009,12 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func controls(_ root: XCUIElement, _ types: [XCUIElement.ElementType],
                                     label: String, prefix: Bool = false) -> XCUIElementQuery {
-        let predicate = NSPredicate(format: "elementType IN %@ AND label " + (prefix ? "BEGINSWITH %@" : "== %@"),
-                                    types.map { NSNumber(value: $0.rawValue) }, label)
+        // Native labels can surface as AXTitle rather than AXDescription.
+        // Keep the same role restriction around both name alternatives; values
+        // and placeholders cannot impersonate a control's visible name.
+        let comparison = prefix ? "BEGINSWITH %@" : "== %@"
+        let predicate = NSPredicate(format: "elementType IN %@ AND (label " + comparison + " OR title " + comparison + ")",
+                                    types.map { NSNumber(value: $0.rawValue) }, label, label)
         return root.descendants(matching: .any).matching(predicate)
     }
     @MainActor private func diagnostic(_ root: XCUIElement) {
@@ -6080,7 +6084,15 @@ final class NormalAppUITests: XCTestCase {
                     _ = try waitStaticText(group, matching: .equalOrContains(name,
                         "Selected folder: " + name + " · folder selection only."), timeout: 48)
                 } else {
-                    _ = try waitStaticText(group, matching: .contains("No folder selected for this project."))
+                    // The unselected paragraph has only these two complete
+                    // renderings (separate conditional text or coalesced text).
+                    // Exact native equality avoids scanning every AX attribute
+                    // under the original five-second observation allowance.
+                    let captions = ["No folder selected for this project.",
+                                    "Required before registering Android tools. No folder selected for this project."]
+                    _ = try waitElement(group.staticTexts.matching(NSPredicate(
+                        format: "value IN %@ OR label IN %@ OR title IN %@",
+                        argumentArray: [captions, captions, captions])), in: group)
                 }
                 _ = try waitElement(group.buttons.matching(identifier: chosen == nil
                     ? "Browse for folder" : "Choose a different folder"), in: group, enabled: true, timeout: 48)
@@ -7862,13 +7874,24 @@ final class NormalAppUITests: XCTestCase {
         let group = try unique(named(renderer, "Account signing recovery state"), "current account report missing or repeated")
         try reveal(group, in: renderer)
         let prefix = "Account signing state · "
-        let headings = try staticTextPrefix(group, prefix) { _ = try remaining(1) }
-        try require(headings.count == 1, "current account state missing or repeated", check: .singleton)
-        let heading = headings[0]
-        let text = try staticTextContent(heading)
-        try require(heading.isHittable && text == prefix + status && (status == "pending" || status == "recovered"),
-                    "current account state differs")
-        return (String(text.dropFirst(prefix.count)), try iosRecoverySession(group))
+        try require(status == "pending" || status == "recovered", "current account state differs")
+        // This is an h4: WebKit exposes its text as title and its numeric
+        // heading level as value. Keep ALL-prefix uniqueness before comparing
+        // the exact expected state; never hide a conflicting status heading.
+        _ = try remaining(1)
+        let headings = group.staticTexts.matching(NSPredicate(format: "title BEGINSWITH %@", prefix))
+        let count = headings.count
+        _ = try remaining(1)
+        try require(count == 1, "current account state missing or repeated", check: .singleton)
+        let heading = headings.element(boundBy: 0)
+        let hittable = heading.isHittable
+        _ = try remaining(1)
+        let prefixCount = headings.count
+        _ = try remaining(1)
+        let exactCount = headings.matching(NSPredicate(format: "title == %@", prefix + status)).count
+        _ = try remaining(1)
+        try require(hittable && prefixCount == 1 && exactCount == 1, "current account state differs")
+        return (status, try iosRecoverySession(group))
     }
 
     @MainActor func testInstalledIOSPendingAccountRecoveryThroughUI() throws {
@@ -7905,20 +7928,27 @@ final class NormalAppUITests: XCTestCase {
             var inspect: IOSRecoveryObservation?, recover: IOSRecoveryObservation?
             var session = "", inspectStatus = "", recoverStatus = ""
             var inspectUnchecked = false, recoverUnchecked = false
+            @MainActor func consentChecked(_ checkbox: XCUIElement, expected: Bool) -> Bool {
+                let value = checkbox.value
+                if let text = value as? String { return text == (expected ? "1" : "0") }
+                guard let number = value as? NSNumber else { return false }
+                // Exact 0/1 only: do not truncate fractional or mixed states.
+                return number == NSNumber(value: expected ? 1 : 0)
+            }
             try stage("ios-recovery-inspect") {
                 try fixture.post()
                 try require(named(renderer, "Recovery details").count == 0, "prior recovery cannot supply this journey")
                 try press(renderer, "Review local recovery inspection", renderer: renderer, failures: failures)
                 let review = try waitElement(named(renderer, "Confirm this exact local recovery action"), in: renderer, failures: failures)
                 let pair = try iosRecoveryObservation(renderer, phase: "awaiting-consent")
-                let consent = try waitElement(controls(review, [.checkBox], label:
-                    "I authorize one local inspection of the account signing and selected project build-input recovery controls.", prefix: true),
+                let consent = try waitElement(review.checkBoxes.matching(identifier:
+                    "I authorize one local inspection of the account signing and selected project build-input recovery controls. Inspection does not recover or erase retained state."),
                     in: review, enabled: true, failures: failures)
                 try reveal(consent, in: renderer)
-                try require(consent.value as? String == "0", "inspection consent must begin unchecked")
+                try require(consentChecked(consent, expected: false), "inspection consent must begin unchecked")
                 inspectUnchecked = true
                 consent.click()
-                try require(consent.value as? String == "1", "inspection explicit consent not observed")
+                try require(consentChecked(consent, expected: true), "inspection explicit consent not observed")
                 try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair, "inspection review changed before Start")
                 try fixture.post()
                 try press(review, "Inspect local state once", renderer: renderer, failures: failures) // One actual Start.
@@ -7940,14 +7970,14 @@ final class NormalAppUITests: XCTestCase {
                 try require(pair.operationID != inspected.operationID && pair.ownerGeneration != inspected.ownerGeneration,
                             "account recovery requires a fresh original pair")
                 try require(try iosRecoverySession(review, review: true) == session, "account recovery review session differs")
-                let consent = try waitElement(controls(review, [.checkBox], label:
-                    "I confirm this macOS account and signing services are idle and authorize ordinary restoration of only this inspected account session’s owned state.", prefix: true),
+                let consent = try waitElement(review.checkBoxes.matching(identifier:
+                    "I confirm this macOS account and signing services are idle and authorize ordinary restoration of only this inspected account session’s owned state. Do not override conflicts or treat my confirmation as worker finality."),
                     in: review, enabled: true, failures: failures)
                 try reveal(consent, in: renderer)
-                try require(consent.value as? String == "0", "account recovery consent must begin unchecked")
+                try require(consentChecked(consent, expected: false), "account recovery consent must begin unchecked")
                 recoverUnchecked = true
                 consent.click()
-                try require(consent.value as? String == "1", "account recovery explicit consent not observed")
+                try require(consentChecked(consent, expected: true), "account recovery explicit consent not observed")
                 try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair
                             && iosRecoverySession(review, review: true) == session, "account recovery review changed before Start")
                 try fixture.post()

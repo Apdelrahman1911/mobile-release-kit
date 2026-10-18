@@ -4,6 +4,26 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
+Consumer `39128758182/1` at `3ac11b4d` passed ARM Applications launch/dashboard/
+quit and summary, then failed both project methods: configuration field lookup
+and the five-second unselected Android-source text wait. Pending iOS progressed
+through project selection and original awaiting-consent fields, then failed its
+checkbox lookup. The next helper uses the documented title/name channels,
+exact source-bound checkbox captions and strict String/NSNumber zero/one reads.
+Android's unselected caption uses two exact native equality alternatives for
+its separate/coalesced rendering instead of scanning every element. Its original
+five-second wait and ambiguity rejection remain. The account report h4 now uses
+its title rather than numeric heading level. Independent reviews accepted this
+batch; the same actual native journeys remain required, not inferred.
+
+Restore `39127457166/1` passed its fixture build/audit and progressed beyond the
+prior input admission failure, then failed `app-absence-output-restore` after
+native admission. XNU marks file descriptions with `FWASWRITTEN` after successful
+writes, returns that internal history bit through F_GETFL, and does not allow
+F_SETFL to clear it. The old exact comparison is incompatible with that behavior.
+Its precise runtime flags were not exported. A narrowly researched correction
+is being prepared; no blanket flag mask or cleanup-success assumption is used.
+
 The next focused ordinary/pending-iOS consumer corrects the startup harness's
 five-second assumption: `App.tsx` awaits capabilities then catalogue, each under
 native ten-second work/two-second cleanup limits. Four initial entry sites now
