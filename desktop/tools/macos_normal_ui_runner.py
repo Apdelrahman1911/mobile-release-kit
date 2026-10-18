@@ -47,7 +47,8 @@ NORMAL_SELECTIONS = {
     "test.xcresult": (("testLaunchCancelAndQuit",), 60, 180),
     "applications-test.xcresult": (("testApplicationsLaunchAndQuit",), 60, 180),
     "project-test.xcresult": (("testSyntheticProjectLocalEditsAndImages",
-                              "testSyntheticProjectPathFields"), 300, 720),
+                              "testSyntheticProjectPathFields",
+                              "testSyntheticProjectAndroidSourceSelection"), 300, 1020),
     "persistence-test.xcresult": (("testSyntheticPersistentCredentials",), 300, 420),
     "diagnostics-test.xcresult": (("testSyntheticProjectBuildToolDiagnostics",), 300, 420),
     "saved-checks-test.xcresult": (("testSyntheticProjectSavedOfflineChecks",
@@ -528,19 +529,20 @@ def normal_project_markers(stdout):
     need(type(stdout) is bytes and 0 < len(stdout) <= 1024 * 1024, "normal-project-output-bound")
     text = stdout.decode("utf-8", "strict")
     lines = text.splitlines()
-    methods = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields")
+    methods = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields",
+               "testSyntheticProjectAndroidSourceSelection")
     markers = (
         "MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version-images;cleanExitStatus=unavailable;allWorkerFinality=unavailable",
         "MRK_MACOS_NORMAL_PROJECT_FIELDS_UI=ordinary-four-field-browse-two-cancels-draft-only-invalid-pair-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable",
         "MRK_MACOS_NORMAL_ANDROID_SOURCE_UI=ordinary-jdk-sdk-gradle-native-cancel-jdk-reselect-backend-source-refused-selection-only;cleanExitStatus=unavailable;allWorkerFinality=unavailable",
     )
-    need(lines.count(ORIGINAL_MARKER) == 2 and all(lines.count(marker) == 1 for marker in markers)
+    need(lines.count(ORIGINAL_MARKER) == 3 and all(lines.count(marker) == 1 for marker in markers)
          and "MRK_MACOS_UI_FAILURE_CLEANUP=" not in text, "normal-project-terminal-markers")
     selected = {"-[MRKNormalAppUITests.NormalAppUITests " + method + "]" for method in methods}
     starts = re.findall(r"^Test Case '([^'\r\n]{1,240})' started\.$", text, re.M)
     passes = re.findall(r"^Test Case '([^'\r\n]{1,240})' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.$", text, re.M)
-    need(len(starts) == 2 and set(starts) == selected, "normal-project-exact-attempts")
-    need(len(passes) == 2 and set(passes) == selected
+    need(len(starts) == 3 and set(starts) == selected, "normal-project-exact-attempts")
+    need(len(passes) == 3 and set(passes) == selected
          and re.search(r"^Test Case '[^'\r\n]{1,240}' failed", text, re.M) is None,
          "normal-project-exact-passes")
     return True
@@ -620,7 +622,7 @@ def applications_ui_summary(body):
 
 def normal_cli_arguments(arguments, *, target=ARM_TARGET):
     machine, _ = normal_target_data(target)
-    need(len(arguments) in (25, 26) and arguments[0] == "test-without-building", "normal-fixed-command")
+    need(len(arguments) in (25, 26, 27) and arguments[0] == "test-without-building", "normal-fixed-command")
     # Reconstruct the complete old argv; no extra xcodebuild switch may escape.
     need(arguments[11] == "-derivedDataPath" and arguments[13] == "-resultBundlePath", "normal-product-arguments")
     derived, result = Path(arguments[12]), Path(arguments[14])
@@ -770,7 +772,7 @@ def normal_request(arguments, temporary):
         derived, result, methods, allowance, timeout = normal_cli_arguments(arguments, target=target)
         value = dict(phase="test", derived=derived, result=result, methods=methods,
                      allowance=allowance, timeout=timeout,
-                     phaseSeconds=345 if timeout == 180 else 885 if timeout == 720 else 585)
+                     phaseSeconds=timeout + 165)
     need(value["derived"].is_absolute() and value["derived"].parent.name == "normal-ui"
          and temporary == str(value["derived"].parent / "tmp") + "/", "normal-fixed-tmpdir")
     value["target"] = target
@@ -2019,6 +2021,21 @@ class NormalIOSRecoveryFixture:
         return failure
 
     def __exit__(self, exc_type, exc, tb):
+        if exc is not None:
+            try:
+                # Already parsed canonical child failure; no new IO or native call.
+                original = self.fixtures.precursor_diagnostic
+                child = original["childFailure"]
+                mode = original["kind"].removeprefix("ios-account-")
+                need(not self.fixtures.inflight and self.fixtures.last_returned
+                     and self.fixtures.stage == "account-" + mode, "ios-precursor-original-stage")
+                detail = dict(kind=mode, originalReturncode=original["returncode"],
+                    reasonIndex=self.loader.IOS_ACCOUNT_FAILURE_REASONS.index(child["reason"]),
+                    categoryIndex=self.loader.PRECURSOR_FAILURE_CATEGORIES.index(child["exceptionCategory"]),
+                    sourceSites=child["sourceSites"], sourceSitesComplete=child["sourceSitesComplete"])
+                exc._normal_ios_precursor = ios_precursor_diagnostic(detail, self.phase.records)
+            except BaseException:
+                pass  # Optional diagnostics never replace the original failure/close.
         failure = self.close()
         if failure is not None and exc is None:
             raise failure
@@ -3905,7 +3922,7 @@ def panel_topology_diagnostics(stdout, stderr):
 PROJECT_STAGES = tuple('launch fixture project-open android-source-jdk android-source-sdk android-source-gradle android-source-cancel android-source-reselect android-source-refused field-version field-project field-workspace field-metadata field-file-cancel field-directory-cancel field-review quit project-cancel config github text version images-cancel images readback-and-quit'.split())
 
 
-def project_wait_condition(message):
+def project_wait_condition(message, *, stages=()):
     """Classify complete fixed XCTest errors, never copy their private prose."""
     reasons = (
         (b"case clock unavailable", "case-clock-unavailable"),
@@ -3920,6 +3937,13 @@ def project_wait_condition(message):
         (b"static text content exceeds its bound", "static-text-bytes"),
         (b"static text failure roster exceeds its bound", "static-text-failures"),
     )
+    # Only the caller's fixed selected-subset stages; never a runtime suffix.
+    reasons += tuple((prefix + stage.encode("ascii"), code) for stage in stages for prefix, code in (
+        (b"missing or ambiguous expected control in ", "expected-control-missing-or-ambiguous"),
+        (b"terminal UI refusal in ", "terminal-ui-refusal"),
+        (b"expected renderer control could not be revealed in ", "control-not-hittable"),
+        (b"owned UI did not dismiss in ", "ui-not-dismissed"),
+        (b"original case deadline missing in ", "case-clock-unavailable")))
     for reason, code in reasons:
         for prefix in (b'caught error: ', b'failed: caught error: '):
             for quote in (b'"', b'\\"'):
@@ -3936,7 +3960,8 @@ def project_require_source_sites(stdout, stderr, *, release_evidence=False, save
     methods = ((b"testInstalledIOSPendingAccountRecoveryThroughUI",) if ios_pending else
                (b"testSyntheticProjectSavedVersionRecovery",) if saved_version else
                (b"testSyntheticProjectSavedReleaseEvidence",) if release_evidence else
-               (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages"))
+               (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages",
+                b"testSyntheticProjectAndroidSourceSelection"))
     pattern = (re.escape(namespace) + rb"(REQUIRE_FAILURE|STATIC_WAIT_FAILURE)=v1;method=(" + b"|".join(methods)
                + rb");line=([1-9][0-9]{0,4})(?:;check=(condition|singleton|actionable))?")
     namespaces = (namespace+b"REQUIRE_FAILURE", namespace+b"STATIC_WAIT_FAILURE")
@@ -3974,7 +3999,7 @@ def project_navigation_diagnostics(stdout, stderr):
     need(type(stdout) is bytes and type(stderr) is bytes and len(stdout)+len(stderr) <= 1024*1024,
          'project-navigation-original')
     namespace = b'MRK_NORMAL_PROJECT_NAVIGATION'
-    methods = b'testSyntheticProjectPathFields|testSyntheticProjectLocalEditsAndImages'
+    methods = b'testSyntheticProjectPathFields|testSyntheticProjectLocalEditsAndImages|testSyntheticProjectAndroidSourceSelection'
     states = rb'(absent|ambiguous|disabled|obscured|ready)'
     pattern = (re.escape(namespace) + rb'=v1;method=(' + methods
         + rb');phase=(after-typing|after-return-timeout);role=(standalone-field|combo-child|combo);relation=('
@@ -4013,6 +4038,8 @@ ANDROID_CANDIDATE_STAGES = tuple("android-private-admission android-public-proje
 
 
 SAVED_DIAGNOSTIC_STAGES = {
+    "persistence-test.xcresult": ("persistenceProgress", tuple("persistence-admission persistence-launch persistence-project-and-initialize persistence-save-and-bind-p12 persistence-save-and-bind-profile persistence-context-invalidation persistence-lock-reopen-rebind persistence-replacement-cancel persistence-replace-current-record persistence-delete-and-quit persistence-restart-launch persistence-restart-unlock persistence-restart-rebind-and-quit".split())),
+    "saved-checks-test.xcresult": ("savedChecksProgress", tuple("offline-launch offline-fixture offline-project-open offline-review-and-start offline-original-report offline-readback-and-quit recovery-idle-launch recovery-idle-fixture recovery-idle-project-open recovery-idle-inspect recovery-idle-original-report recovery-idle-readback-and-quit".split())),
     IOS_PENDING_RESULT: ("iosPendingProgress", tuple("ios-recovery-admission ios-recovery-project ios-recovery-inspect ios-recovery-account ios-recovery-quit".split())),
     "saved-version-recovery-test.xcresult": ("savedVersionProgress", tuple("saved-version-fixture saved-version-launch saved-version-project-open saved-version-inspect-close saved-version-reinspect-confirm saved-version-reload saved-version-readback-and-quit".split())),
     "release-evidence-test.xcresult": ("releaseEvidenceProgress", tuple("evidence-launch evidence-fixture evidence-project-open evidence-real-picker evidence-original-observation evidence-shared-navigation evidence-stage-and-cancel evidence-readback-and-quit".split())),
@@ -4593,9 +4620,18 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                                         "line": line, "column": column, "kind": kind}
                                     if (kind == "caught-error" and (
                                             selection == "project-test.xcresult" and match.group(3) in (
-                                                b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages")
-                                            or selection == IOS_PENDING_RESULT and match.group(3) == IOS_PENDING_METHOD.encode("ascii"))):
-                                        condition = project_wait_condition(message)
+                                                b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages",
+                                                b"testSyntheticProjectAndroidSourceSelection")
+                                            or selection == IOS_PENDING_RESULT and match.group(3) == IOS_PENDING_METHOD.encode("ascii")
+                                            or selection == "persistence-test.xcresult" and match.group(3) == b"testSyntheticPersistentCredentials"
+                                            or selection == "saved-checks-test.xcresult" and match.group(3) in (
+                                                b"testSyntheticProjectSavedOfflineChecks", b"testSyntheticProjectEmptyBuildInputInspection"))):
+                                        stages = SAVED_DIAGNOSTIC_STAGES[selection][1] if selection in (
+                                            "persistence-test.xcresult", "saved-checks-test.xcresult") else ()
+                                        if selection == "saved-checks-test.xcresult":
+                                            prefix = "offline-" if match.group(3) == b"testSyntheticProjectSavedOfflineChecks" else "recovery-idle-"
+                                            stages = tuple(stage for stage in stages if stage.startswith(prefix))
+                                        condition = project_wait_condition(message, stages=stages)
                                         if condition is not None:
                                             finding["condition"] = condition
                                     if finding not in xctest_issues:
@@ -5094,6 +5130,29 @@ ADMISSION_COMMAND_ROLES = ("normal-ui-source-roster", "normal-ui-build", "normal
     *("normal-toolchain-" + key for key, _, _ in TOOLCHAIN_QUERIES))
 
 
+def ios_precursor_diagnostic(value, records):
+    """Indices name this helper source's existing Aqua enums, not product enums.
+
+    No exception prose, account path, credential value, or success is transported.
+    The original returned precursor must be the last recorded native command.
+    """
+    need(type(value) is dict and set(value) == {"kind", "originalReturncode", "reasonIndex",
+         "categoryIndex", "sourceSites", "sourceSitesComplete"}, "ios-precursor-fields")
+    need(type(value["kind"]) is str and value["kind"] in ("produce", "observe") and type(value["originalReturncode"]) is int
+         and value["originalReturncode"] == 1 and type(value["reasonIndex"]) is int
+         and 0 <= value["reasonIndex"] < 41 and type(value["categoryIndex"]) is int
+         and 1 <= value["categoryIndex"] < 56 and type(value["sourceSitesComplete"]) is bool,
+         "ios-precursor-values")
+    sites = value["sourceSites"]
+    need(type(sites) is list and len(sites) <= 4
+         and all(type(line) is int and 1 <= line <= 299 for line in sites), "ios-precursor-sites")
+    need(type(records) is list and records and type(records[-1]) is dict
+         and records[-1].get("role") == "ios-account-" + value["kind"]
+         and type(records[-1].get("returncode")) is int and records[-1]["returncode"] == 1,
+         "ios-precursor-original-command")
+    return {**value, "sourceSites": list(sites)}
+
+
 def normal_admission_failure(stage, error, owner, records):
     """Closed exception facts only: no messages, locals, paths or native output."""
     label = next((kind.__name__ for kind in ADMISSION_EXCEPTION_TYPES if type(error) is kind), "other")
@@ -5145,6 +5204,12 @@ def normal_admission_failure(stage, error, owner, records):
         "sourceFrames": frames, "sourceFramesTruncated": omitted or current is not None,
         "commands": records, "ownerFailure": owner_failure, "ownerDiagnostic": owner_diagnostic,
         "unknownStateRetained": True}
+    if stage == "execute":
+        try:
+            result["iosAccountPrecursor"] = ios_precursor_diagnostic(
+                getattr(error, "_normal_ios_precursor", None), records)
+        except BaseException:
+            pass
     if stage == "execute" and type(error) is Refused and error.args == ("output-data-result-post",):
         try:
             result["resultPost"] = admit_output_data_result_post(
@@ -5163,7 +5228,7 @@ def classify_normal_admission_failure(body):
         value = document(body)
         fields = {"schemaVersion", "scope", "productReady", "error", "stage", "exceptionClass",
                   "sourceFrames", "commands", "ownerFailure", "unknownStateRetained"}
-        need(fields <= set(value) <= fields | {"resultPost", "ownerDiagnostic", "sourceFramesTruncated"},
+        need(fields <= set(value) <= fields | {"resultPost", "ownerDiagnostic", "sourceFramesTruncated", "iosAccountPrecursor"},
              "admission-fields")
         need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
              and value["scope"] == "generated-ui-runner-refused" and value["productReady"] is False
@@ -5200,7 +5265,7 @@ def classify_normal_admission_failure(body):
                  and all(type(command[key]) is int for key in ("returncode", "timeoutSeconds", "roleCapSeconds",
                          "outputLimitBytes", "stdoutBytes", "stderrBytes"))
                  and 0 <= command["returncode"] <= 255
-                 and 1 <= command["timeoutSeconds"] <= command["roleCapSeconds"] <= 720
+                 and 1 <= command["timeoutSeconds"] <= command["roleCapSeconds"] <= (1020 if command["role"] == "one-admitted-ui-test" else 720)
                  and 1 <= command["outputLimitBytes"] <= 1024 * 1024
                  and 0 <= command["stdoutBytes"] <= command["outputLimitBytes"]
                  and 0 <= command["stderrBytes"] <= command["outputLimitBytes"] - command["stdoutBytes"]
@@ -5212,6 +5277,9 @@ def classify_normal_admission_failure(body):
         for key in ("ownerDiagnostic", "sourceFramesTruncated"):
             if key in value:
                 result[key] = value[key]
+        if "iosAccountPrecursor" in value:
+            need(value["stage"] == "execute", "ios-precursor-execution-stage")
+            result["iosAccountPrecursor"] = ios_precursor_diagnostic(value["iosAccountPrecursor"], commands)
         if "resultPost" in value:
             need(value["stage"] == "execute" and value["exceptionClass"] == "Refused",
                  "output-data-post-exception-context")
@@ -5220,6 +5288,7 @@ def classify_normal_admission_failure(body):
             # Optional diagnostics never displace an otherwise admitted old record.
             result.pop("ownerDiagnostic", None)
             result.pop("sourceFramesTruncated", None)
+            result.pop("iosAccountPrecursor", None)
         need(len(encoded(result)) + 1 <= 4096, "admission-projection-bound")
         return result
     except Exception:
@@ -5323,7 +5392,7 @@ def fixed_normal_context(request, source):
         methods, allowance, timeout = NORMAL_SELECTIONS[result.name]
         need(request['phase'] == 'test' and request['methods'] == tuple(CLASS + method for method in methods)
              and request['allowance'] == allowance and request['timeout'] == timeout
-             and request['phaseSeconds'] == (345 if timeout == 180 else 885 if timeout == 720 else 585)
+             and request['phaseSeconds'] == (timeout + 165)
              or request['phase'] == 'summary' and request['methods'] == () and request['allowance'] is None
              and (request['timeout'], request['phaseSeconds']) == (30, 90), 'fixed-normal-existing-selection')
     need(request['target'] == ARM_TARGET and request['phase'] in ('build', 'test', 'summary')

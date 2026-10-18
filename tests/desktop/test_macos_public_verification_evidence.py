@@ -873,7 +873,9 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                     b = dict(budget(), files=0, bytes=0, outputBytes=16384)
                     result = DATA.positive_ui_observations(fd, CONTEXT, statuses, phases, inventory, b)
                 finally: os.close(fd)
-                self.assertEqual(result["iosUnsignedArchive"], {"receiptState": "refused"})
+                expected_ios = {"receiptState": "refused"}
+                if fault == "status-failure": expected_ios["failureDiagnostic"] = {"receiptState": "absent"}
+                self.assertEqual(result["iosUnsignedArchive"], expected_ios)
                 self.assertEqual(result["androidSignedBuild"], {"receiptState": "absent"})
         with tempfile.TemporaryDirectory() as directory:
             result = DATA.project(directory, profile="aqua", source=CONTEXT["source"], workflow_source=CONTEXT["source"],
@@ -904,7 +906,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":"))), 8192)
                 for key, row in result["results"].items():
                     self.assertEqual(row["receiptState"], "observed")
-                    self.assertEqual(row["testCounts"], [2, 2, 0, 0, 0] if key in ("project", "savedChecks") else [1, 1, 0, 0, 0])
+                    self.assertEqual(row["testCounts"], [3, 3, 0, 0, 0] if key == "project" else [2, 2, 0, 0, 0] if key == "savedChecks" else [1, 1, 0, 0, 0])
                     self.assertIs(row["resultWriterFinalityEstablished"], False)
                     self.assertIsNone(row["cleanExitStatus"])
                     self.assertIs(row["productReady"], False)
@@ -958,7 +960,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 self.assertTrue(all(result["results"][key]["receiptState"] == "observed" for key in
                     ("workflowRefusal", "releaseEvidence", "savedVersion")))
             faults = ("missing", "oversize", "linked", "duplicate", "nonfinite", "unknown-key", "bool-count",
-                "source", "run", "tree", "package", "hash", "prior", "closed-false", "mixed-singleton", "status", "build-hash")
+                "source", "run", "tree", "package", "hash", "prior", "closed-false", "mixed-singleton", "status", "build-hash", "old-project-count", "wrong-source-method")
             for fault in faults:
                 with self.subTest(ordinaryFault=fault, target=target), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory); bad = copy.deepcopy(values); changed_phases = copy.deepcopy(phases)
@@ -975,6 +977,8 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                     if fault == "mixed-singleton": bad["workflowRefusal"]["selectedSavedFileScope"] = "release-evidence"
                     if fault == "status": changed_statuses["normal-ui/test.status"]["returncode"] = 70
                     if fault == "build-hash": bad["project"]["buildCommandAdmissionSha256"] = "9" * 64
+                    if fault == "old-project-count": bad["project"]["testCounts"].update(totalTestCount=2,passedTests=2)
+                    if fault == "wrong-source-method": bad["project"]["androidToolSourceBrowseTestIdentifier"] = "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields"
                     for key, path, *_ in DATA.ORDINARY_UI_INPUTS:
                         if fault == "missing" and key == "launch": continue
                         raw = (json.dumps(bad[key], sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -988,7 +992,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                         result = DATA.ordinary_ui_observations(fd, context, changed_statuses, changed_phases, inventory,
                             DATA.project_summary(preview, context, False), dict(budget(), files=0, bytes=0, outputBytes=16384))
                     finally: os.close(fd)
-                    selected = {"prior": "diagnostics", "mixed-singleton": "workflowRefusal", "build-hash": "project"}.get(fault, "launch")
+                    selected = {"prior": "diagnostics", "mixed-singleton": "workflowRefusal", "build-hash": "project", "old-project-count": "project", "wrong-source-method": "project"}.get(fault, "launch")
                     self.assertEqual(result["results"][selected], {"receiptState": "absent" if fault == "missing" else "refused"})
                     self.assertNotIn(SENTINEL, json.dumps(result))
         with tempfile.TemporaryDirectory() as directory:

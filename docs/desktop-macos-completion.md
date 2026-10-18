@@ -4,35 +4,45 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
-Independent persistence/offline consumer `39137951683/1` (`295889ae`) is
-running separately. The next batch contains only the two completed failing ARM
-recovery/evidence cohorts, not another full run. iOS consent now waits on the
-**existing** exact Start-enabled gate before reading the published checkbox
-state; same original IDs, fixture checks and one Start remain required. Distinct
-plan/implementation reviews accepted it. The common wait diagnostic now records
-only already-sampled waiter/count/caller-line facts, without another AX query or
-wait. Its privacy regression passes (0.482s, zero skips); this is standalone
-candidate diagnostic output, not acceptance by the legacy public-evidence schema.
-Subset CLI failure diagnostics also retain their actual four-argument phase.
-No new native success is inferred from these changes.
+Signed ARM/Intel application `fcb1aa46` remains unchanged; no repeated application
+build, signing or notarization is required for this helper-only batch.
 
-Consumer `39137375131/1` (`8ac2f3c7`) now establishes **ARM saved-version
-rollback: 1 test passed, zero failures/skips, positive harness cleanup** against
-the unchanged signed `fcb1aa46` app. This uses a real core-created interrupted
-save; interruption of an actual GUI save, Intel recovery and full readiness are
-not inferred. Pending iOS failed its checked-value observation after one click;
-saved evidence still failed its outcome wait. Other jobs continue independently. ARM project fields exhausted their300s case
-budget after the six Android source-selection journeys; a proper independent
-method split is being prepared instead of dropping coverage or extending clocks.
+- `39137375131/1 @8ac2f3c7`: **ARM saved-version recovery passed**, one test,
+  zero failures/skips, positive harness cleanup. It uses a real core-created
+  interrupted save, not interruption of a GUI save. Other completed cohorts
+  failed, including Restore at its original source; the new Restore diagnostic
+  still needs inspection.
+- `39137951683/1 @295889ae`: independent persistence and offline/empty-inspection
+  jobs failed. Empty inspection reached settled/complete/Idle checks, then failed
+  a redundant explanatory-text assertion. That prose check alone is removed;
+  no mutation/consent/finality/file-preservation check is removed. Existing finite
+  diagnostics now identify the original persistence/offline stages and conditions.
+- `39138490866/1 @ba991a9a`: saved evidence's original waiter completed with
+  **two matches, zero failure-title matches**. It now awaits the original exact
+  validated application-ID summary instead of the duplicate heading/text name.
+  Both configuration format checks keep exact typed singleton result queries.
+  Pending iOS did **not** enter XCTest: its account precursor returned1. The
+  existing parsed precursor failure is now carried through the original exception
+  as bounded source-index facts, never raw output or a success/finality claim.
+- Project source selection is now a separate existing-project-suite XCTest:
+  six Android selections no longer consume the four-field case's300s budget.
+  All coverage remains; three independent300s cases compose1020s native and1185s
+  phase budgets. Actual ordinary totals become7, not a fabricated old-six pass.
+  Eight distinct focused methods pass. Initial missing CLI arity and stale
+  negative-case expectation were corrected before native execution.
+- Distinct plan/implementation reviews accepted these changes. Two composed
+  admission/privacy tests pass in0.511s, zero skips; temporary local projections
+  are removed and callers joined. Native outcomes are still required.
 
-To stop project-test failure suppressing unrelated checks, the next consumer
-selects only existing **persistence** and **saved-checks** cohorts on fresh ARM
-runners. Each reuses the same XCTest methods, owners and signed candidate;
-results report only their actual 1 or 2 tests, never ordinary6/Applications/P0.
-Independent plan and implementation reviews accepted the small selection change.
-Four focused local tests pass in 3.638s, zero skips, including original failure
-barriers, real task-output cleanup and unchanged full-ordinary behavior. Syntax,
-workflow parsing and all 22 shell-step syntax checks pass; local scratch retired.
+The older combined unsigned-iOS job stopped at its unrelated Android diagnostics
+case, before any archive test. Independent selection now preserves all actual iOS prerequisites inside the
+unsigned test and all Xcode preparation. Four focused methods pass, including
+real selected-output cleanup; distinct review accepted. The next seven ARM jobs
+select affected project/evidence/Keychain/offline/Android/pending-iOS and the
+previously blocked unsigned archive. No repeated saved-version/Restore/Intel job;
+Intel remains unqualified pending a useful failure diagnostic. No full signing
+workflow is rerun.
+No Desktop merge, main modification, Store mutation or public release occurred.
 
 ### Prior completed consumer and helper corrections
 

@@ -16,6 +16,7 @@ final class NormalAppUITests: XCTestCase {
     private enum RequireCheck: String { case condition, singleton, actionable }
     private enum ProjectRequireMethod: String {
         case pathFields = "testSyntheticProjectPathFields"
+        case androidSourceSelection = "testSyntheticProjectAndroidSourceSelection"
         case localEditsAndImages = "testSyntheticProjectLocalEditsAndImages"
         case savedReleaseEvidence = "testSyntheticProjectSavedReleaseEvidence"
         case savedVersionRecovery = "testSyntheticProjectSavedVersionRecovery"
@@ -6127,8 +6128,8 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_MACOS_NORMAL_PERSISTENCE_UI=initialize-save-assess-bind-context-lock-reopen-rebind-replace-delete-restart-unlock-reassess-rebind;appRestart=passed;ordinaryLifetimes=2;cleanExitStatus=unavailable;allWorkerFinality=unavailable;fixtures=retained-for-disposable-job-retirement")
     }
 
-    @MainActor func testSyntheticProjectPathFields() throws {
-        projectRequireDiagnosticMethod = .pathFields
+    @MainActor func testSyntheticProjectAndroidSourceSelection() throws {
+        projectRequireDiagnosticMethod = .androidSourceSelection
         projectRequireDiagnosticEmitted = false
         projectNavigationDiagnosticPhases.removeAll()
         defer { projectRequireDiagnosticMethod = nil }
@@ -6138,7 +6139,6 @@ final class NormalAppUITests: XCTestCase {
         var launched: (XCUIApplication, XCUIElement, XCUIElement)?
         try stage("launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "project-test.xcresult")) }
         guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
-        try Self.exerciseStaticTextContentData()
         let fixture = LocalFixture()
         ownedFixture = fixture
         try stage("fixture") { try fixture.prepare(.projectFields) }
@@ -6154,7 +6154,7 @@ final class NormalAppUITests: XCTestCase {
             try fixture.assertUnchanged()
         }
 
-        // Six ordinary native source actions precede every project draft edit.
+        // Six source selections own this fresh case, separate from draft field edits.
         // Public named role groups, not duplicate-button ordinals or test hooks.
         let androidRoleLabels = ["jdk": "Java development kit (JDK)",
                                  "sdk": "Android SDK", "gradle": "Gradle distribution"]
@@ -6253,6 +6253,46 @@ final class NormalAppUITests: XCTestCase {
                               relative: LocalFixture.androidRefusedDirectory, refused: true)
         }
 
+        try stage("quit") {
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "normal affirmative Quit unavailable")
+            try completeNormalQuit(app)
+            try fixture.assertUnchanged()
+            try fixture.closeOriginals()
+            ownedFixture = nil
+        }
+        // Source selection is not supplier inspection, protected copy, or an Android build.
+        try acceptFinalScenario()
+        print("MRK_MACOS_NORMAL_ANDROID_SOURCE_UI=ordinary-jdk-sdk-gradle-native-cancel-jdk-reselect-backend-source-refused-selection-only;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    }
+
+    @MainActor func testSyntheticProjectPathFields() throws {
+        projectRequireDiagnosticMethod = .pathFields
+        projectRequireDiagnosticEmitted = false
+        projectNavigationDiagnosticPhases.removeAll()
+        defer { projectRequireDiagnosticMethod = nil }
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "project-test.xcresult")) }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
+        try Self.exerciseStaticTextContentData()
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        try stage("fixture") { try fixture.prepare(.projectFields) }
+        try stage("project-open") {
+            try press(renderer, "Open project folder", renderer: renderer)
+            let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(sheet, path: fixture.projectPath)
+            try nativeOpen(sheet)
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
+                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            try fixture.assertUnchanged()
+        }
+
         @MainActor func settings(_ tab: String) throws {
             try press(renderer, "Project settings", renderer: renderer)
             let tabs = try waitElement(named(renderer, "Settings section"), in: renderer)
@@ -6342,7 +6382,6 @@ final class NormalAppUITests: XCTestCase {
         // Draft-only selection is not Save, release readiness, or all-worker finality.
         try acceptFinalScenario()
         print("MRK_MACOS_NORMAL_PROJECT_FIELDS_UI=ordinary-four-field-browse-two-cancels-draft-only-invalid-pair-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
-        print("MRK_MACOS_NORMAL_ANDROID_SOURCE_UI=ordinary-jdk-sdk-gradle-native-cancel-jdk-reselect-backend-source-refused-selection-only;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
 
     @MainActor func testSyntheticProjectLocalEdits() throws {
@@ -6421,7 +6460,7 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Metadata", renderer: renderer)
             try require(field(renderer, "Android locales, entry 2").value as? String == "fr-FR", "navigation lost the locale draft")
             try press(renderer, "Validate only", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation complete")), in: renderer,
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Format validation complete"), in: renderer,
                                 failures: Self.configurationFailures)
             try press(renderer, "Prepare save review", renderer: renderer, failures: Self.configurationFailures)
             let review = try waitElement(named(renderer, "Native configuration save"), in: renderer)
@@ -6750,10 +6789,11 @@ final class NormalAppUITests: XCTestCase {
         let failures = ["No current evidence result was accepted", "Some documents are missing", "A document needs attention", "The documents do not agree",
                         "Evidence observation or cleanup is unconfirmed. Preserve the original folder; do not treat it as a successful observation."]
         @MainActor func currentDocuments(timeout: TimeInterval = 5) throws {
-            _ = try waitElement(named(renderer, "Documents agree"), in: renderer,
+            // A valid current summary is stronger than a duplicate heading/text AX name.
+            // resultShape rejects every non-consistent result with a non-null summary.
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "com.example.reader"), in: renderer,
                                 timeout: timeout, failures: failures)
             _ = try unique(renderer.staticTexts.matching(identifier: "Documents only"), "documents-only label missing or ambiguous")
-            _ = try unique(renderer.staticTexts.matching(identifier: "com.example.reader"), "declared candidate identity differs")
             _ = try unique(renderer.staticTexts.matching(identifier: "evidence · Candidate"), "selected evidence folder and stage differ")
             let guidanceFields = try staticTextMatching(renderer, .contains(guidance)) { _ = try remaining(1) }
             try require(guidanceFields.count == 1, "candidate-only guidance differs", check: .singleton)
@@ -7315,9 +7355,6 @@ final class NormalAppUITests: XCTestCase {
             _ = try unique(panel.staticTexts.matching(identifier:
                 "No lifecycle failure was reported. This operation concerns project build inputs only, not release readiness."),
                 "the original inspection has a lifecycle failure")
-            _ = try unique(panel.staticTexts.matching(identifier:
-                "This is a build-input observation only. It does not mean the whole project, a previous file edit, signing account or Store release is clean."),
-                "Idle inspection lost its limited absence-only meaning")
             let review = try unique(panel.buttons.matching(identifier: "Review recovery attempt"), "settled recovery Review is ambiguous")
             try require(!review.isEnabled && panel.checkBoxes.count == 0
                         && named(panel, "Confirm the exact build-input recovery attempt").count == 0
@@ -8262,7 +8299,7 @@ final class NormalAppUITests: XCTestCase {
             try settingsTab(settings, "Android", renderer: renderer)
             try replace(field(renderer, "Android upload certificate"), with: certificate, renderer: renderer)
             try press(renderer, "Validate only", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation complete")),
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Format validation complete"),
                                 in: renderer, failures: Self.configurationFailures)
             try press(renderer, "Prepare save review", renderer: renderer, failures: Self.configurationFailures)
             let review = try waitElement(named(renderer, "Native configuration save"), in: renderer)

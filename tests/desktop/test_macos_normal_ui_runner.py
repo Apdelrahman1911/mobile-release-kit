@@ -76,11 +76,12 @@ def applications_output():
 
 def normal_project_output():
     # Literal independent roster/markers: never generated from the helper's table.
-    methods = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields")
+    methods = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields",
+               "testSyntheticProjectAndroidSourceSelection")
     markers = (
         ("MRK_MACOS_NORMAL_PROJECT_UI=project-config-workflows-text-version-images;cleanExitStatus=unavailable;allWorkerFinality=unavailable",),
-        ("MRK_MACOS_NORMAL_PROJECT_FIELDS_UI=ordinary-four-field-browse-two-cancels-draft-only-invalid-pair-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable",
-         "MRK_MACOS_NORMAL_ANDROID_SOURCE_UI=ordinary-jdk-sdk-gradle-native-cancel-jdk-reselect-backend-source-refused-selection-only;cleanExitStatus=unavailable;allWorkerFinality=unavailable"),
+        ("MRK_MACOS_NORMAL_PROJECT_FIELDS_UI=ordinary-four-field-browse-two-cancels-draft-only-invalid-pair-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable",),
+        ("MRK_MACOS_NORMAL_ANDROID_SOURCE_UI=ordinary-jdk-sdk-gradle-native-cancel-jdk-reselect-backend-source-refused-selection-only;cleanExitStatus=unavailable;allWorkerFinality=unavailable",),
     )
     lines = []
     for method, case_markers in zip(methods, markers):
@@ -459,14 +460,15 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                 MODULE.normal_request(["--normal-summary", result_name], temporary)
 
 
-    def test_project_batch_is_exactly_two_methods_with_existing_finite_deadlines(self):
-        expected = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields")
-        self.assertEqual(MODULE.NORMAL_SELECTIONS["project-test.xcresult"], (expected, 300, 720))
+    def test_project_batch_is_exactly_three_methods_with_composed_finite_deadlines(self):
+        expected = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields",
+                    "testSyntheticProjectAndroidSourceSelection")
+        self.assertEqual(MODULE.NORMAL_SELECTIONS["project-test.xcresult"], (expected, 300, 1020))
         arguments = normal_arguments("project-test.xcresult")
         derived, result, methods, allowance, timeout = MODULE.normal_cli_arguments(arguments)
         self.assertEqual(methods, tuple(MODULE.CLASS + method for method in expected))
         temporary = str(derived.parent / "tmp") + "/"
-        self.assertEqual(MODULE.normal_request(arguments, temporary)["phaseSeconds"], 885)
+        self.assertEqual(MODULE.normal_request(arguments, temporary)["phaseSeconds"], 1185)
         fixed = MODULE.xcode_test_arguments("/fixed.xctestrun", result, methods, allowance)
         self.assertEqual([item for item in fixed if item.startswith("-only-testing:")],
                          ["-only-testing:" + method for method in methods])
@@ -474,11 +476,12 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                         arguments[:16] + arguments[15:16] + arguments[16:],
                         [item.replace("testSyntheticProjectPathFields", "testSyntheticProjectLocalEdits")
                          for item in arguments],
-                        arguments[:15] + list(reversed(arguments[15:17])) + arguments[17:]):
+                        arguments[:15] + list(reversed(arguments[15:18])) + arguments[18:],
+                        [item for item in arguments if "testSyntheticProjectAndroidSourceSelection" not in item]):
             with self.subTest(selection=changed[15:18]), self.assertRaises(MODULE.Refused):
                 MODULE.normal_cli_arguments(changed)
 
-    def test_project_output_requires_both_originals_exact_attempts_and_terminal_markers(self):
+    def test_project_output_requires_three_originals_exact_attempts_and_terminal_markers(self):
         output = normal_project_output()
         self.assertIs(MODULE.normal_project_markers(output), True)
         original = MODULE.ORIGINAL_MARKER.encode() + b"\n"
@@ -623,7 +626,8 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         old = {
             "test.xcresult": (("testLaunchCancelAndQuit",), 60, 180),
             "project-test.xcresult": (("testSyntheticProjectLocalEditsAndImages",
-                                      "testSyntheticProjectPathFields"), 300, 720),
+                                      "testSyntheticProjectPathFields",
+                                      "testSyntheticProjectAndroidSourceSelection"), 300, 1020),
             "persistence-test.xcresult": (("testSyntheticPersistentCredentials",), 300, 420),
             "diagnostics-test.xcresult": (("testSyntheticProjectBuildToolDiagnostics",), 300, 420),
             "saved-checks-test.xcresult": (("testSyntheticProjectSavedOfflineChecks",
@@ -1721,6 +1725,58 @@ class NormalPhaseDataTests(unittest.TestCase):
         with_commands = dict(value, commands=[command])
         selected = MODULE.classify_normal_admission_failure(MODULE.encoded(with_commands))
         self.assertEqual(selected["commands"], [{"role": "normal-ui-build", "returncode": 65, "stdoutBytes": 32, "stderrBytes": 12}])
+        for role, cap, accepted in (("one-admitted-ui-test", 1020, True),
+                                    ("one-admitted-ui-test", 1021, False), ("normal-ui-build", 1020, False)):
+            row = dict(command, role=role, roleCapSeconds=cap, timeoutSeconds=cap)
+            observed = MODULE.classify_normal_admission_failure(MODULE.encoded(dict(value, commands=[row])))
+            self.assertEqual(observed['status'], 'observed-exception-only' if accepted else 'unavailable')
+            self.assertNotIn(private.encode(), MODULE.encoded(observed))
+        # Same caught precursor failure survives fixture closing and the public
+        # projection, without exporting already-parsed private child strings.
+        for mode in ("produce", "observe"):
+            record = dict(command, role="ios-account-" + mode, returncode=1,
+                          timeoutSeconds=90, roleCapSeconds=90)
+            fixture = object.__new__(MODULE.NormalIOSRecoveryFixture)
+            fixture.phase = SimpleNamespace(records=[record])
+            fixture.loader = SimpleNamespace(IOS_ACCOUNT_FAILURE_REASONS=("original-clock", "original-work-expired"),
+                                            PRECURSOR_FAILURE_CATEGORIES=("none", "refused"))
+            fixture.fixtures = SimpleNamespace(inflight=False, last_returned=True, stage="account-" + mode,
+                precursor_diagnostic={"kind":"ios-account-" + mode, "returncode":1, "childFailure":{
+                    "reason":"original-work-expired", "exceptionCategory":"refused", "sourceSites":[11],
+                    "sourceSitesComplete":True}})
+            primary = MODULE.Refused(private)
+            with patch.object(fixture, "close", return_value=OSError(private)) as close:
+                self.assertFalse(fixture.__exit__(type(primary), primary, None))
+            close.assert_called_once_with()
+            self.assertEqual(primary.__notes__, ["normal recovery fixture also had a consuming-close refusal"])
+            detail = {"kind":mode,"originalReturncode":1,"reasonIndex":1,"categoryIndex":1,
+                      "sourceSites":[11],"sourceSitesComplete":True}
+            self.assertEqual(primary._normal_ios_precursor, detail)
+            failure = MODULE.normal_admission_failure("execute", primary, None, [record])
+            projected = MODULE.classify_normal_admission_failure(MODULE.encoded(failure))
+            self.assertEqual(projected["iosAccountPrecursor"], detail)
+            self.assertFalse(projected["nativeSuccessInferred"])
+            self.assertNotIn(private.encode(), MODULE.encoded(projected))
+            self.assertLessEqual(len(MODULE.encoded(projected)) + 1, 4096)
+            for changed in ({"reasonIndex":True},{"reasonIndex":41},{"categoryIndex":0},{"categoryIndex":56},
+                            {"sourceSites":[True]},{"sourceSites":[300]},{"sourceSites":[1]*5},
+                            {"sourceSitesComplete":1},{"kind":private},{"originalReturncode":0},{"private":private}):
+                bad = {**detail, **changed}
+                primary._normal_ios_precursor = bad
+                self.assertNotIn("iosAccountPrecursor", MODULE.normal_admission_failure("execute", primary, None, [record]))
+                raw = {**failure, "iosAccountPrecursor":bad}
+                refused = MODULE.classify_normal_admission_failure(MODULE.encoded(raw))
+                self.assertEqual(refused["status"], "unavailable")
+                self.assertNotIn(private.encode(), MODULE.encoded(refused))
+            primary._normal_ios_precursor = detail
+            for records in ([], [dict(record,returncode=0)], [record,command]):
+                self.assertNotIn("iosAccountPrecursor", MODULE.normal_admission_failure("execute", primary, None, records))
+            self.assertNotIn("iosAccountPrecursor", MODULE.normal_admission_failure("loader", primary, None, [record]))
+            fixture.fixtures.inflight = True
+            unrelated = MODULE.Refused(private)
+            with patch.object(fixture, "close", return_value=None):
+                self.assertFalse(fixture.__exit__(type(unrelated), unrelated, None))
+            self.assertFalse(hasattr(unrelated, "_normal_ios_precursor"))
         # Real existing record emitters, inert process port: these seven fixed
         # returned roles must not erase an unrelated original exception.
         for role in ('ios-account-produce','ios-account-observe','candidate-fixture-git-init','candidate-fixture-git-add',
@@ -1983,7 +2039,7 @@ class NormalPhaseDataTests(unittest.TestCase):
                 selected_summary = MODULE.normal_request(["--target", target_value, "--normal-summary", name], temporary)
                 self.assertEqual(selected_test["target"], target_value)
                 self.assertEqual((selected_test["allowance"], selected_test["timeout"], selected_test["phaseSeconds"]),
-                                 (allowance, cap, {180: 345, 420: 585, 720: 885}[cap]))
+                                 (allowance, cap, cap + 165))
                 self.assertEqual((selected_summary["target"], selected_summary["timeout"], selected_summary["phaseSeconds"]),
                                  (target_value, 30, 90))
                 command = MODULE.xcode_test_arguments("/fixed.xctestrun", normal / name,
@@ -2020,7 +2076,7 @@ class NormalPhaseDataTests(unittest.TestCase):
             self.assertEqual((summary["phase"], summary["result"], summary["timeout"], summary["phaseSeconds"]),
                              ("summary", normal / name, 30, 90))
             self.assertEqual((test["result"], test["allowance"], test["timeout"]), (normal / name, allowance, cap))
-            self.assertEqual(test["phaseSeconds"], {180: 345, 420: 585, 720: 885}[cap])
+            self.assertEqual(test["phaseSeconds"], cap + 165)
         for arguments in ([], ["--normal-build", "extra"], ["--normal-summary"],
                           ["--normal-summary", "../test.xcresult"], ["--normal-summary", "other.xcresult"],
                           ["--normal-summary", "test.xcresult", "extra"]):
@@ -3946,6 +4002,52 @@ class NormalPhaseDataTests(unittest.TestCase):
             return MODULE.normal_failure_diagnostics(phase, selection,
                 subprocess.CompletedProcess([], 65, raw, b""))
         old = classify(site + b"unknown " + private + b"\n")
+        # Independent subsets reuse the original finite stage/condition projection.
+        subsets = (
+            ("persistence-test.xcresult", "testSyntheticPersistentCredentials", "persistenceProgress", "persistence-project-and-initialize"),
+            ("saved-checks-test.xcresult", "testSyntheticProjectSavedOfflineChecks", "savedChecksProgress", "offline-review-and-start"),
+            ("saved-checks-test.xcresult", "testSyntheticProjectEmptyBuildInputInspection", "savedChecksProgress", "recovery-idle-original-report"),
+        )
+        for subset, method, progress, stage in subsets:
+            selected_site = ("NormalAppUITests.swift:5051: error: -[MRKNormalAppUITests.NormalAppUITests " + method + "] : ").encode()
+            stage_row = ("MRK_NORMAL_PROJECT_STAGE=" + stage + ";result=failed;laterStages=not-run\n").encode()
+            def caught(reason, quote=b'"'):
+                return selected_site + b'caught error: "condition(' + quote + reason + quote + b')"\n'
+            for stdout, stderr in ((stage_row + caught(b"original case or stage deadline elapsed"), b""),
+                                   (stage_row, caught(b"original case or stage deadline elapsed", b'\\"'))):
+                value = MODULE.normal_failure_diagnostics("test", subset, subprocess.CompletedProcess([], 65, stdout, stderr))
+                self.assertEqual(value[progress]["firstFailed"], stage)
+                self.assertEqual(value["xctestIssues"][0]["condition"], "wait-deadline")
+                self.assertEqual(value["originalReturncode"], 65)
+                self.assertLessEqual(len(MODULE.encoded(value)) + 1, 4096)
+            for prefix, code in ((b"missing or ambiguous expected control in ", "expected-control-missing-or-ambiguous"),
+                                 (b"terminal UI refusal in ", "terminal-ui-refusal"),
+                                 (b"expected renderer control could not be revealed in ", "control-not-hittable"),
+                                 (b"owned UI did not dismiss in ", "ui-not-dismissed"),
+                                 (b"original case deadline missing in ", "case-clock-unavailable")):
+                value = classify(stage_row + caught(prefix + stage.encode()), selection=subset)
+                self.assertEqual(value["xctestIssues"][0]["condition"], code)
+                for suffix in (private, b"foreign-stage", stage.encode() + b" " + private):
+                    value = classify(caught(prefix + suffix), selection=subset)
+                    self.assertNotIn("condition", value["xctestIssues"][0])
+                    self.assertNotIn(private, MODULE.encoded(value))
+            if subset == "saved-checks-test.xcresult":
+                wrong_stage = b"recovery-idle-inspect" if stage.startswith("offline-") else b"offline-review-and-start"
+                self.assertNotIn("condition", classify(caught(b"missing or ambiguous expected control in " + wrong_stage),
+                    selection=subset)["xctestIssues"][0])
+            for malformed in (stage_row[:-1], b'prefix ' + stage_row, stage_row.replace(stage.encode(), private)):
+                value = classify(malformed, selection=subset)
+                self.assertEqual(value[progress]["state"], "refused")
+                self.assertNotIn(private, MODULE.encoded(value))
+            value = MODULE.normal_failure_diagnostics("test", subset, subprocess.CompletedProcess([], 65, b"", stage_row))
+            self.assertEqual(value[progress]["state"], "refused")
+            opposite = "saved-checks-test.xcresult" if subset.startswith("persistence") else "persistence-test.xcresult"
+            self.assertNotIn("xctestIssues", classify(caught(b"original case or stage deadline elapsed"), selection=opposite))
+            self.assertNotIn(progress, classify(stage_row, phase="summary", selection=subset))
+            for public_stage in MODULE.SAVED_DIAGNOSTIC_STAGES[subset][1]:
+                row = ("MRK_NORMAL_PROJECT_STAGE=" + public_stage + ";result=passed\n").encode()
+                self.assertEqual(classify(row, selection=subset)[progress]["lastObserved"],
+                                 {"stage": public_stage, "result": "passed"})
         wait = b"MRK_NORMAL_WAIT=v1;line=6748;waiter=completed;matches=2;failures=0;nonAtomic=1\n"
         row = {"kind":"wait", "stream":"stdout", "line":6748, "waiter":"completed",
                "matches":2, "failures":0, "nonAtomic":True}
@@ -4081,6 +4183,18 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertEqual(MODULE.project_navigation_diagnostics(one,one)['state'],'refused')
         self.assertEqual(MODULE.project_navigation_diagnostics(one.replace(b'\n',b'\r\n'),b'')['state'],'observed')
         with self.assertRaises(MODULE.Refused): MODULE.project_navigation_diagnostics(b'x'*(1024*1024+1),b'')
+        android_method = b'testSyntheticProjectAndroidSourceSelection'
+        android_navigation = one.replace(b'testSyntheticProjectPathFields', android_method)
+        self.assertEqual(MODULE.project_navigation_diagnostics(android_navigation, b'')['state'], 'observed')
+        android_site = b'MRK_NORMAL_PROJECT_STATIC_WAIT_FAILURE=v1;method=' + android_method + b';line=4240\n'
+        android_error = site.replace(b'testSyntheticProjectPathFields', android_method) + b'caught error: "condition("original case or stage deadline elapsed")"\n'
+        android_failure = classify(android_site + android_error)
+        self.assertEqual(android_failure['sourceFailures'][0]['method'], android_method.decode())
+        self.assertEqual(android_failure['xctestIssues'][0]['condition'], 'wait-deadline')
+        self.assertEqual(android_failure['originalReturncode'], 65)
+        for selection in ('saved-checks-test.xcresult', 'test.xcresult'):
+            refused = classify(android_site + android_error, selection=selection)
+            self.assertEqual(refused['sourceFailures'], [])
         source_site=b'MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=testSyntheticProjectPathFields;line=4240;check=condition\n'
         failed=subprocess.CompletedProcess([],65,markers+source_site,b'')
         observed=MODULE.normal_failure_diagnostics('test','project-test.xcresult',failed)

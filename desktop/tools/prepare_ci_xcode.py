@@ -302,7 +302,7 @@ def ci_profile(arguments, environment, platform, effective_uid, script):
              "/.github/workflows/desktop-macos-candidate-consume.yml@" + ref
          and re.fullmatch(r"[0-9a-f]{40}", source) and source != "0" * 40
          and environment.get("GITHUB_WORKFLOW_SHA") == source
-         and environment.get("MRK_CANDIDATE_MODE") == "ordinary-ios-ui"
+         and environment.get("MRK_CANDIDATE_MODE") in ("ordinary-ios-ui", "ordinary-ios-archive-ui", "ordinary-diagnostics-ui")
          and os.path.abspath(script) == "/Users/runner/work/mobile-release-kit/mobile-release-kit/"
              ".candidate-consumer-helper/desktop/tools/prepare_ci_xcode.py", "candidate-consume-profile")
 

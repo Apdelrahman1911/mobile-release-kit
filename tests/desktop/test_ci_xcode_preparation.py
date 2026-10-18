@@ -25,7 +25,8 @@ class ProtectedXcodeFixtureTests(unittest.TestCase):
             GITHUB_EVENT_NAME='push',GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit',GITHUB_REF=ref,
             GITHUB_WORKFLOW_REF='Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-consume.yml@'+ref,
             GITHUB_SHA='a'*40,GITHUB_WORKFLOW_SHA='a'*40,MRK_CANDIDATE_MODE='ordinary-ios-ui')
-        ci.ci_profile(['--candidate-consume'],env,'darwin',0,script)
+        for mode in ('ordinary-ios-ui','ordinary-ios-archive-ui','ordinary-diagnostics-ui'):
+            ci.ci_profile(['--candidate-consume'],dict(env,MRK_CANDIDATE_MODE=mode),'darwin',0,script)
         manual=dict(SUDO_UID='501',GITHUB_ACTIONS='true',RUNNER_ENVIRONMENT='github-hosted',RUNNER_OS='macOS',GITHUB_EVENT_NAME='workflow_dispatch')
         ci.ci_profile([],manual,'darwin',0,'unchanged manual path')
         for args in ([],['--candidate-consume','extra'],['--other']):

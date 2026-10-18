@@ -3102,7 +3102,7 @@ jobs:
       - name: Exercise normal project edits, images and four draft-only Browse fields
         id: normal_project_ui_test
         if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_ui_result.outcome == 'success')
-        timeout-minutes: 16
+        timeout-minutes: 21
         shell: bash
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -3155,8 +3155,8 @@ jobs:
               "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
               "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
           }
-          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
-          # Two separate 300s cases, one720s original command; fixed885s phase includes admission/close.
+          # Public XCTest only; no permission/consent bypass, retry or app change.
+          # Three300s cases; original1020s command plus165s admission/close.
           set +e
           clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
@@ -3165,6 +3165,7 @@ jobs:
             -resultBundlePath "$MRK_MACOS_WORK/normal-ui/project-test.xcresult" \
             -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages \
             -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields \
+            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectAndroidSourceSelection \
             -parallel-testing-enabled NO -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
             -disableAutomaticPackageResolution \
@@ -3173,7 +3174,7 @@ jobs:
           set -e
           printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/project-test.status"
           [[ "$test_status" == 0 ]] || exit "$test_status"
-      - name: Verify both selected project journeys against their original XCTest result
+      - name: Verify three selected project journeys against their original XCTest result
         id: normal_project_ui_result
         if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_project_ui_test.outcome == 'success')
         timeout-minutes: 3
@@ -3260,11 +3261,10 @@ jobs:
                   raise ValueError("original native command did not pass")
           summary_bytes = read(root / "normal-ui/project-summary.raw.json", 262144)
           summary = json.loads(summary_bytes, object_pairs_hook=unique)
-          expected = {"totalTestCount": 2, "passedTests": 2, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+          expected = {"totalTestCount": 3, "passedTests": 3, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
           if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
-              raise ValueError("exact two-pass, zero-failure/skip/expected-failure XCTest result required")
-          # A persisted receipt is not finality: the original helper zero status above
-          # also gates its consuming receipt close and final nonrenewable clock check.
+              raise ValueError("exact three-pass, zero-failure/skip/expected-failure XCTest result required")
+          # Original helper0 gates receipt close and the same final clock.
           def checked_admission(name, phase, bundle, seconds, roles):
               raw = read(root / ("normal-ui/" + name), 32768)
               value = json.loads(raw, object_pairs_hook=unique)
@@ -3314,9 +3314,9 @@ jobs:
               [roster, ("normal-toolchain-xcode", 15, 4096), ("normal-toolchain-sdkPath", 15, 4096),
                ("normal-toolchain-sdkVersion", 15, 4096), ("normal-toolchain-sdkBuild", 15, 4096),
                ("normal-ui-build", 240, 1048576), roster])
-          runner, runner_bytes = checked_admission("project-test.runner-admission.json", "test", "project-test.xcresult", 885,
+          runner, runner_bytes = checked_admission("project-test.runner-admission.json", "test", "project-test.xcresult", 1185,
               [roster, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
-               ("one-admitted-ui-test", 720, 1048576), roster])
+               ("one-admitted-ui-test", 1020, 1048576), roster])
           summary_admission, summary_admission_bytes = checked_admission("project-summary.command-admission.json", "summary", "project-test.xcresult", 90,
               [roster, ("normal-ui-summary", 30, 262144), roster])
           if (runner.get("projectFieldAndEditMarkersObserved") is not True
@@ -3351,10 +3351,11 @@ jobs:
                     "originalCommandStatuses": {"sharedBuild": 0, "projectTest": 0, "projectSummary": 0},
                     "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages",
                     "testIdentifiers": ["MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectLocalEditsAndImages",
-                                        "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields"],
+                                        "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields",
+                                        "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectAndroidSourceSelection"],
                     "projectRelativeFieldBrowseUI": "passed", "fieldBrowseSavedConfiguration": False,
                     "androidToolSourceBrowseUI": "passed",
-                    "androidToolSourceBrowseTestIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectPathFields",
+                    "androidToolSourceBrowseTestIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectAndroidSourceSelection",
                     "androidToolSourceBrowseScope": "selection-only-three-roles-native-cancel-reselect-backend-source-refused",
                     "supplierInspectionQualified": False, "protectedToolCopyQualified": False, "androidBuildQualified": False,
                     "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
