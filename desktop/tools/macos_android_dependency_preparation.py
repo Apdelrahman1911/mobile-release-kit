@@ -870,6 +870,11 @@ def acquire(work, *, private=None):
 # the ordinary installed and same-source candidate jobs; A/B keep their original five-archive route.
 UI_SCOPE = 'prepare-ui-inputs'
 UI_WORKFLOW = '.github/workflows/desktop-macos-installed.yml'
+UI_CONSUMER_SCOPE = 'prepare-consumer-ui-inputs'
+UI_CONSUMER_SOURCE = SOURCE / '.candidate-consumer-helper'
+UI_CONSUMER_WORKFLOW = '.github/workflows/desktop-macos-candidate-consume.yml'
+UI_CONSUMER_REF = 'refs/heads/verify/desktop-macos-candidate-consume'
+UI_CONSUMER_COMMANDS = ('prepare-consumer-ui-inputs', 'acquire-consumer-ui-inputs')
 UI_REF = 'refs/heads/verify/desktop-macos-installed'
 UI_REFS = (UI_REF, 'refs/heads/verify/desktop-macos-candidate')
 UI_TARGET = 'aarch64-apple-darwin'
@@ -900,16 +905,24 @@ def ui_selection(target):
 def ui_reference(environment):
     """An explicit current workflow ref, never inferred from supplier output."""
     ref = environment.get('GITHUB_REF')
-    need(type(ref) is str and ref in UI_REFS, 'ui-fixed-installed-ref')
+    need(type(ref) is str and ref in ((UI_CONSUMER_REF,) if RUN_SCOPE == UI_CONSUMER_SCOPE else UI_REFS), 'ui-fixed-installed-ref')
     return ref
+
+
+def ui_workflow():
+    return UI_CONSUMER_WORKFLOW if RUN_SCOPE == UI_CONSUMER_SCOPE else UI_WORKFLOW
 
 
 def ui_context():
     env = os.environ
     ref = ui_reference(env)
     target = env.get('MRK_MACOS_TARGET')
+    consumer = RUN_SCOPE == UI_CONSUMER_SCOPE
+    need(not consumer or (SOURCE == UI_CONSUMER_SOURCE
+         and Path(__file__).absolute() == SOURCE / 'desktop/tools/macos_android_dependency_preparation.py'),
+         'ui-consumer-fixed-source')
     machine, runner_arch, *_ = ui_selection(target)
-    need(RUN_SCOPE == UI_SCOPE and sys.platform == 'darwin' and os.uname().machine == machine
+    need(RUN_SCOPE in (UI_SCOPE, UI_CONSUMER_SCOPE) and sys.platform == 'darwin' and os.uname().machine == machine
          and os.getuid() > 0 and os.geteuid() == os.getuid()
          and sys.version_info[:3] == (3, 14, 7)
          and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode, 'ui-fixed-python-host')
@@ -917,8 +930,8 @@ def ui_context():
          and env.get('GITHUB_EVENT_NAME') == 'push' and env.get('GITHUB_REF') == ref
          and env.get('GITHUB_WORKFLOW_SHA') == env.get('GITHUB_SHA')
          and re.fullmatch('[0-9a-f]{40}', env.get('GITHUB_SHA', ''))
-         and env.get('GITHUB_WORKFLOW_REF') == env['GITHUB_REPOSITORY'] + '/' + UI_WORKFLOW + '@' + ref
-         and env.get('GITHUB_WORKSPACE') == str(SOURCE) and Path.cwd() == SOURCE
+         and env.get('GITHUB_WORKFLOW_REF') == env['GITHUB_REPOSITORY'] + '/' + ui_workflow() + '@' + ref
+         and env.get('GITHUB_WORKSPACE') == str(UI_CONSUMER_SOURCE.parent if consumer else SOURCE) and Path.cwd() == SOURCE
          and env.get('RUNNER_ENVIRONMENT') == 'github-hosted'
          and env.get('RUNNER_OS') == 'macOS' and env.get('RUNNER_ARCH') == runner_arch
          and all(re.fullmatch('[1-9][0-9]{0,19}', env.get(k, '')) for k in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')),
@@ -1145,7 +1158,7 @@ def ui_tool_post(work, clock, expected):
 def acquire_ui_inputs(work, *, private=None, target=UI_TARGET):
     ref = ui_reference(os.environ)
     _, _, _, pin, archives, _, _ = ui_selection(target)
-    need(RUN_SCOPE == UI_SCOPE and private is not None
+    need(RUN_SCOPE in (UI_SCOPE, UI_CONSUMER_SCOPE) and private is not None
          and os.environ.get('MRK_ANDROID_ACQUISITION_CHILD') == '1', 'ui-acquisition-original-required')
     stage = work / 'normal-ui/android-inputs'
     a = UiAcquisition(stage, target=target)
@@ -1167,7 +1180,7 @@ def acquire_ui_inputs(work, *, private=None, target=UI_TARGET):
     value = {'schemaVersion': 1, 'scope': 'four-supplier-sources-no-native-execution',
         'status': 'closed-awaiting-original-caller', 'sourceCommit': os.environ['GITHUB_SHA'],
         'target': target, 'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
-        'workflow': UI_WORKFLOW, 'ref': ref, 'archives': archives,
+        'workflow': ui_workflow(), 'ref': ref, 'archives': archives,
         'archiveBytes': sum(item['bytes'] for item in archives), 'catalogueSha256': pin[1],
         'toolRosterSha256': roster_sha, 'sdkMetadata': SDK_METADATA, 'toolBytes': a.writes,
         'readBytes': a.reads, 'files': a.files, 'entries': a.entries, 'directoryCount': len(a.directories),
@@ -1192,7 +1205,7 @@ def ui_acquisition_receipt(work, clock, *, target=UI_TARGET):
          and value['status'] == 'closed-awaiting-original-caller'
          and value['sourceCommit'] == os.environ['GITHUB_SHA'] and value['target'] == target
          and value['runId'] == os.environ['GITHUB_RUN_ID'] and value['runAttempt'] == os.environ['GITHUB_RUN_ATTEMPT']
-         and value['workflow'] == UI_WORKFLOW and value['ref'] == ref
+         and value['workflow'] == ui_workflow() and value['ref'] == ref
          and value['archives'] == archives and value['archiveBytes'] == sum(item['bytes'] for item in archives)
          and value['catalogueSha256'] == pin[1] and value['sdkMetadata'] == SDK_METADATA
          and value['protectedRegistration'] is False and value['uiQualification'] is False
@@ -1297,7 +1310,7 @@ def ui_key_arguments(stage, passwords):
 def prepare_ui_inputs(work, *, private=None, target=UI_TARGET):
     ref = ui_reference(os.environ)
     _, _, _, pin, archives, _, _ = ui_selection(target)
-    need(RUN_SCOPE == UI_SCOPE and private is not None and private['path'] == work,
+    need(RUN_SCOPE in (UI_SCOPE, UI_CONSUMER_SCOPE) and private is not None and private['path'] == work,
          'ui-preparation-original-required')
     clock = N.PhaseClock(PHASE_SECONDS)  # One1200s endpoint: acquisition + both key originals + all POST/close.
     need(os.statvfs(work).f_bavail * os.statvfs(work).f_frsize >= 8 << 30, 'eight-gib-free-prerequisite')
@@ -1329,7 +1342,8 @@ def prepare_ui_inputs(work, *, private=None, target=UI_TARGET):
         acquisition = N.NormalPhase(owner, child_env, SOURCE, clock)
         source_original(acquisition, 'pre')
         result = acquisition.call('android-ui-four-source-acquisition', [sys.executable, '-I', '-S', '-B',
-            str(SOURCE / 'desktop/tools/macos_android_dependency_preparation.py'), 'acquire-ui-inputs'],
+            str(SOURCE / 'desktop/tools/macos_android_dependency_preparation.py'),
+            'acquire-consumer-ui-inputs' if RUN_SCOPE == UI_CONSUMER_SCOPE else 'acquire-ui-inputs'],
             ACQUISITION_SECONDS, 16384)
         need(result.returncode == 0, 'ui-acquisition-original-return')
         need(nine(os.stat(stage, follow_symlinks=False))[:5] == stage_identity, 'ui-stage-acquisition-post')
@@ -1399,7 +1413,7 @@ def prepare_ui_inputs(work, *, private=None, target=UI_TARGET):
             handoff = {'schemaVersion': 1, 'scope': 'one-owned-android-ui-inputs',
                 'sourceCommit': os.environ['GITHUB_SHA'], 'target': target,
                 'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
-                'workflow': UI_WORKFLOW, 'ref': ref, 'root': str(stage),
+                'workflow': ui_workflow(), 'ref': ref, 'root': str(stage),
                 'rootFacts': [str(v) for v in stage_facts],
                 'credentialDirectoryFacts': [str(v) for v in N.saved_version_facts(os.fstat(originals.held[0][-1]))],
                 'sourceCatalogueSha256': pin[1], 'sourceRosterSha256': tools[0], 'roots': roots,
@@ -2476,7 +2490,7 @@ def main():
     try:
         # A safe original work directory is required even for early diagnostics.
         candidate = os.environ.get('MRK_ANDROID_PREPARATION_WORK', '')
-        ui = RUN_SCOPE == UI_SCOPE
+        ui = RUN_SCOPE in (UI_SCOPE, UI_CONSUMER_SCOPE)
         pattern = ('/Users/runner/work/_temp/mrk-macos-installed[.][A-Za-z0-9]{8}' if ui else
                    '/Users/runner/work/_temp/mrk-android-dependencies[.][A-Za-z0-9]{8}')
         need(re.fullmatch(pattern, candidate), 'private-work-name')
@@ -2484,7 +2498,7 @@ def main():
         stage = 'scope-context'
         need(len(sys.argv) == 2 and ((RUN_SCOPE == 'observe-sdk' and sys.argv[1] == 'observe-sdk')
              or (RUN_SCOPE == 'prepare-b' and sys.argv[1] in ('prepare-b', 'acquire', 'cleanup'))
-             or (ui and sys.argv[1] in ('prepare-ui-inputs', 'acquire-ui-inputs'))), 'fixed-source-scope')
+             or (ui and sys.argv[1] in (UI_CONSUMER_COMMANDS if RUN_SCOPE == UI_CONSUMER_SCOPE else ('prepare-ui-inputs', 'acquire-ui-inputs')))), 'fixed-source-scope')
         work, target = ui_context() if ui else (context(), None)
         need(work == private['path'], 'private-work-context')
         recheck_chain(private['fds'], private['originals'])
@@ -2492,7 +2506,7 @@ def main():
         N = load('_mrk_android_preparation_normal', 'desktop/tools/macos_normal_ui_runner.py')
         stage = 'transport-helper-load'
         P = load('_mrk_android_preparation_transport', 'desktop/tools/macos_android_supplier_preparation.py')
-        if sys.argv[1] in ('acquire', 'acquire-ui-inputs'):
+        if sys.argv[1] in ('acquire', 'acquire-ui-inputs', 'acquire-consumer-ui-inputs'):
             stage = 'archive-helper-load'
             C = load('_mrk_android_preparation_correspondence', 'desktop/tools/macos_android_supplier_correspondence.py')
         stage = 'sdk-observation' if sys.argv[1] == 'observe-sdk' else sys.argv[1]
@@ -2501,7 +2515,8 @@ def main():
             need(report['status'] == 'observed-not-admitted' and 'reason' not in report
                  and report.get('originalsClosed') is True, 'sdk-observation-refused')
         elif ui:
-            final_clock = {'prepare-ui-inputs': prepare_ui_inputs, 'acquire-ui-inputs': acquire_ui_inputs}[sys.argv[1]](
+            final_clock = {'prepare-ui-inputs': prepare_ui_inputs, 'acquire-ui-inputs': acquire_ui_inputs,
+                           'prepare-consumer-ui-inputs': prepare_ui_inputs, 'acquire-consumer-ui-inputs': acquire_ui_inputs}[sys.argv[1]](
                 work, private=private, target=target)
         else:
             final_clock = {'prepare-b': prepare, 'acquire': acquire, 'cleanup': cleanup}[sys.argv[1]](work, private=private)
@@ -2512,8 +2527,8 @@ def main():
         if not re.fullmatch('[a-z0-9-]{1,96}', code): code = 'preparation-original-failure'
         if private is not None:
             try:
-                name = ('acquire-ui-inputs-failure.json' if len(sys.argv) == 2 and sys.argv[1] == 'acquire-ui-inputs' else
-                        'prepare-ui-inputs-failure.json') if RUN_SCOPE == UI_SCOPE else (
+                name = ('acquire-ui-inputs-failure.json' if len(sys.argv) == 2 and sys.argv[1] in ('acquire-ui-inputs', 'acquire-consumer-ui-inputs') else
+                        'prepare-ui-inputs-failure.json') if RUN_SCOPE in (UI_SCOPE, UI_CONSUMER_SCOPE) else (
                         'observe-sdk-failure.json' if RUN_SCOPE == 'observe-sdk' else (sys.argv[1] if len(sys.argv) == 2
                         and sys.argv[1] in ('acquire', 'cleanup') else 'prepare-b') + '-failure.json')
                 report = {'status': 'refused', 'stage': stage, 'reason': code,
@@ -2555,4 +2570,7 @@ if __name__ == '__main__':
     # still admits the exact source, host, current run and original work first.
     if len(sys.argv) == 2 and sys.argv[1] in ('prepare-ui-inputs', 'acquire-ui-inputs'):
         RUN_SCOPE = UI_SCOPE
+    elif len(sys.argv) == 2 and sys.argv[1] in UI_CONSUMER_COMMANDS:
+        RUN_SCOPE = UI_CONSUMER_SCOPE
+        SOURCE = UI_CONSUMER_SOURCE
     raise SystemExit(main())

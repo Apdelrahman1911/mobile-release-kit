@@ -1151,6 +1151,13 @@ class NormalPhaseDataTests(unittest.TestCase):
         candidate = dict(value, ref=MODULE.ANDROID_CANDIDATE_REF)
         self.assertEqual(MODULE.android_input_document(MODULE.encoded(candidate)+b'\n',source=source,
             run=run,attempt=attempt,root=root,expected_ref=MODULE.ANDROID_CANDIDATE_REF),candidate)
+        current=dict(value,ref=MODULE.ANDROID_CONSUMER_REF,workflow=MODULE.ANDROID_CONSUMER_WORKFLOW)
+        self.assertEqual(MODULE.android_input_document(MODULE.encoded(current)+b'\n',source=source,
+            run=run,attempt=attempt,root=root,expected_ref=MODULE.ANDROID_CONSUMER_REF),current)
+        for changed in (dict(current,workflow=MODULE.ANDROID_WORKFLOW),dict(current,sourceCommit='b'*40),dict(current,runId='43')):
+            with self.assertRaises(MODULE.Refused):MODULE.android_input_document(MODULE.encoded(changed)+b'\n',source=source,
+                run=run,attempt=attempt,root=root,expected_ref=MODULE.ANDROID_CONSUMER_REF)
+        with self.assertRaises(MODULE.Refused):admit(current)
         with self.assertRaises(MODULE.Refused): admit(candidate) # Never infer trust from the handoff.
         for selected, expected in ((value,MODULE.ANDROID_CANDIDATE_REF),(candidate,MODULE.ANDROID_REF),
                                    (candidate,'refs/heads/main'),(candidate,None)):
@@ -2652,6 +2659,84 @@ class NormalPhaseDataTests(unittest.TestCase):
                     self.assertEqual(stat.S_IMODE(receipt.stat().st_mode), 0o600)
                     self.assertEqual(json.loads(receipt.read_bytes())["observation"]["gateFree"], "unqualified")
 
+
+
+    def test_android_consumer_context_keeps_current_fixture_and_application_sources_distinct(self):
+        import resource, pwd
+        helper = MODULE.SAVED_VERSION_CANDIDATE_ROOT / '.candidate-consumer-helper'
+        normal = Path('/Users/runner/work/_temp/mrk-macos-installed.abcdefgh/normal-ui')
+        env = dict(PATH='/usr/bin:/bin:/usr/sbin:/sbin', HOME='/Users/runner', USER='runner', LOGNAME='runner',
+            TMPDIR=str(normal/'tmp')+'/', LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8', TZ='UTC', DEVELOPER_DIR=MODULE.DEVELOPER,
+            TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE='a'*40, TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE='b'*40,
+            TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB='github-hosted-macos26-arm64',
+            GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit', GITHUB_EVENT_NAME='push',
+            GITHUB_REF=MODULE.ANDROID_CONSUMER_REF, GITHUB_SHA='b'*40, GITHUB_WORKFLOW_SHA='b'*40,
+            GITHUB_WORKFLOW_REF='Apdelrahman1911/mobile-release-kit/'+MODULE.ANDROID_CONSUMER_WORKFLOW+'@'+MODULE.ANDROID_CONSUMER_REF,
+            GITHUB_WORKSPACE=str(MODULE.SAVED_VERSION_CANDIDATE_ROOT), GITHUB_RUN_ID='42', GITHUB_RUN_ATTEMPT='1',
+            RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='macOS', RUNNER_ARCH='ARM64')
+        env[MODULE.ANDROID_CURRENT_ENV] = MODULE.ANDROID_CURRENT_SCOPE
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(MODULE,'__file__',str(helper/'desktop/tools/macos_normal_ui_runner.py')))
+            stack.enter_context(patch.object(MODULE.sys,'platform','darwin'))
+            stack.enter_context(patch.object(MODULE.sys,'version_info',(3,14,7)))
+            stack.enter_context(patch.object(MODULE.sys,'flags',SimpleNamespace(isolated=1,no_site=1)))
+            stack.enter_context(patch.object(MODULE.sys,'dont_write_bytecode',True))
+            stack.enter_context(patch.object(MODULE.platform,'mac_ver',return_value=('26.6.2',(),'')))
+            stack.enter_context(patch.object(pwd,'getpwuid',return_value=SimpleNamespace(pw_uid=1000,pw_gid=1000,pw_name='runner',pw_dir='/Users/runner')))
+            for function in ('getuid','geteuid','getgid','getegid'):
+                stack.enter_context(patch.object(MODULE.os,function,return_value=1000))
+            stack.enter_context(patch.object(MODULE.os,'stat',return_value=SimpleNamespace(st_uid=1000)))
+            stack.enter_context(patch.object(MODULE.Path,'cwd',return_value=helper))
+            for target, machine, arch, hosted in ((MODULE.ARM_TARGET,'arm64','ARM64','github-hosted-macos26-arm64'),
+                                                (MODULE.INTEL_TARGET,'x86_64','X64','github-hosted-macos26-x86_64')):
+                for application in ('a'*40,'b'*40):
+                    for flag in ('--normal-build','--normal-android-candidate-inputs-test','--normal-android-candidate-inputs-summary'):
+                        request=MODULE.normal_request(['--target',target,flag],str(normal/'tmp')+'/')
+                        actual=dict(env,RUNNER_ARCH=arch,TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=hosted,
+                                    TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=application)
+                        cap=32*1024**3 if request['phase']=='build' else 1024**3
+                        with patch.object(MODULE.platform,'machine',return_value=machine),patch.dict(MODULE.os.environ,actual,clear=True),patch.object(resource,'getrlimit',return_value=(cap,cap)):
+                            root,source,forwarded,_=MODULE.normal_context(request)
+                        self.assertEqual((root,source),(helper,'b'*40))
+                        self.assertEqual(forwarded[MODULE.ANDROID_CURRENT_ENV],MODULE.ANDROID_CURRENT_SCOPE)
+                        self.assertEqual(forwarded['TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE'],application)
+                        if request['phase']!='build':
+                            self.assertEqual(forwarded[MODULE.ANDROID_INPUT_ENV],str(normal/'android-input-fixture.json'))
+                            self.assertEqual(forwarded[MODULE.ANDROID_CANDIDATE_ENV],str(normal/'android-candidate-fixture.json'))
+                        self.assertNotIn('GITHUB_SHA',forwarded)
+            request=MODULE.normal_request(['--normal-android-candidate-inputs-test'],str(normal/'tmp')+'/')
+            for key,bad in [('GITHUB_REF',MODULE.ANDROID_CANDIDATE_REF),('GITHUB_WORKFLOW_REF','other'),
+                ('GITHUB_WORKSPACE',str(helper)),('GITHUB_EVENT_NAME','workflow_dispatch'),('GITHUB_SHA','a'*40),
+                (MODULE.ANDROID_CURRENT_ENV,'other'),(MODULE.IOS_TOOLS_CURRENT_ENV,MODULE.IOS_TOOLS_CURRENT_SCOPE),
+                ('TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE','0'*40)]:
+                with self.subTest(field=key),patch.object(MODULE.platform,'machine',return_value='arm64'),patch.dict(MODULE.os.environ,dict(env,**{key:bad}),clear=True),patch.object(resource,'getrlimit',return_value=(1024**3,1024**3)),self.assertRaises(MODULE.Refused):
+                    MODULE.normal_context(request)
+            for flag in ('--normal-android-signed-build-test','--normal-ios-unsigned-archive-test'):
+                request=MODULE.normal_request([flag],str(normal/'tmp')+'/')
+                with self.assertRaises(MODULE.Refused): MODULE.android_candidate_consumer_context(request,env,helper)
+        # The actual existing summary path publishes helper SOURCE and a separate
+        # app label, while retaining original native0/source POST and strict counts.
+        for failure in (None,'native','post'):
+            with tempfile.TemporaryDirectory() as temporary:
+                normal=Path(temporary)/'normal-ui';normal.mkdir();result=normal/MODULE.ANDROID_CANDIDATE_RESULT;result.mkdir()
+                request=MODULE.normal_request(['--normal-android-candidate-inputs-summary'],str(normal/'tmp')+'/')
+                counts=MODULE.encoded(dict(totalTestCount=1,passedTests=1,failedTests=0,skippedTests=0,expectedFailures=0))
+                original=subprocess.CompletedProcess([],65 if failure=='native' else 0,counts,b'')
+                phase=MODULE.NormalPhase(SimpleNamespace(run_owned=lambda argv,**kw:subprocess.CompletedProcess(argv,original.returncode,original.stdout,original.stderr)),
+                    dict(env,**{MODULE.ANDROID_RUN_ENV:'42',MODULE.ANDROID_ATTEMPT_ENV:'1'}),helper,MODULE.PhaseClock(90))
+                with patch.object(MODULE,'normal_source_state',side_effect=[{'same':True},{} if failure=='post' else {'same':True}]):
+                    if failure=='post':
+                        with self.assertRaisesRegex(MODULE.Refused,'candidate-ui-source-pre-post'):
+                            MODULE.execute_normal_phase(phase,request,'b'*40,(1024**3,1024**3))
+                        self.assertFalse((normal/'android-candidate-inputs-summary.runner-admission.json').exists())
+                    else:
+                        returned=MODULE.execute_normal_phase(phase,request,'b'*40,(1024**3,1024**3))
+                        self.assertEqual(returned.returncode,original.returncode)
+                        row=json.loads((normal/'android-candidate-inputs-summary.runner-admission.json').read_bytes())
+                        self.assertEqual((row['sourceCommit'],row['applicationSourceCommit']),('b'*40,'a'*40))
+                        self.assertEqual(row['currentCandidateScope'],MODULE.ANDROID_CURRENT_SCOPE)
+                        self.assertEqual(row['originalReturncode'],original.returncode)
+                        self.assertEqual(row['testCounts'] is None,failure=='native')
 
     def test_current_ios_candidate_context_is_two_source_and_only_two_journeys(self):
         root=MODULE.SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper"

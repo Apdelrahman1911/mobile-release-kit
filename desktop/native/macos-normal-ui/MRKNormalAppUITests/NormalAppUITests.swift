@@ -1184,7 +1184,21 @@ final class NormalAppUITests: XCTestCase {
     }
     // End engineering main fixture; ordinary installed cases below are unchanged.
 
-    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap, currentCandidateSavedVersion, currentCandidateIOSTools }
+    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap, currentCandidateSavedVersion, currentCandidateIOSTools, currentCandidateAndroid }
+
+    private static func androidConsumerContext(_ env: [String: String], candidate: Bool) throws -> Bool {
+        guard let marker = env["MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE"] else { return false }
+        let application = env["MRK_NORMAL_UI_APPLICATION_SOURCE"] ?? ""
+        let harness = env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? ""
+        guard candidate && marker == "current-candidate-android-candidate-only-v1"
+              && [application, harness].allSatisfy({ $0.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
+                                                   && $0 != String(repeating: "0", count: 40) })
+              && ["MRK_NORMAL_UI_CURRENT_IOS_TOOLS", "MRK_NORMAL_UI_CURRENT_SAVED_VERSION",
+                  "MRK_NORMAL_UI_FIXED_CARRIER_RESUME", "MRK_NORMAL_UI_FIXED_NORMAL_BATCH"].allSatisfy({ env[$0] == nil }) else {
+            throw Refusal.condition("current Android consumer profile is missing or mixed")
+        }
+        return true // Application identity comes from the same-job original install, not this marker.
+    }
 
     private let fixedNormalBatches: [String: Set<String>] = [
         "launch-project": ["test.xcresult", "project-test.xcresult"],
@@ -1196,6 +1210,11 @@ final class NormalAppUITests: XCTestCase {
 
     @MainActor private func normalJourneyProfile(for result: String) throws -> SourceProfile {
         let context = ProcessInfo.processInfo.environment
+        if context["MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE"] != nil {
+            try require(result == "android-candidate-inputs-test.xcresult"
+                        && Self.androidConsumerContext(context, candidate: true), "current Android consumer permits only its original journey")
+            return .currentCandidateAndroid
+        }
         if let candidate = context["MRK_NORMAL_UI_CURRENT_IOS_TOOLS"] {
             try require(candidate == "current-candidate-ios-tools-only-v1"
                         && ["diagnostics-test.xcresult", "ios-unsigned-archive-test.xcresult"].contains(result)
@@ -1257,7 +1276,12 @@ final class NormalAppUITests: XCTestCase {
         try require(applicationSource.utf8.count == 40 && applicationSource.unicodeScalars.allSatisfy(hexadecimal.contains)
                     && harnessSource.utf8.count == 40 && harnessSource.unicodeScalars.allSatisfy(hexadecimal.contains),
                     "exact application and harness source bindings are required")
+        if context["MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE"] != nil {
+            try require(profile == .currentCandidateAndroid, "Android consumer marker cannot relabel another journey")
+        }
         switch profile {
+        case .currentCandidateAndroid:
+            try require(Self.androidConsumerContext(context, candidate: true), "Android consumer profile required")
         case .sameBuild:
             try require(applicationSource == harnessSource,
                         "this same-build scenario needs exact application and harness source bindings")
@@ -1981,6 +2005,7 @@ final class NormalAppUITests: XCTestCase {
         private var candidateHandoff: (Directory, File)?
         private func adoptAndroidCandidate(_ temporary: Directory, certificate: String) throws {
             let env = ProcessInfo.processInfo.environment
+            let consumer = try NormalAppUITests.androidConsumerContext(env, candidate: true)
             guard let path = env["MRK_NORMAL_UI_ANDROID_CANDIDATE_FIXTURE"],
                   path.range(of: #"^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}/normal-ui/android-candidate-fixture\.json$"#, options: .regularExpression) != nil else {
                 throw Refusal.condition("fixture: candidate owner handoff unavailable")
@@ -1998,7 +2023,7 @@ final class NormalAppUITests: XCTestCase {
                   Set(row.keys) == ["schemaVersion","scope","root","sourceCommit","target","runId","runAttempt","publicCertificateSha256","projectCommit","projectTree","directories","files"],
                   row["schemaVersion"] as? Int == 1, row["scope"] as? String == "one-owned-android-candidate-project",
                   row["sourceCommit"] as? String == env["MRK_NORMAL_UI_HARNESS_SOURCE"],
-                  row["sourceCommit"] as? String == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
+                  (consumer || row["sourceCommit"] as? String == env["MRK_NORMAL_UI_APPLICATION_SOURCE"]),
                   row["target"] as? String == AndroidInputs.target,
                   row["runId"] as? String == env["MRK_NORMAL_UI_ANDROID_RUN_ID"],
                   row["runAttempt"] as? String == env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"],
@@ -2374,7 +2399,7 @@ final class NormalAppUITests: XCTestCase {
                 do { try check() } catch { if primary == nil { primary = error } }
                 if let primary { throw primary }
             }
-            private func load(normal: Directory, path: String, source: String, run: String, attempt: String, candidate:Bool,
+            private func load(normal: Directory, path: String, source: String, run: String, attempt: String, candidate:Bool, consumer:Bool,
                               check: () throws -> Void) throws {
                 rootPath = path + "/android-inputs"
                 let handoff = try leaf(normal, name: "android-input-fixture.json", limit: 16 * 1024, check: check)
@@ -2386,8 +2411,8 @@ final class NormalAppUITests: XCTestCase {
                     && object["scope"] as? String == "one-owned-android-ui-inputs" && object["sourceCommit"] as? String == source
                     && object["target"] as? String == Self.target && object["runId"] as? String == run
                     && object["runAttempt"] as? String == attempt && object["root"] as? String == rootPath
-                    && object["workflow"] as? String == ".github/workflows/desktop-macos-installed.yml"
-                    && object["ref"] as? String == (candidate ? "refs/heads/verify/desktop-macos-candidate" : "refs/heads/verify/desktop-macos-installed")
+                    && object["workflow"] as? String == (consumer ? ".github/workflows/desktop-macos-candidate-consume.yml" : ".github/workflows/desktop-macos-installed.yml")
+                    && object["ref"] as? String == (consumer ? "refs/heads/verify/desktop-macos-candidate-consume" : candidate ? "refs/heads/verify/desktop-macos-candidate" : "refs/heads/verify/desktop-macos-installed")
                     && object["sourceCatalogueSha256"] as? String == Self.catalogue,
                     "Android private current context differs")
                 object["schemaVersion"] = 1; object["parentReturncodeRequired"] = 0
@@ -2481,8 +2506,9 @@ final class NormalAppUITests: XCTestCase {
             }
             static func admit(candidate:Bool=false, check: () throws -> Void) throws -> AndroidInputs {
                 let env = ProcessInfo.processInfo.environment
+                let consumer = try NormalAppUITests.androidConsumerContext(env, candidate: candidate)
                 guard let source = env["MRK_NORMAL_UI_HARNESS_SOURCE"], Self.matches(source, #"^[0-9a-f]{40}$"#),
-                      env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source,
+                      (consumer || env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source),
                       env["MRK_NORMAL_UI_HOSTED_JOB"] == Self.hostedJob,
                       let run = env["MRK_NORMAL_UI_ANDROID_RUN_ID"], Self.matches(run, #"^[1-9][0-9]{0,19}$"#),
                       let attempt = env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"], Self.matches(attempt, #"^[1-9][0-9]{0,19}$"#),
@@ -2501,7 +2527,7 @@ final class NormalAppUITests: XCTestCase {
                         parent = try value.directory(parent, name: name, mode: mode,
                             systemAncestor: Self.systemAncestors.contains(path), check: check)
                     }
-                    try value.load(normal: parent, path: normal, source: source, run: run, attempt: attempt, candidate:candidate, check: check)
+                    try value.load(normal: parent, path: normal, source: source, run: run, attempt: attempt, candidate:candidate, consumer:consumer, check: check)
                     return value
                 } catch {
                     let primary = error
@@ -7376,7 +7402,8 @@ final class NormalAppUITests: XCTestCase {
             else {try fixture.prepare(.androidSignedBuild);try fixture.prepareAndroidCertificate(certificate)}
         }
         guard let initialInputs = inputs else { throw Refusal.condition("Android private input admission absent") }
-        let (app, window, renderer) = try launchForJourney()
+        let currentConsumer = try Self.androidConsumerContext(ProcessInfo.processInfo.environment, candidate: candidateInputs)
+        let (app, window, renderer) = try launchForJourney(profile: currentConsumer ? .currentCandidateAndroid : .sameBuild)
         try stage("android-public-project-and-certificate") {
             try press(renderer, "Open project folder", renderer: renderer)
             let sheet = try nativeSheet(window, title: "Choose a mobile project folder")

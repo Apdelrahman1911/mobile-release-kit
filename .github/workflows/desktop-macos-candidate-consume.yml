@@ -52,7 +52,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          case "$MRK_CANDIDATE_MODE" in restore|ordinary-ui|ordinary-ios-ui|ordinary-saved-ui|ordinary-saved-version-ui) ;; *) exit 1 ;; esac
+          case "$MRK_CANDIDATE_MODE" in restore|ordinary-ui|ordinary-ios-ui|ordinary-saved-ui|ordinary-saved-version-ui|ordinary-android-ui) ;; *) exit 1 ;; esac
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$RUNNER_OS" = macOS
           test "$GITHUB_WORKSPACE" = /Users/runner/work/mobile-release-kit/mobile-release-kit
@@ -260,7 +260,7 @@ jobs:
 
       - name: Install the exact final candidate once without rebuilding or signing it
         id: ordinary_install
-        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui'
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui' || env.MRK_CANDIDATE_MODE == 'ordinary-android-ui'
         timeout-minutes: 12
         shell: bash
         env:
@@ -503,6 +503,146 @@ jobs:
           # build/test outputs, not the installed app, finite phase controls or
           # private synthetic fixtures.
           # Unknown owners stop the sequence and remain for hosted VM disposal.
+      - name: Build only the current Android test harness after the original candidate installation
+        id: ordinary_android_build
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' && steps.ordinary_install.outcome == 'success'
+        timeout-minutes: 11
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_ANDROID_CONSUMER_PHASE: build
+        run: &mrk_android_consumer_phase |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          normal="$MRK_MACOS_WORK/normal-ui"
+          helper="$GITHUB_WORKSPACE/.candidate-consumer-helper"
+          case "$MRK_MACOS_TARGET" in
+            aarch64-apple-darwin) hosted=github-hosted-macos26-arm64 ;;
+            x86_64-apple-darwin) hosted=github-hosted-macos26-x86_64 ;;
+            *) exit 1 ;;
+          esac
+          case "$MRK_ANDROID_CONSUMER_PHASE" in
+            build) prior="$MRK_MACOS_WORK/consumer-install.status" ;;
+            inputs) prior="$normal/build.status" ;;
+            test) prior="$normal/android-inputs.status" ;;
+            *) exit 1 ;;
+          esac
+          # This status supplements the preceding real step success; it never
+          # substitutes for the original install/build/supplier invocation.
+          [[ -f "$prior" && ! -L "$prior" && "$(< "$prior")" == 0 ]]
+          cd "$helper"
+          run_original() {
+            local label=$1 module=$2 status saved
+            shift 2
+            set +e
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+              "TMPDIR=$normal/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+              DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+              "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
+              "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+              "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+              "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+              "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" \
+              "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" "MRK_ANDROID_PREPARATION_WORK=$MRK_MACOS_WORK" \
+              "MRK_CANDIDATE_MODE=$MRK_CANDIDATE_MODE" "MRK_CANDIDATE_SOURCE=$MRK_CANDIDATE_SOURCE" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$hosted" \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$MRK_CANDIDATE_SOURCE" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+              TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE=current-candidate-android-candidate-only-v1 \
+              "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE=$normal/android-input-fixture.json" \
+              "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_RUN_ID=$GITHUB_RUN_ID" \
+              "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+              "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B "$helper/desktop/tools/$module" "$@" \
+              > "$normal/$label.caller.stdout" 2> "$normal/$label.caller.stderr"
+            status=$?
+            printf '%s\n' "$status" > "$normal/$label.status"
+            saved=$?
+            set -e
+            printf 'MRK_CANDIDATE_ANDROID_PHASE=%s;originalReturncode=%s;observationOnly=true\n' "$label" "$status" || :
+            if [[ "$status" != 0 ]]; then return "$status"; fi
+            [[ "$saved" == 0 ]] || return "$saved"
+          }
+          case "$MRK_ANDROID_CONSUMER_PHASE" in
+            build)
+              # Exclusive fresh directories; --normal-build does not create them.
+              /bin/mkdir -m 700 "$normal"
+              /bin/mkdir -m 700 "$normal/tmp"
+              ulimit -f 33554432
+              run_original build macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-build
+              ;;
+            inputs)
+              run_original android-inputs macos_android_dependency_preparation.py prepare-consumer-ui-inputs
+              ;;
+            test)
+              ulimit -f 1048576
+              run_original android-candidate-inputs-test macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-android-candidate-inputs-test
+              run_original android-candidate-inputs-summary macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-android-candidate-inputs-summary
+              ;;
+          esac
+      - name: Prepare disposable Android tools and signing inputs without rebuilding the application
+        id: ordinary_android_inputs
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' && steps.ordinary_android_build.outcome == 'success'
+        timeout-minutes: 22
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_ANDROID_CONSUMER_PHASE: inputs
+        run: *mrk_android_consumer_phase
+      - name: Build and sign an Android candidate through the installed application
+        id: ordinary_android_ui
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' && steps.ordinary_android_inputs.outcome == 'success'
+        timeout-minutes: 23
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_ANDROID_CONSUMER_PHASE: test
+        run: *mrk_android_consumer_phase
+      - name: Retire only joined Android test build and result directories
+        id: ordinary_android_cleanup
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' && steps.ordinary_android_ui.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B - "$MRK_MACOS_WORK/normal-ui" <<'PY_ANDROID_CLEAN'
+          import os, shutil, stat, sys
+          from pathlib import Path
+          normal = Path(sys.argv[1]); parent = normal.lstat()
+          assert normal.name == 'normal-ui' and normal.parent.parent == Path('/Users/runner/work/_temp')
+          assert stat.S_ISDIR(parent.st_mode) and parent.st_uid == os.getuid() != 0
+          assert stat.S_IMODE(parent.st_mode) == 0o700 and shutil.rmtree.avoids_symlink_attacks
+          for name in ('DerivedData', 'android-candidate-inputs-test.xcresult'):
+              path = normal / name; before = path.lstat()
+              assert stat.S_ISDIR(before.st_mode) and before.st_uid == parent.st_uid and before.st_dev == parent.st_dev
+              shutil.rmtree(path)
+          PY_ANDROID_CLEAN
+          # Keep finite evidence and the installed app. Private synthetic inputs
+          # and any uncertain resources are never uploaded; hosted disposal follows.
+      - name: Retain only successful Android observations and original caller statuses
+        if: env.MRK_CANDIDATE_MODE == 'ordinary-android-ui' && steps.ordinary_android_cleanup.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-ordinary-android-ui-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MRK_MACOS_WORK }}/consumer-result.json
+            ${{ env.MRK_MACOS_WORK }}/consumer-install.status
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/build.command-admission.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/build.status
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/android-inputs.status
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs-test.runner-admission.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs-test.status
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs-summary.runner-admission.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs-summary.status
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs.facts.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          # No raw XCTest captures, private inputs, keystore, scalars or xcresult.
+
       - name: Retain only the bounded ordinary UI observation and positive cleanup
         if: (env.MRK_CANDIDATE_MODE == 'ordinary-ui' && steps.ordinary_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-ios-ui' && steps.ordinary_ios_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-saved-ui' && steps.ordinary_saved_ui.outcome == 'success') || (env.MRK_CANDIDATE_MODE == 'ordinary-saved-version-ui' && steps.ordinary_saved_version_ui.outcome == 'success')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

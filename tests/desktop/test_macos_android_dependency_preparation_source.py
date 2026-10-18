@@ -92,6 +92,11 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     for ref in ('refs/heads/main', 'refs/heads/verify/desktop-macos-preview', '', None, True):
                         with self.assertRaises(helper.Refused): helper.ui_reference({'GITHUB_REF': ref})
 
+                    with patch.object(helper,'RUN_SCOPE',helper.UI_CONSUMER_SCOPE),patch.dict(helper.os.environ,{'GITHUB_REF':helper.UI_CONSUMER_REF}):
+                        current=dict(receipt,ref=helper.UI_CONSUMER_REF,workflow=helper.UI_CONSUMER_WORKFLOW)
+                        self.assertEqual(admit(current),current)
+                        with self.assertRaises(helper.Refused):admit(dict(current,workflow=helper.UI_WORKFLOW))
+                        with self.assertRaises(helper.Refused):admit(dict(current,sourceCommit='e'*40))
                     other=helper.ui_selection('x86_64-apple-darwin' if target==helper.UI_TARGET else helper.UI_TARGET)
                     for key,value in (('target','unsupported'),('catalogueSha256',other[3][1]),('archives',other[4]),
                                       ('archiveBytes',archive_bytes+1),('protectedRegistration',True),('uiQualification',True),
@@ -110,6 +115,53 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         self.assertEqual(helper.ui_roster_match([row],dirs,expected,sealed=True),3)
         for changed in (dict(row,sha256='e'*64),dict(row,path='dir/foreign'),dict(row,bytes=4)):
             with self.assertRaises(helper.Refused): helper.ui_roster_match([changed],dirs,expected,sealed=True)
+
+
+    def test_consumer_ui_context_uses_actual_helper_and_never_spoofs_old_route(self):
+        from contextlib import ExitStack
+        from unittest.mock import patch
+        helper=fixture_module('desktop/tools/macos_android_dependency_preparation.py','_mrk_consumer_ui_supplier')
+        root=helper.UI_CONSUMER_SOURCE
+        work=Path('/Users/runner/work/_temp/mrk-macos-installed.abcdefgh')
+        env=dict(GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit',GITHUB_EVENT_NAME='push',
+            GITHUB_REF=helper.UI_CONSUMER_REF,GITHUB_SHA='b'*40,GITHUB_WORKFLOW_SHA='b'*40,
+            GITHUB_WORKFLOW_REF='Apdelrahman1911/mobile-release-kit/'+helper.UI_CONSUMER_WORKFLOW+'@'+helper.UI_CONSUMER_REF,
+            GITHUB_WORKSPACE=str(root.parent),GITHUB_RUN_ID='42',GITHUB_RUN_ATTEMPT='1',
+            RUNNER_ENVIRONMENT='github-hosted',RUNNER_OS='macOS',RUNNER_ARCH='ARM64',
+            MRK_MACOS_TARGET=helper.UI_TARGET,MRK_ANDROID_PREPARATION_WORK=str(work))
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            actual=Path(temporary);actual.chmod(0o700);opened=[];closed=[]
+            def original(path,retained):
+                self.assertEqual((path,retained),(work/'normal-ui',True))
+                fd=os.open(actual,os.O_RDONLY|os.O_DIRECTORY);opened.append(fd);return ([fd],[])
+            def close(fds,rows):
+                self.assertEqual(rows,[])
+                for fd in fds:os.close(fd);closed.append(fd)
+            stack.enter_context(patch.object(helper,'RUN_SCOPE',helper.UI_CONSUMER_SCOPE))
+            stack.enter_context(patch.object(helper,'SOURCE',root))
+            stack.enter_context(patch.object(helper,'__file__',str(root/'desktop/tools/macos_android_dependency_preparation.py')))
+            stack.enter_context(patch.object(helper.sys,'platform','darwin'))
+            stack.enter_context(patch.object(helper.sys,'version_info',(3,14,7)))
+            stack.enter_context(patch.object(helper.sys,'flags',types.SimpleNamespace(isolated=1,no_site=1)))
+            stack.enter_context(patch.object(helper.sys,'dont_write_bytecode',True))
+            stack.enter_context(patch.object(helper.Path,'cwd',return_value=root))
+            stack.enter_context(patch.object(helper,'chain',side_effect=original))
+            stack.enter_context(patch.object(helper,'close_chain',side_effect=close))
+            for target,machine,arch in ((helper.UI_TARGET,'arm64','ARM64'),('x86_64-apple-darwin','x86_64','X64')):
+                actual_env=dict(env,MRK_MACOS_TARGET=target,RUNNER_ARCH=arch)
+                with patch.object(helper.os,'uname',return_value=types.SimpleNamespace(machine=machine)),patch.dict(helper.os.environ,actual_env,clear=True):
+                    self.assertEqual(helper.ui_context(),(work,target))
+                    self.assertEqual(helper.ui_reference(helper.os.environ),helper.UI_CONSUMER_REF)
+                    self.assertEqual(helper.ui_workflow(),helper.UI_CONSUMER_WORKFLOW)
+            for key,bad in [('GITHUB_REF',helper.UI_REF),('GITHUB_EVENT_NAME','workflow_dispatch'),
+                ('GITHUB_WORKSPACE',str(root)),('GITHUB_WORKFLOW_REF','other'),('GITHUB_SHA','a'*40),('RUNNER_ARCH','X64')]:
+                before=len(opened)
+                with self.subTest(field=key),patch.object(helper.os,'uname',return_value=types.SimpleNamespace(machine='arm64')),patch.dict(helper.os.environ,dict(env,**{key:bad}),clear=True),self.assertRaises(helper.Refused):helper.ui_context()
+                self.assertEqual(len(opened),before)
+            with patch.object(helper,'__file__',str(root.parent/'desktop/tools/macos_android_dependency_preparation.py')),patch.dict(helper.os.environ,env,clear=True),self.assertRaisesRegex(helper.Refused,'ui-consumer-fixed-source'):helper.ui_context()
+            self.assertEqual(opened,closed)
+        with patch.object(helper,'RUN_SCOPE',helper.UI_SCOPE),self.assertRaises(helper.Refused):
+            helper.ui_reference({'GITHUB_REF':helper.UI_CONSUMER_REF})
 
     def test_fixed_preparation_owner_resources_scope_and_budgets(self):
         source = (ROOT / 'desktop/tools/macos_android_dependency_preparation.py').read_text()
@@ -134,6 +186,9 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         dispatcher = compile(ast.Module(body=[entry], type_ignores=[]), '<fixed-ui-cli>', 'exec')
         for argv, expected in ((['owner', 'prepare-ui-inputs'], 'prepare-ui-inputs'),
                                (['owner', 'acquire-ui-inputs'], 'prepare-ui-inputs'),
+                               (['owner', 'prepare-consumer-ui-inputs'], 'prepare-consumer-ui-inputs'),
+                               (['owner', 'acquire-consumer-ui-inputs'], 'prepare-consumer-ui-inputs'),
+                               (['owner', 'prepare-consumer-ui-inputs','extra'], 'prepare-b'),
                                (['owner', 'prepare-b'], 'prepare-b'),
                                (['owner', 'acquire'], 'prepare-b'),
                                (['owner', 'cleanup'], 'prepare-b'),
@@ -142,7 +197,10 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                                (['owner'], 'prepare-b')):
             observed = []
             namespace = {'__name__': '__main__', 'sys': types.SimpleNamespace(argv=argv),
-                         'RUN_SCOPE': 'prepare-b', 'UI_SCOPE': 'prepare-ui-inputs'}
+                         'RUN_SCOPE': 'prepare-b', 'UI_SCOPE': 'prepare-ui-inputs',
+                         'UI_CONSUMER_SCOPE': 'prepare-consumer-ui-inputs',
+                         'UI_CONSUMER_COMMANDS': ('prepare-consumer-ui-inputs','acquire-consumer-ui-inputs'),
+                         'SOURCE': Path('/candidate'), 'UI_CONSUMER_SOURCE': Path('/candidate/.candidate-consumer-helper')}
             def original_receiver():
                 observed.append((namespace['RUN_SCOPE'], tuple(namespace['sys'].argv)))
                 return 78  # A selected word alone is never context admission or success.
@@ -151,6 +209,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 exec(dispatcher, namespace)
             self.assertEqual(stopped.exception.code, 78)
             self.assertEqual(observed, [(expected, tuple(argv))])
+            self.assertEqual(namespace['SOURCE'], namespace['UI_CONSUMER_SOURCE'] if expected == 'prepare-consumer-ui-inputs' else Path('/candidate'))
             observed.clear()
             namespace.update(__name__='inert_import', RUN_SCOPE='prepare-b')
             exec(dispatcher, namespace)

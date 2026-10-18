@@ -156,6 +156,91 @@ def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False, saved_files=Fal
 
 
 class CandidateUITests(unittest.TestCase):
+    def test_android_workflow_reuses_candidate_and_stops_at_the_original_failure(self):
+        """Real Bash ordering; only the invoked native Python entry is inert."""
+        import tempfile
+        import textwrap
+        workflow = (ROOT / '.github/workflows/desktop-macos-candidate-consume.yml').read_text()
+        script = textwrap.dedent(workflow.split('        run: &mrk_android_consumer_phase |\n', 1)[1]
+                                 .split('\n      - name:', 1)[0])
+        cases = [('success', N.ARM_TARGET), ('success', 'x86_64-apple-darwin')]
+        cases += [(name, N.ARM_TARGET) for name in ('build-fails', 'inputs-fails', 'test-fails',
+            'summary-fails', 'build-status-fails', 'inputs-status-fails', 'test-status-fails',
+            'test-and-status-fail', 'missing-install', 'missing-context')]
+        for scenario, target in cases:
+            with self.subTest(scenario=scenario, target=target), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); workspace = root / 'workspace'; work = root / 'work'
+                helper = workspace / '.candidate-consumer-helper'
+                (helper / 'desktop/tools').mkdir(parents=True)
+                (work / 'host-python/bin').mkdir(parents=True)
+                (work / 'host-python/bin/python3').symlink_to(sys.executable)
+                if scenario != 'missing-install':
+                    (work / 'consumer-install.status').write_text('0\n')
+                child = textwrap.dedent(f'''
+                    import os, pathlib, sys
+                    phase = ('inputs' if sys.argv[1:] == ['prepare-consumer-ui-inputs'] else
+                             'build' if sys.argv[-1] == '--normal-build' else
+                             'summary' if sys.argv[-1].endswith('-summary') else 'test')
+                    assert sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
+                    assert 'SHOULD_NOT_REACH_NATIVE' not in os.environ and 'GITHUB_TOKEN' not in os.environ
+                    assert os.environ['GITHUB_SHA'] == os.environ['GITHUB_WORKFLOW_SHA'] == 'b' * 40
+                    assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE'] == 'a' * 40
+                    assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE'] == 'b' * 40
+                    assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE'] == 'current-candidate-android-candidate-only-v1'
+                    assert os.environ['GITHUB_REF'] == 'refs/heads/verify/desktop-macos-candidate-consume'
+                    assert pathlib.Path.cwd() == pathlib.Path(os.environ['GITHUB_WORKSPACE']) / '.candidate-consumer-helper'
+                    assert os.environ['GITHUB_RUN_ID'] == '123' and os.environ['GITHUB_RUN_ATTEMPT'] == '1'
+                    target = {target!r}
+                    assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB'] == ('github-hosted-macos26-arm64' if target == 'aarch64-apple-darwin' else 'github-hosted-macos26-x86_64')
+                    if phase != 'inputs':
+                        assert sys.argv[1:3] == ['--target', target]
+                    normal = pathlib.Path(os.environ['TMPDIR']).parent
+                    with (normal / 'tmp/calls.txt').open('a') as stream:
+                        stream.write(phase + '\\n')
+                    scenario = {scenario!r}
+                    status_phase = {{'build-status-fails': 'build', 'inputs-status-fails': 'inputs',
+                        'test-status-fails': 'test', 'test-and-status-fail': 'test'}}.get(scenario)
+                    label = {{'build': 'build', 'inputs': 'android-inputs', 'test': 'android-candidate-inputs-test',
+                             'summary': 'android-candidate-inputs-summary'}}[phase]
+                    if phase == status_phase:
+                        (normal / (label + '.status')).mkdir()
+                    if scenario == phase + '-fails' or scenario == 'test-and-status-fail' and phase == 'test':
+                        sys.exit({{'build': 17, 'inputs': 19, 'test': 23, 'summary': 29}}[phase])
+                ''')
+                for name in ('macos_normal_ui_runner.py', 'macos_android_dependency_preparation.py'):
+                    (helper / 'desktop/tools' / name).write_text(child)
+                env = dict(PATH='/usr/bin:/bin', MRK_MACOS_WORK=str(work), GITHUB_WORKSPACE=str(workspace),
+                    MRK_MACOS_TARGET=target, MRK_CANDIDATE_SOURCE='a'*40, MRK_CANDIDATE_MODE='ordinary-android-ui',
+                    GITHUB_SHA='b'*40, GITHUB_WORKFLOW_SHA='b'*40, GITHUB_EVENT_NAME='push',
+                    GITHUB_REF='refs/heads/verify/desktop-macos-candidate-consume',
+                    GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit',
+                    GITHUB_WORKFLOW_REF='Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-consume.yml@refs/heads/verify/desktop-macos-candidate-consume',
+                    GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='1', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='macOS',
+                    RUNNER_ARCH='ARM64' if target == N.ARM_TARGET else 'X64',
+                    SHOULD_NOT_REACH_NATIVE='inert-ambient-value', GITHUB_TOKEN='inert-not-a-real-token')
+                if scenario == 'missing-context':
+                    del env['GITHUB_WORKFLOW_SHA']
+                for phase in ('build', 'inputs', 'test'):
+                    actual = subprocess.run(['/bin/bash', '--noprofile', '--norc', '-c', script],
+                        cwd=workspace, env=dict(env, MRK_ANDROID_CONSUMER_PHASE=phase), capture_output=True, timeout=10)
+                    if actual.returncode:
+                        break  # Mirrors the workflow's actual-success dependency edges.
+                expected = (0 if scenario == 'success' else 17 if scenario == 'build-fails' else
+                            19 if scenario == 'inputs-fails' else 23 if scenario in ('test-fails', 'test-and-status-fail') else
+                            29 if scenario == 'summary-fails' else 1)
+                if scenario == 'missing-context':
+                    self.assertNotEqual(actual.returncode, 0)
+                else:
+                    self.assertEqual(actual.returncode, expected, actual.stderr.decode(errors='replace'))
+                calls = work / 'normal-ui/tmp/calls.txt'
+                observed = calls.read_text().splitlines() if calls.exists() else []
+                stop = (0 if scenario in ('missing-install', 'missing-context') else
+                        1 if scenario.startswith('build-') else 2 if scenario.startswith('inputs-') else
+                        3 if scenario.startswith('test-') else 4)
+                self.assertEqual(observed, ['build', 'inputs', 'test', 'summary'][:stop])
+                self.assertFalse((work / 'candidate-ui-result.json').exists(), 'no synthesized UI qualification')
+
+
     def test_same_job_install_handoff_is_not_legacy_or_forged_finality(self):
         for target in (N.ARM_TARGET,N.INTEL_TARGET):
             selected,context,value=fixture(target)
