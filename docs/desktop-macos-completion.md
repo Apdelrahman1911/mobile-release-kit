@@ -2,6 +2,28 @@
 
 Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.**
 
+### 2026-10-18: focused follow-on native interaction checks
+
+Run `39142153087/1 @a602c26a`: Restore helper build/audit and original-absence
+baseline now **passed**. Candidate install and remaining Restore phases are still
+pending at this update. Three UI jobs failed; they are not feature passes.
+
+This independently reviewed helper-only batch removes the unsupported empty-menu
+census, retains exact owned menu-item selection/dismissal/value readback, uses
+XCTest's documented click-to-scroll for the same disclosure element, and matches
+format-validation text by exact String AXValue rather than heading aliases.
+Existing failure diagnostics retain first assertion sites in four more selected
+methods and three finite failure reasons; they never copy private runtime prose.
+The extended existing diagnostic/privacy test passed locally (one method, zero
+skips); this is not native interaction evidence.
+
+Next run targets persistence (the representative dropdown journey), ordinary
+project configuration, saved evidence, and pending iOS only. Android/unsigned iOS
+are deferred until their shared interaction is understood, not waived. The older
+Restore run is allowed to finish; no duplicate Restore build or app signing.
+Main/public releases remain unchanged. Remaining installed features, Intel,
+removal/update continuity and final readiness are still unresolved.
+
 ### 2026-10-18: protected Restore completion and real native dropdowns
 
 Run `39140262622/1 @982392a5` completed with **seven failed jobs, no whole-cohort passes**.

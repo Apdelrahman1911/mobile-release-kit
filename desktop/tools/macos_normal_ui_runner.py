@@ -3922,7 +3922,7 @@ def panel_topology_diagnostics(stdout, stderr):
 PROJECT_STAGES = tuple('launch fixture project-open android-source-jdk android-source-sdk android-source-gradle android-source-cancel android-source-reselect android-source-refused field-version field-project field-workspace field-metadata field-file-cancel field-directory-cancel field-review quit project-cancel config github text version images-cancel images readback-and-quit'.split())
 
 
-def project_wait_condition(message, *, stages=()):
+def project_wait_condition(message, *, stages=(), ios_pending=False):
     """Classify complete fixed XCTest errors, never copy their private prose."""
     reasons = (
         (b"case clock unavailable", "case-clock-unavailable"),
@@ -3936,7 +3936,11 @@ def project_wait_condition(message, *, stages=()):
         (b"static text prefix role differs", "static-text-role"),
         (b"static text content exceeds its bound", "static-text-bytes"),
         (b"static text failure roster exceeds its bound", "static-text-failures"),
+        (b"static text snapshot tree exceeds its bound", "static-text-tree"),
+        (b"static text observation changed during readback", "static-text-changed"),
     )
+    if ios_pending:
+        reasons += ((b"current account session absent or ambiguous", "account-session-unavailable"),)
     # Only the caller's fixed selected-subset stages; never a runtime suffix.
     reasons += tuple((prefix + stage.encode("ascii"), code) for stage in stages for prefix, code in (
         (b"missing or ambiguous expected control in ", "expected-control-missing-or-ambiguous"),
@@ -3952,12 +3956,16 @@ def project_wait_condition(message, *, stages=()):
     return None
 
 
-def project_require_source_sites(stdout, stderr, *, release_evidence=False, saved_version=False, ios_pending=False):
+def project_require_source_sites(stdout, stderr, *, release_evidence=False, saved_version=False, ios_pending=False,
+                                 persistence=False, saved_checks=False, android_candidate=False):
     """First-latched SOURCE sites for the exact selected cohort, never error prose."""
-    need(all(type(flag) is bool for flag in (release_evidence, saved_version, ios_pending))
-         and sum((release_evidence, saved_version, ios_pending)) <= 1, "source-site-selection")
+    flags = (release_evidence, saved_version, ios_pending, persistence, saved_checks, android_candidate)
+    need(all(type(flag) is bool for flag in flags) and sum(flags) <= 1, "source-site-selection")
     namespace = b"MRK_NORMAL_PROJECT_"
-    methods = ((b"testInstalledIOSPendingAccountRecoveryThroughUI",) if ios_pending else
+    methods = ((ANDROID_CANDIDATE_METHOD.encode("ascii"),) if android_candidate else
+               (b"testSyntheticPersistentCredentials",) if persistence else
+               (b"testSyntheticProjectSavedOfflineChecks", b"testSyntheticProjectEmptyBuildInputInspection") if saved_checks else
+               (b"testInstalledIOSPendingAccountRecoveryThroughUI",) if ios_pending else
                (b"testSyntheticProjectSavedVersionRecovery",) if saved_version else
                (b"testSyntheticProjectSavedReleaseEvidence",) if release_evidence else
                (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages",
@@ -4577,11 +4585,15 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             else:
                 value["findingsTruncated"] = True
 
-    if any(key in value for key in ("projectProgress", "releaseEvidenceProgress", "savedVersionProgress", "iosPendingProgress")):
+    if any(key in value for key in ("projectProgress", "releaseEvidenceProgress", "savedVersionProgress", "iosPendingProgress",
+                                    "persistenceProgress", "savedChecksProgress", "androidCandidateProgress")):
         sites = project_require_source_sites(original.stdout, original.stderr,
                                              release_evidence="releaseEvidenceProgress" in value,
                                              saved_version="savedVersionProgress" in value,
-                                             ios_pending="iosPendingProgress" in value)
+                                             ios_pending="iosPendingProgress" in value,
+                                             persistence="persistenceProgress" in value,
+                                             saved_checks="savedChecksProgress" in value,
+                                             android_candidate="androidCandidateProgress" in value)
         if sites is None:
             require_invalid = True
         else:
@@ -4627,11 +4639,11 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                                             or selection == "saved-checks-test.xcresult" and match.group(3) in (
                                                 b"testSyntheticProjectSavedOfflineChecks", b"testSyntheticProjectEmptyBuildInputInspection"))):
                                         stages = SAVED_DIAGNOSTIC_STAGES[selection][1] if selection in (
-                                            "persistence-test.xcresult", "saved-checks-test.xcresult") else ()
+                                            "persistence-test.xcresult", "saved-checks-test.xcresult", IOS_PENDING_RESULT) else ()
                                         if selection == "saved-checks-test.xcresult":
                                             prefix = "offline-" if match.group(3) == b"testSyntheticProjectSavedOfflineChecks" else "recovery-idle-"
                                             stages = tuple(stage for stage in stages if stage.startswith(prefix))
-                                        condition = project_wait_condition(message, stages=stages)
+                                        condition = project_wait_condition(message, stages=stages, ios_pending=selection == IOS_PENDING_RESULT)
                                         if condition is not None:
                                             finding["condition"] = condition
                                     if finding not in xctest_issues:

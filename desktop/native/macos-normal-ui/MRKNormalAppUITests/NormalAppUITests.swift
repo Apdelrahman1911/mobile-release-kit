@@ -21,6 +21,10 @@ final class NormalAppUITests: XCTestCase {
         case savedReleaseEvidence = "testSyntheticProjectSavedReleaseEvidence"
         case savedVersionRecovery = "testSyntheticProjectSavedVersionRecovery"
         case iosPendingRecovery = "testInstalledIOSPendingAccountRecoveryThroughUI"
+        case persistentCredentials = "testSyntheticPersistentCredentials"
+        case savedOfflineChecks = "testSyntheticProjectSavedOfflineChecks"
+        case emptyBuildInputInspection = "testSyntheticProjectEmptyBuildInputInspection"
+        case androidCandidateInputs = "testSyntheticProjectAndroidCandidateInputs"
     }
     private enum DashboardReason: String {
         case loading, notLoaded = "not-loaded", bridgeUnavailable = "bridge-unavailable"
@@ -5344,20 +5348,23 @@ final class NormalAppUITests: XCTestCase {
         // descendant of the HTML select. Monitor the already-owned payload;
         // this never launches or adopts another application.
         let app = XCUIApplication(url: OrdinaryLaunch.payloadURL)
-        try require(app.menus.count == 0, "an unrelated application menu is already open", line: line)
         control.click()
-        let menu = try waitElement(app.menus, in: app, line: line)
-        let item = try waitElement(menu.menuItems.matching(identifier: value), in: menu, enabled: true, line: line)
-        try require(item.isHittable, "owned selection menu item is not actionable", line: line)
+        // A menu-tree query can include closed menu-bar subtrees. The intended
+        // exact menu item, not an empty application menu census, is the action.
+        let item = try waitElement(app.menuItems.matching(identifier: value), in: app, enabled: true, line: line)
+        try require(item.isHittable, "owned selection menu item is not actionable")
         item.click()
-        try waitGone(menu, line: line)
-        try require(control.value as? String == value, "selected value was not observed", line: line)
+        try waitGone(item, line: line)
+        try require(control.value as? String == value, "selected value was not observed")
     }
     @MainActor private func expand(_ root: XCUIElement, prefix: String, renderer: XCUIElement,
                                   line: UInt = #line) throws {
         let item = try waitElement(controls(root, [.disclosureTriangle, .button], label: prefix, prefix: true), in: root, enabled: true)
-        try reveal(item, in: renderer, line: line)
+        // click() uses the selected element's standard scroll-to-visible path.
+        // An offscreen isHittable precondition would block that documented step.
+        _ = try remaining(5)
         item.click() // Each fixed details element starts closed in this journey.
+        _ = try remaining(5)
     }
     @MainActor private func displayed(_ root: XCUIElement, label: String, equals expected: String) throws {
         let item = try waitElement(named(root, label), in: root)
@@ -5947,6 +5954,9 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor func testSyntheticPersistentCredentials() throws {
+        projectRequireDiagnosticMethod = .persistentCredentials
+        projectRequireDiagnosticEmitted = false
+        defer { projectRequireDiagnosticMethod = nil }
         continueAfterFailure = false
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
@@ -6466,7 +6476,7 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Metadata", renderer: renderer)
             try require(field(renderer, "Android locales, entry 2").value as? String == "fr-FR", "navigation lost the locale draft")
             try press(renderer, "Validate only", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Format validation complete"), in: renderer,
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "value == %@", "Format validation complete")), in: renderer,
                                 failures: Self.configurationFailures)
             try press(renderer, "Prepare save review", renderer: renderer, failures: Self.configurationFailures)
             let review = try waitElement(named(renderer, "Native configuration save"), in: renderer)
@@ -7073,6 +7083,9 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor func testSyntheticProjectSavedOfflineChecks() throws {
+        projectRequireDiagnosticMethod = .savedOfflineChecks
+        projectRequireDiagnosticEmitted = false
+        defer { projectRequireDiagnosticMethod = nil }
         continueAfterFailure = false
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
@@ -7309,6 +7322,9 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor func testSyntheticProjectEmptyBuildInputInspection() throws {
+        projectRequireDiagnosticMethod = .emptyBuildInputInspection
+        projectRequireDiagnosticEmitted = false
+        defer { projectRequireDiagnosticMethod = nil }
         continueAfterFailure = false
         executionTimeAllowance = 300
         try beginCase(seconds: 300)
@@ -8242,6 +8258,9 @@ final class NormalAppUITests: XCTestCase {
         try syntheticAndroidBuild(candidateInputs:false)
     }
     @MainActor func testSyntheticProjectAndroidCandidateInputs() throws {
+        projectRequireDiagnosticMethod = .androidCandidateInputs
+        projectRequireDiagnosticEmitted = false
+        defer { projectRequireDiagnosticMethod = nil }
         try syntheticAndroidBuild(candidateInputs:true)
     }
     @MainActor private func candidateHistoryAction(_ renderer:XCUIElement,action:String,checkpoint:Int,operation:String?=nil)throws->XCUIElement {
@@ -8305,7 +8324,7 @@ final class NormalAppUITests: XCTestCase {
             try settingsTab(settings, "Android", renderer: renderer)
             try replace(field(renderer, "Android upload certificate"), with: certificate, renderer: renderer)
             try press(renderer, "Validate only", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Format validation complete"),
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "value == %@", "Format validation complete")),
                                 in: renderer, failures: Self.configurationFailures)
             try press(renderer, "Prepare save review", renderer: renderer, failures: Self.configurationFailures)
             let review = try waitElement(named(renderer, "Native configuration save"), in: renderer)

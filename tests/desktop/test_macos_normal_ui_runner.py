@@ -4048,6 +4048,43 @@ class NormalPhaseDataTests(unittest.TestCase):
                 row = ("MRK_NORMAL_PROJECT_STAGE=" + public_stage + ";result=passed\n").encode()
                 self.assertEqual(classify(row, selection=subset)[progress]["lastObserved"],
                                  {"stage": public_stage, "result": "passed"})
+        # Existing first-latched markers remain bound to the exact independent cohort.
+        site_cases = tuple((selection, method) for selection, method, _, _ in subsets) + (
+            (MODULE.ANDROID_CANDIDATE_RESULT, MODULE.ANDROID_CANDIDATE_METHOD),)
+        for selection, method in site_cases:
+            expected = {"stream":"stdout", "source":"NormalAppUITests.swift", "method":method,
+                        "line":8318, "column":None}
+            for kind, tail in (("REQUIRE_FAILURE", ";check=singleton"), ("STATIC_WAIT_FAILURE", "")):
+                marker = ("MRK_NORMAL_PROJECT_" + kind + "=v1;method=" + method + ";line=8318" + tail + "\n").encode()
+                value = classify(private + b"\n" + marker, selection=selection)
+                self.assertEqual(value["sourceFailures"], [expected])
+                self.assertEqual(value["originalReturncode"], 65)
+                self.assertNotIn(private, MODULE.encoded(value))
+                self.assertLessEqual(len(MODULE.encoded(value)) + 1, 4096)
+                for bad in (marker + marker, marker[:-1], b"private " + marker,
+                            marker.replace(b"8318", b"65536"), marker.replace(method.encode(), private)):
+                    result = classify(bad, selection=selection)
+                    self.assertEqual(result["sourceFailures"], [])
+                    self.assertEqual(result["status"], "unavailable")
+                    self.assertNotIn(private, MODULE.encoded(result))
+                result = MODULE.normal_failure_diagnostics("test", selection,
+                    subprocess.CompletedProcess([], 65, b"", marker))
+                self.assertEqual(result["sourceFailures"], [])
+                for other in ("project-test.xcresult", "release-evidence-test.xcresult", MODULE.IOS_PENDING_RESULT):
+                    self.assertEqual(classify(marker, selection=other)["sourceFailures"], [])
+                for other, _ in site_cases:
+                    if other != selection:
+                        self.assertEqual(classify(marker, selection=other)["sourceFailures"], [])
+                self.assertEqual(classify(marker, "summary", selection)["sourceFailures"], [])
+        # The two saved-checks tests each retain their own original first site.
+        check_rows = b"".join(("MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=" + method
+            + ";line=7310;check=condition\n").encode() for selection, method in site_cases
+            if selection == "saved-checks-test.xcresult")
+        self.assertEqual([row["method"] for row in classify(check_rows, selection="saved-checks-test.xcresult")["sourceFailures"]],
+            [method for selection, method in site_cases if selection == "saved-checks-test.xcresult"])
+        for flags in ({"persistence":1}, {"saved_checks":True, "android_candidate":True},
+                      {"persistence":True, "ios_pending":True}):
+            with self.assertRaises(MODULE.Refused): MODULE.project_require_source_sites(b"", b"", **flags)
         wait = b"MRK_NORMAL_WAIT=v1;line=6748;waiter=completed;matches=2;failures=0;nonAtomic=1\n"
         row = {"kind":"wait", "stream":"stdout", "line":6748, "waiter":"completed",
                "matches":2, "failures":0, "nonAtomic":True}
@@ -4128,6 +4165,8 @@ class NormalPhaseDataTests(unittest.TestCase):
             (b"static text prefix role differs", "static-text-role"),
             (b"static text content exceeds its bound", "static-text-bytes"),
             (b"static text failure roster exceeds its bound", "static-text-failures"),
+            (b"static text snapshot tree exceeds its bound", "static-text-tree"),
+            (b"static text observation changed during readback", "static-text-changed"),
         )
         for method in (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages"):
             for reason, code in reasons:
@@ -4151,6 +4190,28 @@ class NormalPhaseDataTests(unittest.TestCase):
                 (exact[:-1] + b"x" * 4096 + b"\n", "test", selected)):
             self.assertTrue(all("condition" not in row
                 for row in classify(raw, phase=phase, selection=selection).get("xctestIssues", [])))
+
+        pending_site = site.replace(b"testSyntheticProjectPathFields", MODULE.IOS_PENDING_METHOD.encode("ascii"))
+        for reason, code in reasons + ((b"current account session absent or ambiguous", "account-session-unavailable"),):
+            for quote in (b'"', b'\\"'):
+                row = pending_site + b'caught error: "condition(' + quote + reason + quote + b')"\n'
+                value = classify(row, selection=MODULE.IOS_PENDING_RESULT)
+                self.assertEqual(value["xctestIssues"][0]["condition"], code)
+                self.assertEqual(value["originalReturncode"],65)
+                self.assertLessEqual(len(MODULE.encoded(value))+1,4096)
+        session = pending_site + b'caught error: "condition(\\"current account session absent or ambiguous\\")"\n'
+        for raw, selection in ((session.replace(b"ambiguous",b"ambiguous "+private),MODULE.IOS_PENDING_RESULT),
+                (session[:-1],MODULE.IOS_PENDING_RESULT), (session+b"x"*4097,selected),
+                (session.replace(MODULE.IOS_PENDING_METHOD.encode(),b"testSyntheticProjectPathFields"),selected),
+                (session.replace(MODULE.IOS_PENDING_METHOD.encode(),b"testSyntheticPersistentCredentials"),"persistence-test.xcresult")):
+            value=classify(raw,selection=selection)
+            self.assertTrue(all("condition" not in row for row in value.get("xctestIssues",[])))
+            self.assertNotIn(private,MODULE.encoded(value))
+        for stage in MODULE.SAVED_DIAGNOSTIC_STAGES[MODULE.IOS_PENDING_RESULT][1]:
+            row = pending_site + b'caught error: "condition(\\"expected renderer control could not be revealed in ' + stage.encode() + b'\\")"\n'
+            self.assertEqual(classify(row,selection=MODULE.IOS_PENDING_RESULT)["xctestIssues"][0]["condition"],"control-not-hittable")
+        foreign=row.replace(stage.encode(),b"persistence-launch")
+        self.assertNotIn("condition",classify(foreign,selection=MODULE.IOS_PENDING_RESULT)["xctestIssues"][0])
 
         def navigation_marker(method='testSyntheticProjectPathFields',phase='after-typing',role='combo-child',
                 relation='exact',unchanged='0',field='ready',fields='1',combos='1',go='ready',opened='disabled',cancel='ready'):
