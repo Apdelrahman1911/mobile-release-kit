@@ -1,13 +1,15 @@
 # Saved release-version VALUE editing
 
-## Status: source implementation, writer closed
+## Status: installed Mac writer route implemented; native verification separate
 
 This is an app-managed **Open → edit two values → Review → confirm Save**
 implementation, including an explicit **Create version file** path for a source
-observed absent. It is not a manual-copy or CLI substitute. The separate
-`NATIVE_RELEASE_VERSION_EDIT_QUALIFIED` gate is **false** and
-`ReleaseVersionInstalledProfile::SOURCE_BINDING` is **None**. No native writer,
-platform, recovery or shipping qualification is asserted here.
+observed absent. It is not a manual-copy or CLI substitute. Current normal
+installed macOS profiles for Apple silicon and Intel select the version writer
+when their fixed runtime bindings match. Original runtime/root custody and
+operation checks still apply; Linux retains its separate installed-profile
+checks. Route selection is not proof of native Save, recovery or shipping
+qualification.
 
 The existing **Read saved version** action and `release.version.observe`
 schema 2 remain read-only and unchanged. Successful Read is not permission to
@@ -16,9 +18,11 @@ Another edit domain's runtime/fixture/evidence cannot enable this writer.
 
 The source now also includes a separate **Inspect recovery → read-only review →
 confirm recovery** path for complete version journals after interruption or
-restart. It does not enable that closed writer or establish native recovery
-qualification. The normal Edit/Create commands and passive Read remain distinct;
+restart. It uses the same admitted native domain, not a bypass for an unavailable
+writer. The normal Edit/Create commands and passive Read remain distinct;
 no fake source, values or absent-file baseline is manufactured for recovery.
+A core interruption followed by fresh UI recovery is not a crash during a
+GUI-originated Save; neither outcome is inferred from this source description.
 
 ## Ordinary application flow
 
@@ -29,7 +33,7 @@ no fake source, values or absent-file baseline is manufactured for recovery.
 2. Use **Settings → Prepare save review** to review any missing conservative
    ignore rules. Configuration still writes only its fixed config and ignore
    destinations. The version editor never repairs `.gitignore`.
-3. When the separately qualified writer is available, select **Open saved
+3. When the installed writer is available, select **Open saved
    version editor** on Dashboard. It loads the original saved-config-derived
    source and keeps one original native lease. The UI displays the admitted
    source, keys, original values, iOS policy and saved byte comparisons.
@@ -45,7 +49,7 @@ no fake source, values or absent-file baseline is manufactured for recovery.
    Read saved version again explicitly before preparing fresh build consent.
 
 No account, JDK/SDK/Xcode, project script or terminal step is needed for this
-ordinary flow once its writer is qualified. Save does not rebuild an application,
+ordinary flow once its writer is available. Save does not rebuild an application,
 change Gradle/Xcode projects, edit Git/index/workflows/metadata, acquire secrets,
 contact a Store, or establish artifact agreement or release readiness.
 
@@ -168,7 +172,7 @@ one original-status observation, never mutation resubmission.
 
 ## Explicit saved-version recovery
 
-When the same native version-writer domain is qualified and original resources
+When the same native version-writer domain is available and original resources
 are known settled, Dashboard's version editor offers **Inspect recovery** for the
 registered project. Close an existing review and wait for its original settlement
 first. No normal Open, draft, selected source or Create baseline is required.
@@ -232,13 +236,12 @@ safely repaired by this narrowly supported route.
 ## Required distinct verification
 
 Pure span/facade/custody-seam tests, DTO/controller promise tests and Rust DATA
-tests do not establish filesystem, UI, process or finality behavior. A future
-admission needs a **new** source-bound core ZIP, exact member inventory,
-bootstrap/manifest/compiler binding and separate version-writer profile review.
-The old installed A payload and metadata/configuration positives cannot be
-borrowed. Only then can separately authorized original-owner Linux
-filesystem/UI/process/finality cases be collected. Windows/macOS writer and
-shipping qualification remain closed by this source change.
+tests do not establish filesystem, UI, process or finality behavior. Installed
+evidence must match the actual source-bound runtime, member inventory and
+bootstrap/manifest/compiler binding. Mac Apple silicon and Intel writer routes
+are implemented, but require their own filesystem/UI/process/finality evidence;
+metadata/configuration positives or a different payload do not establish it.
+Windows writer support and shipping qualification are not asserted here.
 
 Recovery additionally requires actual new-context writer journals, interrupted
 first-process settlement and a genuinely fresh process inspecting/preparing/

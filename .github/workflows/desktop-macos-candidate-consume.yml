@@ -22,7 +22,13 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            mode: restore
+            mode: ordinary-ui
+            runner: macos-26
+            python-architecture: arm64
+            rust-version: 1.98.1
+            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
+          - target: aarch64-apple-darwin
+            mode: ordinary-ios-pending-ui
             runner: macos-26
             python-architecture: arm64
             rust-version: 1.98.1
@@ -36,7 +42,7 @@ jobs:
       # All routes stay inactive until this and candidate-carrier-selection.json
       # name the same genuine retained candidate. No guessed/latest artifact.
       # This is checkout routing, not artifact/source admission authority.
-      MRK_CANDIDATE_SOURCE: 'cafb4f9887938cbe21df698dc79abdcd87c72a96'
+      MRK_CANDIDATE_SOURCE: 'fcb1aa46fb95e601479078fdc98ba05acb701c05'
       MRK_MACOS_TARGET: ${{ matrix.target }}
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:

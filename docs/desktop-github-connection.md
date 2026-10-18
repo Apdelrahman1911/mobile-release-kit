@@ -1,20 +1,31 @@
 # GitHub connection and read-only observations
 
-## Current status: unpublished installed-Linux integration candidate
+## Current status and historical verification
+
+Current source implements a session-only GitHub connection on macOS 26, on
+Apple Silicon and Intel, under the original installed-runtime and repository
+checks. Separate native cards implement remote settings, assigned secrets and
+variables, setup draft-PR publication, and workflow actions; connection alone
+authorizes none of them. See [GitHub setup](desktop-github-setup.md). Implemented
+routes are not proof of usable installed builds or successful authenticated
+service operations; applicable native verification remains required.
+
+### Historical installed-Linux connection scope
 
 The candidate connects the existing guided UI to a **separate installed Linux
 session-only, read-only GitHub profile**. This is source integration, **not yet
 verified shipping availability**. Its exact-source independent implementation,
 installed native and delivery checks remain required.
 
-Only the normal x86_64 GNU Linux shell/custom-protocol build with the fixed
-runtime manifest/protocol and admitted Ubuntu/kernel profile can expose entry.
+That historical route admits only the normal x86_64 GNU Linux shell/custom-
+protocol build with its fixed runtime manifest/protocol and Ubuntu/kernel profile.
 The native document checks that same selector before copying a token, then its
 original Supervisor repeats selection and retains installed custody through
 inspection, one-use transfer/claim, child wait/IO and original settlement.
 Passive/workflow/asset authority cannot substitute for GitHub custody. The
-historical development GitHub/TLS gates stay closed; macOS/Windows GitHub
-connection is not enabled by this change.
+historical development GitHub/TLS gates stay closed. Its Linux evidence does
+not qualify the separate current Mac route; Windows connection remains
+unavailable.
 
 No GitHub App/publisher registration or GNOME credential vault is required for
 a session-only token. The selected project's original native registration and
@@ -31,9 +42,10 @@ Windows GitHub behavior, an installed runtime, or a shipped Desktop application.
 
 Local workflow preview/Apply stays independent. Installing local caller files
 does not push them, authenticate an account, configure remote resources or make
-a release ready. Remote mutation and workflow dispatch remain unavailable;
-template compatibility and release readiness remain unknown. Existing credential
-assets, configuration, project history, Store guards and protected-environment
+a release ready. This read-only connection profile cannot mutate remote state
+or dispatch workflows; separately gated actions need their own consent and
+verification. Template compatibility and release readiness remain unknown.
+Existing credential assets, configuration, project history, Store guards and protected-environment
 requirements are unchanged.
 
 ## Pure core boundary
@@ -201,7 +213,8 @@ native callback qualification remains outstanding.
 `GitHubConnection.tsx` is isolated presentation using existing icons and help
 buttons. It labels retained/stale facts, reported roles, limited metadata,
 expiry, failure and unknown cleanup without rendering remote HTML or fetching
-avatars. Its separate Remote setup card stays unavailable. Fixed core help is
+avatars. Separate Remote setup controls enforce their own availability and
+consent; connection observations never authorize a write. Fixed core help is
 available before a valid connection input; missing/previous help never enables
 entry or Refresh, but does not disable Status/Disconnect. Input IDs are repository
 and token; guidance IDs are authentication, permissions, session-memory,
@@ -268,7 +281,7 @@ qualified OS-keyring lifecycle; plaintext fallback is never allowed. Local
 Disconnect is not remote revocation; the fixed help gives manual GitHub Settings
 navigation without opening a browser or retaining a credential.
 
-## Installed candidate and verification boundaries
+## Historical Linux installed candidate and verification boundaries
 
 The normal **N** material keeps the unchanged Python/core/bootstrap and real CA.
 An installed test route must distinguish separately inventoried **D-R** (test-only

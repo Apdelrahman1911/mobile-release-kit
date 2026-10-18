@@ -3,11 +3,11 @@
 The passive service produces an **in-memory proposal**, not completed GitHub
 setup. A separate local workflow edit path can review and install only four
 fixed caller files, through its own sealed native profile, independently of
-configuration editing. The normal installed Linux connection is **prepared
-source; installed workflow verification is pending**. Global edit flags remain
-false, and other profiles remain closed. Source implementation or inert renderer
-checks are not qualification. The full Desktop remains incomplete; no standalone
-readiness or general installer qualification is claimed.
+configuration editing. Current source implements these separate native routes
+for macOS 26 on Apple Silicon and Intel, subject to their installed-runtime
+checks. The historical Linux verification scope is recorded below. Source
+implementation or inert renderer checks are not installed qualification or a
+claim that a current test build is ready for general use.
 
 A qualified Mac runtime has a separate session-only GitHub connection. Its
 repository-settings card can review and apply two fixed settings: Actions
@@ -112,11 +112,14 @@ provenance. All proposal facts retain `githubContacted:false`,
 and unknown release readiness. A proposal does not initialize metadata,
 configuration or `.gitignore`.
 
-Remote setup still needs authenticated repository identity, fresh remote
-observations, protected PR delivery and partial-failure reconciliation. Runner
-eligibility and protected-environment administration must precede future
-activation. This passive proposal is never a token or shortcut for local or
-remote operations.
+Remote setup requires authenticated repository identity and fresh observations.
+The separate **Publish setup as a draft pull request** card reviews only the
+saved configuration and four canonical callers, then creates Git objects, a
+new branch and a draft PR. Local Git/index/HEAD stay unchanged; unrelated local
+files are excluded. Saved publication intents support read-only reconciliation of
+partial or unknown results, never an automatic write retry. These implemented
+routes still require applicable native and authenticated-service verification;
+this passive proposal is never authorization for them.
 
 ## Separate local workflow edit
 
@@ -227,12 +230,16 @@ undone. A lost reply or duplicate click never resends Open, Prepare or Apply:
 only the original owner is observed. Close keeps the draft and retires authority;
 it is separate from discarding in-memory draft data.
 
-Recovery is limited to one original in-session rollback or committed-cleanup
-attempt. Recovery-required and unknown outcomes retain evidence and block
-further edits. Do not delete/reset journals or retry Apply. Persisted recovery,
-resume and general recovery buttons are not implemented by this feature.
+Recovery-required and unknown outcomes retain evidence and block ordinary edits.
+After the original owner settles, **Inspect workflow recovery** can inspect the
+current journal; **Confirm inspected recovery** authorizes only its specifically
+admitted recovery. It does not revive an old Apply token or retry an unknown
+mutation. Preserve the journal and unrelated edits; never delete/reset controls.
 
-The prepared installed route uses Linux x86_64 GNU strong native registration,
+### Historical Linux verification scope
+
+The prepared installed route described here uses Linux x86_64 GNU strong native
+registration,
 the unchanged A35507734308/1 payload, and the existing exact
 `6.17.0-1022-azure` platform/custody profile. Configuration and workflow runtime
 slots are separately tagged through inspection, transfer, preparation, one-use
@@ -261,4 +268,5 @@ These changed-source checks have not yet been executed or independently accepted
 Historical changed-pin-refusal receipts cannot prove canonical-update behavior.
 Historical headless run35273521622/1, configuration fixtures, pure UI tests,
 compilation and browser previews are not installed workflow evidence.
-Mac/Windows workflow writes and remote setup remain outside this slice.
+Those historical Linux checks do not qualify the current Mac workflow/recovery
+or remote setup routes. Windows workflow writes remain unavailable.

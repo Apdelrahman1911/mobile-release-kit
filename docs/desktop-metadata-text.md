@@ -1,37 +1,34 @@
 # Guided public metadata text
 
-## Status: installed Linux Save routing implemented, verification pending
+## Status: installed Mac and Linux Save routing implemented; native verification separate
 
 The narrow desktop path is **configure locale → load public text → edit and
 validate → review exact files → confirm typed Save**. This is an app-managed
-preview/save implementation, not a manual-copy substitute. The fixed installed
-Linux profile includes passive text observation and validation and now a
-separately sealed metadata writer route. Its installed native verification
-remains pending. General native qualification and packaged-runtime gates
-remain closed. A visible editor, source-authored inert tests, another edit
-domain's evidence or a browser preview does not qualify Save. No new test
-execution or native/Store readiness is asserted by this document.
+preview/save implementation, not a manual-copy substitute. Current normal
+installed macOS profiles for Apple silicon and Intel include passive text
+observation, validation and a separate metadata writer route. Linux x86_64 GNU
+has its own installed-profile checks. Route selection is not proof of native
+Save, restart/recovery or shipping qualification. A visible editor, inert tests,
+another edit domain's evidence or a browser preview does not qualify Save.
 
 The source also implements **Inspect recovery → read-only review → separately
 confirm recovery** for this editor's complete, independently checkable persisted
-journals. That does not enable a platform or qualify restart/UI behavior. It uses
-the same gated native domain and original owner; browser preview cannot inspect
-or recover files. Incomplete and legacy journals remain protected conflicts.
+journals. It uses the same native domain and original owner; browser preview
+cannot inspect or recover files. Incomplete and legacy journals remain protected
+conflicts. This document does not establish a Mac GUI-Save crash/restart test or
+native text/image recovery after restart.
 
-The separate metadata writer gate targets Linux x86_64 GNU with strong original
-root registration. It does not inherit configuration/workflow fixture
-permission and does not enable Windows or macOS mutation. Passive observation
-uses only the supported POSIX named reader; the staged Windows snapshot reader
-does not enable it. Pure validation is portable. Browser preview may display
-the shipped help, but refuses actual file observation, core validation and Save
-rather than returning successful fixtures.
+Normal installed macOS and Linux routes retain their fixed runtime, original
+root registration, custody and platform checks. They do not inherit
+configuration/workflow fixture permission or enable Windows mutation.
+Development/publisher builds and generic resolvers cannot substitute for them.
+Passive observation uses the supported POSIX reader; the staged Windows reader
+does not enable this writer. Browser preview refuses actual file observation,
+core validation and Save rather than returning successful fixtures.
 
-Only the normal Linux x86_64 GNU `desktop-shell` profile can select this
-installed route, using the existing fixed runtime, original custody and
-platform checks. Development/publisher builds and generic resolvers cannot
-substitute for it. The same edit owner and ledger keep metadata separate from
-configuration and workflows through inspection, preparation, registered-root
-claim, the exact `metadata_text` bootstrap selector and final settlement.
+The same edit owner and ledger keep metadata separate from configuration and
+workflows through inspection, preparation, registered-root claim, the exact
+`metadata_text` bootstrap selector and final settlement.
 
 ## One enabled platform and one saved locale
 
