@@ -2166,7 +2166,7 @@ _FAILURE_REASONS = frozenset((*_APP_ABSENCE_BASELINE_REASONS, *_FAILURE_SETUP_RE
     'entry-pie-no-executable-stack', 'entry-segment-command', 'entry-segment-sections',
     'entry-source-changed', 'exact-detached-checkout', 'exclusive-output-original',
     'facade-compiler-artifact-close-unknown', 'facade-compiler-original-changed', 'facade-source-changed',
-    'file-original-changed', 'file-original-read-changed', 'file-original-shape',
+    'file-original-changed', 'file-original-read-changed', 'file-original-shape', 'final-image-configured-purpose',
     'fixed-facade-role', 'fixed-signing-requirement', 'fixed-source-driver',
     'full-package-scope-only', 'helper-absolute-apple-system-dependency', 'helper-dyld-command',
     'helper-dyld-offset', 'helper-dyld-terminated', 'helper-dylib-command',
@@ -5607,7 +5607,12 @@ class Operation:
         need(self.phase in FINAL_IMAGE_PHASES and self.signing is not None
              and (self.environment.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-preview"
                   or (self.phase == "finalize-image"
-                      and self.environment.get("GITHUB_REF") in ("refs/heads/verify/desktop-macos-installed", CANDIDATE_REF)))
+                      and self.environment.get("GITHUB_REF") in ("refs/heads/verify/desktop-macos-installed", CANDIDATE_REF))
+                  or (self.phase == "finalize-remove-image" and self.removal
+                      and self.candidate_removal_context is not None and self.candidate_removal_root is not None
+                      and self.environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                      and self.environment.get("GITHUB_REF") == "refs/heads/task/ci-simplification-20261015"
+                      and self.environment.get("GITHUB_WORKFLOW_REF") == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-consume.yml@refs/heads/task/ci-simplification-20261015"))
              and not any(name in self.environment for name in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES),
              "final-image-configured-purpose")
         self.notary_space(reserve=True)

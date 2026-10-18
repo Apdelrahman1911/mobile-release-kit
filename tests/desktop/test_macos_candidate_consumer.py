@@ -543,6 +543,7 @@ class CandidateConsumerTests(unittest.TestCase):
 
     def test_context_and_fixed_source_selection_are_independent_of_carrier_claims(self):
         import json
+        from desktop.tools import macos_android_helper_package as helper
         for target, machine, arch in (('aarch64-apple-darwin', 'arm64', 'ARM64'), ('x86_64-apple-darwin', 'x86_64', 'X64')):
             env = dict(MRK_MACOS_TARGET=target, GITHUB_WORKSPACE=str(C.CANDIDATE_ROOT), RUNNER_TEMP='/Users/runner/work/_temp',
                 GITHUB_REPOSITORY=R.REPOSITORY, GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/' + C.BRANCH,
@@ -562,6 +563,52 @@ class CandidateConsumerTests(unittest.TestCase):
                 GITHUB_REF='refs/heads/'+C.REMOVAL_BRANCH,
                 GITHUB_WORKFLOW_REF=R.REPOSITORY+'/'+C.WORKFLOW+'@refs/heads/'+C.REMOVAL_BRANCH)
             self.assertEqual(C.context_data(manual,C.HELPER_ROOT,machine)['target'],target)
+            # Execute the actual final-image entry guard with validated H/P
+            # context. The sentinel is BEFORE native/notary or filesystem work.
+            admitted = C.context_data(manual, C.HELPER_ROOT, machine)
+            admitted.update(productSource=nomination(target)['source'])
+            def operation(phase='finalize-remove-image', environment=None):
+                op = helper.Operation(None, C.CANDIDATE_ROOT, admitted['work'].parent,
+                    phase, dict(manual if environment is None else environment), None, target=target)
+                op.signing = ('INERTTEAM0', 'a' * 40)
+                op.candidate_removal_context = dict(admitted)
+                op.candidate_removal_root = object()  # Only the already-loaded-root latch.
+                return op
+            stop = RuntimeError('inert-notary-entry')
+            for phase, ref, candidate in (
+                    ('finalize-remove-image', manual['GITHUB_REF'], True),
+                    ('finalize-remove-image', 'refs/heads/verify/desktop-macos-preview', False),
+                    ('finalize-image', 'refs/heads/verify/desktop-macos-preview', False),
+                    ('finalize-image', 'refs/heads/verify/desktop-macos-installed', False),
+                    ('finalize-image', helper.CANDIDATE_REF, False)):
+                op = operation(phase, dict(manual, GITHUB_REF=ref))
+                if not candidate:
+                    op.candidate_removal_context = op.candidate_removal_root = None
+                with self.subTest(finalImage=phase, ref=ref), mock.patch.object(op, 'notary_space', side_effect=stop) as reserve:
+                    with self.assertRaises(RuntimeError) as caught: op.finalize_image()
+                    self.assertIs(caught.exception, stop)
+                    reserve.assert_called_once_with(reserve=True)
+                    self.assertEqual(op.calls, [])
+            changes = (
+                ('candidate_removal_context', None), ('candidate_removal_root', None),
+                ('removal', False), ('signing', None), ('phase', 'finalize-image'),
+                ('phase', 'package-remove'),
+                ('GITHUB_EVENT_NAME', 'push'), ('GITHUB_REF', 'refs/heads/main'),
+                ('GITHUB_REF', helper.CANDIDATE_REF),
+                ('GITHUB_WORKFLOW_REF', manual['GITHUB_WORKFLOW_REF'] + '-other'),
+                *((key, 'inert-secret') for key in helper.CREDENTIAL_VARIABLES + helper.INSTALLER_CREDENTIAL_VARIABLES))
+            for key, value in changes:
+                op = operation()
+                if key in ('candidate_removal_context', 'candidate_removal_root', 'removal', 'signing', 'phase'):
+                    setattr(op, key, value)
+                else:
+                    op.environment[key] = value
+                with self.subTest(finalImageRefused=key), mock.patch.object(op, 'notary_space') as reserve:
+                    with self.assertRaisesRegex(helper.Refused, '^final-image-configured-purpose$') as caught:
+                        op.finalize_image()
+                    reserve.assert_not_called()
+                    self.assertEqual(op.calls, [])
+                    self.assertEqual(helper.failure_exception(caught.exception)['reason'], 'final-image-configured-purpose')
             for key,value in (('GITHUB_EVENT_NAME','push'),('MRK_CANDIDATE_MODE','restore'),
                               ('GITHUB_REF','refs/heads/'+C.BRANCH),('GITHUB_WORKFLOW_SHA','e'*40)):
                 with self.assertRaises(ValueError): C.context_data(dict(manual,**{key:value}),C.HELPER_ROOT,machine)
