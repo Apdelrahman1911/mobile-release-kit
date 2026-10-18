@@ -1921,6 +1921,7 @@ _FAILURE_FIXTURE_ROLES = (
     "app-absence-pkgbuild", "app-absence-tar", "app-absence-xar",
     "app-absence-image-create", "app-absence-image-verify", "app-absence-baseline-attach",
     "app-absence-baseline", "app-absence-baseline-detach", "app-absence-restore-attach",
+    "app-absence-log-cursor", "app-absence-log-capture",
     "app-absence-withdraw", "app-absence-install", "app-absence-verify", "app-absence-restore-detach",
     "app-absence-recovery-cut-1", "app-absence-recovery-cut-2", "app-absence-recovery-cut-3", "app-absence-recovered",
 ) + tuple("app-absence-cut-" + cut + suffix
@@ -1937,6 +1938,68 @@ _FIXTURE_INSTALLER_ROLES = {
         "app-absence-recovered",
     ),
 }
+
+
+def fixture_log_projection_data(value):
+    if (type(value) is not dict or set(value) != {"state", "reason", "markers", "errors", "omitted"}
+            or type(value["omitted"]) is not bool):
+        return None
+    if value["state"] == "unknown" and type(value["reason"]) is str and value["reason"] in _INSTALLER_LOG_REASONS:
+        return dict(value) if value["markers"] is value["errors"] is None else None
+    if value["state"] != "observed-project-correlated" or value["reason"] is not None:
+        return None
+    markers, errors = installer_markers_data(value["markers"]), installer_errors_data(value["errors"])
+    if markers is None or errors is None:
+        return None
+    return {**value, "markers": markers, "errors": errors}
+
+
+def fixture_log_document(document, status):
+    if type(document) is not dict or type(status) is not int or status not in (0, 1):
+        return None
+    if document.get("state") == "unknown" and status == 1:
+        return fixture_log_projection_data(dict(state="unknown", reason=document.get("reason"),
+            markers=None, errors=None, omitted=False))
+    if (status != 0 or set(document) != {"schemaVersion", "kind", "state", "authority",
+            "scriptOutputFinality", "intervalScope", "projection"}
+            or type(document["schemaVersion"]) is not int or document["schemaVersion"] != 1
+            or document["kind"] != "installer-log-capture" or document["state"] != "observed-project-correlated"
+            or document["scriptOutputFinality"] != "unestablished"
+            or document["intervalScope"] != "before-baseline-through-failed-installer"):
+        return None
+    value = document["projection"]
+    if (type(value) is not dict or set(value) != {"markerTokens", "errorTokens", "omitted"}
+            or type(value["omitted"]) is not bool):
+        return None
+    bodies = []
+    for key in ("markerTokens", "errorTokens"):
+        rows = value[key]
+        if (type(rows) is not list or len(rows) > 4 or any(type(row) is not str or not row.isascii()
+                or not 0 < len(row) <= 1024 or "\n" in row or "\r" in row for row in rows)):
+            return None
+        for row in rows:
+            body = (row + "\n").encode("ascii")
+            if key == "markerTokens":
+                parsed = installer_markers(body, b"")
+                if (parsed is None or not row.startswith(("MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=", "MRK_MACOS_INSTALL_COMPLETED_REFUSED="))
+                        or len(parsed["acl"]) + len(parsed["parent"]) != 1
+                        or parsed["phases"] or parsed["refusals"] or parsed["omitted"]):
+                    return None
+            else:
+                parsed = installer_errors(body, b"")
+                if parsed is None or len(parsed["rows"]) != 1 or parsed["omitted"]:
+                    return None
+                error = parsed["rows"][0]
+                if row != "Error Domain=" + error["domain"] + " Code=" + str(error["code"]):
+                    return None
+        bodies.append(("\n".join(rows) + "\n").encode("ascii"))
+    markers, errors = installer_markers(bodies[0], b""), installer_errors(bodies[1], b"")
+    if markers is None or errors is None:
+        return None
+    markers["omitted"] |= value["omitted"]
+    errors["omitted"] |= value["omitted"]
+    return fixture_log_projection_data(dict(state=document["state"], reason=None,
+        markers=markers, errors=errors, omitted=value["omitted"]))
 
 
 def fixture_installer_diagnostic(phase, calls):
@@ -1957,7 +2020,18 @@ def fixture_installer_diagnostic(phase, calls):
             or type(row.get("returncode")) is not int or not -65536 <= row["returncode"] <= 65535
             or row["returncode"] == 0):
         return None
-    return {"role": row["role"], "index": index + 1, "returncode": row["returncode"],
+    log = None
+    if (phase == "candidate-baseline" and index == 4 and len(calls) == 6
+            and tuple(item.get("role") for item in calls if type(item) is dict) == (
+                "app-absence-image-create", "app-absence-image-verify", "app-absence-baseline-attach",
+                "app-absence-log-cursor", "app-absence-baseline", "app-absence-log-capture")
+            and all(item.get("entered") is True and item.get("returned") is True
+                and item.get("capturesSettled") is True and type(item.get("returncode")) is int
+                and item["returncode"] == 0 for item in calls[:4])
+            and all(calls[-1].get(key) is True for key in ("entered", "returned", "capturesSettled"))
+            and type(calls[-1].get("returncode")) is int and calls[-1]["returncode"] in (0, 1)):
+        log = fixture_log_projection_data(calls[-1].get("fixtureLog"))
+    return {"role": row["role"], "index": index + 1, "returncode": row["returncode"], "log": log,
             "markers": installer_markers_data(row.get("installerMarkers")),
             "errors": installer_errors_data(row.get("installerErrors")),
             "systemServiceExitClaimed": False}
@@ -2515,7 +2589,8 @@ def emit_failure_diagnostic(error, **context):
         package = value["packageInstall"]
         installer = package["calls"]["installer"] if package is not None else None
         capture = package["calls"]["installer-log-capture"] if package is not None else None
-        for original in (installer, capture, value["fixtureInstall"]):
+        fixture_log = value["fixtureInstall"].get("log") if value["fixtureInstall"] is not None else None
+        for original in (installer, capture, value["fixtureInstall"], fixture_log):
             markers = original.get("markers") if original is not None else None
             if markers is not None:
                 for key in ("acl", "parent", "phases", "refusals"):
@@ -2523,7 +2598,7 @@ def emit_failure_diagnostic(error, **context):
                         markers[key].pop()
                         markers["omitted"] = True
                         body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
-        for original in (installer, capture, value["fixtureInstall"]):
+        for original in (installer, capture, value["fixtureInstall"], fixture_log):
             errors = original.get("errors") if original is not None else None
             if errors is not None:
                 while len(body) > 4096 and errors["rows"]:
@@ -3420,7 +3495,8 @@ class Operation:
             except BaseException:
                 pass  # No diagnostic failure may replace the SAME nonzero result.
         diagnostic = (self.phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
-                      or self.setup_verify and role in ("setup-log-cursor", XCODE_SETUP_LOG_CAPTURE))
+                      or self.setup_verify and role in ("setup-log-cursor", XCODE_SETUP_LOG_CAPTURE)
+                      or self.phase == "candidate-baseline" and role in ("app-absence-log-cursor", "app-absence-log-capture"))
         need(result.returncode == 0 and not (self.app_absence is not None and self.app_absence_module.cut_role_data(self, role))
              or diagnostic and result.returncode == 1
              or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, role, result.returncode)
@@ -9701,6 +9777,7 @@ class Operation:
                                        or self.phase == "package-install"
                                        and call["role"] in ("installer-log-cursor", "installer-log-capture") and call["returncode"] == 1
                                        or self.setup_verify and call["role"] == "setup-log-cursor" and call["returncode"] == 1
+                                       or self.phase == "candidate-baseline" and call["role"] == "app-absence-log-cursor" and call["returncode"] == 1
                                        or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, call["role"], call["returncode"])
                                        or self.app_absence is not None and self.app_absence_module.cut_return_data(self, call["role"], call["returncode"])) for call in self.calls)
                                   and self.sha256 is not None

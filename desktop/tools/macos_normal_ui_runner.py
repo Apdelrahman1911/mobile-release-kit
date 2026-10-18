@@ -4233,11 +4233,12 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
              rb"(initial|identifier|title|label|value|placeholderValue|containingSameStaticText)"
              rb";matches=([0-5]);exceedsFour=([01]);nonAtomic=1")
 
-    # Fixed ordinary source-site diagnostics only; dashboard remains basic-only.
+    # Fixed ordinary source-site diagnostics; only explicitly wired entry cases.
     # The packaged-entry route has separate admission and is not added here.
     require_invalid = False
     require_eligible = (phase == "test" and not engineering and (
         (selection == "test.xcresult" and methods == ("testLaunchCancelAndQuit",))
+        or (selection == "applications-test.xcresult" and methods == ("testApplicationsLaunchAndQuit",))
         or (selection == IOS_UNSIGNED_RESULT and methods == (IOS_UNSIGNED_METHOD,))
         or (selection == IOS_PENDING_RESULT and methods == (IOS_PENDING_METHOD,))))
     if require_eligible:
@@ -4255,14 +4256,17 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             else:
                 require_invalid = True
 
-    # Only the existing basic-normal case can pair this supplementary observation.
-    dashboard_eligible = (phase == "test" and selection == "test.xcresult"
-                          and methods == ("testLaunchCancelAndQuit",))
+    # Same bounded pre-wait supplement, only where the original dashboard is wired.
+    dashboard_eligible = (phase == "test" and not engineering and (
+        (selection == "test.xcresult" and methods == ("testLaunchCancelAndQuit",))
+        or (selection == "applications-test.xcresult" and methods == ("testApplicationsLaunchAndQuit",))
+        or (selection == IOS_PENDING_RESULT and methods == (IOS_PENDING_METHOD,))))
     dashboard_namespace = b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE"
     dashboard_pattern = (re.escape(dashboard_namespace) + rb"=v1;line=([1-9][0-9]{0,4});ordinal=([1-4])"
                          rb";waiter=(timed-out|incorrect-order|inverted-fulfillment|interrupted|unknown)"
                          rb";enabled=([01]);hittable=([01]);reason=(loading|not-loaded|bridge-unavailable|"
-                         rb"selection-unavailable|selection-in-progress|shutting-down|owner-offline-preflight|"
+                         rb"selection-unavailable|selection-in-progress|shutting-down|owner-local-history|"
+                         rb"owner-store-readback|owner-store-execution|owner-store-preparation|owner-store-access|owner-offline-preflight|"
                          rb"owner-android-build|owner-ios-archive|owner-project-recovery|owner-github-preflight|"
                          rb"owner-github-release|owner-project-path|owner-saved-version-edit|owner-metadata-images|"
                          rb"other-or-unobserved|ambiguous)"

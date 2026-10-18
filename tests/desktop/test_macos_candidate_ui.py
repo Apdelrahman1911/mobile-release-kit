@@ -562,6 +562,43 @@ class CandidateUITests(unittest.TestCase):
                 self.assertEqual(result, {'status': 'unavailable', 'condition': None})
                 self.assertNotIn('PRIVATE', R.canonical(result).decode())
         self.assertEqual(U.applications_condition_diagnostic(b'x' * ((1 << 20) + 4097), b'')['status'], 'unavailable')
+        # Actual finite launcher/event/clock reasons use the same complete
+        # selected XCTest record; no broad owner-prefix or arbitrary suffix.
+        owner_conditions = {
+            'launch event has no running reference': 'launch-event-reference',
+            'unrequested or late payload launch event': 'payload-event-timing',
+            'payload launch event refused': 'payload-event-refused',
+            'late launcher callback': 'launcher-callback-timing',
+            'launcher callback refused': 'launcher-callback-refused',
+            'ambiguous Applications launch observation': 'launch-observation-ambiguous',
+            'callback original is not the installed Applications launcher': 'launcher-callback-identity',
+            'retained payload event identity changed or differs': 'payload-event-identity',
+            'Applications observations incomplete': 'launch-observation-incomplete',
+            'Applications launch is not one main-thread request': 'launch-request-thread-or-count',
+            'Applications launch deadline missing': 'launch-deadline-missing',
+            'observed payload terminated before UI admission': 'payload-terminated-before-ui',
+            'Applications observed normal termination incomplete': 'observed-termination-incomplete',
+            'Applications normal UI Quit was not accepted': 'normal-quit-not-accepted',
+            'failed Applications observation is not normal Quit evidence': 'failure-not-normal-quit',
+            'case clock unavailable': 'case-clock-unavailable',
+            'case clock moved backwards or became unavailable': 'case-clock-invalid',
+            'invalid bounded wait': 'invalid-bounded-wait',
+            'original case or stage deadline elapsed': 'case-or-stage-deadline',
+            'original case deadline elapsed': 'case-deadline',
+        }
+        for literal, label in owner_conditions.items():
+            for escaped in (False, True):
+                body = record(literal, escaped)
+                for streams in ((body, b''), (b'', body)):
+                    with self.subTest(literal=literal, escaped=escaped, stream=bool(streams[1])):
+                        self.assertEqual(U.applications_condition_diagnostic(*streams),
+                                         {'status': 'classified', 'condition': label})
+                for candidate in (record(literal + ': PRIVATE detail', escaped),
+                                  body.replace(b'testApplicationsLaunchAndQuit', b'testLaunchCancelAndQuit'),
+                                  body + record(literal, escaped)):
+                    result = U.applications_condition_diagnostic(candidate, b'')
+                    self.assertEqual(result, {'status': 'unavailable', 'condition': None})
+                    self.assertNotIn('PRIVATE', R.canonical(result).decode())
         # Every published label is tied only to an existing public SOURCE literal.
         source = (ROOT / 'desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift').read_text()
         self.assertTrue(all('"' + text + '"' in source for text in U.APPLICATIONS_CONDITIONS))

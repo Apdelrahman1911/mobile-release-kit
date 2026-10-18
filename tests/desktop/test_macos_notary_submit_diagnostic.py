@@ -399,6 +399,143 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
         self.assertFalse(op.calls[0]['capturesSettled'])
         self.assertNotIn('installerMarkers', op.calls[0])
 
+    def test_fixture_baseline_log_uses_same_owner_finite_interval_and_preserves_failure(self):
+        from unittest import mock
+        import stat
+        stager = load('fixture_interval_stager', 'stage_macos_installed.py')
+        fixture = load('fixture_interval_adapter', 'macos_app_absence_fixture.py')
+        now = 1_000_000_000
+        binding = dict(fixtureSource='a'*40, productSource='b'*40, target=HELPER.ARM_TARGET,
+            runId='123', runAttempt='1', inventorySha256='c'*64, runtimeManifestSha256='d'*64)
+        context = '\n'.join(('123','1',binding['target'],'app-absence-baseline-attach'))
+        mounted = Path('/Volumes') / ('MRK-AppAbsence-' + stager.digest(context.encode())[:32])
+        args = SimpleNamespace(command='installer-log-cursor', app_absence=True, fixture=False, xcode_setup=False,
+            package=mounted/fixture.PHASE_NAMES[0], fixture_source=binding['fixtureSource'],
+            expected_source=binding['productSource'], expected_inventory=binding['inventorySha256'],
+            expected_manifest=binding['runtimeManifestSha256'], run_id='123', run_attempt='1', target=binding['target'])
+        admitted = stager.installer_log_binding(args)
+        self.assertEqual((admitted['fixtureSource'],admitted['productSource']),('a'*40,'b'*40))
+        for key,value in (('package',mounted/fixture.PHASE_NAMES[1]),('fixture',True),('xcode_setup',True),
+                          ('fixture_source','a'*39),('expected_source',True),('selected_output',Path('/private')),
+                          ('run_attempt','2'),('target',HELPER.INTEL_TARGET)):
+            bad = copy.copy(args);setattr(bad,key,value)
+            with self.subTest(binding=key),self.assertRaises(stager.Refused):stager.installer_log_binding(bad)
+        info = SimpleNamespace(st_dev=1,st_ino=2,st_mode=stat.S_IFREG|0o644,st_uid=0,st_gid=0,st_nlink=1,st_size=7)
+        before = b'before\n'; closed=[]
+        @contextlib.contextmanager
+        def log_file():
+            try:yield 9,8,'install.log',info
+            finally:closed.append(True)
+        with mock.patch.object(stager,'installer_log_file',log_file), \
+             mock.patch.object(stager,'positioned_log_read',return_value=before), \
+             mock.patch.object(stager,'log_growth',return_value=0):
+            cursor,status=stager.installer_log_diagnostic(args)
+        self.assertEqual(status,0);self.assertEqual(closed,[True])
+        parent=b'MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256='+b'a'*64+b';exit=1;originals=1;native=1;timely=1;unknown=0\n'
+        acl=b'MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role=input-directory;phase=acl-entry-present;result=1;call=0;errno=0;freeCall=0;freeErrno=0\n'
+        interval=(PRIVATE+b' '+admitted['packageIdentifier'].encode()+b'\nprivate prefix '+parent+
+            b'private prefix '+acl+b'private Error  Domain=PKInstallErrorDomain  Code=112 '+PRIVATE+b'\n')
+        whole=before+interval;info.st_size=len(whole)
+        @contextlib.contextmanager
+        def cursor_parent(_):yield 8,'cursor.json'
+        capture_args=copy.copy(args);capture_args.command='installer-log-capture';capture_args.cursor=Path('/fixed/cursor.json')
+        with mock.patch.object(stager,'installer_log_file',log_file), \
+             mock.patch.object(stager,'parent',cursor_parent), \
+             mock.patch.object(stager,'read_at',return_value=(stager.canonical(cursor),SimpleNamespace(st_uid=stager.os.getuid(),st_mode=stat.S_IFREG|0o600))), \
+             mock.patch.object(stager,'positioned_log_read',side_effect=lambda fd,start,size:whole[start:start+size]), \
+             mock.patch.object(stager,'log_growth',return_value=0),mock.patch.object(stager,'write_log_selection') as output:
+            captured,status=stager.installer_log_diagnostic(capture_args)
+        self.assertEqual(status,0);self.assertEqual(closed,[True,True]);output.assert_not_called()
+        self.assertNotIn(PRIVATE.decode(),json.dumps(captured));self.assertNotIn('private prefix',json.dumps(captured))
+        finite=HELPER.fixture_log_document(captured,0)
+        self.assertEqual(finite['markers']['parent'][0]['reasonSha256'],'a'*64)
+        self.assertEqual(finite['errors']['rows'],[dict(domain='PKInstallErrorDomain',code=112)])
+        repeated=stager.select_app_absence_log(admitted['packageIdentifier'].encode()+b'\n'+parent*5,admitted)
+        self.assertEqual(len(repeated['markerTokens']),4);self.assertTrue(repeated['omitted'])
+        for body in (parent,interval[:-1],b'x'*(stager.LOG_INTERVAL_BYTES+1)):
+            with self.assertRaises(stager.Refused):stager.select_app_absence_log(body,admitted)
+        for key,value in (('markerTokens',[PRIVATE.decode()]),('errorTokens',['Error Domain=private Code=1']),
+                          ('omitted',1),('markerTokens',['x'*1025])):
+            bad=copy.deepcopy(captured);bad['projection'][key]=value
+            self.assertIsNone(HELPER.fixture_log_document(bad,0))
+        unknown=dict(authority=stager.LOG_AUTHORITY,state='unknown',reason='log-file-identity')
+        self.assertEqual(HELPER.fixture_log_document(unknown,1)['state'],'unknown')
+        self.assertIsNone(HELPER.fixture_log_document(unknown,0))
+        # The real baseline adapter + Operation.call, with only native/file ports inert.
+        for fault in (None,'cursor-one','cursor-publication','native-unknown','capture-unknown','capture-malformed','late','success'):
+            with self.subTest(fault=fault):
+                op=self.operation();op.phase='candidate-baseline';op.target=HELPER.ARM_TARGET
+                op.calls=[dict(role=role,entered=True,returned=True,capturesSettled=True,returncode=0)
+                          for role in fixture.BASELINE_ROLES[:3]]
+                op.app_absence=dict(nativeBinding=binding,pendingRoot=None,pendingCut=None,mount={'known':True})
+                op.app_absence_module=fixture;op.app_absence_api=HELPER;op.candidate_fixture_stager=stager
+                op.candidate_fixture_checkout=Path('/fixed/current-helper');op.package_endpoint=now+60_000_000_000
+                op.package_settled=lambda: op.stager_io_pending is None and not op.errors and all(
+                    row['returned'] and row['capturesSettled'] for row in op.calls)
+                invoked=[];primary=[]
+                publication_error=OSError('private cursor publication failed')
+                publish=op.publish
+                def publishing(name,body,*,parent=None):
+                    if fault=='cursor-publication' and name=='app-absence-log-cursor.json':raise publication_error
+                    return publish(name,body,parent=parent)
+                op.publish=publishing
+                def owned(argv,**kwargs):
+                    role=op.calls[-1]['role'];invoked.append(role)
+                    if role=='app-absence-log-cursor':
+                        self.assertEqual(argv[4],'/fixed/current-helper/desktop/tools/stage_macos_installed.py')
+                        self.assertIn('--app-absence',argv);self.assertEqual(kwargs['timeout'],30)
+                        document=unknown if fault=='cursor-one' else cursor
+                        return subprocess.CompletedProcess(argv,int(fault=='cursor-one'),stager.canonical(document),b'')
+                    if role=='app-absence-baseline':
+                        if fault=='native-unknown':raise RuntimeError('private unknown native')
+                        return subprocess.CompletedProcess(argv,0 if fault=='success' else 1,b'',PRIVATE)
+                    self.assertEqual(role,fixture.LOG_CAPTURE)
+                    if fault=='capture-unknown':raise RuntimeError('private unknown capture')
+                    return subprocess.CompletedProcess(argv,0,stager.canonical({'private':PRIVATE.decode()} if fault=='capture-malformed' else captured),b'')
+                op.owner.run_owned=owned
+                op.package_call=lambda role,argv,**kwargs: HELPER.Operation.call(op,role,argv,kwargs['environment'] if kwargs.get('environment') is not None else {},
+                    cwd=op.work,timeout=kwargs['timeout'],limit=kwargs['limit'])
+                original_root=fixture.root_call
+                def root(owner,phase):
+                    try:return original_root(owner,phase)
+                    except BaseException as error:primary.append(error);raise
+                def clock(owner):return op.package_endpoint-1 if fault=='late' and len(op.calls)>=5 else now
+                with mock.patch.object(fixture,'clock',side_effect=clock),mock.patch.object(fixture,'post'), \
+                     mock.patch.object(fixture,'reserve'),mock.patch.object(fixture,'mounted_path',return_value=mounted), \
+                     mock.patch.object(fixture,'root_call',side_effect=root), \
+                     mock.patch.object(fixture,'phase_observation',return_value={'baselineSha256':'e'*64}), \
+                     mock.patch.object(fixture,'io',return_value={'original':'unchanged'}):
+                    if fault=='success':
+                        fixture.baseline(op);self.assertEqual(op.app_absence['baselineSha256'],'e'*64)
+                        self.assertIsNone(op.app_absence['pendingRoot'])
+                    elif fault=='cursor-publication':
+                        with self.assertRaises(OSError) as caught:fixture.baseline(op)
+                        self.assertIs(caught.exception,publication_error)
+                        self.assertEqual(invoked,['app-absence-log-cursor']);self.assertEqual(primary,[])
+                        self.assertIsNone(op.app_absence['pendingRoot']);self.assertNotIn('logCursor',op.app_absence)
+                    else:
+                        with self.assertRaises(BaseException) as caught:fixture.baseline(op)
+                        self.assertIs(caught.exception,primary[0]);self.assertEqual(op.app_absence['pendingRoot'],'app-absence-baseline')
+                capture_entered=fault not in ('cursor-one','cursor-publication','native-unknown','late','success')
+                self.assertEqual(fixture.LOG_CAPTURE in invoked,capture_entered)
+                projected=HELPER.fixture_installer_diagnostic(op.phase,op.calls)
+                if fault is None:self.assertEqual(projected['log'],finite)
+                elif projected is not None:self.assertIsNone(projected['log'])
+                self.assertNotIn(PRIVATE.decode(),json.dumps(projected))
+                self.assertTrue(op.app_absence['mount']['known'])
+                output=io.StringIO()
+                with contextlib.redirect_stderr(output):HELPER.emit_failure_diagnostic(HELPER.Refused('original-nonzero-app-absence-baseline'),operation=op)
+                self.assertTrue(output.getvalue());self.assertLessEqual(len(output.getvalue()),4096);self.assertNotIn(PRIVATE.decode(),output.getvalue())
+                if fault is None:
+                    good=copy.deepcopy(op.calls)
+                    for mutation in ('wrong-role','duplicate','unsettled','cursor-one'):
+                        bad=copy.deepcopy(good)
+                        if mutation=='wrong-role':bad[-1]['role']='app-absence-private'
+                        elif mutation=='duplicate':bad.append(copy.deepcopy(bad[-1]))
+                        elif mutation=='unsettled':bad[-1]['capturesSettled']=False
+                        else:bad[3]['returncode']=1
+                        self.assertIsNone(HELPER.fixture_installer_diagnostic(op.phase,bad)['log'])
+
     def test_actual_installer_and_diagnostic_statuses_stay_distinct(self):
         for code in (0, 1):
             with self.subTest(code=code):

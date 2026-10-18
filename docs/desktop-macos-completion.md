@@ -4,38 +4,37 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
-The current signed candidate is `cafb4f9887938cbe21df698dc79abdcd87c72a96`
-(run `39094572546/1`). Both Apple Silicon and Intel application/Installer signing,
-notarization, stapling and final disk-image packaging passed. ARM Applications
-launch passed. These results **do not establish complete installed usability**.
-Earlier `8800fd3e` packages contain startup permission defects and are not usable
-predecessors. No main changes or public release are authorized.
+The current signed candidate is `fcb1aa46fb95e601479078fdc98ba05acb701c05`
+(run `39116948396/1`). Both Apple Silicon and Intel application/Installer signing,
+notarization, stapling, actual installation/readback and final disk-image retention
+passed. **Both subsequent Applications launch tests failed with XCTest exit 65.**
+The producer's public output establishes no more specific cause. These images
+are not qualified as usable releases or update predecessors. No main changes or
+public release are authorized.
 
 Installed consumers reuse those exact applications: helper-only changes do not
-rebuild or re-sign them. Run `39112277383/1` failed ordinary project UI, pending
-iOS recovery and Restore. The first two failed in text/diagnostic queries; the
-Restore fixture built successfully but its native baseline failed. Reviewed
-helper changes `60dde135` use typed text waits, a single public failure snapshot,
-and fixed private-safe diagnostic categories (three focused Linux methods pass).
-Run `39115467696/1` failed both affected ARM UI cohorts. The ordinary app
-reported `mac-runtime-inspection` after two completed snapshot observations:
-installed runtime admission blocks project access; the exact failure category
-was not available in that application. Pending recovery exposed separate AXValue
-nodes for the caption and IDs, not the expected complete text node.
+rebuild or re-sign them. Consumer `39123531551/1` at `698ba6b8` runs only the ARM
+ordinary UI and independent pending-iOS recovery cohorts. Both installed
+successfully, then failed at the dashboard Open-project readiness check, before
+project/recovery work. Existing finite diagnostics identify that check but do not
+establish whether it was disabled, obscured or waiting for startup.
+The Applications harness itself is unchanged; a rerun is not an assumed fix.
+Direct protected-entry recovery does not qualify the Applications launcher. The existing
+pre-wait readiness snapshot is now wired into these entry paths, reporting only
+enabled/hittable and fixed public reasons. Five-second waits, full case clocks
+and application behavior are unchanged. Two focused snapshot-parser tests pass;
+this instrumentation is not a startup fix.
 
-The next reviewed product batch fixes a source-proven descriptor shortfall:
-allowed runtime paths can require 51 originals against the former 48 limit;
-the bounded, compositional limit is now 67 with ownership/cleanup unchanged.
-It also preserves the nine static runtime inspection failure categories and
-renders each recovery-detail paragraph as one React string child. The portable
-budget regression passes (the former limit fails), the focused diagnostic parser
-passes, and the affected TSX transpiles without diagnostics. None of these local
-checks establishes the installed Mac cause or complete recovery. Both-architecture
-native compilation and all 74 selected contracts passed in `39116453156/1`
-(source `fcb1aa46`; zero failed or ignored on either architecture). One coherent
-signed application rebuild is running as `39116948396/1`. Intel compilation
-remained mandatory while packaging was scheduled in parallel after ARM passed;
-packaging progress is not installed qualification.
+Earlier candidate `cafb4f98` passed ARM Applications launch but failed project
+access. Source review found allowed runtime paths requiring 51 originals against
+its 48 limit; the reviewed compositional limit is now 67, with ownership and
+cleanup unchanged. The current candidate also preserves nine static runtime
+inspection error categories and renders each recovery-detail paragraph as one
+React string child. Focused regressions pass, and native compilation plus all
+74 selected contracts passed on each architecture in `39116453156/1` at
+`fcb1aa46` (zero failed or ignored). Those checks are not installed project or
+recovery qualification. Earlier `8800fd3e` packages contain startup permission
+defects and are not usable predecessors.
 
 A source-proven Restore transport mismatch is corrected in `383b363a`: the
 candidate fixture now mounts under separately held protected `/Volumes` parents,
@@ -65,6 +64,17 @@ admission and inert native endpoints. The existing bounded completed-refusal
 marker is emitted only after known settlement; PackageKit forwarding and actual
 native Restore remain unverified. No new signing or application readiness is
 inferred from this helper change.
+
+Actual helper `4df7ce0b` run `39122003400/1` built the observer/cuts successfully,
+then failed the baseline Installer with return 1 and `PKInstallErrorDomain` 112,
+before app installation or recovery cuts. Its existing finite diagnostic contains
+no forwarded Rust refusal marker. The exact native cause remains unknown; this
+is not proof that the callback failed to enter. The next helper reuses the existing
+bounded physical Installer-log reader, only around this baseline and only for
+fixed public failure tokens. Cursor publication errors stop before Installer;
+unknown native outcomes never authorize the readback or continued restoration. Captures settled, but original
+closes and target retirement are unknown. This diagnostic used the unchanged
+`cafb4f98` product and does not qualify current `fcb1aa46` Restore.
 
 Still required: actual installed project/configuration/GitHub Apply,
 metadata/images/version and credentials; Android, unsigned iOS, saved evidence

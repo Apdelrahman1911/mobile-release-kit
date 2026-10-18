@@ -972,6 +972,9 @@ class RestoreChainFixtureData(unittest.TestCase):
                             self.assertEqual(mount["parent"]["removal_system_path"],"/Volumes")
                             self.assertEqual(mount["parent"]["removal_facts"][0][5],80)
                             if fault == "post-name": own.rename(volumes / "changed")
+                            # This lower root/mount test does not invoke the log child.
+                            # The separately tested diagnostic slot has no root effect.
+                            op.calls.append(call_row("app-absence-log-cursor", entered=True))
                             FIXTURE.root_call(op,"baseline")
                             FIXTURE.detach(op,"app-absence-baseline-detach")
                         if fault:

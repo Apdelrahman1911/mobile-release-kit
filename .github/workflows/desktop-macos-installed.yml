@@ -5767,12 +5767,8 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          # One original existing owner: final archive audit, explicit producer,
-          # two fixed signed images, readonly mount, standard Installer and V2
-          # nonroot readback. Ordinary one990s remains unchanged. The fixed
-          # app-absence route alone adds baseline/image originals within1740s
-          # work/1800s hard; the job350min cap is never renewed.
-          # Previous pkgbuild/tar/xar construction is not relabeled as owned.
+          # Existing owner/deadlines cover signature, readonly mount, Installer
+          # and V2 readback; earlier construction is not installation evidence.
           set +e
           MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
           MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
@@ -5803,9 +5799,7 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
-          # The old signed image and package receipt remain immutable. The
-          # fixed phase finalizes only its own copy; the final readonly mount
-          # must contain exactly the already-bound P and two producer files.
+          # Finalize only our copy; readonly contents stay bound to P/producer.
           set +e
           MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py finalize-image --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" \
@@ -5817,8 +5811,7 @@ jobs:
           set -e
           if [[ "$image_status" != 0 ]]; then exit "$image_status"; fi
           [[ "$image_status_saved" == 0 ]] || exit "$image_status_saved"
-          # Neither a provisional file nor its receipt substitutes for this
-          # actual original0. Preview has no fallback to the old image.
+          # Require original0; no old-image fallback.
       - name: Stage the current signed candidate only after actual installation and final-image verification
         id: candidate_stage
         if: github.event_name == 'push' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success'
@@ -5894,6 +5887,21 @@ jobs:
           ui applications-summary --normal-summary applications-test.xcresult
           # Keep this same compiled harness for the candidate journey below.
           # A failed/unknown phase never starts the next test.
+      - name: Retain sanitized candidate Applications failure diagnostics
+        if: failure() && steps.candidate_applications_ui.outcome == 'failure'
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-applications-failure-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/toolchain.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/build.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/build.settings-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/applications-test.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/applications-summary.failure-diagnostics.json
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
       - name: Prepare private Android tools and disposable signing inputs for this candidate
         id: candidate_android_inputs
         if: github.event_name == 'push' && steps.candidate_applications_ui.outcome == 'success'

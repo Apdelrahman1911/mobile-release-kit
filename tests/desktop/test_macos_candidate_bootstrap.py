@@ -325,7 +325,7 @@ class CandidateBootstrapTests(unittest.TestCase):
             status=op.original(op.work_entry,'acquired.status','acquisition-status',4,(0o600,))
             def native(role, argv, **kwargs):
                 F.dispatch(op,role)
-                op.calls.append(dict(role=role,returned=True,capturesSettled=True,returncode=0))
+                op.calls.append(dict(role=role,entered=True,returned=True,capturesSettled=True,returncode=0))
                 F.returned(op,role)
                 body=b'MRK_MACOS_APP_ABSENCE_RESULT='+json.dumps(observed,separators=(',',':')).encode()+b'\n' if role=='app-absence-baseline' else b''
                 return SimpleNamespace(args=argv,returncode=0,stdout=body,stderr=b'')
@@ -347,7 +347,8 @@ class CandidateBootstrapTests(unittest.TestCase):
                 close(item)
                 if fault=='close' and item is entry:
                     item['closed']=False;op.errors.append(dict(stage='close',role='acquisition',type='OSError'))
-            with mock.patch.object(F,'image_prepare',side_effect=image), mock.patch.object(F,'detach',side_effect=detach), \
+            with mock.patch.object(F,'baseline_log',side_effect=lambda owner,**kwargs: native('app-absence-log-cursor',[])), \
+                 mock.patch.object(F,'image_prepare',side_effect=image), mock.patch.object(F,'detach',side_effect=detach), \
                  mock.patch.object(F,'mounted_post'),mock.patch.object(F,'baseline_read',return_value=original), \
                  mock.patch.object(op,'close',side_effect=closing):
                 try: result=op.candidate_baseline(entry,status,None,acquisition['nomination'],'e'*40)

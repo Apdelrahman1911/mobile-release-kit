@@ -5179,9 +5179,12 @@ class NormalPhaseDataTests(unittest.TestCase):
             "owner-android-build", "owner-ios-archive", "owner-project-recovery",
             "owner-github-preflight", "owner-github-release", "owner-project-path",
             "owner-saved-version-edit", "owner-metadata-images", "other-or-unobserved", "ambiguous",
+            "owner-local-history", "owner-store-readback", "owner-store-execution",
+            "owner-store-preparation", "owner-store-access",
         )
         waiters = ("timed-out", "incorrect-order", "inverted-fulfillment", "interrupted", "unknown")
-        self.assertEqual(len(set(reasons)), 17)
+        self.assertEqual(len(set(reasons)), 22)
+        selections = ("test.xcresult", "applications-test.xcresult", MODULE.IOS_PENDING_RESULT)
         for index, reason in enumerate(reasons):
             ordinal, line = index % 4 + 1, 1 if index % 2 == 0 else 65535
             waiter, enabled, hittable = waiters[index % 5], bool(index % 2), bool(index // 2 % 2)
@@ -5189,30 +5192,34 @@ class NormalPhaseDataTests(unittest.TestCase):
             require = f"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line={line};check=condition".encode()
             row = (f"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line={line};ordinal={ordinal};waiter={waiter}"
                    f";enabled={int(enabled)};hittable={int(hittable)};reason={reason};sample=pre-wait;nonAtomic=1").encode()
-            with self.subTest(reason=reason, ordinal=ordinal, waiter=waiter):
-                value = MODULE.normal_failure_diagnostics("test", "test.xcresult",
-                    subprocess.CompletedProcess([], 65, require + ending + row + ending, b""))
-                self.assertEqual(value["requireObservations"],
-                    [{"source": "NormalAppUITests.swift", "line": line, "check": "condition"}])
-                self.assertEqual(value["dashboardReadiness"], {
-                    "stream": "stdout", "line": line, "ordinal": ordinal, "waiter": waiter,
-                    "enabled": enabled, "hittable": hittable, "reason": reason,
-                    "sample": "pre-wait", "nonAtomic": True})
-                self.assertEqual(value["originalReturncode"], 65)
-                self.assertEqual(value["status"], "classified")
-                self.assertFalse(any(value["markers"].values()))  # Not a XCTest outcome or final UI state.
+            for selection in selections:
+                with self.subTest(selection=selection, reason=reason, ordinal=ordinal, waiter=waiter):
+                    value = MODULE.normal_failure_diagnostics("test", selection,
+                        subprocess.CompletedProcess([], 65, require + ending + row + ending, b""))
+                    self.assertEqual(value["requireObservations"],
+                        [{"source": "NormalAppUITests.swift", "line": line, "check": "condition"}])
+                    self.assertEqual(value["dashboardReadiness"], {
+                        "stream": "stdout", "line": line, "ordinal": ordinal, "waiter": waiter,
+                        "enabled": enabled, "hittable": hittable, "reason": reason,
+                        "sample": "pre-wait", "nonAtomic": True})
+                    self.assertEqual(value["originalReturncode"], 65)
+                    self.assertEqual(value["status"], "classified")
+                    self.assertFalse(any(value["markers"].values()))  # Not a XCTest outcome or final UI state.
 
         require = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=65535;check=condition\n"
         row = (b"MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=65535;ordinal=4;waiter=inverted-fulfillment;"
                b"enabled=0;hittable=0;reason=owner-saved-version-edit;sample=pre-wait;nonAtomic=1\n")
         for phase, selection in (
                 ("build", None), ("query", None), ("summary", "test.xcresult"),
-                *(("test", name) for name in MODULE.NORMAL_SELECTIONS if name != "test.xcresult")):
+                *(("test", name) for name in MODULE.NORMAL_SELECTIONS if name not in selections),
+                ("test", MODULE.IOS_UNSIGNED_RESULT)):
             with self.subTest(phase=phase, selection=selection):
                 value = MODULE.normal_failure_diagnostics(phase, selection,
                     subprocess.CompletedProcess([], 65, require + row, b""))
                 self.assertIsNone(value["dashboardReadiness"])
-                self.assertEqual(value["requireObservations"], [])
+                self.assertEqual(value["requireObservations"],
+                    [{"source": "NormalAppUITests.swift", "line": 65535, "check": "condition"}]
+                    if phase == "test" and selection == MODULE.IOS_UNSIGNED_RESULT else [])
                 self.assertEqual(value["originalReturncode"], 65)
         stderr_only = MODULE.normal_failure_diagnostics("test", "test.xcresult",
             subprocess.CompletedProcess([], 65, b"", require + row))
@@ -5237,6 +5244,17 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertEqual(value["originalReturncode"], 65)
         self.assertLessEqual(len(MODULE.encoded(value)) + 1, 4096)
         self.assertNotIn(b"fixture-secret", MODULE.encoded(value))
+
+        swift = SWIFT.read_text()
+        apps = swift.split("func testApplicationsLaunchAndQuit() throws {", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("packagedRequireDiagnosticActive = true", apps)
+        self.assertIn("defer { packagedRequireDiagnosticActive = false }", apps)
+        for ordinal in (1, 2):
+            self.assertIn(f"try dashboard(renderer, diagnosticOrdinal: {ordinal})", apps)
+        pending = swift.split("func testInstalledIOSPendingAccountRecoveryThroughUI() throws {", 1)[1].split("\n    @MainActor", 1)[0]
+        self.assertIn("try launchForJourney(profile: profile, diagnosticOrdinal: 1)", pending)
+        self.assertIn("diagnosticOrdinal: UInt8? = nil) throws ->", swift)
+        self.assertIn("try dashboard(renderer, diagnosticOrdinal: diagnosticOrdinal)", swift)
 
     def test_dashboard_failure_diagnostics_reject_ambiguous_or_malformed_data(self):
         require = b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE=v1;line=508;check=condition\n"

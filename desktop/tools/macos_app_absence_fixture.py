@@ -234,6 +234,9 @@ def transport_layout(op, rows):
     return transport_layout_data(rows, recovery=recovery_mode(op))
 
 
+BASELINE_ROLES = ("app-absence-image-create", "app-absence-image-verify", "app-absence-baseline-attach",
+                  "app-absence-log-cursor", "app-absence-baseline", "app-absence-baseline-detach")
+LOG_CAPTURE = "app-absence-log-capture"
 PREPARE = "prepare-app-absence"
 RESTORE = "app-absence-restore"
 PHASES = (PREPARE, RESTORE)
@@ -336,8 +339,7 @@ def io(op, label, function, *args, **kwargs):
 
 def roles(op):
     if op.phase == "candidate-baseline":
-        return ("app-absence-image-create", "app-absence-image-verify", "app-absence-baseline-attach",
-                "app-absence-baseline", "app-absence-baseline-detach")
+        return BASELINE_ROLES
     if recovery_mode(op):
         if op.phase == PREPARE:
             return PREPARE_ROLES + tuple("app-absence-cut-" + cut + "-" + role for cut in CUTS
@@ -358,14 +360,30 @@ def cut_return_data(op, role, code):
     return cut_role_data(op, role) and type(code) is int and code == 1
 
 
+def failed_baseline(op):
+    rows = op.calls
+    return (op.phase == "candidate-baseline" and len(rows) == 5
+        and tuple(row.get("role") for row in rows) == BASELINE_ROLES[:5]
+        and all(row.get("entered") is True and row.get("returned") is True
+                and row.get("capturesSettled") is True and type(row.get("returncode")) is int for row in rows)
+        and all(row["returncode"] == 0 for row in rows[:4]) and rows[-1]["returncode"] != 0
+        and op.app_absence.get("logCursor") is True
+        and op.app_absence["pendingRoot"] == "app-absence-baseline")
+
+
 def dispatch(op, role):
     state = op.app_absence
     clock(op)
     expected = roles(op)
+    if role == LOG_CAPTURE:
+        need(failed_baseline(op) and not op.errors and op.stager_io_pending is None,
+             "app-absence-log-original-order")
+        return  # Read-only terminal observation; pendingRoot remains unchanged.
     need(not op.errors and op.stager_io_pending is None and state["pendingRoot"] is None
          and len(op.calls) < len(expected) and role == expected[len(op.calls)]
          and all(row.get("returned") is True and row.get("capturesSettled") is True
-                 and type(row.get("returncode")) is int and (row.get("returncode") == 0 and not cut_role_data(op, row.get("role")) or op.phase == "package-install"
+                 and type(row.get("returncode")) is int and (row.get("returncode") == 0 and not cut_role_data(op, row.get("role")) or op.phase == "candidate-baseline"
+                      and row.get("role") == "app-absence-log-cursor" and row.get("returncode") == 1 or op.phase == "package-install"
                       and row.get("role") in ("installer-log-cursor", "installer-log-capture") and row.get("returncode") == 1
                       or cut_return_data(op, row.get("role"), row.get("returncode")))
                  for row in op.calls), "app-absence-exact-original-order")
@@ -1447,14 +1465,14 @@ def candidate_baseline_receipt_data(value, nomination, helper_source, helper_tre
          and original['sha256'] == value['baselineSha256'] and type(original['identity']) is list
          and len(original['identity']) == 9 and all(type(item) is int for item in original['identity']),
          'candidate-baseline-original-shape')
-    roles = ('app-absence-image-create','app-absence-image-verify','app-absence-baseline-attach',
-             'app-absence-baseline','app-absence-baseline-detach')
+    roles = BASELINE_ROLES
     calls = value['originalCalls']
     need(type(calls) is list and len(calls) == len(roles), 'candidate-baseline-original-count')
     for row,role in zip(calls,roles):
         need(type(row) is dict and set(row) == {'role','entered','returned','capturesSettled','returncode'}
              and row['role'] == role and row['entered'] is row['returned'] is row['capturesSettled'] is True
-             and type(row['returncode']) is int and row['returncode'] == 0, 'candidate-baseline-original-finality')
+             and type(row['returncode']) is int and row['returncode'] in
+                 ((0, 1) if role == 'app-absence-log-cursor' else (0,)), 'candidate-baseline-original-finality')
     return value
 
 
@@ -1479,6 +1497,46 @@ def candidate_initial_data(observed, baseline, census):
             'resultSha256':census[request]['sha256'], 'instance':observed['installationMetadata'][0]['instance']}
 
 
+def baseline_log(op, *, capture):
+    api, stager = op.app_absence_api, op.candidate_fixture_stager
+    need(op.phase == "candidate-baseline" and op.package_settled(), "app-absence-log-original-order")
+    need(api.package_timeout_data(clock(op), op.package_endpoint, 30) == 30,
+         "app-absence-log-deadline")
+    binding = op.app_absence["nativeBinding"]
+    command = "installer-log-capture" if capture else "installer-log-cursor"
+    args = SimpleNamespace(app_absence=True, fixture=False, xcode_setup=False, target=op.target,
+        package=mounted_path(op)/PHASE_NAMES[0], fixture_source=binding["fixtureSource"],
+        expected_source=binding["productSource"], expected_inventory=binding["inventorySha256"],
+        expected_manifest=binding["runtimeManifestSha256"], run_id=binding["runId"], run_attempt=binding["runAttempt"])
+    expected = stager.installer_log_binding(args)
+    argv = [api.sys.executable, "-I", "-S", "-B", str(op.candidate_fixture_checkout/"desktop/tools/stage_macos_installed.py"),
+        command, "--app-absence", "--target", op.target, "--package", str(args.package),
+        "--fixture-source", args.fixture_source, "--expected-source", args.expected_source,
+        "--expected-inventory", args.expected_inventory, "--expected-manifest", args.expected_manifest,
+        "--run-id", args.run_id, "--run-attempt", args.run_attempt]
+    if capture:
+        argv.extend(("--cursor", str(op.work/"app-absence-log-cursor.json")))
+    result = call(op, LOG_CAPTURE if capture else "app-absence-log-cursor", argv, maximum=30, limit=16384,
+                  environment={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin", "LANG":"C", "LC_ALL":"C", "TZ":"UTC"})
+    try:
+        document = stager.decode(result.stdout)
+        need(type(document) is dict and document.get("authority") == stager.LOG_AUTHORITY,
+             "app-absence-log-output")
+        if not capture:
+            stager.validate_log_cursor(document, expected)
+            need(result.returncode == 0, "app-absence-log-output")
+        else:
+            value = api.fixture_log_document(document, result.returncode)
+            need(value is not None, "app-absence-log-output")
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError, stager.Refused):
+        return  # Optional DATA only; owned I/O and cancellation are not absence.
+    if capture:
+        op.calls[-1]["fixtureLog"] = value
+    else:
+        op.publish("app-absence-log-cursor.json", result.stdout)
+        op.app_absence["logCursor"] = True
+
+
 def root_call(op, phase):
     index = 2 if phase in RECOVERY_PHASES else {"baseline": 0, "withdraw": 1, "verify": 2}[phase]
     role = "app-absence-" + phase
@@ -1489,7 +1547,17 @@ def root_call(op, phase):
 
 
 def baseline(op):
-    observed = root_call(op, "baseline")
+    if op.phase == "candidate-baseline":
+        baseline_log(op, capture=False)
+    try:
+        observed = root_call(op, "baseline")
+    except BaseException:
+        if failed_baseline(op):
+            try:
+                baseline_log(op, capture=True)
+            except BaseException:
+                pass  # Preserve the SAME failed Installer, pendingRoot and unknown custody.
+        raise
     op.app_absence["baselineSha256"] = observed["baselineSha256"]
     op.app_absence["baselineOriginal"] = io(op, "baseline-read", baseline_read, op, observed["baselineSha256"])
     op.app_absence["baselineObservation"] = observed

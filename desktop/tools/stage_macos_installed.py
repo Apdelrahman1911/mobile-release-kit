@@ -5037,6 +5037,25 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest, *, 
 
 
 def installer_log_binding(args):
+    if getattr(args, "app_absence", False):
+        package = os.fspath(args.package)
+        source = getattr(args, "fixture_source", None)
+        need(args.fixture is False and getattr(args, "xcode_setup", False) is False
+             and getattr(args, "request_id", None) is None and getattr(args, "selected_output", None) is None
+             and type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
+             and type(args.expected_source) is str and re.fullmatch(r"[0-9a-f]{40}", args.expected_source)
+             and sha(args.expected_inventory) and sha(args.expected_manifest)
+             and type(args.run_id) is str and re.fullmatch(r"[1-9][0-9]{0,23}", args.run_id)
+             and type(args.run_attempt) is str and re.fullmatch(r"[1-9][0-9]{0,5}", args.run_attempt), "log-input-binding")
+        target = command_target(args)
+        name = "MRK-AppAbsence-" + digest("\n".join((args.run_id, args.run_attempt,
+            target, "app-absence-baseline-attach")).encode("ascii"))[:32]
+        need(package == str(Path("/Volumes") / name / "MRK-AppAbsence-Baseline.pkg"), "log-input-binding")
+        return {"packageKind": "app-absence", "packageIdentifier": PACKAGE_ID + "-app-absence-fixture",
+                "packagePath": package, "fixtureSource": source, "productSource": args.expected_source,
+                "target": target, "inventorySha256": args.expected_inventory,
+                "runtimeManifestSha256": args.expected_manifest, "runId": args.run_id, "runAttempt": args.run_attempt}
+    need(getattr(args, "fixture_source", None) is None, "log-input-binding")
     if getattr(args, "xcode_setup", False):
         # Genuine companion identity. No invented main-app inventory, manifest,
         # request ID or result marker is used to correlate this interval.
@@ -5164,11 +5183,7 @@ def validate_log_window(cursor, identity, end, anchor, body):
     need((not anchor or anchor.endswith(b"\n")) and (not body or body.endswith(b"\n")), "log-incomplete-boundary")
 
 
-def select_installer_log(body, binding):
-    # Byte-preserving diagnostic selection only. No PID attribution, JSON result
-    # decoding, convenient-record choice, or acceptance/finality implication.
-    need(type(body) is bytes and len(body) <= LOG_INTERVAL_BYTES, "log-interval-bound")
-    need(not body or body.endswith(b"\n"), "log-incomplete-boundary")
+def _installer_log_patterns(binding):
     def token(value, path=False):
         chars = rb"A-Za-z0-9._+~%/-" if path else rb"A-Za-z0-9._+-"
         return re.compile(rb"(?<![" + chars + rb"])" + re.escape(value) + rb"(?![" + chars + rb"])")
@@ -5190,6 +5205,15 @@ def select_installer_log(body, binding):
             rb"acl-object|acl-validation|acl-first-entry|acl-entry-present|acl-free|ffi-output)"
             rb";result=-?[0-9]{1,10};call=-?[0-9]{1,10};errno=-?[0-9]{1,10};freeCall=-?[0-9]{1,10};freeErrno=-?[0-9]{1,10}(?=\r?\n$)"),
     }
+    return patterns
+
+
+def select_installer_log(body, binding):
+    # Byte-preserving diagnostic selection only. No PID attribution, JSON result
+    # decoding, convenient-record choice, or acceptance/finality implication.
+    need(type(body) is bytes and len(body) <= LOG_INTERVAL_BYTES, "log-interval-bound")
+    need(not body or body.endswith(b"\n"), "log-incomplete-boundary")
+    patterns = _installer_log_patterns(binding)
     counts = {key: 0 for key in patterns}
     selected = bytearray()
     rows = []
@@ -5214,6 +5238,37 @@ def select_installer_log(body, binding):
     state = "mixed" if counts[other] else "duplicate" if counts[wanted] > 1 else "unbound" if counts[wanted] == 1 else "missing"
     return bytes(selected), {"linesObserved": total, "linesUnselected": total - len(rows), "selectedLines": rows,
                              "markerCounts": counts, "resultMarkerState": state}
+
+
+def select_app_absence_log(body, binding):
+    """Only exact diagnostic tokens, never original log lines or callback proof."""
+    need(type(body) is bytes and len(body) <= LOG_INTERVAL_BYTES
+         and (not body or body.endswith(b"\n")), "log-interval-bound")
+    patterns = _installer_log_patterns(binding)
+    error = re.compile(rb"(?<![A-Za-z0-9_])Error[ \t]+Domain="
+        rb"(PKInstallErrorDomain|NSCocoaErrorDomain|NSPOSIXErrorDomain|NSOSStatusErrorDomain)"
+        rb"[ \t]+Code=(-?[0-9]{1,10})(?![A-Za-z0-9_+.-])")
+    markers, errors, correlated, omitted = [], [], False, False
+    for line in body.splitlines(keepends=True):
+        need(line.endswith(b"\n") and len(line) <= LOG_LINE_BYTES, "log-line-bound")
+        correlated = correlated or any(patterns[key].search(line) for key in ("package-identifier", "package-path"))
+        if len(line) > 16384:
+            omitted = True
+            continue
+        for pattern, rows in ((patterns["acl-diagnostic"], markers),
+                              (patterns["completed-parent-diagnostic"], markers), (error, errors)):
+            for match in pattern.finditer(line):
+                # Do not deduplicate conflicting/repeated facts or retain context.
+                if len(rows) == 4:
+                    omitted = True
+                elif rows is errors:
+                    code = int(match[2])
+                    if -(1 << 31) <= code < 1 << 31:
+                        rows.append("Error Domain=" + match[1].decode("ascii") + " Code=" + str(code))
+                else:
+                    rows.append(match[0].decode("ascii"))
+    need(bool(correlated), "log-no-project-lines")
+    return {"markerTokens": markers, "errorTokens": errors, "omitted": omitted}
 
 
 def select_xcode_setup_log(body, binding):
@@ -5324,6 +5379,13 @@ def installer_log_diagnostic(args):
             validate_log_window(cursor, identity, end, anchor, body)
             need(positioned_log_read(fd, start - len(anchor), len(anchor)) == anchor, "log-anchor-rewritten")
             growth = log_growth(fd, outer, name, identity, end)
+        if binding["packageKind"] == "app-absence":
+            projection = select_app_absence_log(body, binding)
+            result = {"schemaVersion": 1, "kind": "installer-log-capture", "state": "observed-project-correlated",
+                      "authority": LOG_AUTHORITY, "scriptOutputFinality": "unestablished",
+                      "intervalScope": "before-baseline-through-failed-installer", "projection": projection}
+            need(len(canonical(result)) <= 16384, "log-metadata-bound")
+            return result, 0
         if binding["packageKind"] == "xcode-setup":
             # The shared reader has positively closed. Raw interval bytes never
             # leave this process or reach write_log_selection / an artifact.
@@ -7360,6 +7422,8 @@ def main(argv=None):
         diagnostic = commands.add_parser(name)
         diagnostic.add_argument("--fixture", action="store_true")
         diagnostic.add_argument("--xcode-setup", action="store_true")
+        diagnostic.add_argument("--app-absence", action="store_true")
+        diagnostic.add_argument("--fixture-source")
         diagnostic.add_argument("--package", required=True, type=Path)
         diagnostic.add_argument("--request-id", help="Ordinary fixed mounted package correlation only; absent for fixtures")
         diagnostic.add_argument("--expected-source", required=True)

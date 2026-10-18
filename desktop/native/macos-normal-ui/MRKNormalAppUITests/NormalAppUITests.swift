@@ -22,6 +22,9 @@ final class NormalAppUITests: XCTestCase {
         case loading, notLoaded = "not-loaded", bridgeUnavailable = "bridge-unavailable"
         case selectionUnavailable = "selection-unavailable", selectionInProgress = "selection-in-progress"
         case shuttingDown = "shutting-down"
+        case ownerLocalHistory = "owner-local-history", ownerStoreReadback = "owner-store-readback"
+        case ownerStoreExecution = "owner-store-execution", ownerStorePreparation = "owner-store-preparation"
+        case ownerStoreAccess = "owner-store-access"
         case ownerOfflinePreflight = "owner-offline-preflight", ownerAndroidBuild = "owner-android-build"
         case ownerIOSArchive = "owner-ios-archive", ownerProjectRecovery = "owner-project-recovery"
         case ownerGitHubPreflight = "owner-github-preflight", ownerGitHubRelease = "owner-github-release"
@@ -832,6 +835,21 @@ final class NormalAppUITests: XCTestCase {
                     "The application is shutting down.",
                 ], .shuttingDown),
                 ([
+                    "A local release-history intent or operation is retained. Cancel or finish it before other work.",
+                ], .ownerLocalHistory),
+                ([
+                    "A local Store readback intent or operation is retained. Cancel or finish it before other work.",
+                ], .ownerStoreReadback),
+                ([
+                    "A local Store execution intent or operation is retained. Cancel or finish it before other work.",
+                ], .ownerStoreExecution),
+                ([
+                    "A local Store preparation intent or operation is retained. Cancel or finish it before other work.",
+                ], .ownerStorePreparation),
+                ([
+                    "A local Store access-check intent or operation is retained. Cancel or finish it before other work.",
+                ], .ownerStoreAccess),
+                ([
                     "Offline-check ownership or finality is unverified. Keep the original status; conflicting work is disabled.",
                     "Saved offline checks hold the original intent or execution slot. Cancel or settle that original operation before conflicting work.",
                     "The original offline-check status is unverified. Check retained status before conflicting work.",
@@ -1374,6 +1392,8 @@ final class NormalAppUITests: XCTestCase {
 
     @MainActor
     func testApplicationsLaunchAndQuit() throws {
+        packagedRequireDiagnosticActive = true
+        defer { packagedRequireDiagnosticActive = false }
         continueAfterFailure = false
         executionTimeAllowance = 60
         try beginCase(seconds: 60)
@@ -1407,12 +1427,12 @@ final class NormalAppUITests: XCTestCase {
         try require(window.isHittable, "Applications main window is not usable")
         try require(window.webViews.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "Applications renderer is missing")
         let renderer = try unique(window.webViews, "Applications renderer is ambiguous")
-        try dashboard(renderer)
+        try dashboard(renderer, diagnosticOrdinal: 1)
         try click(renderer.buttons.matching(identifier: "Project settings"), "Applications settings navigation is unavailable")
         try require(renderer.staticTexts.matching(identifier: "A little clarity before the next release.")
                     .element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "Applications settings did not render")
         try click(renderer.buttons.matching(identifier: "Dashboard"), "Applications Dashboard navigation is unavailable")
-        try dashboard(renderer)
+        try dashboard(renderer, diagnosticOrdinal: 2)
         try gate.probe(busy: true)
         let sheet = try quitSheet(app, window)
         try click(sheet.buttons.matching(identifier: "Quit"), "Applications genuine normal Quit is unavailable")
@@ -5484,7 +5504,8 @@ final class NormalAppUITests: XCTestCase {
         return (url, account)
     }
 
-    @MainActor private func launchForJourney(profile: SourceProfile = .sameBuild) throws -> (XCUIApplication, XCUIElement, XCUIElement) {
+    @MainActor private func launchForJourney(profile: SourceProfile = .sameBuild,
+                                             diagnosticOrdinal: UInt8? = nil) throws -> (XCUIApplication, XCUIElement, XCUIElement) {
         _ = try admittedJourneyApplication(profile: profile) // Defaults remain exact same-build.
         let app = try launchOrdinaryApplication()
         try require(app.wait(for: .runningForeground, timeout: try remaining(5)), "ordinary app did not enter the foreground")
@@ -5507,7 +5528,7 @@ final class NormalAppUITests: XCTestCase {
         try require(observedReadyCount == 1, "ordinary first-party renderer is missing or ambiguous")
         let renderer = rendererQuery.element(boundBy: 0)
         // End shared journey bounded renderer readiness.
-        try dashboard(renderer)
+        try dashboard(renderer, diagnosticOrdinal: diagnosticOrdinal)
         return (app, window, renderer)
     }
 
@@ -7842,7 +7863,7 @@ final class NormalAppUITests: XCTestCase {
                 _ = try admitHostedAccount(profile)
                 try fixture.open(.pending)
             }
-            let (app, window, renderer) = try launchForJourney(profile: profile)
+            let (app, window, renderer) = try launchForJourney(profile: profile, diagnosticOrdinal: 1)
             try stage("ios-recovery-project") {
                 try fixture.post()
                 try press(renderer, "Open project folder", renderer: renderer)

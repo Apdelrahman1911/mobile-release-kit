@@ -398,6 +398,27 @@ def read_phase(read, normal, name, selected, work, *, helper_source=None, ios_to
 # Fixed public assertion literals from the Applications journey and its shared
 # dashboard/quit helpers. Diagnostics only, never arbitrary XCTest error text.
 APPLICATIONS_CONDITIONS = {
+    # Existing launcher/event-owner and case-clock refusals, not raw error prose.
+    'launch event has no running reference': 'launch-event-reference',
+    'unrequested or late payload launch event': 'payload-event-timing',
+    'payload launch event refused': 'payload-event-refused',
+    'late launcher callback': 'launcher-callback-timing',
+    'launcher callback refused': 'launcher-callback-refused',
+    'ambiguous Applications launch observation': 'launch-observation-ambiguous',
+    'callback original is not the installed Applications launcher': 'launcher-callback-identity',
+    'retained payload event identity changed or differs': 'payload-event-identity',
+    'Applications observations incomplete': 'launch-observation-incomplete',
+    'Applications launch is not one main-thread request': 'launch-request-thread-or-count',
+    'Applications launch deadline missing': 'launch-deadline-missing',
+    'observed payload terminated before UI admission': 'payload-terminated-before-ui',
+    'Applications observed normal termination incomplete': 'observed-termination-incomplete',
+    'Applications normal UI Quit was not accepted': 'normal-quit-not-accepted',
+    'failed Applications observation is not normal Quit evidence': 'failure-not-normal-quit',
+    'case clock unavailable': 'case-clock-unavailable',
+    'case clock moved backwards or became unavailable': 'case-clock-invalid',
+    'invalid bounded wait': 'invalid-bounded-wait',
+    'original case or stage deadline elapsed': 'case-or-stage-deadline',
+    'original case deadline elapsed': 'case-deadline',
     "case deadline cannot be reset": "case-already-active",
     "removal harness channel is exclusive to its fixed case": "unexpected-removal-channel",
     "this scenario is not admitted on a shared or personal desktop": "hosted-scenario",
