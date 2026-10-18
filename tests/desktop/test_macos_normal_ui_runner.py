@@ -4700,6 +4700,107 @@ class NormalPhaseDataTests(unittest.TestCase):
                 self.assertNotIn(secret, captured[0][1])
                 self.assertEqual(json.loads(captured[0][1])["originalReturncode"], 65)
 
+    def test_android_candidate_failure_diagnostics_keep_private_text_out(self):
+        selection = "android-candidate-inputs-test.xcresult"
+        method = "testSyntheticProjectAndroidCandidateInputs"
+        case = "-[MRKNormalAppUITests.NormalAppUITests " + method + "]"
+        private = b"PRIVATE-keystore-password-and-project-path"
+        stages = ("android-private-admission", "android-public-project-and-certificate", "android-saved-input-read",
+            "android-separate-installed-service-setup", "android-source-inspection-without-license-acceptance",
+            "android-fresh-reviewed-protected-copy", "android-new-protected-copy-full-readback",
+            "android-memory-input-assignment", "android-one-signed-build-original", "android-known-native-terminal",
+            "candidate-original-history-review-and-abandon", "android-output-census-and-normal-quit")
+        def event(stage, result="started"):
+            return ("MRK_NORMAL_PROJECT_STAGE=" + stage + ";result=" + result
+                    + (";laterStages=not-run" if result == "failed" else "") + "\n").encode()
+        site = ("/private/not-published/NormalAppUITests.swift:765:9: error: " + case + " : ").encode() + private + b"\n"
+        body = ("Test Case '" + case + "' started.\n").encode() + b'Type "' + private + b'"\n'
+        body += event(stages[0]) + event(stages[0], "passed") + event(stages[5]) + event(stages[5], "failed") + site
+        body += ("Test Case '" + case + "' failed (1.000 seconds).\n").encode()
+        stderr = b'Error Domain=NSPOSIXErrorDomain Code=13 "' + private + b'"\n'
+        def observe(stdout=body, errors=stderr, selected=selection, phase="test"):
+            return MODULE.normal_failure_diagnostics(phase, selected, subprocess.CompletedProcess([], 65, stdout, errors))
+        value = observe()
+        self.assertEqual(value["sourceFailures"], [{"stream": "stdout", "source": "NormalAppUITests.swift",
+            "method": method, "line": 765, "column": 9}])
+        self.assertEqual(value["errorCodes"][0]["domain"], "NSPOSIXErrorDomain")
+        self.assertEqual(value["androidCandidateProgress"], {"state": "observed", "firstFailed": stages[5],
+            "lastObserved": {"stage": stages[5], "result": "failed"}})
+        self.assertTrue(value["markers"]["selectedCaseStarted"] and value["markers"]["selectedCaseFailed"])
+        self.assertEqual(value["requireObservations"], [])  # This Swift method does not emit that namespace.
+        self.assertNotIn(private, MODULE.encoded(value)); self.assertNotIn(b"/private/", MODULE.encoded(value))
+        self.assertLessEqual(len(MODULE.encoded(value)) + 1, 4096)
+        for stage in stages:
+            self.assertEqual(observe(event(stage), b"")["androidCandidateProgress"]["lastObserved"]["stage"], stage)
+        for bad in (event("unselected-private"), event("launch"), event(stages[0])[:-1], b"prefix " + event(stages[0]),
+                    event(stages[0]).replace(b";result=", b";private=value;result="), event(stages[0]) * 129):
+            self.assertEqual(observe(bad, b"")["androidCandidateProgress"]["state"], "refused")
+        self.assertEqual(observe(b"", event(stages[0]))["androidCandidateProgress"]["state"], "refused")
+        self.assertEqual(MODULE.project_stage_diagnostics(event("launch"), b"")["lastObserved"]["stage"], "launch")
+        self.assertEqual(MODULE.project_stage_diagnostics(event(stages[0]), b"")["state"], "refused")
+        self.assertEqual(observe(body.replace(method.encode(), b"testApplicationsLaunchAndQuit"))["sourceFailures"], [])
+        self.assertNotIn("androidCandidateProgress", observe(selected="test.xcresult"))
+        self.assertNotIn("androidCandidateProgress", observe(phase="summary"))
+        with self.assertRaises(MODULE.Refused): observe(selected="unselected.xcresult")
+        with self.assertRaises(MODULE.Refused): observe(stdout=b"x" * (1024 * 1024 + 1), errors=b"")
+        with self.assertRaises(MODULE.Refused): MODULE.project_stage_diagnostics(b"", b"", android_candidate=1)
+
+    def test_android_candidate_native_failure_publication_preserves_first_status(self):
+        work = Path("/Users/runner/work/_temp/mrk-macos-installed.ABCDef12")
+        private = b"PRIVATE-password-original-output"
+        body = b"MRK_NORMAL_PROJECT_STAGE=android-private-admission;result=failed;laterStages=not-run\n" + private + b"\n"
+        for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+            for fault in ("none", "post-native", "admission", "formatter", "oversize", "publication", "original-bound", "zero"):
+                with self.subTest(target=target, fault=fault), ExitStack() as stack:
+                    output, errors, published, calls = io.BytesIO(), io.BytesIO(), [], []
+                    original = subprocess.CompletedProcess(["fixed-native"], 0 if fault == "zero" else 65,
+                        b"x" * (1024 * 1024 + 1) if fault == "original-bound" else body, b"")
+                    def native(*_a, **_kw):
+                        calls.append(1); return original
+                    owner = SimpleNamespace(ProcessError=OSError, ProcessInterrupted=InterruptedError, run_owned=native)
+                    def execute(phase, *_args):
+                        if fault == "admission": raise MODULE.Refused(private.decode())
+                        # Original-bound simulates the already returned oversized
+                        # original; real owner rejection remains independently tested.
+                        if fault == "original-bound": return original
+                        value = phase.call("one-admitted-ui-test", ["fixed-native"], 1020)
+                        if fault == "post-native": raise MODULE.Refused(private.decode())
+                        return value
+                    def publish(path, data, cap):
+                        if fault == "publication" and path.name.endswith(".failure-diagnostics.json"):
+                            raise OSError(private.decode())
+                        published.append((path, data, cap))
+                    def stream(buffer):
+                        return SimpleNamespace(buffer=buffer, write=lambda value: buffer.write(value.encode()), flush=lambda: None)
+                    for patcher in (
+                        patch.object(MODULE.sys, "argv", ["helper", "--target", target, "--normal-android-candidate-inputs-test"]),
+                        patch.dict(MODULE.os.environ, {"TMPDIR": str(work / "normal-ui/tmp") + "/"}),
+                        patch.object(MODULE.time, "monotonic_ns", return_value=0),
+                        patch.object(MODULE, "normal_context", return_value=(Path("/inert"), "a" * 40, {}, (1024**3,) * 2)),
+                        patch.object(MODULE, "load_normal_owner", return_value=owner),
+                        patch.object(MODULE, "execute_normal_phase", side_effect=execute),
+                        patch.object(MODULE, "exclusive_output", side_effect=publish),
+                        patch.object(MODULE.sys, "stdout", stream(output)), patch.object(MODULE.sys, "stderr", stream(errors))):
+                        stack.enter_context(patcher)
+                    if fault == "formatter": stack.enter_context(patch.object(MODULE, "normal_failure_diagnostics", side_effect=ValueError(private.decode())))
+                    if fault == "oversize": stack.enter_context(patch.object(MODULE, "normal_failure_diagnostics", return_value={"private": "x" * 5000}))
+                    self.assertEqual(MODULE.main(), 0 if fault == "zero" else 1 if fault == "admission" else 65)
+                    self.assertEqual(calls, [] if fault in ("admission", "original-bound") else [1])
+                    rows = {path.name: json.loads(data) for path, data, _ in published}
+                    if fault == "zero": self.assertEqual(rows, {}); continue
+                    self.assertEqual(rows["android-candidate-inputs.failure.json"]["originalStatus"], 1 if fault == "admission" else 65)
+                    if fault in ("publication", "original-bound"):
+                        self.assertNotIn("android-candidate-inputs-test.failure-diagnostics.json", rows)
+                    else:
+                        diagnostic = rows["android-candidate-inputs-test.failure-diagnostics.json"]
+                        if fault != "admission":
+                            self.assertEqual(diagnostic["originalReturncode"], 65)
+                            self.assertEqual(diagnostic["status"], "unavailable" if fault in ("formatter", "oversize") else "unclassified")
+                    for path, data, cap in published:
+                        self.assertNotIn(private, data); self.assertLessEqual(len(data), cap)
+                    if fault not in ("post-native", "admission"):
+                        self.assertEqual(output.getvalue(), original.stdout)  # PRIVATE workflow capture, not artifact.
+
     def test_dashboard_failure_diagnostics_preserve_finite_prewait_data(self):
         reasons = (
             "loading", "not-loaded", "bridge-unavailable", "selection-unavailable",

@@ -17,6 +17,12 @@ class MacOSOptionalArraysTests(unittest.TestCase):
         for name, count in (("history_provider_arguments", 1), ("removal_arguments", 3), ("github_seal_arguments", 1)):
             self.assertEqual(source.count(forms[name]), count)
             self.assertNotIn('"${' + name + '[@]}"', source.replace(forms[name], ""))
+        # The consumer's empty ordinary cohort previously failed on macOS
+        # Bash3.2 before its helper ran. Test its actual selected expansion too.
+        consumer = path.with_name("desktop-macos-candidate-consume.yml").read_text()
+        forms["cohort"] = '${cohort[@]+"${cohort[@]}"}'
+        self.assertEqual(consumer.count(forms["cohort"]), 1)
+        self.assertNotIn('"${cohort[@]}"', consumer.replace(forms["cohort"], ""))
         start = source.index("      - name: Assemble the ordinary image app and sign code inside-out (never --deep)\n")
         assembly = source[start:source.index("      - name:", start + 1)]
         self.assertIn("          set -euo pipefail\n", assembly)

@@ -9,7 +9,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: desktop-macos-candidate-consume
+  group: desktop-macos-candidate-consume-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -34,61 +34,13 @@ jobs:
             rust-version: 1.98.0
             rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
           - target: aarch64-apple-darwin
-            mode: ordinary-ios-ui
+            mode: ordinary-android-ui
             runner: macos-26
             python-architecture: arm64
             rust-version: 1.98.1
             rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
           - target: x86_64-apple-darwin
-            mode: ordinary-ios-ui
-            runner: macos-26-intel
-            python-architecture: x64
-            rust-version: 1.98.0
-            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
-          - target: aarch64-apple-darwin
-            mode: ordinary-saved-ui
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: x86_64-apple-darwin
-            mode: ordinary-saved-ui
-            runner: macos-26-intel
-            python-architecture: x64
-            rust-version: 1.98.0
-            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
-          - target: aarch64-apple-darwin
-            mode: ordinary-saved-version-ui
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: x86_64-apple-darwin
-            mode: ordinary-saved-version-ui
-            runner: macos-26-intel
-            python-architecture: x64
-            rust-version: 1.98.0
-            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
-          - target: aarch64-apple-darwin
-            mode: ordinary-ios-pending-ui
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: x86_64-apple-darwin
-            mode: ordinary-ios-pending-ui
-            runner: macos-26-intel
-            python-architecture: x64
-            rust-version: 1.98.0
-            rust-commit: 88d9e12ae178fab0fb5cc050a94da85685d449ea
-          - target: aarch64-apple-darwin
-            mode: restore
-            runner: macos-26
-            python-architecture: arm64
-            rust-version: 1.98.1
-            rust-commit: 48a229ceaefd4985c50990b14116b6d856af0985
-          - target: x86_64-apple-darwin
-            mode: restore
+            mode: ordinary-android-ui
             runner: macos-26-intel
             python-architecture: x64
             rust-version: 1.98.0
@@ -405,7 +357,7 @@ jobs:
             esac
             set +e
             "$MRK_MACOS_WORK/host-python/bin/python3" -I -S -B \
-              "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_ui.py" "${cohort[@]}" "$phase" \
+              "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_candidate_ui.py" ${cohort[@]+"${cohort[@]}"} "$phase" \
               > "$MRK_MACOS_WORK/candidate-ui-$phase.json"
             status=$?
             printf '%s\n' "$status" > "$status_path"
@@ -826,6 +778,10 @@ jobs:
             ${{ env.MRK_MACOS_WORK }}/normal-ui/saved-version-recovery-test.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/saved-version-recovery-summary.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs.failure.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs-test.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs-summary.failure-diagnostics.json
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs-test.status
+            ${{ env.MRK_MACOS_WORK }}/normal-ui/android-candidate-inputs-summary.status
             ${{ env.MRK_MACOS_WORK }}/normal-ui/ios-pending-recovery-test.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/normal-ui/ios-pending-recovery-summary.failure-diagnostics.json
             ${{ env.MRK_MACOS_WORK }}/prepare-ui-inputs-failure.json

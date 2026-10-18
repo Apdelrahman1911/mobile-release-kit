@@ -706,7 +706,8 @@ SUMMARY_STEMS = {"test.xcresult": "summary", "applications-test.xcresult": "appl
     "release-evidence-test.xcresult": "release-evidence-summary",
     "saved-version-recovery-test.xcresult": "saved-version-recovery-summary",
     IOS_UNSIGNED_RESULT: "ios-unsigned-archive-summary",
-    IOS_PENDING_RESULT: "ios-pending-recovery-summary"}
+    IOS_PENDING_RESULT: "ios-pending-recovery-summary",
+    "android-candidate-inputs-test.xcresult": "android-candidate-inputs-summary"}
 TOOLCHAIN_QUERIES = (
     ("xcode", "xcode-version.txt", ("/usr/bin/xcodebuild", "-version")),
     ("sdkPath", "sdk-path.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")),
@@ -3706,7 +3707,7 @@ def failure_base(phase, selection, original, *, engineering=False):
     # Diagnostic dispatch only: native/ordinary selection admission is unchanged.
     need(type(engineering) is bool and phase in ("build", "test", "summary", "query")
          and (selection is None if phase in ("build", "query") else
-              selection == "engineering-test.xcresult" if engineering else selection in NORMAL_SELECTIONS or selection in (OUTPUT_DATA_RESULT, IOS_UNSIGNED_RESULT, IOS_PENDING_RESULT)),
+              selection == "engineering-test.xcresult" if engineering else selection in NORMAL_SELECTIONS or selection in (OUTPUT_DATA_RESULT, IOS_UNSIGNED_RESULT, IOS_PENDING_RESULT, ANDROID_CANDIDATE_RESULT)),
          "normal-diagnostic-selection")
     cap = 4096 if phase == "query" else 262144 if phase == "summary" else 1024 * 1024
     need(type(original) is subprocess.CompletedProcess and type(original.returncode) is int
@@ -3733,6 +3734,8 @@ def failure_base(phase, selection, original, *, engineering=False):
         value["outputDataFailure"] = None
     if not engineering and phase == "test" and selection == "project-test.xcresult":
         value["projectProgress"] = None
+    if not engineering and phase == "test" and selection == ANDROID_CANDIDATE_RESULT:
+        value["androidCandidateProgress"] = None
     if not engineering and phase == "test" and selection == IOS_UNSIGNED_RESULT:
         value["iosUnsignedStages"] = {"state": "unavailable", "events": []}
     return value
@@ -3816,10 +3819,15 @@ def project_navigation_diagnostics(stdout, stderr):
     return {'state':'observed' if rows else 'absent','observations':rows}
 
 
-def project_stage_diagnostics(stdout, stderr):
-    """Existing project stdout markers only; no method, order or success claim."""
+ANDROID_CANDIDATE_STAGES = tuple("android-private-admission android-public-project-and-certificate android-saved-input-read android-separate-installed-service-setup android-source-inspection-without-license-acceptance android-fresh-reviewed-protected-copy android-new-protected-copy-full-readback android-memory-input-assignment android-one-signed-build-original android-known-native-terminal candidate-original-history-review-and-abandon android-output-census-and-normal-quit".split())
+
+
+def project_stage_diagnostics(stdout, stderr, *, android_candidate=False):
+    """Existing selected stdout markers only; no method, order or success claim."""
+    need(type(android_candidate) is bool, "normal-stage-diagnostic-selection")
+    stages = ANDROID_CANDIDATE_STAGES if android_candidate else PROJECT_STAGES
     namespace = b"MRK_NORMAL_PROJECT_STAGE="
-    pattern = re.escape(namespace) + b"(" + b"|".join(s.encode() for s in PROJECT_STAGES) + rb");result=(started|passed|failed)(;laterStages=not-run)?"
+    pattern = re.escape(namespace) + b"(" + b"|".join(s.encode() for s in stages) + rb");result=(started|passed|failed)(;laterStages=not-run)?"
     first_failed = last = None
     invalid = False
     count = 0
@@ -3913,6 +3921,7 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                ("testPositiveAndroidOutputCustodyData",) if selection == OUTPUT_DATA_RESULT else
                (IOS_UNSIGNED_METHOD,) if selection == IOS_UNSIGNED_RESULT else
                (IOS_PENDING_METHOD,) if selection == IOS_PENDING_RESULT else
+               (ANDROID_CANDIDATE_METHOD,) if selection == ANDROID_CANDIDATE_RESULT else
                NORMAL_SELECTIONS[selection][0]) if selection is not None else ()
     method_pattern = b"|".join(re.escape(m.encode("ascii")) for m in methods)
     case = rb"-\[MRKNormalAppUITests\.NormalAppUITests (?:" + method_pattern + rb")\]"
@@ -4518,6 +4527,11 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         value["iosUnsignedStages"] = ios_unsigned_stage_diagnostics(original.stdout, original.stderr)
         if len(encoded(value)) + 1 > 4096:
             value["iosUnsignedStages"] = {"state": "unavailable", "events": []}
+            value["findingsTruncated"] = True
+    if "androidCandidateProgress" in value:
+        value["androidCandidateProgress"] = project_stage_diagnostics(original.stdout, original.stderr, android_candidate=True)
+        if len(encoded(value)) + 1 > 4096:
+            value["androidCandidateProgress"] = None
             value["findingsTruncated"] = True
     if "projectProgress" in value:
         value["projectProgress"] = project_stage_diagnostics(original.stdout, original.stderr)
@@ -5723,6 +5737,11 @@ def main():
                 retained_intel_build = original  # Before any optional diagnostic/publication can fail.
             stage = "diagnostic"
             if request.get("androidPositive") is True:
+                if request.get("androidCandidate") is True:
+                    try:
+                        publish_failure_diagnostics(request, original)
+                    except BaseException:
+                        pass  # Diagnostics cannot replace the actual native nonzero.
                 publish_android_signed_failure(request, stage, original.returncode)
             elif engineering:
                 publish_engineering_failure(request, engineering_native_failure(request, original, owner, records))
@@ -5772,6 +5791,19 @@ def main():
             return code
         if request is not None and request.get("androidPositive") is True:
             code = phase.first_nonzero.returncode if phase is not None and phase.first_nonzero is not None else 1
+            if request.get("androidCandidate") is True and phase is not None:
+                try:
+                    if phase.first_nonzero is not None:
+                        publish_failure_diagnostics(request, phase.first_nonzero)
+                    else:
+                        failure = classify_normal_admission_failure(encoded(
+                            normal_admission_failure(stage, error, owner, records)))
+                        body = encoded(failure) + b"\n"
+                        need(len(body) <= 4096, "android-candidate-diagnostic-bound")
+                        stem = SUMMARY_STEMS[request["result"].name] if request["phase"] == "summary" else request["result"].stem
+                        exclusive_output(request["derived"].parent / (stem + ".failure-diagnostics.json"), body, 4096)
+                except BaseException:
+                    pass
             try:
                 publish_android_signed_failure(request, stage, code)
             except BaseException:
