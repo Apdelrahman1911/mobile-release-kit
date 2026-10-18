@@ -9,6 +9,7 @@ PRODUCT_LIMIT = 512 * 1024 * 1024
 FIXTURE_PACKAGE_LIMIT = 640 * 1024 * 1024
 FIXTURE_IMAGE_LIMIT = 2560 * 1024 * 1024
 RECORD_LIMIT = 64 * 1024
+MARKER_COUNT_REFUSALS = ("app-absence-phase-marker-missing", "app-absence-phase-marker-duplicate")
 FIXTURE_EXECUTABLE = "mrk-macos-app-absence-fixture"
 PHASE_NAMES = (
     "MRK-AppAbsence-Baseline.pkg",
@@ -373,9 +374,11 @@ def failed_baseline(op):
         and tuple(row.get("role") for row in rows) == BASELINE_ROLES[:5]
         and all(row.get("entered") is True and row.get("returned") is True
                 and row.get("capturesSettled") is True and type(row.get("returncode")) is int for row in rows)
-        and all(row["returncode"] == 0 for row in rows[:4]) and rows[-1]["returncode"] != 0
+        and all(row["returncode"] == 0 for row in rows[:4])
         and op.app_absence.get("logCursor") is True
-        and op.app_absence["pendingRoot"] == "app-absence-baseline")
+        and ((rows[-1]["returncode"] != 0 and op.app_absence["pendingRoot"] == "app-absence-baseline")
+             or (rows[-1]["returncode"] == 0 and op.app_absence["pendingRoot"] is None
+                 and rows[-1].get("phaseMarkerRefusal") in MARKER_COUNT_REFUSALS)))
 
 
 def dispatch(op, role):
@@ -1227,9 +1230,11 @@ def phase_observation(op, result, phase):
     need((phase in PROOFS or recovery_step is not None) and type(result.returncode) is int and result.returncode == 0 and type(result.stdout) is bytes and type(result.stderr) is bytes
          and len(result.stdout) + len(result.stderr) <= 256*1024, "app-absence-phase-output-bound")
     marker = b"MRK_MACOS_APP_ABSENCE_RESULT="
+    count = result.stdout.count(marker) + result.stderr.count(marker)
+    need(count > 0, MARKER_COUNT_REFUSALS[0])
+    need(count == 1, MARKER_COUNT_REFUSALS[1])
     found = []
     for stream in (result.stdout, result.stderr):
-        need(stream.count(marker) <= 1, "app-absence-phase-marker-count")
         for line in stream.splitlines(keepends=True):
             if marker not in line:
                 continue
@@ -1558,12 +1563,21 @@ def baseline(op):
         baseline_log(op, capture=False)
     try:
         observed = root_call(op, "baseline")
-    except BaseException:
-        if failed_baseline(op):
-            try:
+    except BaseException as error:
+        try:
+            # A settled Installer0 does not authenticate a missing/duplicate
+            # observation. Retain its exact parser refusal only for diagnostics.
+            args = BaseException.args.__get__(error)
+            if (type(error) is ValueError and len(args) == 1 and type(args[0]) is str
+                    and args[0] in MARKER_COUNT_REFUSALS and len(op.calls) == 5
+                    and op.calls[-1].get("role") == "app-absence-baseline"
+                    and all(op.calls[-1].get(key) is True for key in ("entered", "returned", "capturesSettled"))
+                    and type(op.calls[-1].get("returncode")) is int and op.calls[-1]["returncode"] == 0):
+                op.calls[-1]["phaseMarkerRefusal"] = args[0]
+            if failed_baseline(op):
                 baseline_log(op, capture=True)
-            except BaseException:
-                pass  # Preserve the SAME failed Installer, pendingRoot and unknown custody.
+        except BaseException:
+            pass  # Never replace the original parser/native failure or its custody.
         raise
     op.app_absence["baselineSha256"] = observed["baselineSha256"]
     op.app_absence["baselineOriginal"] = io(op, "baseline-read", baseline_read, op, observed["baselineSha256"])

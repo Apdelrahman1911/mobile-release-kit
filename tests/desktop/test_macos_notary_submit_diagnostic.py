@@ -86,6 +86,7 @@ class NotarySubmitDiagnosticTests(unittest.TestCase):
         # Keep only the fixed baseline ValueError guard, without rendering it.
         for reason in (
             "app-absence-phase-output-bound", "app-absence-phase-marker-count",
+            "app-absence-phase-marker-missing", "app-absence-phase-marker-duplicate",
             "app-absence-phase-marker-shape", "app-absence-phase-canonical-json",
             "app-absence-phase-observation", "app-absence-phase-proof",
             "app-absence-baseline-original", "app-absence-baseline-original-post",
@@ -479,7 +480,8 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
         parent=b'MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256='+b'a'*64+b';exit=1;originals=1;native=1;timely=1;unknown=0\n'
         acl=b'MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role=input-directory;phase=acl-entry-present;result=1;call=0;errno=0;freeCall=0;freeErrno=0\n'
         interval=(PRIVATE+b' '+admitted['packageIdentifier'].encode()+b'\nprivate prefix '+parent+
-            b'private prefix '+acl+b'private Error  Domain=PKInstallErrorDomain  Code=112 '+PRIVATE+b'\n')
+            b'private prefix '+acl+b'private Error  Domain=PKInstallErrorDomain  Code=112 '+PRIVATE+b'\n'
+            +b'private MRK_MACOS_APP_ABSENCE_RESULT='+PRIVATE+b'\n')
         whole=before+interval;info.st_size=len(whole)
         @contextlib.contextmanager
         def cursor_parent(_):yield 8,'cursor.json'
@@ -495,6 +497,25 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
         finite=HELPER.fixture_log_document(captured,0)
         self.assertEqual(finite['markers']['parent'][0]['reasonSha256'],'a'*64)
         self.assertEqual(finite['errors']['rows'],[dict(domain='PKInstallErrorDomain',code=112)])
+        self.assertEqual(finite['phaseMarkerCount'],1)
+        self.assertEqual(captured['authority'],stager.LOG_AUTHORITY)
+        self.assertEqual(captured['scriptOutputFinality'],'unestablished')
+        for count in (0,1,2,5,8):
+            raw=admitted['packageIdentifier'].encode()+b'\n'+(b'MRK_MACOS_APP_ABSENCE_RESULT='+PRIVATE+b'\n')*count
+            projected=stager.select_app_absence_log(raw,admitted)
+            self.assertEqual(projected['phaseMarkerCount'],min(count,5))
+            self.assertNotIn(PRIVATE.decode(),json.dumps(projected))
+        legacy=copy.deepcopy(captured)
+        legacy['intervalScope']='before-baseline-through-failed-installer'
+        del legacy['projection']['phaseMarkerCount']
+        self.assertNotIn('phaseMarkerCount',HELPER.fixture_log_document(legacy,0))
+        for count in (True,-1,6,PRIVATE.decode()):
+            bad=copy.deepcopy(captured);bad['projection']['phaseMarkerCount']=count
+            self.assertIsNone(HELPER.fixture_log_document(bad,0))
+            bad=copy.deepcopy(finite);bad['phaseMarkerCount']=count
+            self.assertIsNone(HELPER.fixture_log_projection_data(bad))
+        bad=copy.deepcopy(captured);del bad['projection']['phaseMarkerCount']
+        self.assertIsNone(HELPER.fixture_log_document(bad,0))
         repeated=stager.select_app_absence_log(admitted['packageIdentifier'].encode()+b'\n'+parent*5,admitted)
         self.assertEqual(len(repeated['markerTokens']),4);self.assertTrue(repeated['omitted'])
         for body in (parent,interval[:-1],b'x'*(stager.LOG_INTERVAL_BYTES+1)):
@@ -507,8 +528,10 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
         self.assertEqual(HELPER.fixture_log_document(unknown,1)['state'],'unknown')
         self.assertIsNone(HELPER.fixture_log_document(unknown,0))
         # The real baseline adapter + Operation.call, with only native/file ports inert.
-        for fault in (None,'cursor-one','cursor-publication','native-unknown','capture-unknown','capture-malformed','late','success'):
+        for fault in (None,'cursor-one','cursor-publication','native-unknown','capture-unknown','capture-malformed','late','success',
+                      'zero-missing','zero-duplicate','zero-other','zero-late','zero-capture-unknown'):
             with self.subTest(fault=fault):
+                zero = type(fault) is str and fault.startswith('zero-')
                 op=self.operation();op.phase='candidate-baseline';op.target=HELPER.ARM_TARGET
                 op.calls=[dict(role=role,entered=True,returned=True,capturesSettled=True,returncode=0)
                           for role in fixture.BASELINE_ROLES[:3]]
@@ -533,9 +556,11 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
                         return subprocess.CompletedProcess(argv,int(fault=='cursor-one'),stager.canonical(document),b'')
                     if role=='app-absence-baseline':
                         if fault=='native-unknown':raise RuntimeError('private unknown native')
-                        return subprocess.CompletedProcess(argv,0 if fault=='success' else 1,b'',PRIVATE)
+                        stdout=(b'MRK_MACOS_APP_ABSENCE_RESULT={}\n'*2 if fault=='zero-duplicate' else
+                                b'MRK_MACOS_APP_ABSENCE_RESULT={}\n' if fault=='zero-other' else b'')
+                        return subprocess.CompletedProcess(argv,0 if fault=='success' or zero else 1,stdout,PRIVATE)
                     self.assertEqual(role,fixture.LOG_CAPTURE)
-                    if fault=='capture-unknown':raise RuntimeError('private unknown capture')
+                    if fault in ('capture-unknown','zero-capture-unknown'):raise RuntimeError('private unknown capture')
                     return subprocess.CompletedProcess(argv,0,stager.canonical({'private':PRIVATE.decode()} if fault=='capture-malformed' else captured),b'')
                 op.owner.run_owned=owned
                 op.package_call=lambda role,argv,**kwargs: HELPER.Operation.call(op,role,argv,kwargs['environment'] if kwargs.get('environment') is not None else {},
@@ -544,11 +569,12 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
                 def root(owner,phase):
                     try:return original_root(owner,phase)
                     except BaseException as error:primary.append(error);raise
-                def clock(owner):return op.package_endpoint-1 if fault=='late' and len(op.calls)>=5 else now
+                def clock(owner):return op.package_endpoint-1 if fault in ('late','zero-late') and len(op.calls)>=5 else now
+                original_observation=fixture.phase_observation
                 with mock.patch.object(fixture,'clock',side_effect=clock),mock.patch.object(fixture,'post'), \
                      mock.patch.object(fixture,'reserve'),mock.patch.object(fixture,'mounted_path',return_value=mounted), \
                      mock.patch.object(fixture,'root_call',side_effect=root), \
-                     mock.patch.object(fixture,'phase_observation',return_value={'baselineSha256':'e'*64}), \
+                     mock.patch.object(fixture,'phase_observation',side_effect=lambda o,r,p: original_observation(o,r,p) if zero else {'baselineSha256':'e'*64}), \
                      mock.patch.object(fixture,'io',return_value={'original':'unchanged'}):
                     if fault=='success':
                         fixture.baseline(op);self.assertEqual(op.app_absence['baselineSha256'],'e'*64)
@@ -560,16 +586,26 @@ class InstallerFailureDiagnosticTests(unittest.TestCase):
                         self.assertIsNone(op.app_absence['pendingRoot']);self.assertNotIn('logCursor',op.app_absence)
                     else:
                         with self.assertRaises(BaseException) as caught:fixture.baseline(op)
-                        self.assertIs(caught.exception,primary[0]);self.assertEqual(op.app_absence['pendingRoot'],'app-absence-baseline')
-                capture_entered=fault not in ('cursor-one','cursor-publication','native-unknown','late','success')
+                        self.assertIs(caught.exception,primary[0]);self.assertEqual(op.app_absence['pendingRoot'],None if zero else 'app-absence-baseline')
+                capture_entered=fault not in ('cursor-one','cursor-publication','native-unknown','late','success','zero-other','zero-late')
                 self.assertEqual(fixture.LOG_CAPTURE in invoked,capture_entered)
                 projected=HELPER.fixture_installer_diagnostic(op.phase,op.calls)
-                if fault is None:self.assertEqual(projected['log'],finite)
+                if fault in (None,'zero-missing','zero-duplicate'):self.assertEqual(projected['log'],finite)
                 elif projected is not None:self.assertIsNone(projected['log'])
+                if fault in ('zero-missing','zero-duplicate','zero-capture-unknown'):
+                    reason='app-absence-phase-marker-duplicate' if fault=='zero-duplicate' else 'app-absence-phase-marker-missing'
+                    self.assertEqual(primary[0].args,(reason,))
+                    self.assertEqual(projected['returncode'],0)
+                    self.assertEqual(projected['phaseMarkerRefusal'],reason)
+                    self.assertNotIn('baselineObservation',op.app_absence)
+                    for key,value in (('phaseMarkerRefusal','app-absence-phase-observation'),
+                                      ('phaseMarkerRefusal',PRIVATE.decode()),('capturesSettled',False),('returncode',False)):
+                        bad=copy.deepcopy(op.calls);bad[4][key]=value
+                        self.assertIsNone(HELPER.fixture_installer_diagnostic(op.phase,bad))
                 self.assertNotIn(PRIVATE.decode(),json.dumps(projected))
                 self.assertTrue(op.app_absence['mount']['known'])
                 output=io.StringIO()
-                with contextlib.redirect_stderr(output):HELPER.emit_failure_diagnostic(HELPER.Refused('original-nonzero-app-absence-baseline'),operation=op)
+                with contextlib.redirect_stderr(output):HELPER.emit_failure_diagnostic(primary[0] if primary else HELPER.Refused('original-nonzero-app-absence-baseline'),operation=op)
                 self.assertTrue(output.getvalue());self.assertLessEqual(len(output.getvalue()),4096);self.assertNotIn(PRIVATE.decode(),output.getvalue())
                 if fault is None:
                     good=copy.deepcopy(op.calls)

@@ -3946,6 +3946,26 @@ class NormalPhaseDataTests(unittest.TestCase):
             return MODULE.normal_failure_diagnostics(phase, selection,
                 subprocess.CompletedProcess([], 65, raw, b""))
         old = classify(site + b"unknown " + private + b"\n")
+        field = b"MRK_NORMAL_PROJECT_FIELD=v1;field=project;clamped=1;waiter=timed-out;matches=0;fields=1;relation=empty;nonAtomic=1\n"
+        row = {"kind":"project-field", "stream":"stdout", "field":"project", "allowanceClamped":True,
+            "waiter":"timed-out", "matches":0, "fields":1, "relation":"empty", "nonAtomic":True}
+        self.assertEqual(classify(field)["queryObservations"], [row])
+        for relation in (b'exact', b'empty', b'other', b'non-string', b'unavailable'):
+            value = classify(private+b'\n'+field.replace(b'relation=empty',b'relation='+relation))
+            self.assertEqual(value['queryObservations'][0]['relation'],relation.decode())
+            self.assertEqual(value['originalReturncode'],65);self.assertNotIn(private,MODULE.encoded(value))
+            self.assertLessEqual(len(MODULE.encoded(value))+1,4096)
+        unavailable=field.replace(b'fields=1;relation=empty',b'fields=unavailable;relation=unavailable')
+        self.assertIsNone(classify(unavailable)['queryObservations'][0]['fields'])
+        for raw in (field+field,field[:-1],b'prefix '+field,field.replace(b'project;',b'private;'),
+                field.replace(b'clamped=1',b'clamped=2'),field.replace(b'matches=0',b'matches=6'),
+                field.replace(b'fields=1',b'fields=0'),field.replace(b'empty',private),b'x'*4096+field):
+            value=classify(raw);self.assertEqual(value['queryObservations'],[])
+            self.assertNotIn(private,MODULE.encoded(value))
+        self.assertEqual(MODULE.normal_failure_diagnostics('test',selected,
+            subprocess.CompletedProcess([],65,b'',field))['queryObservations'],[])
+        for phase,selection in (('build',None),('test','test.xcresult'),('test','release-evidence-test.xcresult')):
+            self.assertEqual(classify(field,phase,selection)['queryObservations'],[])
         for prefix, kind in cases:
             for path in (b"", b"/Users/runner/work/private source/"):
                 value = classify(path + site + prefix + private + b"\r\n")
@@ -5529,6 +5549,39 @@ def pending_account_data(loader, binding, uid, gid):
 
 
 class NormalIOSPendingRecoveryDataTests(unittest.TestCase):
+    def test_pending_recovery_stage_and_source_diagnostics_remain_private(self):
+        method = MODULE.IOS_PENDING_METHOD
+        selection = MODULE.IOS_PENDING_RESULT
+        stage = b"MRK_NORMAL_PROJECT_STAGE=ios-recovery-inspect;result=failed;laterStages=not-run\n"
+        site = ("MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=" + method + ";line=8100;check=singleton\n").encode()
+        private = b"PRIVATE credential value and selected account path\n"
+        def observe(stdout, stderr=b"", selected=selection, phase="test"):
+            return MODULE.normal_failure_diagnostics(phase, selected, subprocess.CompletedProcess([], 65, stdout, stderr))
+        value = observe(stage + site + private)
+        self.assertEqual(value["iosPendingProgress"]["firstFailed"], "ios-recovery-inspect")
+        self.assertEqual(value["sourceFailures"][0]["method"], method)
+        self.assertEqual(value["sourceFailures"][0]["line"], 8100)
+        self.assertEqual(value["originalReturncode"], 65)
+        self.assertNotIn(b"PRIVATE", MODULE.encoded(value))
+        self.assertLessEqual(len(MODULE.encoded(value)) + 1, 4096)
+        wait = site.replace(b"REQUIRE_FAILURE", b"STATIC_WAIT_FAILURE").replace(b";check=singleton", b"")
+        self.assertEqual(observe(stage + wait)["sourceFailures"], value["sourceFailures"])
+        for bad in (site + site, site[:-1], b"prefix " + site, site.replace(b"8100", b"65536"), site.replace(method.encode(), b"unselected")):
+            self.assertIsNone(MODULE.project_require_source_sites(bad, b"", ios_pending=True))
+        self.assertIsNone(MODULE.project_require_source_sites(b"", site, ios_pending=True))
+        for options in ({"ios_pending": 1}, {"ios_pending": True, "saved_version": True}, {"ios_pending": True, "release_evidence": True}):
+            with self.assertRaises(MODULE.Refused): MODULE.project_require_source_sites(site, b"", **options)
+        for selected, phase in (("project-test.xcresult", "test"), ("release-evidence-test.xcresult", "test"), (selection, "summary")):
+            other = observe(stage + site, selected=selected, phase=phase)
+            self.assertNotIn("iosPendingProgress", other)
+            self.assertEqual(other["sourceFailures"], [])
+        foreign = stage.replace(b"ios-recovery-inspect", b"saved-version-inspect-close")
+        self.assertEqual(observe(foreign)["iosPendingProgress"]["state"], "refused")
+        caught = ("NormalAppUITests.swift:8140: error: -[MRKNormalAppUITests.NormalAppUITests " + method
+            + '] : caught error: "condition(\\"original case or stage deadline elapsed\\")"\n').encode()
+        self.assertEqual(observe(caught)["xctestIssues"][0]["condition"], "wait-deadline")
+        self.assertNotIn("condition", observe(caught.replace(b"original case or stage deadline elapsed", b"PRIVATE"))["xctestIssues"][0])
+
     def test_pending_consumer_context_and_summary_keep_separate_sources(self):
         import resource, pwd
         helper = MODULE.SAVED_VERSION_CANDIDATE_ROOT / '.candidate-consumer-helper'

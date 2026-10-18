@@ -5262,6 +5262,8 @@ def select_app_absence_log(body, binding):
         rb"(PKInstallErrorDomain|NSCocoaErrorDomain|NSPOSIXErrorDomain|NSOSStatusErrorDomain)"
         rb"[ \t]+Code=(-?[0-9]{1,10})(?![A-Za-z0-9_+.-])")
     markers, errors, correlated, omitted = [], [], False, False
+    # Count only (5 means at least five); no text or log record becomes authority.
+    phase_markers = min(5, body.count(b"MRK_MACOS_APP_ABSENCE_RESULT="))
     for line in body.splitlines(keepends=True):
         need(line.endswith(b"\n") and len(line) <= LOG_LINE_BYTES, "log-line-bound")
         correlated = correlated or any(patterns[key].search(line) for key in ("package-identifier", "package-path"))
@@ -5281,7 +5283,7 @@ def select_app_absence_log(body, binding):
                 else:
                     rows.append(match[0].decode("ascii"))
     need(bool(correlated), "log-no-project-lines")
-    return {"markerTokens": markers, "errorTokens": errors, "omitted": omitted}
+    return {"markerTokens": markers, "errorTokens": errors, "omitted": omitted, "phaseMarkerCount": phase_markers}
 
 
 def select_xcode_setup_log(body, binding):
@@ -5396,7 +5398,7 @@ def installer_log_diagnostic(args):
             projection = select_app_absence_log(body, binding)
             result = {"schemaVersion": 1, "kind": "installer-log-capture", "state": "observed-project-correlated",
                       "authority": LOG_AUTHORITY, "scriptOutputFinality": "unestablished",
-                      "intervalScope": "before-baseline-through-failed-installer", "projection": projection}
+                      "intervalScope": "before-baseline-through-observation-refusal", "projection": projection}
             need(len(canonical(result)) <= 16384, "log-metadata-bound")
             return result, 0
         if binding["packageKind"] == "xcode-setup":

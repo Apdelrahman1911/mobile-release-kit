@@ -4,6 +4,52 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
+Consumer `39135234657/1` (`2456d860`) finished with all five selected jobs
+failing. The version-file native picker now advances; the next project-field
+failure is Xcode-project draft readback. Configuration reaches its confirmation
+lookup. Saved-version recovery reaches its original journal review and fails the
+assembled `SHA256 <digest>` text expectation. Evidence reaches the actual
+Inspect request and fails the outcome-heading wait. Pending recovery now fails
+at an outer rethrow without its original stage; no full recovery pass is inferred.
+
+The next reviewed helper batch uses documented macOS accessibility roles for
+HTML dialogs and the passive evidence heading, retaining exact-name singleton
+checks and the same negative/consent checks. Saved-version keeps exact complete
+digests and actual original-file/rollback checks rather than reconstructing
+split presentation text. The first evidence result uses15s for its existing
+10s work+2s cleanup bounds; later waits and absolute deadlines are unchanged.
+Removed assembled presentation assertions are **not** claimed as native passes.
+
+The existing pending diagnostic now projects its five actual stage markers and
+original source sites, without new UI observations. One focused privacy/parser
+regression passes (0.009s, no skips). Restore `39133256502/1` is a completed
+failure: Installer0/captures settled, then `app-absence-phase-marker-count`.
+The next diagnostic distinguishes missing from duplicate and can report a bounded
+physical-log count after that exact settled refusal; strict proof acceptance and
+unknown finality remain unchanged. Three affected existing tests pass (0.351s,
+no skips); initial test-selector/projection errors were corrected and disclosed.
+All temporary local test projections were removed and callers joined.
+
+**Routing correction:** `ordinary-entry-ui` runs the older direct-entry method,
+not Applications. The previous Intel selection therefore does **not** establish
+an Intel Applications pass; its direct-entry test failed. The next matrix uses
+existing Intel `ordinary-ui`, which actually tests Applications first and then
+independently needed ordinary journeys. No new partial-cohort result or P0
+acceptance is fabricated. Four affected ARM UI cohorts, the existing Android and
+unsigned-iOS cohorts, and independent ARM Restore are selected. All reuse signed
+`fcb1aa46`; no application rebuild/sign/notary. Android service approval remains
+explicit; unsigned iOS does not qualify signed IPA export or managed Xcode setup.
+
+The Xcode-project field failure now reports the actual original wait's clamped
+allowance and a bounded exact/empty/other value classification, without exporting
+values or renewing time. Its existing privacy regression passes (0.455s, no
+skips); an initial invalid build-selection test fixture was corrected, with the
+failed result retained. Reviewed Android name-channel and unsigned-iOS checkbox
+value corrections preserve singleton, consent and one-Start checks. All are
+source-reviewed changes awaiting native behavior, not newly qualified features.
+
+### Previous source-specific checkpoint (historical)
+
 Consumer `39133256502/1` (`dacf5e9a`) completed all four ARM UI jobs with
 failures. The revised harness compiled and Android source-selection advanced
 through its retained/cancel/reselect/refused cases to the version-file picker.

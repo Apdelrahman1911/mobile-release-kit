@@ -1941,11 +1941,14 @@ _FIXTURE_INSTALLER_ROLES = {
 
 
 def fixture_log_projection_data(value):
-    if (type(value) is not dict or set(value) != {"state", "reason", "markers", "errors", "omitted"}
-            or type(value["omitted"]) is not bool):
+    if (type(value) is not dict or set(value) not in ({"state", "reason", "markers", "errors", "omitted"},
+            {"state", "reason", "markers", "errors", "omitted", "phaseMarkerCount"})
+            or type(value["omitted"]) is not bool
+            or "phaseMarkerCount" in value and (type(value["phaseMarkerCount"]) is not int
+                or not 0 <= value["phaseMarkerCount"] <= 5)):
         return None
     if value["state"] == "unknown" and type(value["reason"]) is str and value["reason"] in _INSTALLER_LOG_REASONS:
-        return dict(value) if value["markers"] is value["errors"] is None else None
+        return dict(value) if value["markers"] is value["errors"] is None and "phaseMarkerCount" not in value else None
     if value["state"] != "observed-project-correlated" or value["reason"] is not None:
         return None
     markers, errors = installer_markers_data(value["markers"]), installer_errors_data(value["errors"])
@@ -1965,11 +1968,16 @@ def fixture_log_document(document, status):
             or type(document["schemaVersion"]) is not int or document["schemaVersion"] != 1
             or document["kind"] != "installer-log-capture" or document["state"] != "observed-project-correlated"
             or document["scriptOutputFinality"] != "unestablished"
-            or document["intervalScope"] != "before-baseline-through-failed-installer"):
+            or document["intervalScope"] not in ("before-baseline-through-failed-installer",
+                "before-baseline-through-observation-refusal")):
         return None
     value = document["projection"]
-    if (type(value) is not dict or set(value) != {"markerTokens", "errorTokens", "omitted"}
-            or type(value["omitted"]) is not bool):
+    fields = {"markerTokens", "errorTokens", "omitted"}
+    if document["intervalScope"] == "before-baseline-through-observation-refusal":
+        fields.add("phaseMarkerCount")
+    if (type(value) is not dict or set(value) != fields or type(value["omitted"]) is not bool
+            or "phaseMarkerCount" in fields and (type(value["phaseMarkerCount"]) is not int
+                or not 0 <= value["phaseMarkerCount"] <= 5)):
         return None
     bodies = []
     for key in ("markerTokens", "errorTokens"):
@@ -1999,7 +2007,8 @@ def fixture_log_document(document, status):
     markers["omitted"] |= value["omitted"]
     errors["omitted"] |= value["omitted"]
     return fixture_log_projection_data(dict(state=document["state"], reason=None,
-        markers=markers, errors=errors, omitted=value["omitted"]))
+        markers=markers, errors=errors, omitted=value["omitted"],
+        **({"phaseMarkerCount": value["phaseMarkerCount"]} if "phaseMarkerCount" in value else {})))
 
 
 def fixture_installer_diagnostic(phase, calls):
@@ -2016,9 +2025,18 @@ def fixture_installer_diagnostic(phase, calls):
     if selected is None:
         return None
     index, row = selected
+    marker_refusal = row.get("phaseMarkerRefusal")
+    zero_refusal = (phase == "candidate-baseline" and index == 4
+        and tuple(item.get("role") for item in calls[:4] if type(item) is dict) == (
+            "app-absence-image-create", "app-absence-image-verify", "app-absence-baseline-attach", "app-absence-log-cursor")
+        and all(item.get("entered") is True and item.get("returned") is True
+            and item.get("capturesSettled") is True and type(item.get("returncode")) is int
+            and item["returncode"] == 0 for item in calls[:4])
+        and type(marker_refusal) is str and marker_refusal in
+            ("app-absence-phase-marker-missing", "app-absence-phase-marker-duplicate"))
     if (any(row.get(key) is not True for key in ("entered", "returned", "capturesSettled"))
             or type(row.get("returncode")) is not int or not -65536 <= row["returncode"] <= 65535
-            or row["returncode"] == 0):
+            or row["returncode"] == 0 and not zero_refusal):
         return None
     log = None
     if (phase == "candidate-baseline" and index == 4 and len(calls) == 6
@@ -2032,6 +2050,7 @@ def fixture_installer_diagnostic(phase, calls):
             and type(calls[-1].get("returncode")) is int and calls[-1]["returncode"] in (0, 1)):
         log = fixture_log_projection_data(calls[-1].get("fixtureLog"))
     return {"role": row["role"], "index": index + 1, "returncode": row["returncode"], "log": log,
+            **({"phaseMarkerRefusal": marker_refusal} if zero_refusal and row["returncode"] == 0 else {}),
             "markers": installer_markers_data(row.get("installerMarkers")),
             "errors": installer_errors_data(row.get("installerErrors")),
             "systemServiceExitClaimed": False}
@@ -2087,6 +2106,7 @@ _FAILURE_PRODUCT_REASONS = (
 # diagnostic observations and cannot qualify the original Installer/readback.
 _APP_ABSENCE_BASELINE_REASONS = frozenset((
     "app-absence-phase-output-bound", "app-absence-phase-marker-count",
+    "app-absence-phase-marker-missing", "app-absence-phase-marker-duplicate",
     "app-absence-phase-marker-shape", "app-absence-phase-canonical-json",
     "app-absence-phase-observation", "app-absence-phase-proof",
     "app-absence-baseline-original", "app-absence-baseline-original-post",

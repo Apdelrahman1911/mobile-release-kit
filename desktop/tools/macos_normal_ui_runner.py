@@ -3928,12 +3928,13 @@ def project_wait_condition(message):
     return None
 
 
-def project_require_source_sites(stdout, stderr, *, release_evidence=False, saved_version=False):
+def project_require_source_sites(stdout, stderr, *, release_evidence=False, saved_version=False, ios_pending=False):
     """First-latched SOURCE sites for the exact selected cohort, never error prose."""
-    need(type(release_evidence) is bool and type(saved_version) is bool
-         and not (release_evidence and saved_version), "source-site-selection")
+    need(all(type(flag) is bool for flag in (release_evidence, saved_version, ios_pending))
+         and sum((release_evidence, saved_version, ios_pending)) <= 1, "source-site-selection")
     namespace = b"MRK_NORMAL_PROJECT_"
-    methods = ((b"testSyntheticProjectSavedVersionRecovery",) if saved_version else
+    methods = ((b"testInstalledIOSPendingAccountRecoveryThroughUI",) if ios_pending else
+               (b"testSyntheticProjectSavedVersionRecovery",) if saved_version else
                (b"testSyntheticProjectSavedReleaseEvidence",) if release_evidence else
                (b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages"))
     pattern = (re.escape(namespace) + rb"(REQUIRE_FAILURE|STATIC_WAIT_FAILURE)=v1;method=(" + b"|".join(methods)
@@ -4012,6 +4013,7 @@ ANDROID_CANDIDATE_STAGES = tuple("android-private-admission android-public-proje
 
 
 SAVED_DIAGNOSTIC_STAGES = {
+    IOS_PENDING_RESULT: ("iosPendingProgress", tuple("ios-recovery-admission ios-recovery-project ios-recovery-inspect ios-recovery-account ios-recovery-quit".split())),
     "saved-version-recovery-test.xcresult": ("savedVersionProgress", tuple("saved-version-fixture saved-version-launch saved-version-project-open saved-version-inspect-close saved-version-reinspect-confirm saved-version-reload saved-version-readback-and-quit".split())),
     "release-evidence-test.xcresult": ("releaseEvidenceProgress", tuple("evidence-launch evidence-fixture evidence-project-open evidence-real-picker evidence-original-observation evidence-shared-navigation evidence-stage-and-cancel evidence-readback-and-quit".split())),
     "diagnostics-test.xcresult": ("diagnosticsProgress", tuple("diagnostics-launch diagnostics-fixture diagnostics-project-open diagnostics-context diagnostics-original-report diagnostics-readback-and-quit".split())),
@@ -4536,6 +4538,8 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             b"Timed out waiting for matching snapshots:", b"Timed out waiting for matching snapshots.")),
         ("caught-error", (b"caught error:", b"failed: caught error:")),
     )
+    field_namespace = b"MRK_NORMAL_PROJECT_FIELD"
+    field_candidates, field_candidate = 0, None
     android_conditions = []
     android_condition_invalid = False
 
@@ -4546,10 +4550,11 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             else:
                 value["findingsTruncated"] = True
 
-    if "projectProgress" in value or "releaseEvidenceProgress" in value or "savedVersionProgress" in value:
+    if any(key in value for key in ("projectProgress", "releaseEvidenceProgress", "savedVersionProgress", "iosPendingProgress")):
         sites = project_require_source_sites(original.stdout, original.stderr,
                                              release_evidence="releaseEvidenceProgress" in value,
-                                             saved_version="savedVersionProgress" in value)
+                                             saved_version="savedVersionProgress" in value,
+                                             ios_pending="iosPendingProgress" in value)
         if sites is None:
             require_invalid = True
         else:
@@ -4586,9 +4591,10 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                                 if kind is not None:
                                     finding = {"stream": stream, "method": match.group(3).decode("ascii"),
                                         "line": line, "column": column, "kind": kind}
-                                    if (selection == "project-test.xcresult" and kind == "caught-error"
-                                            and match.group(3) in (b"testSyntheticProjectPathFields",
-                                                b"testSyntheticProjectLocalEditsAndImages")):
+                                    if (kind == "caught-error" and (
+                                            selection == "project-test.xcresult" and match.group(3) in (
+                                                b"testSyntheticProjectPathFields", b"testSyntheticProjectLocalEditsAndImages")
+                                            or selection == IOS_PENDING_RESULT and match.group(3) == IOS_PENDING_METHOD.encode("ascii"))):
                                         condition = project_wait_condition(message)
                                         if condition is not None:
                                             finding["condition"] = condition
@@ -4815,6 +4821,17 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                         "hittable": match.group(5) == b"1", "reason": match.group(6).decode("ascii"),
                         "sample": "pre-wait", "nonAtomic": True}
                 continue
+            if "projectProgress" in value and (field_namespace in record or (record and field_namespace.startswith(record))
+                    or (not complete and any(record.endswith(field_namespace[:i]) for i in range(1,len(field_namespace))))):
+                field_candidates += 1
+                match = re.fullmatch(rb"MRK_NORMAL_PROJECT_FIELD=v1;field=(version|project|workspace|metadata);clamped=([01]);waiter=(completed|timed-out|other);matches=([0-5]);fields=([0-5]|unavailable);relation=(exact|empty|other|non-string|unavailable);nonAtomic=1", record) if complete and stream == "stdout" and len(record) <= 256 else None
+                field_candidate = None
+                if field_candidates == 1 and match and (match[5] == b"1" or match[6] == b"unavailable"):
+                    field_candidate = {"kind": "project-field", "stream": "stdout", "field": match[1].decode("ascii"),
+                        "allowanceClamped": match[2] == b"1", "waiter": match[3].decode("ascii"), "matches": int(match[4]),
+                        "fields": None if match[5] == b"unavailable" else int(match[5]),
+                        "relation": match[6].decode("ascii"), "nonAtomic": True}
+                continue
             if not complete:
                 break  # Incomplete records may veto dashboard pairing, never become query observations.
             if engineering:
@@ -4830,6 +4847,9 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             if exceeds == (count == 5):
                 retain("queryObservations", {"stream": stream, "kind": kind, "observation": observation,
                     "matches": count, "exceedsFour": exceeds, "nonAtomic": True}, 4, distinct=False)
+    if field_candidates:
+        if field_candidates == 1 and field_candidate is not None: retain("queryObservations", field_candidate, 4, distinct=False)
+        else: value["findingsTruncated"] = True
     if engineering_require and not guide_invalid:
         value["queryObservations"] = guide_rows  # Partial sets stay partial/nonAtomic, never padded or authoritative.
     if engineering_require and not artifact_invalid:

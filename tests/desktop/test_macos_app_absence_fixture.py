@@ -548,6 +548,11 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
                     (line, b"", 1), (line, b"", None), (line, b"", False)):
                 with self.subTest(phase=phase, code=code), self.assertRaises(ValueError):
                     FIXTURE.phase_observation(op, SimpleNamespace(returncode=code, stdout=stdout, stderr=stderr), phase)
+            for stdout, stderr, reason in ((b"", b"", "app-absence-phase-marker-missing"),
+                    (line + line, b"", "app-absence-phase-marker-duplicate"),
+                    (line, line, "app-absence-phase-marker-duplicate")):
+                with self.assertRaisesRegex(ValueError, "^" + reason + "$"):
+                    FIXTURE.phase_observation(op, SimpleNamespace(returncode=0, stdout=stdout, stderr=stderr), phase)
             changes = ({"runId": "124"}, {"productReady": True}, {"systemServiceExitClaimed": True},
                        {"originalOuterExitRequired": False}, {"schemaVersion": True},
                        {"privatePath": "/private/fixture"}, {"baselineSha256": "6" * 64})
