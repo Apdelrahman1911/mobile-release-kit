@@ -24,7 +24,7 @@ from test_macos_candidate_carrier import fixture
 ROOT=Path(__file__).resolve().parents[2]
 
 class CandidateFixtureBootstrapTests(unittest.TestCase):
-    def exercise(self, fault=None, *, actual_builder=False):
+    def exercise(self, fault=None, *, actual_builder=False, depth=8):
         with tempfile.TemporaryDirectory() as name:
             top=Path(name);root=top/'checkout';root.mkdir(mode=0o700)
             helper=root/'.candidate-consumer-helper';helper.mkdir(mode=0o700)
@@ -54,7 +54,7 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
                 acquired[key]=dict(name=leaf,bytes=len(data),sha256=R.sha(data))
                 if key!='inventory': (producer/leaf).write_bytes(data);(producer/leaf).chmod(0o444)
             data=b'inert exact app bytes'
-            leaf='app/a/b/c/d/e/f/g/leaf'
+            leaf='app/'+'d/'*(depth-1)+'leaf'
             app_rows={leaf:dict(size=len(data),sha256=R.sha(data),executable=False)}
             full_rows=dict(app_rows,**{'runtime/store/'+str(i):dict(size=1,sha256='a'*64,executable=False) for i in range(5000)})
             input_root=work/'input';input_root.mkdir(mode=0o700)
@@ -122,8 +122,8 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
                 if path.name=='macos_aqua_qualification.py': return SimpleNamespace(load_owner=lambda r:SimpleNamespace(run_owned=owned))
                 if path.name=='macos_xcode_host_preparation.py': return SimpleNamespace(DarwinAPI=lambda *a,**k:SimpleNamespace(waitable_sigchld=lambda:None))
                 if path.name=='stage_macos_installed.py':
-                    return SimpleNamespace(DESKTOP=root/'desktop',source_build_selection=lambda target:SimpleNamespace(release='current-release'),MAX_BYTES=768<<20,
-                        BuildSelection=namedtuple('BuildSelection','target package_version release'),build_release_data=lambda *a,**k:{'packageVersion':'0.1.9'},
+                    return SimpleNamespace(DESKTOP=root/'desktop',source_build_selection=lambda target:SimpleNamespace(release='current-release',package_version='0.1.2'),MAX_BYTES=768<<20,
+                        BuildSelection=namedtuple('BuildSelection','target package_version release'),build_release_data=lambda *a,**k:{'packageVersion':'0.1.2'},
                         CURRENT_PROTOCOL='b'*64,INSTALLATION_INVENTORY_NAME='install-inventory.json',INVENTORY_BYTES=12<<20,PACKAGE_ID='inert.fixture',
                         observation_inventory_bytes=lambda body,*a,**k:json.loads(body),macho=lambda *a,**k:None,
                         app_absence_original_command=lambda args,**kw:dict(originalPackageSha256=R.sha(args.original_package.read_bytes()),packageInfo=b'inert package info'),
@@ -160,16 +160,22 @@ class CandidateFixtureBootstrapTests(unittest.TestCase):
         self.assertEqual(ops[0].credential_calls,[])
         print('INERT fixture bootstrap held/peak/lifetime',effects[0],ops[0].test_peak,len(ops[0].entries))
 
-    def test_full_four_builders_use_same_input_original_and_fit_depth8_real_ledger(self):
-        result,error,ops,effects,calls=self.exercise(actual_builder=True)
+    def test_full_four_builders_use_same_input_original_and_fit_maximum_depth_real_ledger(self):
+        for depth in (8,15):
+            with self.subTest(depth=depth):
+                self.check_four_builders(depth)
+
+    def check_four_builders(self, depth):
+        result,error,ops,effects,calls=self.exercise(actual_builder=True,depth=depth)
         self.assertIsNone(error,repr(error));op=ops[0]
         self.assertTrue(result['passed']);self.assertEqual(len(op.calls),25)
-        self.assertLessEqual(op.test_peak,96)
+        self.assertLessEqual(op.test_peak,160)
+        self.assertEqual(op.app_absence_live_limit(),160)
         self.assertEqual(len([e for e in op.entries if e.get('role')=='app-absence-retained-install-inventory.json']),1)
         self.assertEqual(len([e for e in op.entries if e.get('role')=='source-app-absence-data-tests']),0)
         self.assertEqual(set(result['appAbsencePreparation']['restoreCuts']),set(F.CUTS))
         self.assertTrue(all(e['closed'] for e in op.entries))
-        print('INERT four-builder depth8 peak/lifetime',op.test_peak,len(op.entries))
+        print('INERT four-builder depth/peak/lifetime',depth,op.test_peak,len(op.entries))
 
     def test_source_and_handoff_refusal_before_phase_and_unknown_never_complete(self):
         for fault in ('source','acquisition','native','last-source'):

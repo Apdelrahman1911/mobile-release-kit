@@ -4812,6 +4812,17 @@ final class NormalAppUITests: XCTestCase {
         try require(first.exists && (!enabled || first.isEnabled), "expected UI condition disappeared", line: line)
         return first
     }
+    @MainActor private func waitForSnapshotIdentity(_ query: XCUIElementQuery, in renderer: XCUIElement,
+                                                    line: UInt = #line) throws -> XCUIElement {
+        // Selecting a folder publishes its heading/path before the asynchronous
+        // snapshot. Its existing native owner has 10s work + 2s cleanup; the
+        // generic 5s UI wait can reject that still-live first observation.
+        // This wait alone permits 15s, clamped by the SAME original case clock.
+        // The exact identity/singleton and terminal failures remain mandatory.
+        try waitElement(query, in: renderer, timeout: 15, failures: [
+            "Static observation unavailable", "Only a partial static observation is available",
+        ], line: line)
+    }
     @MainActor private func waitGone(_ element: XCUIElement, timeout: TimeInterval = 5, line: UInt = #line) throws {
         let wait = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
         try require(XCTWaiter.wait(for: [wait], timeout: try remaining(timeout)) == .completed,
@@ -4963,46 +4974,6 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_NORMAL_PROJECT_NAVIGATION=v1;method=\(method.rawValue);phase=\(phase.rawValue);role=\(role.rawValue);relation=\(relation);unchanged=\(unchanged ? 1 : 0);field=\(selected);fields=\(fields);combos=\(combos);go=\(go);open=\(open);cancel=\(cancel);nonAtomic=1")
     }
 
-    @MainActor private func diagnosePanelBaseline(_ sheet: XCUIElement, fields: Int, combos: Int) {
-        // Only public role counts and exact fixed classifications leave the runner.
-        // Never read field values or print identifiers, labels, paths or snapshots.
-        guard let clock = caseClock, let outer = journeyDeadline, clock.firstFailure == nil else { return }
-        let started = ProcessInfo.processInfo.systemUptime
-        guard clock.observationAllowed(started, before: outer) else { return }
-        let waitEnd = min(clock.deadline, outer, started + 5)
-        func allowed() -> Bool { clock.observationAllowed(ProcessInfo.processInfo.systemUptime, before: outer) }
-        func category(_ text: String?) -> String {
-            guard let text else { return "none" }
-            if text.isEmpty { return "none" }
-            if ["Search", "Search:", "Search...", "Search…"].contains(text) { return "search" }
-            if ["Go to Folder", "Go to folder", "Go to the folder:", "Folder"].contains(text) { return "folder" }
-            return "other"
-        }
-        func row(_ phase: String, _ waiter: String) {
-            guard allowed() else { return }
-            let fieldQuery = sheet.textFields, comboQuery = sheet.comboBoxes
-            let fieldCount = fieldQuery.count, comboCount = comboQuery.count
-            let searchCount = sheet.searchFields.count, sheetCount = sheet.sheets.count
-            let fieldLabel = fieldCount == 1 ? category(fieldQuery.element(boundBy: 0).label) : fieldCount == 0 ? "none" : "ambiguous"
-            let fieldPlaceholder = fieldCount == 1 ? category(fieldQuery.element(boundBy: 0).placeholderValue) : fieldCount == 0 ? "none" : "ambiguous"
-            let comboLabel = comboCount == 1 ? category(comboQuery.element(boundBy: 0).label) : comboCount == 0 ? "none" : "ambiguous"
-            let comboPlaceholder = comboCount == 1 ? category(comboQuery.element(boundBy: 0).placeholderValue) : comboCount == 0 ? "none" : "ambiguous"
-            let children = comboCount == 1 ? comboQuery.element(boundBy: 0).textFields.count : 0
-            guard allowed() else { return }
-            print("MRK_NORMAL_PANEL_TOPOLOGY=v1;phase=\(phase);waiter=\(waiter);fields=\(min(fieldCount, 5));combos=\(min(comboCount, 5));search=\(min(searchCount, 5));sheets=\(min(sheetCount, 5));fieldLabel=\(fieldLabel);fieldPlaceholder=\(fieldPlaceholder);comboLabel=\(comboLabel);comboPlaceholder=\(comboPlaceholder);comboChildren=\(min(children, 5));nonAtomic=1")
-        }
-        row("before", "not-run")
-        guard allowed(), ProcessInfo.processInfo.systemUptime < waitEnd else { return }
-        sheet.typeKey("g", modifierFlags: [.command, .shift]) // Once; diagnostic branch never pastes/types a path.
-        let now = ProcessInfo.processInfo.systemUptime
-        guard allowed(), now < waitEnd else { return }
-        let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            sheet.textFields.count != fields || sheet.comboBoxes.count != combos
-        }, object: sheet)
-        let returned = XCTWaiter.wait(for: [changed], timeout: waitEnd - now)
-        row("after", returned == .completed ? "completed" : returned == .timedOut ? "timed-out" : "other")
-    }
-
     @MainActor private func goToFolder(_ sheet: XCUIElement, path: String,
                                      recoveryFixture: IOSRecoveryFixture? = nil) throws {
         if let recoveryFixture {
@@ -5020,24 +4991,25 @@ final class NormalAppUITests: XCTestCase {
         let cancel = try waitElement(cancels, in: sheet, enabled: true)
         let open = try unique(opens, "original native Open control is missing or ambiguous")
         try require(cancel.isHittable, "original native selection panel is not actionable")
-        // Open-panel internals do not promise an English AX field label. Bind
-        // the editor to this original sheet and its appearance after the shortcut,
-        // never to a first field elsewhere in the app or the renderer.
-        let fields = sheet.textFields
-        let combos = sheet.comboBoxes
-        let initialFields = fields.count, initialCombos = combos.count
-        if initialFields != 0 || initialCombos != 0 {
-            diagnosePanelBaseline(sheet, fields: initialFields, combos: initialCombos)
-        }
-        try require(initialFields == 0 && initialCombos == 0,
+        // The browsing panel already contains search/other text fields. Only
+        // the new direct child sheet created by this shortcut is the editor's
+        // scope; never choose a field from the whole panel or another window.
+        let navigationSheets = sheet.children(matching: .sheet)
+        try require(navigationSheets.count == 0,
                     "original native panel already has an ambiguous navigation editor", check: .singleton)
         sheet.typeKey("g", modifierFlags: [.command, .shift])
-        let targets: NSDictionary = ["field": fields.element(boundBy: 0), "combo": combos.element(boundBy: 0)]
-        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format:
-            "(field.exists == true AND field.enabled == true) OR (combo.exists == true AND combo.enabled == true)"),
-            object: targets)
+        let navigation = navigationSheets.element(boundBy: 0)
+        let fields = navigation.textFields
+        let combos = navigation.comboBoxes
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard navigationSheets.count == 1 && navigation.exists else { return false }
+            let field = fields.element(boundBy: 0), combo = combos.element(boundBy: 0)
+            return (field.exists && field.isEnabled) || (combo.exists && combo.isEnabled)
+        }, object: navigation)
         try require(XCTWaiter.wait(for: [ready], timeout: try remaining(5)) == .completed,
                     "standard Go to Folder editor did not appear in the original sheet")
+        try require(navigationSheets.count == 1 && navigation.exists,
+                    "standard Go to Folder editor is missing or ambiguous", check: .singleton)
         let fieldCount = fields.count, comboCount = combos.count
         try require(fieldCount <= 1 && comboCount <= 1 && fieldCount + comboCount > 0,
                     "standard Go to Folder editor is missing or ambiguous", check: .singleton)
@@ -5056,7 +5028,8 @@ final class NormalAppUITests: XCTestCase {
             pathField = fields.element(boundBy: 0) // Count was proved exactly one.
             navigationRole = .field
         }
-        try require(pathField.exists && pathField.isEnabled && pathField.isHittable,
+        try require(navigationSheets.count == 1 && navigation.exists
+                    && pathField.exists && pathField.isEnabled && pathField.isHittable,
                     "standard Go to Folder field is not actionable", check: .actionable)
         let navigationInitial = projectRequireDiagnosticMethod == nil || journeyStage != "project-open" ? nil : pathField.value as? String
         // Use the normal Paste action for one complete synthetic path, not
@@ -5126,16 +5099,17 @@ final class NormalAppUITests: XCTestCase {
         _ = try remaining(15) // Expired whole-case settlement cannot authorize Return.
         pathField.typeKey("\r", modifierFlags: [])
         do {
-            // An ordinal field query can resolve to a different field after
-            // navigation. The retained parent panel, not that query's absence,
-            // supplies the browsing-ready boundary. File selection comes later.
-            let panelTargets: NSDictionary = ["cancel": cancel, "open": open]
+            // An ordinal field query can resolve differently after navigation.
+            // Require the child sheet to dismiss AND the retained parent panel
+            // to become ready. File selection comes later.
+            let panelTargets: NSDictionary = ["navigation": navigation, "cancel": cancel, "open": open]
             let navigable = XCTNSPredicateExpectation(predicate: NSPredicate(format:
-                "cancel.exists == true AND cancel.enabled == true AND cancel.hittable == true AND open.exists == true"),
+                "navigation.exists == false AND cancel.exists == true AND cancel.enabled == true AND cancel.hittable == true AND open.exists == true"),
                 object: panelTargets)
             try require(XCTWaiter.wait(for: [navigable], timeout: try remaining(15)) == .completed,
                         "original native panel did not become navigable")
-            try require(cancels.count == 1 && opens.count == 1 && cancel.exists && cancel.isEnabled
+            try require(navigationSheets.count == 0 && !navigation.exists
+                        && cancels.count == 1 && opens.count == 1 && cancel.exists && cancel.isEnabled
                         && cancel.isHittable && open.exists, "original native panel readiness changed")
             _ = try remaining(15) // A late whole-case sample cannot authorize the next action.
         }
@@ -5696,7 +5670,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
 
@@ -5949,7 +5923,7 @@ final class NormalAppUITests: XCTestCase {
             let identityRoles = min(renderer.descendants(matching: .any).matching(identifier: "org.fixture.app").count, 5)
             let androidCaption = min(renderer.staticTexts.matching(identifier: "Configured Android application ID").count, 5)
             let iosCaption = min(renderer.staticTexts.matching(identifier: "Configured iOS bundle ID").count, 5)
-            do { _ = try waitElement(identity, in: renderer) }
+            do { _ = try waitForSnapshotIdentity(identity, in: renderer) }
             catch {
                 print("MRK_NORMAL_PROJECT_IDENTITY=v1;sample=pre-wait;staticText=\(identityTexts);anyRole=\(identityRoles);androidCaption=\(androidCaption);iosCaption=\(iosCaption);nonAtomic=1")
                 throw error // Keep the actual original failure; observation cannot authorize success.
@@ -6209,7 +6183,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "recovery selected project differs")
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertSavedVersionPending()
         }
         try press(renderer, "Dashboard", renderer: renderer)
@@ -6337,7 +6311,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "source project path differs")
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
         try stage("evidence-real-picker") {
@@ -6443,7 +6417,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
         try stage("workflow-refusal-preview") {
@@ -6602,7 +6576,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "offline project path is not exact")
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
         let failures = ["No new offline-check outcome was confirmed", "Original cleanup unknown"]
@@ -6837,7 +6811,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "recovery inspection project path is not exact")
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
         let failures = ["No new recovery outcome was confirmed", "Original cleanup unknown"]
@@ -6965,7 +6939,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "diagnostics project path is not exact")
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
             try fixture.assertUnchanged()
         }
         var panel: XCUIElement?
@@ -7308,7 +7282,7 @@ final class NormalAppUITests: XCTestCase {
                 _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")),
                                     in: renderer, failures: ["Static observation unavailable", "Only a partial static observation is available"])
                 _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "iOS selected fixture differs")
-                _ = try waitElement(renderer.staticTexts.matching(identifier: "org.example.mrk.observed"), in: renderer)
+                _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.example.mrk.observed"), in: renderer)
                 try fixture.assertUnchanged()
                 try observeIOSToolDiagnostics(renderer)
                 try fixture.assertUnchanged()
@@ -7416,11 +7390,20 @@ final class NormalAppUITests: XCTestCase {
             let trimmedPrefix = min(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", trimmed)).count, 5)
             let captionOnly = min(details.staticTexts.matching(NSPredicate(format: "label == %@", trimmed)).count, 5)
             let anyPrefix = min(details.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).count, 5)
+            let selectedRole: String
+            switch details.elementType {
+            case .group: selectedRole = "group"
+            case .staticText: selectedRole = "static-text"
+            default: selectedRole = "other"
+            }
+            let directChildren = min(details.children(matching: .any).count, 5)
+            let allDescendants = min(details.descendants(matching: .any).count, 5)
+            let rendererPrefix = min(renderer.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).count, 5)
             let field: XCUIElement
             do { field = try unique(query, "current recovery field missing or repeated") }
             catch {
                 if phase == "awaiting-consent" || phase == "terminal" {
-                    print("MRK_NORMAL_RECOVERY_FIELD=v1;phase=\(phase);field=\(role);sample=pre-check;exactPrefix=\(exactPrefix);trimmedPrefix=\(trimmedPrefix);captionOnly=\(captionOnly);anyPrefix=\(anyPrefix);nonAtomic=1")
+                    print("MRK_NORMAL_RECOVERY_FIELD=v2;phase=\(phase);field=\(role);sample=pre-check;exactPrefix=\(exactPrefix);trimmedPrefix=\(trimmedPrefix);captionOnly=\(captionOnly);anyPrefix=\(anyPrefix);role=\(selectedRole);children=\(directChildren);descendants=\(allDescendants);rendererPrefix=\(rendererPrefix);nonAtomic=1")
                 }
                 throw error // Keep the original singleton refusal and its cleanup.
             }
@@ -7650,7 +7633,7 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")),
                                 in: renderer, failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "Android project selection differs")
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.example.saved"), in: renderer)
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.example.saved"), in: renderer)
             if !candidateInputs {
             try press(renderer, "Project settings", renderer: renderer)
             let settings = try waitElement(named(renderer, "Settings section"), in: renderer)

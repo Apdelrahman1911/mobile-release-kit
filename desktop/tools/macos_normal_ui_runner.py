@@ -3796,11 +3796,16 @@ def recovery_field_diagnostics(stdout, stderr):
     for stream, body in (("stdout", stdout), ("stderr", stderr)):
         for record in body.splitlines(keepends=True):
             if prefix not in record: continue
-            match = re.fullmatch(re.escape(prefix) + rb"=v1;phase=(awaiting-consent|terminal);field=(operation-id|owner-generation|phase|outcome|reason);sample=pre-check;exactPrefix=([0-5]);trimmedPrefix=([0-5]);captionOnly=([0-5]);anyPrefix=([0-5]);nonAtomic=1\r?\n", record) if stream == "stdout" else None
+            match = re.fullmatch(re.escape(prefix) + rb"=v([12]);phase=(awaiting-consent|terminal);field=(operation-id|owner-generation|phase|outcome|reason);sample=pre-check;exactPrefix=([0-5]);trimmedPrefix=([0-5]);captionOnly=([0-5]);anyPrefix=([0-5])(?:;role=(group|static-text|other);children=([0-5]);descendants=([0-5]);rendererPrefix=([0-5]))?;nonAtomic=1\r?\n", record) if stream == "stdout" else None
             if match is None or sample is not None: return {"state": "refused", "sample": None}
-            phase, field, *counts = match.groups()
+            version, phase, field, *facts = match.groups()
+            counts, scope = facts[:4], facts[4:]
+            if (version == b"1") != (scope[0] is None): return {"state": "refused", "sample": None}
             sample = dict(zip(("exactPrefix", "trimmedPrefix", "captionOnly", "anyPrefix"), map(int, counts)),
                           phase=phase.decode("ascii"), field=field.decode("ascii"), timing="pre-check", countsCappedAt=5, nonAtomic=True)
+            if version == b"2":
+                sample.update(role=scope[0].decode("ascii"), directChildren=int(scope[1]),
+                              allDescendants=int(scope[2]), rendererPrefix=int(scope[3]))
     return {"state": "observed", "sample": sample} if sample is not None else {"state": "absent", "sample": None}
 
 

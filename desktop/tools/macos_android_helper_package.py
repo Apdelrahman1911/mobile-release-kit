@@ -3000,6 +3000,14 @@ class Operation:
         self.app_absence_module = module
         module.start(self, sys.modules[__name__])
 
+    def app_absence_live_limit(self):
+        # Only the sequential candidate PREPARE owns the bootstrap originals
+        # plus paired source/destination DFS walks. Other phases are unchanged.
+        if getattr(self, "candidate_restore_context", None) is not None and self.phase == "prepare-app-absence":
+            need(getattr(self, "candidate_external_originals", None) is None, "candidate-builder-budget-scope")
+            return 160
+        return 128 if getattr(self, "candidate_external_originals", None) is not None else 96
+
     def register(self, fd, role, kind, parent=None, name=None):
         entry = {"fd": fd, "role": role, "kind": kind, "parent": parent, "name": name, "closed": False}
         self.entries.append(entry)  # Before any fallible identity/content observation.
@@ -3019,7 +3027,7 @@ class Operation:
             # The candidate materializer coexists with the acquisition's original
             # owner (up to96) and its bounded DFS writer (up to19). Other owners
             # retain their existing96 limit. Unknown closes never free a slot.
-            live_limit = 96 if external is None else 128
+            live_limit = self.app_absence_live_limit()
             need(type(extra) is int and 0 <= extra <= 96 and len(self.entries) + getattr(self, "candidate_bootstrap_originals", 0) + (24 if getattr(self, "candidate_restore_context", None) is not None else 0) <= 24576
                  and extra + sum(e["fd"] is not None or not e["closed"] for e in self.entries) <= live_limit,
                  "app-absence-original-ledger-bound")
@@ -8123,7 +8131,7 @@ class Operation:
 
     def package_call(self, role, argv, *, environment=None, timeout=30, limit=65536, cwd=None):
         if getattr(self, "candidate_restore_context", None) is not None:
-            need(sum(e["fd"] is not None for e in self.entries) + 8 <= 96, "candidate-native-original-quote")
+            need(sum(e["fd"] is not None or not e["closed"] for e in self.entries) + 8 <= self.app_absence_live_limit(), "candidate-native-original-quote")
         if self.phase == "prepare-removal-observers":
             return self.removal_prepare_call(role, argv, maximum=timeout, limit=limit, cwd=cwd, environment=environment)
         if self.phase in FINAL_IMAGE_PHASES:
@@ -10525,7 +10533,7 @@ def candidate_fixture_phase(consumer, context, purpose, started, bootstrap):
             for helper, root, sha, paths in ((True,consumer.HELPER_ROOT,context["helperSource"],helper_files),
                                             (False,consumer.CANDIDATE_ROOT,nomination["source"],candidate_files)):
                 prefix=["/usr/bin/git","-C",str(root),"-c","core.fsmonitor=false","-c","core.hooksPath=/dev/null","--no-optional-locks","--literal-pathspecs"]
-                need(sum(e["fd"] is not None for e in op.entries) + 8 <= 96, "candidate-source-query-quote")
+                need(sum(e["fd"] is not None or not e["closed"] for e in op.entries) + 8 <= op.app_absence_live_limit(), "candidate-source-query-quote")
                 op.stager_io_pending = "candidate-source-query"
                 result=source_phase.call("helper-source" if helper else "candidate-source",prefix+["rev-parse","HEAD","HEAD^{tree}"],15,8192)
                 need(result.returncode == 0 and result.stderr == b"", "candidate-source-query")

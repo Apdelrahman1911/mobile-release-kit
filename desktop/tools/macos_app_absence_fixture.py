@@ -832,14 +832,32 @@ def prepare_one(op, cut=None):
 
 def recovery_builder_quote_data(files, directories, depth, retained, live, *, sequential=False):
     need(all(type(n) is int and n >= 0 for n in (files, directories, depth, retained, live))
-         and type(sequential) is bool and depth <= 15
-         and 24 * (files + 1 + directories) + retained + 512 <= 24576
-         and live + (11 + 2 + max(2 * depth + 2, 8) if sequential else 4 * 11 + 7 + 2 * depth + 8) <= 96, "restore-chain-complete-original-quote")
+         and type(sequential) is bool and depth <= 15, "restore-chain-complete-original-quote")
+    extra = 11 + 2 + max(2 * depth + 2, 8) if sequential else 4 * 11 + 7 + 2 * depth + 8
+    limit = 160 if sequential else 96
+    for valid, reason in (
+            (not sequential or live <= 96, "restore-chain-bootstrap-original-quote"),
+            (24 * (files + 1 + directories) + retained + 512 <= 24576, "restore-chain-lifetime-original-quote"),
+            (live + extra <= limit, "restore-chain-live-original-quote")):
+        if not valid:
+            try:
+                import sys
+                sys.stderr.write("MRK_CANDIDATE_BUILDER_ADMISSION=" + json.dumps(dict(
+                    files=files, directories=directories, depth=depth, retained=retained,
+                    live=live, additionalLive=extra, liveLimit=limit, lifetimeLimit=24576), sort_keys=True) + "\n")
+            except BaseException:
+                pass
+            need(False, reason if sequential else "restore-chain-complete-original-quote")
 
 
 
 def prepare(op):
     if recovery_mode(op):
+        sequential = getattr(op, "candidate_restore_context", None) is not None
+        if sequential:
+            import resource
+            soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+            need(soft_limit == resource.RLIM_INFINITY or soft_limit >= 192, "restore-chain-os-fd-limit")
         _inventory, rows = input_rows(op)
         rows = app_rows(rows)
         paths = {"", "runtime"}
@@ -853,8 +871,8 @@ def prepare(op):
         # Native8 endpoints never overlap paired copy/POST traversal. Default
         # owner keeps its original conservative four-builder formula.
         recovery_builder_quote_data(len(rows), len(paths), max((name.count("/") for name in rows), default=0),
-            len(op.entries), sum(entry["fd"] is not None for entry in op.entries),
-            sequential=getattr(op, "candidate_restore_context", None) is not None)
+            len(op.entries), sum(entry["fd"] is not None or not entry["closed"] for entry in op.entries),
+            sequential=sequential)
     data = prepare_one(op)
     if recovery_mode(op):
         if getattr(op, "candidate_restore_context", None) is not None:

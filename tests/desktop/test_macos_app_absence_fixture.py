@@ -441,10 +441,21 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
                                               for event in (("build", cut), ("closed", cut))])
                     self.assertEqual(op.app_absence["future"]["cutCopies"], 96)
         FIXTURE.recovery_builder_quote_data(1, 2, 3, 80, 75, sequential=True)
+        FIXTURE.recovery_builder_quote_data(1, 17, 15, 96, 96, sequential=True)  #141, inside160.
         with self.assertRaisesRegex(ValueError, "restore-chain-complete-original-quote"):
             FIXTURE.recovery_builder_quote_data(1, 2, 3, 70, 64)
-        with self.assertRaisesRegex(ValueError, "restore-chain-complete-original-quote"):
-            FIXTURE.recovery_builder_quote_data(1, 2, 3, 80, 76, sequential=True)
+        with self.assertRaisesRegex(ValueError, "restore-chain-bootstrap-original-quote"):
+            FIXTURE.recovery_builder_quote_data(1, 17, 15, 97, 97, sequential=True)
+        with self.assertRaisesRegex(ValueError, "restore-chain-lifetime-original-quote"):
+            FIXTURE.recovery_builder_quote_data(1024, 17, 15, 96, 96, sequential=True)
+        import resource
+        blocked = SimpleNamespace(candidate_restore_context={}, environment={"MRK_MACOS_PACKAGE_ROLE":"ordinary-image"},
+            phase=FIXTURE.PREPARE, app_absence={})
+        with patch.object(FIXTURE,"recovery_mode",return_value=True), \
+                patch.object(resource,"getrlimit",return_value=(191,256)), \
+                patch.object(FIXTURE,"input_rows") as acquire:
+            with self.assertRaisesRegex(ValueError,"restore-chain-os-fd-limit"): FIXTURE.prepare(blocked)
+            acquire.assert_not_called()
 
     def test_fixed_bindings_layout_and_stricter_script_quote(self):
         FIXTURE.fixed_binding_and_layout_data_checks()

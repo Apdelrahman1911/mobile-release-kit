@@ -2755,6 +2755,33 @@ class NormalPhaseDataTests(unittest.TestCase):
                         self.assertEqual(row['testCounts'] is None,failure=='native')
 
     def test_current_ordinary_context_receipt_and_fixed_identity_diagnostic(self):
+        # Project selection's heading is not a completed async snapshot. Keep
+        # the native work/cleanup window inside the existing case, not a new
+        # global timeout, and preserve exact identity+terminal failure checks.
+        swift=SWIFT.read_text()
+        helper=swift.split('@MainActor private func waitForSnapshotIdentity(',1)[1].split('@MainActor private func waitGone(',1)[0]
+        self.assertIn('try waitElement(query, in: renderer, timeout: 15, failures: [',helper)
+        self.assertIn('], line: line)',helper)
+        for title in ('Static observation unavailable','Only a partial static observation is available'):
+            self.assertIn('"'+title+'"',helper)
+        # Disabled iOS legitimately renders textValue's default 'Not configured'
+        # alongside a valid Android identity; global status text is NOT failure.
+        import base64
+        fixture=json.loads((SWIFT.parent/'Fixtures/normal-project-v1.json').read_bytes())
+        config=json.loads(base64.b64decode(fixture['files']['project/release/mobile-release.json'],validate=True))
+        self.assertFalse(config['ios']['enabled']);self.assertNotIn('bundleId',config['ios'])
+        self.assertEqual(config['android']['applicationId'],'org.fixture.app')
+        self.assertNotIn('"Not configured"',helper);self.assertNotIn('"Needs attention"',helper)
+        wait=swift.split('@MainActor private func waitElement(',1)[1].split('@MainActor private func waitForSnapshotIdentity(',1)[0]
+        self.assertIn('timeout: TimeInterval = 5',wait)
+        self.assertIn('timeout: try remaining(timeout)',wait)
+        self.assertIn('query.count != 1',wait)
+        # Ten existing post-selection identity assertions now share the narrow
+        # wait; the later explicit-refresh assertion retains its old contract.
+        self.assertEqual(swift.count('waitForSnapshotIdentity('),11)
+        self.assertIn('try waitGone(earlier)\n            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)',swift)
+        for label in ('org.example.saved','org.example.mrk.observed'):
+            self.assertIn('waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "'+label+'"), in: renderer)',swift)
         root=MODULE.SAVED_VERSION_CANDIDATE_ROOT/".candidate-consumer-helper"
         env={MODULE.ORDINARY_CURRENT_ENV:MODULE.ORDINARY_CURRENT_SCOPE,
              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE":"a"*40,
@@ -5811,8 +5838,8 @@ class AndroidCandidateProjectTests(unittest.TestCase):
 class PanelTopologyDiagnosticTests(unittest.TestCase):
     def test_pending_recovery_field_rows_are_closed_and_failure_only(self):
         def row(phase='awaiting-consent',field='operation-id'):
-            return ('MRK_NORMAL_RECOVERY_FIELD=v1;phase='+phase+';field='+field+
-                ';sample=pre-check;exactPrefix=0;trimmedPrefix=1;captionOnly=1;anyPrefix=0;nonAtomic=1\n').encode()
+            return ('MRK_NORMAL_RECOVERY_FIELD=v2;phase='+phase+';field='+field+
+                ';sample=pre-check;exactPrefix=0;trimmedPrefix=1;captionOnly=1;anyPrefix=0;role=group;children=0;descendants=0;rendererPrefix=1;nonAtomic=1\n').encode()
         private=b'PRIVATE operation values, account paths and secure text\n'
         for phase in ('awaiting-consent','terminal'):
             for field in ('operation-id','owner-generation','phase','outcome','reason'):
@@ -5820,9 +5847,20 @@ class PanelTopologyDiagnosticTests(unittest.TestCase):
                 value=MODULE.normal_failure_diagnostics('test',MODULE.IOS_PENDING_RESULT,original)
                 self.assertEqual(value['originalReturncode'],65)
                 self.assertEqual(value['recoveryField'],dict(state='observed',sample=dict(phase=phase,field=field,
-                    timing='pre-check',countsCappedAt=5,nonAtomic=True,exactPrefix=0,trimmedPrefix=1,captionOnly=1,anyPrefix=0)))
+                    timing='pre-check',countsCappedAt=5,nonAtomic=True,exactPrefix=0,trimmedPrefix=1,captionOnly=1,anyPrefix=0,
+                    role='group',directChildren=0,allDescendants=0,rendererPrefix=1)))
                 self.assertNotIn(b'PRIVATE',MODULE.encoded(value));self.assertLessEqual(len(MODULE.encoded(value))+1,4096)
         valid=row()
+        extension=b';role=group;children=0;descendants=0;rendererPrefix=1'
+        legacy=valid.replace(b'=v2;',b'=v1;').replace(extension,b'')
+        old=MODULE.recovery_field_diagnostics(legacy,b'')
+        self.assertEqual(old['state'],'observed');self.assertNotIn('role',old['sample'])
+        for role in (b'group',b'static-text',b'other'):
+            self.assertEqual(MODULE.recovery_field_diagnostics(valid.replace(b'role=group',b'role='+role),b'')['sample']['role'],role.decode())
+        for bad in (valid.replace(b'=v2;',b'=v1;'),valid.replace(extension,b''),
+            valid.replace(b'children=0',b'children=6'),valid.replace(b'role=group',b'role=PRIVATE'),
+            valid.replace(b';descendants=0',b''),legacy+valid):
+            self.assertEqual(MODULE.recovery_field_diagnostics(bad,b''),dict(state='refused',sample=None))
         for stdout,stderr in ((valid+valid,b''),(b'',valid),(valid[:-1],b''),(b'prefix '+valid,b''),
             (row('PRIVATE'),b''),(row(field='PRIVATE'),b''),(valid.replace(b'exactPrefix=0',b'exactPrefix=6'),b''),
             (valid.replace(b'nonAtomic=1',b'nonAtomic=0'),b'')):
@@ -5880,13 +5918,23 @@ class PanelTopologyDiagnosticTests(unittest.TestCase):
         self.assertNotIn("panelTopology",MODULE.normal_failure_diagnostics("test","persistence-test.xcresult",original))
         self.assertNotIn("panelTopology",MODULE.normal_failure_diagnostics("summary",MODULE.PANEL_TOPOLOGY_SELECTIONS[0],original))
         swift=SWIFT.read_text()
-        helper=swift.split("private func diagnosePanelBaseline(",1)[1].split("private func goToFolder(",1)[0]
-        self.assertIn("min(clock.deadline, outer, started + 5)",helper)
-        self.assertEqual(helper.count('sheet.typeKey("g"'),1)
-        self.assertNotIn("pasteboard",helper.lower());self.assertNotIn(".typeText(",helper)
-        self.assertNotIn(".value",helper);self.assertNotIn(".identifier",helper)
-        panel=swift.split("private func goToFolder(",1)[1].split('sheet.typeKey("g"',1)[0]
-        self.assertLess(panel.index("diagnosePanelBaseline(sheet"),panel.index("try require(initialFields == 0 && initialCombos == 0"))
+        # Historical bounded rows still decode; the current helper no longer
+        # rejects unrelated browse fields or sends a second diagnostic shortcut.
+        self.assertNotIn("private func diagnosePanelBaseline(",swift)
+        panel=swift.split("private func goToFolder(",1)[1].split("private func nativeOpen(",1)[0]
+        self.assertEqual(panel.count('sheet.typeKey("g"'),1)
+        self.assertIn("let navigationSheets = sheet.children(matching: .sheet)",panel)
+        self.assertLess(panel.index("try require(navigationSheets.count == 0"),panel.index('sheet.typeKey("g"'))
+        self.assertLess(panel.index("let navigation = navigationSheets.element(boundBy: 0)"),panel.index("let fields = navigation.textFields"))
+        self.assertIn("guard navigationSheets.count == 1 && navigation.exists else { return false }",panel)
+        self.assertEqual(panel.count("timeout: try remaining(5)"),1)
+        self.assertIn("let combos = navigation.comboBoxes",panel)
+        self.assertNotIn("sheet.textFields",panel);self.assertNotIn("sheet.comboBoxes",panel)
+        self.assertIn("navigation.exists == false AND cancel.exists == true",panel)
+        self.assertIn("navigationSheets.count == 0 && !navigation.exists",panel)
+        self.assertIn('path == recoveryFixture.projectPath',panel)
+        self.assertIn('settled == .completed && typedValue == path',panel)
+        self.assertIn('pasteboard.changeCount == ownedPasteboardGeneration',panel)
 
 
 if __name__ == "__main__":

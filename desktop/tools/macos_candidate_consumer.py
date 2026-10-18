@@ -949,6 +949,8 @@ def failure_data(error):
         'candidate-bootstrap-original-post', 'candidate-fixture-entry', 'candidate-fixture-terminal',
         'candidate-native-original-quote', 'candidate-source-query-quote', 'candidate-carrier-close-unknown',
         'candidate-baseline-original-binding', 'restore-chain-complete-original-quote',
+        'restore-chain-bootstrap-original-quote', 'restore-chain-lifetime-original-quote',
+        'restore-chain-live-original-quote', 'restore-chain-os-fd-limit',
         'app-absence-original-deadline', 'candidate-restore-native-status-original'}
     parts = BaseException.args.__get__(error)
     reason = parts[0] if len(parts) == 1 and type(parts[0]) is str and parts[0] in allowed else 'unavailable'
