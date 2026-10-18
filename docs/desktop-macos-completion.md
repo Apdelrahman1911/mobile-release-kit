@@ -4,6 +4,21 @@ Updated: 2026-10-18. **NOT READY; not delivered or approved for public release.*
 
 ### Current Mac verification checkpoint
 
+The Restore observer now retains actual positive write progress and compares
+restored raw flags with precisely PRE plus XNU's documented `FWASWRITTEN` bit
+after a positive write. Every other bit must still match; there is no blanket
+mask. Restoration remains unconditional and the original send error remains
+primary. Independent plan and implementation reviews accepted this one-file
+helper correction. The exact pure Rust regression passed; the former expectation
+failed as expected. Three private Darwin pipe cases extend an existing observer
+test and will run before native Installer work. They are not yet native passes.
+The next consumer selects Restore only and does not rebuild or re-sign the app.
+
+Consumer `39129874451/1` at `4fc7c242` compiled the revised native harness.
+Pending-iOS failed again; its exact failed boundary is under investigation.
+The ordinary journey is still running. No full UI or recovery acceptance follows
+from the previously completed launch/dashboard/quit checks.
+
 Consumer `39128758182/1` at `3ac11b4d` passed ARM Applications launch/dashboard/
 quit and summary, then failed both project methods: configuration field lookup
 and the five-second unselected Android-source text wait. Pending iOS progressed

@@ -593,6 +593,12 @@ fn verify(book:&mut Install,admission:&mut Admission,binding:&Value,baseline:&Ba
     maintenance::app_absence_state_post(book,&observed)?;book.check_name(retained,true)?;
     observation_data(binding,PhaseData::Verify,&baseline.record.digest,&record.digest)
 }
+// XNU sys_generic.c marks every positive write with FWASWRITTEN (fcntl.h).
+// F_GETFL exposes this kernel bookkeeping; F_SETFL cannot clear it. Preserve
+// every other raw bit rather than masking unknown or user-modifiable flags.
+fn output_flags_after_write_data(old:i32,wrote:bool)->i32 {
+    old | if wrote {0x0001_0000} else {0}
+}
 // Exactly one bounded JSON line, not an authority-bearing frame. Use the same
 // original absolute work clock and existing nonblocking-pipe helpers. Restore
 // inherited flags before releasing any fixture originals; no new export clock.
@@ -604,8 +610,9 @@ fn emit_observation(book:&Install,value:&Value)->Result<()> {
     let output=std::io::stdout();let fd=output.as_fd();let deadline=book.shared_deadline()?;
     pipe_data(fd,true,deadline)?;
     let old=fcntl::fcntl(fd,fcntl::FcntlArg::F_GETFL).map_err(|_|"app-absence-output-flags")?;
+    let mut at=0;
     let sent=(|| {
-        nonblocking(fd,deadline)?;let mut at=0;
+        nonblocking(fd,deadline)?;
         while at<bytes.len() {
             deadline.check_work()?;
             match unistd::write(fd,&bytes[at..]) {
@@ -617,9 +624,10 @@ fn emit_observation(book:&Install,value:&Value)->Result<()> {
         }
         deadline.check_work()
     })();
-    let restore=fcntl::fcntl(fd,fcntl::FcntlArg::F_SETFL(OFlag::from_bits_truncate(old)))
+    let restore=fcntl::fcntl(fd,fcntl::FcntlArg::F_SETFL(OFlag::from_bits_retain(old)))
         .map_err(|_|"app-absence-output-restore").and_then(|_|{
-            check(fcntl::fcntl(fd,fcntl::FcntlArg::F_GETFL).map_err(|_|"app-absence-output-flags")?==old,"app-absence-output-restore")});
+            check(fcntl::fcntl(fd,fcntl::FcntlArg::F_GETFL).map_err(|_|"app-absence-output-flags")?
+                ==output_flags_after_write_data(old,at>0),"app-absence-output-restore")});
     sent.and(restore)
 }
 pub(in crate::installer) fn entry()->i32 {
@@ -727,6 +735,42 @@ mod tests {
     }
     #[test]
     fn output_quote_and_original_exit_finality_are_separate() {
+        // Exact raw-bit behavior, including an unrelated unnamed bit. Neither
+        // first-write bookkeeping nor restoration may hide another flag change.
+        for old in [1,1|4,1|0x0001_0000,1|0x2000_0000] {
+            assert_eq!(output_flags_after_write_data(old,false),old);
+            let written=output_flags_after_write_data(old,true);
+            assert_eq!(written,old|0x0001_0000);
+            for changed in [1,4,0x40,0x4000_0000] {
+                assert_ne!(written^changed,output_flags_after_write_data(old,true));
+            }
+            assert_ne!(written&!0x0001_0000,output_flags_after_write_data(old,true));
+        }
+        // Three private ordinary pipes, never inherited stdout. The existing
+        // Mac observer test invocation verifies the actual kernel transition.
+        for (initial_nonblocking,prewritten) in [(false,false),(true,false),(false,true)] {
+            let (reader,writer)=unistd::pipe().unwrap();
+            if initial_nonblocking {
+                let flags=fcntl::fcntl(&writer,fcntl::FcntlArg::F_GETFL).unwrap();
+                fcntl::fcntl(&writer,fcntl::FcntlArg::F_SETFL(OFlag::from_bits_retain(flags)|OFlag::O_NONBLOCK)).unwrap();
+            }
+            let mut readback=[0u8;1];
+            if prewritten {
+                assert_eq!(unistd::write(&writer,b"p").unwrap(),1);
+                assert_eq!(unistd::read(&reader,&mut readback).unwrap(),1);
+                assert_eq!(readback,*b"p");
+            }
+            let old=fcntl::fcntl(&writer,fcntl::FcntlArg::F_GETFL).unwrap();
+            assert_eq!(old&0x0001_0000!=0,prewritten);
+            fcntl::fcntl(&writer,fcntl::FcntlArg::F_SETFL(OFlag::from_bits_retain(old)|OFlag::O_NONBLOCK)).unwrap();
+            assert_eq!(fcntl::fcntl(&writer,fcntl::FcntlArg::F_GETFL).unwrap(),old|OFlag::O_NONBLOCK.bits());
+            assert_eq!(unistd::write(&writer,b"x").unwrap(),1);
+            fcntl::fcntl(&writer,fcntl::FcntlArg::F_SETFL(OFlag::from_bits_retain(old))).unwrap();
+            assert_eq!(fcntl::fcntl(&writer,fcntl::FcntlArg::F_GETFL).unwrap(),output_flags_after_write_data(old,true));
+            assert_eq!(unistd::read(&reader,&mut readback).unwrap(),1);
+            assert_eq!(readback,*b"x");
+            unistd::close(writer).unwrap();unistd::close(reader).unwrap();
+        }
         assert_eq!(RECORD_LIMIT,64*1024);
         let max=transport_output_bytes_data(installation_record::PAYLOAD_LIMIT,FIXTURE_PACKAGE_LIMIT,FIXTURE_IMAGE_LIMIT).unwrap();
         assert!(max>FIXTURE_IMAGE_LIMIT);
