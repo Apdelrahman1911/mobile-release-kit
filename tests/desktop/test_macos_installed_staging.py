@@ -3045,12 +3045,65 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         match = re.search(r"include: \$\{\{ fromJSON\(github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '([^']+)' \|\| '([^']+)'\) \}\}", source)
         self.assertIsNotNone(match)
         selected, ordinary = map(json.loads, match.groups())
-        self.assertEqual(selected, [dict(row, removal_case=case) for case in ("ordinary", "abrupt") for row in ordinary])
+        selected_targets = {row["target"] for row in selected}
+        self.assertTrue(selected_targets and selected_targets <= set(TOOL.MAC_TARGETS))
+        self.assertEqual(selected, [dict(row, removal_case=case) for case in ("ordinary", "abrupt")
+                                   for row in ordinary if row["target"] in selected_targets])
         self.assertEqual([(row["target"], row["runner"], row["machine"], row["hosted_job"]) for row in ordinary],
             [(TOOL.ARM_TARGET, "macos-26", "arm64", "github-hosted-macos26-arm64"),
              (TOOL.INTEL_TARGET, "macos-26-intel", "x86_64", "github-hosted-macos26-x86_64")])
-        self.assertEqual(len(selected), 4)
+        self.assertEqual(len(selected), 2 * len(selected_targets))
         self.assertIn("      fail-fast: false\n      max-parallel: 2\n      matrix:", source)
+        # Execute the real workflow admission branch, not just a matching matrix.
+        # The version probes and other workflow commands are never executed.
+        step = workflow_step(source, "Reserve fresh work and record exact source and actual tool bindings")
+        body = step.split("<<'PY'\n", 1)[1].split("\n          PY\n", 1)[0]
+        tree = ast.parse("\n".join(line[10:] for line in body.splitlines()))
+        routes = next(node for node in tree.body if isinstance(node, ast.Assign)
+                      and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "supplier_routes")
+        guards = [node for node in tree.body if isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                  and any(isinstance(value, ast.Constant) and value.value == ANDROID_HELPER.REMOVAL_REF
+                          for value in node.test.comparators)]
+        self.assertEqual(len(guards), 1)
+        program = compile(ast.Module(body=guards, type_ignores=[]), "<removal-source-admission>", "exec")
+        with tempfile.TemporaryDirectory() as temporary:
+            environment_file = Path(temporary) / "environment"
+            for target, case in [(target, case) for target in TOOL.MAC_TARGETS for case in ("ordinary", "abrupt")] + [("other", "ordinary"), (TOOL.INTEL_TARGET, "other")]:
+                environment_file.write_text("")
+                environment = {"GITHUB_REF": ANDROID_HELPER.REMOVAL_REF, "MRK_MACOS_REMOVAL_CASE": case,
+                               "GITHUB_ENV": str(environment_file)}
+                value = {"target": target}
+                context = {"build_target": target, "supplier_routes": ast.literal_eval(routes.value), "value": value,
+                           "os": SimpleNamespace(environ=environment, urandom=lambda count: b"a" * count)}
+                if target not in TOOL.MAC_TARGETS or case not in ("ordinary", "abrupt"):
+                    with self.assertRaisesRegex(ValueError, "removal fixed source case"):
+                        exec(program, context)
+                    self.assertEqual(environment_file.read_text(), "")
+                    self.assertEqual(value, {"target": target})
+                    continue
+                exec(program, context)
+                self.assertEqual(value["removalCase"], case)
+                self.assertEqual(value["instrumented"], case == "abrupt")
+                self.assertEqual(value["removalCorrelation"], "61" * 16)
+                self.assertEqual(environment_file.read_text(), "MRK_MACOS_REMOVAL_CORRELATION=" + "61" * 16 + "\n")
+                self.assertTrue(all(value[key] is False for key in ("applicationLaunched", "fullUIQualified",
+                    "removalQualified", "powerLossQualified", "distributionQualified")))
+
+        # Run only the observer-preparation target/correlation predicate, never
+        # the privileged observation owner or the rest of its workflow step.
+        import subprocess
+        step = workflow_step(source, "Prepare three source-bound readonly observation carriers without removal")
+        predicates = [line.strip() for line in step.splitlines()
+                      if line.strip().startswith('[[ "$MRK_MACOS_TARGET"') or line.strip().startswith('[[ ( "$MRK_MACOS_TARGET"')]
+        self.assertEqual(len(predicates), 1)
+        for target, correlation, accepted in [(target, "f" * 32, True) for target in TOOL.MAC_TARGETS] + [
+            ("other", "f" * 32, False), (TOOL.INTEL_TARGET, "bad", False), (TOOL.ARM_TARGET, "F" * 32, False)]:
+            result = subprocess.run(["/usr/bin/bash", "-c", predicates[0]], check=False,
+                env={"MRK_MACOS_TARGET": target, "MRK_MACOS_REMOVAL_CORRELATION": correlation},
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            self.assertEqual(result.returncode == 0, accepted)
+            self.assertEqual(result.stdout, b"")
+            self.assertEqual(result.stderr, b"")
 
     def test_primary_owner_finality_failure_data_is_closed_bounded_and_private(self):
         module = ANDROID_HELPER
