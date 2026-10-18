@@ -7162,17 +7162,41 @@ class Operation:
         self.package_clock()
         return value["snapshotFlags"]
 
+    def removal_system_ancestor_path(self, entry):
+        """Only four standard parents, via their same registered directory chain."""
+        need(self.entry_registry.get(id(entry)) is entry and entry["fd"] is not None and not entry["closed"],
+             "removal-protected-owner")
+        path = entry.get("removal_system_path")
+        need(path in ("/", "/Volumes", "/Library", "/Library/Application Support"), "removal-protected-owner")
+        parent = entry.get("parent_entry")
+        if path == "/":
+            need(parent is None and entry["parent"] is None and entry["name"] == "/", "removal-protected-owner")
+        else:
+            need(type(parent) is dict and entry["parent"] == parent["fd"] and entry["name"] == path.rsplit("/", 1)[1],
+                 "removal-protected-owner")
+            expected = path.rsplit("/", 1)[0] or "/"
+            need(parent.get("removal_system_path") == expected, "removal-protected-owner")
+            need(self.removal_system_ancestor_path(parent) == expected, "removal-protected-owner")
+        return path
+
     def removal_directory_facts(self, entry, *, protected=False, readonly=False, private=False):
         # MNT_MULTILABEL is MAC-label support, not MNT_UNION (Apple mount.h).
         self.package_clock()
         need(self.entry_registry.get(id(entry)) is entry and entry["fd"] is not None and not entry["closed"],
              "removal-directory-original")
+        need(entry.get("removal_system_path") is None or (protected is True and readonly is False and private is False),
+             "removal-protected-owner")
         info = os.fstat(entry["fd"])
         named = os.lstat("/") if entry.get("name") == "/" else os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)
         need(signature(info) == signature(named) and stat.S_ISDIR(info.st_mode)
              and not info.st_mode & 0o7022, "removal-directory-named-held")
         if protected:
-            need(info.st_uid == info.st_gid == 0, "removal-protected-owner")
+            system = entry.get("removal_system_path") is not None
+            if system:
+                self.removal_system_ancestor_path(entry)
+            # System parents may be root:admin; managed nodes remain root:wheel.
+            # All observed group identities are still retained and POST-checked.
+            need(info.st_uid == 0 and (system or info.st_gid == 0), "removal-protected-owner")
         elif private:
             need((info.st_uid, info.st_gid) == (os.getuid(), os.getgid())
                  and stat.S_IMODE(info.st_mode) == 0o700, "removal-channel-directory")
@@ -7192,12 +7216,21 @@ class Operation:
         need(signature(os.fstat(entry["fd"])) == signature(info), "removal-directory-post")
         return signature(info), flags, fs
 
-    def removal_open_directory(self, parent, name, role, *, protected=False, readonly=False, private=False, context=None):
+    def removal_open_directory(self, parent, name, role, *, protected=False, readonly=False, private=False, context=None, system_ancestor=False):
+        need(type(system_ancestor) is bool, "removal-protected-owner")
+        system_path = None
+        if system_ancestor:
+            need(protected is True and readonly is False and private is False, "removal-protected-owner")
+            base = "" if parent is None else self.removal_system_ancestor_path(parent).rstrip("/")
+            system_path = "/" if parent is None and name == "/" else base + "/" + name
+            need((parent is not None or name == "/") and system_path in ("/", "/Volumes", "/Library", "/Library/Application Support")
+                 and name == ("/" if parent is None else system_path.rsplit("/", 1)[1]), "removal-protected-owner")
         self.removal_reserve()
         # Register acquisition custody BEFORE the syscall; an exception is not
         # an Absent or a known-close receipt.
         entry = self.register(None, role, "removal-directory", None if parent is None else parent["fd"], name)
         entry["parent_entry"] = parent
+        if system_ancestor: entry["removal_system_path"] = system_path
         if context is not None:
             entry["removal_acquired"] = False
             context["entries"].append(entry)
@@ -7456,8 +7489,8 @@ class Operation:
         return context, bundles
 
     def removal_result_parent(self):
-        library = self.removal_open_directory(self.removal_slash, "Library", "removal-system-library", protected=True)
-        parent = self.removal_open_directory(library, "Application Support", "removal-result-parent", protected=True)
+        library = self.removal_open_directory(self.removal_slash, "Library", "removal-system-library", protected=True, system_ancestor=True)
+        parent = self.removal_open_directory(library, "Application Support", "removal-result-parent", protected=True, system_ancestor=True)
         self.removal_system_parents.extend((library, parent))
         return parent
 
@@ -7770,8 +7803,8 @@ class Operation:
              and prepared["targetImage"] == self.removal_target_image and set(prepared["observers"]) == set(phases),
              "removal-prepared-actual-target")
         target_image, observer_image = self.removal_runtime_images(prepared)
-        self.removal_slash = self.removal_open_directory(None, "/", "removal-system-root", protected=True)
-        self.removal_volumes = self.removal_open_directory(self.removal_slash, "Volumes", "removal-protected-volumes", protected=True)
+        self.removal_slash = self.removal_open_directory(None, "/", "removal-system-root", protected=True, system_ancestor=True)
+        self.removal_volumes = self.removal_open_directory(self.removal_slash, "Volumes", "removal-protected-volumes", protected=True, system_ancestor=True)
         self.removal_output_parent = self.removal_result_parent()
         self.removal_output_roster = self.removal_roster(self.removal_output_parent)
         self.removal_absent(self.removal_output_parent, "MobileReleaseKit-RemovalRequests")
@@ -7963,8 +7996,8 @@ class Operation:
         self.removal_host_module = load_data(self.checkout, "macos_xcode_host_preparation.py", "_mrk_removal_baseline_host")
         need(self.read(original) == body, "removal-baseline-host-source-post")
         self.removal_host()
-        self.removal_slash = self.removal_open_directory(None, "/", "removal-baseline-system-root", protected=True)
-        self.removal_volumes = self.removal_open_directory(self.removal_slash, "Volumes", "removal-baseline-volumes", protected=True)
+        self.removal_slash = self.removal_open_directory(None, "/", "removal-baseline-system-root", protected=True, system_ancestor=True)
+        self.removal_volumes = self.removal_open_directory(self.removal_slash, "Volumes", "removal-baseline-volumes", protected=True, system_ancestor=True)
         parent = self.removal_result_parent()
         # Before the genuine Install original, absence is actual and exact.
         # The hosted-runner label itself is never installation ownership.
@@ -8278,8 +8311,8 @@ class Operation:
                    "GITHUB_RUN_ATTEMPT": self.environment.get("GITHUB_RUN_ATTEMPT")}
         path = transport_mount_path_data(context, self.target, self.phase)
         self.transport_source_post()
-        self.transport_slash = self.removal_open_directory(None, "/", "package-transport-system-root", protected=True)
-        self.transport_volumes = self.removal_open_directory(self.transport_slash, "Volumes", "package-transport-volumes", protected=True)
+        self.transport_slash = self.removal_open_directory(None, "/", "package-transport-system-root", protected=True, system_ancestor=True)
+        self.transport_volumes = self.removal_open_directory(self.transport_slash, "Volumes", "package-transport-volumes", protected=True, system_ancestor=True)
         for entry in (self.transport_slash, self.transport_volumes):
             need(not entry["removal_facts"][2]["flags"] & 0x400000, "package-transport-automounted")
         self.removal_absent(self.transport_volumes, path.name)
@@ -8838,8 +8871,8 @@ class Operation:
             setup_originals={key:audit[key] for key in ("helperSha256", "bomSha256", "payloadSha256")})
         del final_body
         self.normal_mount_host()  # Read-only DarwinAPI/ACL source, no host preparation.
-        slash = self.removal_open_directory(None, "/", "setup-system-root", protected=True)
-        self.setup_library = self.removal_open_directory(slash, "Library", "setup-system-library", protected=True)
+        slash = self.removal_open_directory(None, "/", "setup-system-root", protected=True, system_ancestor=True)
+        self.setup_library = self.removal_open_directory(slash, "Library", "setup-system-library", protected=True, system_ancestor=True)
         private = self.removal_open_directory(slash, "private", "setup-system-private", protected=True)
         var = self.removal_open_directory(private, "var", "setup-system-var", protected=True)
         db = self.removal_open_directory(var, "db", "setup-system-db", protected=True)

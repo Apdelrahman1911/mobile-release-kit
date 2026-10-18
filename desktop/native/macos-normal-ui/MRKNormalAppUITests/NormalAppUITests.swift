@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import CoreFoundation
 import Darwin
 import Foundation
 import XCTest
@@ -1184,7 +1185,7 @@ final class NormalAppUITests: XCTestCase {
     }
     // End engineering main fixture; ordinary installed cases below are unchanged.
 
-    private enum SourceProfile { case sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap, currentCandidateSavedVersion, currentCandidateIOSTools, currentCandidateAndroid, currentCandidateIOSPending }
+    private enum SourceProfile { case currentCandidateOrdinary, sameBuild, packagedEntry, fixedCarrierResume, fixedNormalBatch, updateP0Bootstrap, currentCandidateSavedVersion, currentCandidateIOSTools, currentCandidateAndroid, currentCandidateIOSPending }
 
     private static func androidConsumerContext(_ env: [String: String], candidate: Bool) throws -> Bool {
         guard let marker = env["MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE"] else { return false }
@@ -1193,7 +1194,7 @@ final class NormalAppUITests: XCTestCase {
         guard candidate && marker == "current-candidate-android-candidate-only-v1"
               && [application, harness].allSatisfy({ $0.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
                                                    && $0 != String(repeating: "0", count: 40) })
-              && ["MRK_NORMAL_UI_CURRENT_IOS_TOOLS", "MRK_NORMAL_UI_CURRENT_SAVED_VERSION", "MRK_NORMAL_UI_CURRENT_IOS_PENDING",
+              && ["MRK_NORMAL_UI_CURRENT_ORDINARY", "MRK_NORMAL_UI_CURRENT_IOS_TOOLS", "MRK_NORMAL_UI_CURRENT_SAVED_VERSION", "MRK_NORMAL_UI_CURRENT_IOS_PENDING",
                   "MRK_NORMAL_UI_FIXED_CARRIER_RESUME", "MRK_NORMAL_UI_FIXED_NORMAL_BATCH"].allSatisfy({ env[$0] == nil }) else {
             throw Refusal.condition("current Android consumer profile is missing or mixed")
         }
@@ -1207,7 +1208,7 @@ final class NormalAppUITests: XCTestCase {
         guard marker == "current-candidate-ios-pending-only-v1"
               && [application, harness].allSatisfy({ $0.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
                                                    && $0 != String(repeating: "0", count: 40) })
-              && ["MRK_NORMAL_UI_CURRENT_IOS_TOOLS", "MRK_NORMAL_UI_CURRENT_SAVED_VERSION", "MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE",
+              && ["MRK_NORMAL_UI_CURRENT_ORDINARY", "MRK_NORMAL_UI_CURRENT_IOS_TOOLS", "MRK_NORMAL_UI_CURRENT_SAVED_VERSION", "MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE",
                   "MRK_NORMAL_UI_FIXED_CARRIER_RESUME", "MRK_NORMAL_UI_FIXED_NORMAL_BATCH"].allSatisfy({ env[$0] == nil }) else {
             throw Refusal.condition("current iOS pending consumer profile is missing or mixed")
         }
@@ -1224,6 +1225,15 @@ final class NormalAppUITests: XCTestCase {
 
     @MainActor private func normalJourneyProfile(for result: String) throws -> SourceProfile {
         let context = ProcessInfo.processInfo.environment
+        if let marker = context["MRK_NORMAL_UI_CURRENT_ORDINARY"] {
+            try require(marker == "current-candidate-ordinary-only-v1"
+                        && ["applications-test.xcresult", "project-test.xcresult", "persistence-test.xcresult", "saved-checks-test.xcresult"].contains(result)
+                        && ["MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE", "MRK_NORMAL_UI_CURRENT_IOS_PENDING",
+                            "MRK_NORMAL_UI_CURRENT_IOS_TOOLS", "MRK_NORMAL_UI_CURRENT_SAVED_VERSION",
+                            "MRK_NORMAL_UI_FIXED_CARRIER_RESUME", "MRK_NORMAL_UI_FIXED_NORMAL_BATCH"].allSatisfy({ context[$0] == nil }),
+                        "current ordinary consumer permits only its original journeys")
+            return .currentCandidateOrdinary
+        }
         if context["MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE"] != nil {
             try require(result == "android-candidate-inputs-test.xcresult"
                         && Self.androidConsumerContext(context, candidate: true), "current Android consumer permits only its original journey")
@@ -1296,7 +1306,15 @@ final class NormalAppUITests: XCTestCase {
         if context["MRK_NORMAL_UI_CURRENT_ANDROID_CANDIDATE"] != nil {
             try require(profile == .currentCandidateAndroid, "Android consumer marker cannot relabel another journey")
         }
+        if context["MRK_NORMAL_UI_CURRENT_ORDINARY"] != nil {
+            try require(profile == .currentCandidateOrdinary, "ordinary consumer marker cannot relabel another journey")
+        }
         switch profile {
+        case .currentCandidateOrdinary:
+            try require(applicationSource != harnessSource && applicationSource != String(repeating: "0", count: 40)
+                        && harnessSource != String(repeating: "0", count: 40)
+                        && context["MRK_NORMAL_UI_CURRENT_ORDINARY"] == "current-candidate-ordinary-only-v1",
+                        "current ordinary requires distinct candidate and harness sources")
         case .currentCandidateIOSPending:
             try require(Self.iosPendingConsumerContext(context), "iOS pending consumer profile required")
         case .currentCandidateAndroid:
@@ -1358,7 +1376,7 @@ final class NormalAppUITests: XCTestCase {
         continueAfterFailure = false
         executionTimeAllowance = 60
         try beginCase(seconds: 60)
-        _ = try admittedJourneyApplication() // Same-build installed/read-back fixture only.
+        _ = try admittedJourneyApplication(profile: normalJourneyProfile(for: "applications-test.xcresult")) // Exact app source; current harness only under its closed profile.
         try require(originalLaunch == nil && entryGateObservation == nil && !applicationsQuitObserved
                     && ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] == nil,
                     "Applications observation requires empty ordinary custody")
@@ -2023,6 +2041,127 @@ final class NormalAppUITests: XCTestCase {
         private var candidateEmptyDirectories: Set<String> = []
         private(set) var candidateCommit = "", candidateTree = "", candidateSHA256 = ""
         private var candidateHandoff: (Directory, File)?
+        // Python encoded() wire form for these closed ASCII-key fixture schemas.
+        // Exact byte equality below still rejects duplicates and alternate forms.
+        private struct CandidateCanonicalWriter {
+            var bytes: [UInt8] = []
+            var nodes = 0
+            mutating func append(_ value: [UInt8]) throws {
+                try LocalFixture.need(value.count <= 65536 - bytes.count, "candidate handoff canonical bytes")
+                bytes.append(contentsOf: value)
+            }
+            mutating func string(_ value: String) throws {
+                try append([34])
+                let hex = Array("0123456789abcdef".utf8)
+                func escaped(_ unit: UInt32) -> [UInt8] {
+                    [92, 117, hex[Int((unit >> 12) & 15)], hex[Int((unit >> 8) & 15)],
+                     hex[Int((unit >> 4) & 15)], hex[Int(unit & 15)]]
+                }
+                for scalar in value.unicodeScalars {
+                    switch scalar.value {
+                    case 34, 92: try append([92, UInt8(scalar.value)])
+                    case 8: try append([92, 98])
+                    case 9: try append([92, 116])
+                    case 10: try append([92, 110])
+                    case 12: try append([92, 102])
+                    case 13: try append([92, 114])
+                    case 32...126: try append([UInt8(scalar.value)])
+                    case 0...65535: try append(escaped(scalar.value))
+                    default:
+                        let value = scalar.value - 65536
+                        try append(escaped(0xd800 + (value >> 10)))
+                        try append(escaped(0xdc00 + (value & 1023)))
+                    }
+                }
+                try append([34])
+            }
+            mutating func write(_ value: Any, depth: Int = 0) throws {
+                try LocalFixture.need(depth <= 32 && nodes < 4096, "candidate handoff canonical bytes")
+                nodes += 1
+                if let object = value as? [String: Any] {
+                    try LocalFixture.need(object.count <= 4096 - nodes
+                        && object.keys.allSatisfy({ $0.unicodeScalars.allSatisfy({ $0.value < 128 }) }),
+                        "candidate handoff canonical bytes")
+                    let keys = object.keys.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+                    try append([123])
+                    for (index, key) in keys.enumerated() {
+                        if index != 0 { try append([44]) }
+                        try string(key); try append([58])
+                        try write(object[key]!, depth: depth + 1)
+                    }
+                    try append([125])
+                } else if let values = value as? [Any] {
+                    try LocalFixture.need(values.count <= 4096 - nodes, "candidate handoff canonical bytes")
+                    try append([91])
+                    for (index, child) in values.enumerated() {
+                        if index != 0 { try append([44]) }
+                        try write(child, depth: depth + 1)
+                    }
+                    try append([93])
+                } else if let text = value as? String {
+                    try string(text)
+                } else if let number = value as? NSNumber {
+                    if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                        try append(Array((number.boolValue ? "true" : "false").utf8))
+                    } else {
+                        let text = number.stringValue
+                        try LocalFixture.need(["c", "s", "i", "l", "q", "C", "S", "I", "L", "Q"].contains(String(cString: number.objCType))
+                            && Int64(text).map({ String($0) == text }) == true, "candidate handoff canonical bytes")
+                        try append(Array(text.utf8))
+                    }
+                } else if value is NSNull {
+                    try append(Array("null".utf8))
+                } else {
+                    throw Refusal.condition("fixture: candidate handoff canonical bytes")
+                }
+            }
+        }
+        private static func candidateCanonicalJSON(_ object: Any) throws -> Data {
+            var writer = CandidateCanonicalWriter()
+            try writer.write(object)
+            try writer.append([10])
+            return Data(writer.bytes)
+        }
+
+        // Public DATA only; no app, credentials, fixture descriptors or mutation.
+        static func exerciseCandidateCanonicalData() throws {
+            let vector = #"{"files":{"project/.git/HEAD":[],"project/.git/config":[],"project/.git/objects/10/a":[],"project/.git/objects/2/a":[]},"integer":[-9223372036854775808,9223372036854775807],"schemaVersion":1,"text":"quote\" backslash\\ slash/ \b\f\n\r\t\u0000\u001f\u007f\u00e9\ud83d\ude00","values":[true,false,null]}"#
+            let expected = Data(vector.utf8) + Data([10])
+            let parsed = try JSONSerialization.jsonObject(with: expected)
+            try need(try candidateCanonicalJSON(parsed) == expected, "candidate canonical public vector")
+            let sample = ["project/.git/HEAD": 1, "project/.git/config": 2]
+            let python = Data(#"{"project/.git/HEAD":1,"project/.git/config":2}"#.utf8) + Data([10])
+            try need(try candidateCanonicalJSON(sample) == python, "candidate canonical ASCII key order")
+            let foundation = try JSONSerialization.data(withJSONObject: sample, options: [.sortedKeys, .withoutEscapingSlashes]) + Data([10])
+            func matches(_ body: String, normalizeSchema: Bool = false) -> Bool {
+                do {
+                    let data = Data(body.utf8)
+                    guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+                    if normalizeSchema { object["schemaVersion"] = 1 }
+                    return try candidateCanonicalJSON(object) == data
+                } catch { return false }
+            }
+            for bad in ["{\"schemaVersion\":1,\"schemaVersion\":1}\n", "{\"schemaVersion\":true}\n",
+                        "{\"schemaVersion\":1.0}\n", "{\"schemaVersion\":1e0}\n", "{ \"schemaVersion\":1}\n",
+                        "{\"schemaVersion\":1}", "{\"schemaVersion\":1,}\n"] {
+                try need(!matches(bad, normalizeSchema: true), "candidate canonical alternative representation")
+            }
+            for bad in ["{\"b\":1,\"a\":2}\n", "{\"a\":\"\\/\"}\n", "{\"a\":\"\\u007F\"}\n",
+                        "{\"a\":\"é\"}\n", "{\"a\":\"\\q\"}\n", "{\"a\":18446744073709551615}\n"] {
+                try need(!matches(bad), "candidate canonical changed wire form")
+            }
+            func refuses(_ value: Any) -> Bool {
+                do { _ = try candidateCanonicalJSON(value); return false } catch { return true }
+            }
+            try need(refuses(["number": NSNumber(value: 1.5)]) && refuses(["number": NSNumber(value: UInt64.max)])
+                     && refuses(["nonASCIIé": 1]) && refuses(["text": String(repeating: "x", count: 65536)])
+                     && refuses(Array(repeating: NSNull(), count: 4096)), "candidate canonical bounds and numeric type")
+            var deep: Any = NSNull()
+            for _ in 0..<34 { deep = [deep] }
+            try need(refuses(deep), "candidate canonical nesting bound")
+            print("MRK_MACOS_CANDIDATE_CANONICAL_DATA=passed;foundationOrderDiffers=\(foundation != python)")
+        }
+
         private func adoptAndroidCandidate(_ temporary: Directory, certificate: String) throws {
             let env = ProcessInfo.processInfo.environment
             let consumer = try NormalAppUITests.androidConsumerContext(env, candidate: true)
@@ -2055,7 +2194,7 @@ final class NormalAppUITests: XCTestCase {
                   let dirs = row["directories"] as? [String:[String]], let files = row["files"] as? [String:[String:Any]],
                   dirs.count + files.count <= 144 else {throw Refusal.condition("fixture: candidate closed handoff")}
             var canonical = row; canonical["schemaVersion"] = 1
-            try Self.need(try JSONSerialization.data(withJSONObject:canonical,options:[.sortedKeys,.withoutEscapingSlashes]) + Data([10]) == file.bytes,
+            try Self.need(try Self.candidateCanonicalJSON(canonical) == file.bytes,
                           "candidate handoff canonical bytes")
             guard let saved = originals[Self.config], var config = try JSONSerialization.jsonObject(with:saved) as? [String:Any],
                   var source = config["source"] as? [String:Any], var android = config["android"] as? [String:Any] else {
@@ -2063,7 +2202,7 @@ final class NormalAppUITests: XCTestCase {
             }
             source["localStoreEnabled"] = true; android["uploadCertificateSha256"] = certificate
             config["source"] = source; config["android"] = android
-            originals[Self.config] = try JSONSerialization.data(withJSONObject:config,options:[.sortedKeys,.withoutEscapingSlashes]) + Data([10])
+            originals[Self.config] = try Self.candidateCanonicalJSON(config)
             originals["template/info/exclude"] = Data()
             let gitControls: Set<String> = ["HEAD","config","index","COMMIT_EDITMSG","refs/heads/main","logs/HEAD","logs/refs/heads/main","info/exclude"]
             let extra = Set(files.keys).subtracting(originals.keys)
@@ -4567,6 +4706,7 @@ final class NormalAppUITests: XCTestCase {
     // Legacy fixed selector, now Android+iOS filesystem DATA only. Neither an
     // application case nor an archive/signing observation; same original 30s.
     func testPositiveAndroidOutputCustodyData() throws {
+        try LocalFixture.exerciseCandidateCanonicalData()
         try LocalFixture.exerciseAndroidOutputCustodyData()
     }
 
@@ -5802,7 +5942,18 @@ final class NormalAppUITests: XCTestCase {
             _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
                                 failures: ["Static observation unavailable", "Only a partial static observation is available"])
             _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "selected project path is not exact")
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            // Fixed public fixture expectations only. Snapshot before the original
+            // wait; never inspect new AX values after its first failure.
+            let identity = renderer.staticTexts.matching(identifier: "org.fixture.app")
+            let identityTexts = min(identity.count, 5)
+            let identityRoles = min(renderer.descendants(matching: .any).matching(identifier: "org.fixture.app").count, 5)
+            let androidCaption = min(renderer.staticTexts.matching(identifier: "Configured Android application ID").count, 5)
+            let iosCaption = min(renderer.staticTexts.matching(identifier: "Configured iOS bundle ID").count, 5)
+            do { _ = try waitElement(identity, in: renderer) }
+            catch {
+                print("MRK_NORMAL_PROJECT_IDENTITY=v1;sample=pre-wait;staticText=\(identityTexts);anyRole=\(identityRoles);androidCaption=\(androidCaption);iosCaption=\(iosCaption);nonAtomic=1")
+                throw error // Keep the actual original failure; observation cannot authorize success.
+            }
             try fixture.assertUnchanged()
         }
         try stage("config") {
@@ -7463,6 +7614,7 @@ final class NormalAppUITests: XCTestCase {
         continueAfterFailure = false
         executionTimeAllowance = 900
         try beginCase(seconds: 900, androidPositive: true)
+        if candidateInputs { try LocalFixture.exerciseCandidateCanonicalData() }
         let fixture = LocalFixture()
         ownedFixture = fixture
         var inputs: LocalFixture.AndroidInputs?

@@ -5818,6 +5818,73 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertTrue(all(entry['fd'] is None for entry in selected.entries))
 
 
+    def test_removal_system_parent_group_is_scoped_and_preserved(self):
+        """Real relative directory FDs; Darwin root ownership/filesystem are DATA ports."""
+        module = ANDROID_HELPER
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            support = root / 'Library/Application Support'; support.mkdir(parents=True)
+            (root / 'Volumes').mkdir(); (support / 'Managed').mkdir()
+            real_open, real_stat, real_fstat, real_lstat = os.open, os.stat, os.fstat, os.lstat
+            support_inode = support.stat().st_ino
+            group, owner, extra_mode = 80, 0, 0
+            def info(value):
+                fields = {key: getattr(value, key) for key in ('st_dev','st_ino','st_mode','st_uid','st_gid',
+                    'st_nlink','st_size','st_mtime_ns','st_ctime_ns')}
+                fields.update(st_uid=owner, st_gid=group if value.st_ino == support_inode else 0,
+                              st_mode=value.st_mode | extra_mode, st_flags=0)
+                return SimpleNamespace(**fields)
+            op = module.Operation(None, root, root, 'package-install', dict(GITHUB_SHA='a'*40,
+                GITHUB_WORKFLOW_SHA='a'*40, GITHUB_WORKFLOW_REF='inert', GITHUB_RUN_ID='1', GITHUB_RUN_ATTEMPT='1'), None)
+            op.removal_api = SimpleNamespace(filesystem=lambda fd: {'flags': 0x1000, 'typeName': 'apfs'})
+            def opened(name, flags, **kwargs):
+                return real_open(root if name == '/' and not kwargs else name, flags, **kwargs)
+            with mock.patch.object(op, 'package_clock', return_value=0), mock.patch.object(op, 'removal_reserve'), \
+                 mock.patch.object(op, 'removal_acl', return_value=0), mock.patch.object(module.os, 'open', side_effect=opened), \
+                 mock.patch.object(module.os, 'fstat', side_effect=lambda fd: info(real_fstat(fd))), \
+                 mock.patch.object(module.os, 'lstat', side_effect=lambda path: info(real_lstat(root if path == '/' else path))), \
+                 mock.patch.object(module.os, 'stat', side_effect=lambda *a, **k: info(real_stat(*a, **k))):
+                try:
+                    slash = op.removal_open_directory(None, '/', 'test-root', protected=True, system_ancestor=True)
+                    library = op.removal_open_directory(slash, 'Library', 'test-library', protected=True, system_ancestor=True)
+                    parent = op.removal_open_directory(library, 'Application Support', 'test-support', protected=True, system_ancestor=True)
+                    op.removal_open_directory(slash, 'Volumes', 'test-volumes', protected=True, system_ancestor=True)
+                    self.assertEqual(parent['removal_facts'][0][5], 80)
+                    op.removal_directory_post(parent)
+                    with self.assertRaisesRegex(module.Refused, 'removal-protected-owner'):
+                        op.removal_directory_facts(parent)
+                    # No generic non-wheel allowance, even at the same real parent.
+                    with self.assertRaisesRegex(module.Refused, 'removal-protected-owner'):
+                        op.removal_open_directory(library, 'Application Support', 'unmarked', protected=True)
+                    for ancestor, name, kwargs in ((parent, 'Managed', {'protected':True}),
+                            (slash, 'Library/..', {'protected':True}), (None, '/Library', {'protected':True}),
+                            (library, 'Application Support', {'private':True}),
+                            (dict(library), 'Application Support', {'protected':True})):
+                        before = len(op.entries)
+                        with self.assertRaises(module.Refused):
+                            op.removal_open_directory(ancestor, name, 'not-authorized', system_ancestor=True, **kwargs)
+                        self.assertEqual(len(op.entries), before)
+                    with self.assertRaises(module.Refused):
+                        op.removal_open_directory(None, '/', 'wrong-type', protected=True, system_ancestor=1)
+                    group = 81
+                    with self.assertRaisesRegex(module.Refused, 'removal-directory-facts-changed'):
+                        op.removal_directory_post(parent)
+                    group = 80; owner = 1
+                    with self.assertRaisesRegex(module.Refused, 'removal-protected-owner'):
+                        op.removal_directory_post(parent)
+                    owner = 0; extra_mode = 0o020
+                    with self.assertRaisesRegex(module.Refused, 'removal-directory-named-held'):
+                        op.removal_directory_post(parent)
+                    extra_mode = 0
+                    original_parent = parent['parent']; parent['parent'] = slash['fd']
+                    with self.assertRaises((module.Refused, OSError)): op.removal_directory_post(parent)
+                    parent['parent'] = original_parent
+                    op.removal_directory_post(parent)
+                finally:
+                    for entry in reversed(op.entries): op.close(entry)
+            self.assertTrue(all(e['closed'] and e['fd'] is None for e in op.entries))
+            self.assertFalse(op.errors)
+
     def test_removal_directory_mac_labels_preserve_filesystem_and_original_guards(self):
         """Real held/named directory originals; Darwin fs/ACL flags are DATA ports."""
         module = ANDROID_HELPER

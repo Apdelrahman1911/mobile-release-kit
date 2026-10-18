@@ -115,7 +115,7 @@ def saved_version_recovery(target):
     return value
 
 
-def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False, saved_files=False, saved_version=False, current_ios=False, entry=False):
+def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False, saved_files=False, saved_version=False, current_ios=False, current_ordinary=False, entry=False):
     selected, context, install=fixture(target)
     args, req=U.phase_request(N,name,target,WORK,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,entry=entry)
     mode=req['phase']; result=None if req['result'] is None else req['result'].name
@@ -135,6 +135,9 @@ def phase_fixture(name, target=R.TARGETS[0], *, ios_tools=False, saved_files=Fal
     if current_ios:
         assert ios_tools and not saved_version
         row.update(sourceCommit=context['helperSource'],applicationSourceCommit=selected['source'],currentCandidateScope=U.IOS_TOOLS_SCOPE)
+    if current_ordinary:
+        assert not (ios_tools or saved_files or saved_version or entry)
+        row.update(sourceCommit=context['helperSource'],applicationSourceCommit=selected['source'],currentCandidateScope=U.ORDINARY_SCOPE)
     row['normalPhase' if mode=='test' else 'phase']=mode
     row['originalTestReturncode' if mode=='test' else 'originalReturncode']=0
     if mode=='test':
@@ -632,7 +635,7 @@ class CandidateUITests(unittest.TestCase):
     def test_actual_owned_wrapper_known_nonzero_unknown_and_changed_post_never_publish_status(self):
         for fault in (None,'nonzero','unknown','post','applications'):
             phase = 'applications-test' if fault == 'applications' else 'project-test'
-            selected,context,_,_,req,row,out=phase_fixture(phase)
+            selected,context,_,_,req,row,out=phase_fixture(phase,current_ordinary=True)
             events=[]
             class Book:
                 def __init__(self):self.entries=[];self.directories={WORK/'normal-ui':{}}
@@ -678,8 +681,8 @@ class CandidateUITests(unittest.TestCase):
                                  {'status': 'classified', 'condition': 'payload-foreground'})
                 self.assertNotIn('source2', events)
             self.assertEqual(owner.kw['timeout'],req['phaseSeconds']+15)
-            self.assertEqual(owner.kw['environ'],U.clean_environment(N,selected,WORK))
-            self.assertEqual(owner.kw['cwd'],U.consumer.CANDIDATE_ROOT)
+            self.assertEqual(owner.kw['environ'],U.clean_environment(N,selected,WORK,helper_source=context['helperSource'],ordinary=True))
+            self.assertEqual(owner.kw['cwd'],U.consumer.HELPER_ROOT)
 
     def test_prior_caller_status_is_required_even_after_success_shaped_inner_receipt(self):
         selected,_,_,_,_,row,out=phase_fixture('build')
@@ -712,8 +715,10 @@ class CandidateUIMainTests(unittest.TestCase):
         selected,context,install=fixture(target)
         if same_source:
             context['helperSource']=selected['source'];install['helperSource']=selected['source'];install['helperTree']=selected['tree']
+        ordinary=not (ios_tools or saved_files or saved_version or entry)
+        current_ordinary=ordinary and not same_source
         current_ios=ios_tools and not same_source
-        helper_source=context['helperSource'] if saved_version or current_ios else None
+        helper_source=context['helperSource'] if saved_version or current_ios or current_ordinary else None
         files={};directories=set();books=[];effects=[];modes={}
         root=U.consumer.HELPER_ROOT
         sources=tuple(dict.fromkeys((*U.consumer.HELPER_SOURCE_INPUTS,U.consumer.CONSUMER_PATH,
@@ -755,7 +760,7 @@ class CandidateUIMainTests(unittest.TestCase):
         previous=phases if name=='result' else phases[:phases.index(name)]
         if name!='build':directories.add(WORK/'normal-ui');directories.add(WORK/'normal-ui/tmp')
         for phase in previous:
-            _,_,_,_,_,row,out=phase_fixture(phase,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,current_ios=current_ios,entry=entry)
+            _,_,_,_,_,row,out=phase_fixture(phase,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,current_ios=current_ios,current_ordinary=current_ordinary,entry=entry)
             for suffix,body in (('.status',b'0\n'),('.stdout',out),('.stderr',b'')):
                 files[WORK/'normal-ui'/(phase+suffix)]=body
             files[WORK/'normal-ui'/U.admission_name(phase)]=R.canonical(row)
@@ -807,8 +812,8 @@ class CandidateUIMainTests(unittest.TestCase):
                 effects.append('native-cli')
                 child_root=root if helper_source is not None else U.consumer.CANDIDATE_ROOT
                 assert argv[4]==str(child_root/U.RUNNER) and kw['cwd']==child_root
-                assert kw['environ']==U.clean_environment(N,selected,WORK,helper_source=helper_source,ios_tools=ios_tools)
-                _,_,_,_,_,row,out=phase_fixture(name,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,current_ios=current_ios,entry=entry)
+                assert kw['environ']==U.clean_environment(N,selected,WORK,helper_source=helper_source,ios_tools=ios_tools,ordinary=ordinary)
+                _,_,_,_,_,row,out=phase_fixture(name,target,ios_tools=ios_tools,saved_files=saved_files,saved_version=saved_version,current_ios=current_ios,current_ordinary=current_ordinary,entry=entry)
                 if native_fault=='unknown':raise RuntimeError('inert unknown native original')
                 files[WORK/'normal-ui'/U.admission_name(name)]=R.canonical(row)
                 return subprocess.CompletedProcess(argv,86 if native_fault=='nonzero' else 0,out,b'')
@@ -844,6 +849,36 @@ class CandidateUIMainTests(unittest.TestCase):
         self.assertEqual(len(books[0].attempts),len(set(books[0].attempts)))
         self.assertFalse(any(p.name==name+'.status' for p in files if name not in previous))
         return value,effects,quotas[0].reserved
+
+    def test_current_ordinary_main_preserves_six_tests_and_source_boundaries(self):
+        for target in (N.ARM_TARGET,N.INTEL_TARGET):
+            for name in (*U.PHASES,'result'):
+                with self.subTest(target=target,name=name):
+                    value,effects,count=self.exercise(name,target)
+                    self.assertLessEqual(count,96)
+                    self.assertEqual(value['applicationSource'],fixture(target)[0]['source'])
+                    self.assertEqual(value['harnessSource'],fixture(target)[1]['helperSource'])
+                    self.assertEqual(effects,['native-cli'] if name!='result' else [])
+                    if name=='result': self.assertEqual((value['totalTests'],value['failedTests'],value['skippedTests']),(6,0,0))
+            value,effects,count=self.exercise('project-test',target,same_source=True)
+            self.assertEqual(value['harnessSource'],value['applicationSource'])
+            for fault in ('prior-status','prior-source','nonzero','unknown','post'):
+                value,effects,_=self.exercise('project-test',target,native_fault=fault)
+                self.assertIsNone(value)
+                self.assertEqual(effects,[] if fault.startswith('prior-') else ['native-cli'])
+            self.assertIsNone(self.exercise('project-test',target,unknown_close=True)[0])
+            selected,context,_,_,request,row,body=phase_fixture('project-test',target,current_ordinary=True)
+            for changes in ({'applicationSourceCommit':'f'*40},{'sourceCommit':selected['source']},
+                            {'currentCandidateScope':U.IOS_TOOLS_SCOPE},{'originalClosesCompleted':False}):
+                with self.assertRaises(R.Refused):
+                    U.phase_admission_data({**row,**changes},request,selected['source'],body,b'',normal=N,
+                        helper_source=context['helperSource'],ordinary=True)
+            for name in ('test','diagnostics-test','release-evidence-test','saved-version-recovery-test'):
+                flags={'entry':True} if name=='test' else {'ios_tools':True} if name=='diagnostics-test' else {'saved_files':True} if name=='release-evidence-test' else {'saved_version':True}
+                selected,context,_,_,request,row,body=phase_fixture(name,target,**flags)
+                with self.assertRaises(R.Refused):
+                    U.phase_admission_data(row,request,selected['source'],body,b'',normal=N,
+                        helper_source=context['helperSource'],ordinary=True)
 
     def test_actual_entry_main_both_targets_69_originals_and_failure_barriers(self):
         for target in (N.ARM_TARGET, N.INTEL_TARGET):

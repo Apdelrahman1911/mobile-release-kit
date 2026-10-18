@@ -2754,6 +2754,68 @@ class NormalPhaseDataTests(unittest.TestCase):
                         self.assertEqual(row['originalReturncode'],original.returncode)
                         self.assertEqual(row['testCounts'] is None,failure=='native')
 
+    def test_current_ordinary_context_receipt_and_fixed_identity_diagnostic(self):
+        root=MODULE.SAVED_VERSION_CANDIDATE_ROOT/".candidate-consumer-helper"
+        env={MODULE.ORDINARY_CURRENT_ENV:MODULE.ORDINARY_CURRENT_SCOPE,
+             "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE":"a"*40,
+             "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE":"b"*40}
+        temporary="/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui/tmp/"
+        for target in (MODULE.ARM_TARGET,MODULE.INTEL_TARGET):
+            for result in (None,*MODULE.ORDINARY_CURRENT_RESULTS):
+                request=MODULE.normal_request(["--target",target,*( ["--normal-build"] if result is None else ["--normal-summary",result])],temporary)
+                self.assertEqual(MODULE.ordinary_candidate_context(request,env,root),{MODULE.ORDINARY_CURRENT_ENV:MODULE.ORDINARY_CURRENT_SCOPE})
+            for name in MODULE.ORDINARY_CURRENT_RESULTS:
+                args=normal_arguments(name); args[8]="platform=macOS,arch="+MODULE.normal_target_data(target)[0]
+                request=MODULE.normal_request(["--target",target,*args],temporary)
+                self.assertEqual(MODULE.ordinary_candidate_context(request,env,root),{MODULE.ORDINARY_CURRENT_ENV:MODULE.ORDINARY_CURRENT_SCOPE})
+            for changes in ({MODULE.ORDINARY_CURRENT_ENV:"other"},{"TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE":"b"*40},
+                {"TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE":"0"*40},{"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE":"0"*40},
+                *({key:"mixed"} for key in (MODULE.IOS_TOOLS_CURRENT_ENV,MODULE.SAVED_VERSION_CURRENT_ENV,
+                    MODULE.IOS_PENDING_CURRENT_ENV,MODULE.ANDROID_CURRENT_ENV,MODULE.FIXED_RESUME_ENV,MODULE.FIXED_NORMAL_BATCH_ENV))):
+                with self.assertRaises(MODULE.Refused): MODULE.ordinary_candidate_context(request,{**env,**changes},root)
+            for changes in (dict(result=Path("test.xcresult")),dict(result=Path(MODULE.IOS_UNSIGNED_RESULT)),
+                dict(result=Path(MODULE.SAVED_VERSION_RESULT)),dict(result=Path("diagnostics-test.xcresult")),
+                dict(phase="query"),*({key:True} for key in ('iosUnsigned','iosPending','androidPositive','androidCandidate','outputData','credentialUpdate'))):
+                with self.assertRaises(MODULE.Refused): MODULE.ordinary_candidate_context({**request,**changes},env,root)
+            with self.assertRaises(MODULE.Refused):MODULE.ordinary_candidate_context(request,env,MODULE.SAVED_VERSION_CANDIDATE_ROOT)
+            self.assertEqual(MODULE.ordinary_candidate_context(request,{},root),{})
+            # Existing normal phase emits the actual two-source receipt through
+            # its real original SOURCE reads and consuming publication.
+            with tempfile.TemporaryDirectory() as tmp:
+                path=Path(tmp);normal=path/'normal-ui';normal.mkdir(mode=0o700)
+                result='project-test.xcresult';(normal/result).mkdir(mode=0o700)
+                rows=[]
+                for relative in ('desktop/tools/macos_normal_ui_runner.py',
+                    'desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift',
+                    'desktop/src/components/IOSArchive.tsx'):
+                    leaf=path/relative;leaf.parent.mkdir(parents=True,exist_ok=True)
+                    body=b'public inert original SOURCE\n';leaf.write_bytes(body)
+                    blob=hashlib.sha1(b'blob '+str(len(body)).encode()+b'\0'+body).hexdigest()
+                    rows.append(b'100644 blob '+blob.encode()+b'\t'+relative.encode()+b'\0')
+                roster=b''.join(rows)
+                def call(argv,**kw):
+                    self.assertEqual(kw['cwd'],path)
+                    return subprocess.CompletedProcess(argv,0,roster if argv[0]=='/usr/bin/git' else MODULE.encoded(dict(totalTestCount=2,passedTests=2,failedTests=0,skippedTests=0,expectedFailures=0)),b'')
+                request=MODULE.normal_request(['--target',target,'--normal-summary',result],str(normal/'tmp')+'/')
+                phase=MODULE.NormalPhase(SimpleNamespace(run_owned=call),env,path,MODULE.PhaseClock(90))
+                self.assertEqual(MODULE.execute_normal_phase(phase,request,'b'*40,(1<<30,1<<30)).returncode,0)
+                row=json.loads((normal/'project-summary.command-admission.json').read_bytes())
+                self.assertEqual((row['sourceCommit'],row['applicationSourceCommit'],row['currentCandidateScope']),('b'*40,'a'*40,MODULE.ORDINARY_CURRENT_SCOPE))
+                self.assertTrue(row['sourcePrePostMatched'])
+                self.assertEqual([x['role'] for x in row['commands']],['normal-ui-source-roster','normal-ui-summary','normal-ui-source-roster'])
+        valid=b'MRK_NORMAL_PROJECT_IDENTITY=v1;sample=pre-wait;staticText=0;anyRole=1;androidCaption=1;iosCaption=1;nonAtomic=1\n'
+        private=b'PRIVATE-keystrokes-and-credential-value\n'
+        original=subprocess.CompletedProcess(['fixed-original'],65,valid+private,b'')
+        diagnostic=MODULE.normal_failure_diagnostics('test','project-test.xcresult',original)
+        self.assertEqual(diagnostic['originalReturncode'],65)
+        self.assertEqual(diagnostic['projectIdentity']['sample'],dict(staticText=0,anyRole=1,androidCaption=1,iosCaption=1,timing='pre-wait',countsCappedAt=5,nonAtomic=True))
+        self.assertNotIn(b'PRIVATE',MODULE.encoded(diagnostic));self.assertLessEqual(len(MODULE.encoded(diagnostic))+1,4096)
+        for a,b in ((valid+valid,b''),(valid[:-1],b''),(b'prefix '+valid,b''),(valid.replace(b'staticText=0',b'staticText=6'),b''),(b'',valid),(valid.replace(b'pre-wait',b'PRIVATE'),b'')):
+            self.assertEqual(MODULE.project_identity_diagnostics(a,b)['state'],'refused')
+        self.assertNotIn('projectIdentity',MODULE.normal_failure_diagnostics('test','test.xcresult',original))
+        self.assertNotIn('projectIdentity',MODULE.normal_failure_diagnostics('summary','project-test.xcresult',original))
+        with self.assertRaises(MODULE.Refused): MODULE.project_identity_diagnostics(b'x'*(1024*1024+1),b'')
+
     def test_current_ios_candidate_context_is_two_source_and_only_two_journeys(self):
         root=MODULE.SAVED_VERSION_CANDIDATE_ROOT / ".candidate-consumer-helper"
         env={MODULE.IOS_TOOLS_CURRENT_ENV:MODULE.IOS_TOOLS_CURRENT_SCOPE,
@@ -5706,6 +5768,34 @@ class AndroidCandidateProjectTests(unittest.TestCase):
             self.assertEqual(len(calls),3);self.assertTrue(fixture.closed);self.assertEqual(fixture.fds,[])
             self.assertFalse((fixture.normal/'android-candidate-fixture.json').exists())
             self.assertNotIn('GIT_AUTHOR_NAME',phase.environment)
+    def test_candidate_canonical_public_vector_matches_actual_producer(self):
+        # Native regression consumes these same exact public literals. This DATA
+        # check executes the real producer encoder, not a second JSON encoder.
+        swift=SWIFT.read_text()
+        regression=swift.split('static func exerciseCandidateCanonicalData() throws {',1)[1].split('private func adoptAndroidCandidate(',1)[0]
+        vector=regression.split('let vector = #"',1)[1].split('"#',1)[0].encode('ascii')+b'\n'
+        value=MODULE.document(vector)
+        self.assertEqual(MODULE.encoded(value)+b'\n',vector)
+        self.assertEqual(value['integer'],[-(1<<63),(1<<63)-1])
+        self.assertEqual(list(value['files']),['project/.git/HEAD','project/.git/config',
+            'project/.git/objects/10/a','project/.git/objects/2/a'])
+        self.assertEqual(value['values'],[True,False,None])
+        self.assertIn('é',value['text']);self.assertIn(chr(127),value['text'])
+        self.assertIn(chr(0x1f600),value['text'])
+        sample={'project/.git/config':2,'project/.git/HEAD':1}
+        expected=regression.split('let python = Data(#"',1)[1].split('"#.utf8)',1)[0].encode('ascii')+b'\n'
+        self.assertEqual(MODULE.encoded(sample)+b'\n',expected)
+        # Canonical byte equality (not semantic equality) retains original
+        # duplicate/whitespace/order/escape/numeric representation refusals.
+        for body in (b'{"schemaVersion":1,"schemaVersion":1}\n', b'{"schemaVersion":1,}\n'):
+            with self.assertRaises((MODULE.Refused,ValueError)): MODULE.document(body)
+        for body in (b'{ "schemaVersion":1}\n',b'{"schemaVersion":1}',
+                     b'{"b":1,"a":2}\n',b'{"a":"\\/"}\n',b'{"a":"\\u007F"}\n'):
+            self.assertNotEqual(MODULE.encoded(MODULE.document(body))+b'\n',body)
+        for body in (b'{"schemaVersion":true}\n',b'{"schemaVersion":1.0}\n',b'{"schemaVersion":1e0}\n'):
+            row=MODULE.document(body);row['schemaVersion']=1
+            self.assertNotEqual(MODULE.encoded(row)+b'\n',body)
+
     def test_candidate_selector_cannot_be_relabelled_as_ordinary(self):
         derived=Path('/Users/runner/work/_temp/mrk-macos-installed.abcdefgh/normal-ui/DerivedData')
         result=derived.parent/MODULE.ANDROID_CANDIDATE_RESULT
@@ -5747,7 +5837,7 @@ class PanelTopologyDiagnosticTests(unittest.TestCase):
             self.assertEqual(diagnostic["panelTopology"],observed)
             self.assertLessEqual(len(MODULE.encoded(diagnostic))+1,4096)
             self.assertNotIn("private",json.dumps(diagnostic))
-        self.assertNotIn("panelTopology",MODULE.normal_failure_diagnostics("test","project-test.xcresult",original))
+        self.assertNotIn("panelTopology",MODULE.normal_failure_diagnostics("test","persistence-test.xcresult",original))
         self.assertNotIn("panelTopology",MODULE.normal_failure_diagnostics("summary",MODULE.PANEL_TOPOLOGY_SELECTIONS[0],original))
         swift=SWIFT.read_text()
         helper=swift.split("private func diagnosePanelBaseline(",1)[1].split("private func goToFolder(",1)[0]
