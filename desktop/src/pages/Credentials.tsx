@@ -40,6 +40,7 @@ export function Credentials({ catalog, state, controller, project, inputState, i
   const activePreparation = useRef<ReleaseInputPreparationTarget | null>(null);
   const mounted = useRef(true);
   const guideRef = useRef<HTMLDivElement>(null);
+  const referenceRef = useRef<HTMLDetailsElement>(null);
   const sessionRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; activePreparation.current = null; }; }, []);
   const currentHelp = (content: HelpContent) => { if (inputController.getSnapshot() === inputState) onHelp(content); };
@@ -59,23 +60,40 @@ export function Credentials({ catalog, state, controller, project, inputState, i
     if (sessionPreparationKind(target.guideId)) {
       activePreparation.current = target; setPreparation(target); sessionRef.current?.focus();
     } else {
-      activePreparation.current = null; setPreparation(null); guideRef.current?.focus();
+      activePreparation.current = null; setPreparation(null);
+      // Reveal only on this explicit, still-current help request. Native
+      // details keeps the guide mounted; no deferred focus or private action.
+      if (referenceRef.current) referenceRef.current.open = true;
+      guideRef.current?.focus();
     }
   };
   const credentials = inputState.help.credentials.filter((entry) => `${entry.name} ${entry.platform} ${entry.what}`.toLocaleLowerCase().includes(filter.toLocaleLowerCase()));
   return <>
-    <PageHeading eyebrow="CREDENTIALS & SIGNING" title="Private by design." description="Understand each input, review its supported checks, and keep storage separate from assignment." />
-    <div className="privacy-hero card"><div className="privacy-illustration"><Icon name="lock" size={42} /></div><div><Badge tone="info">Private inputs are not project settings</Badge><h2>Your credentials stay out of this draft.</h2><p>Use only the explicitly available private-input controls below. Memory-only and encrypted storage require separate consent and native availability; neither signs in to a Store account. Do not paste tokens, passwords, private keys, or service-account JSON into project settings.</p></div></div>
-    <div className="three-card-grid">{[{ icon: 'android' as const, title: 'Android signing', description: 'A keystore, signing policy, and the matching upload identity.' }, { icon: 'apple' as const, title: 'Apple signing', description: 'Certificates, provisioning, and protected App Store access.' }, { icon: 'github' as const, title: 'GitHub access', description: 'Reviewed repository access and protected release environments.' }].map((item) => <div className="card credential-summary" key={item.title}><span className="soft-icon"><Icon name={item.icon} size={23} /></span><h3>{item.title}</h3><p>{item.description}</p><Badge>Reference · not a verification result</Badge></div>)}</div>
-    <ReleaseInputGuidance state={inputState} controller={inputController} onSettings={onSettings} onHelp={onHelp} onGuide={openGuide} />
+    <PageHeading eyebrow="CREDENTIALS & SIGNING" title="Use your existing signing files." description="Start with the files you already use. Importing, keeping a copy and assigning it to a release each need their own review." />
+    <div className="notice notice-info"><Icon name="lock" /><div>
+      <strong>Keep the key your app already uses</strong>
+      <p>For an Android app update, use your existing upload key. Replacing it can prevent updates. Private files and passwords belong only in the supported controls below, never in project settings.</p>
+      <p>Keep an encrypted backup and its recovery code separately. You need both to restore, including on another Mac. The controls below show which storage and backup actions are available.</p>
+    </div></div>
     {nativeBusyReason && <p className="review-caution" role="status">{nativeBusyReason} Private session controls cannot start conflicting work; original status, cancellation and discard remain separate.</p>}
     <div ref={sessionRef} tabIndex={-1}><CredentialSession state={state} controller={controller} project={project} guide={catalog?.credentialGuide ?? null} onHelp={onHelp} nativeBusyReason={nativeBusyReason}
       preparation={preparation} isPreparationCurrent={isPreparationCurrent} takePreparation={takePreparation} dismissPreparation={dismissPreparation} /></div>
-    <div ref={guideRef} tabIndex={-1}><AssetGuide guide={inputState.help.guide} selected={selectedGuide} onSelect={setSelectedGuide} sessionAvailable={state.mode === 'native' && state.status?.capability.available === true && !state.blocked && !state.observationFailed && nativeBusyReason === null} onHelp={currentHelp} /></div>
-    <section className="card"><SectionHeading title="Core requirement catalogue" description="Conditional requirements are guidance, not proof that credentials exist or work."><label className="search-field"><Icon name="search" size={16} /><span className="sr-only">Find a credential requirement</span><input type="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Find a requirement…" /></label></SectionHeading>
-      {credentials.length ? <div className="credential-list">{credentials.map((credential, index) => <article key={`${credential.name}-${index}`}><div className="credential-row-heading"><div className="inline-heading"><h3>{credential.name}</h3><HelpButton content={{ ...credential, label: credential.name }} onHelp={currentHelp} /></div><Badge>Not verified</Badge></div><p>{credential.what}</p><div className="credential-meta"><span>{credential.platform}</span><span>{credential.kind}</span><span>{credential.stages.join(' · ')}</span></div><p className="credential-when">{credential.requiredWhen}</p></article>)}</div> : <EmptyState compact icon="key" title={filter ? 'No matching requirement' : 'No native credential catalogue loaded'} description={filter ? 'Try a platform name or a different keyword.' : 'The connected core supplies exact credential names, conditional requiredness, formats, and recovery guidance. Browser examples never invent credential status.'} />}
-    </section>
-    <div className="two-card-grid"><section className="card"><SectionHeading title="Storage is not assignment" description="Memory-only copies last for this launch. Explicitly saved encrypted copies can remain for later launches." /><p>Use the storage panel’s current native status. An encrypted vault needs a qualified filesystem and OS keyring. Missing or inaccessible keys are not replaced automatically; there is no plaintext or silent memory fallback. Each stored revision needs explicit assessment and assignment for the current draft.</p></section><section className="card"><SectionHeading title="Native and service verification" description="Choose a specific check. Importing or assigning a file is not proof that it works." />
+    <ReleaseInputGuidance state={inputState} controller={inputController} onSettings={onSettings} onHelp={onHelp} onGuide={openGuide} />
+    <details className="card progressive-disclosure" ref={referenceRef}>
+      <summary>Reference: where to find files, supported formats &amp; privacy</summary>
+      <div ref={guideRef} tabIndex={-1}><AssetGuide guide={inputState.help.guide} selected={selectedGuide} onSelect={setSelectedGuide} sessionAvailable={state.mode === 'native' && state.status?.capability.available === true && !state.blocked && !state.observationFailed && nativeBusyReason === null} onHelp={currentHelp} /></div>
+      <div className="privacy-hero card"><div className="privacy-illustration"><Icon name="lock" size={42} /></div><div><Badge tone="info">Private inputs are not project settings</Badge><h2>Your credentials stay out of this draft.</h2><p>Use only the explicitly available private-input controls on this page. Memory-only and encrypted storage require separate consent and native availability; neither signs in to a Store account. Do not paste tokens, passwords, private keys, or service-account JSON into project settings.</p></div></div>
+      <div className="three-card-grid">{[{ icon: 'android' as const, title: 'Android signing', description: 'A keystore, signing policy, and the matching upload identity.' }, { icon: 'apple' as const, title: 'Apple signing', description: 'Certificates, provisioning, and protected App Store access.' }, { icon: 'github' as const, title: 'GitHub access', description: 'Reviewed repository access and protected release environments.' }].map((item) => <div className="card credential-summary" key={item.title}><span className="soft-icon"><Icon name={item.icon} size={23} /></span><h3>{item.title}</h3><p>{item.description}</p><Badge>Reference · not a verification result</Badge></div>)}</div>
+      <section className="card"><SectionHeading title="Storage is not assignment" description="Memory-only copies last for this launch. Explicitly saved encrypted copies can remain for later launches." /><p>Use the storage panel’s current native status. An encrypted vault needs a qualified filesystem and OS keyring. Missing or inaccessible keys are not replaced automatically; there is no plaintext or silent memory fallback. Each stored revision needs explicit assessment and assignment for the current draft.</p></section>
+    </details>
+
+    <details className="card progressive-disclosure">
+      <summary>Reference: complete credential requirement catalogue</summary>
+      <section className="card"><SectionHeading title="Core requirement catalogue" description="Conditional requirements are guidance, not proof that credentials exist or work."><label className="search-field"><Icon name="search" size={16} /><span className="sr-only">Find a credential requirement</span><input type="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Find a requirement…" /></label></SectionHeading>
+        {credentials.length ? <div className="credential-list">{credentials.map((credential, index) => <article key={`${credential.name}-${index}`}><div className="credential-row-heading"><div className="inline-heading"><h3>{credential.name}</h3><HelpButton content={{ ...credential, label: credential.name }} onHelp={currentHelp} /></div><Badge>Not verified</Badge></div><p>{credential.what}</p><div className="credential-meta"><span>{credential.platform}</span><span>{credential.kind}</span><span>{credential.stages.join(' · ')}</span></div><p className="credential-when">{credential.requiredWhen}</p></article>)}</div> : <EmptyState compact icon="key" title={filter ? 'No matching requirement' : 'No native credential catalogue loaded'} description={filter ? 'Try a platform name or a different keyword.' : 'The connected core supplies exact credential names, conditional requiredness, formats, and recovery guidance. Browser examples never invent credential status.'} />}
+      </section>
+    </details>
+    <section className="card"><SectionHeading title="Native and service verification" description="Choose a specific check. Importing or assigning a file is not proof that it works." />
       <h3>Saved offline checks · Android</h3>
       <p>Review the existing saved-project preflight in Releases. Core builds and toolkit credential use are disabled, but configured project checks can run programs, change files or use the network. This does not verify signing or account access.</p>
       <button type="button" className="button secondary" disabled={!project || nativeBusyReason !== null} onClick={onOfflineChecks}>Review saved offline checks</button>
@@ -87,6 +105,6 @@ export function Credentials({ catalog, state, controller, project, inputState, i
       <p className="save-note">Use the original build's status, Cancel and Recovery controls in Releases. Cancel is not rollback; an unknown cleanup state cannot be reset by reopening this page.</p>
       <h3>Store account access · separate online check</h3>
       <DisabledAction label="Check Store account access" icon="shield" reason="This screen has no admitted bundled Ruby/Bundler Store-check provider. No account request is made. Offline checks and local Android or Apple signing do not verify Play or App Store account access." />
-    </section></div>
+    </section>
   </>;
 }
