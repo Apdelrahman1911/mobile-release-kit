@@ -1,0 +1,30 @@
+diff --git a/desktop/src-tauri/src/version_allocation_state_native.rs b/desktop/src-tauri/src/version_allocation_state_native.rs
+--- a/desktop/src-tauri/src/version_allocation_state_native.rs
++++ b/desktop/src-tauri/src/version_allocation_state_native.rs
+@@ -22,6 +22,11 @@
+ use serde_json::{json, Value};
+ use sha2::{Digest, Sha256};
+ use std::{collections::BTreeSet, fmt::Write as _, sync::Arc};
++
++#[path = "version_allocation_protocol_native.rs"]
++pub(crate) mod dialogue;
++#[path = "version_allocation_state_jobs.rs"]
++pub(crate) mod jobs;
+ 
+ const PROTOCOL: &str = "mrk-version-allocation-state/1";
+ const ALLOCATION_PROTOCOL: &str = "mrk-version-allocation/1";
+diff --git a/src/mobile_release/_desktop_github_setup_engine.py b/src/mobile_release/_desktop_github_setup_engine.py
+--- a/src/mobile_release/_desktop_github_setup_engine.py
++++ b/src/mobile_release/_desktop_github_setup_engine.py
+@@ -76,6 +76,11 @@
+         header = policy._frame(initial, policy.MAX_INITIAL_BYTES, nodes=256, depth=8)
+         if type(header) is dict and header.get("protocol") == "mrk-github-setup-publication/1":
+             from ._github_setup_publication_runtime import run_owned
++            end = started + 60.0
++            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
++            request = None
++        elif type(header) is dict and header.get("protocol") == "mrk-version-allocation-runtime/1":
++            from ._desktop_version_allocation_runtime import run_owned
+             end = started + 60.0
+             run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+             request = None
