@@ -1,0 +1,18 @@
+Selected-gh native entry source/patch validation 2026-10-19T10:35:57.217066+00:00
+No Cargo, native/gh/account/keyring/network calls or original capture tests executed.
+PASS: exact six-file baseline, patch --check/apply, all six resulting hashes; five patched Rust files syntax parsed (not typechecked).
+PASS source assertions: same-Doc gh response check before GuiFacts, no gh endpoint renewal, original early/selected-path failure hooks.
+PASS source assertions: fixed panel17 is single-file only with original no-alias/no-multiple configuration. Not native execution.
+PASS: own two Rust files syntax parsed (not typechecked).
+DEFINED, NOT RUN: 13 new Rust tests (8 child +4 protocol +1 patched panel), 5 earlier child tests retained. Root scheduled batch required.
+PASS: tracked diff --check plus every new artifact explicit whitespace checks; temporary source copies removed, no owned workers left.
+
+Initial checks above covered the pre-review six-file patch only; the following supersedes that integration scope.
+Final RAW/permission review amendment validation 2026-10-19T10:46:09.530507+00:00
+No Cargo, native/gh/account/keyring/network calls or earlier capture tests executed.
+PASS: exact8 baseline/result hashes, patch --check/apply,6 patched Rust syntax parses (not typechecks).
+PASS source assertions: only3 new RAW routes use production strict decoder; exact3 AppManifest commands and3 main-window permissions, no old permission removed.
+PASS unchanged source assertions: same-Doc-before-GuiFacts, no renewal, earliest failure hooks, fixed single-file/no-alias panel. No native execution.
+PASS own2 Rust syntax parses; strict RAW decoder is production, test cases exercise that same function.
+DEFINED NOT RUN:12 new core Rust tests +1 Mac-only routing test (13new);5 earlier child tests retained. Root scheduled Rust/actual Mac batches required.
+PASS diff --check + explicit new-file whitespace checks. Task-owned temporary source copies removed; no owned worker remains.

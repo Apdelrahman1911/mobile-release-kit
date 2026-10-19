@@ -1,0 +1,240 @@
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -657,6 +657,7 @@
+         document.gui_response(&owner, response, quit)
+     }
+     pub(crate) fn selected_path(&self, path: Result<std::path::PathBuf, Reason>) {
++        let failure_at = Instant::now();
+         let Some(inner) = self.document.upgrade() else { return; };
+         let document = DocumentBinding { inner };
+         let Some(owner) = self.owner() else { return; };
+@@ -667,7 +668,8 @@
+                 Ok(_) => {},
+                 Err(reason) => {
+                     facts.refusal = Some(reason);
+-                    if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, &owner)) { slot.stop(reason, Instant::now()); }
++                    gh_auth::gui_failed_locked(&state, &owner, reason, failure_at);
++                    if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, &owner)) { slot.stop(reason, failure_at); }
+                 }
+             }
+         }
+@@ -684,6 +686,8 @@
+         } else if state.quit.as_ref().is_some_and(|work| Arc::ptr_eq(work, &owner)) {
+             owner.set_endpoint(None);
+         }
++        // The distinct gh original keeps its admitted whole-operation clock;
++        // presenting this panel never clears or renews that endpoint.
+     }
+ }
+
+@@ -691,6 +695,7 @@
+     // Same transition and notification order as the ordinary native failure
+     // path. This only requests STOP; it supplies no response or settlement.
+     if let Some(mut facts) = call.facts() { if facts.refusal.is_none() { facts.refusal = Some(reason); } }
++    gh_auth::gui_failed_locked(state, owner, reason, at);
+     if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) { slot.stop(reason, at); }
+     if state.quit.as_ref().is_some_and(|quit| Arc::ptr_eq(quit, owner)) { stop_quit(state, at); }
+     owner.stop();
+@@ -4847,21 +4852,27 @@
+         let mut publisher = if quit { self.inner.android_registration_control.reserve(RegistrationPublisherKind::Quit, true).ok() } else { None };
+         let result = (|| {
+         let mut state = self.lock(); self.expire(&mut state, Instant::now());
++        // The same retained gh registration rematches under Document BEFORE
++        // borrowing GuiFacts; the helper never re-locks either mutex.
++        let gh_original = if quit { None } else { gh_auth::gui_current_locked(self, &mut state, owner) };
+         let mut facts = owner.gui.facts()?;
+         if facts.response { return None; }
+         facts.response = true; facts.showing = false;
+         let now = Instant::now();
+         let original = if quit { state.quit.as_ref().is_some_and(|work| Arc::ptr_eq(work, owner)) }
+-            else { state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner)) && state.lifetime.original_bound() && !state.stopping && !state.unknown };
++            else { gh_original.unwrap_or_else(|| state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner)) && state.lifetime.original_bound() && !state.stopping && !state.unknown) };
+         // Remember the actual native decline before stop_quit changes STOP.
+         // A programmatic post-STOP close or rejected late OK is never Cancel.
+-        let path_choice = !quit && state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && (slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact() || slot.operation.images()));
++        let path_choice = !quit && (gh_original.is_some() || state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner) && (slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact() || slot.operation.images())));
+         // Preserve the existing Project/File/Evidence receipt semantics. This
+         // new purpose separately records genuine native Cancel, never Other or
+         // a programmatic/late post-STOP close, for its null-only cancellation.
+         (facts.accepted, facts.declined) = admitted_response(response, original, owner.interrupted(), quit || path_choice);
+         fixture_event!(owner, ResponseDecision, u32::from(facts.accepted) + 2 * u32::from(facts.declined));
+-        if facts.accepted { facts.accepted_at = Some(now); owner.set_endpoint(Some(now + WORK)); }
++        if facts.accepted {
++            facts.accepted_at = Some(now);
++            if gh_original.is_none() { owner.set_endpoint(Some(now + WORK)); }
++        }
+         let read_one_path = facts.accepted && !quit;
+         if quit {
+             if facts.accepted {
+@@ -4886,6 +4897,9 @@
+                 slot.source = if slot.operation == Operation::ChooseFile || slot.operation.images() { SourceState::Pending } else { SourceState::NotRun };
+                 if !slot.operation.project_path() && !slot.operation.android_source() && !slot.operation.artifact() && slot.review_end.is_none() { slot.review_end = Some(now + REVIEW); }
+             } else { slot.stop(Reason::UserCancelled, now); }
++        } else if gh_original.is_some() && !read_one_path {
++            gh_auth::gui_failed_locked(&state, owner,
++                if facts.declined { Reason::UserCancelled } else { Reason::SourceRefused }, now);
+         }
+         drop(facts); self.bump(&mut state); owner.gui.changed(); Some(read_one_path)
+         })();
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1641,6 +1641,43 @@
+     if webview.label() != MAIN_WINDOW { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); }
+     request_body(request).map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))
+ }
++fn github_auth_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::github_auth_entry_protocol::Command, BridgeError> {
++    if webview.label() != MAIN_WINDOW { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); }
++    // These three new routes admit RAW UTF-8 JSON only. Tauri's JSON Value
++    // cannot establish the original byte bound or detect duplicate keys.
++    let tauri::ipc::InvokeBody::Raw(bytes) = request.body()
++        else { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); };
++    crate::github_auth_entry_protocol::decode_command(name, bytes)
++        .map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))
++}
++#[tauri::command]
++async fn github_auth_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_entry_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
++    github_auth_command("github_auth_status", &webview, &request)?;
++    Ok(state.document.github_auth_status())
++}
++#[tauri::command]
++async fn github_auth_connect(app: AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_entry_protocol::ConnectResult, BridgeError> {
++    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
++    let crate::github_auth_entry_protocol::Command::Connect(input) =
++        github_auth_command("github_auth_connect", &webview, &request)?
++        else { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); };
++    // Synchronous SAME Document registration precedes any native dispatch.
++    // Invoke only observes bounded result DATA; dropping it cannot end custody.
++    let observer = state.document.github_connect_selected_gh(app, input)?;
++    drop(request); drop(state); drop(webview);
++    observer.returned().await
++}
++#[tauri::command]
++async fn github_auth_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_entry_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
++    let crate::github_auth_entry_protocol::Command::Cancel { operation_id } =
++        github_auth_command("github_auth_cancel", &webview, &request)?
++        else { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); };
++    // No stale observation revision can make STOP unreachable.
++    state.document.github_auth_cancel(&operation_id)
++}
++
+ #[tauri::command]
+ async fn github_connection_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
+     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
+@@ -2768,6 +2805,8 @@
+
+ #[derive(Clone, Copy)]
+ pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), PublicImages, Project, ProjectPath(asset_commands::ProjectPathField), EvidenceFolder, Quit,
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    GitHubAuthExecutable,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     AndroidToolSource(crate::android_tool_sources::Role),
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -4169,6 +4208,7 @@
+             project_identity_open, project_identity_prepare, project_identity_apply,
+             project_identity_close, project_identity_status,
+             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
++            github_auth_status, github_auth_connect, github_auth_cancel,
+             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
+             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
+             github_release_status, github_release_prepare, github_release_dispatch, github_release_track,
+--- a/desktop/src-tauri/src/shell_macos_dialog.rs
++++ b/desktop/src-tauri/src/shell_macos_dialog.rs
+@@ -627,6 +627,7 @@
+ // separate; original native custody still decides whether either can be used.
+ fn panel_kind(choice: DialogChoice, initial_folder: Option<&std::path::Path>) -> Result<PanelKind, Reason> {
+     match (choice, initial_folder) {
++        (DialogChoice::GitHubAuthExecutable, None) => Ok(PanelKind::GitHubAuthExecutable),
+         (DialogChoice::AndroidToolSource(role), None) => Ok(match role {
+             crate::android_tool_sources::Role::Jdk => PanelKind::AndroidJdk,
+             crate::android_tool_sources::Role::Sdk => PanelKind::AndroidSdk,
+@@ -840,6 +841,12 @@
+         assert!(matches!(panel_kind(field, Some(Path::new("/inert/project"))), Ok(PanelKind::VersionSource)));
+     }
+     #[test]
++    fn selected_gh_has_one_fixed_file_purpose_and_no_caller_initial_path() {
++        assert_eq!(panel_kind(DialogChoice::GitHubAuthExecutable, None).unwrap(), PanelKind::GitHubAuthExecutable);
++        assert!(panel_kind(DialogChoice::GitHubAuthExecutable, Some(std::path::Path::new("/fixture"))).is_err());
++        assert_ne!(PanelKind::GitHubAuthExecutable, PanelKind::File);
++    }
++    #[test]
+     fn evidence_folder_has_its_own_purpose_without_a_project_initial_root() {
+         assert!(evidence_folder_routing_data_check());
+     }
+--- a/desktop/native/macos-installed-native/src/lib.rs
++++ b/desktop/native/macos-installed-native/src/lib.rs
+@@ -314,13 +314,14 @@
+ }
+
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot, EvidenceFolder, PublicImages, AndroidJdk, AndroidSdk, AndroidGradle, ArtifactAab, ArtifactIpa, ArtifactArchive, ArtifactDsyms }
++pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot, EvidenceFolder, PublicImages, AndroidJdk, AndroidSdk, AndroidGradle, ArtifactAab, ArtifactIpa, ArtifactArchive, ArtifactDsyms, GitHubAuthExecutable }
+ impl PanelKind {
+     fn code(self) -> c_int { match self {
+         Self::Project => 1, Self::Quit => 2, Self::File => 3, Self::VersionSource => 4,
+         Self::IosProject => 5, Self::IosWorkspace => 6, Self::MetadataRoot => 7, Self::EvidenceFolder => 8,
+         Self::PublicImages => 9, Self::AndroidJdk => 10, Self::AndroidSdk => 11, Self::AndroidGradle => 12,
+         Self::ArtifactAab=>13,Self::ArtifactIpa=>14,Self::ArtifactArchive=>15,Self::ArtifactDsyms=>16,
++        Self::GitHubAuthExecutable=>17,
+     } }
+     fn project_field(self) -> bool { matches!(self, Self::VersionSource | Self::IosProject | Self::IosWorkspace | Self::MetadataRoot) }
+ }
+--- a/desktop/native/macos-installed-native/src/native.m
++++ b/desktop/native/macos-installed-native/src/native.m
+@@ -311,7 +311,7 @@
+ // Closed ABI result: Other=0, Accept=1, Decline=2. This same pure mapping is
+ // exercised by narrow native-crate test definitions; no panel is fabricated.
+ static BOOL mrk_panel_project_field(int kind) { return kind >= 4 && kind <= 7; }
+-static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || kind == 8 || kind == 9 || (kind >= 10 && kind <= 16) || mrk_panel_project_field(kind); }
++static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || kind == 8 || kind == 9 || (kind >= 10 && kind <= 17) || mrk_panel_project_field(kind); }
+ int mrk_panel_response(int kind, int64_t code, int programmatic) {
+     if (programmatic) return 0;
+     if (mrk_panel_open_kind(kind)) {
+@@ -532,6 +532,7 @@
+                 : kind == 14 ? @"Choose an iOS IPA to inspect"
+                 : kind == 15 ? @"Choose its Xcode archive or archive ZIP"
+                 : kind == 16 ? @"Choose its dSYM directory or ZIP"
++                : kind == 17 ? @"Choose your installed GitHub CLI (gh) executable"
+                 : kind == 9 ? @"Choose up to 10 public PNG or JPEG listing images"
+                 : kind == 3 ? @"Choose a signing or iOS build-input file"
+                 : kind == 4 ? @"Choose an existing version source inside the project" : kind == 5 ? @"Choose an existing Xcode project directory"
+@@ -539,7 +540,7 @@
+             [panel setTitle:title];
+             // The message displays the purpose inside the sheet; its window title may not.
+             [panel setMessage:title];
+-            [panel setCanChooseFiles:kind == 3 || kind == 4 || kind == 9 || (kind >= 13 && kind <= 16)];
++            [panel setCanChooseFiles:kind == 3 || kind == 4 || kind == 9 || (kind >= 13 && kind <= 17)];
+             [panel setCanChooseDirectories:kind == 1 || kind == 8 || (kind >= 5 && kind <= 7) || (kind >= 10 && kind <= 12) || kind == 15 || kind == 16];
+             [panel setAllowsMultipleSelection:kind == 9]; [panel setCanCreateDirectories:NO];
+             [panel setResolvesAliases:NO]; [panel setTreatsFilePackagesAsDirectories:(kind >= 5 && kind <= 7) || kind == 10 || kind == 15 || kind == 16];
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -260,6 +260,7 @@
+ mod metadata_images_edit_protocol;
+ pub mod release_version_edit_protocol;
+ pub mod github_connection_protocol;
++mod github_auth_entry_protocol;
+ mod github_connection_session;
+ mod github_preflight_protocol;
+ mod github_preflight_session;
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -319,6 +319,7 @@
+             "project_identity_open", "project_identity_prepare", "project_identity_apply",
+             "project_identity_close", "project_identity_status",
+             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
++            "github_auth_status", "github_auth_connect", "github_auth_cancel",
+             "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",
+             "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
+             "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -46,6 +46,7 @@
+     "allow-project-identity-open", "allow-project-identity-prepare", "allow-project-identity-apply",
+     "allow-project-identity-close", "allow-project-identity-status",
+     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
++    "allow-github-auth-status", "allow-github-auth-connect", "allow-github-auth-cancel",
+     "allow-github-preflight-status", "allow-github-preflight-prepare", "allow-github-preflight-dispatch", "allow-github-preflight-track",
+     "allow-github-preflight-reconcile", "allow-github-preflight-pending", "allow-github-preflight-cancel",
+     "allow-github-release-status", "allow-github-release-prepare", "allow-github-release-dispatch", "allow-github-release-track",

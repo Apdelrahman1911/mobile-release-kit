@@ -4,7 +4,7 @@
 //! unavailable without the distinct installed stock nomination/profile.
 use super::*;
 use crate::{
-    github_auth_capture_wire as wire,
+    github_auth_capture_wire as wire, github_auth_entry_protocol as entry_wire,
     github_auth_native_owner::NativeGhProvider,
     github_connection_session::auth_provider,
     supervisor::{
@@ -12,57 +12,14 @@ use crate::{
         GitHubAuthWait,
     },
 };
+pub(crate) use entry_wire::{
+    Connect as GitHubAuthRequest, Phase as GitHubAuthPhase, Status as GitHubAuthStatus,
+};
 use std::path::PathBuf;
 
 const WHOLE: Duration = Duration::from_secs(60);
 const FAILURE_CLEANUP: Duration = Duration::from_secs(10);
 
-/// Native command DATA. Only `DocumentBinding::github_connect_selected_gh`
-/// can retain it with the original session/registry and mint its one-use gate.
-/// A future native picker may supply the physical path; it never supplies a
-/// hash/nomination or authority to execute a different version of that file.
-pub(crate) struct GitHubAuthRequest {
-    pub(crate) project_id: String,
-    pub(crate) repository: String,
-    pub(crate) selected_login: String,
-    pub(crate) physical_executable: PathBuf,
-    pub(crate) expected_document_revision: u32,
-    pub(crate) expected_connection_revision: u32,
-}
-impl GitHubAuthRequest {
-    fn bounded(&self) -> bool {
-        self.project_id
-            .capacity()
-            .checked_add(self.repository.capacity())
-            .and_then(|bytes| bytes.checked_add(self.selected_login.capacity()))
-            .and_then(|bytes| bytes.checked_add(self.physical_executable.capacity()))
-            .is_some_and(|bytes| bytes <= 16384)
-            && self.selected_login.len() <= 39
-            && crate::protocol::valid_id(&self.project_id)
-            && crate::github_connection_protocol::coordinate(&self.repository)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum GitHubAuthPhase {
-    Idle,
-    Running,
-    CheckingIdentity,
-    Settled,
-    Failed,
-    CleanupUnknown,
-}
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct GitHubAuthStatus {
-    available: bool,
-    operation_id: Option<String>,
-    phase: GitHubAuthPhase,
-    reason: GitHubReason,
-    // Selection remains unverified until the ORIGINAL HTTP /user checks it.
-    selected_login: Option<String>,
-}
 // Only a positively joined original may be replaced by this bounded public
 // history. Keeping the whole retired Supervisor here would also keep its
 // closed runtime inventory allocation alive during a later operation.
@@ -79,8 +36,171 @@ impl Entry {
     }
 }
 
+/// Bounded historical response DATA only. There is deliberately no strong or
+/// weak native owner/runtime/SourceBook/HTTPWait reference in this slot. A late
+/// or dropped invoke may keep this small value, never the retired runtime whose
+/// working debit the Document has released. Native lifetime belongs to Entry.
+struct ResultSlot(Mutex<ResultFacts>);
+struct ResultFacts {
+    last: GitHubAuthStatus,
+    result: Option<entry_wire::ConnectResult>,
+    consumed: bool,
+}
+impl ResultSlot {
+    fn new(last: GitHubAuthStatus) -> Self {
+        Self(Mutex::new(ResultFacts {
+            last,
+            result: None,
+            consumed: false,
+        }))
+    }
+    fn observe(&self, status: GitHubAuthStatus) -> Result<(), BridgeError> {
+        if status.retained_bytes().is_none_or(|bytes| bytes > 8192) {
+            return Err(BridgeError::cleanup_unknown());
+        }
+        let mut facts = self.0.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if status.operation_id != facts.last.operation_id
+            || status.project_id != facts.last.project_id
+            || status.repository != facts.last.repository
+            || status.selected_login != facts.last.selected_login
+            || facts
+                .last
+                .http
+                .as_ref()
+                .is_some_and(|http| status.http.as_ref() != Some(http))
+        {
+            return Err(BridgeError::cleanup_unknown());
+        }
+        facts.last = status;
+        Ok(())
+    }
+    /// Sole production caller is the actual successful same-Document HTTP
+    /// admission after its original wait/hold was retained. This checks DATA
+    /// consistency, not admission. No public status can call this constructor.
+    fn handoff(
+        &self,
+        connection: crate::github_connection_protocol::Status,
+    ) -> Result<entry_wire::HttpHandoff, BridgeError> {
+        use crate::github_connection_protocol::{OperationKind, Phase, SessionState};
+        let mut facts = self.0.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if facts.result.is_some() || facts.consumed || facts.last.http.is_some() {
+            return Err(BridgeError::cleanup_unknown());
+        }
+        let session = connection
+            .session
+            .as_ref()
+            .ok_or_else(BridgeError::cleanup_unknown)?;
+        let operation = connection
+            .operation
+            .as_ref()
+            .ok_or_else(BridgeError::cleanup_unknown)?;
+        if Some(&session.project_id) != facts.last.project_id.as_ref()
+            || Some(&session.target_repository) != facts.last.repository.as_ref()
+            || session.state != SessionState::Checking
+            || operation.kind != OperationKind::Connect
+            || operation.phase != Phase::Running
+            || operation.reason != GitHubReason::None
+            || !crate::protocol::valid_id(&session.id)
+            || !crate::protocol::valid_id(&operation.id)
+            || serde_json::to_vec(&connection).map_or(true, |bytes| {
+                bytes.len() > crate::github_connection_protocol::STATUS_LIMIT
+            })
+        {
+            return Err(BridgeError::cleanup_unknown());
+        }
+        let http = entry_wire::HttpHandoff {
+            session_id: session.id.clone(),
+            operation_id: operation.id.clone(),
+        };
+        let operation_id = facts
+            .last
+            .operation_id
+            .clone()
+            .ok_or_else(BridgeError::cleanup_unknown)?;
+        facts.last.http = Some(http.clone());
+        facts.result = Some(entry_wire::ConnectResult {
+            schema_version: 1,
+            operation_id,
+            outcome: entry_wire::Outcome::HttpHandoff { connection },
+        });
+        Ok(http)
+    }
+    fn terminal(&self, known_no_http: bool) -> Result<(), BridgeError> {
+        let mut facts = self.0.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if facts.result.is_some() || facts.consumed {
+            return Ok(());
+        }
+        let mut auth = facts.last.clone();
+        let operation_id = auth
+            .operation_id
+            .clone()
+            .ok_or_else(BridgeError::cleanup_unknown)?;
+        let outcome =
+            if known_no_http && auth.http.is_none() && auth.phase == GitHubAuthPhase::Failed {
+                entry_wire::Outcome::NoHttp { auth }
+            } else {
+                // No synthetic no-send proof on lost Document, uncertain claim,
+                // poisoned/missing data, timeout or incomplete actual settlement.
+                auth.phase = GitHubAuthPhase::CleanupUnknown;
+                auth.reason = GitHubReason::CleanupUnknown;
+                entry_wire::Outcome::Unknown { auth }
+            };
+        facts.result = Some(entry_wire::ConnectResult {
+            schema_version: 1,
+            operation_id,
+            outcome,
+        });
+        Ok(())
+    }
+    fn take(&self) -> Result<Option<entry_wire::ConnectResult>, BridgeError> {
+        let mut facts = self.0.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if facts.consumed {
+            return Err(BridgeError::cleanup_unknown());
+        }
+        if facts.result.is_none() {
+            return Ok(None);
+        }
+        facts.consumed = true;
+        Ok(facts.result.take())
+    }
+}
+fn no_http_proved(custody: GitHubAuthCustody, claimed: bool) -> bool {
+    !claimed
+        && matches!(custody, GitHubAuthCustody::Refused(reason)
+        if !matches!(reason, GitHubReason::None | GitHubReason::CleanupUnknown))
+}
+
+/// Consume-only observer, not an operation owner. It never retains Registration
+/// or OriginalWork; each actual Document observation is released before await.
+pub(crate) struct GitHubAuthConnectObserver {
+    document: Weak<Inner>,
+    result: Arc<ResultSlot>,
+}
+impl GitHubAuthConnectObserver {
+    pub(crate) async fn returned(self) -> Result<entry_wire::ConnectResult, BridgeError> {
+        loop {
+            if let Some(result) = self.result.take()? {
+                return Ok(result);
+            }
+            if let Some(inner) = self.document.upgrade() {
+                let document = DocumentBinding { inner };
+                // Actual expiry/reconciliation publishes terminal no-HTTP only
+                // after original joins. No guard/native owner crosses sleep.
+                document.github_auth_status();
+            } else {
+                self.result.terminal(false)?;
+            }
+            if let Some(result) = self.result.take()? {
+                return Ok(result);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
+    Picking,
     Sources,
     Version,
     Token,
@@ -148,6 +268,7 @@ struct Facts {
     consent_live: bool,
     http_claimed: bool,
     http_started: bool,
+    http_handoff: Option<entry_wire::HttpHandoff>,
     source_entered: bool,
     source_returned: bool,
     before_http_entered: bool,
@@ -167,6 +288,10 @@ pub(super) struct Registration {
     idle_connection_epoch: u32,
     root: asset_source::RegisteredRoot,
     request: GitHubAuthRequest,
+    // Only the actual SAME original GUI may fill this cell, after its native
+    // close/release dispatches join. This is not supplied by the command DTO.
+    physical_executable: Mutex<Option<PathBuf>>,
+    result: Arc<ResultSlot>,
     context: wire::Context,
     end: Instant,
     facts: Mutex<Facts>,
@@ -245,6 +370,73 @@ fn source_error(error: Reason) -> BridgeError {
         Reason::SourceChanged | Reason::ContextStale => GitHubReason::TargetChanged,
         _ => GitHubReason::RuntimeUnavailable,
     })
+}
+fn gui_error(error: Reason) -> BridgeError {
+    github_session::refused(match error {
+        Reason::CleanupUnknown => GitHubReason::CleanupUnknown,
+        Reason::UserCancelled | Reason::Shutdown | Reason::DocumentLost => GitHubReason::Cancelled,
+        Reason::Deadline | Reason::ReviewExpired => GitHubReason::Expired,
+        Reason::SourceChanged | Reason::ContextStale => GitHubReason::TargetChanged,
+        Reason::InvalidRequest | Reason::SourceRefused => GitHubReason::InvalidInput,
+        _ => GitHubReason::RuntimeUnavailable,
+    })
+}
+
+/// Called by the ORIGINAL gui_response under Document, BEFORE it borrows
+/// GuiFacts. None means a different purpose; Some(false) is this gh original's
+/// refused response, not permission to fall back to another picker owner.
+pub(super) fn gui_current_locked(
+    document: &DocumentBinding,
+    state: &mut DocumentState,
+    owner: &Arc<OriginalWork>,
+) -> Option<bool> {
+    let original = state
+        .gh_auth
+        .as_ref()
+        .and_then(Entry::original)
+        .filter(|original| Arc::ptr_eq(&original.original, owner))
+        .cloned()?;
+    let result = current_locked(document, state, &original, &original.context).and_then(|()| {
+        if original
+            .facts
+            .lock()
+            .is_ok_and(|facts| facts.stage == Stage::Picking)
+        {
+            Ok(())
+        } else {
+            Err(BridgeError::cleanup_unknown())
+        }
+    });
+    if let Err(error) = &result {
+        original.fail(error.clone(), Instant::now());
+    }
+    Some(result.is_ok())
+}
+/// This helper does not lock Document or GuiFacts and preserves the original
+/// callback's first failure time. It must not manufacture GUI settlement.
+pub(super) fn gui_failed_locked(
+    state: &DocumentState,
+    owner: &Arc<OriginalWork>,
+    cause: Reason,
+    at: Instant,
+) {
+    if let Some(original) = state
+        .gh_auth
+        .as_ref()
+        .and_then(Entry::original)
+        .filter(|original| Arc::ptr_eq(&original.original, owner))
+    {
+        original.fail(gui_error(cause), at);
+    }
+}
+fn physical_selection_bounded(path: &std::path::Path) -> bool {
+    path.is_absolute()
+        && path.to_str().is_some_and(|text| {
+            !text.is_empty()
+                && text.len() <= entry_wire::PATH_LIMIT
+                && !text.as_bytes().contains(&0)
+        })
+        && path.file_name().is_some_and(|name| name == "gh")
 }
 impl Registration {
     fn gate(self: &Arc<Self>) -> GitHubAuthGoGate {
@@ -800,7 +992,34 @@ pub(super) fn retire_joined(document: &DocumentBinding, state: &mut DocumentStat
     {
         return;
     }
-    let snapshot = original_status(document, &original);
+    let custody = original.custody();
+    let snapshot = original_status(document, state, &original);
+    let claimed = original
+        .facts
+        .lock()
+        .map_or(true, |facts| facts.http_claimed);
+    let handoff_known = original
+        .facts
+        .lock()
+        .is_ok_and(|facts| facts.http_started && facts.http_handoff.is_some());
+    if claimed && !handoff_known || !claimed && custody == GitHubAuthCustody::Ready {
+        original.fail(BridgeError::cleanup_unknown(), Instant::now());
+        state.unknown = true;
+        state.github.unknown();
+        return;
+    }
+    let update = original.result.observe(snapshot.clone()).and_then(|()| {
+        // A real handoff (possibly already consumed) is immutable in the result
+        // slot. Otherwise only positively settled, never-claimed work can say
+        // no HTTP. The observer need not be polled before retirement.
+        original.result.terminal(no_http_proved(custody, claimed))
+    });
+    if update.is_err() {
+        original.fail(BridgeError::cleanup_unknown(), Instant::now());
+        state.unknown = true;
+        state.github.unknown();
+        return;
+    }
     state.gh_auth = Some(Entry::Finished(snapshot));
 }
 /// No running-owner census is invented. A fresh admission is possible only
@@ -809,9 +1028,9 @@ pub(super) fn retained_bytes(state: &DocumentState) -> Option<usize> {
     match &state.gh_auth {
         None => Some(0),
         Some(Entry::Original(_)) => None,
-        Some(Entry::Finished(status)) => std::mem::size_of::<Entry>()
-            .checked_add(status.operation_id.as_ref().map_or(0, String::capacity))?
-            .checked_add(status.selected_login.as_ref().map_or(0, String::capacity)),
+        Some(Entry::Finished(status)) => {
+            std::mem::size_of::<Entry>().checked_add(status.retained_bytes()?)
+        }
     }
 }
 
@@ -836,10 +1055,12 @@ impl DocumentBinding {
         self.bump(&mut state);
         Ok(status(self, &state))
     }
+    #[cfg(feature = "desktop-shell")]
     pub(crate) fn github_connect_selected_gh(
         &self,
+        app: tauri::AppHandle,
         request: GitHubAuthRequest,
-    ) -> Result<GitHubAuthStatus, BridgeError> {
+    ) -> Result<GitHubAuthConnectObserver, BridgeError> {
         #[cfg(not(all(
             target_os = "macos",
             target_pointer_width = "64",
@@ -850,7 +1071,7 @@ impl DocumentBinding {
             not(feature = "ubuntu-runtime-publisher")
         )))]
         {
-            let _ = request;
+            let _ = (app, request);
             return Err(github_session::refused(GitHubReason::RuntimeUnavailable));
         }
         #[cfg(all(
@@ -867,7 +1088,7 @@ impl DocumentBinding {
             // Document retains the explicit request and its original owner.
             let nomination = crate::github_auth_nomination::StockGhNomination::compiled()
                 .ok_or_else(|| github_session::refused(GitHubReason::RuntimeUnavailable))?;
-            if !self.inner.bridge.supervisor.github_auth_profile_available() {
+            if !entry_available(self) {
                 return Err(github_session::refused(GitHubReason::RuntimeUnavailable));
             }
             let mut state = self.lock();
@@ -895,20 +1116,6 @@ impl DocumentBinding {
                 .github
                 .gh_auth_idle_epoch()
                 .ok_or_else(|| github_session::refused(GitHubReason::Busy))?;
-            let path = request
-                .physical_executable
-                .to_str()
-                .ok_or_else(BridgeError::invalid)?;
-            if path.is_empty()
-                || path.len() > 4096
-                || !request.physical_executable.is_absolute()
-                || request
-                    .physical_executable
-                    .file_name()
-                    .is_none_or(|name| name != "gh")
-            {
-                return Err(BridgeError::invalid());
-            }
             let (generation, root) = self
                 .registry_result(
                     &mut state,
@@ -940,7 +1147,8 @@ impl DocumentBinding {
                     bytes.checked_add(
                         std::mem::size_of::<OriginalWork>()
                             + std::mem::size_of::<Registration>()
-                            + 256 * 1024,
+                            + 256 * 1024
+                            + entry_wire::ENTRY_BACKING,
                     )
                 })
                 .ok_or_else(BridgeError::invalid)?;
@@ -949,8 +1157,27 @@ impl DocumentBinding {
             let end = Instant::now()
                 .checked_add(WHOLE)
                 .ok_or_else(BridgeError::invalid)?;
-            let original = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
+            let original = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
             original.set_endpoint(Some(end));
+            let result = Arc::new(ResultSlot::new(GitHubAuthStatus {
+                schema_version: 1,
+                document_revision: state.revision,
+                connection_revision: state.github.snapshot().revision,
+                available: true,
+                operation_id: Some(id.to_string()),
+                project_id: Some(context.project_id.clone()),
+                repository: Some(context.repository.clone()),
+                selected_login: Some(context.login.clone()),
+                phase: GitHubAuthPhase::Picking,
+                reason: GitHubReason::None,
+                http: None,
+            }));
+            // Observer has no path/source/native owner backreference. It is
+            // created before dispatch and cannot become execution authority.
+            let observer = GitHubAuthConnectObserver {
+                document: Arc::downgrade(&self.inner),
+                result: result.clone(),
+            };
             let registered = Arc::new(Registration {
                 original: original.clone(),
                 document: Arc::downgrade(&self.inner),
@@ -960,6 +1187,8 @@ impl DocumentBinding {
                 idle_connection_epoch,
                 root,
                 request,
+                physical_executable: Mutex::new(None),
+                result,
                 context,
                 end,
                 provider: Mutex::new(None),
@@ -968,13 +1197,14 @@ impl DocumentBinding {
                 sources: Mutex::new(asset_source::GhAuthSources::new()),
                 nomination,
                 facts: Mutex::new(Facts {
-                    stage: Stage::Sources,
+                    stage: Stage::Picking,
                     failure: None,
                     cleanup_end: None,
                     unknown: false,
                     consent_live: true,
                     http_claimed: false,
                     http_started: false,
+                    http_handoff: None,
                     source_entered: false,
                     source_returned: false,
                     before_http_entered: false,
@@ -1002,9 +1232,12 @@ impl DocumentBinding {
             coordinator.handle = Some(tauri::async_runtime::spawn(async move {
                 let mut guard = guard;
                 if enter.await.is_err() {
+                    // This sole coordinator has not dispatched any GUI call.
+                    // It may prove not-created; no ambiguous dispatch is reset.
+                    registered.original.gui.not_created(Reason::UserCancelled);
                     registered.fail(BridgeError::cleanup_unknown(), Instant::now());
                 } else {
-                    coordinate(&document, &registered).await;
+                    coordinate(&document, &registered, app).await;
                 }
                 if let Ok(mut facts) = registered.facts.lock() {
                     facts.stage = Stage::BodyReturned;
@@ -1017,26 +1250,75 @@ impl DocumentBinding {
                 original.stop();
             }
             self.bump(&mut state);
-            Ok(status(self, &state))
+            Ok(observer)
         }
     }
 }
+fn entry_available(document: &DocumentBinding) -> bool {
+    #[cfg(all(
+        target_os = "macos",
+        target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64"),
+        feature = "desktop-shell",
+        feature = "custom-protocol",
+        not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher")
+    ))]
+    {
+        document
+            .inner
+            .bridge
+            .supervisor
+            .github_auth_profile_available()
+            && document.github_qualified()
+            && document.native_qualified()
+            && crate::github_auth_nomination::StockGhNomination::compiled().is_some()
+    }
+    #[cfg(not(all(
+        target_os = "macos",
+        target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64"),
+        feature = "desktop-shell",
+        feature = "custom-protocol",
+        not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher")
+    )))]
+    {
+        let _ = document;
+        false
+    }
+}
 fn status(document: &DocumentBinding, state: &DocumentState) -> GitHubAuthStatus {
-    let available = document
-        .inner
-        .bridge
-        .supervisor
-        .github_auth_profile_available()
-        && document.github_qualified();
+    let available = entry_available(document);
     match &state.gh_auth {
-        Some(Entry::Original(original)) => original_status(document, original),
+        Some(Entry::Original(original)) => {
+            let snapshot = original_status(document, state, original);
+            let update = original.result.observe(snapshot.clone()).and_then(|()| {
+                if snapshot.phase == GitHubAuthPhase::CleanupUnknown {
+                    original.result.terminal(false)
+                } else {
+                    Ok(())
+                }
+            });
+            if update.is_err() {
+                original.fail(BridgeError::cleanup_unknown(), Instant::now());
+            }
+            snapshot
+        }
         Some(Entry::Finished(status)) => GitHubAuthStatus {
             available,
+            document_revision: state.revision,
+            connection_revision: state.github.snapshot().revision,
             ..status.clone()
         },
         None => GitHubAuthStatus {
+            schema_version: 1,
+            document_revision: state.revision,
+            connection_revision: state.github.snapshot().revision,
             available,
             operation_id: None,
+            project_id: None,
+            repository: None,
             phase: GitHubAuthPhase::Idle,
             reason: if available {
                 GitHubReason::None
@@ -1044,17 +1326,21 @@ fn status(document: &DocumentBinding, state: &DocumentState) -> GitHubAuthStatus
                 GitHubReason::RuntimeUnavailable
             },
             selected_login: None,
+            http: None,
         },
     }
 }
-fn original_status(document: &DocumentBinding, original: &Registration) -> GitHubAuthStatus {
-    let available = document
-        .inner
-        .bridge
-        .supervisor
-        .github_auth_profile_available()
-        && document.github_qualified();
-    let (phase, reason) = match original.custody() {
+fn original_status(
+    document: &DocumentBinding,
+    state: &DocumentState,
+    original: &Registration,
+) -> GitHubAuthStatus {
+    let available = entry_available(document);
+    let custody = original.custody();
+    // Brief data-only lock: benign contention must not erase an already
+    // retained HTTP identity or turn a progress observation into Unknown.
+    let facts = original.facts.lock();
+    let (phase, reason) = match custody {
         GitHubAuthCustody::Unknown => (
             GitHubAuthPhase::CleanupUnknown,
             GitHubReason::CleanupUnknown,
@@ -1063,25 +1349,41 @@ fn original_status(document: &DocumentBinding, original: &Registration) -> GitHu
         // Native custody only. Authentication success remains exclusively the
         // existing ConnectionState /user login + immutable account-ID result.
         GitHubAuthCustody::Ready => (GitHubAuthPhase::Settled, GitHubReason::None),
-        GitHubAuthCustody::Pending => (
-            if original
-                .facts
-                .try_lock()
-                .is_ok_and(|facts| facts.http_started)
-            {
-                GitHubAuthPhase::CheckingIdentity
-            } else {
-                GitHubAuthPhase::Running
+        GitHubAuthCustody::Pending => facts.as_ref().map_or(
+            (GitHubAuthPhase::Stopping, GitHubReason::CleanupUnknown),
+            |facts| {
+                if let Some((error, _)) = &facts.failure {
+                    (GitHubAuthPhase::Stopping, reason(error))
+                } else {
+                    (
+                        if facts.http_started {
+                            GitHubAuthPhase::CheckingIdentity
+                        } else if facts.stage == Stage::Picking {
+                            GitHubAuthPhase::Picking
+                        } else {
+                            GitHubAuthPhase::Running
+                        },
+                        GitHubReason::None,
+                    )
+                }
             },
-            GitHubReason::None,
         ),
     };
     GitHubAuthStatus {
+        schema_version: 1,
+        document_revision: state.revision,
+        connection_revision: state.github.snapshot().revision,
         available,
         operation_id: Some(original.original.id.to_string()),
+        project_id: Some(original.context.project_id.clone()),
+        repository: Some(original.context.repository.clone()),
         phase,
         reason,
         selected_login: Some(original.context.login.clone()),
+        http: facts
+            .as_ref()
+            .ok()
+            .and_then(|facts| facts.http_handoff.clone()),
     }
 }
 
@@ -1203,12 +1505,21 @@ pub(super) fn execute_child(owner: &Arc<OriginalWork>, call: ChildCall) -> Resul
             .lock()
             .map_err(|_| BridgeError::cleanup_unknown())?;
         let result = match call.step {
-            ChildStep::Inspect => source.inspect_selected(
-                &original.request.physical_executable,
-                &original.nomination,
-                crate::installed_runtime::GitHubAuthRuntimeSlots::source_runtime_fd_bound(),
-                &mut || owner.interrupted(),
-            ),
+            ChildStep::Inspect => {
+                let selected = original
+                    .physical_executable
+                    .lock()
+                    .map_err(|_| BridgeError::cleanup_unknown())?;
+                let path = selected
+                    .as_deref()
+                    .ok_or_else(BridgeError::cleanup_unknown)?;
+                source.inspect_selected(
+                    path,
+                    &original.nomination,
+                    crate::installed_runtime::GitHubAuthRuntimeSlots::source_runtime_fd_bound(),
+                    &mut || owner.interrupted(),
+                )
+            }
             ChildStep::BeforeHttp | ChildStep::Finish => source.post(&mut || owner.interrupted()),
             ChildStep::Close => source.close(&mut |first| {
                 source_native_failure(&original, first);
@@ -1304,9 +1615,80 @@ async fn capture(
 #[cfg(all(
     target_os = "macos",
     target_pointer_width = "64",
-    any(target_arch = "aarch64", target_arch = "x86_64")
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    feature = "desktop-shell"
 ))]
-async fn run(document: &DocumentBinding, original: &Arc<Registration>) -> Result<(), BridgeError> {
+async fn pick(
+    document: &DocumentBinding,
+    original: &Arc<Registration>,
+    app: &tauri::AppHandle,
+) -> Result<(), BridgeError> {
+    if let Err(error) = original.gate().check_current(&original.context) {
+        // The sole coordinator has not entered run_owned_dialog. This is the
+        // original no-creation path, never a fallback after uncertain dispatch.
+        original.original.gui.not_created(Reason::UserCancelled);
+        return Err(error);
+    }
+    let selected = crate::shell::run_owned_dialog(
+        app,
+        &original.original,
+        crate::shell::DialogChoice::GitHubAuthExecutable,
+        None,
+    )
+    .await
+    .map_err(gui_error)?;
+    let mut state = document.lock();
+    let Some(path) = selected else {
+        let known_decline = original
+            .original
+            .gui
+            .facts()
+            .is_some_and(|facts| project_path_gui_settled(&facts, false));
+        return Err(if known_decline {
+            cancelled()
+        } else {
+            BridgeError::cleanup_unknown()
+        });
+    };
+    current_locked(document, &mut state, original, &original.context)?;
+    // The panel itself is not authority to execute. Only after its original
+    // response/close/release dispatches joined do we retain bounded path DATA;
+    // unchanged SourceBook will inspect the physical file and exact nomination.
+    if !original
+        .original
+        .gui
+        .facts()
+        .is_some_and(|facts| project_path_gui_settled(&facts, true))
+    {
+        return Err(BridgeError::cleanup_unknown());
+    }
+    if path.capacity() > entry_wire::PATH_LIMIT || !physical_selection_bounded(&path) {
+        return Err(BridgeError::invalid());
+    }
+    let mut slot = original
+        .physical_executable
+        .lock()
+        .map_err(|_| BridgeError::cleanup_unknown())?;
+    if slot.is_some() {
+        return Err(BridgeError::cleanup_unknown());
+    }
+    *slot = Some(path);
+    original.stage(Stage::Sources)?;
+    document.bump(&mut state);
+    Ok(())
+}
+#[cfg(all(
+    target_os = "macos",
+    target_pointer_width = "64",
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    feature = "desktop-shell"
+))]
+async fn run(
+    document: &DocumentBinding,
+    original: &Arc<Registration>,
+    app: &tauri::AppHandle,
+) -> Result<(), BridgeError> {
+    pick(document, original, app).await?;
     source_call(original, ChildStep::Inspect).await?;
     let provider = NativeGhProvider::registered(original.gate(), original.context.clone())
         .map_err(provider_error)?;
@@ -1369,7 +1751,7 @@ async fn run(document: &DocumentBinding, original: &Arc<Registration>) -> Result
         let hold = GitHubAuthConnectionHold {
             original: original.clone(),
         };
-        state.github.connect_prepared_gh(
+        let connection = state.github.connect_prepared_gh(
             prepared,
             original.context.project_id.clone(),
             original.context.repository.clone(),
@@ -1389,11 +1771,17 @@ async fn run(document: &DocumentBinding, original: &Arc<Registration>) -> Result
             .http
             .lock()
             .map_err(|_| BridgeError::cleanup_unknown())? = Some(Arc::new(wait));
-        original
+        // Save the ACTUAL returned handoff while holding this same Document.
+        // A late invoke never rediscovers it from a newer public Connected or
+        // depends on the ticket/hold still existing after normal reconciliation.
+        let handoff = original.result.handoff(connection)?;
+        let mut facts = original
             .facts
             .lock()
-            .map_err(|_| BridgeError::cleanup_unknown())?
-            .http_started = true;
+            .map_err(|_| BridgeError::cleanup_unknown())?;
+        facts.http_started = true;
+        facts.http_handoff = Some(handoff);
+        drop(facts);
         document.bump(&mut state);
     }
     let http = original
@@ -1411,11 +1799,29 @@ async fn run(document: &DocumentBinding, original: &Arc<Registration>) -> Result
 #[cfg(all(
     target_os = "macos",
     target_pointer_width = "64",
-    any(target_arch = "aarch64", target_arch = "x86_64")
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    feature = "desktop-shell"
 ))]
-async fn coordinate(document: &DocumentBinding, original: &Arc<Registration>) {
-    if let Err(error) = run(document, original).await {
-        original.fail(error, Instant::now());
+async fn coordinate(
+    document: &DocumentBinding,
+    original: &Arc<Registration>,
+    app: tauri::AppHandle,
+) {
+    if let Err(error) = run(document, original, &app).await {
+        // We do not classify a sent/entered but unconfirmed HTTP call as an
+        // unsent retryable selection failure, even if a later child joins.
+        let uncertain_claim = original
+            .facts
+            .lock()
+            .map_or(true, |facts| facts.http_claimed && !facts.http_started);
+        original.fail(
+            if uncertain_claim {
+                BridgeError::cleanup_unknown()
+            } else {
+                error
+            },
+            Instant::now(),
+        );
     }
     if let Some(wait) = original.active.lock().ok().and_then(|slot| slot.clone()) {
         match wait.returned().await {
@@ -1465,6 +1871,7 @@ mod tests {
             assert!(!work_stage_refused(CheckPurpose::Observation, stage, true));
         }
         for stage in [
+            Stage::Picking,
             Stage::Sources,
             Stage::Version,
             Stage::Token,
@@ -1544,7 +1951,6 @@ mod tests {
             project_id: "fixture-project".into(),
             repository: "fixture-owner/fixture-repo".into(),
             selected_login: "fixture-login".into(),
-            physical_executable: "/fixture/official/gh".into(),
             expected_document_revision: 1,
             expected_connection_revision: 1,
         };
@@ -1555,5 +1961,223 @@ mod tests {
         request.selected_login = "fixture-login".into();
         request.repository = "fixture-owner/fixture-repo?redirect=1".into();
         assert!(!request.bounded());
+    }
+    fn auth_data() -> GitHubAuthStatus {
+        GitHubAuthStatus {
+            schema_version: 1,
+            document_revision: 4,
+            connection_revision: 2,
+            available: false,
+            operation_id: Some("fixture-gh-operation".into()),
+            project_id: Some("fixture-project".into()),
+            repository: Some("fixture-owner/fixture-repo".into()),
+            selected_login: Some("fixture-login".into()),
+            phase: GitHubAuthPhase::Picking,
+            reason: GitHubReason::None,
+            http: None,
+        }
+    }
+    fn handoff_data() -> crate::github_connection_protocol::Status {
+        // Deliberately only DATA. No private ConnectionState session/ticket,
+        // nominated executable, GUI, native receipt or Connected proof exists.
+        use crate::github_connection_protocol::{
+            Operation, OperationKind, Phase, Session, SessionState,
+        };
+        let mut status = ConnectionState::new().snapshot();
+        status.capability.read_only_session_available = true;
+        status.capability.reason = GitHubReason::None;
+        status.session = Some(Session {
+            id: "fixture-http-session".into(),
+            project_id: "fixture-project".into(),
+            target_repository: "fixture-owner/fixture-repo".into(),
+            state: SessionState::Checking,
+            expires_at: Some("2026-10-19T12:00:00Z".into()),
+        });
+        status.operation = Some(Operation {
+            id: "fixture-http-operation".into(),
+            kind: OperationKind::Connect,
+            phase: Phase::Running,
+            reason: GitHubReason::None,
+        });
+        assert!(crate::github_connection_protocol::decode_status(
+            &serde_json::to_vec(&status).unwrap()
+        )
+        .is_ok());
+        status
+    }
+    #[test]
+    fn terminal_no_http_requires_original_known_refusal_and_no_claim_data_only() {
+        for custody in [
+            GitHubAuthCustody::Pending,
+            GitHubAuthCustody::Ready,
+            GitHubAuthCustody::Unknown,
+            GitHubAuthCustody::Refused(GitHubReason::None),
+            GitHubAuthCustody::Refused(GitHubReason::CleanupUnknown),
+        ] {
+            assert!(!no_http_proved(custody, false));
+            assert!(!no_http_proved(custody, true));
+        }
+        assert!(no_http_proved(
+            GitHubAuthCustody::Refused(GitHubReason::Cancelled),
+            false
+        ));
+        assert!(!no_http_proved(
+            GitHubAuthCustody::Refused(GitHubReason::Cancelled),
+            true
+        ));
+        let mut status = auth_data();
+        status.phase = GitHubAuthPhase::Failed;
+        status.reason = GitHubReason::Cancelled;
+        let slot = ResultSlot::new(status);
+        slot.terminal(true).unwrap();
+        assert!(matches!(
+            slot.take().unwrap().unwrap().outcome,
+            entry_wire::Outcome::NoHttp { .. }
+        ));
+        assert!(slot.take().is_err());
+    }
+    #[test]
+    fn late_observer_gets_exact_original_handoff_once_not_a_newer_connection() {
+        let slot = ResultSlot::new(auth_data());
+        let original = handoff_data();
+        let handoff = slot.handoff(original.clone()).unwrap();
+        let mut later = auth_data();
+        later.http = Some(handoff);
+        later.phase = GitHubAuthPhase::Settled;
+        later.connection_revision = 999;
+        slot.observe(later).unwrap();
+        // Normal hold/ticket retirement cannot overwrite an already latched
+        // historical handoff, even when no invoke observer polled until now.
+        slot.terminal(false).unwrap();
+        let result = slot.take().unwrap().unwrap();
+        let entry_wire::Outcome::HttpHandoff { connection } = result.outcome else {
+            panic!("lost original handoff DATA")
+        };
+        assert_eq!(connection, original);
+        assert_ne!(connection.revision, 999);
+        assert!(slot.handoff(handoff_data()).is_err());
+        assert!(slot.take().is_err());
+    }
+    #[test]
+    fn handoff_data_rejects_cross_target_and_non_connect_status_without_authority() {
+        for field in 0..4 {
+            let slot = ResultSlot::new(auth_data());
+            let mut status = handoff_data();
+            match field {
+                0 => status.session.as_mut().unwrap().project_id = "foreign-project".into(),
+                1 => {
+                    status.session.as_mut().unwrap().target_repository =
+                        "other-owner/other-repo".into()
+                }
+                2 => {
+                    status.operation.as_mut().unwrap().kind =
+                        crate::github_connection_protocol::OperationKind::Refresh
+                }
+                _ => {
+                    status.session.as_mut().unwrap().state =
+                        crate::github_connection_protocol::SessionState::Connected
+                }
+            }
+            assert!(slot.handoff(status).is_err());
+            slot.terminal(false).unwrap();
+            assert!(matches!(
+                slot.take().unwrap().unwrap().outcome,
+                entry_wire::Outcome::Unknown { .. }
+            ));
+        }
+    }
+    #[tokio::test]
+    async fn lost_document_observer_is_unknown_not_no_http_or_native_retention() {
+        let result = Arc::new(ResultSlot::new(auth_data()));
+        let observer = GitHubAuthConnectObserver {
+            document: Weak::new(),
+            result: result.clone(),
+        };
+        let reply = observer.returned().await.unwrap();
+        assert!(matches!(reply.outcome, entry_wire::Outcome::Unknown { .. }));
+        assert_eq!(Arc::strong_count(&result), 1);
+        assert!(result.take().is_err());
+    }
+    #[test]
+    fn dropped_observer_does_not_hold_original_work_or_runtime_backing() {
+        // Empty original allocation only, no native resource work/qualification.
+        let original = OriginalWork::new(1, false, Weak::new());
+        let weak = Arc::downgrade(&original);
+        let data = Arc::new(ResultSlot::new(auth_data()));
+        let observer = GitHubAuthConnectObserver {
+            document: Weak::new(),
+            result: data.clone(),
+        };
+        drop(original);
+        assert!(weak.upgrade().is_none()); // DATA observer has no original edge.
+        drop(observer);
+        assert_eq!(Arc::strong_count(&data), 1);
+    }
+    #[test]
+    fn physical_selection_is_only_bounded_path_data_not_execution_authority() {
+        assert!(physical_selection_bounded(std::path::Path::new(
+            "/fixture/installed/gh"
+        )));
+        for path in ["gh", "/fixture/not-gh", "/fixture/gh\0", ""] {
+            assert!(!physical_selection_bounded(std::path::Path::new(path)));
+        }
+        assert!(!physical_selection_bounded(std::path::Path::new(&format!(
+            "/{}/gh",
+            "a".repeat(4096)
+        ))));
+    }
+    #[test]
+    fn gh_uses_original_gui_receipt_predicate_not_response_or_path_alone() {
+        let facts = || GuiFacts {
+            dispatched: true,
+            constructing: false,
+            created: true,
+            showing: false,
+            response: true,
+            accepted: true,
+            declined: false,
+            accepted_at: Some(Instant::now()),
+            destroyed: true,
+            released: true,
+            not_created: false,
+            close_queued: true,
+            close_ack: true,
+            release_queued: true,
+            selected: None,
+            refusal: None,
+        };
+        // Scalar predicate fixture, not a successful native panel/owner proof.
+        assert!(project_path_gui_settled(&facts(), true));
+        for field in 0..9 {
+            let mut value = facts();
+            match field {
+                0 => value.dispatched = false,
+                1 => value.constructing = true,
+                2 => value.showing = true,
+                3 => value.destroyed = false,
+                4 => value.close_ack = false,
+                5 => value.released = false,
+                6 => value.selected = Some("/fixture/gh".into()),
+                7 => value.refusal = Some(Reason::CleanupUnknown),
+                _ => value.accepted_at = None,
+            }
+            assert!(!project_path_gui_settled(&value, true));
+        }
+    }
+    #[test]
+    fn gui_error_preserves_native_stop_deadline_and_unknown_classification() {
+        assert_eq!(
+            reason(&gui_error(Reason::CleanupUnknown)),
+            GitHubReason::CleanupUnknown
+        );
+        assert_eq!(
+            reason(&gui_error(Reason::UserCancelled)),
+            GitHubReason::Cancelled
+        );
+        assert_eq!(reason(&gui_error(Reason::Deadline)), GitHubReason::Expired);
+        assert_eq!(
+            reason(&gui_error(Reason::SourceChanged)),
+            GitHubReason::TargetChanged
+        );
     }
 }
