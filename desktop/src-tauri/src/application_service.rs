@@ -7,7 +7,7 @@
 use crate::{application_state_store::{Namespace, PrivateStateDirectory, Revision}, service_protocol as p};
 use p::{Error, Id};
 use serde::{Deserialize, Serialize};
-use std::{collections::{BTreeMap, BTreeSet}, path::{Component, Path}, sync::{Arc, Mutex, MutexGuard}, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, BTreeSet}, path::{Component, Path}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, MutexGuard}, time::{Duration, Instant}};
 
 const MAX_ACCESS: Duration = Duration::from_secs(60 * 60);
 
@@ -65,29 +65,88 @@ pub(crate) struct ClientSession { client_id: Id, session_id: Id, grant_id: Id, i
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReadAccessStatus { pub(crate) enabled: bool, pub(crate) remaining_ms: u64, pub(crate) project_ids: Vec<Id> }
 
-pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State> }
+pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
+    identity_requests: Arc<crate::agent_identity_requests::Inbox> }
 impl ApplicationService {
     pub(crate) fn open(store: Arc<PrivateStateDirectory>) -> Result<Self, Error> {
         let snapshot = store.read(Namespace::Projects).map_err(|e| e.code)?;
         let mut saved = if snapshot.bytes.is_empty() && snapshot.revision == Revision(0) { Persisted::empty() }
             else { serde_json::from_slice::<Persisted>(&snapshot.bytes).map_err(|_| Error::RecoveryRequired)? };
+        for project in &mut saved.projects {
+            if let Some(observation) = &mut project.observation { observation.normalize_setup_analysis(); }
+        }
         saved.validate(snapshot.revision)?;
         // Remembered facts remain readable, but restart does not reacquire the
         // original project, operation, credential or observation authority.
         for project in &mut saved.projects { if let Some(observation) = &mut project.observation { observation.stale = true; } }
         for operation in &mut saved.operations { operation.stale = true; }
-        Ok(Self { store, instance: Id::random()?, state: Mutex::new(State { revision: snapshot.revision, saved,
+        let instance = Id::random()?;
+        let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+        Ok(Self { store, instance, identity_requests, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
     }
     pub(crate) fn instance(&self) -> &Id { &self.instance }
+    pub(crate) fn identity_requests(&self) -> &Arc<crate::agent_identity_requests::Inbox> { &self.identity_requests }
+    // Saved comparison only, never RegisteredRoot authority. Every caller which
+    // may hold Document/Edit must obtain it OFF those guards and recheck its
+    // original native root/SavedEditStamp before admitting a GUI review.
+    fn identity_point(state: &State, id: &Id) -> Result<crate::agent_identity_requests::SavedPoint, Error> {
+        let (runtime_id, _) = state.runtime_aliases.iter().find(|(_, project)| *project == id).ok_or(Error::Conflict)?;
+        let project = state.saved.projects.iter().find(|project| &project.binding.project_id == id).ok_or(Error::Conflict)?;
+        let observation = project.observation.as_ref();
+        Ok(crate::agent_identity_requests::SavedPoint { project_id: id.clone(), runtime_id: runtime_id.clone(),
+            root: Path::new(&project.binding.canonical_root).to_path_buf(), device: project.binding.device, inode: project.binding.inode,
+            revision: observation.map_or(0, |saved| saved.revision), fresh: observation.is_some_and(|saved| !saved.stale) })
+    }
+    pub(crate) fn identity_request_point(&self, runtime_id: &str) -> Result<crate::agent_identity_requests::SavedPoint, Error> {
+        let state = self.lock()?; self.check(&state)?;
+        let id = state.runtime_aliases.get(runtime_id).ok_or(Error::Conflict)?;
+        if !live_grant(&state)?.projects.contains(id) { return Err(Error::AccessDenied); }
+        let point = Self::identity_point(&state, id)?;
+        if point.runtime_id != runtime_id || !point.fresh { return Err(Error::Conflict); }
+        Ok(point)
+    }
+    fn submit_identity(&self, client: &ClientSession, input: crate::agent_identity_requests::Submit) -> Result<p::ResponseBody, Error> {
+        let state = self.lock()?; self.check(&state)?;
+        let grant = live_grant(&state)?;
+        if client.instance != self.instance || grant.id != client.grant_id || !grant.projects.contains(&input.project_id) {
+            return Err(Error::AccessDenied);
+        }
+        // A stale point can observe an identical earlier request; Inbox
+        // refuses it for a NEW intent before allocating a proposal. Retain the
+        // original grant guard through the memory-only put, so read revocation
+        // cannot race authorization/enqueue. Inbox never calls Doc/Host/IO.
+        let point = Self::identity_point(&state, &input.project_id)?;
+        let origin = crate::agent_identity_requests::Origin { instance: self.instance.clone(), client: client.client_id.clone(), session: client.session_id.clone() };
+        let result = self.identity_requests.submit(origin, input, &point).map(p::ResponseBody::IdentityIntent);
+        drop(state); result
+    }
+    fn query_identity(&self, client: &ClientSession, query: &crate::agent_identity_requests::Query) -> Result<p::ResponseBody, Error> {
+        {
+            let state = self.lock()?; self.check(&state)?;
+            let grant = live_grant(&state)?;
+            if client.instance != self.instance || grant.id != client.grant_id || !grant.projects.contains(&query.project_id) {
+                return Err(Error::AccessDenied);
+            }
+        }
+        self.identity_requests.query(query).map(p::ResponseBody::IdentityIntent)
+    }
     pub(crate) fn state_directory(&self) -> &Arc<PrivateStateDirectory> { &self.store }
+    /// Permanent original-service read fence. Native observation callbacks must
+    /// not wait for the state mutex, which real store IO can hold. No Allow or
+    /// later successful write clears this flag; original cleanup still runs.
+    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); }
+    pub(crate) fn native_history_current(&self) -> Result<(), Error> {
+        if self.native_history_fenced.load(Ordering::Acquire) { Err(Error::StateUnknown) } else { Ok(()) }
+    }
     fn lock(&self) -> Result<MutexGuard<'_, State>, Error> { self.state.lock().map_err(|_| Error::StateUnknown) }
     fn check(&self, state: &State) -> Result<(), Error> {
+        self.native_history_current()?;
         if state.stopped { return Err(Error::Unavailable); }
         // Missing/replaced state cannot be concealed by an in-memory cache.
         let snapshot = self.store.read(Namespace::Projects).map_err(|e| e.code)?;
         if snapshot.revision != state.revision { return Err(Error::Conflict); }
-        Ok(())
+        self.native_history_current()
     }
     fn save(&self, state: &mut State, next: Persisted) -> Result<(), Error> {
         let revision = Revision(state.revision.0.checked_add(1).ok_or(Error::StateUnknown)?);
@@ -159,8 +218,12 @@ impl ApplicationService {
         let partial = snapshot.pointer("/discovery/partial").and_then(|v| v.as_bool()).ok_or(Error::InvalidRequest)?;
         let issues = snapshot.get("issues").and_then(|v| v.as_array()).ok_or(Error::InvalidRequest)?.len();
         if issues > 20_000 { return Err(Error::InvalidRequest); }
+        // Same completed passive response, no new read or readiness analysis.
+        // Unsupported optional DATA must not discard the useful base result.
+        let setup_analysis = crate::service_setup_guidance::project(snapshot.get("setupAnalysis"), config_state, partial);
         if state.saved.projects[index].observation.as_ref().is_some_and(|previous| !previous.stale
-            && previous.configuration == saved_config && previous.discovery_partial == partial && previous.issue_count == issues as u32) {
+            && previous.configuration == saved_config && previous.discovery_partial == partial && previous.issue_count == issues as u32
+            && previous.setup_analysis == setup_analysis) {
             // Idle saved-file polling is not a new observation revision when
             // every retained fact is unchanged. A stale->fresh return still
             // persists below, even if the same saved bytes were observed.
@@ -169,7 +232,7 @@ impl ApplicationService {
         let revision = state.revision.0.checked_add(1).ok_or(Error::StateUnknown)?;
         let mut next = state.saved.clone();
         next.projects[index].observation = Some(p::SavedObservation { revision, stale: false, configuration: saved_config,
-            discovery_partial: partial, issue_count: issues as u32 });
+            discovery_partial: partial, issue_count: issues as u32, setup_analysis });
         self.save(&mut state, next)?;
         Ok(view(&state, &state.saved.projects[index]))
     }
@@ -178,6 +241,9 @@ impl ApplicationService {
         let id = state.runtime_aliases.get(runtime_id).ok_or(Error::Conflict)?.clone();
         let mut next = state.saved.clone();
         let project = next.projects.iter_mut().find(|p| p.binding.project_id == id).ok_or(Error::Conflict)?;
+        // Still check the original store above. Repeated invalidations need no
+        // durable rewrite; the host separately fences each input publication.
+        if project.observation.as_ref().is_none_or(|observation| observation.stale) { return Ok(()); }
         if let Some(observation) = &mut project.observation {
             observation.stale = true;
             observation.revision = state.revision.0.checked_add(1).ok_or(Error::StateUnknown)?;
@@ -186,8 +252,18 @@ impl ApplicationService {
         // need their original domain owners' revocation, wired by the host.
         self.save(&mut state, next)
     }
+    /// First publication of a genuine original operation. A fresh native
+    /// session may not adopt an older pending row, even on an ID collision.
+    pub(crate) fn begin_operation(&self, runtime_id: &str, operation_id: Id, action: p::Action, operation_state: p::OperationState,
+        settlement: p::Settlement) -> Result<(), Error> {
+        self.write_operation(runtime_id, operation_id, action, operation_state, settlement, true)
+    }
     pub(crate) fn publish_operation(&self, runtime_id: &str, operation_id: Id, action: p::Action, operation_state: p::OperationState,
         settlement: p::Settlement) -> Result<(), Error> {
+        self.write_operation(runtime_id, operation_id, action, operation_state, settlement, false)
+    }
+    fn write_operation(&self, runtime_id: &str, operation_id: Id, action: p::Action, operation_state: p::OperationState,
+        settlement: p::Settlement, require_new: bool) -> Result<(), Error> {
         if !consistent_status(operation_state, settlement) { return Err(Error::InvalidRequest); }
         let mut state = self.lock()?; self.check(&state)?;
         let id = state.runtime_aliases.get(runtime_id).ok_or(Error::Conflict)?.clone();
@@ -195,7 +271,7 @@ impl ApplicationService {
         let observation = p::OperationObservation { operation_id: operation_id.clone(), project_id: id.clone(), action,
             state: operation_state, settlement, observation_revision: state.revision.0.checked_add(1).ok_or(Error::StateUnknown)?, stale: false };
         if let Some(existing) = next.operations.iter_mut().find(|op| op.operation_id == operation_id) {
-            if existing.project_id != id || existing.action != action { return Err(Error::Conflict); }
+            if require_new || existing.project_id != id || existing.action != action { return Err(Error::Conflict); }
             // Unknown is absorbing in this cache. Reconciliation belongs to the
             // original journal/owner and must publish a distinct observation.
             if existing.state == p::OperationState::Unknown && operation_state != p::OperationState::Unknown { return Err(Error::Conflict); }
@@ -210,33 +286,52 @@ impl ApplicationService {
     }
 
     pub(crate) fn allow_agent_read(&self, projects: Vec<Id>, lifetime: Duration) -> Result<ReadAccessStatus, Error> {
+        self.native_history_current()?;
         if projects.is_empty() || projects.len() > p::PROJECT_LIMIT || lifetime.is_zero() || lifetime > MAX_ACCESS { return Err(Error::InvalidRequest); }
         let mut state = self.lock()?; self.check(&state)?;
         let selected: BTreeSet<_> = projects.into_iter().collect();
         if selected.iter().any(|id| !state.runtime_aliases.values().any(|registered| registered == id)) { return Err(Error::Conflict); }
         state.grant = Some(Grant { id: Id::random()?, projects: selected, expires: Instant::now().checked_add(lifetime).ok_or(Error::InvalidRequest)? });
-        Ok(access_status(&state))
+        let status = access_status(&state);
+        self.native_history_current()?; Ok(status)
     }
     pub(crate) fn revoke_agent_read(&self) -> Result<(), Error> { self.lock()?.grant = None; Ok(()) }
-    pub(crate) fn read_access_status(&self) -> Result<ReadAccessStatus, Error> { let state = self.lock()?; Ok(access_status(&state)) }
+    pub(crate) fn read_access_status(&self) -> Result<ReadAccessStatus, Error> {
+        self.native_history_current()?;
+        let state = self.lock()?; let status = access_status(&state);
+        self.native_history_current()?; Ok(status)
+    }
     pub(crate) fn admit_client(&self) -> Result<ClientSession, Error> {
+        self.native_history_current()?;
         let state = self.lock()?; self.check(&state)?;
         let grant = live_grant(&state)?;
-        Ok(ClientSession { client_id: Id::random()?, session_id: Id::random()?, grant_id: grant.id.clone(), instance: self.instance.clone() })
+        let client = ClientSession { client_id: Id::random()?, session_id: Id::random()?, grant_id: grant.id.clone(), instance: self.instance.clone() };
+        self.native_history_current()?; Ok(client)
     }
     pub(crate) fn client_current(&self, client: &ClientSession) -> Result<(), Error> {
+        self.native_history_current()?;
         let state = self.lock()?; self.check(&state)?;
         if client.instance != self.instance || live_grant(&state)?.id != client.grant_id { return Err(Error::AccessDenied); }
-        Ok(())
+        self.native_history_current()
     }
     pub(crate) fn dispatch(&self, client: &ClientSession, request: p::Request) -> p::Response {
         let result = (|| {
+            self.native_history_current()?;
+            if request.version != p::VERSION { return Err(Error::InvalidRequest); }
+            // These two fixed routes touch only the bounded proposal inbox.
+            // No native callback, executor or GUI approval runs in a socket.
+            match &request.request {
+                p::RequestBody::IdentitySubmit(input) => return self.submit_identity(client, input.clone()),
+                p::RequestBody::IdentityIntent(query) => return self.query_identity(client, query),
+                _ => {},
+            }
             let state = self.lock()?; self.check(&state)?;
             let grant = live_grant(&state)?;
             if request.version != p::VERSION || client.instance != self.instance || grant.id != client.grant_id { return Err(Error::AccessDenied); }
             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
+                p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) => return Err(Error::InvalidRequest),
                 p::RequestBody::Info(_) => p::ResponseBody::Info(p::ServiceInfo { read_only: true, requires_running_desktop: true,
                     cached_observations_are_authority: false, remaining_access_ms: remaining(grant) }),
                 p::RequestBody::Projects(_) => p::ResponseBody::Projects(state.saved.projects.iter().filter(|p| grant.projects.contains(&p.binding.project_id)).map(|p| view(&state, p)).collect()),
@@ -248,12 +343,15 @@ impl ApplicationService {
                 }
             })
         })();
+        // Recheck after building the read result; IPC also repeats the same
+        // atomic fence through client_current immediately before sending bytes.
+        let result = self.native_history_current().and(result);
         p::Response { version: p::VERSION, request_id: request.request_id, service_instance: self.instance.clone(),
             client_id: client.client_id.clone(), session_id: client.session_id.clone(), response: result.unwrap_or_else(p::ResponseBody::Error) }
     }
     /// The IPC owner must first stop accepting, notify and join all original
     /// workers. This revokes admission but does not pretend to join them.
-    pub(crate) fn stop(&self) -> Result<(), Error> { let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+    pub(crate) fn stop(&self) -> Result<(), Error> { self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
 }
 
 fn valid_root(path: &Path) -> Result<&str, Error> {
@@ -294,6 +392,10 @@ pub(crate) mod tests {
     use super::*;
     use crate::application_state_store::Fixture;
     use std::{fs::File, os::unix::fs::MetadataExt, path::PathBuf};
+    /// Test-only real mutex hold; no simulated write or native authority.
+    pub(crate) fn with_state_locked<T>(service: &ApplicationService, body: impl FnOnce() -> T) -> T {
+        let _original = service.state.lock().unwrap(); body()
+    }
     pub(crate) fn register_fixture(service: &ApplicationService, app: &Path, name: &str, runtime: &str) -> (Id, PathBuf) {
         let root = app.parent().unwrap().join(name);
         std::fs::create_dir(&root).unwrap();
@@ -381,6 +483,11 @@ pub(crate) mod tests {
         let after = store.read(Namespace::Projects).unwrap();
         assert_eq!(after.revision, before.revision); assert_eq!(after.bytes, before.bytes);
         service.invalidate_native("project-1").unwrap();
+        let stale = store.read(Namespace::Projects).unwrap();
+        service.invalidate_native("project-1").unwrap();
+        let still_stale = store.read(Namespace::Projects).unwrap();
+        assert_eq!(still_stale.revision, stale.revision);
+        assert_eq!(still_stale.bytes, stale.bytes);
         let refreshed = service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap();
         assert!(!refreshed.stale); assert!(refreshed.revision > first.observation.unwrap().revision);
         assert!(store.read(Namespace::Projects).unwrap().revision.0 > before.revision.0);
@@ -401,5 +508,101 @@ pub(crate) mod tests {
         assert_eq!(store.read(Namespace::Projects).unwrap().revision, before.revision);
         assert_eq!(store.read(Namespace::Projects).unwrap().bytes, before.bytes);
         service.stop().unwrap(); store.close().unwrap();
+    }
+
+    #[test]
+    fn optional_setup_guidance_uses_original_store_redaction_and_dedup() {
+        use crate::service_setup_guidance as guidance;
+        let f = Fixture::new(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+        let service = ApplicationService::open(store.clone()).unwrap();
+        let (id, root) = register_fixture(&service, &f.app, "project", "project-1");
+        let mut saved = passive(&root, &"1".repeat(64));
+        let absent = service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap();
+        assert!(absent.setup_analysis.is_none());
+        saved["setupAnalysis"] = guidance::fixture(&[guidance::Platform::Android], p::ConfigurationState::FormatValid, false);
+        saved["setupAnalysis"]["requirements"][0]["summary"] = serde_json::json!("never-store-summary-sentinel");
+        saved["setupAnalysis"]["requirements"][0]["reference"] = serde_json::json!("never-store-path-sentinel/file");
+        let projected = service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap();
+        assert!(projected.setup_analysis.is_some()); assert!(projected.revision > absent.revision);
+        let before = store.read(Namespace::Projects).unwrap();
+        assert!(!String::from_utf8(before.bytes.clone()).unwrap().contains("sentinel"));
+        saved["setupAnalysis"]["requirements"][0]["summary"] = serde_json::json!("Different discarded text.");
+        assert_eq!(service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap(), projected);
+        let unchanged = store.read(Namespace::Projects).unwrap();
+        assert_eq!(unchanged.revision, before.revision); assert_eq!(unchanged.bytes, before.bytes);
+        saved["setupAnalysis"]["requirements"][0]["state"] = serde_json::json!("needs-input");
+        let changed = service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap();
+        assert!(changed.revision > projected.revision);
+        service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
+        let client = service.admit_client().unwrap();
+        let request = request(p::RequestBody::Observe(p::ProjectQuery { project_id: id }));
+        let response = service.dispatch(&client, request.clone());
+        let bytes = p::encode_response(&response).unwrap();
+        let decoded = p::decode_response(&bytes, &request.request_id, service.instance()).unwrap();
+        assert_eq!(decoded, response);
+        let mut incompatible = serde_json::to_value(&response).unwrap();
+        incompatible["response"]["value"]["observation"]["setupAnalysis"]["discoveryPartial"] = serde_json::json!(true);
+        let decoded = p::decode_response(&serde_json::to_vec(&incompatible).unwrap(), &request.request_id, service.instance()).unwrap();
+        match decoded.response { p::ResponseBody::Observation(row) => {
+            let observed = row.observation.unwrap(); assert!(observed.setup_analysis.is_none());
+            assert_eq!(observed.configuration, changed.configuration);
+        }, _ => panic!("wrong response") }
+        saved["setupAnalysis"]["schemaVersion"] = serde_json::json!(2);
+        let unavailable = service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap();
+        assert!(unavailable.setup_analysis.is_none()); assert!(unavailable.revision > changed.revision);
+        assert_eq!(unavailable.configuration, changed.configuration);
+        let before = store.read(Namespace::Projects).unwrap();
+        service.publish_passive_snapshot("project-1", &saved).unwrap();
+        let after = store.read(Namespace::Projects).unwrap();
+        assert_eq!(before.revision, after.revision); assert_eq!(before.bytes, after.bytes);
+        saved["config"]["content"]["sha256"] = serde_json::json!("bad");
+        assert_eq!(service.publish_passive_snapshot("project-1", &saved).err(), Some(Error::InvalidRequest));
+        service.stop().unwrap(); store.close().unwrap();
+    }
+    #[test]
+    fn setup_guidance_restart_is_stale_and_optional_damage_does_not_hide_base_damage() {
+        use crate::service_setup_guidance as guidance;
+        let f = Fixture::new(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+        let service = ApplicationService::open(store.clone()).unwrap();
+        let (id, root) = register_fixture(&service, &f.app, "project", "project-1");
+        let mut saved = passive(&root, &"1".repeat(64));
+        saved["setupAnalysis"] = guidance::fixture(&[guidance::Platform::Ios], p::ConfigurationState::FormatValid, false);
+        let original = service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap();
+        service.stop().unwrap(); drop(service); store.close().unwrap(); drop(store);
+        let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+        let service = ApplicationService::open(store.clone()).unwrap();
+        assert!(service.admit_client().is_err()); assert!(service.native_binding("project-1").is_err());
+        let stat = File::open(&root).unwrap().metadata().unwrap();
+        assert_eq!(service.register_native("project-9", &root, stat.dev(), stat.ino()).unwrap().project_id, id);
+        service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
+        let client = service.admit_client().unwrap();
+        let response = service.dispatch(&client, request(p::RequestBody::Observe(p::ProjectQuery { project_id: id })));
+        match response.response { p::ResponseBody::Observation(row) => {
+            let restored = row.observation.unwrap(); assert!(restored.stale);
+            assert_eq!(restored.setup_analysis, original.setup_analysis);
+        }, _ => panic!("wrong response") }
+        let refreshed = service.publish_passive_snapshot("project-9", &saved).unwrap().observation.unwrap();
+        assert!(!refreshed.stale); assert!(refreshed.revision > original.revision);
+        service.stop().unwrap(); drop(service);
+        // Exact original store CAS, not a replacement/mocked filesystem owner.
+        let current = store.read(Namespace::Projects).unwrap();
+        let mut data: serde_json::Value = serde_json::from_slice(&current.bytes).unwrap();
+        data["projects"][0]["observation"]["setupAnalysis"]["discoveryPartial"] = serde_json::json!(true);
+        store.replace(Namespace::Projects, current.revision, &serde_json::to_vec(&data).unwrap()).unwrap();
+        let reopened = ApplicationService::open(store.clone()).unwrap();
+        assert!(reopened.state.lock().unwrap().saved.projects[0].observation.as_ref().unwrap().setup_analysis.is_none());
+        reopened.stop().unwrap(); drop(reopened);
+        let current = store.read(Namespace::Projects).unwrap();
+        data["projects"][0]["observation"]["setupAnalysis"] = serde_json::json!({"unsupported": "no-default-empty"});
+        store.replace(Namespace::Projects, current.revision, &serde_json::to_vec(&data).unwrap()).unwrap();
+        let reopened = ApplicationService::open(store.clone()).unwrap();
+        let observed = reopened.state.lock().unwrap().saved.projects[0].observation.clone().unwrap();
+        assert!(observed.setup_analysis.is_none()); assert_eq!(observed.configuration, original.configuration);
+        reopened.stop().unwrap(); drop(reopened);
+        let current = store.read(Namespace::Projects).unwrap();
+        data["projects"][0]["observation"]["issueCount"] = serde_json::json!(20_001);
+        store.replace(Namespace::Projects, current.revision, &serde_json::to_vec(&data).unwrap()).unwrap();
+        assert_eq!(ApplicationService::open(store.clone()).err(), Some(Error::RecoveryRequired));
+        store.close().unwrap();
     }
 }

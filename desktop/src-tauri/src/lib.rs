@@ -101,10 +101,16 @@ compile_error!("installed remover requires its isolated nonsigning LP64 Mac role
 pub mod error;
 pub mod protocol;
 mod service_protocol;
+mod service_setup_guidance;
+mod agent_identity_requests;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod version_allocation_state_native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod application_state_store;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod application_service;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod application_service_host;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod installed_cli_ipc;
 mod installed_cli;
@@ -115,6 +121,7 @@ mod candidate_evidence_protocol;
 mod lifecycle_evidence_protocol;
 mod environment_diagnostics_protocol;
 mod tool_preparation;
+mod tool_acquisition_protocol;
 mod tool_preparation_adapters;
 mod tool_preparation_protocol;
 mod environment_diagnostics_owner;
@@ -227,6 +234,8 @@ mod edit_commands;
 mod metadata_text_commands;
 mod metadata_images_commands;
 mod release_version_edit_commands;
+mod project_identity_commands;
+mod project_identity_edit_protocol;
 mod github_commands;
 mod credential_assessment;
 mod credential_format;
@@ -255,6 +264,10 @@ mod saved_text_recovery_protocol;
 mod metadata_images_edit_protocol;
 pub mod release_version_edit_protocol;
 pub mod github_connection_protocol;
+mod github_auth_capture_wire;
+mod github_auth_nomination;
+mod github_auth_native_owner;
+mod github_auth_entry_protocol;
 mod github_connection_session;
 mod github_preflight_protocol;
 mod github_preflight_session;

@@ -169,6 +169,18 @@ pub struct SavedObservation {
     pub configuration: SavedConfiguration,
     pub discovery_partial: bool,
     pub issue_count: u32,
+    #[serde(default, deserialize_with = "crate::service_setup_guidance::deserialize_optional", skip_serializing_if = "Option::is_none")]
+    pub setup_analysis: Option<crate::service_setup_guidance::SetupAnalysis>,
+}
+impl SavedObservation {
+    // Optional guidance cannot contradict its enclosing saved observation or
+    // conceal a failure of the required base fields. It grants no operation.
+    pub(crate) fn normalize_setup_analysis(&mut self) {
+        if self.setup_analysis.as_ref().is_some_and(|analysis|
+            !analysis.matches(self.configuration.state, self.discovery_partial)) {
+            self.setup_analysis = None;
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +210,8 @@ pub enum RequestBody {
     #[serde(rename = "project.observation")] Observe(ProjectQuery),
     #[serde(rename = "operation.list")] Operations(ProjectQuery),
     #[serde(rename = "operation.status")] Operation(OperationQuery),
+    #[serde(rename = "identity.request")] IdentitySubmit(crate::agent_identity_requests::Submit),
+    #[serde(rename = "identity.request-status")] IdentityIntent(crate::agent_identity_requests::Query),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -216,6 +230,7 @@ pub struct ServiceInfo {
 pub enum ResponseBody {
     Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
+    IdentityIntent(crate::agent_identity_requests::IntentStatus),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -250,6 +265,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     nesting(bytes)?;
     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
     if request.version != VERSION { return Err(Error::InvalidRequest); }
+    if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
     Ok(request)
 }
 pub fn encode_request(request: &Request) -> Result<Vec<u8>, Error> {
@@ -266,9 +282,18 @@ pub fn encode_response(response: &Response) -> Result<Vec<u8>, Error> {
 pub fn decode_response(bytes: &[u8], request_id: &Id, instance: &Id) -> Result<Response, Error> {
     if bytes.is_empty() || bytes.len() > RESPONSE_BYTES { return Err(Error::InvalidRequest); }
     nesting(bytes)?;
-    let response: Response = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+    let mut response: Response = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
     if response.version != VERSION || &response.request_id != request_id || &response.service_instance != instance {
         return Err(Error::Conflict);
+    }
+    let projects = match &mut response.response {
+        ResponseBody::Projects(rows) => rows.as_mut_slice(),
+        ResponseBody::Observation(row) => std::slice::from_mut(row),
+        _ => &mut [],
+    };
+    if projects.len() > PROJECT_LIMIT { return Err(Error::InvalidRequest); }
+    for project in projects {
+        if let Some(saved) = &mut project.observation { saved.normalize_setup_analysis(); }
     }
     validate_response(&response)?;
     Ok(response)
@@ -309,6 +334,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             for row in rows { operation(row)?; if !seen.insert(&row.operation_id) { return Err(Error::InvalidRequest); } }
         }
         ResponseBody::Operation(row) => operation(row)?,
+        ResponseBody::IdentityIntent(row) => { row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         _ => {}
     }
     Ok(())

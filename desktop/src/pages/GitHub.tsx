@@ -116,18 +116,18 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
   const shaHelp = state.help?.inputs.find((entry) => entry.id === 'toolingSha');
   const snapshotHelp = state.help?.inputs.find((entry) => entry.id === 'suppliedSnapshot');
   return <>
-    <PageHeading eyebrow="GITHUB" title="Review the setup. Keep authority separate." description="Preview four caller files and a core-sourced checklist. Local installation needs its own fresh native review and confirmation. On a qualified Mac runtime, use the separate remote setup card to review repository policies, environment protections, secrets and variables. Each change requires its own preview and confirmation." />
+    <PageHeading eyebrow="GITHUB" title="Connect GitHub and prepare automation." description="Connect your account, review workflow files and choose which repository settings to apply. File changes and online actions have separate approvals. Nothing is published automatically." />
     {connectionView}
-    <div className="notice notice-info"><Icon name="shield" /><div><strong>Passive setup preview · no remote changes</strong><p>This preview does not contact GitHub. Remote repository state, toolkit ref existence, template compatibility and release readiness remain unknown from a preview. A passive proposal never authorizes local writes or a release. Separate local operation outcomes are shown below.</p></div></div>
+    <div className="notice notice-info"><Icon name="shield" /><div><strong>Preview first, then review changes</strong><p>The preview below does not change files or contact GitHub. It shows a proposal, not proof that your repository is ready. Use the separate apply and online-check controls when you are ready.</p></div></div>
     <form className="card github-form" onSubmit={(event) => { event.preventDefault(); void controller.propose(); }}>
-      <SectionHeading title="Preview setup from your draft" description="Toolkit inputs are separate from the application’s source identity. No account or commit is preselected."><Badge>{state.pending ? 'Preparing preview…' : 'In-memory only'}</Badge></SectionHeading>
+      <SectionHeading title="Preview workflow files" description="Choose the Mobile Release Kit template source below. This is separate from your app’s repository above; use the ? buttons if you need help finding these values."><Badge>{state.pending ? 'Preparing preview…' : 'Not applied'}</Badge></SectionHeading>
       <div className="github-draft">
         <strong>{session?.project.name ?? 'No project selected'} · current draft</strong>
         <dl className="github-facts">
-          <div><dt>source.candidateBranch</dt><dd><code>{draftBranch(session, 'source.candidateBranch')}</code></dd></div>
-          <div><dt>source.productionBranch</dt><dd><code>{draftBranch(session, 'source.productionBranch')}</code></dd></div>
+          <div><dt>Candidate branch</dt><dd><code>{draftBranch(session, 'source.candidateBranch')}</code></dd></div>
+          <div><dt>Production branch</dt><dd><code>{draftBranch(session, 'source.productionBranch')}</code></dd></div>
         </dl>
-        <p>Draft fields only, not validated here or observed branch protection. Your unsaved configuration is retained unchanged.</p>
+        <p>These are your draft settings, not checked branch protections. Unsaved changes are kept.</p>
         <div className="button-row">
           <button type="button" className="button small secondary" onClick={() => onNavigate('settings')}>Review project settings<Icon name="arrow" size={15} /></button>
           <button type="button" className="button small secondary" onClick={() => onNavigate('credentials')}>Open Credentials &amp; Signing<Icon name="arrow" size={15} /></button>
@@ -145,6 +145,9 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
           <InputHelp id="github-sha-help" help={shaHelp} open={inputHelpOpen.sha} onToggle={(open) => helpOpened('sha', open)} />
         </div>
       </div>
+      <details className="github-help">
+        <summary>Advanced: compare with a manually supplied file summary{state.inputs.snapshotEnabled ? ' (enabled)' : ' (optional)'}</summary>
+        <p>You can skip this. Applying workflow files uses its own fresh review of the actual files; this optional summary is only for the preview.</p>
       <fieldset className="github-comparison"><legend><span className="github-legend-title">{snapshotHelp?.label ?? 'Optional supplied comparison'}<InputHelpButton id="github-snapshot-help" help={snapshotHelp} open={inputHelpOpen.snapshot} onToggle={() => helpOpened('snapshot', !inputHelpOpen.snapshot)} />{snapshotHelp && <Badge>{snapshotHelp.requiredness}</Badge>}</span></legend>
         <InputHelp id="github-snapshot-help" help={snapshotHelp} open={inputHelpOpen.snapshot} onToggle={(open) => helpOpened('snapshot', open)} />
         <label className="github-comparison-toggle"><input type="checkbox" checked={state.inputs.snapshotEnabled} aria-describedby="github-snapshot-help" onChange={(event) => controller.setSnapshotEnabled(event.target.checked)} />Use a caller-supplied summary — no files are read</label>
@@ -161,6 +164,7 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
           </div>}
         </div>)}</div>}
       </fieldset>
+      </details>
       {state.help && <section className="github-guidance" aria-label="Core setup guidance available before preview"><h3>Core setup guide · requirements to review</h3><p>Local, core-sourced text only. Links, paths and commands mentioned in guidance are never opened or executed here.</p>{state.help.guidance.map((entry) => <details className="github-help" key={entry.id}><summary>{entry.label}</summary><HelpDefinitions help={entry} /></details>)}</section>}
       <div className="github-propose-action"><button type="submit" className="button primary" disabled={reason !== null} aria-describedby="github-propose-reason"><Icon name={state.pending ? 'refresh' : 'github'} size={17} />{state.pending ? 'Preparing preview…' : 'Preview GitHub setup'}</button><p id="github-propose-reason">{reason ?? 'Uses the shared core only. No file write, GitHub call, credential access or workflow execution.'}</p></div>
     </form>
@@ -169,9 +173,9 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
     {state.result?.state === 'invalid' && <section className="card"><SectionHeading title="Draft needs correction" description="The passive core returned no workflow or settings proposal. This preview saved or applied nothing and did not contact GitHub."><Badge tone="danger">Format invalid</Badge></SectionHeading><Issues issues={state.result.validation.issues} /><button type="button" className="button secondary" onClick={() => onNavigate('settings')}>Review the draft and field guidance</button></section>}
     {state.result?.state === 'proposed' && <Proposal result={state.result} credentialHelp={credentialHelp} onHelp={onHelp} />}
     {nativeReview}
-    <section className="card"><SectionHeading title="Local setup is not remote authorization" description="Previewing or applying local caller files does not configure remote environments or secrets, or authorize workflow dispatch. Separate connection and workflow cards enforce their own native availability and user-consent requirements." /><div className="github-disabled-actions">
+    <details className="card progressive-disclosure"><summary>Help: what setup changes, and what it does not</summary><SectionHeading title="Saving workflows does not run them" description="Applying workflow files only changes your local repository. GitHub environments, secrets, checks and releases use the separate controls and approvals shown on this page or in Releases." /><div className="github-disabled-actions">
       <p className="save-note">For supported environment protections, secrets and variables, use the separate remote setup card above. It reports current native availability, requires an eligible connection and assigned inputs where needed, and shows a review before each confirmed change. Local file approval never grants remote authority.</p>
       <DisabledAction label="Dispatch from this setup preview" icon="rocket" reason="This preview cannot run checks or dispatch workflows. Use GitHub nonpublishing preflight on this page, or Protected release workflows in Releases; those separate actions may still be unavailable." />
-    </div></section>
+    </div></details>
   </>;
 }

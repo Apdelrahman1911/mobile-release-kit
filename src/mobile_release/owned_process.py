@@ -193,6 +193,11 @@ def run_owned(
                     execution_scope=execution_scope, journal_binding=journal_binding)
         if cleanup:
             raise ValueError("Saved command cleanup has no original signed account owner")
+        if domain is SavedCommandDomain.GitRead:
+            source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+                capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+                cleanup=cleanup, execution_scope=execution_scope,
+                journal_binding=journal_binding, evidence=_evidence)
         if domain is SavedCommandDomain.GitHubAuth:
             source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
                 capture=capture, text=text, output_limit=output_limit, on_start=on_start,

@@ -264,6 +264,15 @@ impl Catalog {
         self.generation==loan.generation&&self.active.is_none()&&self.selected.is_none()&&self.retired.is_none()
             &&self.published.as_ref().is_some_and(|p|Arc::ptr_eq(p,&loan.published)&&p.entries.is_empty())
     }
+    /// Source admission deliberately retires this publication. A directory
+    /// nomination may compare the SAME last original only after its separately
+    /// recorded successful picker/epoch transition; this never restores trust.
+    pub(super) fn same_source_picker_empty_loan(&self, loan:&EmptyLoan, continuing:bool)->bool {
+        if !continuing { return self.same_empty_acquisition_loan(loan); }
+        self.generation==loan.generation && self.active.is_none() && self.selected.is_none() && self.published.is_none()
+            && self.retired==Some(wire::Reason::CatalogChanged)
+            && self.last.as_ref().is_some_and(|last| Arc::ptr_eq(last,&loan.published.original))
+    }
     /// Finite prior/current Catalog holdings for the app-M2 admission census.
     /// No lifecycle mutation, native/book access or post-tail probing. The
     /// worker froze its positive retained charge BEFORE moving the close tail;

@@ -313,6 +313,7 @@ export interface ProjectSnapshot {
   };
   assurance: Assurance;
   issues: Issue[];
+  setupAnalysis?: JsonObject;
 }
 
 export interface ProjectReference { id: string; name: string; path: string }
@@ -418,6 +419,13 @@ export interface PrepareConfigEditRequest {
 
 export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi, LocalStorePrepareApi, LocalHistoryApi, LocalStorePreflightApi, PublicationApi, ArtifactInspectionApi, ProjectInitializationApi, AssetSessionApi, GitHubRemoteSetupApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, GitHubHistoryApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi {
   mode: BridgeMode;
+  // A closed, native-host-bound read-access port. Preview has no such service.
+  readonly applicationRead?: import('./cliReadAccessController.ts').CliReadAccessPort;
+  readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
+  readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
+  readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
+  // Fixed original native owner only; no preview or generic transport fallback.
+  readonly toolAcquisition?: import('./toolAcquisitionNative.ts').ToolAcquisitionApi | null;
   appInfo(): Promise<AppInfo>;
   revealInstallation(): Promise<InstallationRevealResult>;
   installationStatus(): Promise<InstallationStatus>;

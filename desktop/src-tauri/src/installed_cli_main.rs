@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 mod service_protocol;
+mod service_setup_guidance;
+mod agent_identity_requests;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod application_state_store;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

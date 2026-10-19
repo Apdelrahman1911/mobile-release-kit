@@ -17,6 +17,11 @@ use cms::{content_info::ContentInfo, signed_data::SignedData};
 use der_07::{asn1::{AnyRef, ObjectIdentifier, OctetStringRef}, Decode, Reader, SliceReader, Tag, Tagged};
 use pkcs12::pfx::Pfx;
 
+// Separate provisioning comparison DATA, not an expansion of the mechanical
+// FileObservation path above. Candidates are untrusted and grant no use.
+#[path = "apple_provisioning_certificate.rs"]
+pub(crate) mod provisioning_certificate;
+
 const DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1");
 const SIGNED_DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.2");
 const SIBLING_LIMIT: usize = 64;

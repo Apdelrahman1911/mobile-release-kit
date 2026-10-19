@@ -28,6 +28,9 @@ const SIGNAL_STORAGE:usize=4*1024;
 /// publisher reserves here before reading F and before Document/Registry locks.
 pub(crate) struct ControlSlot {
     book: Mutex<ControlBook>, wake: std::sync::Condvar, unknown: AtomicBool,
+    // Fixed native integration, never a callback or renderer-selected service.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    application_service: std::sync::OnceLock<Weak<crate::application_service_host::ApplicationHost>>,
     // Test observation only; no control/callback/authority can be injected.
     #[cfg(test)] wait_entries: AtomicUsize,
     #[cfg(test)] wait_observed: std::sync::Condvar,
@@ -64,19 +67,36 @@ pub(crate) struct CancelPublisher {
 impl Default for ControlSlot {
     fn default() -> Self { Self { book: Mutex::new(ControlBook::default()),
         wake: std::sync::Condvar::new(), unknown: AtomicBool::new(false),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        application_service: std::sync::OnceLock::new(),
         #[cfg(test)] wait_entries: AtomicUsize::new(0),
         #[cfg(test)] wait_observed: std::sync::Condvar::new(),
     } }
 }
 impl ControlSlot {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn bind_application_service(&self, host: &Arc<crate::application_service_host::ApplicationHost>) {
+        let selected = Arc::downgrade(host);
+        if let Some(original) = self.application_service.get() {
+            if !Weak::ptr_eq(original, &selected) || original.strong_count() == 0 { self.poisoned(); }
+        } else if self.application_service.set(selected).is_err() {
+            self.poisoned();
+        }
+    }
     pub(crate) fn poisoned(&self) {
         self.unknown.store(true, Ordering::SeqCst);
         let book = self.book.lock().unwrap_or_else(|error| error.into_inner());
         let original = book.original.clone().or_else(|| book.review.as_ref()
             .and_then(|route|route.original.upgrade()).map(|original|original.control.clone()));
         drop(book);
-        self.wake.notify_all();
+        // Original STOP/poison propagation must not wait for read-service disk
+        // work. The read host is still retired before this call returns.
         if let Some(original) = original { original.poisoned(); }
+        self.wake.notify_all();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(host) = self.application_service.get().and_then(Weak::upgrade) {
+            let _ = host.retire_for_exit();
+        }
     }
     pub(crate) fn is_unknown(&self) -> bool { self.unknown.load(Ordering::SeqCst) || self.book.is_poisoned() }
     fn pending(book: &ControlBook) -> bool { book.pending.iter().any(Option::is_some) || book.cancel.is_some() }
@@ -203,6 +223,17 @@ impl Publisher {
     pub(crate) fn at(&self) -> Instant { self.at }
     pub(crate) fn accepted(&self) -> bool { self.accepted && !self.finished }
     pub(crate) fn same_slot(&self, slot: &Arc<ControlSlot>) -> bool { Arc::ptr_eq(&self.slot, slot) }
+    /// Read-only comparison for the exact ordinary source-picker publisher.
+    /// epoch() remains strict for every other caller. No acceptance or renewal.
+    pub(crate) fn tool_source_epoch(&self) -> Result<u64, BridgeError> {
+        let book = self.slot.book.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if self.finished || self.index >= 8 || self.slot.is_unknown() || book.cancel.is_some()
+            || book.pending.iter().enumerate().any(|(i,p)| i != self.index && p.is_some())
+            || !book.pending[self.index].is_some_and(|p| p.serial == self.serial && p.accepted == self.accepted) {
+            return Err(BridgeError::cleanup_unknown());
+        }
+        Ok(book.epoch)
+    }
     pub(crate) fn accept(&mut self, reason: wire::Reason) -> Result<(), BridgeError> {
         if self.accepted || self.finished { self.slot.poisoned(); return Err(BridgeError::cleanup_unknown()); }
         let mut book = self.slot.book.lock().map_err(|_| BridgeError::cleanup_unknown())?;
@@ -231,9 +262,18 @@ impl Publisher {
         };
         self.accepted = true;
         drop(book);
-        // No Document/Registry/native book is needed to STOP the armed original.
+        // Propagate the original STOP first. Host locks/storage must never
+        // delay its watchdog or cancellation signal behind shared read data.
         if let Some(original) = original { original.control.stop_at(reason, self.at); }
         self.slot.wake.notify_all();
+        // The original input epoch is already changed, and its publication is
+        // still pending. Retire stale shared data before allowing the original
+        // action to proceed. A host/storage error revokes only this read service
+        // and does not rewrite the independent core mutation's outcome.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(host) = self.slot.application_service.get().and_then(Weak::upgrade) {
+            let _ = host.invalidate_all_native();
+        }
         Ok(())
     }
     fn resolve(&mut self, accepted: bool) {
@@ -1943,6 +1983,26 @@ mod lifecycle_book_tests {
         assert!(control.failure().is_none() && !*control.stop.borrow());
     }
 
+    #[test]
+    fn tool_source_epoch_only_observes_its_exact_sole_publisher() {
+        let slot=Arc::new(ControlSlot::default());
+        let mut publisher=slot.reserve(PublisherKind::General,false).unwrap();
+        assert!(slot.epoch().is_err());assert_eq!(publisher.tool_source_epoch().unwrap(),0);
+        let other=slot.reserve(PublisherKind::General,false).unwrap();
+        assert!(publisher.tool_source_epoch().is_err());other.reject();
+        { let mut book=slot.book.lock().unwrap();book.cancel=Some(PendingCancel{serial:1,original:Weak::new(),reviewed:None}); }
+        assert!(publisher.tool_source_epoch().is_err());slot.book.lock().unwrap().cancel=None;
+        { let mut book=slot.book.lock().unwrap();book.pending[publisher.index].as_mut().unwrap().serial+=1; }
+        assert!(publisher.tool_source_epoch().is_err());
+        slot.book.lock().unwrap().pending[publisher.index].as_mut().unwrap().serial=publisher.serial;
+        publisher.accept(wire::Reason::SourceChanged).unwrap();
+        assert_eq!(publisher.tool_source_epoch().unwrap(),1);assert!(slot.epoch().is_err());
+        slot.book.lock().unwrap().pending[publisher.index].as_mut().unwrap().accepted=false;
+        assert!(publisher.tool_source_epoch().is_err());
+        slot.book.lock().unwrap().pending[publisher.index].as_mut().unwrap().accepted=true;
+        publisher.resolve(true);assert!(publisher.tool_source_epoch().is_err());
+        assert_eq!(slot.epoch().unwrap(),1);
+    }
     #[test]
     fn accepted_event_keeps_original_f_after_pending_projection_finishes() {
         let (slot,control,_cohort,gate)=control_at(Instant::now());

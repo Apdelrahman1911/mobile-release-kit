@@ -193,6 +193,12 @@ impl AndroidBuildOwner {
         -> Result<crate::android_toolchain_catalog::Status,BridgeError> {
         self.saved.cancel_android_catalog(input,gate)
     }
+    // Closed sibling facet only: never exposes a SavedCommandOwner/path as
+    // renderer authority or lends an Android build permit to another command.
+    pub(crate) fn bind_tool_acquisition(&self, tools: &crate::saved_command_owner::SavedCommandOwner,
+        document: &std::sync::Arc<()>, native_application_data: &std::path::Path) -> Result<(), BridgeError> {
+        tools.bind_tool_acquisition_document(&self.saved, document, native_application_data)
+    }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }

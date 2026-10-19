@@ -530,6 +530,7 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind, initial_folder: Option<&std
         // Keep the original PANEL borrow, but no Record/GuiFacts guard, across
         // this SAME start. There is no per-getter observer callback in AppKit.
         let returned = match initial_folder {
+            Some(root) if matches!(choice,PanelKind::AndroidJdk|PanelKind::AndroidSdk|PanelKind::AndroidGradle) => panel.start_android_source(choice,root),
             Some(root) => panel.start_project_field(choice, root),
             None => panel.start(choice),
         };
@@ -660,6 +661,7 @@ fn tick(call: &Arc<GuiCall>, id: u32, kind: PanelKind,
 // separate; original native custody still decides whether either can be used.
 fn panel_kind(choice: DialogChoice, initial_folder: Option<&std::path::Path>) -> Result<PanelKind, Reason> {
     match (choice, initial_folder) {
+        (DialogChoice::GitHubAuthExecutable, None) => Ok(PanelKind::GitHubAuthExecutable),
         (DialogChoice::AndroidToolSource(role), None) => Ok(match role {
             crate::android_tool_sources::Role::Jdk => PanelKind::AndroidJdk,
             crate::android_tool_sources::Role::Sdk => PanelKind::AndroidSdk,
@@ -698,6 +700,19 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
     match run_owned_choice(app, owner, choice, initial_folder).await? {
         Some(DialogResult::Single(path)) => Ok(Some(path)), None => Ok(None),
         Some(DialogResult::Images(_) | DialogResult::Backup) => Err(Reason::CleanupUnknown),
+    }
+}
+/// The initial directory comes only from a completed original acquisition.
+/// Generic AndroidToolSource + Some(path) routing above remains refused.
+pub(crate) async fn run_owned_acquired_tool_source(app: &tauri::AppHandle, owner: &Arc<OriginalWork>,
+    nomination: &crate::saved_command_owner::ToolSourceNomination) -> Result<Option<PathBuf>, Reason> {
+    if !nomination.admitted_to(owner) { owner.gui.not_created(Reason::ContextStale);return Err(Reason::ContextStale); }
+    let kind=match panel_kind(DialogChoice::AndroidToolSource(nomination.role()),None) {
+        Ok(kind)=>kind,Err(reason)=>{owner.gui.not_created(reason);return Err(reason);}
+    };
+    match run_owned_panel(app,owner,owner.gui.clone(),kind,Some(nomination.initial_directory().to_path_buf())).await? {
+        Some(DialogResult::Single(path))=>Ok(Some(path)),None=>Ok(None),
+        Some(DialogResult::Images(_)|DialogResult::Backup)=>Err(Reason::CleanupUnknown),
     }
 }
 pub(crate) async fn run_owned_images_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>) -> Result<Option<Vec<PathBuf>>, Reason> {
@@ -932,6 +947,12 @@ mod tests {
         assert!(matches!(panel_kind(field, None), Err(Reason::SourceRefused)));
         assert!(matches!(panel_kind(field, Some(Path::new("/inert/../project"))), Err(Reason::SourceRefused)));
         assert!(matches!(panel_kind(field, Some(Path::new("/inert/project"))), Ok(PanelKind::VersionSource)));
+    }
+    #[test]
+    fn selected_gh_has_one_fixed_file_purpose_and_no_caller_initial_path() {
+        assert_eq!(panel_kind(DialogChoice::GitHubAuthExecutable, None).unwrap(), PanelKind::GitHubAuthExecutable);
+        assert!(panel_kind(DialogChoice::GitHubAuthExecutable, Some(std::path::Path::new("/fixture"))).is_err());
+        assert_ne!(PanelKind::GitHubAuthExecutable, PanelKind::File);
     }
     #[test]
     fn evidence_folder_has_its_own_purpose_without_a_project_initial_root() {

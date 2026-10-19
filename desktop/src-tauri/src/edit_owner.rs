@@ -625,7 +625,9 @@ pub(crate) struct RegisteredEditRoot {
 // Keep existing workflow callers/fixtures bound to their original API. The
 // shared root proof is not a domain permit; admission and tickets remain tagged.
 pub(crate) type WorkflowRegistration = RegisteredEditRoot;
-pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool, saved_text_recovery: bool, configuration_recovery: bool, initialization: Option<initialization_wire::Open>, identity: Option<identity_wire::BoundOpen> }
+pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool, saved_text_recovery: bool, configuration_recovery: bool, initialization: Option<initialization_wire::Open>, identity: Option<identity_wire::BoundOpen>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_identity: Option<Arc<agent_identity::Link>> }
 pub(crate) type WorkflowOpenTicket = RegisteredOpenTicket;
 
 // Only the ignored headless workflow fixture can construct this private value,
@@ -758,12 +760,21 @@ fn expired_phase(review_end: Instant, phase_end: Option<Instant>, applying: bool
     (now >= end).then_some((end, if !applying && end == review_end { Reason::ReviewExpired } else { Reason::ActiveTimeout }))
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "edit_owner_identity_history.rs"]
+mod identity_history;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "edit_owner_agent_identity.rs"]
+mod agent_identity;
+
 #[derive(Clone)]
 pub struct EditOwner { inner: Arc<Inner> }
 struct Inner {
     runtime: RuntimeConfig, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify,
     poisoned: AtomicBool,
     android_registration: std::sync::OnceLock<SavedRegistrationBinding>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    identity_history: std::sync::OnceLock<identity_history::Binding>,
     #[cfg(all(test, feature = "development-runtime"))]
     fixture_authorized: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -933,6 +944,8 @@ struct ActiveOwner {
     session: Arc<Session>, projection: EditProjection, review_end: Instant, phase_end: Option<Instant>,
     cleanup_start: Option<Instant>, prepare_counters: Option<(u32, u32)>, claimed_seq: u32,
     opened: bool, prepared: bool, terminal: bool, unknown: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    history: identity_history::Link,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -945,6 +958,8 @@ struct Startup { attempted: bool, returned: bool, failed: bool, child: Option<Ch
 impl Default for Startup { fn default() -> Self { Self { attempted: false, returned: false, failed: false, child: None } } }
 struct Session {
     domain: EditDomain, registration: Option<WorkflowRegistration>, saved_text_recovery: bool, configuration_recovery: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    agent_identity: Option<Arc<agent_identity::Link>>,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native_failure: Mutex<Option<(Reason, Instant)>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1420,6 +1435,8 @@ impl Inner {
         if registry.disabled || registry.exhausted || self.poisoned.load(Ordering::SeqCst) {
             if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        identity_history::changed(self, registry);
         self.changes.send_replace(registry.revision);
         self.changed.notify_waiters();
     }
@@ -1679,6 +1696,8 @@ impl EditOwner {
         let (changes, _) = watch::channel(0);
         Self { inner: Arc::new(Inner { runtime, changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             android_registration: std::sync::OnceLock::new(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            identity_history: std::sync::OnceLock::new(),
             #[cfg(all(test, feature = "development-runtime"))]
             fixture_authorized: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1906,6 +1925,8 @@ impl EditOwner {
         registration: RegisteredEditRoot, mut ticket: RegisteredOpenTicket,
         continuity: identity_wire::NativeContinuity) -> Result<IdentityStatus, BridgeError> {
         if !args.valid() || ticket.domain != EditDomain::ProjectIdentity || ticket.identity.is_some() { return Err(invalid_owner()); }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if ticket.agent_identity.as_ref().is_some_and(|link| !link.matches_open(&args)) { return Err(invalid_owner()); }
         let project_id = args.project_id().to_owned();
         ticket.identity = Some(args.bind(continuity));
         let root = registration.root.path.clone();
@@ -2040,7 +2061,9 @@ impl EditOwner {
         // Entropy is obtained before the real document/selection mutex. This
         // private ticket performs no observation, registration, claim or spawn.
         let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
-        Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false, configuration_recovery, initialization: None, identity: None })
+        Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false, configuration_recovery, initialization: None, identity: None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_identity: None })
     }
     pub(crate) fn open_workflow(&self, window: &str, project_id: String, registration: WorkflowRegistration,
         ticket: WorkflowOpenTicket) -> Result<WorkflowEditStatus, BridgeError> {
@@ -2164,6 +2187,11 @@ impl EditOwner {
         if ticket.as_ref().is_some_and(|ticket| ticket.saved_text_recovery || ticket.configuration_recovery) { return Err(invalid_owner()); }
         if project_id.is_empty() || project_id.len() > 128 { return Err(BridgeError::invalid()); }
         let root = root.to_str().filter(|s| s.len() <= 4096).ok_or_else(BridgeError::invalid)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let agent_identity = {
+            if ticket.as_ref().is_some_and(|ticket| ticket.agent_identity.is_some() && domain != EditDomain::ProjectIdentity) { return Err(invalid_owner()); }
+            ticket.as_ref().and_then(|ticket| ticket.agent_identity.clone())
+        };
         let (id, executor, workflow_recovery, saved_text_recovery, configuration_recovery, initialization, identity) = match (domain, ticket) {
             (EditDomain::Configuration, None) => {
                 let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
@@ -2219,6 +2247,8 @@ impl EditOwner {
         let (pipes, _) = watch::channel(PipeAcquisition::Pending);
         let (frames, frame_rx) = mpsc::channel(3);
         let session = Arc::new(Session { domain, registration, saved_text_recovery, configuration_recovery, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_identity,
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2268,11 +2298,17 @@ impl EditOwner {
             }
             let now = Instant::now();
             let generation = r.generation.clone();
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_identity::before_claim(&self.inner, &r, &session, &project_id)?;
             // Claim is permanent for this invocation BEFORE its projection or
             // queue can fail. No postclaim error is a negative admission fact.
             *claimed = true;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_identity::claim_entered(&session);
             r.active = Some(ActiveOwner { session: session.clone(), review_end: now + REVIEW, phase_end: Some(now + ACTIVE), cleanup_start: None,
                 prepare_counters: None, claimed_seq: 0, opened: false, prepared: false, terminal: false, unknown: false,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                history: identity_history::Link::default(),
                 projection: EditProjection { domain, workflow: (domain == EditDomain::GitHubWorkflows).then(||
                     if workflow_recovery { workflow_wire::Details::recovery() } else { workflow_wire::Details::default() }),
                     metadata_text: if domain == EditDomain::MetadataText && saved_text_recovery { Some(metadata_wire::Details::recovery()) }
@@ -2282,6 +2318,8 @@ impl EditOwner {
                     project_id, session_id: id.clone(), owner_generation: generation, phase: Phase::Opening,
                     review_remaining_ms: REVIEW.as_millis() as u32, checkout: None, prepared: None, apply_submitted: false,
                     core_outcome: None, native_reason: Reason::None, native_finality: NativeFinality::Pending, late_settled: false } });
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            agent_identity::linked(&r);
             self.inner.bump(&mut r, &mut publication);
             self.inner.snapshot_for(&r, domain)? // Admission reply captured BEFORE queue/start.
         };
@@ -2404,6 +2442,8 @@ impl EditOwner {
             }
             match (domain, submission) {
                 (EditDomain::ProjectIdentity, Some(SavedTextSubmission::Identity(submission))) => {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    if !agent_identity::prepare_allowed(a, &submission, now) { self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
                     if counters != (0, 0) || !a.projection.identity.as_mut().is_some_and(|detail| detail.admit_submission(submission)) {
                         self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
                     }
@@ -2539,6 +2579,8 @@ impl EditOwner {
             let generation = r.generation.clone();
             let a = r.active.as_mut().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
             if a.projection.phase != Phase::Reviewing || !a.prepared { return Err(invalid_owner()); }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if !agent_identity::apply_allowed(a, now) { self.inner.trigger_locked(&mut publication, &mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
             if domain == EditDomain::Configuration && a.session.configuration_recovery != recovery_intent { return Err(invalid_owner()); }
             if a.session.registration != registration || a.projection.plan_token() != Some(plan_token) {
                 if a.session.configuration_recovery || matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages | EditDomain::ProjectInitialization | EditDomain::ProjectIdentity) { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); }
@@ -4325,6 +4367,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         }
         r.last = Some(a.projection); // Atomic active -> one terminal projection.
         inner.bump(&mut r, &mut publication);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
     }
     guard.completed = true;
     })();

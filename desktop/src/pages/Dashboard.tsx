@@ -18,6 +18,7 @@ import type { IconName } from '../components/Icon.tsx';
 import { ProgressiveDisclosure } from '../components/ProgressiveDisclosure.tsx';
 import { SetupWizard } from '../components/SetupWizard.tsx';
 import { TaskOverview } from '../components/TaskOverview.tsx';
+import { LocalSetupReadiness } from '../components/LocalSetupReadiness.tsx';
 import '../components/setupOverview.css';
 
 const projectHelp: HelpContent = {
@@ -37,11 +38,12 @@ const laterTasks: readonly { page: Page; icon: IconName; title: string; descript
   { page: 'artifacts', icon: 'box', title: 'Inspect a build', description: 'Check a selected app package and its saved release evidence.' },
 ];
 
-export function Dashboard({ session, preview, chooseDisabled, chooseReason, refreshReason, releaseVersionState, releaseVersionReason,
+export function Dashboard({ session, preview, chooseDisabled, chooseReason, refreshReason, setupReadinessReason, releaseVersionState, releaseVersionReason,
   versionEditor, versionEditState, initializationPanel, initializationState, configSaveState, checks, activities,
   onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
   session: ProjectSession | null; info: AppInfo | null; preview: boolean;
   chooseDisabled: boolean; chooseReason: string | null; refreshReason: string | null;
+  setupReadinessReason: string | null;
   versionEditor: ReactNode; versionEditState: VersionEditState;
   initializationPanel: ReactNode; initializationState: ProjectInitializationState;
   configSaveState: ConfigEditState;
@@ -102,6 +104,9 @@ export function Dashboard({ session, preview, chooseDisabled, chooseReason, refr
 
     <TaskOverview overview={overview} preview={preview} onAction={act} />
     <SetupWizard overview={overview} onAction={act} onHelp={onHelp} />
+    <ProgressiveDisclosure title="Local setup checklist" description="See what can be prepared now, and what can wait until Store delivery.">
+      <LocalSetupReadiness session={session} preview={preview} refreshReason={setupReadinessReason} onNavigate={onNavigate} />
+    </ProgressiveDisclosure>
 
     <ProgressiveDisclosure title="Edit version & build number" needsAttention={overview.versionEditorNeedsAttention} reveal={versionReveal}
       description="Manual by default. Open the saved values, choose a change and review it before saving. This does not build or release the app.">

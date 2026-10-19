@@ -46,7 +46,7 @@ function status(revision = 0, p = null, overrides = {}) {
 }
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let i = 0; i < 15; i += 1) await Promise.resolve(); };
-function harness({ subscribePending = false, invokeHook, currentHook } = {}) {
+function harness({ subscribePending = false, invokeHook, currentHook, submittedHook, offHook } = {}) {
   const calls = [], submitted = [], outcomes = [], subscription = deferred(); let event, offCount = 0, current = context(), blocked = null;
   const api = createProjectIdentityApi('native', (command, raw) => {
     assert.ok(raw instanceof Uint8Array);
@@ -55,11 +55,11 @@ function harness({ subscribePending = false, invokeHook, currentHook } = {}) {
     return work.promise;
   }, (name, callback) => {
     assert.equal(name, PROJECT_IDENTITY_EVENT); event = callback;
-    return subscribePending ? subscription.promise : Promise.resolve(() => { offCount++; });
+    return subscribePending ? subscription.promise : Promise.resolve(() => { offCount++; offHook?.(); });
   });
   let owner;
   owner = new ProjectIdentityNativeController(api, { current: () => { currentHook?.(owner); return current; },
-    otherOperationReason: () => blocked, onMutationSubmitted: (id, intent) => submitted.push([id, intent]), onOutcome: (p) => outcomes.push(p) });
+    otherOperationReason: () => blocked, onMutationSubmitted: (id, intent) => { submitted.push([id, intent]); submittedHook?.(id, intent); }, onOutcome: (p) => outcomes.push(p) });
   const ui = new ProjectIdentityController(() => current, owner); ui.subscribe(() => {});
   return { api, owner, ui, calls, submitted, outcomes, subscription, get offCount() { return offCount; },
     emit(value) { event(value); }, change(next) { current = next; }, block(value) { blocked = value; },
@@ -179,7 +179,8 @@ test('reentrant listeners and context getters can retire a latched admission bef
 
 test('pending Open keeps both original promises while explicit status finds its ID and Close is sent once', async () => {
   const h = harness(); await h.ready(); assert.equal(h.ui.analyze(), true); const open = h.calls.at(-1);
-  assert.equal(h.owner.requestClose(), true); assert.equal(h.count('project_identity_close'), 0);
+  assert.equal(h.owner.canRequestClose(), true);
+  assert.equal(h.owner.requestClose(), true); assert.equal(h.owner.canRequestClose(), false); assert.equal(h.count('project_identity_close'), 0);
   assert.equal(h.owner.checkStatus(), true); assert.equal(h.owner.getState().pendingCount, 2);
   h.calls.at(-1).resolve(status(1, projection('opening'))); await flush(); const close = h.calls.at(-1);
   assert.equal(close.command, 'project_identity_close'); assert.deepEqual(close.args, { sessionId: SID });
@@ -192,7 +193,8 @@ test('pending Open keeps both original promises while explicit status finds its 
 });
 
 test('a lost Open never retries or attaches a foreign project; explicit original status/close remain available', async () => {
-  const h = harness(); await h.ready(); assert.equal(h.ui.analyze(), true); h.calls.at(-1).reject(Error('PRIVATE synthetic exception'));
+  const h = harness(); await h.ready(); assert.equal(h.owner.canRequestClose(), false);
+  assert.equal(h.ui.analyze(), true); h.calls.at(-1).reject(Error('PRIVATE synthetic exception'));
   await flush(); assert.equal(h.owner.getState().issue, 'unconfirmed'); assert.equal(h.calls.length, 2);
   assert.equal(h.ui.analyze(), false); assert.equal(h.owner.checkStatus(), true);
   h.calls.at(-1).resolve(status(1, projection('editing', 'edit', { projectId: 'project-2' }))); await flush();
@@ -201,6 +203,19 @@ test('a lost Open never retries or attaches a foreign project; explicit original
   assert.equal(h.owner.discard({ sessionId: SID }), false); assert.ok(h.owner.ownerReason());
   assert.equal(h.count('project_identity_open'), 1); assert.equal(h.count('project_identity_close'), 0);
   assert.equal(JSON.stringify(h.owner.getState()).includes('PRIVATE'), false);
+});
+
+test('App invalidation after real Apply handoff retires consent without cancelling or releasing the original request', async () => {
+  const h = harness({ submittedHook: () => {
+    assert.equal(h.calls.at(-1).command, 'project_identity_apply');
+    assert.equal(h.owner.getState().pendingCount, 1);
+    h.owner.beforeContextIntent(); h.change({ ...context(), contextEpoch: 2, blocked: true }); h.ui.retire();
+  } });
+  await h.ready(); await h.review(); h.ui.acknowledgeReview(true); assert.equal(h.ui.apply(), true);
+  assert.equal(h.count('project_identity_close'), 0); assert.equal(h.owner.getState().pendingCount, 1);
+  h.calls.at(-1).resolve(status(3, projection('final'))); await flush();
+  assert.equal(h.owner.getState().original.coreOutcome.effect, 'committed'); assert.equal(h.owner.getState().pendingCount, 0);
+  assert.equal(h.count('project_identity_apply'), 1); assert.equal(h.count('project_identity_close'), 0);
 });
 
 test('native finality may arrive before an Apply reply; late transport rejection cannot erase it or free that Promise early', async () => {
@@ -277,6 +292,18 @@ test('recovery uses separate original revision/intent and the same UI explicit c
   assert.deepEqual(h.calls.at(-1).args, { sessionId: SID, revision: REV, planToken: PLAN, intent: 'recover' });
   h.calls.at(-1).resolve(status(3, projection('final', 'recover'))); await flush();
   assert.equal(h.ui.getSnapshot().result, 'recovered'); assert.deepEqual(h.submitted, [['project-1', 'recover']]);
+});
+
+test('failed original unlisten latches uncertainty after disposal and cannot be treated as a safe rebind', async () => {
+  const h = harness({ offHook: () => { throw Error('PRIVATE inert unlisten failure'); } });
+  await h.ready(); assert.equal(h.owner.ownerReason(), null);
+  const before = h.owner.getState(), count = h.calls.length;
+  h.ui.dispose(); h.owner.dispose();
+  assert.notEqual(h.owner.getState(), before); assert.equal(h.owner.getState().issue, 'unconfirmed');
+  assert.ok(h.owner.ownerReason()); assert.equal(h.owner.getState().pendingCount, 0);
+  assert.equal(h.owner.checkStatus(), false); assert.equal(h.owner.connect(), false);
+  assert.equal(h.calls.length, count); assert.equal(h.offCount, 1);
+  assert.equal(JSON.stringify(h.owner.getState()).includes('PRIVATE'), false);
 });
 
 test('disposal retires display/consent but owns both original Open and Close promises until they settle', async () => {

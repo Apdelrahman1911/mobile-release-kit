@@ -81,6 +81,12 @@ pub(crate) struct ApplicationDirectoryExclusion {
 pub(crate) type ApplicationDirectoryFields = (u64, u64, u32, u32, u32);
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl ApplicationDirectoryExclusion {
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        let mut bytes = std::mem::size_of::<Self>().checked_add(self.path.capacity())?
+            .checked_add(self.projects.capacity().checked_mul(std::mem::size_of::<RegisteredRoot>())?)?;
+        for project in &self.projects { bytes = bytes.checked_add(project.path.capacity())?; }
+        Some(bytes)
+    }
     pub(crate) fn matches(&self, path: &Path, projects: &[RegisteredRoot]) -> bool {
         self.path == path && self.projects == projects
     }

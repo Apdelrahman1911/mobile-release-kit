@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error::BridgeError,
     protocol::{check_value, strict_json, valid_id}};
+#[path = "apple_provisioning_bundle_read.rs"]
+mod bundle_read;
+#[path = "apple_provisioning_profile_read.rs"]
+mod profile_read;
 
 pub(crate) const PROTOCOL: &str = "mrk-local-store-preflight/1";
 pub(crate) const CONSENT: &str = "local-android-store-access-v1";
@@ -58,12 +62,15 @@ pub(crate) struct Context {
     pub(crate) saved_config: Content, pub(crate) saved_version: crate::android_build_protocol::SavedVersion,
     pub(crate) credential_context_revision: u32, pub(crate) record_id: String, pub(crate) record_revision: u32,
     pub(crate) execution_mode: ExecutionMode, pub(crate) platform: AccessPlatform, pub(crate) operation: Operation,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "bundle_read::optional_query")]
+    pub(crate) query: Option<bundle_read::Query>,
 }
 impl Context {
     fn valid(&self) -> bool { valid_id(&self.project_id) && self.draft_revision < u32::MAX
         && self.baseline_generation < u32::MAX && self.saved_config.valid() && self.saved_version.valid()
         && self.credential_context_revision > 0 && self.credential_context_revision < u32::MAX
-        && token(&self.record_id) && self.record_revision > 0 && self.record_revision < u32::MAX }
+        && token(&self.record_id) && self.record_revision > 0 && self.record_revision < u32::MAX
+        && (self.query.is_none() || self.platform == AccessPlatform::Ios) }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -73,13 +80,15 @@ pub(crate) struct Prepare {
     pub(crate) credential_context_revision: u32, pub(crate) record_id: String, pub(crate) record_revision: u32,
     pub(crate) execution_mode: ExecutionMode,
     #[serde(default)] platform: Option<AppleSelection>,
+    #[serde(default, deserialize_with = "bundle_read::optional_query")] query: Option<bundle_read::Query>,
 }
 impl Prepare {
     pub(crate) fn context(&self) -> Context { Context { project_id: self.project_id.clone(), draft_revision: self.draft_revision,
         baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
         saved_version: self.saved_version.clone(), credential_context_revision: self.credential_context_revision,
         record_id: self.record_id.clone(), record_revision: self.record_revision, execution_mode: self.execution_mode,
-        platform: if self.platform.is_some(){AccessPlatform::Ios}else{AccessPlatform::Android}, operation: Operation::LocalStorePreflight } }
+        platform: if self.platform.is_some(){AccessPlatform::Ios}else{AccessPlatform::Android}, operation: Operation::LocalStorePreflight,
+        query: self.query } }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -92,17 +101,22 @@ pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
         "credentialContextRevision", "recordId", "recordRevision", "executionMode"])
         && !(keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
             "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform"])
-            && value.get("platform").and_then(Value::as_str)==Some("ios")) { return Err(invalid()); }
+            && value.get("platform").and_then(Value::as_str)==Some("ios"))
+        && !(keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+            "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "query"])
+            && value.get("platform").and_then(Value::as_str)==Some("ios")
+            && matches!(value.get("query").and_then(Value::as_str),Some("bundle-id-registration"|"app-store-profile-reuse"))) { return Err(invalid()); }
     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
     if !input.context().valid() { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT) { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|bundle_read::CONSENT|profile_read::CONSENT) { return Err(invalid()); } Ok(input)
 }
 impl Start {
     pub(crate) fn matches_context(&self, context:&Context)->bool {
+        if let Some(query)=context.query { return context.platform == AccessPlatform::Ios && self.consent_version == query.consent(); }
         self.consent_version == context.platform.consent()
     }
 }
@@ -177,16 +191,26 @@ pub(crate) struct Finding { check: CheckId, status: CoreStatus }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Limitation { NonPublishing, NoProjectCommands, NoBuildOrSigning, NoReleaseReadiness,
-    PointInTimeAccountAccess, SavedInputsNotAtomic }
+    PointInTimeAccountAccess, SavedInputsNotAtomic, NoTeamVerification, NoGlobalAvailabilityClaim, NoProvisioningChanges,
+    MetadataOnly, NoPrivateKeyMatch, NoProfileAuthentication, NoAccountCertificateInventory }
 const LIMITATIONS: [Limitation; 6] = [Limitation::NonPublishing, Limitation::NoProjectCommands,
     Limitation::NoBuildOrSigning, Limitation::NoReleaseReadiness, Limitation::PointInTimeAccountAccess,
     Limitation::SavedInputsNotAtomic];
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ResultData { schema_version: u32, scope: String, findings: Vec<Finding>, limitations: Vec<Limitation> }
+pub(crate) struct ResultData { schema_version: u32, scope: String, findings: Vec<Finding>, limitations: Vec<Limitation>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "bundle_read::optional_observation")]
+    observation: Option<bundle_read::Observation>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "profile_read::optional_summary")]
+    profile_reuse: Option<profile_read::Summary>,
+}
 impl ResultData {
-    fn valid(&self, platform:AccessPlatform) -> bool {
-        self.schema_version == 1 && self.scope == platform.scope()
+    fn valid(&self, context:&Context) -> bool {
+        if let Some(query)=context.query { return context.platform == AccessPlatform::Ios && match query {
+            bundle_read::Query::BundleIdRegistration => bundle_read::valid_result(self),
+            bundle_read::Query::AppStoreProfileReuse => profile_read::valid_result(self),
+        }; }
+        self.observation.is_none() && self.profile_reuse.is_none() && self.schema_version == 1 && self.scope == context.platform.scope()
             && self.limitations.as_slice() == LIMITATIONS && self.findings.len() <= 16
     }
 }
@@ -215,7 +239,7 @@ impl Terminal {
             || self.lifetime.commands > context.platform.commands() { return false; }
         if self.outcome == Outcome::Complete {
             return self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
-                && self.result.as_ref().is_some_and(|r| r.valid(context.platform));
+                && self.result.as_ref().is_some_and(|r| r.valid(context));
         }
         if self.result.is_some() || self.reason == Reason::None { return false; }
         if self.outcome == Outcome::Unknown { return self.reason == Reason::CleanupUnknown && !self.lifetime.settled(); }

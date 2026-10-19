@@ -80,9 +80,13 @@ import { PROJECT_RECOVERY_EVENT, encodeProjectRecoveryRequest, projectRecoveryEr
 import type { ProjectRecoveryCommand } from './projectRecoveryProtocol.ts';
 import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
+import { cliReadAccessProjectIdFits } from './cliReadAccess.ts';
+import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdentityNative.ts';
+import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
+import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -379,6 +383,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
   };
   return {
     mode,
+    projectIdentity: createProjectIdentityApi(mode, invoke, listen),
+    agentIdentity: createAgentIdentityApi(mode, invoke),
+    githubGhEntry: createGitHubGhApi(mode, invoke),
+    toolAcquisition: createToolAcquisitionApi(mode, invoke, listen),
+    applicationRead: mode === 'native' ? Object.freeze({
+      status: () => call<unknown>('application_read_status', {}),
+      allow: (projectId: string) => cliReadAccessProjectIdFits(projectId)
+        ? call<unknown>('allow_application_read', { projectId })
+        : Promise.reject({ code: 'cli_access_invalid_request', message: 'Select a project in this app first.', retryable: false }),
+      revoke: () => call<unknown>('revoke_application_read', {}),
+    }) : undefined,
     appInfo: () => call<AppInfo>('app_info'),
     revealInstallation: async () => {
       try {
@@ -784,6 +799,8 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     chooseAsset: (request) => assetCall('asset_choose', { ...request }),
     prepareCredential: (request) => assetCall('credential_prepare', { ...request }),
     prepareAssetDelete: (record) => assetCall('vault_prepare_delete', { ...record }),
+    exportCredentialBackup: (request) => assetCall('vault_backup_export', request),
+    importCredentialBackup: (request) => assetCall('vault_backup_import', request),
     commitAsset: (previewToken) => assetCall('vault_commit', { previewToken }),
     bindAsset: (previewToken) => assetCall('vault_bind', { previewToken }),
     discardAsset: (operationId) => assetCall('vault_discard', { operationId }),

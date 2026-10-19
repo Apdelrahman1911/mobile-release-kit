@@ -24,6 +24,7 @@ from ..discovery import IGNORED_PARTS, PRIVATE_PREFIXES, parse_project_sources
 from ..errors import ConfigurationError
 from ..init_transaction import is_state_name
 from ._json import bounded_json_text
+from ._setup_analysis import analyze_setup
 from .contracts import ApiError, ConfigObservation, Issue, ScanCounts, SnapshotResult, assurance, issue
 
 MAX_DEPTH = 12
@@ -703,9 +704,17 @@ def _assemble_snapshot(selected_root: str, observed_at: str, inventory: _Invento
     except (ValueError, RecursionError):
         inventory.note("snapshot.parse-limit", "Static source parsing could not produce a bounded hint set.")
         bounded = {}
+    # Optional guidance uses the SAME admitted configuration and bounded hints.
+    # An unsupported projection must not discard an otherwise useful snapshot.
+    analysis = None
+    try:
+        analysis = analyze_setup(config["state"], config["data"], bounded,
+                                 partial=inventory.partial)
+    except ApiError:
+        pass
     # Cooperative parsing over finite input may use the remaining scan allowance.
     inventory.tick()
-    return {
+    result: SnapshotResult = {
         "root": selected_root, "observedAt": observed_at,
         "observationScope": "single-request-non-atomic", "config": config,
         "discovery": {"state": "unverified", "partial": inventory.partial,
@@ -713,3 +722,6 @@ def _assemble_snapshot(selected_root: str, observed_at: str, inventory: _Invento
                       "scan": inventory.counts, "limits": dict(LIMITS)},
         "assurance": assurance("static-text"), "issues": inventory.issues,
     }
+    if analysis is not None and analysis["discoveryPartial"] == inventory.partial:
+        result["setupAnalysis"] = analysis
+    return result

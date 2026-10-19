@@ -342,6 +342,8 @@ export const previewApi: DesktopApi = {
   chooseAsset: assetUnavailable,
   prepareCredential: assetUnavailable,
   prepareAssetDelete: assetUnavailable,
+  exportCredentialBackup: assetUnavailable,
+  importCredentialBackup: assetUnavailable,
   commitAsset: assetUnavailable,
   bindAsset: assetUnavailable,
   discardAsset: assetUnavailable,

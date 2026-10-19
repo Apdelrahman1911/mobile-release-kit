@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from ._desktop_preflight_protocol import (_keys, _pairs, _path, _structure, integer, content,
                                          _TOKEN, _PROJECT, _DECIMAL, STATUSES)
 from ._desktop_android_build_protocol import saved_version
+from . import apple_provisioning_bundle_read as bundle_read
+from . import apple_provisioning_profile_read as profile_read
 
 PROTOCOL = "mrk-local-store-preflight/1"
 CONSENT = "local-android-store-access-v1"
@@ -32,10 +34,14 @@ def require(ok):
     if not ok:
         raise ProtocolError("Invalid local Store access-check protocol")
 
-def context(value, *, apple_access=False):
-    require(type(apple_access) is bool)
+def context(value, *, apple_access=False, bundle_query=False):
+    require(type(apple_access) is bool and type(bundle_query) is bool)
+    query_keys = {"query"} if type(value) is dict and "query" in value else set()
+    # This explicit access-only opt-in stays false for Prepare/Execute/Reconcile.
+    require(not query_keys or apple_access and bundle_query and value.get("platform") == "ios"
+            and value["query"] in (bundle_read.QUERY, profile_read.QUERY))
     value = _keys(value, {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
-                         "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "operation"})
+                         "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "operation"} | query_keys)
     require(type(value["projectId"]) is str and _PROJECT.fullmatch(value["projectId"]) is not None
             and integer(value["draftRevision"], 2**32-2) and integer(value["baselineGeneration"], 2**32-2)
             and integer(value["credentialContextRevision"], 2**32-2, 1)
@@ -61,7 +67,7 @@ def parse_request(raw):
         value = _keys(value, {"protocol", "operationId", "ownerGeneration", "context", "native"})
         require(value["protocol"] == PROTOCOL and all(type(value[k]) is str and _TOKEN.fullmatch(value[k])
                 for k in ("operationId", "ownerGeneration")))
-        selected = context(value["context"], apple_access=True)
+        selected = context(value["context"], apple_access=True, bundle_query=True)
         native = _keys(value["native"], {"profile", "projectRoot", "rootIdentity", "cwd", "credentialConfig"})
         require(native["profile"] in PROFILES)
         _path(native["projectRoot"]); _path(native["cwd"])
@@ -92,7 +98,11 @@ def project_result(findings, *, platform="android"):
     validate_result(result, platform=platform)
     return result
 
-def validate_result(value, *, platform="android"):
+def validate_result(value, *, platform="android", query=None):
+    if query is not None:
+        require(platform == "ios" and (query == bundle_read.QUERY and bundle_read.valid_result(value)
+                or query == profile_read.QUERY and profile_read.valid_result(value)))
+        return
     require(platform in ("android", "ios"))
     value=_keys(value,{"schemaVersion","scope","findings","limitations"})
     require(type(value["schemaVersion"]) is int and value["schemaVersion"]==1 and value["scope"]==(APPLE_SCOPE if platform == "ios" else SCOPE)
@@ -103,7 +113,7 @@ def validate_result(value, *, platform="android"):
 
 def validate_terminal(value,request):
     value=_keys(value,{"schemaVersion","context","outcome","reason","result","lifetime"})
-    require(type(value["schemaVersion"]) is int and value["schemaVersion"]==1 and context(value["context"], apple_access=True)==request.context
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"]==1 and context(value["context"], apple_access=True, bundle_query=True)==request.context
             and value["outcome"] in OUTCOMES and value["reason"] in REASONS)
     life=_keys(value["lifetime"],{"complete","fatal","contained","commandDispatched","commands","profileCalls",
                                 "inputClosed","handlersRestored","invocationClosed","stopObserved"})
@@ -115,7 +125,7 @@ def validate_terminal(value,request):
              and life["handlersRestored"] and life["invocationClosed"] and life["commandDispatched"] is not None)
     if value["outcome"]=="complete":
         require(settled and value["reason"]=="none" and life["stopObserved"]=="none")
-        validate_result(value["result"], platform=request.context["platform"])
+        validate_result(value["result"], platform=request.context["platform"], query=request.context.get("query"))
     else:
         require(value["result"] is None and value["reason"]!="none" and (settled or value["outcome"]=="unknown"))
         if value["outcome"]=="unknown": require(not settled and value["reason"]=="cleanup-unknown")

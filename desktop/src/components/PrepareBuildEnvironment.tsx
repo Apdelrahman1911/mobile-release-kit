@@ -2,6 +2,7 @@ import type { AndroidToolSourceRole } from '../androidToolSources.ts';
 import type { ToolAcquisitionController, ToolAcquisitionState } from '../toolAcquisitionController.ts';
 import { stagedToolSourceGuidance, toolAcquisitionFailureGuidance } from '../toolAcquisitionGuidance.ts';
 import type { ToolRequirementHint } from '../toolAcquisitionProtocol.ts';
+import { PreparedToolSourceFolders } from './PreparedToolSourceFolders.tsx';
 
 export interface PrepareBuildEnvironmentProps {
   state: ToolAcquisitionState;
@@ -11,6 +12,7 @@ export interface PrepareBuildEnvironmentProps {
   // becomes a SourceSnapshot, and no callback approves a protected copy.
   toolsBusy: boolean;
   chooseSource(role: AndroidToolSourceRole): void | Promise<void>;
+  choosePreparedSource(role: AndroidToolSourceRole): void | Promise<void>;
   refreshCatalog(): void | Promise<void>;
   openRegistration(): void;
 }
@@ -18,7 +20,7 @@ const hint = (value: ToolRequirementHint) => value.state === 'literal' ? value.v
   value.state === 'unspecified' ? 'Exact native profile required' : 'Could not be read safely';
 
 /** Controlled view: mounting, navigation and checkbox rendering do no work. */
-export function PrepareBuildEnvironment({ state, controller, compact = false, toolsBusy, chooseSource,
+export function PrepareBuildEnvironment({ state, controller, compact = false, toolsBusy, chooseSource, choosePreparedSource,
   refreshCatalog, openRegistration }: PrepareBuildEnvironmentProps) {
   const op = state.status?.operation;
   const active = op && op.phase !== 'terminal';
@@ -58,7 +60,7 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
   return <section className="card" aria-label="Prepare Android build environment" aria-busy={state.pending !== null || state.requestPending}>
     <div className="section-heading"><div><h2>{title}</h2><p>Reuse compatible tools first. Downloads are optional and always need your approval.</p></div></div>
     {problem && <p className="notice notice-warning" role="status">{problem}</p>}
-    {!consent && !active && (!report || state.historical || state.presentation === 'stale') && <>
+    {!state.preparedFolders && !consent && !active && (!report || state.historical || state.presentation === 'stale') && <>
       <div className="button-row">
         <button type="button" className="button primary" disabled={checkReason !== null} onClick={() => void controller.inspect()}>
           {state.pending === 'inspect' ? 'Checking required tools…' : 'Check required tools'}</button>
@@ -88,14 +90,9 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
         onClick={() => void controller.download(consent.operationId, consent.ownerGeneration)}>Download required tools</button></div>
       {downloadReason && <p className="save-note">{downloadReason}</p>}
     </div></div>}
-    {staged && <div className="notice notice-info" role="status"><div><strong>{staged.title}</strong><p>{staged.body}</p>
-      {staged.pickers.length > 0 && <>
-        <p>Choose each prepared folder with the native picker, then inspect the selected sources and review the protected-copy approval. This app build does not open the cache location for you.</p>
-        <div className="button-row">{staged.pickers.map((picker) => <button type="button" className="button secondary" key={picker.role}
-          disabled={busy} onClick={() => void chooseSource(picker.role)}>{picker.label}</button>)}
-          <button type="button" className="button secondary" onClick={openRegistration}>Inspect &amp; review selected tools</button></div>
-      </>}
-    </div></div>}
+    {state.preparedFolders ? <PreparedToolSourceFolders folders={state.preparedFolders} busy={busy}
+      choosePrepared={choosePreparedSource} chooseExisting={chooseSource} openRegistration={openRegistration} /> :
+      staged && <div className="notice notice-info" role="status"><div><strong>{staged.title}</strong><p>{staged.body}</p></div></div>}
     {originalControls}
     <details><summary>Existing tools &amp; manual setup</summary>
       <p>Keep your working JDK, Android SDK and Gradle installation. Refresh the protected tool list, or choose complete existing source folders. Inspection and explicit protected-copy approval remain in Build &amp; release.</p>

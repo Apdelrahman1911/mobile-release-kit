@@ -72,7 +72,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 async function settle() { for (let i = 0; i < 10; i += 1) await Promise.resolve(); }
-function harness(initial = status()) {
+function harness(initial = status(), otherOperationReason = () => null) {
   let selected = { project: { id: 'project-a', name: 'Inert project', path: 'never-forwarded' }, draft: { schemaVersion: 1 }, revision: 1, baselineGeneration: 1 };
   let current = initial;
   let event;
@@ -88,7 +88,7 @@ function harness(initial = status()) {
     prepareAssetDelete: (input) => pending('delete', input), commitAsset: (token) => pending('commit', token),
     bindAsset: (token) => pending('bind', token), discardAsset: (id) => pending('discard', id), lockAssetSession: () => pending('lock', {}),
   };
-  const controller = new AssetSessionController(() => selected, () => time);
+  const controller = new AssetSessionController(() => selected, () => time, otherOperationReason);
   return { api, controller, calls, selected: () => selected, latest: (command) => calls.filter((call) => call.command === command).at(-1),
     setProject: (value, sync = true) => { selected = value; if (sync) controller.syncProject(); },
     emit: (value) => { current = structuredClone(value); event(value); },
@@ -389,6 +389,25 @@ test('an admitted changed preparation scope reuses one context submission; equal
     await settle();
     assert.equal(closed.controller.getSnapshot().status.mode, 'closed'); assert.equal(closed.calls.length, count);
   } finally { closed.controller.dispose(); }
+});
+
+test('identity saved-source invalidation does not submit credential context while its original edit is pending', async () => {
+  let identityPending = false;
+  const h = harness(status(), () => identityPending ? 'Original app ID change is pending.' : null);
+  try {
+    await ready(h);
+    const before = h.controller.getSnapshot(), draft = h.selected().draft, count = h.calls.length;
+    identityPending = true;
+    h.controller.savedProjectChanged('other'); assert.equal(h.controller.getSnapshot(), before);
+    h.controller.savedProjectChanged('project-a'); await settle();
+    assert.equal(h.controller.getSnapshot().contextCurrent, false); assert.equal(h.controller.getSnapshot().status, before.status);
+    assert.equal(h.selected().draft, draft); assert.equal(h.calls.length, count);
+    identityPending = false; await settle(); assert.equal(h.calls.length, count);
+    // Only an explicit existing context check can submit after the owner settles.
+    h.controller.submitContext(); await settle(); assert.equal(h.calls.length, count + 1);
+    assert.deepEqual(h.latest('context').args.draft, draft); assert.notEqual(h.latest('context').args.draft, draft);
+    assert.equal(h.calls.some((call) => ['prepare', 'choose', 'bind', 'commit'].includes(call.command)), false);
+  } finally { h.controller.dispose(); }
 });
 
 test('context edits invalidate immediately and coalesce while the original context reply is pending', async () => {

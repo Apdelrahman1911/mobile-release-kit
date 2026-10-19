@@ -4,11 +4,39 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CLI_READ_ACCESS_MAX_MS, CLI_READ_ACCESS_SCOPE, cliReadAccessSummary, parseCliReadAccessStatus } from '../src/cliReadAccess.ts';
 import { CliReadAccessController } from '../src/cliReadAccessController.ts';
+import { createNativeApi } from '../src/bridge.ts';
 
 const ID = 'a'.repeat(32), OTHER_ID = 'b'.repeat(32);
 const on = (ids = [ID], remainingMs = CLI_READ_ACCESS_MAX_MS) => ({ enabled: true, remainingMs, projectIds: ids });
 const off = () => ({ enabled: false, remainingMs: 0, projectIds: [] });
 const project = (id = 'project-a') => ({ id, name: id === 'project-a' ? 'Example app' : 'Another app' });
+
+test('native bridge exposes only the fixed read-access operations and retains independent revocation', async () => {
+  const calls = [], pendingAllow = deferred();
+  const api = createNativeApi('native', (command, args) => {
+    calls.push({ command, args });
+    return command === 'allow_application_read' ? pendingAllow.promise : Promise.resolve(off());
+  });
+  assert.deepEqual(calls, [], 'constructing or showing the port must not grant access');
+  assert.ok(Object.isFrozen(api.applicationRead));
+  const allow = api.applicationRead.allow('project-a');
+  assert.deepEqual(await api.applicationRead.revoke(), off());
+  assert.deepEqual(await api.applicationRead.status(), off());
+  assert.deepEqual(calls, [
+    { command: 'allow_application_read', args: { projectId: 'project-a' } },
+    { command: 'revoke_application_read', args: {} },
+    { command: 'application_read_status', args: {} },
+  ]);
+  pendingAllow.resolve(off());
+  await allow;
+  await assert.rejects(api.applicationRead.allow('../private'), { code: 'cli_access_invalid_request' });
+  assert.equal(calls.length, 3, 'invalid input never reaches native admission');
+});
+
+test('unavailable bridge cannot expose an agent port or manufacture a successful native reply', () => {
+  const api = createNativeApi('unavailable', () => { assert.fail('unavailable transport was invoked'); });
+  assert.equal(api.applicationRead, undefined);
+});
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });

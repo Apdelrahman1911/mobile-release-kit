@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from mobile_release.api._setup_analysis import analyze_setup, MAX_RESULT_BYTES
+from mobile_release.api import _snapshot
 from mobile_release.api.contracts import ApiError
 from mobile_release.config import default_config_data, ReleaseConfig
 from mobile_release.discovery import parse_project_sources
@@ -27,6 +28,34 @@ def rows(result: dict) -> dict:
 
 
 class SetupAnalysisTests(unittest.TestCase):
+    def test_actual_snapshot_projects_its_same_saved_inputs_without_io(self):
+        inventory = _snapshot._Inventory(root_settled=True, sources={
+            "app/build.gradle.kts": 'plugins { id("com.android.application") }\nandroid { defaultConfig { applicationId = "org.example.app" } }',
+        })
+        found = parse_project_sources(inventory.sources, inventory.directories)
+        config = {"path": "release/mobile-release.json", "state": "format-valid", "content": None,
+                  "data": default_config_data(found), "issues": []}
+        with patch.object(os, "open", side_effect=AssertionError("no snapshot assembly file read")), \
+             patch.object(subprocess, "Popen", side_effect=AssertionError("no project execution")):
+            result = _snapshot._assemble_snapshot("/inert-project", "2026-10-19T00:00:00Z", inventory, config)
+        self.assertIs(result["config"], config)
+        self.assertEqual(result["setupAnalysis"], analyze_setup(config["state"], config["data"],
+                         result["discovery"]["hints"], partial=result["discovery"]["partial"]))
+        self.assertEqual(result["setupAnalysis"]["assurance"]["releaseReadiness"], "unknown")
+
+    def test_optional_projection_refusal_or_late_partial_preserves_useful_snapshot(self):
+        config = {"path": "release/mobile-release.json", "state": "missing", "content": None,
+                  "data": None, "issues": []}
+        with patch.object(_snapshot, "analyze_setup", side_effect=ApiError("unsupported", "Inert unsupported hints")):
+            result = _snapshot._assemble_snapshot("/inert-project", "2026-10-19T00:00:00Z",
+                                                   _snapshot._Inventory(root_settled=True), config)
+        self.assertNotIn("setupAnalysis", result)
+        self.assertEqual(result["config"]["state"], "missing")
+        late = _snapshot._assemble_snapshot("/inert-project", "2026-10-19T00:00:00Z",
+                                            _snapshot._Inventory(root_settled=True, deadline=0), config)
+        self.assertTrue(late["discovery"]["partial"])
+        self.assertNotIn("setupAnalysis", late)
+
     def test_shared_static_selectors_local_first_and_no_io(self):
         found = hints()
         self.assertEqual(found["android"]["applicationId"], "org.example.app")

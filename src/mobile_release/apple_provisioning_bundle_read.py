@@ -32,8 +32,21 @@ def selected_query(context: dict) -> bool:
     return context.get("query") == QUERY and context.get("platform") == "ios"
 
 
+def selected_read(context: dict) -> bool:
+    from . import apple_provisioning_profile_read as profiles
+    return selected_query(context) or profiles.selected_query(context)
+
+
 def fixed_argv(tooling_root: Path) -> tuple[str, ...]:
     return ("bundle", "exec", "ruby", str(tooling_root / "fastlane/apple_provisioning_bundle_read.rb"))
+
+
+def fixed_read_argv(tooling_root: Path, context: dict) -> tuple[str, ...]:
+    from . import apple_provisioning_profile_read as profiles
+    if selected_query(context):
+        return fixed_argv(tooling_root)
+    api.require(profiles.selected_query(context), "invalid_provisioning_read")
+    return profiles.fixed_argv(tooling_root)
 
 
 def query_prerequisites(config) -> bool:
@@ -47,12 +60,11 @@ def query_prerequisites(config) -> bool:
         return False
 
 
-def observation_from_frame(raw: bytes, *, context_sha256: str, bundle_id: str) -> str:
-    """Validate the ORIGINAL pre-JSON HTTP bytes, not an SDK-normalized Hash.
+def _response_from_frame(raw: bytes, *, context_sha256: str, bundle_id: str) -> tuple[str | None, bytes | None]:
+    """Private shared envelope only; both closed queries validate their rows.
 
-    This describes at most one completed response page. A missing continuation,
-    count, row or permission cannot imply global availability. Transport/native
-    finality is deliberately not an input or an output of this DATA parser.
+    This is not a provider response/finality object or a generic HTTP parser.
+    The native Context hash and fixed seventh command bind which read was used.
     """
     api.list_bundle_ids(bundle_id)
     api.require(type(context_sha256) is str and api.HEX_RE.fullmatch(context_sha256) is not None,
@@ -70,15 +82,30 @@ def observation_from_frame(raw: bytes, *, context_sha256: str, bundle_id: str) -
         api.require(failure is None or failure == "provider_request_unconfirmed")
         if failure is not None:
             api.require(encoded is None)
-            return "not-permitted" if status in (401, 403) else "inconclusive"
+            return ("not-permitted" if status in (401, 403) else "inconclusive"), None
         api.require(type(status) is int and type(encoded) is str and encoded.isascii()
                     and 0 < len(encoded) <= 4 * ((RAW_LIMIT + 2) // 3))
         original = base64.b64decode(encoded, validate=True)
         api.require(0 < len(original) <= RAW_LIMIT and base64.b64encode(original).decode("ascii") == encoded)
         if status in (401, 403):
-            return "not-permitted"
+            return "not-permitted", None
         # A list GET has a 200 response. 404/204/redirects are not an empty list.
         api.require(status == 200)
+        return None, original
+    except (api.ProvisioningError, ValueError, TypeError, KeyError, UnicodeError, binascii.Error):
+        return "inconclusive", None
+
+
+def observation_from_frame(raw: bytes, *, context_sha256: str, bundle_id: str) -> str:
+    """One saved Bundle ID from ORIGINAL raw bytes, not an SDK-normalized Hash.
+
+    A missing continuation, count, row or permission cannot imply global
+    availability. Native finality is neither an input nor an output here.
+    """
+    reason, original = _response_from_frame(raw, context_sha256=context_sha256, bundle_id=bundle_id)
+    if reason is not None:
+        return reason
+    try:
         document = api.document(original)
         api.require("errors" not in document and "error" not in document)
         rows, links, meta = (document.get(k) for k in ("data", "links", "meta"))
@@ -118,8 +145,8 @@ def project_result(findings: list[Finding], observation: str) -> dict:
     return value
 
 
-def read_saved_bundle_id(operation, config, material) -> tuple[list[Finding], str]:
-    """Called only inside the existing StorePreflightRun's selected-material loan.
+def _read_raw_frame(operation, config, material, *, expected_query: str) -> tuple[list[Finding], bytes | None]:
+    """Two closed metadata reads on the original selected-material loan.
 
     The final command replaces that run's ordinary Fastfile access query. Its
     same P8 validator and five installed-runtime probes remain the first six
@@ -134,8 +161,10 @@ def read_saved_bundle_id(operation, config, material) -> tuple[list[Finding], st
     from .owned_process import ProcessError, run_owned
     from .stores import _require_fastlane_bundle, _runtime_environment
     from .tooling import _complete_tooling_root
+    from . import apple_provisioning_profile_read as profiles
 
-    api.require(type(operation) is StorePreflightRun and selected_query(operation.request.context)
+    api.require(expected_query in {QUERY, profiles.QUERY} and type(operation) is StorePreflightRun
+                and selected_read(operation.request.context) and operation.request.context.get("query") == expected_query
                 and operation.source.require_operation() is operation and type(material) is SelectedStoreMaterial,
                 "bundle_read_original_unavailable")
     operation.checkpoint()
@@ -144,29 +173,33 @@ def read_saved_bundle_id(operation, config, material) -> tuple[list[Finding], st
     material.require(config=config, platforms=("ios",), invocation=invocation)
     runtime.require(root=config.root, invocation=invocation)
     bundle_id = config.section("ios")["bundleId"]
-    request = api.list_bundle_ids(bundle_id)
+    request = api.list_bundle_ids(bundle_id) if expected_query == QUERY else api.list_profiles()
     context_sha256 = api.digest(api.canonical(operation.request.context))
     tooling = runtime.tooling_root
+    needed = ("fastlane/apple_provisioning.rb", "fastlane/apple_provisioning_bundle_read.rb")
+    if expected_query == profiles.QUERY:
+        needed += ("fastlane/apple_provisioning_profile_read.rb",)
     if not _complete_tooling_root(tooling) or any(
         (tooling / name).is_symlink() or not (tooling / name).is_file()
-        for name in ("fastlane/apple_provisioning.rb", "fastlane/apple_provisioning_bundle_read.rb")
+        for name in needed
     ):
-        return [Finding("store.online.fastfile", Status.FAIL, "Bundled Bundle-ID reader is unavailable.",
-                        category="store-access")], "not-checked"
+        return [Finding("store.online.fastfile", Status.FAIL, "Bundled provisioning metadata reader is unavailable.",
+                        category="store-access")], None
     try:
         _require_fastlane_bundle(tooling, cancellation=operation.guard, runtime_context=runtime)
     except ProcessError:
         raise
     except StoreOperationError:
         return [Finding("store.online.bundle", Status.FAIL, "Pinned Store dependencies are unavailable.",
-                        category="store-access")], "not-checked"
+                        category="store-access")], None
 
     def current():
         operation._source_post()
         operation._received_post()
         material.require(config=config, platforms=("ios",), invocation=invocation)
         runtime.require(root=config.root, invocation=invocation)
-        api.require(api.list_bundle_ids(config.section("ios")["bundleId"]) == request,
+        api.require(config.section("ios")["bundleId"] == bundle_id
+                    and (api.list_bundle_ids(bundle_id) if expected_query == QUERY else api.list_profiles()) == request,
                     "bundle_read_original_changed")
 
     with finite_scratch(layout="online-runner", cancellation=operation.guard,
@@ -182,15 +215,23 @@ def read_saved_bundle_id(operation, config, material) -> tuple[list[Finding], st
                             "FASTLANE_SKIP_DOCS": "true", "FASTLANE_SKIP_UPDATE_CHECK": "true",
                             "MOBILE_RELEASE_ASC_BUNDLE_ID": bundle_id,
                             "MOBILE_RELEASE_ASC_BUNDLE_READ_CONTEXT": context_sha256})
-        argv = fixed_argv(tooling)
+        argv = fixed_read_argv(tooling, operation.request.context)
         with runtime.command(argv, capture=True):
             completed = run_owned(argv, cwd=runner._path, environ=environment, capture=True, text=False,
                                   timeout=QUERY_SECONDS, output_limit=FRAME_LIMIT, cancellation=operation.guard)
         current()
         if (type(completed.returncode) is not int or completed.returncode != 0
                 or type(completed.stdout) is not bytes or completed.stderr != b""):
-            observation = "inconclusive"
+            raw = None
         else:
-            observation = observation_from_frame(completed.stdout, context_sha256=context_sha256, bundle_id=bundle_id)
+            raw = completed.stdout
     current()
-    return [], observation
+    return [], raw
+
+
+def read_saved_bundle_id(operation, config, material) -> tuple[list[Finding], str]:
+    findings, raw = _read_raw_frame(operation, config, material, expected_query=QUERY)
+    if findings or raw is None:
+        return findings, "not-checked" if findings else "inconclusive"
+    return findings, observation_from_frame(raw, context_sha256=api.digest(api.canonical(operation.request.context)),
+                                            bundle_id=config.section("ios")["bundleId"])

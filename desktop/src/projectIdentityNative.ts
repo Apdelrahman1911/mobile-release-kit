@@ -81,6 +81,143 @@ export function createProjectIdentityApi(mode: string, invoke: Invoke, listen?: 
     subscribe: (listener: (value: unknown) => void) => listen(PROJECT_IDENTITY_EVENT, listener) });
 }
 
+
+// Identity proposals are DATA in the running Desktop, not CLI write permits.
+export type AgentIdentityCommand = 'agent_identity_status' | 'allow_agent_identity' | 'revoke_agent_identity' |
+  'decline_agent_identity' | 'review_agent_identity' | 'prepare_agent_identity' | 'apply_agent_identity';
+export interface AgentIdentityProposal {
+  runtimeId: string;
+  request: { serviceInstance: string; intentId: string; projectId: string; expectedObservationRevision: number;
+    change: { selection: Target; desiredIdentity: string; identityIntent: IdentityIntent } };
+}
+export interface AgentIntentObservation {
+  serviceInstance: string; projectId: string; intentId: string;
+  state: 'queued' | 'desktop-review' | 'original-sid-available' | 'declined' | 'expired' | 'refused-before-claim' | 'admission-unconfirmed';
+  operationId: string | null; originalLinkRetained: boolean; historyMustBeQueried: boolean;
+}
+export interface AgentIdentityGuiStatus {
+  lease: { enabled: boolean; remainingMs: number; projectId: string | null };
+  pending: AgentIdentityProposal | null; requests: readonly AgentIntentObservation[];
+}
+export interface AgentIdentityApi {
+  readonly mode: 'native';
+  status(): Promise<unknown>; allow(projectId: string): Promise<unknown>; revoke(): Promise<unknown>;
+  decline(intentId: string): Promise<unknown>; review(intentId: string): Promise<unknown>;
+  prepare(args: { intentId: string; sessionId: string; revision: string; acknowledgeNewApplication: boolean }): Promise<unknown>;
+  apply(args: { intentId: string; sessionId: string; revision: string; planToken: string; reviewed: boolean }): Promise<unknown>;
+}
+const agentToken = (v: unknown): v is string => token(v) && v !== '0'.repeat(32);
+const runtimeProject = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(v);
+function agentProposal(value: unknown): AgentIdentityProposal | null {
+  if (!keys(value, ['runtimeId', 'request']) || !runtimeProject(value.runtimeId) ||
+      !keys(value.request, ['serviceInstance', 'intentId', 'projectId', 'expectedObservationRevision', 'change'])) return null;
+  const r = value.request;
+  if (!agentToken(r.serviceInstance) || !agentToken(r.intentId) || !agentToken(r.projectId) ||
+      !Number.isSafeInteger(r.expectedObservationRevision) || (r.expectedObservationRevision as number) <= 0 ||
+      !keys(r.change, ['selection', 'desiredIdentity', 'identityIntent']) ||
+      !keys(r.change.selection, ['platform', 'target', 'project']) ||
+      !encodeProjectIdentityRequest('project_identity_open', { intent: 'edit', projectId: value.runtimeId, selection: r.change.selection }) ||
+      !['android', 'ios'].includes(r.change.selection.platform as string) ||
+      !identityValueFits(r.change.desiredIdentity, r.change.selection.platform as 'android' | 'ios') ||
+      !['preserve', 'new-application'].includes(r.change.identityIntent as string)) return null;
+  Object.freeze(r.change.selection); Object.freeze(r.change); Object.freeze(r);
+  return Object.freeze(value) as unknown as AgentIdentityProposal;
+}
+function agentObservation(value: unknown): value is AgentIntentObservation {
+  if (!keys(value, ['serviceInstance', 'projectId', 'intentId', 'state', 'operationId', 'originalLinkRetained', 'historyMustBeQueried']) ||
+      !agentToken(value.serviceInstance) || !agentToken(value.projectId) || !agentToken(value.intentId) ||
+      !['queued', 'desktop-review', 'original-sid-available', 'declined', 'expired', 'refused-before-claim', 'admission-unconfirmed'].includes(value.state as string) ||
+      value.operationId !== null && !agentToken(value.operationId) || typeof value.originalLinkRetained !== 'boolean' ||
+      typeof value.historyMustBeQueried !== 'boolean') return false;
+  const linked = value.operationId !== null;
+  return value.historyMustBeQueried === linked && (!value.originalLinkRetained || linked) &&
+    (value.state !== 'original-sid-available' || linked) &&
+    (!linked || value.state === 'original-sid-available' || value.state === 'admission-unconfirmed');
+}
+export function parseAgentIdentityGuiStatus(input: unknown): AgentIdentityGuiStatus | null {
+  try {
+    const v = copyBoundedComparisonData(input, 64 * 1024, 4096);
+    if (!keys(v, ['lease', 'pending', 'requests']) || !keys(v.lease, ['enabled', 'remainingMs', 'projectId']) ||
+        typeof v.lease.enabled !== 'boolean' || typeof v.lease.remainingMs !== 'number' || !Number.isSafeInteger(v.lease.remainingMs) ||
+        v.lease.remainingMs < 0 || v.lease.remainingMs > 900_000 ||
+        (v.lease.projectId !== null && !agentToken(v.lease.projectId)) ||
+        (v.lease.enabled ? !agentToken(v.lease.projectId) : v.lease.projectId !== null || v.lease.remainingMs !== 0) ||
+        !Array.isArray(v.requests) || v.requests.length > 32 || !v.requests.every(agentObservation)) return null;
+    if (new Set(v.requests.map((row) => row.intentId)).size !== v.requests.length) return null;
+    const pending = v.pending === null ? null : agentProposal(v.pending);
+    if (v.pending !== null && (!pending || !v.requests.some((row) => row.intentId === pending.request.intentId &&
+        row.projectId === pending.request.projectId && row.serviceInstance === pending.request.serviceInstance && row.state === 'queued'))) return null;
+    v.requests.forEach(Object.freeze); Object.freeze(v.requests);
+    const lease = Object.freeze({ enabled: v.lease.enabled, remainingMs: v.lease.remainingMs, projectId: v.lease.projectId });
+    return Object.freeze({ lease, pending, requests: v.requests });
+  } catch { return null; }
+}
+export function encodeAgentIdentityRequest(command: AgentIdentityCommand, input: unknown): Uint8Array | null {
+  try {
+    const v = copyBoundedComparisonData(input, 4096, 128);
+    let valid = false;
+    if (command === 'agent_identity_status' || command === 'revoke_agent_identity') valid = keys(v, []);
+    if (command === 'allow_agent_identity') valid = keys(v, ['projectId']) && runtimeProject(v.projectId);
+    if (command === 'decline_agent_identity' || command === 'review_agent_identity') valid = keys(v, ['intentId']) && agentToken(v.intentId);
+    if (command === 'prepare_agent_identity') valid = keys(v, ['intentId', 'sessionId', 'revision', 'acknowledgeNewApplication']) &&
+      agentToken(v.intentId) && agentToken(v.sessionId) && agentToken(v.revision) && typeof v.acknowledgeNewApplication === 'boolean';
+    if (command === 'apply_agent_identity') valid = keys(v, ['intentId', 'sessionId', 'revision', 'planToken', 'reviewed']) &&
+      agentToken(v.intentId) && agentToken(v.sessionId) && agentToken(v.revision) && agentToken(v.planToken) &&
+      v.revision !== v.planToken && typeof v.reviewed === 'boolean';
+    if (!valid) return null;
+    const bytes = new TextEncoder().encode(JSON.stringify(v)); return bytes.length <= 4096 ? bytes : null;
+  } catch { return null; }
+}
+export function createAgentIdentityApi(mode: string,
+    invoke: (command: AgentIdentityCommand, body: Uint8Array) => Promise<unknown>): AgentIdentityApi | null {
+  if (mode !== 'native') return null;
+  const call = (command: AgentIdentityCommand, input: unknown) => {
+    const body = encodeAgentIdentityRequest(command, input);
+    if (!body) throw failure();
+    return invoke(command, body);
+  };
+  return Object.freeze({ mode: 'native' as const, status: () => call('agent_identity_status', {}),
+    allow: (projectId: string) => call('allow_agent_identity', { projectId }), revoke: () => call('revoke_agent_identity', {}),
+    decline: (intentId: string) => call('decline_agent_identity', { intentId }), review: (intentId: string) => call('review_agent_identity', { intentId }),
+    prepare: (args: Parameters<AgentIdentityApi['prepare']>[0]) => call('prepare_agent_identity', args),
+    apply: (args: Parameters<AgentIdentityApi['apply']>[0]) => call('apply_agent_identity', args) });
+}
+/** One immutable proposal, explicit GUI controls and the ORIGINAL native
+ * controller/preview. This adapter cannot mint a SID or a history receipt. */
+export function bindAgentIdentityApi(base: ProjectIdentityApi, agent: AgentIdentityApi, value: AgentIdentityProposal): ProjectIdentityApi | null {
+  let proposal: AgentIdentityProposal | null;
+  try { proposal = agentProposal(copyBoundedComparisonData(value, 4096, 128)); } catch { return null; }
+  if (!proposal || base.mode !== 'native' || agent.mode !== 'native') return null;
+  const { open, prepare, apply, close, status, subscribe } = base;
+  const review = agent.review, prepareIntent = agent.prepare, applyIntent = agent.apply;
+  const retained = proposal, id = retained.request.intentId, change = retained.request.change;
+  let sent = false;
+  return Object.freeze({ mode: 'native' as const,
+    open: (request: IdentityOpenRequest) => {
+      if (!encodeProjectIdentityRequest('project_identity_open', request)) throw failure();
+      // Explicit ordinary GUI recovery remains its separate original action.
+      // It never reuses the proposal link or replaces its remembered SID.
+      if (request.intent === 'recover') return open.call(base, request);
+      if (sent || request.projectId !== retained.runtimeId || !identityDataEqual(request.selection, change.selection)) throw failure();
+      sent = true; return review.call(agent, id);
+    },
+    prepare: (request: IdentityPrepareRequest) => {
+      if (!encodeProjectIdentityRequest('project_identity_prepare', request)) throw failure();
+      if (request.intent === 'recover') return prepare.call(base, request);
+      if (!sent || request.desiredIdentity !== change.desiredIdentity || request.identityIntent !== change.identityIntent) throw failure();
+      return prepareIntent.call(agent, { intentId: id, sessionId: request.sessionId, revision: request.revision,
+        acknowledgeNewApplication: request.identityIntent === 'new-application' });
+    },
+    apply: (request: IdentitySendRequest) => {
+      if (!encodeProjectIdentityRequest('project_identity_apply', request)) throw failure();
+      if (request.intent === 'recover') return apply.call(base, request);
+      if (!sent) throw failure();
+      return applyIntent.call(agent, { intentId: id, sessionId: request.sessionId, revision: request.revision, planToken: request.planToken, reviewed: true });
+    },
+    close: (request: { sessionId: string }) => close.call(base, request),
+    status: () => status.call(base), subscribe: (listener: (value: unknown) => void) => subscribe.call(base, listener) });
+}
+
 type Issue = 'unconfirmed' | 'protocol' | 'generation-changed' | 'cleanup-unknown';
 export interface ProjectIdentityNativeState {
   status: IdentityOwnerStatus | null; original: IdentityProjection | null; projectId: string | null;
@@ -398,6 +535,11 @@ export class ProjectIdentityNativeController implements IdentityNativePort {
     const a = this.#attempt;
     if (a) { a.retired = true; if (!a.applySent) a.closeRequested = true; }
     this.#publish(); this.#closeOriginal();
+  }
+  // Display only: a foreign status summary never enables original cancellation.
+  canRequestClose(): boolean {
+    const a = this.#attempt;
+    return !!a?.sent && !terminal(a.projection) && !a.closeRequested;
   }
   /** Explicit original cancellation, independent of selected project/busy. */
   requestClose(): boolean {

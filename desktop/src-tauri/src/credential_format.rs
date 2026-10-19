@@ -21,6 +21,12 @@ mod apple;
 #[path = "credential_google.rs"]
 mod google;
 
+// This separately named helper yields untrusted comparison DATA only. It does
+// not change inspect/FileObservation/SafeAssessment or establish Apple trust.
+pub(crate) use apple::provisioning_certificate::{
+    inspect_certificate_candidate, CertificateCandidateFailure, UntrustedCertificateCandidate,
+};
+
 const JKS_LIMIT: usize = 32 * 1024 * 1024;
 const JSON_LIMIT: usize = 4 * 1024 * 1024;
 const QUOTED_LIMIT: usize = 8192; // Includes both encoded quote bytes.

@@ -2,6 +2,7 @@
 // observer/one-Start lifetime. A view, Promise or saved comparison is not native
 // custody, qualification, cancellation settlement or a release approval.
 import { isDirty } from './drafts.ts';
+import type { PreparedToolSourcePick } from './toolAcquisitionSourcePicker.ts';
 import { assetStorageWritable } from './assetSessionProtocol.ts';
 import type { AssetDisplayState } from './assetSessionTypes.ts';
 import type { ProjectSession, WorkspaceAction } from './drafts.ts';
@@ -628,17 +629,30 @@ export class AndroidBuildController {
     if (this.state.toolSources.availability !== 'available') return androidBuildAvailabilityText[this.state.toolSources.availability];
     return this.context.otherOperationReason();
   };
-  async chooseToolSource(role: AndroidToolSourceRole): Promise<void> {
+  async chooseToolSource(role: AndroidToolSourceRole, prepared?: PreparedToolSourcePick): Promise<void> {
     this.syncProject();
     if (!['jdk', 'sdk', 'gradle'].includes(role) || this.sourceActionReason() || !this.observer?.sources || !this.state.project) return;
     const observer = this.observer, previous = observer.sources!;
     if (previous.sourceGeneration >= ANDROID_BUILD_COUNTER_MAX - 1) { this.retire({ generationLost: true }); return; }
-    const request = { schemaVersion: 1 as const, sourceGeneration: previous.sourceGeneration, projectId: this.state.project.projectId, role };
+    const acquired = prepared?.claim(this.state.project.projectId,role,previous.sourceGeneration);
+    if (prepared && !acquired) return;
+    const request = { schemaVersion: 1 as const, sourceGeneration: previous.sourceGeneration, projectId: this.state.project.projectId, role,
+      ...(acquired ? { acquired } : {}) };
     this.retire(this.advance('contextGeneration'));
+    if (prepared && !prepared.stillCurrent()) return;
     const attempt = { observer, before: previous.sourceGeneration, after: previous.statusRevision, role, projectId: request.projectId, retired: false,
       identity: null as AndroidToolSourceIdentity | null, settled: false };
     this.sourcesAttempt = attempt; this.sourcesCancelClaim = null;
     this.update({ sourcesPending: true, sourcesUnconfirmed: true, sourcesError: null, sourcesCancelClaimed: null });
+    // Rendering/context callbacks above may reenter selection. Check AFTER
+    // them, immediately before this same original invoke; never fall back.
+    if (prepared && !prepared.stillCurrent()) {
+      if (this.sourcesAttempt === attempt && this.observer === observer) {
+        this.sourcesAttempt = null; this.sourcesCancelClaim = null;
+        this.update({ sourcesPending: false, sourcesUnconfirmed: false }); // Known not invoked.
+      }
+      return;
+    }
     try {
       const value = await observer.api.chooseAndroidToolSource!(request);
       if (!observer.active || this.sourcesAttempt !== attempt) return;

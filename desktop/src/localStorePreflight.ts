@@ -7,7 +7,7 @@ import { parseAndroidBuildSavedConfig, parseAndroidBuildSavedVersion, sameAndroi
 import type { AssetDisplayState } from './assetSessionTypes.ts';
 import { assetStorageWritable } from './assetSessionProtocol.ts';
 import { sameOfflineData } from './offlinePreflightProtocol.ts';
-import { parseLocalStoreRequest, parseLocalStoreStatus, storeConsent } from './localStorePreflightProtocol.ts';
+import { parseLocalStoreRequest, parseLocalStoreStatus, storeConsent, APPLE_BUNDLE_QUERY, APPLE_PROFILE_QUERY } from './localStorePreflightProtocol.ts';
 import type { BridgeMode } from './types.ts';
 import type { LocalStoreIdentity, LocalStorePreflightApi, LocalStoreStatus, PrepareLocalStorePreflight } from './localStorePreflightTypes.ts';
 type Port=LocalStorePreflightApi&{mode:BridgeMode};
@@ -63,7 +63,7 @@ export class LocalStorePreflightController {
  }
  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading)return;this.reading=true;try{this.receive(await this.api.localStorePreflightStatus());}catch{this.fail();}finally{this.reading=false;}}
  prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Stores.';if(localStoreOwnerReason(this.state))return localStoreOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for the local Store check.';if(!this.state.request)return this.state.platform==='ios'?'Read the saved version, then in Credentials choose This Mac → iOS → Store (or Full), select an App Store Connect P8 with its Key ID and Issuer ID, keep and assign it.':'Read the saved version, then in Credentials choose This Mac → Android → Store (or Full), select a Google service-account JSON, keep and assign it.';return this.source.otherOperationReason();}
- async prepare(){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status)return;const api=this.api,request=this.state.request;
+ async prepare(query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status||query!==undefined&&((query!==APPLE_BUNDLE_QUERY&&query!==APPLE_PROFILE_QUERY)||this.state.platform!=='ios'))return;const api=this.api,request=query===undefined?this.state.request:parseLocalStoreRequest({...this.state.request,query});if(!request)return;
   this.attempt={request,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
   this.update({pending:true,unconfirmed:true,error:null,historical:false});
   try{this.receive(await api.prepareLocalStorePreflight(request));const op=this.state.status?.operation;
@@ -75,7 +75,7 @@ export class LocalStorePreflightController {
   if(a?.started)return; // A queued second click cannot cancel the original run.
   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});
-  try{this.receive(await api.startLocalStorePreflight({...a.id,consentVersion:storeConsent(a.request.platform)}));}catch{this.fail();}finally{this.update({pending:false});}}
+  try{this.receive(await api.startLocalStorePreflight({...a.id,consentVersion:storeConsent(a.request.platform,a.request.query)}));}catch{this.fail();}finally{this.update({pending:false});}}
  cancel=()=>{this.invalidate();return this.cancelOriginal(true);};
  private async cancelOriginal(explicitRetry:boolean){const api=this.api,id=this.attempt?.id??this.state.status?.operation;if(!api||!id||this.state.status?.operation?.phase==='terminal')return;
   const key=id.operationId+id.ownerGeneration;if(this.cancelClaim===key||!explicitRetry&&this.failedCancel===key)return;this.cancelClaim=key;this.failedCancel=null;this.clearTimer();this.update({acknowledged:false,consentUntil:null});

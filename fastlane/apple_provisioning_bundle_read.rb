@@ -24,6 +24,11 @@ module MobileReleaseKit
       raise Error unless value
     end
 
+    def self.supported_input?(input)
+      input.instance_of?(Input) ||
+        (defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input))
+    end
+
     class Input
       attr_reader :bundle_id, :context, :key_id, :issuer_id
 
@@ -109,7 +114,10 @@ module MobileReleaseKit
 
     class ReadOwner
       def initialize(input, token, client)
+        AppleBundleRead.require!(AppleBundleRead.supported_input?(input))
         @input, @token, @client, @thread = input, token, client, Thread.current
+        @request = AppleProvisioning::Request.new(input.request)
+        AppleBundleRead.require!(@request.kind == (input.instance_of?(Input) ? "list_bundle_ids" : "list_profiles"))
         @connection, @builder = client.client, client.client.builder
         @admitted = @sent = @captured = @finished = false
         @raw = @status = nil
@@ -143,9 +151,9 @@ module MobileReleaseKit
         url = environment[:url]
         AppleBundleRead.require!(environment[:method] == :get && environment[:body].nil? && url.is_a?(URI::HTTPS) &&
           url.scheme == "https" && url.host == "api.appstoreconnect.apple.com" && url.port == 443 &&
-          url.userinfo.nil? && url.fragment.nil? && url.path == "/v1/bundleIds" && url.to_s.bytesize <= 2048)
+          url.userinfo.nil? && url.fragment.nil? && url.path == @request.path && url.to_s.bytesize <= 2048)
         pairs = URI.decode_www_form(url.query || "")
-        AppleBundleRead.require!(pairs.size == 3 && pairs.to_h == @input.request.fetch("query") &&
+        AppleBundleRead.require!(pairs.size == @request.query.size && pairs.to_h == @request.query &&
           environment[:request_headers]["Authorization"] == "Bearer #{@token.text}")
         true
       end
@@ -188,7 +196,7 @@ module MobileReleaseKit
 
     class Operation
       def initialize(input)
-        AppleBundleRead.require!(input.instance_of?(Input))
+        AppleBundleRead.require!(AppleBundleRead.supported_input?(input))
         @input, @used = input, false
       end
 
@@ -220,9 +228,17 @@ module MobileReleaseKit
         Gem.loaded_specs.fetch("faraday_middleware").version.to_s == "1.2.1")
     end
 
-    def self.main(arguments, environment, output)
+    def self.main(arguments, environment, output, query: :bundle)
       require!(arguments.empty?)
-      input = Input.new(environment) # Refuse ambient SDK state before loading it.
+      # The fixed entry script selects one of two exact classes; no endpoint,
+      # factory, credential, arbitrary operation or caller-selected URL input.
+      input = case query
+              when :bundle then Input.new(environment)
+              when :profiles
+                require!(defined?(AppleProfileRead::Input))
+                AppleProfileRead::Input.new(environment)
+              else raise Error
+              end # Refuse ambient SDK state before loading it.
       frame = Operation.new(input).execute
       require!(frame.bytesize <= FRAME_LIMIT && output.write(frame) == frame.bytesize)
       output.flush

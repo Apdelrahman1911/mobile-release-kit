@@ -304,7 +304,7 @@ pub(crate) fn path(value: &str) -> bool {
 mod tests {
     use super::*;
     fn request(role: Role) -> Request {
-        let snapshot = |mode| Snapshot {
+        let snapshot = |mode: u32| Snapshot {
             identity: (1, 2, 0o100000 | mode, 1001, 1001, 1, 12, 123, 456),
             sha256: "a".repeat(64),
         };

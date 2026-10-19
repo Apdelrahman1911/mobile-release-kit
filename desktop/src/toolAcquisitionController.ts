@@ -9,6 +9,9 @@ import { parseToolAcquisitionContext, parseToolAcquisitionStatus, sameToolAcquis
 import type { ToolAcquisitionContext, ToolAcquisitionIdentity, ToolAcquisitionOperation, ToolAcquisitionStatus,
   ToolAcquisitionStart, ToolRequirementsObservation } from './toolAcquisitionProtocol.ts';
 import type { StagedToolPresentation } from './toolAcquisitionGuidance.ts';
+import { PreparedToolSourceHandoff } from './toolAcquisitionSourcePicker.ts';
+import type { PreparedToolFolders, PreparedToolSourcePick, ToolSourceFolderContext } from './toolAcquisitionSourcePicker.ts';
+import type { AndroidToolSourceRole } from './androidToolSources.ts';
 
 interface Source {
   selectedProject(): ProjectSession | null;
@@ -36,7 +39,7 @@ export interface ToolAcquisitionState {
   projectId: string | null; status: ToolAcquisitionStatus | null; issue: Issue | null; historical: boolean;
   inspection: ToolRequirementsObservation | null;
   consent: (ToolAcquisitionIdentity & { acknowledged: boolean }) | null;
-  presentation: StagedToolPresentation; cancelRequested: boolean; cancelSent: boolean;
+  presentation: StagedToolPresentation; preparedFolders: PreparedToolFolders | null; cancelRequested: boolean; cancelSent: boolean;
   checkReason: string | null; reviewReason: string | null; downloadReason: string | null;
   canRead: boolean; canCancel: boolean;
 }
@@ -66,6 +69,7 @@ export class ToolAcquisitionController {
   private attempt: Attempt | null = null;
   private inspection: Inspection | null = null;
   private witness: Witness | null = null;
+  private readonly sourceFolders = new PreparedToolSourceHandoff();
   private epoch = 0;
   private mutation = 0;
   private action: ToolAcquisitionState['pending'] = null;
@@ -102,6 +106,11 @@ export class ToolAcquisitionController {
         known: [known[0], known[1], known[2]] };
     } catch { return null; }
   }
+  private folderContext(witness = this.capture()): ToolSourceFolderContext | null {
+    return witness && this.api && !this.disposed && !this.connectionRetired && !this.selectionPending && this.visible
+      ? { connection: this.api, context: witness.context, observation: witness.observation, draft: witness.draft,
+          baseline: witness.baseline, snapshot: witness.snapshot, catalog: witness.known[0], sources: witness.known[1], registration: witness.known[2] } : null;
+  }
   private current(a: { witness: Witness; epoch: number }): boolean {
     return !this.disposed && !this.connectionRetired && !this.selectionPending && a.epoch === this.epoch && sameWitness(a.witness, this.capture());
   }
@@ -122,7 +131,7 @@ export class ToolAcquisitionController {
       requestPending: this.preparing || this.starting, cancelPending: this.cancelling, projectId: this.projectId(), status: this.status,
       issue: this.issue, historical: !!op && !current, inspection: this.inspection && this.current(this.inspection) ? this.inspection.result :
         current ? a.requirements : null,
-      consent, presentation, cancelRequested: a?.cancelRequested ?? this.cancelIdentity !== null,
+      consent, presentation, preparedFolders: this.sourceFolders.preview(this.folderContext(),op,presentation), cancelRequested: a?.cancelRequested ?? this.cancelIdentity !== null,
       cancelSent: a?.cancelSent ?? this.cancelIdentity !== null, checkReason: this.checkReason(), reviewReason: this.reviewReason(),
       downloadReason: this.downloadReason(), canRead: !!this.api && !this.reading && !this.subscribing,
       canCancel: !!this.api && !!op && active(op) && !this.cancelling && !sameToolAcquisitionIdentity(this.cancelIdentity, op) });
@@ -131,7 +140,8 @@ export class ToolAcquisitionController {
     try { for (const listener of [...this.listeners]) { try { listener(); } catch { /* Rendering cannot release work. */ } } }
     finally { this.notifying = false; }
   }
-  private retire(): void {
+  private retire(preserveSourceFolders = false): void {
+    if (!preserveSourceFolders) this.sourceFolders.retire();
     if (this.epoch >= 0xffff_fffe) this.issue = 'protocol'; else this.epoch++;
     this.inspection = null; this.consentOpen = false; this.acknowledged = false;
     if (this.attempt) {
@@ -150,11 +160,22 @@ export class ToolAcquisitionController {
   }
   selectionIntent(): void { this.retire(); }
   toolInputsIntent(): void { this.retire(); }
+  async choosePreparedSource(role: AndroidToolSourceRole,
+    choose: (role: AndroidToolSourceRole, original: PreparedToolSourcePick) => Promise<void>): Promise<void> {
+    this.syncProject();
+    if (this.ownerReason() || this.other()) return;
+    const pick=this.sourceFolders.begin(this.folderContext(),this.status?.operation,this.state.presentation,role,() => this.folderContext());
+    if (!pick) return;
+    this.retire(true); // Only the separate directory nomination survives.
+    try { if (pick.stillCurrent()) await choose(role,pick); }
+    finally { pick.joined(); this.publish(); }
+  }
   snapshotIntent(projectId: string): void { if (projectId === this.projectId() || projectId === this.attempt?.context.projectId) this.retire(); }
   versionIntent(): void { this.retire(); }
   syncProject(): void {
     const next = this.capture();
-    if (!sameWitness(this.witness, next)) { this.witness = next; this.retire(); } else this.publish();
+    const preserveFolders = this.sourceFolders.sync(this.folderContext(next));
+    if (!sameWitness(this.witness, next)) { this.witness = next; this.retire(preserveFolders); } else this.publish();
   }
   setSelectionPending(value: boolean): void { if (value !== this.selectionPending) { this.selectionPending = value; this.retire(); } }
   setVisible(value: boolean): void {
@@ -165,6 +186,7 @@ export class ToolAcquisitionController {
     if (!value) this.retire(); else this.publish();
   }
   private fail(issue: Issue): void {
+    this.sourceFolders.retire();
     if (this.issue === null || this.issue === 'unconfirmed') this.issue = issue;
     this.consentOpen = false; this.acknowledged = false; this.inspection = null;
     if (this.attempt && !this.attempt.startSent) { this.attempt.retired = true; this.attempt.cancelRequested = true; }
@@ -320,6 +342,7 @@ export class ToolAcquisitionController {
       previous: this.status.operation && identity(this.status.operation), identity: null, prepareSent: false, prepareJoined: false, prepareAccepted: false,
       startClaimed: false, startSent: false, startJoined: false, retired: false, unconfirmed: false, terminalRead: false, cancelRequested: false, cancelSent: false,
       requirements: action === 'acquire' ? inspected!.result : null };
+    this.sourceFolders.retire();
     this.attempt = a; this.cancelIdentity = null; this.consentOpen = false; this.acknowledged = false;
     this.inspection = null; // A checked observation can prepare at most one download.
     this.action = action === 'inspect' ? 'inspect' : 'review'; this.publish();

@@ -30,6 +30,8 @@ from .owned_process import fatal_lifetime_error
 from .preflight import _online_query_blockers
 from .reporting import Finding, Status, FAILING_STATUSES
 from .stores import _fastlane_probe_commands, online_preflight_findings
+from . import apple_provisioning_bundle_read as bundle_read
+from . import apple_provisioning_profile_read as profile_read
 
 
 class _Refused(Exception):
@@ -87,6 +89,8 @@ class StorePreflightRun:
 
     def bind_scratch(self, scratch):
         layouts = ("online-runner", "store-selection", "store-selection", "online-runner", "online-readback")
+        if bundle_read.selected_read(self.request.context):
+            layouts = layouts[:4]  # Private capture, never a Store-access output file.
         require(type(scratch) is FiniteScratch and scratch.cancellation is self.guard
                 and len(self.scratches) < len(layouts) and scratch.layout == layouts[len(self.scratches)]
                 and self.invocation is not None and scratch.journal is None and scratch._lane_binding is None)
@@ -219,13 +223,15 @@ class StorePreflightRun:
         self.checkpoint()
         require(runtime is self.runtime and type(runtime) is StoreRuntimeContext and self._pending is None
                 and self._next_command <= self._lane_index and type(capture) is bool)
-        expected = (*_fastlane_probe_commands(runtime.tooling_root),
-                    ("bundle", "exec", "ruby", str(runtime.tooling_root / "fastlane/run_lane.rb"), self.request.context["platform"] + "_online_preflight"))
+        query = bundle_read.selected_read(self.request.context)
+        final = (bundle_read.fixed_read_argv(runtime.tooling_root, self.request.context) if query else
+                 ("bundle", "exec", "ruby", str(runtime.tooling_root / "fastlane/run_lane.rb"), self.request.context["platform"] + "_online_preflight"))
+        expected = (*_fastlane_probe_commands(runtime.tooling_root), final)
         index = self._next_command
         if self.request.context["platform"] == "ios":
             # Only the first command consumes the still-validating material.
             expected = ((self.apple_material_command(self._apple_material) if index == 0 else ()), *expected)
-        require(tuple(argv) == expected[index] and capture is (index < self._lane_index))
+        require(tuple(argv) == expected[index] and capture is (index < self._lane_index or query))
         self._next_command += 1  # Failed/unknown calls are never replayed.
         self._pending, self._pending_argv, self._pending_capture = index, expected[index], capture
         self._command_claimed = False
@@ -242,14 +248,16 @@ class StorePreflightRun:
         self.checkpoint()
         require(self._pending is not None and not self._command_claimed
                 and tuple(argv) == self._pending_argv and capture is self._pending_capture
-                and (type(evidence) is CommandCallEvidence if self._pending == self._lane_index else evidence is None))
+                and (type(evidence) is CommandCallEvidence if self._pending == self._lane_index
+                     and not bundle_read.selected_read(self.request.context) else evidence is None))
         self._command_claimed = True
 
     def command_limits(self, timeout, capture, output_limit):
         self.checkpoint()
         require(self._pending is not None and capture is self._pending_capture and self._command_claimed)
-        maximum = 60 if self._pending < self._lane_index else 900
-        return min(timeout, maximum), min(output_limit, 2 * 1024 * 1024)
+        query = self._pending == self._lane_index and bundle_read.selected_read(self.request.context)
+        maximum = 60 if self._pending < self._lane_index or query else 900
+        return min(timeout, maximum), min(output_limit, bundle_read.FRAME_LIMIT if query else 2 * 1024 * 1024)
 
     def require_query_timing(self, timeout):
         self.checkpoint()
@@ -283,15 +291,31 @@ class StorePreflightRun:
                         with _selected_store_material(config, values=values, platforms=(platform,),
                                                       invocation=invocation, scratch_parent=home._path) as material:
                             findings.extend(material.validate(runtime_context=self.runtime) if platform == "ios" else material.validate())
-                            blockers = _online_query_blockers(config, (platform,), findings)
-                            if blockers:
-                                findings.append(Finding("store.online.gate", Status.BLOCKED,
-                                                        "Configure the required saved Store inputs.", category="store-access"))
-                            elif not any(row.status in FAILING_STATUSES for row in findings):
-                                findings.extend(online_preflight_findings(config=config, release=version,
-                                    platforms=(platform,), material=material, invocation=invocation, runtime_context=self.runtime))
-                            self._source_post(); self._received_post()
-                            self.report = project_result(findings, platform=platform)
+                            if bundle_read.selected_read(self.request.context):
+                                profiles = profile_read.selected_query(self.request.context)
+                                observation = profile_read.unavailable("not-checked") if profiles else "not-checked"
+                                if not bundle_read.query_prerequisites(config) or any(row.status in FAILING_STATUSES for row in findings):
+                                    findings.append(Finding("store.online.gate", Status.BLOCKED,
+                                        "Configure the saved iOS Bundle ID and selected API key.", category="store-access"))
+                                else:
+                                    if profiles:
+                                        extra, observation = profile_read.read_saved_profiles(self, config, material)
+                                    else:
+                                        extra, observation = bundle_read.read_saved_bundle_id(self, config, material)
+                                    findings.extend(extra)
+                                self._source_post(); self._received_post()
+                                self.report = (profile_read.project_result(findings, observation) if profiles else
+                                               bundle_read.project_result(findings, observation))
+                            else:
+                                blockers = _online_query_blockers(config, (platform,), findings)
+                                if blockers:
+                                    findings.append(Finding("store.online.gate", Status.BLOCKED,
+                                                            "Configure the required saved Store inputs.", category="store-access"))
+                                elif not any(row.status in FAILING_STATUSES for row in findings):
+                                    findings.extend(online_preflight_findings(config=config, release=version,
+                                        platforms=(platform,), material=material, invocation=invocation, runtime_context=self.runtime))
+                                self._source_post(); self._received_post()
+                                self.report = project_result(findings, platform=platform)
         except BaseException as error:
             self.remember(error)
             raise

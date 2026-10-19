@@ -4,6 +4,7 @@ import type { ProjectSession } from './drafts.ts';
 import type { DesktopApi } from './types.ts';
 import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetPreviewAction, AssetRecordIntent, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, P12Fields, AscP8Fields, TokenFields, WifFields, AppleReviewContactFields, AppleReviewDemoFields, OperationCommitmentFields } from './assetSessionTypes.ts';
 import { ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetRequestFits, assetStorageWritable, parseAssetStatus } from './assetSessionProtocol.ts';
+import { BACKUP_EXPORT_OPERATION, BACKUP_IMPORT_OPERATION, credentialBackupExportRequest, credentialBackupImportRequest } from './credentialBackup.ts';
 
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -173,7 +174,7 @@ export class AssetSessionController {
       if (phase.reviewBinding === null) phase.reviewBinding = binding;
       return phase.reviewBinding === binding;
     }
-    if (subject.type !== 'record' || !assetStorageWritable(status)) return false;
+    if (phase.intent.type !== 'record' || subject.type !== 'record' || !assetStorageWritable(status)) return false;
     if (subject.kind !== phase.intent.kind || (preview.action !== 'delete' && (!this.current(status) || status.context?.revision !== phase.contextRevision))) return false;
     let matches: boolean;
     if (phase.afterSave) {
@@ -291,6 +292,12 @@ export class AssetSessionController {
     if (sameRevision(project, this.projectBinding)) return;
     this.projectBinding = project ? { id: project.project.id, revision: project.revision, baseline: project.baselineGeneration } : null;
     this.invalidateContext();
+  }
+  // A saved-source edit is not a new draft or a credential assignment. Retire
+  // only this selected project's context; the existing owner gate controls any
+  // later submission and retains all original private material/operations.
+  savedProjectChanged(projectId: string): void {
+    if (!this.disposed && this.selectedProject()?.project.id === projectId) this.invalidateContext();
   }
   setScope(scope: AssetScope): void {
     if (this.disposed || (assetImageOperationPending(this.state.status) || assetInstallationOperationPending(this.state.status)) || sameScope(scope, this.state.scope)) return;
@@ -420,6 +427,32 @@ export class AssetSessionController {
     if (!intent) return false;
     this.reviewCeiling = null;
     return this.run('prepare-delete', () => this.api!.prepareAssetDelete(record), this.phase(intent, 'prepare-delete', 'delete'));
+  }
+  exportBackup(record: AssetRecordRef, expected: AssetDisplayState): boolean {
+    // A retained callback may refer to an older committed view. Recheck after
+    // syncProject too: that call can retire the context without another render.
+    if (expected !== this.state || !this.contextReady() || expected !== this.state) return false;
+    const request = credentialBackupExportRequest(this.state, record);
+    if (!request) return false;
+    return this.run(BACKUP_EXPORT_OPERATION, () => this.api!.exportCredentialBackup(request),
+      this.phase({ type: 'backup', change: 'export', record: request.record }, BACKUP_EXPORT_OPERATION, null));
+  }
+  importBackup(expected: AssetDisplayState): boolean {
+    if (expected !== this.state || !this.contextReady() || expected !== this.state) return false;
+    const request = credentialBackupImportRequest(this.state);
+    if (!request) return false;
+    return this.run(BACKUP_IMPORT_OPERATION, () => this.api!.importCredentialBackup(request),
+      this.phase({ type: 'backup', change: 'import', record: null }, BACKUP_IMPORT_OPERATION, null));
+  }
+  backupExportCompleted(expected: AssetDisplayState): boolean {
+    const phase = this.intentPhase, operation = this.state.status?.operation;
+    // Read-only presentation correlation, not a new finality receipt. A poll,
+    // record-count change or idle phase never supplies the missing own reply.
+    return !this.disposed && expected === this.state && !!phase && phase.intent.type === 'backup' && phase.intent.change === 'export' &&
+      !phase.uncertain && phase.localRevision === this.localRevision && phase.contextRevision === this.state.status?.context?.revision &&
+      this.current() && !!operation && phase.operationId === operation.operationId && operation.operationId !== this.cancelling &&
+      operation.operation === BACKUP_EXPORT_OPERATION && operation.phase === 'idle' && operation.settlement === 'known' &&
+      operation.reason === 'none' && operation.backupDelivered === true && credentialBackupExportRequest(this.state, phase.intent.record) !== null;
   }
   confirmPreview(expectedToken: string, expectedAction: AssetPreviewAction): boolean {
     this.syncProject();

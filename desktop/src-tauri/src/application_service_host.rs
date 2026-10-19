@@ -20,6 +20,10 @@ use std::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
+#[path = "application_service_identity_history.rs"]
+mod identity_history;
+pub(crate) use identity_history::{IdentityCapture, IdentityObservation, IdentitySource, identity_history_document_backing_bytes};
+
 const ACCESS_LIFETIME: Duration = Duration::from_secs(3600);
 // Work admission is not the user lease. Bounded synchronous native calls have
 // checkpoints; this does not claim that a stalled kernel call is preemptible.
@@ -154,6 +158,7 @@ struct Originals {
 
 pub(crate) struct ApplicationHost {
     identity: Arc<()>, control: Mutex<Control>, originals: AsyncMutex<Originals>,
+    history: Arc<identity_history::History>,
 }
 impl ApplicationHost {
     /// No path lookup, directory, reservation, socket or background task.
@@ -162,7 +167,7 @@ impl ApplicationHost {
             phase: Phase::Dormant, epoch: 0, source_epoch: 0, pending: None, prepared: None,
             native_location: None, native_roots: Vec::new(), store: None, service: None,
             registered: BTreeMap::new(), fence: None, failures: Vec::new(),
-        }), originals: AsyncMutex::new(Originals::default()) }
+        }), originals: AsyncMutex::new(Originals::default()), history: Arc::new(identity_history::History::default()) }
     }
     fn lock(&self) -> Result<MutexGuard<'_, Control>, Error> {
         match self.control.lock() {
@@ -236,7 +241,11 @@ impl ApplicationHost {
             };
             if !proof.excludes_application(Some(&current)) { return Err(Error::Conflict); }
             store.excludes_project(device, inode).map_err(|error| error.code)?;
-        } else if !proof.excludes_application(None) { return Err(Error::Conflict); }
+        }
+        // A dormant Host owns no application-directory exclusion. The same
+        // Document's tool cache may still require one; its independent final
+        // ProjectProbe validator must check that marker before registration.
+        // Absence of our store never waives another owner's marker or errors.
         // A new native registration may arrive between the complete roster
         // reservation and prepare. Keep it in that SAME pre-create exclusion
         // set AND retire pending Allow. A new member cannot inherit an earlier
@@ -366,7 +375,7 @@ impl ApplicationHost {
             }
             state.registered.insert(ticket.original.runtime_id.clone(), ticket.original.clone());
         }
-        self.check_startup(&self.lock()?, ticket)?;
+        self.check_startup(&*self.lock()?, ticket)?;
         if originals.server.is_none() {
             let service = originals.service.as_ref().ok_or(Error::StateUnknown)?.clone();
             match installed_cli_ipc::start(service).await {
@@ -407,6 +416,18 @@ impl ApplicationHost {
             if error != Error::Expired { state.fail(HostFailure::simple(HostStage::Publish, error)); }
         }
         result
+    }
+    // Called OFF Document/Edit guards. Never starts a dormant Host or
+    // replaces its service; only the genuine current registration may link.
+    pub(crate) fn identity_request_service(&self, original: &NativeProject) -> Result<Arc<ApplicationService>, Error> {
+        let state = self.lock()?; state.available()?;
+        if state.phase != Phase::Listening { return Err(Error::Unavailable); }
+        if !state.registered.get(&original.runtime_id).is_some_and(|bound| bound.same_registration(original)) {
+            return Err(Error::Conflict);
+        }
+        let service = state.service.clone().ok_or(Error::Unavailable)?;
+        service.native_history_current()?;
+        Ok(service)
     }
     pub(crate) fn snapshot_ticket(&self, original: &NativeProject) -> Result<Option<SnapshotTicket>, Error> {
         let state = self.lock()?; state.available()?;
@@ -476,6 +497,7 @@ impl ApplicationHost {
     /// Accepted exit/document retirement only. A cancelled quit does not call
     /// this method, and therefore does not silently destroy existing consent.
     pub(crate) fn retire_for_exit(&self) -> Result<(), Error> {
+        self.history.retire_capture(); // Memory-only barrier before existing Host/Service work.
         let mut state = self.lock()?;
         state.pending = None; state.prepared = None; state.phase = Phase::Retiring;
         if let Some(service) = state.service.clone() {
@@ -715,10 +737,20 @@ mod tests {
     #[test]
     fn stale_snapshot_after_invalidation_cannot_freshen_saved_observation() {
         runtime().block_on(async {
-            let f = Fixture::short(); let mut project = project(&f); let host = ApplicationHost::new();
+            let f = Fixture::short(); let mut project = project(&f); let host = Arc::new(ApplicationHost::new());
+            // Exercise the actual fixed native-control binding, not a direct
+            // Host invalidation call. The Store/Service fixture above still
+            // makes no claim of successful native filesystem qualification.
+            let control = Arc::new(crate::saved_command_owner::AndroidRegistrationControl::default());
+            control.bind_application_service(&host);
+            let mut initial = control.reserve(crate::saved_command_owner::AndroidRegistrationPublisherKind::General, false).unwrap();
+            initial.accept(crate::android_registration_app_protocol::Reason::ContextChanged).unwrap();
+            initial.finish();
+            project.input_revision = control.epoch().unwrap();
             enable(&host, &f, &project).await;
             let old = host.snapshot_ticket(&project).unwrap().unwrap();
-            host.invalidate_all_native().unwrap();
+            let mut publisher = control.reserve(crate::saved_command_owner::AndroidRegistrationPublisherKind::General, false).unwrap();
+            publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged).unwrap();
             let original_core_result = passive(&project.canonical_root, &"1".repeat(64));
             // Even reusing the old numeric native stamp cannot defeat the
             // synchronously captured host-side mutation fence.
@@ -726,7 +758,8 @@ mod tests {
             match installed_cli_ipc::request(&f.app, &list()).await.unwrap().response {
                 p::ResponseBody::Projects(rows) => assert!(rows[0].observation.as_ref().unwrap().stale), _ => panic!("wrong response"),
             }
-            project.input_revision += 1;
+            publisher.finish();
+            project.input_revision = control.epoch().unwrap();
             let fresh = host.snapshot_ticket(&project).unwrap().unwrap();
             host.publish_snapshot(fresh, &project, &passive(&project.canonical_root, &"2".repeat(64))).unwrap();
             match installed_cli_ipc::request(&f.app, &list()).await.unwrap().response {
@@ -903,6 +936,14 @@ mod tests {
             let current = asset_source::probe_project_excluding_private_roots(&mut current_book,
                 project.canonical_root.clone(), &[], None, Some(&application), &mut || false).unwrap();
             assert!(current_book.settled()); host.check_project_root(&current).unwrap();
+
+            // A genuine extra marker does not start/grant the dormant Host.
+            // The separate cache validator remains responsible for that marker.
+            let dormant = ApplicationHost::new();
+            dormant.check_project_root(&current).unwrap();
+            assert!(dormant.native_exclusion_root().unwrap().is_none());
+            assert!(dormant.shutdown().await.settled());
+            assert_eq!(dormant.check_project_root(&current), Err(Error::Unavailable));
 
             let inside = f.app.join("synthetic-project"); std::fs::create_dir(&inside).unwrap();
             // Actual APFS Data-volume spelling, not invented identity DATA.

@@ -400,6 +400,7 @@ pub(super) async fn run_selected(document: &DocumentBinding, owner: &Arc<Origina
 impl DocumentBinding {
     pub(crate) fn choose_credential_backup_export(&self, app: tauri::AppHandle, context_revision: u32,
         reference: commands::RecordRef<'_>) -> Result<AssetStatus, AssetError> {
+        super::backup_desktop::qualification(self)?;
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
         self.durable_gate(&state, true)?; idle(&state)?;
         let context = self.current_context(&mut state, context_revision)?;
@@ -416,6 +417,7 @@ impl DocumentBinding {
     }
     pub(crate) fn choose_credential_backup_import(&self, app: tauri::AppHandle, context_revision: u32)
         -> Result<AssetStatus, AssetError> {
+        super::backup_desktop::qualification(self)?;
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
         self.durable_gate(&state, true)?; idle(&state)?;
         let context = self.current_context(&mut state, context_revision)?;

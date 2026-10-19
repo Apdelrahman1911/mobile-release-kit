@@ -14,6 +14,21 @@ pub(super) struct SavedObservationLane {
     stage: std::sync::atomic::AtomicU8, completion_returned: AtomicBool,
 }
 impl SavedObservationLane {
+    // Called by the same prepared tool Input on its blocking worker. This
+    // never reacquires the Document or Edit Registry held by Start admission.
+    pub(super) fn tool_acquisition_current(&self, document: &Inner, registration: u32,
+        root: &asset_source::RegisteredRoot, project_id: &str) -> bool {
+        self.returned() && self.registration == registration && self.root == *root
+            && self.project_id == project_id
+            && document.android_registration_control.matches_epoch(self.epoch)
+            && document.bridge.registry_generation() == registration
+    }
+    pub(super) fn tool_source_epoch(&self) -> u64 { self.epoch }
+    pub(super) fn tool_source_matches(&self, document: &Inner, edit: &crate::edit_owner::SavedEditGuard<'_>,
+        registration: u32, root: &asset_source::RegisteredRoot, project_id: &str) -> bool {
+        self.returned() && self.registration == registration && self.root == *root && self.project_id == project_id
+            && document.bridge.registry_generation() == registration && edit.matches(&self.stamp)
+    }
     pub(super) fn returned(&self) -> bool {
         self.stage.load(Ordering::SeqCst) == RETURNED && self.completion_returned.load(Ordering::SeqCst)
     }
@@ -235,6 +250,7 @@ impl DocumentBinding {
         self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.android_build.ensure_idle()?;
         self.inner.bridge.project_recovery.ensure_idle()?; self.inner.bridge.ios_archive.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
+        self.inner.bridge.tool_acquisition.ensure_idle()?;
         Ok(())
     }
     pub(crate) fn saved_observation(&self, bridge: &DesktopBridge, project_id: &str) -> Result<crate::supervisor::SavedObservationQuery, BridgeError> {
@@ -261,6 +277,30 @@ impl DocumentBinding {
             lane.stage.store(RETURNED, Ordering::SeqCst); state.saved_observation = None;
         }
         result
+    }
+    // The caller already holds the SAME Doc and the borrowed original Edit
+    // guard. Only existing returned saved bytes enter the new tool intent.
+    // Draft/baseline counters remain request/comparison DATA, not native facts.
+    pub(super) fn tool_acquisition_saved_lane(&self, state: &DocumentState,
+        input: &crate::tool_acquisition_protocol::Context, edit: &crate::edit_owner::SavedEditGuard<'_>,
+        registration: u32, root: &asset_source::RegisteredRoot) -> Result<Arc<SavedObservationLane>, BridgeError> {
+        let binding = state.saved_input.as_ref().ok_or_else(stale)?;
+        if !state.saved_observation.as_ref().is_some_and(|current| Arc::ptr_eq(current, &binding.lane))
+            || !binding.lane.tool_acquisition_current(&self.inner, registration, root, &input.project_id)
+            || !edit.matches(&binding.lane.stamp)
+            || binding.comparison.config_bytes != input.saved_config.bytes
+            || SavedComparisonData::digest(&input.saved_config.sha256) != Some(binding.comparison.config_sha256) {
+            return Err(stale());
+        }
+        Ok(binding.lane.clone())
+    }
+    pub(super) fn tool_source_saved_input_matches(&self, state: &DocumentState, lane: &Arc<SavedObservationLane>,
+        context: &crate::tool_acquisition_protocol::Context, continuing: bool) -> bool {
+        match &state.saved_input {
+            Some(binding) => Arc::ptr_eq(&binding.lane,lane) && binding.comparison.config_bytes == context.saved_config.bytes
+                && SavedComparisonData::digest(&context.saved_config.sha256) == Some(binding.comparison.config_sha256),
+            None => continuing, // Only exact recorded original source picks may clear it.
+        }
     }
     pub(super) fn validated_saved_input(&self, state: &DocumentState, input: &crate::android_build_protocol::Prepare) -> Result<ValidatedSavedInput, BridgeError> {
         let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;

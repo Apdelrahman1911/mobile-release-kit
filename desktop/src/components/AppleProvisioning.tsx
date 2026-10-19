@@ -3,6 +3,7 @@ import { localStoreOwnerReason } from '../localStorePreflight.ts';
 import { APPLE_BUNDLE_QUERY, APPLE_BUNDLE_SCOPE } from '../localStorePreflightProtocol.ts';
 import type { BundleIdObservation, StoreCheck } from '../localStorePreflightTypes.ts';
 import { sameOfflineData } from '../offlinePreflightProtocol.ts';
+import { AppleProvisioningProfiles } from './AppleProvisioningProfiles.tsx';
 
 const observations: Record<BundleIdObservation, { title: string; detail: string }> = {
   found: { title: 'Matching Bundle ID returned', detail: 'The selected App Store Connect key returned this saved iOS Bundle ID. This does not verify its team, certificate, provisioning profile or signing readiness.' },
@@ -51,6 +52,7 @@ export function AppleProvisioning({ state, controller, compact = false, onCreden
       <button disabled={!!reason || state.pending} onClick={() => void controller.prepare()}>Review saved-app access instead</button>
       {reason && <p className="save-note">{reason}</p>}
     </>}
+    {!compact && <AppleProvisioningProfiles state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
     {state.consentUntil !== null && <div className="notice">
       <p>Contact App Store Connect once to read the saved Bundle ID visible to the selected key. Apple may log or rate-limit this request. This does not create, replace or revoke any signing resource, and an empty result does not authorize creating one.</p>
       <label><input type="checkbox" checked={state.acknowledged} onChange={event => controller.acknowledge(event.target.checked)} /> I authorize this read-only Bundle ID check.</label>

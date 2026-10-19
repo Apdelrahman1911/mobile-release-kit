@@ -23,6 +23,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fmt::Write as _, sync::Arc};
 
+#[path = "version_allocation_protocol_native.rs"]
+pub(crate) mod dialogue;
+#[path = "version_allocation_state_jobs.rs"]
+pub(crate) mod jobs;
+
 const PROTOCOL: &str = "mrk-version-allocation-state/1";
 const ALLOCATION_PROTOCOL: &str = "mrk-version-allocation/1";
 const STATE_LIMIT: usize = 1024 * 1024;

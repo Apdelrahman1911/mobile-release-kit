@@ -1,6 +1,7 @@
 // Closed presentation/wire checks. Core alone judges credential policy. These
 // limits apply to already-materialized JS data, not upstream IPC allocations.
 import type { ApiError } from './types.ts';
+import { credentialBackupRequestFits, isCredentialBackupOperation } from './credentialBackup.ts';
 import type { AssetFileKind, AssetKind, AssetReason, AssetStatus, CredentialAssessment } from './assetSessionTypes.ts';
 
 export const ASSET_FILE_KINDS = ['android-keystore', 'android-firebase', 'ios-firebase', 'apple-p12', 'apple-profile', 'asc-p8', 'google-service-account'] as const;
@@ -140,7 +141,7 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
   try {
     const mode = object(value) ? Object.getOwnPropertyDescriptor(value, 'mode') : undefined;
     const encrypted = mode && 'value' in mode && mode.value === 'encrypted';
-    if (!assetJsonFits(value, encrypted ? 131072 : 32768) || !keys(value, ['schemaVersion', 'statusRevision', 'mode', 'persistence', 'capability', 'modes', 'context', 'operation', 'records', 'assignments']) ||
+    if (!assetJsonFits(value, encrypted ? 131072 : 32768) || !keys(value, ['schemaVersion', 'statusRevision', 'mode', 'persistence', 'capability', 'modes', 'context', 'operation', 'records', 'assignments', ...(object(value) && Object.hasOwn(value, 'backup') ? ['backup'] : [])]) ||
         value.schemaVersion !== 3 || !assetCounter(value.statusRevision) || !one(value.mode, ['closed', 'session', 'encrypted']) ||
         !keys(value.capability, ['available', 'reason']) || typeof value.capability.available !== 'boolean' || !one(value.capability.reason, ASSET_REASONS) ||
         (value.capability.available && value.capability.reason !== 'none') ||
@@ -152,6 +153,9 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
     }
     if ((value.modes.session as ObjectValue).available !== value.capability.available ||
         (value.modes.session as ObjectValue).reason !== value.capability.reason) return null;
+    if (Object.hasOwn(value, 'backup') && (!keys(value.backup, ['available', 'reason']) || typeof value.backup.available !== 'boolean' ||
+        !one(value.backup.reason, ASSET_REASONS) || value.backup.available !== (value.backup.reason === 'none') ||
+        value.backup.available && (!value.capability.available || !(value.modes.encrypted as ObjectValue).available))) return null;
     if (encrypted ? !keys(value.persistence, ['state', 'reason', 'keyAccess']) ||
         !one(value.persistence.state, ['uninitialized', 'locked', 'unlocked', 'initializing', 'mutating', 'interrupted', 'unknown']) ||
         !one(value.persistence.reason, ASSET_REASONS) || !one(value.persistence.keyAccess, ['locked', 'read-only', 'read-write']) ||
@@ -170,21 +174,26 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
         one(assignment.availability, ['available', 'unavailable'])) || new Set(value.assignments.map((assignment) => (assignment as ObjectValue).kind)).size !== value.assignments.length) return null;
     const operation = value.operation;
     if (operation !== null) {
-      if (!keys(operation, ['operationId', 'operation', 'phase', 'reason', 'source', 'settlement', 'storageOutcome', 'selectionToken', 'assessment', 'preview']) ||
-          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-images', 'inspect-installation', 'choose-project', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock']) ||
+      if (!keys(operation, ['operationId', 'operation', 'phase', 'reason', 'source', 'settlement', 'storageOutcome', 'selectionToken', 'assessment', 'preview', ...(object(operation) && Object.hasOwn(operation, 'backupDelivered') ? ['backupDelivered'] : [])]) ||
+          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-images', 'inspect-installation', 'choose-project', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup']) ||
           !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'assessing', 'preview', 'mutating', 'stopping', 'unknown']) ||
           !one(operation.reason, ASSET_REASONS) || !one(operation.source, ['not-run', 'pending', 'captured', 'refused', 'unknown']) ||
           !one(operation.settlement, ['pending', 'known', 'unknown', 'late-known']) || (operation.selectionToken !== null && !token(operation.selectionToken)) ||
           (operation.assessment !== null && !assessment(operation.assessment))) return null;
       const storage = operation.storageOutcome;
-      if (value.mode === 'session' && (storage !== null || one(operation.operation, ['open-vault', 'prepare-initialize', 'initialize', 'unlock']))) return null;
-      if (storage !== null && (!keys(storage, ['effect', 'durability', 'cleanup']) || !one(operation.operation, ['initialize', 'commit']) ||
+      if (value.mode === 'session' && (storage !== null || one(operation.operation, ['open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup']))) return null;
+      if (storage !== null && (!keys(storage, ['effect', 'durability', 'cleanup']) || !one(operation.operation, ['initialize', 'commit', 'import-backup']) ||
           !one(storage.effect, ['not-started', 'known-none', 'known-applied', 'unknown']) || !one(storage.durability, ['not-run', 'confirmed', 'unknown']) ||
           !one(storage.cleanup, ['pending', 'known', 'unknown']) || storage.durability === 'confirmed' && storage.effect !== 'known-applied')) return null;
       if (operation.operation === 'inspect-installation' && (!one(operation.phase, ['idle', 'admitting', 'capturing', 'stopping', 'unknown']) || storage !== null)) return null;
       if (operation.operation === 'choose-images' && !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'stopping', 'unknown'])) return null;
-      if (['choose-images', 'inspect-installation', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence'].includes(operation.operation as string) &&
+      if (['choose-images', 'inspect-installation', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare-backup-export', 'import-backup'].includes(operation.operation as string) &&
           (operation.selectionToken !== null || operation.assessment !== null || operation.preview !== null)) return null;
+      if (isCredentialBackupOperation(operation.operation) && !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'mutating', 'stopping', 'unknown'])) return null;
+      if (Object.hasOwn(operation, 'backupDelivered') && (operation.backupDelivered !== true || operation.operation !== 'prepare-backup-export' ||
+          operation.phase !== 'idle' || operation.settlement !== 'known' || operation.reason !== 'none' || !one(operation.source, ['not-run', 'captured']) || storage !== null ||
+          !object(value.backup) || value.backup.available !== true || value.mode !== 'encrypted' || !object(value.persistence) ||
+          value.persistence.state !== 'unlocked' || value.persistence.keyAccess !== 'read-write' || !object(value.context) || value.context.revision === 0 || operation.operationId === 0)) return null;
       if (operation.preview !== null && (!keys(operation.preview, ['token', 'action', 'expiresInMs', 'subject']) || !token(operation.preview.token) ||
           !one(operation.preview.action, ['save', 'bind', 'delete', 'initialize']) || !assetCounter(operation.preview.expiresInMs) || operation.preview.expiresInMs > 300000 ||
           operation.phase !== 'preview' || operation.settlement !== 'known' || operation.selectionToken !== null ||
@@ -243,7 +252,7 @@ function fields(value: unknown, names: readonly string[]): boolean {
   return keys(value, names) && names.every((key) => value[key] === null || (typeof value[key] === 'string' && value[key].length <= 4096 &&
     !/[\ud800-\udfff]/u.test(value[key]) && encoder.encode(value[key]).byteLength <= 4096));
 }
-export type AssetCommand = 'vault_status' | 'vault_open' | 'vault_prepare_initialize' | 'vault_unlock' | 'asset_context' | 'asset_choose' | 'credential_prepare' | 'vault_prepare_delete' | 'vault_commit' | 'vault_bind' | 'vault_discard' | 'vault_lock';
+export type AssetCommand = 'vault_status' | 'vault_open' | 'vault_prepare_initialize' | 'vault_unlock' | 'asset_context' | 'asset_choose' | 'credential_prepare' | 'vault_prepare_delete' | 'vault_commit' | 'vault_bind' | 'vault_discard' | 'vault_lock' | 'vault_backup_export' | 'vault_backup_import';
 export function assetRequestFits(command: AssetCommand, value: unknown): boolean {
   const limit = command === 'asset_context' ? 1048576 : command === 'credential_prepare' ? 131072 : 1024;
   if (!assetJsonFits(value, limit)) return false;
@@ -254,6 +263,7 @@ export function assetRequestFits(command: AssetCommand, value: unknown): boolean
     case 'vault_commit': case 'vault_bind': return keys(value, ['previewToken']) && token(value.previewToken);
     case 'vault_discard': return keys(value, ['operationId']) && assetCounter(value.operationId);
     case 'vault_prepare_delete': return recordRef(value);
+    case 'vault_backup_export': case 'vault_backup_import': return credentialBackupRequestFits(command, value);
     case 'asset_context': return keys(value, object(value) && Object.hasOwn(value, 'executionMode') ? ['projectId', 'draft', 'platform', 'stage', 'purpose', 'executionMode'] : ['projectId', 'draft', 'platform', 'stage', 'purpose']) && projectId(value.projectId) && object(value.draft) &&
       assetJsonFits(value.draft, 524288) && scope({ platform: value.platform, stage: value.stage, purpose: value.purpose, ...(Object.hasOwn(value, 'executionMode') ? { executionMode: value.executionMode } : {}) });
     case 'asset_choose': return keys(value, ['contextRevision', 'kind', 'replacement']) && assetCounter(value.contextRevision) && isAssetFileKind(value.kind) &&

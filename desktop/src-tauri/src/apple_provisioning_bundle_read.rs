@@ -11,6 +11,17 @@ pub(crate) const SCOPE: &str = "local-ios-bundle-id-registration-read";
 pub(crate) enum Query {
     #[serde(rename = "bundle-id-registration")]
     BundleIdRegistration,
+    #[serde(rename = "app-store-profile-reuse")]
+    AppStoreProfileReuse,
+}
+
+impl Query {
+    pub(super) fn consent(self) -> &'static str {
+        match self {
+            Self::BundleIdRegistration => CONSENT,
+            Self::AppStoreProfileReuse => super::profile_read::CONSENT,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -53,6 +64,7 @@ pub(super) fn valid_result(value: &super::ResultData) -> bool {
     value.schema_version == 1
         && value.scope == SCOPE
         && value.observation.is_some()
+        && value.profile_reuse.is_none()
         && value.limitations.as_slice() == LIMITATIONS
         && value.findings.len() <= 16
         && value

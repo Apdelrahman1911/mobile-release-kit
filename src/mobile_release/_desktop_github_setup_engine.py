@@ -79,6 +79,16 @@ def main(*, started: float, runtime_dir: str) -> int:
             end = started + 60.0
             run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
             request = None
+        elif type(header) is dict and header.get("protocol") == "mrk-version-allocation-runtime/1":
+            from ._desktop_version_allocation_runtime import run_owned
+            end = started + 60.0
+            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+            request = None
+        elif type(header) is dict and header.get("protocol") == "mrk-version-allocation-source/1":
+            from .version_allocation_source import run_owned
+            end = started + 60.0
+            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+            request = None
         else:
             end = started + READ_SECONDS
             request = policy.parse_initial(initial)

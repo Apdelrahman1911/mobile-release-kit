@@ -73,21 +73,21 @@ impl DocumentBinding {
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
             || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled() || (self.inner.bridge.local_store.disabled() || self.inner.bridge.local_store_prepare.disabled())
             || self.inner.bridge.android_build.disabled() || self.inner.bridge.project_recovery.disabled()
-            || self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled(){return Availability::CleanupUnknown;}
+            || self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled()){return Availability::CleanupUnknown;}
         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
             || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.local_store.stopping() || self.inner.bridge.local_store_prepare.stopping())
             || self.inner.bridge.android_build.stopping() || self.inner.bridge.project_recovery.stopping()
-            || self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping(){return Availability::Shutdown;}
+            || self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping()){return Availability::Shutdown;}
         if wire::Profile::current().is_none(){return Availability::UnsupportedPlatform;}
         if state.lost_observed{return Availability::DocumentLost;}
         if !state.lifetime.original_bound(){return Availability::Busy;}
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed()
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane|!lane.returned())
             || state.slot.as_ref().is_some_and(|slot|slot.phase!=Phase::Idle||!slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
             || (self.inner.bridge.local_store.busy() || self.inner.bridge.local_store_prepare.busy()) || self.inner.bridge.android_build.busy() || self.inner.bridge.project_recovery.busy()
-            || self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy(){return Availability::Busy;}
+            || self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy()){return Availability::Busy;}
         Availability::Available
     }
 }

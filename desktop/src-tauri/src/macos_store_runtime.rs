@@ -12,6 +12,8 @@ pub const REQUIRED: &[&str] = &[
     "store/bundle/ruby/3.3.0/gems/fastlane-2.235.0/fastlane/lib/fastlane.rb",
     "store/tooling/Gemfile", "store/tooling/Gemfile.lock", "store/tooling/fastlane/Fastfile",
     "store/tooling/fastlane/run_lane.rb", "store/tooling/fastlane/native_process_spawn.rb",
+    "store/tooling/fastlane/apple_provisioning.rb", "store/tooling/fastlane/apple_provisioning_bundle_read.rb",
+    "store/tooling/fastlane/apple_provisioning_profile_read.rb",
     "store/licenses/Ruby-COPYING", "store/licenses/Ruby-BSDL", "store/licenses/Ruby-LEGAL",
     "store/licenses/OpenSSL-LICENSE.txt", "store/licenses/LibYAML-License",
     "store/licenses/locked-gem-licenses.txt",

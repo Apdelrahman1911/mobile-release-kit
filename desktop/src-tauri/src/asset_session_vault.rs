@@ -9,6 +9,8 @@ mod assignment_native;
 mod backup_native;
 #[path = "credential_backup_selection.rs"]
 mod backup_selection;
+#[path = "credential_backup_desktop.rs"]
+pub(super) mod backup_desktop;
 pub(super) use backup_selection::Selectors as BackupSelectors;
 pub(crate) use backup_selection::Choice as CredentialBackupChoice;
 
@@ -177,6 +179,9 @@ pub(super) struct SlotData {
     // Set only by the original explicit Discard/Lock path or the accepted
     // New-only publisher. Generic STOP/Idle/status never authorizes disposal.
     backup_discard: bool, backup_new_published: bool, backup_export_published: bool,
+    // Nonsecret current-display stamp; the ordinary private working reference
+    // is cleared by retirement. This grants no loan, retry or disposal right.
+    backup_export_context: Option<(u32, StoredRef)>,
 }
 
 pub(super) fn mode(state: &DocumentState) -> bool { state.vault.is_some() }
@@ -424,6 +429,8 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
             // then this exact parent rematched the vault and native context
             // after actual joins. Only now may its ordinary off-lock drain
             // dispose the retained private output. No assessment/Bind follows.
+            slot.vault.backup_export_context = slot.context.as_ref().and_then(|context|
+                slot.vault.reference.map(|reference| (context.revision, reference)));
             slot.vault.backup_export_published = true;
             slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
             slot.selection = None; slot.preview = None; slot.assessment = None;

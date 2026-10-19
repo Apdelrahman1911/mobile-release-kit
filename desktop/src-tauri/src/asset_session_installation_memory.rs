@@ -86,6 +86,12 @@ fn android_fixture_histories_empty(document:&DocumentBinding)->bool {
     if document.inner.github_fixture.is_some(){return false;}
     let _=document;true
 }
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(super) fn additional_document_bytes(document: &DocumentBinding, state: &DocumentState) -> Result<usize, Reason> {
+    if !android_fixture_histories_empty(document) { return Err(Reason::Capacity); }
+    known::additional_document_bytes(state)
+}
 pub(super) fn android_service_setup_census<'a>(document:&'a DocumentBinding,state:&'a DocumentState,
     pickers:&'a [Option<Arc<OriginalWork>>;3])->Result<AndroidServiceSetupCensus<'a>,Reason>{
     if !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
@@ -162,6 +168,22 @@ mod known {
         }
     }
     struct Census { bytes: usize, seen: Seen }
+    // Reuse the original lane/evidence/maintenance accounting for the new tool
+    // path; do not silently omit fields absent from the older lookup census.
+    pub(super) fn additional_document_bytes(state: &DocumentState) -> Count<usize> {
+        if !state.maintenance.data_only() { return Err(Reason::Capacity); }
+        let mut census = Census::new();
+        census.document_state_gate(state)?;
+        census.document_cells()?;
+        if let Some(lane) = &state.saved_observation { census.saved_observation(lane)?; }
+        if let Some(binding) = &state.saved_input { census.saved_observation(&binding.lane)?; }
+        census.evidence(&state.evidence)?;
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+        census.add(capacity(state.maintenance.notice_bytes())?)?;
+        census.add(size_of::<Census>())?;
+        // lookup_memory already charges this inline portion of Inner.
+        capacity(census.bytes.checked_sub(size_of::<DocumentState>()))
+    }
     impl Census {
         fn new() -> Self { Self { bytes: 0, seen: Seen::new() } }
         fn add(&mut self, bytes: usize) -> Count<()> {
@@ -250,7 +272,9 @@ mod known {
         }
         fn android_source(&mut self, value: &Arc<AndroidSourceBinding>) -> Count<()> {
             if !self.seen.insert(value)? { return Ok(()); }
-            self.arc::<AndroidSourceBinding>()?; self.add(value.project_id.capacity())?; self.add(value.root.path.capacity())
+            self.arc::<AndroidSourceBinding>()?; self.add(value.project_id.capacity())?; self.add(value.root.path.capacity())?;
+            if let Some(nomination)=&value.acquired { self.add(capacity(nomination.retained_bytes())?)?; }
+            Ok(())
         }
         fn image_binding(&mut self, value: &Arc<images::Binding>) -> Count<()> {
             if !self.seen.insert(value)? { return Ok(()); }
@@ -347,11 +371,15 @@ mod known {
                 if value.gnome_transport_gate.try_lock().map_err(|_| Reason::Capacity)?.is_some() { return Err(Reason::Capacity); }
                 self.arc::<OriginalWork>()?;
                 self.gui(&value.gui, value)?;
+                if let Some(selectors) = value.backup_selection.get() {
+                    self.add(capacity(selectors.settled_census_bytes())?)?;
+                }
                 let source = value.source.try_lock().map_err(|_| Reason::Capacity)?;
                 if !source.not_started() && !source.settled() { return Err(Reason::Capacity); }
                 self.source_data_rows(&value.source,&source)?;
                 let work = value.vault.try_lock().map_err(|_| Reason::Capacity)?;
                 if !work.settled() { return Err(Reason::Capacity); }
+                self.add(capacity(work.backup_retained_bytes())?)?;
                 if let Some(store) = work.store_ref() { self.vault_store(store)?; }
                 if let Some(key) = work.key_ref() { self.vault_key(key)?; }
                 if let Some(work) = &value.installation { self.add(capacity(work.retained_bytes_if_settled())?)?; }
@@ -513,12 +541,12 @@ mod known {
         slot.project=Some(Project{id:project_id.to_owned(),name:"Catalogue allocation DATA".to_owned(),
             path:project.path.to_str().unwrap().to_owned()});
         slot.android_source=Some(Arc::new(AndroidSourceBinding{project_id:project_id.to_owned(),generation:1,
-            root:project.clone(),role:crate::android_tool_sources::Role::Jdk}));
+            root:project.clone(),role:crate::android_tool_sources::Role::Jdk,acquired:None}));
         let state=DocumentState{lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
             retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,
             session_owner_reason:None,maintenance:macos_maintenance::Closure::default(),context:Some(context),slot:Some(slot),records,assignments,
-            quit:None,quit_accepted:false,quit_cleanup_end:None,github:ConnectionState::new(),
+            quit:None,quit_accepted:false,quit_cleanup_end:None,github:ConnectionState::new(),gh_auth:None,
             evidence:EvidenceRegistry::new(),images:images::Registry::new(),installation:installation::Registry::new(),vault:None};
         // Two mentions of one identity proxy, not two made-up returned lanes.
         // Its smaller layout is never used: saved_observation_rows charges the
@@ -624,7 +652,7 @@ mod known {
                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
                 quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None,
                 session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
-                quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(),
+                quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None,
                 evidence: EvidenceRegistry::new(), images: images::Registry::new(),
                 installation: installation::Registry::new(), vault: None }
         }

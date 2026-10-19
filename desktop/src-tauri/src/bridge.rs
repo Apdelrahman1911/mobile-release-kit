@@ -206,6 +206,8 @@ pub(crate) struct ProjectRoster { pub(crate) generation: u32, pub(crate) roots: 
 pub struct DesktopBridge {
     pub supervisor: Supervisor,
     pub edits: EditOwner,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) application_service: std::sync::Arc<crate::application_service_host::ApplicationHost>,
     pub(crate) diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner,
     pub(crate) preflight: crate::offline_preflight_owner::OfflinePreflightOwner,
     pub(crate) local_history: crate::local_release_history_owner::LocalReleaseHistoryOwner,
@@ -217,6 +219,7 @@ pub struct DesktopBridge {
     pub(crate) project_recovery: crate::project_recovery_owner::ProjectRecoveryOwner,
     pub(crate) ios_archive: crate::ios_archive_owner::IOSArchiveOwner,
     pub(crate) artifact_inspection: crate::saved_command_owner::SavedCommandOwner,
+    pub(crate) tool_acquisition: crate::saved_command_owner::SavedCommandOwner,
     installed_project_selection_available: bool,
     installed_project_path_selection_available: bool,
     installed_android_source_selection_available: bool,
@@ -272,6 +275,8 @@ impl DesktopBridge {
         let installed_evidence_selection_available = runtime.evidence_selection_profile_available();
         Self {
             supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime.clone()),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            application_service: std::sync::Arc::new(crate::application_service_host::ApplicationHost::new()),
             diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime.clone()),
             preflight: crate::offline_preflight_owner::OfflinePreflightOwner::new(runtime.clone()),
             local_history: crate::local_release_history_owner::LocalReleaseHistoryOwner::new(runtime.clone()),
@@ -284,6 +289,7 @@ impl DesktopBridge {
             // custody or qualification. The renderer cannot select this profile.
             android_build: crate::android_build_owner::AndroidBuildOwner::new(runtime.clone(), crate::android_toolchain::AndroidToolchainProfile::compiled()),
             artifact_inspection: crate::saved_command_owner::SavedCommandOwner::artifact_inspection(runtime.clone()),
+            tool_acquisition: crate::saved_command_owner::SavedCommandOwner::tool_acquisition(runtime.clone()),
             ios_archive: crate::ios_archive_owner::IOSArchiveOwner::new(runtime),
             installed_project_selection_available,
             installed_project_path_selection_available,
@@ -361,8 +367,13 @@ impl DesktopBridge {
         document.passive_query(self, Method::ProposeGithubSetup, input.into_params()?)?.wait().await
     }
     pub(crate) async fn project_snapshot(&self, document: &crate::asset_session::DocumentBinding, project_id: String) -> Result<Value, BridgeError> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        { document.service_project_query(self, &project_id)?.wait().await }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
         let root = self.project_root(&project_id)?;
         document.passive_query(self, Method::ProjectSnapshot, json!({"root": root}))?.wait().await
+        }
     }
     pub(crate) async fn observe_release_version(&self, document: &crate::asset_session::DocumentBinding, input: crate::release_version_protocol::Request) -> Result<crate::release_version_protocol::Observation, BridgeError> {
         // Admission/root/stamp and completion belong to the original Document
@@ -394,7 +405,7 @@ impl DesktopBridge {
         let value = document.passive_query(self, Method::MetadataTextValidate, json!({"platform":input.platform,"fields":&input.fields}))?.wait().await?;
         crate::metadata_text_edit_protocol::validation_result(value, input.platform, &input.fields)
     }
-    fn project_root(&self, project_id: &str) -> Result<PathBuf, BridgeError> {
+    pub(crate) fn project_root(&self, project_id: &str) -> Result<PathBuf, BridgeError> {
         if !crate::protocol::valid_id(project_id) { return Err(BridgeError::invalid()); }
         let projects = self.projects.lock().map_err(|_| BridgeError::new("unavailable", "The project registry is unavailable."))?;
         projects.get(project_id).map(|project| project.root.clone())
@@ -449,7 +460,7 @@ impl DesktopBridge {
         self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
-        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -463,7 +474,7 @@ impl DesktopBridge {
         self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
-        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -568,6 +579,18 @@ impl DesktopBridge {
         session_id: &str, plan_token: &str) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
         document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, session_id), |bridge, registration, publisher|
             bridge.edits.apply_metadata_text_published(publisher, window, session_id, plan_token, registration))
+    }
+    pub(crate) fn open_project_identity(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_identity_edit_protocol::Open) -> Result<crate::project_identity_edit_protocol::IdentityStatus, BridgeError> {
+        document.open_project_identity(window, args)
+    }
+    pub(crate) fn prepare_project_identity(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_identity_edit_protocol::Prepare) -> Result<crate::project_identity_edit_protocol::IdentityStatus, BridgeError> {
+        document.prepare_project_identity(window, args)
+    }
+    pub(crate) fn apply_project_identity(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_identity_edit_protocol::Apply) -> Result<crate::project_identity_edit_protocol::IdentityStatus, BridgeError> {
+        document.apply_project_identity(window, args)
     }
     pub(crate) fn open_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::release_version_edit_commands::Open) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
@@ -699,6 +722,16 @@ impl DesktopBridge {
     #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
     pub(crate) fn publish_checked_project(&self, proof: crate::asset_source::ProjectProbe, expected_generation: u32) -> Result<Project, crate::asset_commands::AssetError> {
         use crate::asset_commands::{AssetError, Reason};
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.application_service.check_project_root(&proof).map_err(|error|
+                AssetError::new(if error == crate::service_protocol::Error::StateUnknown {
+                    Reason::CleanupUnknown
+                } else { Reason::SourceRefused }))?;
+        }
+        self.tool_acquisition.tool_acquisition_check_project_root(&proof).map_err(|error|
+            AssetError::new(if error.code == "cleanup_unknown" { Reason::CleanupUnknown }
+                else { Reason::ExclusionUnconfirmed }))?;
         let mut projects = self.projects.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
         if self.project_generation.load(Ordering::SeqCst) != expected_generation { return Err(AssetError::new(Reason::ContextStale)); }
         if let Some(existing) = projects.values().find(|entry| entry.root == proof.path()) {
@@ -722,7 +755,7 @@ impl DesktopBridge {
         self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
-        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() || self.edits.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() || self.edits.disabled() { return Err(BridgeError::cleanup_unknown()); }

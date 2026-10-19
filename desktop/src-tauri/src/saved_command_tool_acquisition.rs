@@ -23,6 +23,9 @@ mod cache;
 ))]
 #[path = "saved_command_tool_acquisition_macos.rs"]
 mod native;
+#[path = "saved_command_tool_acquisition_sources.rs"]
+mod sources;
+pub(crate) use sources::SourceNomination;
 
 // A complete source implementation is not installed-profile qualification.
 // Root's native observation/packaging gate must be exercised before enabling.
@@ -211,6 +214,8 @@ pub(super) struct Registry {
     // A later known pre-effect refusal must not discard the earlier actual
     // app-data nomination. This is a second original reference, not a receipt.
     application_observation: Option<Arc<Session>>,
+    // Only accepted Complete Acquire + positive original joins mint this.
+    completed_sources: Option<Arc<sources::CompletedSources>>,
 }
 pub(super) struct State {
     intent: Option<Arc<Intent>>,
@@ -437,6 +442,7 @@ impl SavedCommandOwner {
             return Err(wire::invalid());
         }
         p.tools = Some(intent);
+        r.tool_acquisition.completed_sources = None;
         Ok(status)
     }
     pub(crate) fn prepared_tool_acquisition_document(
@@ -708,6 +714,7 @@ pub(super) fn after_final(r: &mut super::Registry, active: &Active, owner: &Arc<
     if owner.domain != SavedCommandDomain::ToolAcquisition {
         return;
     }
+    r.tool_acquisition.completed_sources = None;
     // Retain the SAME attempt even when POST/closure later fails. A pending
     // attempt is already retained in Active; no guessed path or JSON can stand
     // in for its original cache book after retirement.
@@ -760,6 +767,9 @@ pub(super) fn after_final(r: &mut super::Registry, active: &Active, owner: &Arc<
         && active.projection.outcome == Some(Outcome::Complete)
     {
         if let Some(Terminal::ToolAcquisition(t)) = &active.projection.result {
+            if t.context.action == wire::Action::Acquire {
+                r.tool_acquisition.completed_sources = sources::CompletedSources::capture(owner, active);
+            }
             if t.context.action == wire::Action::Inspect
                 && t.outcome == wire::Outcome::Complete
                 && t.lifetime.settled()
@@ -868,6 +878,10 @@ fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>) -> Opt
     }
     let mut seen = BTreeSet::new();
     let mut queue = r.tool_acquisition.producers.clone();
+    if let Some(completed) = &r.tool_acquisition.completed_sources {
+        queue.push(completed.original().clone()); // SAME producer, deduplicated below.
+        bytes = bytes.checked_add(completed.retained_bytes()?)?;
+    }
     if let Some(application) = &r.tool_acquisition.application {
         queue.push(application.clone());
     }

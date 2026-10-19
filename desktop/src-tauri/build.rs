@@ -281,6 +281,7 @@ fn main() {
             "app_info", "reveal_installation", "installation_status", "inspect_installation", "cancel_installation",
             "installation_preparation_status", "prepare_installation_quit",
             "choose_project", "choose_project_path", "project_snapshot", "catalog",
+            "application_read_status", "allow_application_read", "revoke_application_read",
             "environment_requirements", "release_version_observe",
             "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
             "release_evidence_choose", "release_evidence_status", "release_evidence_observe", "release_evidence_cancel",
@@ -293,6 +294,7 @@ fn main() {
             "prepare_offline_preflight", "start_offline_preflight", "offline_preflight_status", "cancel_offline_preflight",
             "artifact_inspection_pick", "artifact_inspection_prepare", "artifact_inspection_start",
             "artifact_inspection_cancel", "artifact_inspection_status", "artifact_inspection_discard",
+            "prepare_tool_acquisition", "start_tool_acquisition", "tool_acquisition_status", "cancel_tool_acquisition",
             "prepare_android_build", "start_android_build", "android_build_status", "cancel_android_build",
             "android_toolchain_catalog_status", "refresh_android_toolchain_catalog", "recover_android_toolchain", "select_android_toolchain", "cancel_android_toolchain_catalog",
             "android_tool_sources_status", "choose_android_tool_source", "cancel_android_tool_source",
@@ -314,7 +316,10 @@ fn main() {
             "metadata_images_edit_apply", "metadata_images_edit_close", "metadata_images_edit_status",
             "release_version_edit_open", "release_version_edit_prepare", "release_version_edit_apply",
             "release_version_edit_close", "release_version_edit_status",
+            "project_identity_open", "project_identity_prepare", "project_identity_apply",
+            "project_identity_close", "project_identity_status",
             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
+            "github_auth_status", "github_auth_connect", "github_auth_cancel",
             "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",
             "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
             "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",
@@ -323,7 +328,7 @@ fn main() {
             "github_setup_publication_status", "github_setup_publication_prepare", "github_setup_publication_publish", "github_setup_publication_pending", "github_setup_publication_reconcile", "github_setup_publication_discard", "github_setup_publication_cancel",
             "github_history_status", "github_history_start", "github_history_cancel",
             "vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "asset_context", "asset_choose", "credential_prepare",
-            "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
+            "vault_prepare_delete", "vault_backup_export", "vault_backup_import", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
         ];
         let attributes = tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));

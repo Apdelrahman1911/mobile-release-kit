@@ -200,6 +200,7 @@ unsafe extern "C" {
     fn mrk_panel_reserve_images() -> *mut c_void;
     fn mrk_panel_start(panel: *mut c_void, kind: c_int) -> c_int;
     fn mrk_panel_start_project_field(panel: *mut c_void, kind: c_int, initial: *const u8, bytes: usize) -> c_int;
+    fn mrk_panel_start_android_source(panel: *mut c_void, kind: c_int, initial: *const u8, bytes: usize) -> c_int;
     fn mrk_panel_poll(panel: *mut c_void, result: *mut c_int, path: *mut u8, capacity: usize) -> c_int;
     fn mrk_panel_poll_images(panel: *mut c_void, result: *mut c_int, selection: *mut c_int,
         count: *mut usize, paths: *mut u8, capacity: usize) -> c_int;
@@ -314,19 +315,30 @@ pub fn swap_installation_state(root: BorrowedFd<'_>, archived: &str) -> io::Resu
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot, EvidenceFolder, PublicImages, AndroidJdk, AndroidSdk, AndroidGradle, ArtifactAab, ArtifactIpa, ArtifactArchive, ArtifactDsyms }
+pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot, EvidenceFolder, PublicImages, AndroidJdk, AndroidSdk, AndroidGradle, ArtifactAab, ArtifactIpa, ArtifactArchive, ArtifactDsyms, GitHubAuthExecutable, EncryptedBackup, RecoveryCode, EncryptedDestination, RecoveryDestination }
 impl PanelKind {
     fn code(self) -> c_int { match self {
         Self::Project => 1, Self::Quit => 2, Self::File => 3, Self::VersionSource => 4,
         Self::IosProject => 5, Self::IosWorkspace => 6, Self::MetadataRoot => 7, Self::EvidenceFolder => 8,
         Self::PublicImages => 9, Self::AndroidJdk => 10, Self::AndroidSdk => 11, Self::AndroidGradle => 12,
         Self::ArtifactAab=>13,Self::ArtifactIpa=>14,Self::ArtifactArchive=>15,Self::ArtifactDsyms=>16,
+        Self::GitHubAuthExecutable=>21,
+        Self::EncryptedBackup=>17,Self::RecoveryCode=>18,Self::EncryptedDestination=>19,Self::RecoveryDestination=>20,
     } }
     fn project_field(self) -> bool { matches!(self, Self::VersionSource | Self::IosProject | Self::IosWorkspace | Self::MetadataRoot) }
+    fn android_source(self) -> bool { matches!(self,Self::AndroidJdk|Self::AndroidSdk|Self::AndroidGradle) }
 }
 fn project_field_initial(kind: PanelKind, initial: &Path) -> io::Result<&[u8]> {
+    if !kind.project_field() { return Err(io::ErrorKind::InvalidInput.into()); }
+    initial_directory(initial)
+}
+fn android_source_initial(kind: PanelKind, initial: &Path) -> io::Result<&[u8]> {
+    if !kind.android_source() { return Err(io::ErrorKind::InvalidInput.into()); }
+    initial_directory(initial)
+}
+fn initial_directory(initial: &Path) -> io::Result<&[u8]> {
     let bytes = initial.as_os_str().as_bytes();
-    if !kind.project_field() || bytes.is_empty() || bytes.len() > 4096 || bytes[0] != b'/'
+    if bytes.is_empty() || bytes.len() > 4096 || bytes[0] != b'/'
         || bytes.contains(&0) || initial.to_str().is_none()
         || bytes != b"/" && bytes[1..].split(|byte| *byte == b'/').any(|part|
             part.is_empty() || part == b"." || part == b".." || part.len() > 255) {
@@ -455,6 +467,11 @@ impl Panel {
         let bytes = project_field_initial(kind, initial)?;
         self.start_inner(kind, Some(bytes))
     }
+    /// Only the fixed Android source kinds can nominate a starting directory.
+    /// Same panel/setter/lifetime; this does not select or inspect that folder.
+    pub fn start_android_source(&mut self, kind: PanelKind, initial: &Path) -> io::Result<()> {
+        let bytes=android_source_initial(kind,initial)?;self.start_inner(kind,Some(bytes))
+    }
     fn start_inner(&mut self, kind: PanelKind, initial: Option<&[u8]>) -> io::Result<()> {
         #[cfg(feature = "installed-observation")]
         { self.observation_start = None; }
@@ -464,6 +481,7 @@ impl Panel {
         let status = unsafe { match initial {
             // SAFETY: the complete borrowed UTF-8 slice was checked above and
             // remains live through this synchronous native start/temporary close.
+            Some(bytes) if kind.android_source() => mrk_panel_start_android_source(self.original.as_ptr(),kind.code(),bytes.as_ptr(),bytes.len()),
             Some(bytes) => mrk_panel_start_project_field(self.original.as_ptr(), kind.code(), bytes.as_ptr(), bytes.len()),
             None => mrk_panel_start(self.original.as_ptr(), kind.code()),
         } };
@@ -3031,7 +3049,8 @@ mod tests {
         // Android purposes are actual open panels, not unknown-kind sentinels.
         // Use the public purpose mapping while testing the same native classifier.
         for purpose in [PanelKind::AndroidJdk, PanelKind::AndroidSdk, PanelKind::AndroidGradle,
-            PanelKind::ArtifactAab,PanelKind::ArtifactIpa,PanelKind::ArtifactArchive,PanelKind::ArtifactDsyms] {
+            PanelKind::ArtifactAab,PanelKind::ArtifactIpa,PanelKind::ArtifactArchive,PanelKind::ArtifactDsyms,
+            PanelKind::EncryptedBackup,PanelKind::RecoveryCode,PanelKind::EncryptedDestination,PanelKind::RecoveryDestination,PanelKind::GitHubAuthExecutable] {
             let kind = purpose.code();
             for (code, expected) in [(1, PanelResponse::Accept), (0, PanelResponse::Decline),
                 (-1000, PanelResponse::Other), (-1001, PanelResponse::Other),
@@ -3048,6 +3067,11 @@ mod tests {
             assert_eq!(kind.code(),code);assert!(!kind.project_field());
             assert!(project_field_initial(kind,Path::new("/inert")).is_err());
         }
+        for (kind, code) in [(PanelKind::EncryptedBackup, 17), (PanelKind::RecoveryCode, 18),
+            (PanelKind::EncryptedDestination, 19), (PanelKind::RecoveryDestination, 20), (PanelKind::GitHubAuthExecutable, 21)] {
+            assert_eq!(kind.code(), code); assert!(!kind.project_field());
+            assert!(project_field_initial(kind, Path::new("/inert")).is_err());
+        }
         assert!(panel_response(-1).is_err());
         assert!(panel_response(3).is_err());
     }
@@ -3060,3 +3084,21 @@ mod ios_sdk_selection;
 #[cfg(feature="xcode-setup")]
 #[allow(dead_code)]
 mod macos_xcode_facts;
+
+#[cfg(test)]
+mod acquired_tool_source_location_tests {
+    use super::*;
+    #[test]
+    fn only_fixed_android_source_purposes_accept_the_bounded_initial_location() {
+        for kind in [PanelKind::AndroidJdk,PanelKind::AndroidSdk,PanelKind::AndroidGradle] {
+            assert_eq!(android_source_initial(kind,Path::new("/native/cache" )).unwrap(),b"/native/cache");
+            assert!(project_field_initial(kind,Path::new("/native/cache")).is_err());
+            for path in ["relative","/bad/../cache","/bad//cache","/bad\0/cache"] {
+                assert!(android_source_initial(kind,Path::new(path)).is_err());
+            }
+        }
+        for kind in [PanelKind::Project,PanelKind::File,PanelKind::Quit,PanelKind::VersionSource,PanelKind::GitHubAuthExecutable,PanelKind::EncryptedDestination] {
+            assert!(android_source_initial(kind,Path::new("/native/cache")).is_err());
+        }
+    }
+}

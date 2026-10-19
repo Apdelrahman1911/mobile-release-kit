@@ -1,12 +1,13 @@
 import { useId, useSyncExternalStore } from 'react';
 import { IDENTITY_NEW_WARNING, identityValueFits } from '../projectIdentity.ts';
 import type { ProjectIdentityController } from '../projectIdentityController.ts';
+import type { AgentIdentityProposal } from '../projectIdentityNative.ts';
 import { Badge, SectionHeading } from './Common.tsx';
 
 // Root supplies a controller only through the genuine native identity owner.
 // A controller without that optional port renders useful, disabled guidance.
 // Mounting/typing never invokes a native analysis, build, Store call or write.
-export function ProjectIdentityEditor({ controller }: { controller: ProjectIdentityController }) {
+export function ProjectIdentityEditor({ controller, onDraftChange, requestedChange }: { controller: ProjectIdentityController; onDraftChange?: (value: string) => void; requestedChange?: AgentIdentityProposal['request']['change'] }) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const id = useId();
   const { analysis, preview, recovery, actions, diagnostic } = state;
@@ -17,6 +18,8 @@ export function ProjectIdentityEditor({ controller }: { controller: ProjectIdent
   const cleanup = recovery?.action !== 'rollback';
   const needsRecovery = state.session?.coreOutcome?.journal === 'recovery_required';
   const newInputValid = platform !== undefined && identityValueFits(state.desiredIdentity, platform);
+  const requestMismatch = !!requestedChange && !recovery && (state.intent !== requestedChange.identityIntent ||
+    (state.intent === 'preserve' ? analysis?.identity : state.desiredIdentity) !== requestedChange.desiredIdentity);
   return <section className="card" aria-labelledby={`${id}-title`}>
     <div id={`${id}-title`}><SectionHeading title={label} description="This ID connects your app to its store listing. Keep it when updating an existing app.">
       <Badge tone={state.tone === 'success' ? 'info' : state.tone}>{state.busy ? 'Working' : state.result ? 'Finished' : state.reviewCurrent ? 'Review' : 'Project setup'}</Badge>
@@ -27,6 +30,11 @@ export function ProjectIdentityEditor({ controller }: { controller: ProjectIdent
       {diagnostic && <p><strong>Where to look:</strong> <code>{diagnostic.path}:{diagnostic.line}</code></p>}
     </div>
 
+    {requestedChange && <div className="notice notice-info"><div><strong>Immutable CLI proposal</strong>
+      <p><code>{requestedChange.desiredIdentity}</code> · {requestedChange.identityIntent === 'new-application' ? 'a separate new app' : 'keep this app'}</p>
+      <p>Your ordinary local draft is kept. This proposal cannot be changed through another editor; decline it if it is wrong.</p>
+      {analysis && requestMismatch && <p className="review-caution">The original source/continuity check cannot preview this exact proposal. Close it and inspect the saved project; no altered proposal will be substituted.</p>}
+    </div></div>}
     {analysis && <div className="field-grid">
       <div className="field"><span className="field-label">Last read {label}</span><code>{analysis.identity ?? 'Not recognized'}</code></div>
       {analysis.configuredIdentity !== analysis.identity && <div className="field"><span className="field-label">ID in saved project settings</span><code>{analysis.configuredIdentity ?? 'Not available'}</code></div>}
@@ -34,16 +42,16 @@ export function ProjectIdentityEditor({ controller }: { controller: ProjectIdent
 
     {analysis?.state === 'supported' && !recovery && !preview && state.session?.phase === 'editing' && <fieldset disabled={!state.canEditDraft}>
       <legend>Which app are you setting up?</legend>
-      <label className="checkbox-row"><input type="radio" name={`${id}-intent`} checked={state.intent === 'preserve'}
+      <label className="checkbox-row"><input type="radio" name={`${id}-intent`} checked={state.intent === 'preserve'} disabled={!!requestedChange}
         onChange={() => controller.setIntent('preserve')} />Keep this app and its current ID</label>
-      <label className="checkbox-row"><input type="radio" name={`${id}-intent`} checked={state.intent === 'new-application'} disabled={!state.canChooseNew}
+      <label className="checkbox-row"><input type="radio" name={`${id}-intent`} checked={state.intent === 'new-application'} disabled={!state.canChooseNew || !!requestedChange}
         onChange={() => controller.setIntent('new-application')} />Set up a different, new app</label>
       {(analysis.selection.continuity === 'existing' || analysis.identityStatus !== 'unverified') && <p className="field-help">An existing or approved app keeps its ID. This editor cannot turn it into an update under a different ID.</p>}
       {state.intent === 'new-application' && <>
         <label className="field" htmlFor={`${id}-new`}><span className="field-label">New {label}</span>
-          <input id={`${id}-new`} type="text" value={state.desiredIdentity} maxLength={255} autoComplete="off" spellCheck={false}
+          <input id={`${id}-new`} type="text" value={state.desiredIdentity} readOnly={!!requestedChange} maxLength={255} autoComplete="off" spellCheck={false}
             placeholder="com.example.myapp" aria-describedby={`${id}-format ${id}-new-warning`}
-            onChange={(event) => controller.setDesiredIdentity(event.target.value)} />
+            onChange={(event) => { const value = event.target.value; if (controller.setDesiredIdentity(value)) onDraftChange?.(value); }} />
         </label>
         <p id={`${id}-format`} className="field-help">Use your chosen ID, with dot-separated parts beginning with a letter. {platform === 'android' ? 'Letters, digits and underscores are allowed.' : 'Letters, digits and hyphens are allowed.'} Spaces are not removed for you.</p>
         {state.desiredIdentity && !newInputValid && <p className="review-caution">Check the ID format before making a preview.</p>}
@@ -93,7 +101,7 @@ export function ProjectIdentityEditor({ controller }: { controller: ProjectIdent
     <div className="button-row">
       {needsRecovery && !recovery && <button type="button" className="button primary" disabled={!actions.inspectRecovery} onClick={() => controller.inspectRecovery()}>Review interrupted change</button>}
       {(!state.session || state.session.phase === 'final') && !needsRecovery ? <button type="button" className="button primary" disabled={!actions.analyze} onClick={() => controller.analyze()}>Read {label}</button> : null}
-      {analysis && !preview && !recovery && state.session?.phase === 'editing' && <button type="button" className="button primary" disabled={!actions.prepare} onClick={() => controller.prepare()}>Preview {state.intent === 'new-application' ? 'ID change' : 'unchanged ID'}</button>}
+      {analysis && !preview && !recovery && state.session?.phase === 'editing' && <button type="button" className="button primary" disabled={!actions.prepare || requestMismatch} onClick={() => controller.prepare()}>Preview {state.intent === 'new-application' ? 'ID change' : 'unchanged ID'}</button>}
       {actions.discard && <button type="button" className="button secondary" onClick={() => controller.discard()}>Close review</button>}
       {!state.session && !actions.analyze && <button type="button" className="button secondary" disabled={!actions.checkStatus} onClick={() => controller.checkStatus()}>Check status</button>}
       {state.session && !actions.prepare && !actions.apply && !actions.prepareRecovery && !actions.recover && <button type="button" className="button secondary" disabled={!actions.checkStatus} onClick={() => controller.checkStatus()}>Check status</button>}

@@ -3,6 +3,7 @@
 import type { ApiError, HelpContent } from './types.ts';
 import type { AndroidBuildAvailability } from './androidBuildTypes.ts';
 export type AndroidToolSourceRole = 'jdk' | 'sdk' | 'gradle';
+export interface AcquiredToolSource { operationId: string; ownerGeneration: string }
 export interface AndroidToolSourceIdentity { operationId: number; sourceGeneration: number; role: AndroidToolSourceRole }
 export interface AndroidToolSourcesStatus {
   schemaVersion: 1; statusRevision: number; sourceGeneration: number; projectId: string | null;
@@ -15,7 +16,7 @@ export interface AndroidToolSourcesApi {
   // Older/unqualified adapters can omit the entire surface. The controller
   // never enables a picker when any member is unavailable.
   androidToolSourcesStatus?(): Promise<AndroidToolSourcesStatus>;
-  chooseAndroidToolSource?(request: { schemaVersion: 1; sourceGeneration: number; projectId: string; role: AndroidToolSourceRole }): Promise<AndroidToolSourcesStatus>;
+  chooseAndroidToolSource?(request: { schemaVersion: 1; sourceGeneration: number; projectId: string; role: AndroidToolSourceRole; acquired?: AcquiredToolSource }): Promise<AndroidToolSourcesStatus>;
   cancelAndroidToolSource?(request: { schemaVersion: 1; sourceGeneration: number; operationId: number }): Promise<AndroidToolSourcesStatus>;
   subscribeAndroidToolSources?(onStatus: (status: unknown) => void): Promise<() => void>;
 }
@@ -94,7 +95,10 @@ export function encodeAndroidToolSourcesRequest(command: AndroidToolSourcesComma
       ? ['schemaVersion', 'sourceGeneration', 'projectId', 'role'] : command === 'cancel_android_tool_source'
       ? ['schemaVersion', 'sourceGeneration', 'operationId'] : null;
     if (!keys) return null;
-    const data = record(value, keys);
+    const withAcquired = command === 'choose_android_tool_source' && value !== null && typeof value === 'object' && Object.hasOwn(value,'acquired');
+    const data = record(value, withAcquired ? [...keys,'acquired'] : keys);
+    const acquired = withAcquired && data ? record(data.acquired,['operationId','ownerGeneration']) : null;
+    if (withAcquired && (!acquired || ![acquired.operationId,acquired.ownerGeneration].every((id) => typeof id === 'string' && /^[0-9a-f]{32}$/.test(id)))) return null;
     if (!data || data.schemaVersion !== 1 || command !== 'android_tool_sources_status' && !count(data.sourceGeneration, command === 'cancel_android_tool_source')
         || command === 'choose_android_tool_source' && (!project(data.projectId) || !role(data.role))
         || command === 'cancel_android_tool_source' && !count(data.operationId, true)) return null;

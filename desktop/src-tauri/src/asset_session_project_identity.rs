@@ -19,7 +19,7 @@ fn combine_vetoes(
         NativeContinuity::Unknown
     })
 }
-fn current_continuity(
+pub(super) fn current_continuity(
     bridge: &DesktopBridge,
     project: &str,
     registered: &RegisteredEditRoot,

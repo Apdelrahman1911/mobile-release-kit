@@ -1058,7 +1058,7 @@ mod tests {
         );
     }
     fn request() -> Arc<wire::Request> {
-        let snapshot = |mode| wire::Snapshot {
+        let snapshot = |mode: u32| wire::Snapshot {
             identity: (1, 2, 0o100000 | mode, 1001, 1001, 1, 12, 123, 456),
             sha256: "a".repeat(64),
         };

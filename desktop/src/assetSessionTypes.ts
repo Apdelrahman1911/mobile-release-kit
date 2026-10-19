@@ -11,6 +11,8 @@ export type AssetExecutionMode = 'github' | 'local';
 export interface AssetScope { platform: AssetPlatform; stage: AssetStage; purpose: AssetPurpose; executionMode?: AssetExecutionMode }
 export interface AssetContextRequest extends AssetScope { projectId: string; draft: JsonObject }
 export interface AssetRecordRef { recordId: string; expectedRevision: number }
+export type AssetBackupExportRequest = { contextRevision: number; record: AssetRecordRef };
+export type AssetBackupImportRequest = { contextRevision: number };
 export interface AssetRecordPreviewSubject {
   type: 'record';
   kind: AssetKind;
@@ -26,7 +28,8 @@ export interface AssetRecordIntent {
   change: AssetRecordPreviewSubject['change'];
   record: AssetRecordRef | null;
 }
-export type AssetIntent = AssetRecordIntent | { type: 'vault'; change: 'open' | 'initialize' | 'unlock' };
+export type AssetIntent = AssetRecordIntent | { type: 'vault'; change: 'open' | 'initialize' | 'unlock' } |
+  { type: 'backup'; change: 'export'; record: AssetRecordRef } | { type: 'backup'; change: 'import'; record: null };
 export interface AssetChooseRequest { contextRevision: number; kind: AssetFileKind; replacement: AssetRecordRef | null }
 export interface KeystoreFields { storePassword: string | null; keyAlias: string | null; keyPassword: string | null }
 export interface P12Fields { password: string | null }
@@ -49,7 +52,7 @@ export type CredentialPrepareRequest =
 export type AssetReason = 'none' | 'closed' | 'unqualified' | 'unsupported-platform' | 'unsupported-filesystem' | 'unsupported-format' | 'invalid-request' | 'busy' | 'source-refused' | 'source-changed' | 'material-limit' | 'parser-limit' | 'project-overlap' | 'exclusion-unconfirmed' | 'capacity' | 'context-stale' | 'user-cancelled' | 'review-expired' | 'deadline' | 'document-lost' | 'shutdown' | 'cleanup-unknown' |
   'vault-uninitialized' | 'vault-key-missing' | 'vault-keyring-locked' | 'vault-keyring-denied' | 'vault-keyring-unavailable' | 'vault-provider-unsupported' | 'vault-corrupt' | 'vault-interrupted' | 'vault-durability-unknown';
 export type AssetPhase = 'idle' | 'admitting' | 'picking' | 'capturing' | 'selected' | 'assessing' | 'preview' | 'mutating' | 'stopping' | 'unknown';
-export type AssetOperationName = 'choose-file' | 'choose-images' | 'inspect-installation' | 'choose-project' | 'choose-project-path' | 'choose-android-source' | 'choose-evidence-folder' | 'inspect-evidence' | 'prepare' | 'prepare-delete' | 'commit' | 'bind' | 'discard' | 'lock' | 'open-vault' | 'prepare-initialize' | 'initialize' | 'unlock';
+export type AssetOperationName = 'choose-file' | 'choose-images' | 'inspect-installation' | 'choose-project' | 'choose-project-path' | 'choose-android-source' | 'choose-evidence-folder' | 'inspect-evidence' | 'prepare' | 'prepare-delete' | 'commit' | 'bind' | 'discard' | 'lock' | 'open-vault' | 'prepare-initialize' | 'initialize' | 'unlock' | 'prepare-backup-export' | 'import-backup';
 export type CredentialState = 'not-applicable' | 'missing' | 'unknown' | 'invalid' | 'configured' | 'format-valid';
 export type CredentialFieldId = 'file' | 'storePassword' | 'keyAlias' | 'keyPassword' | 'password' | 'keyId' | 'issuerId' | 'provider' | 'serviceAccount' | 'token' | 'contactFirstName' | 'contactLastName' | 'contactEmail' | 'contactPhone' | 'demoUsername' | 'demoPassword' | 'keyBase64' | 'version';
 export type CredentialIssue = 'not-run' | 'incomplete' | 'unsupported-format' | 'unsupported-variant' | 'material-limit' | 'parser-limit' | 'empty-file' | 'suffix-conflict' | 'malformed-container' | 'required-missing' | 'value-nul' | 'scalar-format' | 'pkcs8-algorithm' | 'firebase-shape' | 'identity-mismatch';
@@ -75,6 +78,8 @@ export interface AssetStatus {
   mode: 'closed' | 'session' | 'encrypted';
   persistence: { state: 'uninitialized' | 'locked' | 'unlocked' | 'initializing' | 'mutating' | 'interrupted' | 'unknown'; reason: AssetReason; keyAccess: 'locked' | 'read-only' | 'read-write' } | null;
   capability: { available: boolean; reason: AssetReason };
+  // Missing on an older host means unavailable, never inferred from vault support.
+  backup?: { available: boolean; reason: AssetReason };
   modes: { session: { available: boolean; reason: AssetReason }; encrypted: { available: boolean; reason: AssetReason } };
   context: ({ revision: number; projectId: string } & AssetScope) | null;
   operation: {
@@ -82,6 +87,8 @@ export interface AssetStatus {
     source: 'not-run' | 'pending' | 'captured' | 'refused' | 'unknown';
     settlement: 'pending' | 'known' | 'unknown' | 'late-known';
     storageOutcome: { effect: 'not-started' | 'known-none' | 'known-applied' | 'unknown'; durability: 'not-run' | 'confirmed' | 'unknown'; cleanup: 'pending' | 'known' | 'unknown' } | null;
+    // Omitted unless the exact current original published both backup files.
+    backupDelivered?: true;
     selectionToken: string | null; assessment: CredentialAssessment | null;
     preview: { token: string; action: AssetPreviewAction; expiresInMs: number; subject: AssetPreviewSubject } | null;
   } | null;
@@ -98,6 +105,8 @@ export interface AssetSessionApi {
   chooseAsset(request: AssetChooseRequest): Promise<AssetStatus>;
   prepareCredential(request: CredentialPrepareRequest): Promise<AssetStatus>;
   prepareAssetDelete(record: AssetRecordRef): Promise<AssetStatus>;
+  exportCredentialBackup(request: AssetBackupExportRequest): Promise<AssetStatus>;
+  importCredentialBackup(request: AssetBackupImportRequest): Promise<AssetStatus>;
   commitAsset(previewToken: string): Promise<AssetStatus>;
   bindAsset(previewToken: string): Promise<AssetStatus>;
   discardAsset(operationId: number): Promise<AssetStatus>;

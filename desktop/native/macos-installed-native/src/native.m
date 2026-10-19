@@ -311,7 +311,7 @@ int mrk_observation_original_window(uintptr_t original, uint32_t *flags) {
 // Closed ABI result: Other=0, Accept=1, Decline=2. This same pure mapping is
 // exercised by narrow native-crate test definitions; no panel is fabricated.
 static BOOL mrk_panel_project_field(int kind) { return kind >= 4 && kind <= 7; }
-static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || kind == 8 || kind == 9 || (kind >= 10 && kind <= 20) || mrk_panel_project_field(kind); }
+static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || kind == 8 || kind == 9 || (kind >= 10 && kind <= 21) || mrk_panel_project_field(kind); }
 int mrk_panel_response(int kind, int64_t code, int programmatic) {
     if (programmatic) return 0;
     if (mrk_panel_open_kind(kind)) {
@@ -506,7 +506,7 @@ static int mrk_panel_initial_directory(MRKInstalledPanel *s, const uint8_t *byte
 }
 static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial, size_t length) {
     if (!pthread_main_np() || !opaque || (!mrk_panel_open_kind(kind) && kind != 2)) return EINVAL;
-    if (mrk_panel_project_field(kind)) {
+    if (mrk_panel_project_field(kind) || ((kind >= 10 && kind <= 12) && (initial || length))) {
         if (!initial || !length || length > 4096 || initial[0] != '/' || memchr(initial, 0, length)) return EINVAL;
     } else if (initial || length) return EINVAL;
     MRKInstalledPanel *s = opaque;
@@ -536,6 +536,7 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
                 : kind == 18 ? @"Choose the matching recovery code file"
                 : kind == 19 ? @"Choose a folder for the encrypted signing backup"
                 : kind == 20 ? @"Choose a different folder for the recovery code"
+                : kind == 21 ? @"Choose your installed GitHub CLI (gh) executable"
                 : kind == 9 ? @"Choose up to 10 public PNG or JPEG listing images"
                 : kind == 3 ? @"Choose a signing or iOS build-input file"
                 : kind == 4 ? @"Choose an existing version source inside the project" : kind == 5 ? @"Choose an existing Xcode project directory"
@@ -543,7 +544,7 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
             [panel setTitle:title];
             // The message displays the purpose inside the sheet; its window title may not.
             [panel setMessage:kind == 20 ? @"Keep the recovery code separate from the encrypted backup. You need both files to restore your signing key without this Mac." : title];
-            [panel setCanChooseFiles:kind == 3 || kind == 4 || kind == 9 || (kind >= 13 && kind <= 18)];
+            [panel setCanChooseFiles:kind == 3 || kind == 4 || kind == 9 || (kind >= 13 && kind <= 18) || kind == 21];
             [panel setCanChooseDirectories:kind == 1 || kind == 8 || (kind >= 5 && kind <= 7) || (kind >= 10 && kind <= 12) || kind == 15 || kind == 16 || kind == 19 || kind == 20];
             [panel setAllowsMultipleSelection:kind == 9]; [panel setCanCreateDirectories:NO];
             [panel setResolvesAliases:NO]; [panel setTreatsFilePackagesAsDirectories:(kind >= 5 && kind <= 7) || kind == 10 || kind == 15 || kind == 16];
@@ -567,7 +568,7 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
         // sole source is the original binding. In the instrumented path the
         // existing parent/prompt tags precede it, preserving the same ordered
         // partial-return decoder as Project/File. No observation setter is used.
-        if (mrk_panel_project_field(kind)) {
+        if (initial) {
             int configured = mrk_panel_initial_directory(s, initial, length);
             if (configured != 0 || s->unknown) { s->unknown = YES; return EIO; }
 #ifdef MRK_INSTALLED_OBSERVATION
@@ -643,6 +644,10 @@ int mrk_panel_start(void *opaque, int kind) {
 }
 int mrk_panel_start_project_field(void *opaque, int kind, const uint8_t *initial, size_t length) {
     if (!mrk_panel_project_field(kind)) return EINVAL;
+    return mrk_panel_start_inner(opaque, kind, initial, length);
+}
+int mrk_panel_start_android_source(void *opaque, int kind, const uint8_t *initial, size_t length) {
+    if (kind < 10 || kind > 12 || !initial || !length) return EINVAL;
     return mrk_panel_start_inner(opaque, kind, initial, length);
 }
 int mrk_panel_poll(void *opaque, int *result, uint8_t *path, size_t capacity) {

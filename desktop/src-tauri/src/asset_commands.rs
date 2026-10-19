@@ -5,6 +5,9 @@ use std::{io, sync::Arc};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
 use crate::protocol;
+#[path = "credential_backup_commands.rs"]
+mod backup;
+pub(crate) use backup::{backup_export, backup_import};
 
 pub(crate) const POLICY: &str = "credential-policy-v1";
 pub(crate) const DRAFT_LIMIT: usize = 512 * 1024;

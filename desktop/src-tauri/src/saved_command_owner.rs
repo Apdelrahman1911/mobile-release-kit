@@ -23,7 +23,7 @@ use crate::{installed_runtime::{AdmissionFailure, CloseOutcome, IOSArchiveRuntim
 
 #[path = "saved_command_tool_acquisition.rs"]
 mod tool_acquisition;
-pub(crate) use tool_acquisition::{Admitted as ToolAcquisitionAdmitted, Census as ToolAcquisitionCensus};
+pub(crate) use tool_acquisition::{Admitted as ToolAcquisitionAdmitted, Census as ToolAcquisitionCensus, SourceNomination as ToolSourceNomination};
 
 #[path = "saved_command_local_history.rs"]
 mod local_history;
@@ -1998,6 +1998,19 @@ impl SavedCommandOwner {
     pub(crate) fn start_offline(&self, input: wire::Start, admitted_at: Instant, registered: Option<(u32, RegisteredRoot)>,
         gate: wire::Availability) -> Result<crate::offline_preflight_owner::Admitted, BridgeError> {
         self.require_domain(SavedCommandDomain::OfflinePreflight)?;
+        {
+            let registry = self.inner.lock();
+            let prepared = registry.prepared.as_ref().filter(|p|
+                p.projection.operation_id == input.operation_id && p.projection.owner_generation == input.owner_generation)
+                .ok_or_else(|| self.inner.domain.invalid_owner())?;
+            if !matches!(&prepared.projection.context, Context::OfflinePreflight(context) if input.consents_to(context)) {
+                return Err(wire::invalid());
+            }
+            // The immutable prepared context belongs to these exact original
+            // IDs. start() checks the same IDs under its original lock before
+            // taking the one-use intent; an intervening retirement cannot
+            // transfer this consent to a new preparation or scope.
+        }
         let admitted = self.start(Start { operation_id: input.operation_id, owner_generation: input.owner_generation },
             admitted_at, registered, Availability::from_offline(gate))?;
         Ok(crate::offline_preflight_owner::Admitted::new(admitted.status.offline()?, admitted.release))

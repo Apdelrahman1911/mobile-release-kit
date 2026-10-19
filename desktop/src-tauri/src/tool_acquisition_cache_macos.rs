@@ -1279,6 +1279,20 @@ impl Book {
         self.settled_intent = true;
         self.check_before_use(stop)
     }
+    /// Location DATA from this original settled cache only. This performs no
+    /// filesystem IO and grants no continuing lease or selected-source proof.
+    pub(super) fn prepared_sources_location(&self, operation: &str) -> Option<PathBuf> {
+        if !self.settled() || !self.settled_intent { return None; }
+        let cache = self.cache.as_ref()?;
+        if cache.operation != operation || !crate::edit_protocol::token(operation)
+            || !self.application.as_ref().is_some_and(|application| application.post_checked) { return None; }
+        let suffix = format!("archives/tool-{operation}/sources");
+        let length = cache.location.cache.as_os_str().len().checked_add(1 + suffix.len())?;
+        if length > 4096 { return None; }
+        let mut result = PathBuf::new(); result.try_reserve_exact(length).ok()?;
+        result.push(&cache.location.cache); result.push(suffix);
+        (result.capacity() <= 4096).then_some(result)
+    }
     pub(super) fn origin(&self) -> Option<(Origin, Witness)> {
         if !self.settled() || !self.settled_intent {
             return None;

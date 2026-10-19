@@ -1861,6 +1861,65 @@ async fn coordinate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn pending_gh_picker_excludes_native_peers_before_supervisor_claim_and_keeps_stop_available() {
+        // In-memory admission regression. No picker, gh, process, file or
+        // native receipt is produced; the unopened bridge only allocates state.
+        let bridge = Arc::new(DesktopBridge::new("/unopened-gh-peer-regression".into()));
+        let document = DocumentBinding::new(bridge.clone());
+        document.hook_installed();
+        document.observe(|lifetime| lifetime.started(true));
+        document.observe(|lifetime| lifetime.finished(true));
+        let context = wire::Context { project_id: "project-1".into(), repository: "fixture/project".into(),
+            login: "fixture-user".into(), generation: 1, revision: "gh-selection-1".into() };
+        let original = OriginalWork::new(1, true, Arc::downgrade(&document.inner));
+        let end = Instant::now() + WHOLE;
+        original.set_endpoint(Some(end));
+        let initial = GitHubAuthStatus { schema_version: 1, document_revision: 1, connection_revision: 1,
+            available: false, operation_id: Some("1".into()), project_id: Some(context.project_id.clone()),
+            repository: Some(context.repository.clone()), selected_login: Some(context.login.clone()),
+            phase: GitHubAuthPhase::Picking, reason: GitHubReason::None, http: None };
+        let registration = Arc::new(Registration {
+            original, document: Arc::downgrade(&document.inner), session_identity: document.inner.session_identity.clone(),
+            native_context: None, native_session: false, idle_connection_epoch: 1,
+            root: asset_source::RegisteredRoot { path: "/unopened-gh-project".into(),
+                identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
+            request: GitHubAuthRequest { project_id: context.project_id.clone(), repository: context.repository.clone(),
+                selected_login: context.login.clone(), expected_document_revision: 1, expected_connection_revision: 1 },
+            physical_executable: Mutex::new(None), result: Arc::new(ResultSlot::new(initial)), context, end,
+            provider: Mutex::new(None), active: Mutex::new(None), http: Mutex::new(None),
+            facts: Mutex::new(Facts { stage: Stage::Picking, failure: None, cleanup_end: None, unknown: false,
+                consent_live: true, http_claimed: false, http_started: false, http_handoff: None,
+                source_entered: false, source_returned: false, before_http_entered: false, before_http_returned: false,
+                finish_entered: false, close_entered: false, body_returned: false, final_join: None,
+                roles: [RoleBook::new(), RoleBook::new()] }),
+        });
+        {
+            let mut state = document.lock();
+            assert_eq!(document.environment_gate(&state), crate::environment_diagnostics_protocol::Availability::Available);
+            state.gh_auth = Some(Entry::Original(registration.clone()));
+            assert!(state.slot.is_none() && state.github.registration().is_none() && bridge.supervisor.can_exit());
+            assert!(pending(&state));
+            assert_eq!(document.environment_gate(&state), crate::environment_diagnostics_protocol::Availability::Busy);
+            assert!(passive_document_gate(&state).is_err());
+            assert_eq!(status(&document, &state).phase, GitHubAuthPhase::Picking);
+        }
+        // Cancellation is still accepted. Requesting STOP cannot release the
+        // original pending exclusion or manufacture native finality.
+        assert!(document.github_auth_cancel("1").is_ok());
+        assert!(registration.original.interrupted());
+        {
+            let state = document.lock();
+            assert!(pending(&state));
+            assert_eq!(document.environment_gate(&state), crate::environment_diagnostics_protocol::Availability::Busy);
+        }
+        registration.fail(BridgeError::cleanup_unknown(), Instant::now());
+        let state = document.lock();
+        assert!(pending(&state));
+        assert_eq!(document.environment_gate(&state), crate::environment_diagnostics_protocol::Availability::Busy);
+        assert_eq!(status(&document, &state).phase, GitHubAuthPhase::CleanupUnknown);
+    }
     #[test]
     fn normal_closing_observation_uses_scope_rematch_without_reopening_work() {
         for stage in [Stage::Closing, Stage::BodyReturned] {

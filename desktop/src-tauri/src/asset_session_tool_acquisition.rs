@@ -15,6 +15,7 @@ pub(crate) struct ToolAcquisitionDocumentInput {
     saved: Arc<SavedObservationLane>,
 }
 impl ToolAcquisitionDocumentInput {
+    pub(crate) fn source_picker_epoch(&self) -> u64 { self.saved.tool_source_epoch() }
     pub(crate) fn context(&self) -> &wire::Context {
         &self.context
     }
@@ -142,6 +143,26 @@ fn merge_application_roots(
 }
 
 impl DocumentBinding {
+    /// Same original saved lane/stamp/root/complete registry, without reviving
+    /// its old acquisition epoch. The exact source Publisher owns that check.
+    pub(super) fn tool_source_nomination_current(&self, state: &DocumentState,
+        nomination: &crate::saved_command_owner::ToolSourceNomination,
+        registration: u32, root: &RegisteredRoot, admitted: Option<&Arc<OriginalWork>>) -> Result<(), BridgeError> {
+        let input=nomination.document();
+        let roster=self.inner.bridge.native_roster().map_err(|_| crate::android_tool_sources::invalid())?;
+        if !input.document.upgrade().is_some_and(|document| Arc::ptr_eq(&document,&self.inner))
+            || !same_roster(input,registration,root,&roster)
+            || !state.saved_observation.as_ref().is_some_and(|lane| same_lane(lane,&input.saved)) {
+            return Err(crate::android_tool_sources::invalid());
+        }
+        let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+        if !input.saved.tool_source_matches(&self.inner,&edit,registration,root,&input.context.project_id)
+            || !self.tool_source_saved_input_matches(state,&input.saved,&input.context,
+                nomination.continuing() || admitted.is_some_and(|owner| nomination.admitted_to(owner))) {
+            return Err(crate::android_tool_sources::invalid());
+        }
+        Ok(()) // Edit guard drops before any outer gate, GUI, IO, or GO.
+    }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn tool_application_exclusion_root(
         &self,
@@ -256,6 +277,7 @@ impl DocumentBinding {
             || state.lock_pending
             || state.compatibility_picker_pending
             || state.maintenance.closed()
+            || gh_auth::pending(state)
             || state
                 .saved_observation
                 .as_ref()

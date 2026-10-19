@@ -4,14 +4,18 @@ import type { RetainedEditAttention } from '../drafts.ts';
 import { EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
 
-export function Releases({ offlineChecks, androidBuild, iosArchive, evidence, protectedWorkflows, onOpenGitHub }: { offlineChecks: ReactNode; androidBuild: ReactNode; iosArchive: ReactNode; evidence: ReactNode; protectedWorkflows?: ReactNode; onOpenGitHub: () => void }) {
+export function Releases({ offlineChecks, androidBuild, iosArchive, evidence, storeOperations, storeNeedsAttention = false, protectedWorkflows, workflowNeedsAttention = false, onOpenGitHub }: { offlineChecks: ReactNode; androidBuild: ReactNode; iosArchive: ReactNode; evidence: ReactNode; storeOperations?: ReactNode; storeNeedsAttention?: boolean; protectedWorkflows?: ReactNode; workflowNeedsAttention?: boolean; onOpenGitHub: () => void }) {
   return <>
-    <PageHeading eyebrow="RELEASES" title="One candidate. A traceable journey." description="Inspect saved release documents, review local checks, and separately prepare a protected release workflow when its installed runtime is qualified." />
-    {protectedWorkflows}
-    {evidence}
+    <PageHeading eyebrow="RELEASES" title="Build and release your app" description="Start with local checks, then build your app. Uploading to a Store or running a GitHub release needs a separate review and your approval." />
+    {storeNeedsAttention && <div className="notice notice-warning"><Icon name="shield" /><div><strong>A Store task needs your attention</strong><p>Review its status before starting another task.</p><a href="#release-store-operations">Go to the Store task</a></div></div>}
+    {workflowNeedsAttention && <div className="notice notice-warning"><Icon name="github" /><div><strong>A GitHub release request is ready to review or needs attention</strong><a href="#release-github-operations">Go to the release request</a></div></div>}
+    <SectionHeading title="1. Check and build" description="These actions prepare your app locally. They do not publish a release." />
     {offlineChecks}
     {androidBuild}
     {iosArchive}
+    {evidence}
+    <section id="release-store-operations" tabIndex={-1}><SectionHeading title="2. Store uploads and promotion" description="Use an existing verified build. Review the destination and the proposed action before approving any Store change." />{storeOperations}</section>
+    <section id="release-github-operations" tabIndex={-1}><SectionHeading title="GitHub release automation" description="An alternative to running the supported release steps on this Mac. Your repository's permissions and release safeguards still apply." />{protectedWorkflows}</section>
     <section className="card"><EmptyState icon="github" title="Read authenticated release history in GitHub" description="Open GitHub to connect the original project and choose one exact run, attempt, stage and platform. An authenticated read requires a qualified native runtime and a separate explicit Start. Missing evidence does not prove that no release happened; retained workflow evidence is not current Store state."><button type="button" className="button secondary" onClick={onOpenGitHub}>Open authenticated History in GitHub</button></EmptyState></section>
   </>;
 }

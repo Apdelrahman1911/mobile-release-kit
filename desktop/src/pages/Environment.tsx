@@ -4,6 +4,8 @@ import type { ProjectSession } from '../drafts.ts';
 import type { EnvironmentController, EnvironmentPlatform, EnvironmentOperation, EnvironmentState } from '../environment.ts';
 import type { EnvironmentDiagnosticsController, EnvironmentDiagnosticsState } from '../environmentDiagnosticsController.ts';
 import { EnvironmentDiagnostics } from '../components/EnvironmentDiagnostics.tsx';
+import { PrepareBuildEnvironment } from '../components/PrepareBuildEnvironment.tsx';
+import type { PrepareBuildEnvironmentProps } from '../components/PrepareBuildEnvironment.tsx';
 import { Badge, ErrorNotice, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
 import { ProgressiveDisclosure } from '../components/ProgressiveDisclosure.tsx';
@@ -32,9 +34,10 @@ const initialHelp: Record<'platform' | 'operation', HelpContent> = {
 };
 const activity = (operation: EnvironmentOperation) => operation === 'build' ? 'Build / archive prerequisites' : 'Artifact-validation prerequisites';
 
-export function Environment({ info, api, preview, session, state, controller, diagnosticsState, diagnosticsController, onRetry, onSettings, onHelp, loading }: {
+export function Environment({ info, api, preview, session, state, controller, diagnosticsState, diagnosticsController, toolPreparation, onRetry, onSettings, onHelp, loading }: {
   info: AppInfo | null; api: DesktopApi | null; preview: boolean; session: ProjectSession | null; state: EnvironmentState; controller: EnvironmentController;
   diagnosticsState: EnvironmentDiagnosticsState; diagnosticsController: EnvironmentDiagnosticsController;
+  toolPreparation: PrepareBuildEnvironmentProps;
   onRetry: () => void; onSettings: () => void; onHelp: (help: HelpContent) => void; loading: boolean;
 }) {
   const runtime = info?.runtime;
@@ -44,6 +47,7 @@ export function Environment({ info, api, preview, session, state, controller, di
   const resultPreview = state.resultBinding?.mode === 'preview';
   const guide = result?.help ?? initialHelp;
   const setContext = (platform: EnvironmentPlatform, operation: EnvironmentOperation) => {
+    toolPreparation.controller.setVisible(platform === 'android' && operation === 'build');
     diagnosticsController.setContext(platform, operation);
     controller.setContext(platform, operation);
   };
@@ -61,6 +65,7 @@ export function Environment({ info, api, preview, session, state, controller, di
       </div>
     </section>
     <EnvironmentDiagnostics state={diagnosticsState} controller={diagnosticsController} loading={loading} />
+    {state.platform === 'android' && state.operation === 'build' && <PrepareBuildEnvironment {...toolPreparation} />}
     <ProgressiveDisclosure title="Required tools & versions"
       description="See what this project asks for. This list does not check what is installed on your computer."
       needsAttention={state.pending !== null || state.error !== null || (result !== null && state.stale)}>

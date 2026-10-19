@@ -149,6 +149,15 @@ pub fn strict_json(bytes: &[u8]) -> Result<Value, BridgeError> {
     strict_json_with_limits(bytes, NODE_LIMIT, DEPTH_LIMIT)
 }
 
+// Fixed native VersionAllocations state only. No renderer namespace/decoder
+// selection and no widening of the ordinary passive protocol's limits.
+pub(crate) fn strict_version_allocation_state_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+    if bytes.len() > 1024 * 1024 {
+        return Err(BridgeError::protocol());
+    }
+    strict_json_with_limits(bytes, 50_000, 20)
+}
+
 // Signed Mac inventory DATA only. Seven nodes/runtime row and nine/install
 // row, including keys: 16,384 rows fit these fixed bounds. No renderer caller.
 pub(crate) fn strict_macos_runtime_manifest_json(bytes: &[u8]) -> Result<Value, BridgeError> {

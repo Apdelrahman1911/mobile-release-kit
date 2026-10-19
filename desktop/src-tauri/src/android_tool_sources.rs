@@ -33,6 +33,15 @@ pub(crate) struct Status {
 pub(crate) struct Choose {
     pub(crate) schema_version: u32, pub(crate) source_generation: u32,
     pub(crate) project_id: String, pub(crate) role: Role,
+    // Omission preserves ordinary Browse. Explicit null/path/URL is refused.
+    #[serde(default, deserialize_with = "acquired")]
+    pub(crate) acquired: Option<Acquired>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Acquired { pub(crate) operation_id: String, pub(crate) owner_generation: String }
+fn acquired<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Acquired>, D::Error> {
+    Acquired::deserialize(d).map(Some)
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -64,7 +73,9 @@ impl Choose {
     pub(crate) fn parse(raw: &[u8]) -> Result<Self, BridgeError> {
         if raw.len() > REQUEST_LIMIT { return Err(invalid()); }
         let item: Self = serde_json::from_value(strict_json(raw).map_err(|_| invalid())?).map_err(|_| invalid())?;
-        if item.schema_version != 1 || item.source_generation == u32::MAX || !valid_id(&item.project_id) { return Err(invalid()); }
+        if item.schema_version != 1 || item.source_generation == u32::MAX || !valid_id(&item.project_id)
+            || item.acquired.as_ref().is_some_and(|a| !crate::edit_protocol::token(&a.operation_id)
+                || !crate::edit_protocol::token(&a.owner_generation)) { return Err(invalid()); }
         Ok(item)
     }
 }
@@ -106,6 +117,17 @@ mod tests {
         }
         assert!(parse_empty(br#"{"schemaVersion":1,"schemaVersion":1}"#).is_err());
         assert!(Cancel::parse(br#"{"schemaVersion":1,"sourceGeneration":0,"operationId":1}"#).is_err());
+    }
+    #[test]
+    fn acquired_source_nomination_is_optional_closed_ids_not_a_path_or_null() {
+        let good = serde_json::json!({"schemaVersion":1,"sourceGeneration":2,"projectId":"project-a","role":"sdk",
+            "acquired":{"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32)}});
+        assert!(Choose::parse(&serde_json::to_vec(&good).unwrap()).unwrap().acquired.is_some());
+        for value in [serde_json::Value::Null,serde_json::json!({}),serde_json::json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"path":"/cache"}),
+            serde_json::json!({"operationId":"https://vendor.invalid/archive","ownerGeneration":"b".repeat(32)})] {
+            let mut bad=good.clone();bad["acquired"]=value;assert!(Choose::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+        assert!(Choose::parse(br#"{"schemaVersion":1,"sourceGeneration":0,"projectId":"p","role":"jdk","acquired":{},"acquired":{}}"#).is_err());
     }
     #[test]
     fn status_selector_only_demotes_available_with_an_unqualified_source_picker() {

@@ -306,6 +306,7 @@ impl GateGuard {
                 EditDomain::ReleaseVersion => { let _ = self.owner.close_release_version("main", &id); },
                 EditDomain::MetadataImages => { let _ = self.owner.close_metadata_images("main", &id); },
                 EditDomain::ProjectInitialization => { let _ = self.owner.close_initialization("main", &id); },
+                EditDomain::ProjectIdentity => { let _ = self.owner.close_identity("main", &id); },
             }
         }
         self.schedule.release();
@@ -2949,6 +2950,7 @@ mod metadata {
                     EditDomain::ReleaseVersion => { let _=self.batch.owner.close_release_version("main",&id); let _=self.batch.owner.shutdown().await; },
                     EditDomain::MetadataImages => { let _=self.batch.owner.close_metadata_images("main",&id); let _=self.batch.owner.shutdown().await; },
                     EditDomain::ProjectInitialization => { let _=self.batch.owner.close_initialization("main",&id); let _=self.batch.owner.shutdown().await; },
+                    EditDomain::ProjectIdentity => { let _=self.batch.owner.close_identity("main",&id); let _=self.batch.owner.shutdown().await; },
                     EditDomain::GitHubWorkflows => { let _=self.batch.owner.close_workflow("main",&id); let _=workflow_observed(&self.batch.owner,&id,Phase::Final).await; },
                 }
             }
@@ -4433,7 +4435,7 @@ mod version {
             && matches!(core.reason,CoreReason::Cancelled|CoreReason::None),Failure::UnexpectedOutcome)?;
         let mut value=serde_json::to_value(facts).map_err(|_| Failure::ReceiptIo)?;
         value["domain"]=json!(match session.domain { EditDomain::Configuration=>"configuration",EditDomain::GitHubWorkflows=>"github_workflows",
-            EditDomain::MetadataText=>"metadata_text",EditDomain::ReleaseVersion|EditDomain::MetadataImages|EditDomain::ProjectInitialization=>return Err(Failure::UnexpectedStatus) });
+            EditDomain::MetadataText=>"metadata_text",EditDomain::ReleaseVersion|EditDomain::MetadataImages|EditDomain::ProjectInitialization|EditDomain::ProjectIdentity=>return Err(Failure::UnexpectedStatus) });
         value["nativePhase"]=json!(phase); value["nativeFinality"]=json!(finality); value["nativeReason"]=json!(native);
         value["applySubmitted"]=json!(applied); value["lateSettled"]=json!(late); value["outcome"]=json!(core); value["terminalSeq"]=json!(0);
         Ok(value)
