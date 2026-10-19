@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from . import config_edit as _shared
 from .api._json import bounded_json_text
+from .config import parse_config_text
 from .config_edit import ConfigEditFailure, CoreEditOutcome
 from .errors import ConfigurationError
 from .init_transaction import TypedEditProfile
@@ -28,12 +29,13 @@ _PROFILE = TypedEditProfile.RELEASE_VERSION
 
 class VersionCheckout(_shared._PrivateAuthority):
     __slots__ = ("_identity", "_lease", "_revision", "_revision_token", "_selection",
-                 "_dependencies", "_files", "_baseline_json", "_original_values", "_state", "_prepared")
+                 "_enabled_platforms", "_dependencies", "_files", "_baseline_json", "_original_values", "_state", "_prepared")
     _identity: VersionCheckout
     _lease: InitRootLease
     _revision: RootedRevision
     _revision_token: str
     _selection: VersionSelection
+    _enabled_platforms: tuple[str, ...]
     _dependencies: tuple[_shared._FileSnapshot, ...]
     _files: tuple[_shared._FileSnapshot, ...]
     _baseline_json: bytes
@@ -51,6 +53,11 @@ class VersionCheckout(_shared._PrivateAuthority):
     @property
     def selection(self) -> VersionSelection:
         return self._selection
+
+    @property
+    def enabled_platforms(self) -> tuple[str, ...]:
+        """Detached facts from the captured config, not a target/path grant."""
+        return self._enabled_platforms
 
     @property
     def values(self) -> dict[str, str] | None:
@@ -161,6 +168,11 @@ def capture_release_version_edit(lease: InitRootLease) -> VersionCheckout:
         selection = revision.version_selection
         if type(selection) is not VersionSelection:
             raise _shared._ContractViolation()
+        # Only platform facts are derived here. The target inventory remains
+        # the descriptor bound by the original lease, never a reparsed path.
+        saved_config = parse_config_text(config.decode("utf-8"))
+        enabled_platforms = tuple(platform for platform in ("android", "ios")
+                                  if saved_config[platform].get("enabled") is True)
         files = tuple(_shared._snapshot(item, path, MAX_VERSION_BYTES)
                       for item, path in zip(originals, selection.paths))
         if len(files) != len(selection.paths):
@@ -173,6 +185,7 @@ def capture_release_version_edit(lease: InitRootLease) -> VersionCheckout:
         for name, value in (
             ("_identity", checkout), ("_lease", lease), ("_revision", revision), ("_revision_token", revision.token),
             ("_selection", selection), ("_dependencies", captured_dependencies), ("_files", files),
+            ("_enabled_platforms", enabled_platforms),
             ("_baseline_json", baseline_json), ("_original_values", original_values), ("_state", _shared._CAPTURED), ("_prepared", None),
         ):
             object.__setattr__(checkout, name, value)
