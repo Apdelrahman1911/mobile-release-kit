@@ -80,7 +80,7 @@ import { OfflinePreflight } from './components/OfflinePreflight.tsx';
 import { AndroidBuild, AndroidBuildResultView } from './components/AndroidBuild.tsx';
 import { IOSArchive, IOSArchiveResultView, IOSRecovery } from './components/IOSArchive.tsx';
 import { Icon } from './components/Icon.tsx';
-import type { IconName } from './components/Icon.tsx';
+import { WorkspaceNavigation, workspacePages } from './components/WorkspaceNavigation.tsx';
 import { Dashboard } from './pages/Dashboard.tsx';
 import { Environment } from './pages/Environment.tsx';
 import { Credentials } from './pages/Credentials.tsx';
@@ -88,18 +88,6 @@ import { Metadata } from './pages/Metadata.tsx';
 import { Recovery, Releases } from './pages/Future.tsx';
 import { Artifacts } from './pages/Artifacts.tsx';
 import { GitHub } from './pages/GitHub.tsx';
-
-const navigation: { id: Page; label: string; icon: IconName; group: 'workspace' | 'release' }[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', group: 'workspace' },
-  { id: 'settings', label: 'Project settings', icon: 'settings', group: 'workspace' },
-  { id: 'environment', label: 'Environment', icon: 'environment', group: 'workspace' },
-  { id: 'credentials', label: 'Credentials', icon: 'key', group: 'workspace' },
-  { id: 'metadata', label: 'Metadata', icon: 'metadata', group: 'workspace' },
-  { id: 'github', label: 'GitHub', icon: 'github', group: 'release' },
-  { id: 'releases', label: 'Releases', icon: 'rocket', group: 'release' },
-  { id: 'artifacts', label: 'Artifacts', icon: 'box', group: 'release' },
-  { id: 'recovery', label: 'Recovery', icon: 'recovery', group: 'release' },
-];
 
 export function App() {
   const [api, setApi] = useState<DesktopApi | null>(null);
@@ -594,7 +582,7 @@ export function App() {
   const mode = api?.mode ?? 'unavailable';
   const preview = mode === 'preview';
   const session = workspace.selectedId ? workspace.projects[workspace.selectedId] ?? null : null;
-  const currentNavigation = navigation.find((item) => item.id === page) ?? navigation[0];
+  const currentNavigation = workspacePages[page];
   const nativeSaveAvailable = mode === 'native' && saveState.status?.capability.available === true &&
     !saveState.observationIssue && !saveState.integrityFailed && !saveState.generationLost && !saveState.nativeBlocked;
   const nativeWorkflowAvailable = mode === 'native' && workflowState.status?.capability.available === true &&
@@ -799,7 +787,7 @@ export function App() {
   useEffect(() => () => assetSession.dispose(), [assetSession]);
 
   useEffect(() => {
-    document.title = `${currentNavigation?.label ?? 'Dashboard'} · Mobile Release Kit${preview ? ' · Browser preview' : ''}`;
+    document.title = `${currentNavigation.label} · Mobile Release Kit${preview ? ' · Browser preview' : ''}`;
   }, [currentNavigation, preview]);
 
   useEffect(() => {
@@ -1046,14 +1034,14 @@ export function App() {
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark"><Icon name="box" size={25} /></span><div>Mobile Release Kit<span>THE KIT FOR A CAREFUL LAUNCH</span></div></div>
       <div className="project-switcher"><label htmlFor="project-switch">CURRENT PROJECT</label><div className="project-switcher-control"><span className="project-switch-icon"><Icon name="folder" size={18} /></span><select id="project-switch" aria-label="Switch project; unsaved configuration, text and version drafts are retained" value={workspace.selectedId ?? ''} onChange={(event) => dispatch({ type: 'switch', projectId: event.target.value })}><option value="" disabled>{choosing ? 'Opening project…' : 'Choose a project'}</option>{Object.values(workspace.projects).map((entry) => <option key={entry.project.id} value={entry.project.id}>{entry.project.name}{isDirty(entry) ? ' • unsaved config' : ''}{metadataProjectDirty(metadataState.entries, entry.project.id) ? ' • unsaved text' : ''}{versionProjectDirty(versionEditState, entry.project.id) ? ' • unsaved version' : ''}</option>)}</select><button type="button" className="icon-button" disabled={chooseDisabled} aria-label={preview ? 'Load example project' : 'Open another project folder'} onClick={() => void chooseProject()}><Icon name="plus" size={16} /></button></div></div>
-      <nav aria-label="Workspace navigation">{(['workspace', 'release'] as const).map((group) => <div className="nav-group" key={group}><span className="nav-group-label">{group === 'workspace' ? 'WORKSPACE' : 'DELIVERY'}</span>{navigation.filter((entry) => entry.group === group).map((entry) => <button type="button" key={entry.id} className={`nav-item${entry.id === page ? ' active' : ''}`} aria-label={entry.label} aria-current={entry.id === page ? 'page' : undefined} onClick={() => navigate(entry.id)}><Icon name={entry.icon} size={19} /><span>{entry.label}</span></button>)}</div>)}</nav>
+      <WorkspaceNavigation page={page} onNavigate={navigate} />
       <div className="sidebar-footer"><div className="foundation-label"><span className="local-dot" />{localEditingLabel}</div><p>Thoughtful preparation.<br />No accidental releases.</p><div className="sidebar-version"><span>{`DESKTOP ${info?.appVersion ?? 'Not loaded'}`}</span><Icon name="shield" size={14} /></div></div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />Every action has its own checks</span><Badge tone={preview || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || localStoreExecuteState.blocked || localStoreReconcileState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project initialization owner retained' : recoveryBusy() ? 'Project recovery owner retained' : androidBusy() ? 'Android build owner retained' : iosBusy() ? 'iOS archive owner retained' : artifactBusy() ? 'Artifact inspection owner retained' : localHistoryBusy() ? 'Local history owner retained' : storeBusy() ? 'Local Store operation retained' : preflightBusy() ? 'Saved offline-check owner retained' : diagnosticsState.status?.active ? 'Build-tool diagnostics active' : saveState.status?.active ? 'Native save session active' : workflowState.status?.active ? 'Local workflow session active' : metadataImagesOwnerReason(metadataImagesState) ? 'Image operation retained' : metadataState.edit.status?.active ? 'Public-text session active' : versionEditState.edit.status?.active ? 'Saved-version session active' : localEditingLabel}</Badge></div></header>
+      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No automatic publishing</span><Badge tone={preview || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || localStoreExecuteState.blocked || localStoreReconcileState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project setup · see status below' : recoveryBusy() ? 'Recovery · see status below' : androidBusy() ? 'Android build · see status below' : iosBusy() ? 'iOS build · see status below' : artifactBusy() ? 'Build files · see status below' : localHistoryBusy() ? 'Release history · see status below' : storeBusy() ? 'Store operation · see status below' : preflightBusy() ? 'Local checks · see status below' : diagnosticsState.status?.active ? 'Build tools · see status below' : saveState.status?.active ? 'Project settings task · see status below' : workflowState.status?.active ? 'GitHub files task · see status below' : metadataImagesOwnerReason(metadataImagesState) ? 'Store images · see status below' : metadataState.edit.status?.active ? 'Store listing task · see status below' : versionEditState.edit.status?.active ? 'Version task · see status below' : localEditingLabel}</Badge></div></header>
       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
       <main id="main-content" tabIndex={-1} ref={main}>
-        {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Loading desktop capabilities and the core field catalogue…</span></div>}
+        {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Connecting to the app and loading project settings…</span></div>}
         {bootError && <><ErrorNotice error={bootError} title="The native service is unavailable" /><div className="bridge-retry"><button className="button small secondary" disabled={loading || savedCommandBusy() !== null} onClick={() => void bootstrap()}><Icon name="refresh" size={15} />Retry connection</button><span>No browser fallback or mock engine has been enabled.</span></div></>}
         {catalogError && <ErrorNotice error={catalogError} title="The field catalogue could not be loaded" />}
         {chooseError && <ErrorNotice error={chooseError} title="The project could not be selected" />}
@@ -1098,6 +1086,7 @@ export function App() {
         {page !== 'metadata' && <MetadataImagesOperation state={metadataImagesState} controller={metadataImages} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
         {page !== 'dashboard' && <ReleaseVersionSave state={versionEditState} controller={versionEdit} onShowProject={showVersionProject} />}
         {page === 'dashboard' && <Dashboard session={session} info={info} preview={preview} configSaveState={saveState} chooseDisabled={chooseDisabled} chooseReason={chooseReason} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
+          initializationState={initializationState} versionEditState={versionEditState}
           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
           versionEditor={<ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} />}
           releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); void releaseVersion.read(); }}

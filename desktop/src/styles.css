@@ -58,6 +58,11 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; fo
 .nav-item:hover { color: #314743; background: #f4f7f7; }
 .nav-item.active { color: #246c60; background: #eaf4f0; font-weight: 650; }
 .nav-item.active::before { content: ""; position: absolute; left: 0; width: 3px; height: 19px; border-radius: 2px; background: #3d8c79; }
+.nav-disclosure { margin-bottom: 8px; }
+.nav-disclosure-pages { margin-left: 15px; padding-left: 6px; border-left: 1px solid var(--line); }
+.nav-disclosure-pages[hidden] { display: none; }
+.nav-disclosure-pages .nav-item { min-height: 38px; font-size: 11px; }
+.nav-disclosure-toggle[aria-disabled="true"] { cursor: default; }
 .nav-soon { font-size: 7px; letter-spacing: .6px; font-weight: 600; color: #99a4a9; background: #f1f4f5; border-radius: 3px; padding: 3px 4px; }
 .sidebar-footer { margin-top: auto; padding: 17px 12px 0; border-top: 1px solid var(--line); }
 .foundation-label { display: flex; align-items: center; gap: 7px; font-size: 10px; font-weight: 600; color: #5b746f; }
