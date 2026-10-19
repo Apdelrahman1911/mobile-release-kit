@@ -12,6 +12,10 @@ pub(crate) const DESCRIPTOR_LIMIT: usize = 512;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirectoryIdentity { dev: u64, ino: u64, mode: u32, uid: u32, gid: u32 }
 impl DirectoryIdentity {
+    /// Native service placement checks compare the actual selected directory,
+    /// not its spelling (macOS firmlinks/case aliases can name the same inode).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn service_identity(self) -> (u64, u64) { (self.dev, self.ino) }
     // Only a private store's actual held Linux/macOS directory observation calls
     // this bridge. It is not renderer input, a synthetic source or write lease.
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
@@ -64,6 +68,31 @@ impl ProjectIdentity {
 }
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RegisteredRoot { pub(crate) path: PathBuf, pub(crate) identity: ProjectIdentity }
+
+/// Point-in-time result of the SAME native SourceBook. It is not a continuing
+/// ancestry lease. The private-store owner must match the existing parent and
+/// expected Missing/Existing application directory before its first write.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct ApplicationDirectoryExclusion {
+    path: PathBuf, projects: Vec<RegisteredRoot>, parent: DirectoryIdentity,
+    existing: Option<DirectoryIdentity>,
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) type ApplicationDirectoryFields = (u64, u64, u32, u32, u32);
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ApplicationDirectoryExclusion {
+    pub(crate) fn matches(&self, path: &Path, projects: &[RegisteredRoot]) -> bool {
+        self.path == path && self.projects == projects
+    }
+    pub(crate) fn store_expectation(&self, path: &Path, projects: &[RegisteredRoot])
+        -> Result<(ApplicationDirectoryFields, Option<ApplicationDirectoryFields>), Reason> {
+        if !self.matches(path, projects) { return Err(Reason::ExclusionUnconfirmed); }
+        // Complete native metadata across the source/store module boundary.
+        // Neither subsystem imports the other's executable ownership graph.
+        let project = |id: DirectoryIdentity| (id.dev, id.ino, id.mode, id.uid, id.gid);
+        Ok((project(self.parent), self.existing.map(project)))
+    }
+}
 
 /// Produced only by a completed original project-directory roster probe. When
 /// the vault does not exist yet, its owner must additionally compare these
@@ -169,10 +198,18 @@ impl CapturedSource {
         }) }
     }
 }
-pub(crate) struct ProjectProbe { path: PathBuf, identity: ProjectIdentity }
+pub(crate) struct ProjectProbe {
+    path: PathBuf, identity: ProjectIdentity,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    application_exclusion: Option<RegisteredRoot>,
+}
 impl ProjectProbe {
     pub(crate) fn path(&self) -> &Path { &self.path }
     pub(crate) fn identity(&self) -> ProjectIdentity { self.identity }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn excludes_application(&self, current: Option<&RegisteredRoot>) -> bool {
+        self.application_exclusion.as_ref() == current
+    }
 }
 // Metadata-only, point-in-time descendant proof. No native absolute path,
 // payload, source witness or reusable file/write authority reaches the DTO.
@@ -484,6 +521,11 @@ mod linux {
             Ok(())
         }
         fn close_all(&mut self) -> bool { self.close_all_observing(&mut |_| {}) }
+        /// Cleanup-only for the host's retained startup probe. This never
+        /// retries a consumed/unknown descriptor or renews an admission.
+        pub(crate) fn retire_application_probe(&mut self) -> bool {
+            self.not_started() || self.settled() || self.close_all()
+        }
         fn close_all_observing(&mut self, failed: &mut dyn FnMut(Reason)) -> bool {
             let mut known = true;
             for slot in self.slots.iter_mut().rev() {
@@ -766,13 +808,19 @@ mod linux {
         probe_project_excluding_vault(book, path, origins, None, stop)
     }
     pub(crate) fn probe_project_excluding_vault(book: &mut SourceBook, path: PathBuf, origins: &[Arc<OriginWitness>], vault: Option<&RegisteredRoot>, stop: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> {
+        probe_project_excluding_private_roots(book, path, origins, vault, None, stop)
+    }
+    pub(crate) fn probe_project_excluding_private_roots(book: &mut SourceBook, path: PathBuf,
+        origins: &[Arc<OriginWitness>], vault: Option<&RegisteredRoot>, application: Option<&RegisteredRoot>,
+        stop: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> {
         if origins.len() > 32 || path.to_str().is_none() { return Err(Reason::SourceRefused); }
         let project_parts = parts(&path)?;
         let mut origin_parts = Vec::new(); origin_parts.try_reserve_exact(origins.len()).map_err(|_| Reason::Capacity)?;
         for origin in origins { origin_parts.push(parts(&origin.path)?); }
         let vault_parts = vault.map(|root| parts(&root.path)).transpose()?;
+        let application_parts = application.map(|root| parts(&root.path)).transpose()?;
         let capacity = roster_limit(std::iter::once(project_parts.len()).chain(origin_parts.iter().map(|parts| parts.len().saturating_sub(1)))
-            .chain(vault_parts.iter().map(Vec::len)), 0)?;
+            .chain(vault_parts.iter().map(Vec::len)).chain(application_parts.iter().map(Vec::len)), 0)?;
         book.begin(capacity, origins.len())?;
         let result = (|| {
             book.root(stop)?;
@@ -783,6 +831,13 @@ mod linux {
                 let current = book.directory(*vault_chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
                 if ProjectIdentity::Posix(current) != vault.identity { return Err(Reason::ExclusionUnconfirmed); }
                 reject_ancestry_overlap(book, &project_chain, &vault_chain)?;
+            }
+            if let (Some(application), Some(components)) = (application, &application_parts) {
+                let chain = book.chain(components, stop)?;
+                if ProjectIdentity::Posix(book.directory(*chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?) != application.identity {
+                    return Err(Reason::ExclusionUnconfirmed);
+                }
+                reject_ancestry_overlap(book, &project_chain, &chain)?;
             }
             for (origin, components) in origins.iter().zip(&origin_parts) {
                 let (leaf_name, parents) = components.split_last().ok_or(Reason::SourceRefused)?;
@@ -802,7 +857,7 @@ mod linux {
                 if file_identity(&metadata)? != origin.leaf { return Err(Reason::ExclusionUnconfirmed); }
                 book.probes.push(LeafProbe { parent, name: copy_bytes(leaf_name)?, identity: origin.leaf });
             }
-            Ok(ProjectProbe { path: path.clone(), identity: ProjectIdentity::Posix(project) })
+            Ok(ProjectProbe { path: path.clone(), identity: ProjectIdentity::Posix(project), application_exclusion: application.cloned() })
         })();
         book.finish(result, stop)
     }
@@ -845,6 +900,61 @@ mod linux {
                 project_roots.push(current);
             }
             Ok(VaultAbsentExclusion { project_roots })
+        })();
+        book.finish(result, stop)
+    }
+
+    /// Fresh full-roster exclusion before service state exists. The absent leaf
+    /// is observed through its original existing parent; no path is created.
+    pub(crate) fn probe_application_directory_exclusion(book: &mut SourceBook, app_data: &Path,
+        projects: &[RegisteredRoot], stop: &mut dyn FnMut() -> bool) -> Result<ApplicationDirectoryExclusion, Reason> {
+        if projects.len() > 64 || app_data.file_name().and_then(|v| v.to_str()) != Some("dev.mobile-release-kit.desktop") {
+            return Err(Reason::SourceRefused);
+        }
+        let app_parts = parts(app_data)?;
+        if !(2..=96).contains(&app_parts.len()) { return Err(Reason::Capacity); }
+        let (name, parents) = app_parts.split_last().ok_or(Reason::SourceRefused)?;
+        let project_parts: Vec<_> = projects.iter().map(|root| parts(&root.path)).collect::<Result<_, _>>()?;
+        let capacity = roster_limit(std::iter::once(app_parts.len()).chain(project_parts.iter().map(Vec::len)), 0)?;
+        book.begin(capacity, 0)?;
+        let result = (|| {
+            book.root(stop)?;
+            let mut app_chain = book.chain(parents, stop)?;
+            let parent_index = *app_chain.last().ok_or(Reason::SourceRefused)?;
+            let parent = book.directory(parent_index)?;
+            checkpoint(stop)?;
+            let named = stat::fstatat(book.fd(parent_index)?, OsStr::from_bytes(name), AtFlags::AT_SYMLINK_NOFOLLOW);
+            checkpoint(stop)?;
+            let existing = match named {
+                Ok(value) => {
+                    let expected = directory_identity(&value)?;
+                    let child = book.child(parent_index, name, false, stop)?;
+                    if book.directory(child)? != expected { return Err(Reason::SourceChanged); }
+                    app_chain.push(child); Some(expected)
+                }
+                Err(nix::errno::Errno::ENOENT) => None,
+                Err(_) => return Err(Reason::SourceRefused),
+            };
+            for (project, components) in projects.iter().zip(&project_parts) {
+                let chain = book.chain(components, stop)?;
+                let actual = book.directory(*chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
+                if ProjectIdentity::Posix(actual) != project.identity { return Err(Reason::ExclusionUnconfirmed); }
+                if existing.is_some() { reject_ancestry_overlap(book, &chain, &app_chain)?; }
+                else {
+                    // A genuinely absent leaf cannot contain a project. Its
+                    // original parent chain must still not be inside one.
+                    for index in &app_chain {
+                        if book.directory(*index)?.same_object(actual) { return Err(Reason::ProjectOverlap); }
+                    }
+                }
+            }
+            if existing.is_none() {
+                checkpoint(stop)?;
+                let named = stat::fstatat(book.fd(parent_index)?, OsStr::from_bytes(name), AtFlags::AT_SYMLINK_NOFOLLOW);
+                checkpoint(stop)?;
+                if !matches!(named, Err(nix::errno::Errno::ENOENT)) { return Err(Reason::SourceChanged); }
+            }
+            Ok(ApplicationDirectoryExclusion { path: app_data.to_owned(), projects: projects.to_vec(), parent, existing })
         })();
         book.finish(result, stop)
     }
@@ -1107,7 +1217,8 @@ pub(crate) use linux::{SourceBook, capture, probe_project, probe_project_path, s
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::capture_public_images;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-pub(crate) use linux::{probe_project_excluding_vault, probe_vault_exclusion};
+pub(crate) use linux::{probe_project_excluding_vault, probe_project_excluding_private_roots, probe_vault_exclusion,
+    probe_application_directory_exclusion};
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::assert_project_path_source_contracts;
 
@@ -1115,7 +1226,8 @@ pub(crate) use linux::assert_project_path_source_contracts;
 #[path = "asset_source_macos.rs"]
 mod macos;
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub(crate) use macos::{SourceBook, capture, capture_public_images, probe_artifact, probe_project, probe_project_path, probe_project_excluding_vault, probe_vault_exclusion, suffix, path_hint};
+pub(crate) use macos::{SourceBook, capture, capture_public_images, probe_artifact, probe_project, probe_project_path, probe_project_excluding_vault,
+    probe_project_excluding_private_roots, probe_vault_exclusion, probe_application_directory_exclusion, suffix, path_hint};
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use macos::PUBLIC_IMAGES_SOURCE_CONTROL_BYTES;
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]

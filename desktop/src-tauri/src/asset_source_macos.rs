@@ -337,6 +337,11 @@ impl SourceBook {
     fn close_all(&mut self) -> bool {
         self.close_all_observing(&mut |_| {})
     }
+    /// Cleanup-only; the host retains this original even if its startup poll
+    /// panics. No consumed/unknown native call or descriptor is tried again.
+    pub(crate) fn retire_application_probe(&mut self) -> bool {
+        self.not_started() || self.settled() || self.close_all()
+    }
     fn close_all_observing(&mut self, failed: &mut dyn FnMut(Reason)) -> bool {
         // Continue independent original closes; never retry EINTR or reconstruct
         // a numeric descriptor, and never equate Drop with known settlement.
@@ -611,14 +616,20 @@ pub(crate) fn probe_project(book: &mut SourceBook, path: PathBuf, origins: &[Arc
 }
 pub(crate) fn probe_project_excluding_vault(book: &mut SourceBook, path: PathBuf, origins: &[Arc<OriginWitness>],
     vault: Option<&RegisteredRoot>, stop: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> {
+    probe_project_excluding_private_roots(book,path,origins,vault,None,stop)
+}
+pub(crate) fn probe_project_excluding_private_roots(book: &mut SourceBook, path: PathBuf,
+    origins: &[Arc<OriginWitness>], vault: Option<&RegisteredRoot>, application: Option<&RegisteredRoot>,
+    stop: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> {
     if origins.len() > 32 { return Err(Reason::Capacity); }
     let project_parts = parts(&path)?;
     let mut origin_parts = Vec::new(); origin_parts.try_reserve_exact(origins.len()).map_err(|_| Reason::Capacity)?;
     for origin in origins { origin_parts.push(parts(&origin.path)?); }
     let vault_parts=vault.map(|root| parts(&root.path)).transpose()?;
+    let application_parts=application.map(|root| parts(&root.path)).transpose()?;
     let capacity = roster_limit(std::iter::once(project_parts.len()).chain(origin_parts.iter()
         .map(|parts| parts.len().saturating_sub(1) + source_extra(&parts[..parts.len().saturating_sub(1)])))
-        .chain(vault_parts.iter().map(Vec::len)), usize::from(!origins.is_empty()))?;
+        .chain(vault_parts.iter().map(Vec::len)).chain(application_parts.iter().map(Vec::len)), usize::from(!origins.is_empty()))?;
     book.begin(capacity, origins.len(), origins.len())?;
     let result = (|| {
         book.root(stop)?;
@@ -630,6 +641,13 @@ pub(crate) fn probe_project_excluding_vault(book: &mut SourceBook, path: PathBuf
             let current=book.directory(*vault_chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
             if ProjectIdentity::Posix(current) != vault.identity { return Err(Reason::ExclusionUnconfirmed); }
             reject_ancestry_overlap(book,&project_chain,&vault_chain,stop)?;
+        }
+        if let (Some(application),Some(components))=(application,&application_parts) {
+            let (chain,_)=book.chain(components,false,stop)?;
+            if ProjectIdentity::Posix(book.directory(*chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?) != application.identity {
+                return Err(Reason::ExclusionUnconfirmed);
+            }
+            reject_ancestry_overlap(book,&project_chain,&chain,stop)?;
         }
         for (origin, components) in origins.iter().zip(&origin_parts) {
             let (leaf_name, parents) = components.split_last().ok_or(Reason::ExclusionUnconfirmed)?;
@@ -651,7 +669,7 @@ pub(crate) fn probe_project_excluding_vault(book: &mut SourceBook, path: PathBuf
             if book.probes.len() >= book.probes.capacity() { return Err(Reason::Capacity); }
             book.probes.push(LeafProbe { parent, name: copy_bytes(leaf_name)?, identity: origin.leaf });
         }
-        Ok(ProjectProbe { path: path.clone(), identity: ProjectIdentity::Posix(project) })
+        Ok(ProjectProbe { path: path.clone(), identity: ProjectIdentity::Posix(project), application_exclusion: application.cloned() })
     })();
     book.finish(result, stop)
 }
@@ -702,6 +720,62 @@ pub(crate) fn probe_vault_exclusion(book: &mut SourceBook, vault: Option<&Regist
     })();
     // Terminal same-held/name checks and actual one-use closes precede this
     // probe's return. The existing document owner separately requires child join.
+    book.finish(result,stop)
+}
+
+/// Full current native chains, including alternate APFS firmlink/case paths.
+/// No stored project ancestry is mistaken for a fresh proof. Only the fixed
+/// app-data leaf may be missing, and this SOURCE operation never creates it.
+pub(crate) fn probe_application_directory_exclusion(book: &mut SourceBook, app_data: &Path,
+    projects: &[RegisteredRoot], stop: &mut dyn FnMut() -> bool) -> Result<ApplicationDirectoryExclusion,Reason> {
+    if projects.len()>64 || app_data.file_name().and_then(|v|v.to_str())!=Some("dev.mobile-release-kit.desktop") {
+        return Err(Reason::SourceRefused);
+    }
+    let app_parts=parts(app_data)?;
+    if !(2..=96).contains(&app_parts.len()) {return Err(Reason::Capacity);}
+    let (name,parents)=app_parts.split_last().ok_or(Reason::SourceRefused)?;
+    let mut project_parts=Vec::new();project_parts.try_reserve_exact(projects.len()).map_err(|_|Reason::Capacity)?;
+    for project in projects {project_parts.push(parts(&project.path)?);}
+    let capacity=roster_limit(std::iter::once(app_parts.len()).chain(project_parts.iter().map(Vec::len)),0)?;
+    book.begin(capacity,0,0)?;
+    let result=(||{
+        book.root(stop)?;
+        let (mut app_chain,_)=book.chain(parents,false,stop)?;
+        let parent_index=*app_chain.last().ok_or(Reason::SourceRefused)?;
+        let parent=book.directory(parent_index)?;
+        checkpoint(stop)?;
+        let named=stat::fstatat(book.fd(parent_index)?,OsStr::from_bytes(name),AtFlags::AT_SYMLINK_NOFOLLOW);
+        checkpoint(stop)?;
+        let existing=match named {
+            Ok(value)=>{
+                let expected=directory_identity(&value)?;
+                let child=book.child(parent_index,name,false,stop)?;
+                if book.directory(child)?!=expected {return Err(Reason::SourceChanged);}
+                app_chain.push(child);Some(expected)
+            }
+            Err(nix::errno::Errno::ENOENT)=>None,
+            Err(_)=>return Err(Reason::SourceRefused),
+        };
+        for (project,components) in projects.iter().zip(&project_parts) {
+            let (chain,_)=book.chain(components,false,stop)?;
+            let actual=book.directory(*chain.last().ok_or(Reason::ExclusionUnconfirmed)?)?;
+            if ProjectIdentity::Posix(actual)!=project.identity {return Err(Reason::ExclusionUnconfirmed);}
+            if existing.is_some() {reject_ancestry_overlap(book,&chain,&app_chain,stop)?;}
+            else {
+                for index in &app_chain {
+                    checkpoint(stop)?;
+                    if book.directory(*index)?.same_object(actual) {return Err(Reason::ProjectOverlap);}
+                }
+            }
+        }
+        if existing.is_none() {
+            checkpoint(stop)?;
+            let named=stat::fstatat(book.fd(parent_index)?,OsStr::from_bytes(name),AtFlags::AT_SYMLINK_NOFOLLOW);
+            checkpoint(stop)?;
+            if !matches!(named,Err(nix::errno::Errno::ENOENT)) {return Err(Reason::SourceChanged);}
+        }
+        Ok(ApplicationDirectoryExclusion{path:app_data.to_owned(),projects:projects.to_vec(),parent,existing})
+    })();
     book.finish(result,stop)
 }
 

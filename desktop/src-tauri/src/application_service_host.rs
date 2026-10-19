@@ -4,8 +4,10 @@
 //! admission lock. This module never calls back into that document, accepts a
 //! renderer root, constructs an engine, or settles an independent core action.
 use crate::{
+    asset_commands::Reason,
+    asset_source::{self, ApplicationDirectoryExclusion, ProjectProbe, RegisteredRoot, SourceBook},
     application_service::{ApplicationService, ReadAccessStatus},
-    application_state_store::{Cleanup, Durability, Effect, PrivateStateDirectory, StateError},
+    application_state_store::{ApplicationDirectoryIdentity, Cleanup, Durability, Effect, PrivateStateDirectory, StateError},
     installed_cli_ipc::{self, ServerHandle},
     service_protocol as p,
 };
@@ -19,6 +21,9 @@ use std::{
 use tokio::sync::Mutex as AsyncMutex;
 
 const ACCESS_LIFETIME: Duration = Duration::from_secs(3600);
+// Work admission is not the user lease. Bounded synchronous native calls have
+// checkpoints; this does not claim that a stalled kernel call is preemptible.
+const STARTUP_WORK: Duration = Duration::from_secs(30);
 
 /// Native-only facts, not an admission witness. Construct and compare these
 /// ONLY inside the genuine DocumentBinding admission callback, including its
@@ -55,7 +60,7 @@ impl NativeProject {
 
 pub(crate) struct AllowTicket {
     owner: Arc<()>, epoch: u64, source_epoch: u64,
-    original: NativeProject, expires: Instant,
+    original: NativeProject, expires: Instant, startup_expires: Instant,
 }
 pub(crate) struct SnapshotTicket {
     owner: Arc<()>, source_epoch: u64, original: NativeProject,
@@ -64,7 +69,7 @@ pub(crate) struct SnapshotTicket {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HostStage {
     Admission, OpenStore, OpenService, Register, Start, Publish, Invalidate,
-    Revoke, Join, StopService, CloseStore,
+    Revoke, Join, StopService, CloseStore, ProbeSources, CloseSources,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HostFailure {
@@ -100,8 +105,8 @@ impl HostShutdownReport {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase { Dormant, Starting, Listening, Retiring, Closed }
 struct Control {
-    phase: Phase, epoch: u64, source_epoch: u64, pending: Option<u64>,
-    native_location: Option<PathBuf>, native_roots: Vec<(PathBuf, u64, u64)>,
+    phase: Phase, epoch: u64, source_epoch: u64, pending: Option<u64>, prepared: Option<u64>,
+    native_location: Option<PathBuf>, native_roots: Vec<RegisteredRoot>,
     store: Option<Arc<PrivateStateDirectory>>,
     service: Option<Arc<ApplicationService>>,
     registered: BTreeMap<String, NativeProject>,
@@ -114,7 +119,7 @@ impl Control {
         Ok(())
     }
     fn retire_pending(&mut self) -> Result<(), Error> {
-        self.pending = None;
+        self.pending = None; self.prepared = None;
         self.epoch = match self.epoch.checked_add(1) {
             Some(value) => value,
             None => { self.fail(HostFailure::simple(HostStage::Admission, Error::StateUnknown)); return Err(Error::StateUnknown); }
@@ -129,7 +134,7 @@ impl Control {
     fn fail(&mut self, failure: HostFailure) {
         self.remember(failure);
         self.fence.get_or_insert(failure.code);
-        self.pending = None;
+        self.pending = None; self.prepared = None;
         if let Some(service) = &self.service {
             if let Err(error) = service.revoke_agent_read() {
                 self.remember(HostFailure::simple(HostStage::Revoke, error));
@@ -140,6 +145,7 @@ impl Control {
 #[derive(Default)]
 struct Originals {
     location: Option<PathBuf>,
+    source_epoch: Option<u64>, source: Option<SourceBook>, exclusion: Option<ApplicationDirectoryExclusion>,
     store: Option<Arc<PrivateStateDirectory>>,
     service: Option<Arc<ApplicationService>>,
     server: Option<ServerHandle>,
@@ -153,7 +159,7 @@ impl ApplicationHost {
     /// No path lookup, directory, reservation, socket or background task.
     pub(crate) fn new() -> Self {
         Self { identity: Arc::new(()), control: Mutex::new(Control {
-            phase: Phase::Dormant, epoch: 0, source_epoch: 0, pending: None,
+            phase: Phase::Dormant, epoch: 0, source_epoch: 0, pending: None, prepared: None,
             native_location: None, native_roots: Vec::new(), store: None, service: None,
             registered: BTreeMap::new(), fence: None, failures: Vec::new(),
         }), originals: AsyncMutex::new(Originals::default()) }
@@ -167,7 +173,7 @@ impl ApplicationHost {
                 // was poisoned. Never recover an admission from this guard.
                 let service = {
                     let mut state = poisoned.into_inner();
-                    state.pending = None; state.phase = Phase::Retiring;
+                    state.pending = None; state.prepared = None; state.phase = Phase::Retiring;
                     state.fence.get_or_insert(Error::StateUnknown);
                     state.remember(HostFailure::simple(HostStage::Admission, Error::StateUnknown));
                     state.service.clone()
@@ -191,39 +197,70 @@ impl ApplicationHost {
         if Instant::now() >= ticket.expires { return Err(Error::Expired); }
         Ok(())
     }
+    fn check_startup(&self, state: &Control, ticket: &AllowTicket) -> Result<(), Error> {
+        self.check_allow(state, ticket)?;
+        if Instant::now() >= ticket.startup_expires { Err(Error::Expired) } else { Ok(()) }
+    }
     /// Under the real DocumentBinding lock, inspect the COMPLETE genuine native
     /// roster before beginning Allow. This reservation itself performs no IO;
     /// later project registrations must call check_project_root under that same
     /// original document lock before publishing a new registry member.
     pub(crate) fn reserve_native_location(&self, app_data: &Path,
-        registered_roots: &[(PathBuf, u64, u64)]) -> Result<(), Error> {
+        registered_roots: &[RegisteredRoot]) -> Result<(), Error> {
         let mut state = self.lock()?; state.available()?;
         if !ordinary_absolute(app_data)
             || app_data.file_name().and_then(|v| v.to_str()) != Some("dev.mobile-release-kit.desktop")
             || registered_roots.len() > p::PROJECT_LIMIT { return Err(Error::InvalidRequest); }
         if state.native_location.as_ref().is_some_and(|original| original != app_data) { return Err(Error::Conflict); }
-        for (root, _, inode) in registered_roots {
-            if !ordinary_absolute(root) || *inode == 0 { return Err(Error::InvalidRequest); }
-            if overlap(root, app_data) { return Err(Error::Conflict); }
+        for root in registered_roots {
+            let (_, inode) = root.identity.posix().map_err(source_error)?.service_identity();
+            if !ordinary_absolute(&root.path) || inode == 0 { return Err(Error::InvalidRequest); }
+            if overlap(&root.path, app_data) { return Err(Error::Conflict); }
         }
+        if state.native_roots != registered_roots { state.retire_pending()?; }
         state.native_location = Some(app_data.to_owned());
         state.native_roots = registered_roots.to_vec();
         Ok(())
     }
-    pub(crate) fn check_project_root(&self, root: &Path, device: u64, inode: u64) -> Result<(), Error> {
+    pub(crate) fn check_project_root(&self, proof: &ProjectProbe) -> Result<(), Error> {
         let mut state = self.lock()?;
+        state.available()?;
+        let root = proof.path();
+        let (device, inode) = proof.identity().posix().map_err(source_error)?.service_identity();
         if !ordinary_absolute(root) || inode == 0 { return Err(Error::InvalidRequest); }
         if state.native_location.as_ref().is_some_and(|location| overlap(root, location)) { return Err(Error::Conflict); }
-        if let Some(store) = &state.store { store.excludes_project(device, inode).map_err(|error| error.code)?; }
+        if let Some(store) = state.store.clone() {
+            let current = match held_application_root(&store) {
+                Ok(root) => root,
+                Err(error) => { state.fail(HostFailure::storage(HostStage::Register, error)); return Err(error.code); }
+            };
+            if !proof.excludes_application(Some(&current)) { return Err(Error::Conflict); }
+            store.excludes_project(device, inode).map_err(|error| error.code)?;
+        } else if !proof.excludes_application(None) { return Err(Error::Conflict); }
         // A new native registration may arrive between the complete roster
         // reservation and prepare. Keep it in that SAME pre-create exclusion
-        // set. After construction the original store checks physical ancestry.
-        if state.native_location.is_some() && state.store.is_none()
-            && !state.native_roots.iter().any(|(path, dev, ino)| path == root && *dev == device && *ino == inode) {
+        // set AND retire pending Allow. A new member cannot inherit an earlier
+        // complete-roster proof. After construction its genuine ProjectProbe
+        // must have checked BOTH vault and exact current application root.
+        let selected = RegisteredRoot { path: root.to_owned(), identity: proof.identity() };
+        if state.native_location.is_some() && !state.native_roots.contains(&selected) {
             if state.native_roots.len() == p::PROJECT_LIMIT { return Err(Error::InvalidRequest); }
-            state.native_roots.push((root.to_owned(), device, inode));
+            state.retire_pending()?;
+            state.native_roots.push(selected);
         }
         Ok(())
+    }
+    /// Capture under real native selection admission; the later genuine source
+    /// owner must prove this root, and final registration rematches its marker.
+    /// Dormant means no IO. Failure never silently becomes an absent exclusion.
+    pub(crate) fn native_exclusion_root(&self) -> Result<Option<RegisteredRoot>, Error> {
+        let mut state = self.lock()?;
+        state.available()?;
+        let Some(store) = state.store.clone() else { return Ok(None); };
+        match held_application_root(&store) {
+            Ok(root) => Ok(Some(root)),
+            Err(error) => { state.fail(HostFailure::storage(HostStage::Register, error)); Err(error.code) }
+        }
     }
     pub(crate) fn begin_allow(&self, original: NativeProject) -> Result<AllowTicket, Error> {
         let mut state = self.lock()?;
@@ -237,10 +274,16 @@ impl ApplicationHost {
         if !original.valid() { return Err(Error::InvalidRequest); }
         let location = state.native_location.as_ref().ok_or(Error::Unavailable)?;
         if overlap(&original.canonical_root, location) { return Err(Error::Conflict); }
-        let expires = Instant::now().checked_add(ACCESS_LIFETIME).ok_or(Error::StateUnknown)?;
+        if !state.native_roots.iter().any(|root| root.path == original.canonical_root
+            && root.identity.posix().is_ok_and(|id| id.service_identity() == (original.device, original.inode))) {
+            return Err(Error::Conflict);
+        }
+        let now = Instant::now();
+        let expires = now.checked_add(ACCESS_LIFETIME).ok_or(Error::StateUnknown)?;
+        let startup_expires = now.checked_add(STARTUP_WORK).ok_or(Error::StateUnknown)?;
         state.pending = Some(state.epoch);
         Ok(AllowTicket { owner: self.identity.clone(), epoch: state.epoch,
-            source_epoch: state.source_epoch, original, expires })
+            source_epoch: state.source_epoch, original, expires, startup_expires })
     }
     /// Ordinary selection changes retire an unfinished Allow, but do not
     /// transfer, extend or revoke an already granted original project's lease.
@@ -255,28 +298,61 @@ impl ApplicationHost {
         let mut originals = self.originals.lock().await;
         {
             let mut state = self.lock()?;
-            self.check_allow(&state, ticket)?;
+            self.check_startup(&state, ticket)?;
             if state.native_location.as_deref() != Some(app_data)
                 || overlap(&ticket.original.canonical_root, app_data) {
                 return Err(Error::Conflict);
             }
             if originals.location.as_ref().is_some_and(|location| location != app_data) { return Err(Error::Conflict); }
-            let excluded_projects: Vec<_> = state.native_roots.iter().map(|(_, device, inode)| (*device, *inode)).collect();
+            if originals.source_epoch == Some(ticket.epoch) { return Err(Error::Conflict); }
+            if originals.source.as_ref().is_some_and(|book| !book.not_started() && !book.settled()) {
+                state.fail(HostFailure::simple(HostStage::ProbeSources, Error::StateUnknown)); return Err(Error::StateUnknown);
+            }
+            state.phase = Phase::Starting;
+            originals.location = Some(app_data.to_owned());
+            // The original book is retained BEFORE native entry. A panic or
+            // cancellation cannot erase its original acquisition/close facts.
+            // Only an explicit new native Allow may replace a KNOWN closed book.
+            originals.source_epoch = Some(ticket.epoch);
+            originals.source = Some(SourceBook::new()); originals.exclusion = None;
+            let result = asset_source::probe_application_directory_exclusion(originals.source.as_mut().unwrap(),
+                app_data, &state.native_roots, &mut || Instant::now() >= ticket.startup_expires);
+            match result {
+                Ok(proof) => originals.exclusion = Some(proof),
+                Err(reason) => {
+                    let error = source_error(reason);
+                    state.fail(HostFailure::simple(HostStage::ProbeSources, error)); return Err(error);
+                }
+            }
+            if !originals.source.as_ref().is_some_and(SourceBook::settled) {
+                state.fail(HostFailure::simple(HostStage::CloseSources, Error::StateUnknown)); return Err(Error::StateUnknown);
+            }
+            self.check_startup(&state, ticket)?;
+            let exclusion = originals.exclusion.as_ref().ok_or(Error::StateUnknown)?;
+            let (parent, existing) = exclusion.store_expectation(app_data, &state.native_roots).map_err(source_error)?;
+            let metadata = |(device, inode, mode, uid, gid)| ApplicationDirectoryIdentity { device, inode, mode, uid, gid };
+            let expected = (metadata(parent), existing.map(metadata));
+            let excluded_projects: Vec<_> = state.native_roots.iter().map(|root| root.identity.posix()
+                .map(|id| id.service_identity()).map_err(source_error)).collect::<Result<_, _>>()?;
             if originals.store.is_none() {
-                state.phase = Phase::Starting;
-                originals.location = Some(app_data.to_owned());
-                let store = match PrivateStateDirectory::open_excluding_projects(app_data, &excluded_projects) {
+                let store = match PrivateStateDirectory::open_after_exclusion(app_data, &excluded_projects, expected, ticket.startup_expires) {
                     Ok(store) => Arc::new(store),
                     Err(error) => { state.fail(HostFailure::storage(HostStage::OpenStore, error)); return Err(error.code); }
                 };
                 originals.store = Some(store.clone());
                 state.store = Some(store.clone());
+                if let Err(error) = self.check_startup(&state, ticket) {
+                    state.fail(HostFailure::simple(HostStage::OpenService, error)); return Err(error);
+                }
                 let service = match ApplicationService::open(store) {
                     Ok(service) => Arc::new(service),
                     Err(error) => { state.fail(HostFailure::simple(HostStage::OpenService, error)); return Err(error); }
                 };
                 originals.service = Some(service.clone()); state.service = Some(service);
+            } else if let Err(error) = originals.store.as_ref().unwrap().check_application_exclusion(expected) {
+                state.fail(HostFailure::storage(HostStage::Register, error)); return Err(error.code);
             }
+            self.check_startup(&state, ticket)?;
             let store = originals.store.as_ref().ok_or(Error::StateUnknown)?;
             for (device, inode) in excluded_projects {
                 if let Err(error) = store.excludes_project(device, inode) {
@@ -290,6 +366,7 @@ impl ApplicationHost {
             }
             state.registered.insert(ticket.original.runtime_id.clone(), ticket.original.clone());
         }
+        self.check_startup(&self.lock()?, ticket)?;
         if originals.server.is_none() {
             let service = originals.service.as_ref().ok_or(Error::StateUnknown)?.clone();
             match installed_cli_ipc::start(service).await {
@@ -301,8 +378,8 @@ impl ApplicationHost {
             }
         }
         let mut state = self.lock()?;
-        self.check_allow(&state, ticket)?;
-        state.phase = Phase::Listening;
+        self.check_startup(&state, ticket)?;
+        state.phase = Phase::Listening; state.prepared = Some(ticket.epoch);
         Ok(())
     }
     /// Call at the genuine original passive completion, after rechecking the
@@ -313,7 +390,8 @@ impl ApplicationHost {
         let mut state = self.lock()?;
         self.check_allow(&state, &ticket)?;
         state.pending = None;
-        if state.phase != Phase::Listening || !ticket.original.same_input(current) {
+        let prepared = state.prepared.take();
+        if prepared != Some(ticket.epoch) || state.phase != Phase::Listening || !ticket.original.same_input(current) {
             return Err(Error::Conflict);
         }
         let service = state.service.clone().ok_or(Error::Unavailable)?;
@@ -399,7 +477,7 @@ impl ApplicationHost {
     /// this method, and therefore does not silently destroy existing consent.
     pub(crate) fn retire_for_exit(&self) -> Result<(), Error> {
         let mut state = self.lock()?;
-        state.pending = None; state.phase = Phase::Retiring;
+        state.pending = None; state.prepared = None; state.phase = Phase::Retiring;
         if let Some(service) = state.service.clone() {
             if let Err(error) = service.revoke_agent_read() {
                 state.fail(HostFailure::simple(HostStage::Revoke, error)); return Err(error);
@@ -421,6 +499,12 @@ impl ApplicationHost {
         };
         if let Some(error) = retire_error { remember(&mut failures, HostFailure::simple(HostStage::Revoke, error)); }
         let mut originals_closed = true;
+        if let Some(source) = originals.source.as_mut() {
+            if !source.retire_application_probe() {
+                originals_closed = false;
+                remember(&mut failures, HostFailure::simple(HostStage::CloseSources, Error::StateUnknown));
+            }
+        }
         let workers_joined = if let Some(server) = originals.server.as_mut() {
             // Borrow, never take: cancellation preserves the exact join owner.
             match server.shutdown().await {
@@ -450,7 +534,7 @@ impl ApplicationHost {
         match self.control.lock() {
             Ok(mut state) => {
                 for failure in &state.failures { remember(&mut failures, *failure); }
-                state.phase = Phase::Closed; state.pending = None;
+                state.phase = Phase::Closed; state.pending = None; state.prepared = None;
             }
             Err(poisoned) => {
                 // Include failures recorded while the original join was
@@ -474,6 +558,20 @@ fn ordinary_absolute(path: &Path) -> bool {
         && path.components().all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
 }
 fn overlap(one: &Path, other: &Path) -> bool { one.starts_with(other) || other.starts_with(one) }
+fn held_application_root(store: &PrivateStateDirectory) -> Result<RegisteredRoot, StateError> {
+    let (path, id) = store.native_application_root()?;
+    Ok(RegisteredRoot { path, identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::vault_original(
+        id.device, id.inode, id.mode, id.uid, id.gid)) })
+}
+fn source_error(reason: Reason) -> Error {
+    match reason {
+        Reason::CleanupUnknown => Error::StateUnknown,
+        Reason::UnsupportedPlatform | Reason::UnsupportedFilesystem => Error::Unavailable,
+        Reason::UserCancelled | Reason::Deadline => Error::Expired,
+        Reason::Capacity | Reason::InvalidRequest => Error::InvalidRequest,
+        _ => Error::Conflict,
+    }
+}
 fn denied() -> ReadAccessStatus { ReadAccessStatus { enabled: false, remaining_ms: 0, project_ids: Vec::new() } }
 fn remember(failures: &mut Vec<HostFailure>, failure: HostFailure) {
     if !failures.contains(&failure) { failures.push(failure); }
@@ -496,11 +594,43 @@ mod tests {
     }
     fn list() -> p::Request { p::Request { version: p::VERSION, request_id: p::Id::random().unwrap(), request: p::RequestBody::Projects(p::Empty {}) } }
     fn reserve(host: &ApplicationHost, f: &Fixture, project: &NativeProject) {
-        host.reserve_native_location(&f.app, &[(project.canonical_root.clone(), project.device, project.inode)]).unwrap();
+        host.reserve_native_location(&f.app, &[fixture_root(&project.canonical_root)]).unwrap();
+    }
+    fn fixture_root(path: &Path) -> RegisteredRoot {
+        let held = File::open(path).unwrap(); let id = held.metadata().unwrap();
+        let root = RegisteredRoot { path: path.to_owned(), identity: asset_source::ProjectIdentity::Posix(
+            asset_source::DirectoryIdentity::vault_original(id.dev(), id.ino(), id.mode(), id.uid(), id.gid())) };
+        nix::unistd::close(held).unwrap(); root
+    }
+    /// ONLY the lifecycle tests seed retained ordinary Store/Service originals.
+    /// No SourceBook result, native project proof or filesystem qualification is
+    /// fabricated. Native startup admission is tested separately below; Mac
+    /// APFS/EXT4 successful source qualification is not inferred on overlayfs.
+    async fn seed_lifecycle_fixture(host: &ApplicationHost, ticket: &AllowTicket, app: &Path) -> Result<(), Error> {
+        let mut originals = host.originals.lock().await;
+        {
+            let mut state = host.lock()?; host.check_allow(&state, ticket)?;
+            if originals.store.is_none() {
+                originals.location = Some(app.to_owned());
+                let store = Arc::new(PrivateStateDirectory::open(app).map_err(|error| error.code)?);
+                originals.store = Some(store.clone()); state.store = Some(store.clone());
+                let service = match ApplicationService::open(store) {
+                    Ok(service) => Arc::new(service),
+                    Err(error) => { state.fail(HostFailure::simple(HostStage::OpenService, error)); return Err(error); }
+                };
+                originals.service = Some(service.clone()); state.service = Some(service);
+            }
+            originals.service.as_ref().unwrap().register_native(&ticket.original.runtime_id, &ticket.original.canonical_root,
+                ticket.original.device, ticket.original.inode)?;
+            state.registered.insert(ticket.original.runtime_id.clone(), ticket.original.clone());
+        }
+        if originals.server.is_none() { originals.server = Some(installed_cli_ipc::start(originals.service.as_ref().unwrap().clone()).await?); }
+        let mut state = host.lock()?; host.check_allow(&state, ticket)?;
+        state.phase = Phase::Listening; state.prepared = Some(ticket.epoch); Ok(())
     }
     async fn enable(host: &ApplicationHost, f: &Fixture, project: &NativeProject) {
         reserve(host, f, project);
-        let ticket = host.begin_allow(project.clone()).unwrap(); host.prepare(&ticket, &f.app).await.unwrap();
+        let ticket = host.begin_allow(project.clone()).unwrap(); seed_lifecycle_fixture(host, &ticket, &f.app).await.unwrap();
         let status = host.finish_allow(ticket, project, &passive(&project.canonical_root, &"1".repeat(64))).unwrap();
         assert!(status.enabled); assert!(status.remaining_ms <= 3_600_000); assert_eq!(status.project_ids.len(), 1);
     }
@@ -514,6 +644,25 @@ mod tests {
             let report = host.shutdown().await;
             assert!(report.settled()); assert!(report.failures.is_empty()); assert!(report.workers_joined.is_none());
             assert!(!f.app.exists());
+
+            // A failed original Store open may have created private bytes
+            // without yielding a Store handle. Its fence must not turn into
+            // "no private root" for later native registration. This inert
+            // ledger fault does not fabricate a successful source probe.
+            for failure in [HostFailure::simple(HostStage::OpenStore, Error::Conflict),
+                HostFailure::storage(HostStage::OpenStore, StateError {
+                    code: Error::Conflict, effect: Effect::Applied,
+                    durability: Durability::Unknown, cleanup: Cleanup::Known,
+                })] {
+                let host = ApplicationHost::new();
+                host.control.lock().unwrap().fail(failure);
+                assert!(host.control.lock().unwrap().store.is_none());
+                assert_eq!(host.native_exclusion_root().err(), Some(Error::Conflict));
+                let report = host.shutdown().await;
+                assert_eq!(report.settled(), !failure.unknown());
+                assert!(report.failures.contains(&failure));
+                assert!(!f.app.exists());
+            }
         });
     }
     #[test]
@@ -528,7 +677,10 @@ mod tests {
             host.revoke().unwrap(); drop(pending); drop(held);
             assert!(!f.app.exists());
             assert_eq!(host.prepare(&first, &f.app).await.err(), Some(Error::AccessDenied));
-            let second = host.begin_allow(project.clone()).unwrap(); host.prepare(&second, &f.app).await.unwrap();
+            let mut expired = host.begin_allow(project.clone()).unwrap(); expired.startup_expires = Instant::now();
+            assert_eq!(host.prepare(&expired, &f.app).await.err(), Some(Error::Expired));
+            assert!(!f.app.exists()); assert!(host.originals.lock().await.source.is_none());
+            let second = host.begin_allow(project.clone()).unwrap(); seed_lifecycle_fixture(&host, &second, &f.app).await.unwrap();
             host.retire_allow().unwrap();
             assert_eq!(host.finish_allow(second, &project, &passive(&project.canonical_root, &"1".repeat(64))).err().map(|e| e), Some(Error::AccessDenied));
             assert!(!host.status().unwrap().enabled);
@@ -543,10 +695,14 @@ mod tests {
             for changed in [NativeProject { document_identity: Arc::new(()), ..project.clone() },
                 NativeProject { registration_generation: 3, ..project.clone() },
                 NativeProject { input_revision: 2, ..project.clone() }] {
-                let ticket = host.begin_allow(project.clone()).unwrap(); host.prepare(&ticket, &f.app).await.unwrap();
+                let ticket = host.begin_allow(project.clone()).unwrap(); seed_lifecycle_fixture(&host, &ticket, &f.app).await.unwrap();
                 assert_eq!(host.finish_allow(ticket, &changed, &passive(&project.canonical_root, &"1".repeat(64))).err().map(|e| e), Some(Error::Conflict));
                 assert!(!host.status().unwrap().enabled);
             }
+            enable(&host, &f, &project).await;
+            let unprepared = host.begin_allow(project.clone()).unwrap();
+            assert_eq!(host.finish_allow(unprepared, &project, &passive(&project.canonical_root, &"1".repeat(64))).err(), Some(Error::Conflict));
+            assert!(!host.status().unwrap().enabled);
             enable(&host, &f, &project).await;
             let before = host.status().unwrap(); host.retire_allow().unwrap(); let after = host.status().unwrap();
             assert!(after.enabled); assert_eq!(before.project_ids, after.project_ids); assert!(after.remaining_ms <= before.remaining_ms);
@@ -588,7 +744,7 @@ mod tests {
             store.replace(Namespace::Projects, Revision(0), b"not a service document").unwrap(); store.close().unwrap();
             let preserved = std::fs::read(f.app.join(DIRECTORY).join("projects.state")).unwrap();
             let host = ApplicationHost::new(); reserve(&host, &f, &project); let ticket = host.begin_allow(project).unwrap();
-            assert_eq!(host.prepare(&ticket, &f.app).await.err(), Some(Error::RecoveryRequired));
+            assert_eq!(seed_lifecycle_fixture(&host, &ticket, &f.app).await.err(), Some(Error::RecoveryRequired));
             assert!(host.originals.lock().await.store.is_some());
             assert_eq!(host.prepare(&ticket, &f.app).await.err(), Some(Error::RecoveryRequired));
             let report = host.shutdown().await;
@@ -684,60 +840,101 @@ mod tests {
     fn project_overlap_is_refused_before_creating_service_files() {
         runtime().block_on(async {
             let f = Fixture::short(); let project = project(&f); let host = ApplicationHost::new();
-            let ancestor = f.app.parent().unwrap(); let metadata = File::open(ancestor).unwrap().metadata().unwrap();
+            let ancestor = f.app.parent().unwrap();
             assert_eq!(host.reserve_native_location(&f.app, &[
-                (project.canonical_root.clone(), project.device, project.inode),
-                (ancestor.to_owned(), metadata.dev(), metadata.ino()),
+                fixture_root(&project.canonical_root), fixture_root(ancestor),
             ]), Err(Error::Conflict));
             assert!(host.begin_allow(project.clone()).is_err());
             reserve(&host, &f, &project);
-            assert_eq!(host.check_project_root(ancestor, metadata.dev(), metadata.ino()), Err(Error::Conflict));
             let ticket = host.begin_allow(project.clone()).unwrap();
             let other = ancestor.join("other").join("dev.mobile-release-kit.desktop");
             assert_eq!(host.prepare(&ticket, &other).await.err(), Some(Error::Conflict));
-            assert!(!f.app.exists()); assert!(host.shutdown().await.settled());
-
-            // Exercise the real directory owner using actual ancestor dev/ino
-            // but a disjoint textual spelling, as supplied by native admission
-            // for case/firmlink aliases. This is not native APFS qualification.
-            let alternate = ancestor.join("alternate-spelling");
-            for registered_after_reserve in [false, true] {
-                let host = ApplicationHost::new();
-                let mut roster = vec![(project.canonical_root.clone(), project.device, project.inode)];
-                if !registered_after_reserve { roster.push((alternate.clone(), metadata.dev(), metadata.ino())); }
-                host.reserve_native_location(&f.app, &roster).unwrap();
-                let ticket = host.begin_allow(project.clone()).unwrap();
-                if registered_after_reserve {
-                    host.check_project_root(&alternate, metadata.dev(), metadata.ino()).unwrap();
-                }
-                assert!(!f.app.exists());
-                assert_eq!(host.prepare(&ticket, &f.app).await.err(), Some(Error::Conflict));
-                assert!(!f.app.exists());
-                let report = host.shutdown().await;
-                assert!(report.settled());
-                assert!(report.failures.iter().any(|f| f.stage == HostStage::OpenStore));
-            }
-
-            // An already existing app-data directory can itself be the
-            // aliased native root. Refuse before service/marker creation.
-            std::fs::create_dir(&f.app).unwrap();
-            std::fs::set_permissions(&f.app, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let app_metadata = File::open(&f.app).unwrap().metadata().unwrap();
-            let host = ApplicationHost::new();
+            // A changed COMPLETE native roster retires the pending attempt;
+            // it cannot use an earlier exclusion result before construction.
+            let second = ancestor.join("second-project"); std::fs::create_dir(&second).unwrap();
             host.reserve_native_location(&f.app, &[
-                (project.canonical_root.clone(), project.device, project.inode),
-                (alternate.clone(), app_metadata.dev(), app_metadata.ino()),
+                fixture_root(&project.canonical_root), fixture_root(&second),
             ]).unwrap();
-            let ticket = host.begin_allow(project.clone()).unwrap();
-            assert_eq!(host.prepare(&ticket, &f.app).await.err(), Some(Error::Conflict));
-            assert_eq!(std::fs::read_dir(&f.app).unwrap().count(), 0);
+            assert_eq!(host.prepare(&ticket, &f.app).await.err(), Some(Error::AccessDenied));
+            assert!(!f.app.exists()); assert!(host.originals.lock().await.source.is_none());
+            assert!(host.shutdown().await.settled());
+        });
+    }
+    #[test]
+    fn native_source_admission_precedes_private_state_and_retains_original_book() {
+        runtime().block_on(async {
+            let f = Fixture::short(); let project = project(&f); let host = ApplicationHost::new();
+            reserve(&host, &f, &project); let ticket = host.begin_allow(project.clone()).unwrap();
+            // Inspect the real filesystem, without replacing native policy.
+            // On the current overlayfs VPS this proves refusal/closure ONLY.
+            #[cfg(target_os = "linux")]
+            let root_qualified = nix::sys::statfs::statfs(Path::new("/")).unwrap().filesystem_type() == nix::sys::statfs::EXT4_SUPER_MAGIC;
+            #[cfg(target_os = "macos")]
+            let root_qualified = nix::sys::statfs::statfs(Path::new("/")).unwrap().filesystem_type_name() == "apfs";
+            let result = host.prepare(&ticket, &f.app).await;
+            if !root_qualified {
+                assert_eq!(result.err(), Some(Error::Unavailable));
+                assert!(!f.app.exists()); assert!(host.status().is_err());
+                let originals = host.originals.lock().await;
+                assert!(originals.source.as_ref().unwrap().settled());
+                assert!(originals.store.is_none()); assert!(originals.server.is_none());
+            } else {
+                result.unwrap();
+                assert!(host.originals.lock().await.source.as_ref().unwrap().settled());
+                assert!(host.finish_allow(ticket, &project, &passive(&project.canonical_root, &"1".repeat(64))).unwrap().enabled);
+            }
+            assert!(host.shutdown().await.settled());
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_apfs_selection_requires_current_service_exclusion_and_rejects_reverse_alias() {
+        runtime().block_on(async {
+            let f = Fixture::short(); let project = project(&f); let host = ApplicationHost::new();
+            let mut before_book = SourceBook::new();
+            let before = asset_source::probe_project(&mut before_book, project.canonical_root.clone(), &[], &mut || false).unwrap();
+            assert!(before_book.settled());
+            reserve(&host, &f, &project); let ticket = host.begin_allow(project.clone()).unwrap();
+            host.prepare(&ticket, &f.app).await.unwrap();
+            let application = host.native_exclusion_root().unwrap().unwrap();
+            assert_eq!(host.check_project_root(&before), Err(Error::Conflict));
+            let mut current_book = SourceBook::new();
+            let current = asset_source::probe_project_excluding_private_roots(&mut current_book,
+                project.canonical_root.clone(), &[], None, Some(&application), &mut || false).unwrap();
+            assert!(current_book.settled()); host.check_project_root(&current).unwrap();
+
+            let inside = f.app.join("synthetic-project"); std::fs::create_dir(&inside).unwrap();
+            // Actual APFS Data-volume spelling, not invented identity DATA.
+            let alternate = Path::new("/System/Volumes/Data").join(inside.strip_prefix("/").unwrap());
+            let mut alias_book = SourceBook::new();
+            assert_eq!(asset_source::probe_project_excluding_private_roots(&mut alias_book,
+                alternate.clone(), &[], None, Some(&application), &mut || false).err(), Some(Reason::ProjectOverlap));
+            assert!(alias_book.settled());
             assert!(host.shutdown().await.settled());
 
-            // A registration after construction uses the SAME retained store,
-            // and rejecting that overlap does not erase an existing lease.
-            let host = ApplicationHost::new(); enable(&host, &f, &project).await;
-            assert_eq!(host.check_project_root(&alternate, metadata.dev(), metadata.ino()), Err(Error::Conflict));
-            assert!(host.status().unwrap().enabled); assert!(host.shutdown().await.settled());
+            // Startup's COMPLETE roster must catch that same reverse alias,
+            // before opening/writing the existing private service directory.
+            let preserved = std::fs::read(f.app.join(DIRECTORY).join("projects.state")).unwrap();
+            let host = ApplicationHost::new();
+            host.reserve_native_location(&f.app, &[fixture_root(&project.canonical_root), fixture_root(&alternate)]).unwrap();
+            let ticket = host.begin_allow(project).unwrap();
+            assert_eq!(host.prepare(&ticket, &f.app).await.err(), Some(Error::Conflict));
+            assert!(host.originals.lock().await.store.is_none());
+            assert!(host.originals.lock().await.source.as_ref().unwrap().settled());
+            assert_eq!(std::fs::read(f.app.join(DIRECTORY).join("projects.state")).unwrap(), preserved);
+            assert!(host.shutdown().await.settled());
+
+            // Current registered roots are re-probed, not trusted from an old
+            // registration stamp after their actual directories are replaced.
+            let f = Fixture::short(); let project = self::project(&f); let host = ApplicationHost::new();
+            reserve(&host, &f, &project); let ticket = host.begin_allow(project.clone()).unwrap();
+            std::fs::rename(&project.canonical_root, project.canonical_root.with_file_name("retained-project")).unwrap();
+            std::fs::create_dir(&project.canonical_root).unwrap();
+            std::fs::set_permissions(&project.canonical_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(host.prepare(&ticket, &f.app).await.err(), Some(Error::Conflict));
+            assert!(!f.app.exists()); assert!(host.originals.lock().await.source.as_ref().unwrap().settled());
+            assert!(host.shutdown().await.settled());
         });
     }
 }

@@ -12,6 +12,15 @@ use std::{collections::BTreeMap, fs::File, io::{Read, Write}, path::{Component, 
 pub(crate) const DIRECTORY: &str = "service-v1";
 const PARENT_RESERVATION: &str = "service-v1.reservation";
 pub(crate) const MAX_BYTES: usize = 1024 * 1024;
+/// Closed native metadata, not a renderer DTO or filesystem admission. Keeping
+/// this store independent of Desktop source owners preserves the client-only
+/// installed CLI graph. The host supplies it only from its genuine source probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ApplicationDirectoryIdentity {
+    pub(crate) device: u64, pub(crate) inode: u64, pub(crate) mode: u32,
+    pub(crate) uid: u32, pub(crate) gid: u32,
+}
+pub(crate) type ApplicationDirectoryExpectation = (ApplicationDirectoryIdentity, Option<ApplicationDirectoryIdentity>);
 const HEADER: usize = 52;
 const MAGIC: &[u8; 8] = b"MRKST001";
 const RESERVATION: &[u8] = b"MRK application references v1\nprojects\ncredential-references\nversion-allocations\n";
@@ -56,9 +65,20 @@ mod native {
     use nix::{errno::Errno, fcntl::{self, AtFlags, FlockArg, OFlag}, sys::stat::{self, Mode, SFlag}, unistd};
     use std::{ffi::OsString, os::{fd::{AsRawFd, OwnedFd}, unix::ffi::OsStrExt}};
     use zeroize::Zeroizing;
+    use std::time::Instant;
+
+    fn checkpoint(deadline: Option<Instant>) -> Result<()> {
+        if deadline.is_some_and(|cutoff| Instant::now() >= cutoff) { Err(Error::Expired.into()) } else { Ok(()) }
+    }
+    fn application_identity(key: FileKey) -> ApplicationDirectoryIdentity {
+        ApplicationDirectoryIdentity { device: key.device, inode: key.inode, mode: key.mode, uid: key.uid, gid: key.gid }
+    }
 
     #[cfg(test)]
-    thread_local! { static READ_CLOSE_UNKNOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    thread_local! {
+        static READ_CLOSE_UNKNOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static CREATE_PRE_SYNC_REFUSAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
 
     pub(crate) fn uid() -> u32 {
         #[cfg(target_os = "linux")]
@@ -151,6 +171,12 @@ mod native {
         let result = (|| {
             let original = key(&file)?;
             if !original.private_regular(0) || named(dir, name)? != Some(original) { return Err(Error::Conflict.into()); }
+            #[cfg(test)]
+            if CREATE_PRE_SYNC_REFUSAL.with(|cut| cut.replace(false)) {
+                // The real exclusive empty file exists, but no write/fsync
+                // has occurred. The original close below still runs once.
+                return Err(Error::Conflict.into());
+            }
             file.write_all(bytes).map_err(|_| StateError::unknown(Effect::None))?;
             sync(&file)?;
             let written = key(&file)?;
@@ -169,7 +195,8 @@ mod native {
     struct Edge { file: File, name: OsString, original: FileKey }
     pub(crate) struct Directory { path: PathBuf, edges: Vec<Edge>, parent_reservation: Option<FileKey> }
     impl Directory {
-        fn acquire(app_data: &Path, create: bool, excluded_projects: &[(u64, u64)]) -> Result<(Self, bool)> {
+        fn acquire(app_data: &Path, create: bool, excluded_projects: &[(u64, u64)],
+            expected: Option<ApplicationDirectoryExpectation>, deadline: Option<Instant>) -> Result<(Self, bool)> {
             let text = app_data.as_os_str().as_bytes();
             if excluded_projects.len() > crate::service_protocol::PROJECT_LIMIT
                 || excluded_projects.iter().any(|(_, inode)| *inode == 0)
@@ -181,45 +208,67 @@ mod native {
             }
             let names: Vec<_> = app_data.components().filter_map(|c| match c { Component::Normal(n) => Some(n.to_owned()), _ => None }).collect();
             if names.len() < 2 || names.len() > 96 { return Err(Error::InvalidRequest.into()); }
+            checkpoint(deadline)?;
             let root = File::from(fcntl::open("/", OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW, Mode::empty()).map_err(io_error)?);
-            let root_key = key(&root)?;
+            let root_key = match key(&root) { Ok(key) => key, Err(error) => { close(root)?; return Err(error); } };
             if !root_key.directory(false) || excluded_projects.contains(&(root_key.device, root_key.inode)) {
                 close(root)?; return Err(Error::Conflict.into());
             }
             let mut this = Self { path: app_data.join(DIRECTORY), edges: vec![Edge { file: root, name: OsString::from("/"), original: root_key }], parent_reservation: None };
+            let mut created_any = false;
             let result = (|| {
                 for (index, name) in names.iter().enumerate() {
+                    checkpoint(deadline)?;
                     let parent = &this.edges.last().ok_or_else(|| StateError::from(Error::StateUnknown))?.file;
                     let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
+                    let expected_leaf = if index + 1 == names.len() { expected } else { None };
+                    if let Some((expected_parent, _)) = expected_leaf {
+                        if application_identity(key(parent)?) != expected_parent { return Err(Error::Conflict.into()); }
+                    }
                     // Inspect an existing leaf before any create attempt. All
                     // SAME held parents were physically excluded when opened;
                     // an absent app-data leaf is the sole path component we
                     // may create. Path spelling does not decide exclusion.
                     let fd = match fcntl::openat(parent, name.as_os_str(), flags, Mode::empty()) {
-                        Ok(fd) => fd,
+                        Ok(fd) => {
+                            if expected_leaf.is_some_and(|(_, leaf)| leaf.is_none()) {
+                                close(File::from(fd))?; return Err(Error::Conflict.into());
+                            }
+                            fd
+                        }
                         Err(Errno::ENOENT) if create && index + 1 == names.len() => {
+                            if expected_leaf.is_some_and(|(_, leaf)| leaf.is_some()) { return Err(Error::Conflict.into()); }
+                            checkpoint(deadline)?;
                             match stat::mkdirat(parent, name.as_os_str(), Mode::from_bits_truncate(0o700)) {
-                                Ok(()) => sync(parent)?, Err(Errno::EEXIST) => {}, Err(e) => return Err(io_error(e)),
+                                Ok(()) => { created_any = true; sync(parent)?; },
+                                Err(Errno::EEXIST) if expected_leaf.is_none() => {},
+                                Err(Errno::EEXIST) => return Err(Error::Conflict.into()),
+                                Err(e) => return Err(io_error(e)),
                             }
                             fcntl::openat(parent, name.as_os_str(), flags, Mode::empty()).map_err(io_error)?
                         }
                         Err(e) => return Err(if !create && e == Errno::ENOENT { Error::Unavailable.into() } else { io_error(e) }),
                     };
                     let file = File::from(fd);
-                    let original = key(&file)?;
-                    if !original.directory(false) || excluded_projects.contains(&(original.device, original.inode)) {
+                    let original = match key(&file) { Ok(key) => key, Err(error) => { close(file)?; return Err(error); } };
+                    if !original.directory(false) || excluded_projects.contains(&(original.device, original.inode))
+                        || expected_leaf.and_then(|(_, leaf)| leaf).is_some_and(|expected| application_identity(original) != expected) {
                         close(file)?; return Err(Error::Conflict.into());
                     }
                     this.edges.push(Edge { file, name: name.clone(), original });
                 }
-                let parent = &this.edges.last().ok_or_else(|| StateError::from(Error::StateUnknown))?.file;
+                let parent_index = this.edges.len().checked_sub(1).ok_or_else(|| StateError::from(Error::StateUnknown))?;
+                let parent = &this.edges[parent_index].file;
+                checkpoint(deadline)?;
                 // The marker is outside the child: deletion/replacement of the
                 // entire child cannot masquerade as first use with empty state.
                 let child = named(parent, DIRECTORY)?;
                 let marker = named(parent, PARENT_RESERVATION)?;
                 let created = match (child, marker) {
                     (None, None) if create => {
+                        checkpoint(deadline)?;
                         stat::mkdirat(parent, DIRECTORY, Mode::from_bits_truncate(0o700)).map_err(io_error)?;
+                        created_any = true;
                         sync(parent)?; true
                     }
                     (None, None) => return Err(Error::Unavailable.into()),
@@ -228,25 +277,43 @@ mod native {
                 };
                 let fd: OwnedFd = fcntl::openat(parent, DIRECTORY, OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW, Mode::empty()).map_err(io_error)?;
                 let file = File::from(fd);
-                let original = key(&file)?;
+                let original = match key(&file) { Ok(key) => key, Err(error) => { close(file)?; return Err(error); } };
                 if !original.directory(true) || excluded_projects.contains(&(original.device, original.inode)) {
                     close(file)?; return Err(Error::Conflict.into());
                 }
+                // Retain this same child before a deadline, marker/read or
+                // sync can fail. The outer close then attempts EVERY original.
+                this.edges.push(Edge { file, name: OsString::from(DIRECTORY), original });
+                let parent = &this.edges[parent_index].file;
                 let mut binding = b"MRK service root v1\n".to_vec();
                 binding.extend(original.device.to_be_bytes()); binding.extend(original.inode.to_be_bytes());
                 let (reservation_key, reservation_bytes) = if created {
+                    checkpoint(deadline)?;
                     let created_key = create_private(parent, PARENT_RESERVATION, &binding)?;
                     sync(parent)?; (created_key, binding.clone())
                 } else { read_private(parent, PARENT_RESERVATION, binding.len(), marker)? };
-                if reservation_bytes != binding { close(file)?; return Err(Error::Conflict.into()); }
+                if reservation_bytes != binding { return Err(Error::Conflict.into()); }
                 this.parent_reservation = Some(reservation_key);
-                this.edges.push(Edge { file, name: OsString::from(DIRECTORY), original });
                 this.check()?;
                 Ok(created)
             })();
-            match result { Ok(created) => Ok((this, created)), Err(error) => { this.close()?; Err(error) } }
+            match result {
+                Ok(created) => Ok((this, created)),
+                Err(mut error) => {
+                    if created_any && error.effect == Effect::None {
+                        error.effect = Effect::Applied;
+                        // Earlier mkdir syncs do not establish durability of
+                        // a later marker created before its own first fsync.
+                        if error.durability == Durability::NotApplicable { error.durability = Durability::Unknown; }
+                    }
+                    if let Err(mut cleanup) = this.close() {
+                        cleanup.effect = error.effect; return Err(cleanup);
+                    }
+                    Err(error)
+                }
+            }
         }
-        pub(crate) fn for_client(app_data: &Path) -> Result<Self> { Self::acquire(app_data, false, &[]).map(|v| v.0) }
+        pub(crate) fn for_client(app_data: &Path) -> Result<Self> { Self::acquire(app_data, false, &[], None, None).map(|v| v.0) }
         pub(crate) fn file(&self) -> Result<&File> { self.edges.last().map(|e| &e.file).ok_or_else(|| Error::Unavailable.into()) }
         pub(crate) fn path(&self) -> &Path { &self.path }
         pub(crate) fn check(&self) -> Result<()> {
@@ -262,6 +329,11 @@ mod native {
             Ok(())
         }
         fn contains_ancestor(&self, device: u64, inode: u64) -> bool { self.edges.iter().any(|e| e.original.device == device && e.original.inode == inode) }
+        fn application_root(&self) -> Result<(PathBuf, ApplicationDirectoryIdentity)> {
+            let original = self.edges.get(self.edges.len().checked_sub(2).ok_or_else(|| StateError::from(Error::StateUnknown))?)
+                .ok_or_else(|| StateError::from(Error::StateUnknown))?.original;
+            Ok((self.path.parent().ok_or_else(|| StateError::from(Error::StateUnknown))?.to_owned(), application_identity(original)))
+        }
         pub(crate) fn close(mut self) -> Result<()> {
             let mut failed = false;
             while let Some(edge) = self.edges.pop() { failed |= close(edge.file).is_err(); }
@@ -301,12 +373,23 @@ mod native {
         /// before descending or creating private state; this is not a claim
         /// about a project that is itself below this directory through aliases.
         pub(crate) fn open_excluding_projects(app_data: &Path, excluded_projects: &[(u64, u64)]) -> Result<Self> {
-            let (directory, created) = Directory::acquire(app_data, true, excluded_projects)?;
+            Self::open_checked(app_data, excluded_projects, None, None)
+        }
+        /// The only native host startup route: genuine full-roster source
+        /// exclusion, then SAME directory owner with expected presence/identity.
+        pub(crate) fn open_after_exclusion(app_data: &Path, excluded_projects: &[(u64, u64)],
+            expected: ApplicationDirectoryExpectation, deadline: Instant) -> Result<Self> {
+            Self::open_checked(app_data, excluded_projects, Some(expected), Some(deadline))
+        }
+        fn open_checked(app_data: &Path, excluded_projects: &[(u64, u64)],
+            expected: Option<ApplicationDirectoryExpectation>, deadline: Option<Instant>) -> Result<Self> {
+            let (directory, created) = Directory::acquire(app_data, true, excluded_projects, expected, deadline)?;
             let result = (|| {
+                checkpoint(deadline)?;
                 let flags = OFlag::O_RDWR | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK
                     | if created { OFlag::O_CREAT | OFlag::O_EXCL } else { OFlag::empty() };
                 let file = File::from(fcntl::openat(directory.file()?, "owner.lock", flags, Mode::from_bits_truncate(0o600)).map_err(io_error)?);
-                let lock_key = key(&file)?;
+                let lock_key = match key(&file) { Ok(key) => key, Err(error) => { close(file)?; return Err(error); } };
                 if !lock_key.private_regular(0) || named(directory.file()?, "owner.lock")? != Some(lock_key) { close(file)?; return Err(Error::Conflict.into()); }
                 // Raw flock is used only on this owned file. Closing that same
                 // original is the sole release; there is no PID-based owner.
@@ -317,10 +400,12 @@ mod native {
                 }
                 let load = (|| {
                     if created {
+                        checkpoint(deadline)?;
                         sync(&file)?;
                         create_private(directory.file()?, "reservation", RESERVATION)?;
                         sync(directory.file()?)?;
                         for namespace in NAMESPACES {
+                            checkpoint(deadline)?;
                             create_private(directory.file()?, namespace.file(), &encode(namespace, Revision(0), &[])?)?;
                         }
                         sync(directory.file()?)?;
@@ -329,6 +414,7 @@ mod native {
                     if contents != RESERVATION { return Err(Error::RecoveryRequired.into()); }
                     let mut originals = BTreeMap::new();
                     for namespace in NAMESPACES {
+                        checkpoint(deadline)?;
                         if named(directory.file()?, namespace.candidate())?.is_some() || named(directory.file()?, namespace.intent())?.is_some() {
                             return Err(Error::RecoveryRequired.into());
                         }
@@ -343,7 +429,17 @@ mod native {
             match result {
                 Ok((lock, lock_key, reservation, originals)) => Ok(Self { book: Mutex::new(Book { directory: Some(directory), lock: Some(lock), lock_key,
                     reservation, originals, poisoned: false, endpoint_active: false, #[cfg(test)] cut_after_rename: false }) }),
-                Err(error) => { directory.close()?; Err(error) }
+                Err(mut error) => {
+                    if created && error.effect == Effect::None {
+                        error.effect = Effect::Applied;
+                        // owner.lock or a later initial namespace may have
+                        // been created before its sync. Do not equate original
+                        // descriptor closure with durable complete creation.
+                        if error.durability == Durability::NotApplicable { error.durability = Durability::Unknown; }
+                    }
+                    if let Err(mut cleanup) = directory.close() { cleanup.effect = error.effect; return Err(cleanup); }
+                    Err(error)
+                }
             }
         }
         fn lock(&self) -> Result<MutexGuard<'_, Book>> { self.book.lock().map_err(|_| StateError::unknown(Effect::Unknown)) }
@@ -364,6 +460,21 @@ mod native {
         pub(crate) fn excludes_project(&self, device: u64, inode: u64) -> Result<()> {
             let book = self.lock()?; book.check()?;
             if book.directory()?.contains_ancestor(device, inode) { Err(Error::Conflict.into()) } else { Ok(()) }
+        }
+        /// Full metadata from the actual held app-data edge, never stat(path).
+        pub(crate) fn native_application_root(&self) -> Result<(PathBuf, ApplicationDirectoryIdentity)> {
+            let book = self.lock()?; book.check()?; book.directory()?.application_root()
+        }
+        pub(crate) fn check_application_exclusion(&self, expected: ApplicationDirectoryExpectation) -> Result<()> {
+            let book = self.lock()?; book.check()?;
+            let directory = book.directory()?;
+            let (_, actual) = directory.application_root()?;
+            let parent = directory.edges.get(directory.edges.len().checked_sub(3).ok_or_else(|| StateError::from(Error::StateUnknown))?)
+                .ok_or_else(|| StateError::from(Error::StateUnknown))?;
+            if expected != (application_identity(parent.original), Some(actual)) {
+                return Err(Error::Conflict.into());
+            }
+            Ok(())
         }
         pub(crate) fn read(&self, namespace: Namespace) -> Result<Snapshot> {
             let mut book = self.lock()?;
@@ -470,6 +581,72 @@ mod native {
         }
         impl Drop for Fixture {
             fn drop(&mut self) { std::fs::remove_dir_all(&self.root).unwrap(); }
+        }
+        fn held_directory_identity(path: &Path) -> ApplicationDirectoryIdentity {
+            let file = File::open(path).unwrap(); let id = application_identity(key(&file).unwrap());
+            close(file).unwrap(); id
+        }
+        #[test]
+        fn native_store_expected_presence_and_identity_refuse_before_service_writes() {
+            // Exercise the actual Directory owner. These observed input facts
+            // are NOT fabricated SourceBook proofs or APFS qualification.
+            let f = Fixture::short(); let parent = held_directory_identity(f.app.parent().unwrap());
+            std::fs::create_dir(&f.app).unwrap();
+            std::fs::set_permissions(&f.app, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let original = held_directory_identity(&f.app);
+            let acquire = |expected| Directory::acquire(&f.app, true, &[], Some((parent, expected)), None);
+            let error = acquire(None).err().unwrap();
+            assert_eq!((error.code, error.effect, error.cleanup), (Error::Conflict, Effect::None, Cleanup::Known));
+            assert_eq!(std::fs::read_dir(&f.app).unwrap().count(), 0);
+
+            let retained = f.app.with_file_name("retained-application-directory");
+            std::fs::rename(&f.app, &retained).unwrap();
+            assert_eq!(acquire(Some(original)).err().unwrap().code, Error::Conflict);
+            assert!(!f.app.exists());
+            std::fs::create_dir(&f.app).unwrap();
+            std::fs::set_permissions(&f.app, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(acquire(Some(original)).err().unwrap().code, Error::Conflict);
+            assert_eq!(std::fs::read_dir(&f.app).unwrap().count(), 0);
+            std::fs::remove_dir(&f.app).unwrap(); // This fixture's own empty replacement only.
+            symlink(&retained, &f.app).unwrap();
+            assert!(acquire(Some(original)).is_err());
+            assert_eq!(std::fs::read_dir(&retained).unwrap().count(), 0);
+        }
+        #[test]
+        fn native_store_expected_parent_deadline_and_forward_roster_are_checked_before_creation() {
+            let f = Fixture::short(); let location = f.app.parent().unwrap().join("location");
+            std::fs::create_dir(&location).unwrap();
+            std::fs::set_permissions(&location, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let parent = held_directory_identity(&location);
+            let app = location.join("dev.mobile-release-kit.desktop");
+            assert_eq!(Directory::acquire(&app, true, &[], Some((parent, None)), Some(Instant::now())).err().unwrap().code, Error::Expired);
+            assert!(!app.exists());
+            assert_eq!(Directory::acquire(&app, true, &[(parent.device, parent.inode)], Some((parent, None)), None).err().unwrap().code, Error::Conflict);
+            assert!(!app.exists());
+            std::fs::rename(&location, location.with_file_name("retained-location")).unwrap();
+            std::fs::create_dir(&location).unwrap();
+            std::fs::set_permissions(&location, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(Directory::acquire(&app, true, &[], Some((parent, None)), None).err().unwrap().code, Error::Conflict);
+            assert!(!app.exists());
+
+            // Ordinary same-owner success, separate from source qualification.
+            let current_parent = held_directory_identity(&location);
+            let store = PrivateStateDirectory::open_checked(&app, &[], Some((current_parent, None)), None).unwrap();
+            let (path, identity) = store.native_application_root().unwrap();
+            assert_eq!(identity, held_directory_identity(&app));
+            assert_eq!(path, app); store.close().unwrap();
+
+            // A genuine exclusive marker creation followed by an ordinary
+            // refusal before fsync is NOT known durable merely because the
+            // preceding application/service mkdirs were already synced.
+            let partial = Fixture::short(); let parent = held_directory_identity(partial.app.parent().unwrap());
+            CREATE_PRE_SYNC_REFUSAL.with(|cut| cut.set(true));
+            let error = Directory::acquire(&partial.app, true, &[], Some((parent, None)), None).err().unwrap();
+            assert!(!CREATE_PRE_SYNC_REFUSAL.with(|cut| cut.get()));
+            assert_eq!((error.code, error.effect, error.durability, error.cleanup),
+                (Error::Conflict, Effect::Applied, Durability::Unknown, Cleanup::Known));
+            assert!(std::fs::read(partial.app.join(PARENT_RESERVATION)).unwrap().is_empty());
+            assert_eq!(std::fs::read_dir(partial.app.join(DIRECTORY)).unwrap().count(), 0);
         }
         #[test]
         fn all_namespaces_persist_cas_and_exclusive_host() {
