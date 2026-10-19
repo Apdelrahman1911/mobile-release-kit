@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable, Iterator, Mapping
 
 from .android import validate_aab, run_android_build
-from .config import ConfigurationError, ReleaseConfig
+from .config import ConfigurationError, ReleaseConfig, validate_config_data
 from .credentials import (
     ALLOWED_CREDENTIAL_NAMES,
     artifact_validation_environment,
@@ -573,12 +573,20 @@ def _platform_policy_findings(config: ReleaseConfig, platform: str) -> list[Find
 
 
 def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None, *, execution_source=None,
-           cancellation: DefaultCancellation | None = None) -> Report:
+           cancellation: DefaultCancellation | None = None, scope: str = "release") -> Report:
+    selected = tuple(platforms if platforms is not None else config.enabled_platforms)
+    if type(scope) is not str or scope not in {"release", "local-project"}:
+        raise ValidationError("unsupported preflight scope")
+    if scope == "local-project":
+        if selected != ("android",):
+            raise ValidationError("local project checks currently require Android only")
+        # Local setup removes later-stage requirements, never schema errors in
+        # values that were supplied (including Store fields and ID syntax).
+        validate_config_data(config.data)
     budget = config._preflight_budget
     if budget is not None:
         budget.checkpoint()
     report = Report("doctor", context={"config": str(config.path), "root": str(config.root)}, budget=budget)
-    selected = tuple(platforms if platforms is not None else config.enabled_platforms)
     try:
         release = config.release_version()
         report.set_context("release", {"marketingVersion": release.name, "buildNumber": release.build})
@@ -618,7 +626,8 @@ def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None, *, exe
                 category="configuration",
             )
             continue
-        report.extend(_platform_policy_findings(config, platform))
+        if scope == "release":
+            report.extend(_platform_policy_findings(config, platform))
 
     if "android" in selected and config.platform_enabled("android"):
         module = selected_android_module(config, discovered)
@@ -906,6 +915,32 @@ def _online_query_blockers(
     return sorted(set(blockers))
 
 
+def _preflight_scope(scope: str, *, mode: str, selected: tuple[str, ...], run_builds: bool,
+                     artifacts, credentials_file, credentials_from_env: bool, require_tools: bool,
+                     signing_lease=None) -> None:
+    if type(scope) is not str or scope not in {"release", "local-project"}:
+        raise ValidationError("unsupported preflight scope")
+    if scope == "local-project" and (mode != "offline" or selected != ("android",) or run_builds is not False
+            or artifacts is not None or credentials_file is not None or credentials_from_env is not False
+            or require_tools is not False or signing_lease is not None):
+        raise ValidationError("local project checks require offline Android, skip-builds, and no artifacts or credential options")
+
+
+def _project_check_environment(config: ReleaseConfig, credential_values: Mapping[str, str] | None):
+    """Same script environment for both scopes; local scope never resolves credentials."""
+    environment = scrub_credential_capabilities(os.environ)
+    if (credential_values is not None and config.section("source").get("projectReadTokenRequired")
+            and credential_values.get("MOBILE_RELEASE_PROJECT_READ_TOKEN")):
+        environment["MOBILE_RELEASE_PROJECT_READ_TOKEN"] = credential_values["MOBILE_RELEASE_PROJECT_READ_TOKEN"]
+    try:
+        release = config.release_version()
+    except ConfigurationError:
+        release = None
+    if release is not None:
+        environment.update({"MOBILE_RELEASE_VERSION_NAME": release.name, "MOBILE_RELEASE_BUILD_NUMBER": str(release.build)})
+    return environment, release
+
+
 def preflight(
     config: ReleaseConfig,
     *,
@@ -916,13 +951,16 @@ def preflight(
     credentials_file: Path | None = None,
     credentials_from_env: bool = False,
     require_tools: bool = False,
+    scope: str = "release",
 ) -> Report:
     selected = tuple(platforms)
     if mode not in {"offline", "signing", "online"}:
         raise ValidationError(f"unsupported preflight mode: {mode}")
+    _preflight_scope(scope, mode=mode, selected=selected, run_builds=run_builds, artifacts=artifacts,
+                     credentials_file=credentials_file, credentials_from_env=credentials_from_env, require_tools=require_tools)
     arguments = dict(mode=mode, platforms=selected, run_builds=run_builds, artifacts=artifacts,
                      credentials_file=credentials_file, credentials_from_env=credentials_from_env,
-                     require_tools=require_tools)
+                     require_tools=require_tools, scope=scope)
     try:
         # Reserve process-global environment before credential snapshots, then
         # account (when applicable), then continuous project admission. Even
@@ -974,12 +1012,16 @@ def _preflight(
     credentials_file: Path | None = None,
     credentials_from_env: bool = False,
     require_tools: bool = False,
+    scope: str = "release",
     signing_lease: SigningLease | None = None,
     invocation: InvocationCustody,
 ) -> Report:
     if mode not in {"offline", "signing", "online"}:
         raise ValidationError(f"unsupported preflight mode: {mode}")
     selected = tuple(platforms)
+    _preflight_scope(scope, mode=mode, selected=selected, run_builds=run_builds, artifacts=artifacts,
+                     credentials_file=credentials_file, credentials_from_env=credentials_from_env,
+                     require_tools=require_tools, signing_lease=signing_lease)
     if config._preflight_budget is not None:
         if (config._preflight_budget.invocation is not invocation or mode != "offline" or selected != ("android",)
                 or run_builds or artifacts is not None or credentials_file is not None or credentials_from_env
@@ -989,7 +1031,7 @@ def _preflight(
     execution_source = None if signing_lease is None else signing_lease.execution_source()
     cancellation = invocation.cancellation
     invocation.require(root=config.root, cancellation=cancellation, signing_lease=signing_lease)
-    report = doctor(config, selected, execution_source=execution_source, cancellation=cancellation)
+    report = doctor(config, selected, execution_source=execution_source, cancellation=cancellation, scope=scope)
     report.command = f"preflight --{mode}"
     invalid = set(selected) - set(config.enabled_platforms)
     if invalid:
@@ -1000,6 +1042,20 @@ def _preflight(
             category="configuration",
         )
     invocation.require(root=config.root, cancellation=cancellation, signing_lease=signing_lease)
+    if scope == "local-project":
+        report.command += " --local-project-checks"
+        report.set_context("validationScope", "local-project")
+        if not report.ok:
+            return _stop_preflight(report, "Configured project checks were skipped because local prerequisites failed.")
+        # Deliberately before metadata and ALL credential resolution. Project
+        # commands still use the original invocation/C/A/W and may have effects.
+        environment, release = _project_check_environment(config, None)
+        if release is None:
+            report.add("version.source", Status.FAIL, "The release version is no longer readable.", category="version")
+            return _stop_preflight(report, "Configured project checks were not executed with an unavailable version.")
+        report.extend(run_project_checks(config, "preflight", environ=environment,
+                                         execution_source=execution_source, cancellation=cancellation, invocation=invocation))
+        return report
     report.extend(metadata_findings(config, platforms=selected, cancellation=cancellation))
     if (invalid or not selected) and mode == "online":
         report.add("store.online.gate", Status.SKIP,
@@ -1029,24 +1085,7 @@ def _preflight(
         purpose="store",
         platforms=selected,
     )
-    project_check_environment = scrub_credential_capabilities(os.environ)
-    if config.section("source").get("projectReadTokenRequired") and credential_values.get(
-        "MOBILE_RELEASE_PROJECT_READ_TOKEN"
-    ):
-        project_check_environment["MOBILE_RELEASE_PROJECT_READ_TOKEN"] = credential_values[
-            "MOBILE_RELEASE_PROJECT_READ_TOKEN"
-        ]
-    try:
-        release = config.release_version()
-    except ConfigurationError:
-        release = None
-    if release is not None:
-        project_check_environment.update(
-            {
-                "MOBILE_RELEASE_VERSION_NAME": release.name,
-                "MOBILE_RELEASE_BUILD_NUMBER": str(release.build),
-            }
-        )
+    project_check_environment, release = _project_check_environment(config, credential_values)
     if mode == "online":
         report.add(
             "project-check.preflight.online",

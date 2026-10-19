@@ -7,7 +7,7 @@ import { previewApi } from '../src/preview.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
 import { OfflinePreflightController, offlinePreflightOwnerReason } from '../src/offlinePreflight.ts';
 import { selectOfflinePreflightFindings } from '../src/offlinePreflightFindings.ts';
-import { OFFLINE_CORE_STATUSES, OFFLINE_CHECK_IDS, OFFLINE_LIMITATIONS, OFFLINE_PREFLIGHT_CONSENT,
+import { LOCAL_PROJECT_CHECKS_CONSENT, offlineCheckConsent, OFFLINE_CORE_STATUSES, OFFLINE_CHECK_IDS, OFFLINE_LIMITATIONS, OFFLINE_PREFLIGHT_CONSENT,
   OFFLINE_PREFLIGHT_COUNTER_MAX, OFFLINE_PREFLIGHT_DISCLOSURE, OFFLINE_PREFLIGHT_EVENT, copyOfflinePreflightRequest,
   encodeOfflinePreflightRequest, offlineOperationProgress, offlinePreflightError, parseOfflinePreflightResult,
   parseOfflinePreflightStatus, parseSavedConfigContent, savedConfigFromSnapshot } from '../src/offlinePreflightProtocol.ts';
@@ -42,7 +42,7 @@ function workspace() {
 function request(project = workspace().projects['project-1']) {
   return { projectId: project.project.id, draftRevision: project.revision, baselineGeneration: project.baselineGeneration, savedConfig: clone(project.savedConfigContent) };
 }
-const context = (input = request()) => ({ ...clone(input), platform: 'android', operation: 'offline-preflight' });
+const context = (input = request()) => ({ ...clone(input), platform: 'android', operation: input.operation ?? 'offline-preflight' });
 function operation(options = {}) {
   return { operationId: OP, ownerGeneration: OWNER, context: context(), phase: 'awaiting-consent', intentUsable: true,
     outcome: null, reason: 'none', result: null, ...options };
@@ -624,4 +624,72 @@ test('availability-only same-revision disagreement is still a protocol failure',
   assert.equal(h.state.status.availability, 'busy');
   assert.equal(h.state.integrityFailed, true); assert.equal(h.state.nativeBlocked, true);
   assert.ok(offlinePreflightOwnerReason(h.state)); await h.controller.prepare(); assert.equal(h.calls.length, 0);
+});
+
+test('local project scope is closed and results/consent remain bound to original scope', () => {
+  const local = { ...request(), operation: 'local-project-checks' };
+  assert.equal(copyOfflinePreflightRequest('prepare_offline_preflight', local).operation, 'local-project-checks');
+  assert.equal(copyOfflinePreflightRequest('prepare_offline_preflight', request()).operation, undefined);
+  for (const operation of [null, 'online', {}, 'local-project'])
+    assert.equal(copyOfflinePreflightRequest('prepare_offline_preflight', { ...request(), operation }), null);
+  assert.equal(offlineCheckConsent('local-project-checks'), LOCAL_PROJECT_CHECKS_CONSENT);
+  assert.equal(offlineCheckConsent('offline-preflight'), OFFLINE_PREFLIGHT_CONSENT);
+  const result = { ...report(), scope: 'saved-local-android-project-checks' };
+  assert.ok(parseOfflinePreflightResult(result, 'local-project-checks'));
+  assert.equal(parseOfflinePreflightResult(result), null);
+  const op = terminal('complete', { context: context(local), result });
+  assert.ok(parseOfflinePreflightStatus(status(9, op)));
+  assert.equal(parseOfflinePreflightStatus(status(9, { ...op, context: context() })), null);
+  assert.equal(parseOfflinePreflightStatus(status(9, { ...op, result: report() })), null);
+});
+
+test('explicit local prepare and start send the matching one-use consent, never download/build', async (t) => {
+  const h = harness(t);
+  await h.ready;
+  assert.equal(h.state.selectedOperation, 'offline-preflight');
+  h.controller.setOperation('local-project-checks');
+  assert.equal(h.calls.length, 0);
+  const op = await reviewed(h);
+  assert.equal(op.context.operation, 'local-project-checks');
+  assert.equal(h.calls[0].input.operation, 'local-project-checks');
+  const call = start(h, op);
+  assert.equal(call.input.consentVersion, LOCAL_PROJECT_CHECKS_CONSENT);
+  h.reply(call, status(2, terminal('complete', { context: op.context, result: { ...report(), scope: 'saved-local-android-project-checks' } })));
+  await flush();
+  assert.equal(h.state.status.operation.result.scope, 'saved-local-android-project-checks');
+  assert.equal(h.state.consent, null);
+  void h.controller.start(op.operationId, op.ownerGeneration);
+  assert.equal(h.calls.filter((entry) => entry.kind === 'start').length, 1);
+});
+
+test('scope change burns previous review and does not relabel original operation or rearm on ABA', async (t) => {
+  const h = harness(t);
+  const op = await reviewed(h);
+  h.controller.setAcknowledged(op.operationId, op.ownerGeneration, true);
+  h.controller.setOperation('local-project-checks');
+  assert.equal(h.state.consent, null);
+  assert.equal(h.state.status.operation.context.operation, 'offline-preflight');
+  assert.equal(h.calls.at(-1).kind, 'cancel');
+  h.controller.setOperation('offline-preflight');
+  assert.equal(h.state.consent, null);
+  void h.controller.start(op.operationId, op.ownerGeneration);
+  assert.equal(h.calls.filter((entry) => entry.kind === 'start').length, 0);
+  assert.ok(offlinePreflightOwnerReason(h.state));
+});
+
+test('late local preparation after scope retirement keeps original cancel/status, never new consent', async (t) => {
+  const h = harness(t);
+  await h.ready;
+  h.controller.setOperation('local-project-checks');
+  void h.controller.prepare();
+  const original = h.calls.at(-1);
+  h.controller.setOperation('offline-preflight');
+  assert.equal(h.state.pending, 'prepare');
+  assert.equal(h.state.originalUnconfirmed, true);
+  h.reply(original, status(1, operation({ context: context(original.input) })));
+  await flush();
+  assert.equal(h.state.consent, null);
+  assert.equal(h.state.status.operation.context.operation, 'local-project-checks');
+  assert.equal(h.calls.at(-1).kind, 'cancel');
+  assert.equal(h.calls.filter((entry) => entry.kind === 'prepare').length, 1);
 });

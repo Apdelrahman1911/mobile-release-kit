@@ -2,12 +2,23 @@
 // Replies/events are already deserialized DATA: this renderer cannot recover
 // duplicate keys from their original bytes. Native owns that boundary.
 import type { ApiError } from './types.ts';
-import type { OfflineCheckId, OfflineCoreStatus, OfflineLimitation, OfflinePreflightAvailability, OfflinePreflightContext,
+import type { OfflineCheckConsentVersion, OfflineCheckOperation, OfflineCheckId, OfflineCoreStatus, OfflineLimitation, OfflinePreflightAvailability, OfflinePreflightContext,
   OfflinePreflightIdentity, OfflinePreflightOperation, OfflinePreflightReason, OfflinePreflightResult, OfflinePreflightStatus,
   PrepareOfflinePreflight, SavedConfigContent, StartOfflinePreflight } from './offlinePreflightTypes.ts';
 
 export const OFFLINE_PREFLIGHT_EVENT = 'offline-preflight-state-changed';
 export const OFFLINE_PREFLIGHT_CONSENT = 'saved-offline-android-v1';
+export const LOCAL_PROJECT_CHECKS_CONSENT = 'saved-local-android-checks-v1';
+export const OFFLINE_CHECK_OPERATIONS: readonly OfflineCheckOperation[] = ['offline-preflight', 'local-project-checks'];
+export const offlineCheckOperationLabels: Record<OfflineCheckOperation, string> = {
+  'offline-preflight': 'Full offline release preflight', 'local-project-checks': 'Local project checks — no Store setup',
+};
+export function offlineCheckConsent(operation: OfflineCheckOperation): OfflineCheckConsentVersion {
+  return operation === 'local-project-checks' ? LOCAL_PROJECT_CHECKS_CONSENT : OFFLINE_PREFLIGHT_CONSENT;
+}
+function resultScope(operation: OfflineCheckOperation): OfflinePreflightResult['scope'] {
+  return operation === 'local-project-checks' ? 'saved-local-android-project-checks' : 'saved-offline-android-no-core-build';
+}
 export const OFFLINE_PREFLIGHT_COUNTER_MAX = 0xffff_fffe;
 export const OFFLINE_PREFLIGHT_CONSENT_MS = 300_000;
 export const OFFLINE_CORE_STATUSES: readonly OfflineCoreStatus[] = ['PASS', 'FAIL', 'MISSING', 'BLOCKED', 'INVALID', 'SKIP', 'MANUAL', 'CONFIGURED', 'NOT_APPLICABLE'];
@@ -113,7 +124,8 @@ export function sameSavedConfig(a: SavedConfigContent | null, b: SavedConfigCont
   return a === null || b === null ? a === b : a.bytes === b.bytes && a.sha256 === b.sha256;
 }
 function prepare(value: unknown): value is PrepareOfflinePreflight {
-  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig']) && projectId(value.projectId) &&
+  return (keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig']) ||
+    keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'operation']) && oneOf(value.operation, OFFLINE_CHECK_OPERATIONS)) && projectId(value.projectId) &&
     offlineCounter(value.draftRevision) && offlineCounter(value.baselineGeneration) && content(value.savedConfig);
 }
 function identity(value: unknown): value is OfflinePreflightIdentity {
@@ -122,14 +134,14 @@ function identity(value: unknown): value is OfflinePreflightIdentity {
 function context(value: unknown): value is OfflinePreflightContext {
   return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'platform', 'operation']) &&
     projectId(value.projectId) && offlineCounter(value.draftRevision) && offlineCounter(value.baselineGeneration) &&
-    content(value.savedConfig) && value.platform === 'android' && value.operation === 'offline-preflight';
+    content(value.savedConfig) && value.platform === 'android' && oneOf(value.operation, OFFLINE_CHECK_OPERATIONS);
 }
 export function copyOfflinePreflightRequest(command: OfflinePreflightCommand, value: unknown): PrepareOfflinePreflight | StartOfflinePreflight | OfflinePreflightIdentity | Record<string, never> | null {
   try {
     const safe = copyBoundedComparisonData(value, 8192, 64);
     if (command === 'prepare_offline_preflight' && prepare(safe)) return safe;
     if (command === 'start_offline_preflight' && keys(safe, ['operationId', 'ownerGeneration', 'consentVersion']) &&
-        identity(safe) && safe.consentVersion === OFFLINE_PREFLIGHT_CONSENT) return safe as unknown as StartOfflinePreflight;
+        identity(safe) && oneOf(safe.consentVersion, [OFFLINE_PREFLIGHT_CONSENT, LOCAL_PROJECT_CHECKS_CONSENT])) return safe as unknown as StartOfflinePreflight;
     if (command === 'cancel_offline_preflight' && keys(safe, ['operationId', 'ownerGeneration']) && identity(safe)) return safe;
     if (command === 'offline_preflight_status' && keys(safe, [])) return safe as Record<string, never>;
   } catch { /* Invalid descriptors/data are not executable serialization hooks. */ }
@@ -141,9 +153,9 @@ export function encodeOfflinePreflightRequest(command: OfflinePreflightCommand, 
   const bytes = encoder.encode(JSON.stringify(copy));
   return bytes.byteLength >= 1 && bytes.byteLength <= 8192 ? bytes : null;
 }
-function result(value: unknown): value is OfflinePreflightResult {
+function result(value: unknown, operation: OfflineCheckOperation = 'offline-preflight'): value is OfflinePreflightResult {
   if (!keys(value, ['schemaVersion', 'scope', 'usedConfig', 'findings', 'summary', 'limitations']) || value.schemaVersion !== 1 ||
-      value.scope !== 'saved-offline-android-no-core-build' || !content(value.usedConfig)) return false;
+      value.scope !== resultScope(operation) || !content(value.usedConfig)) return false;
   const summary = value.summary, findings = value.findings, limitations = value.limitations;
   if (!keys(summary, ['total', 'shown', 'omitted', 'counts']) || !integer(summary.total, 4096) ||
       !integer(summary.shown, 128) || !integer(summary.omitted, 4096) || summary.shown !== Math.min(summary.total, 128) ||
@@ -163,8 +175,8 @@ function result(value: unknown): value is OfflinePreflightResult {
   }
   return OFFLINE_CORE_STATUSES.every((key) => (shown[key] ?? 0) <= (counts[key] as number));
 }
-export function parseOfflinePreflightResult(value: unknown): OfflinePreflightResult | null {
-  try { const safe = copyBoundedComparisonData(value, 65536); return result(safe) ? safe : null; } catch { return null; }
+export function parseOfflinePreflightResult(value: unknown, operation: OfflineCheckOperation = 'offline-preflight'): OfflinePreflightResult | null {
+  try { const safe = copyBoundedComparisonData(value, 65536); return oneOf(operation, OFFLINE_CHECK_OPERATIONS) && result(safe, operation) ? safe : null; } catch { return null; }
 }
 export const offlineAvailabilityText: Record<OfflinePreflightAvailability, string> = {
   available: 'This installed build supports reviewing saved offline checks. Review and explicit Run are required; Run still checks the actual host and bundled runtime.',
@@ -235,7 +247,7 @@ export function parseOfflinePreflightStatus(value: unknown): OfflinePreflightSta
     } else if (op.phase === 'terminal') {
       if (op.intentUsable || !oneOf(op.outcome, ['complete', 'refused', 'cancelled', 'timed-out', 'failed']) ||
           (op.reason === 'none') !== (op.outcome === 'complete')) return null;
-      if (op.outcome === 'complete' ? !result(op.result) || !sameSavedConfig(op.result.usedConfig, op.context.savedConfig) : op.result !== null) return null;
+      if (op.outcome === 'complete' ? !result(op.result, op.context.operation) || !sameSavedConfig(op.result.usedConfig, op.context.savedConfig) : op.result !== null) return null;
     } else if (op.intentUsable || op.outcome !== null || op.result !== null) return null;
     return safe as unknown as OfflinePreflightStatus;
   } catch { return null; }

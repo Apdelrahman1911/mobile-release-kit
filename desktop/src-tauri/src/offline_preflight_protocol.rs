@@ -8,6 +8,7 @@ use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error
 
 pub(crate) const PROTOCOL: &str = "mrk-offline-preflight/1";
 pub(crate) const CONSENT: &str = "saved-offline-android-v1";
+pub(crate) const LOCAL_CONSENT: &str = "saved-local-android-checks-v1";
 pub(crate) const EVENT: &str = "offline-preflight-state-changed";
 pub(crate) const IPC_LIMIT: usize = 8192;
 pub(crate) const REQUEST_LIMIT: usize = 16 * 1024;
@@ -33,7 +34,12 @@ impl Content { fn valid(&self) -> bool { (1..=524288).contains(&self.bytes) && s
 pub(crate) enum Platform { Android }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Operation { OfflinePreflight }
+pub(crate) enum Operation { OfflinePreflight, LocalProjectChecks }
+impl Default for Operation { fn default() -> Self { Self::OfflinePreflight } }
+impl Operation {
+    pub(crate) fn consent(self) -> &'static str { match self { Self::OfflinePreflight => CONSENT, Self::LocalProjectChecks => LOCAL_CONSENT } }
+    fn result_scope(self) -> &'static str { match self { Self::OfflinePreflight => "saved-offline-android-no-core-build", Self::LocalProjectChecks => "saved-local-android-project-checks" } }
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Context {
@@ -49,27 +55,34 @@ impl Context {
 pub(crate) struct Prepare {
     pub(crate) project_id: String, pub(crate) draft_revision: u32, pub(crate) baseline_generation: u32,
     pub(crate) saved_config: Content,
+    #[serde(default)] pub(crate) operation: Operation,
 }
 impl Prepare {
     pub(crate) fn context(&self) -> Context { Context { project_id: self.project_id.clone(), draft_revision: self.draft_revision,
         baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
-        platform: Platform::Android, operation: Operation::OfflinePreflight } }
+        platform: Platform::Android, operation: self.operation } }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Start { pub(crate) operation_id: String, pub(crate) owner_generation: String, consent_version: String }
+impl Start {
+    // Called on the SAME owner's retained original prepared context before
+    // consumption/GO; parsing a recognized consent alone is not authorization.
+    pub(crate) fn consents_to(&self, context: &Context) -> bool { self.consent_version == context.operation.consent() }
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Cancel { pub(crate) operation_id: String, pub(crate) owner_generation: String }
 pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
-    if !keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig"]) { return Err(invalid()); }
+    if !keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig"])
+        && !keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "operation"]) { return Err(invalid()); }
     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
     if !input.context().valid() { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || input.consent_version != CONSENT { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || ![CONSENT, LOCAL_CONSENT].contains(&input.consent_version.as_str()) { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn cancel(value: &Value) -> Result<Cancel, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration"]) { return Err(invalid()); }
@@ -164,9 +177,9 @@ pub(crate) struct ResultData {
     schema_version: u32, scope: String, used_config: Content, findings: Vec<Finding>, summary: Summary, limitations: Vec<Limitation>,
 }
 impl ResultData {
-    fn valid(&self, used: &Content) -> bool {
+    fn valid(&self, used: &Content, operation: Operation) -> bool {
         let s = &self.summary;
-        if self.schema_version != 1 || self.scope != "saved-offline-android-no-core-build" || &self.used_config != used
+        if self.schema_version != 1 || self.scope != operation.result_scope() || &self.used_config != used
             || !self.used_config.valid() || self.limitations.as_slice() != LIMITATIONS || s.total > 4096
             || s.shown != s.total.min(128) || s.omitted != s.total - s.shown || self.findings.len() != s.shown as usize
             || s.counts.len() != CORE_STATUSES.len() || !CORE_STATUSES.iter().all(|key| s.counts.get(key).is_some_and(|n| *n <= 4096))
@@ -205,7 +218,7 @@ impl Terminal {
             || self.lifetime.commands > 4096 { return false; }
         if self.outcome == Outcome::Complete {
             return self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
-                && self.result.as_ref().is_some_and(|r| r.valid(&context.saved_config));
+                && self.result.as_ref().is_some_and(|r| r.valid(&context.saved_config, context.operation));
         }
         if self.result.is_some() || self.reason == Reason::None { return false; }
         if self.outcome == Outcome::Unknown { return self.reason == Reason::CleanupUnknown && !self.lifetime.settled(); }
@@ -275,3 +288,32 @@ pub(crate) struct Status {
 #[cfg(test)]
 #[path = "offline_preflight_protocol_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod local_project_checks_tests {
+    use super::*;
+    #[test]
+    fn local_scope_requires_matching_original_consent_and_result_scope() {
+        let old = json!({"projectId":"inert-project","draftRevision":2,"baselineGeneration":3,
+            "savedConfig":{"bytes":123,"sha256":"c".repeat(64)}});
+        let release = prepare(&old).unwrap().context();
+        assert_eq!(release.operation, Operation::OfflinePreflight);
+        let mut local = old.clone(); local["operation"] = json!("local-project-checks");
+        let local = prepare(&local).unwrap().context();
+        let request = |consent| start(&json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":consent})).unwrap();
+        assert!(request(LOCAL_CONSENT).consents_to(&local));
+        assert!(!request(CONSENT).consents_to(&local));
+        assert!(request(CONSENT).consents_to(&release));
+        assert!(!request(LOCAL_CONSENT).consents_to(&release));
+        let result: ResultData = serde_json::from_value(json!({"schemaVersion":1,"scope":"saved-local-android-project-checks",
+            "usedConfig":local.saved_config,"findings":[],"summary":{"total":0,"shown":0,"omitted":0,
+            "counts":{"PASS":0,"FAIL":0,"MISSING":0,"BLOCKED":0,"INVALID":0,"SKIP":0,"MANUAL":0,"CONFIGURED":0,"NOT_APPLICABLE":0}},
+            "limitations":LIMITATIONS})).unwrap();
+        assert!(result.valid(&local.saved_config, local.operation));
+        assert!(!result.valid(&release.saved_config, release.operation));
+        for operation in [json!(null), json!("online"), json!({"operation":"local-project-checks"})] {
+            let mut invalid = old.clone(); invalid["operation"] = operation;
+            assert!(prepare(&invalid).is_err());
+        }
+    }
+}

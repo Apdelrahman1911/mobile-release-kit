@@ -16,9 +16,12 @@ from .config import MAX_CONFIG_BYTES
 
 PROTOCOL = "mrk-offline-preflight/1"
 CONSENT = "saved-offline-android-v1"
+LOCAL_CONSENT = "saved-local-android-checks-v1"
 REQUEST_LIMIT, RESPONSE_LIMIT = 16 * 1024, 64 * 1024
 WORK_SECONDS, FINALITY_SECONDS = 1800, 1810
 SCOPE = "saved-offline-android-no-core-build"
+LOCAL_SCOPE = "saved-local-android-project-checks"
+OPERATIONS = ("offline-preflight", "local-project-checks")
 PROFILES = {"linux-gnu-x86_64": ("linux", "x86_64"), "linux-gnu-aarch64": ("linux", "aarch64"),
             "macos-x86_64": ("macos", "x86_64"), "macos-arm64": ("macos", "arm64")}
 STATUSES = ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")
@@ -99,7 +102,7 @@ def context(value: object) -> dict:
     value = _keys(value, {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "platform", "operation"})
     require(type(value["projectId"]) is str and _PROJECT.fullmatch(value["projectId"]) is not None
             and integer(value["draftRevision"], 2**32 - 2) and integer(value["baselineGeneration"], 2**32 - 2)
-            and value["platform"] == "android" and value["operation"] == "offline-preflight")
+            and value["platform"] == "android" and type(value["operation"]) is str and value["operation"] in OPERATIONS)
     return {**value, "savedConfig": content(value["savedConfig"])}
 
 
@@ -169,7 +172,12 @@ def project_finding(code: str, category: str) -> tuple[str, int | None]:
     return "other-core-finding", None
 
 
-def project_result(report, used: dict) -> dict:
+def result_scope(operation: str) -> str:
+    require(type(operation) is str and operation in OPERATIONS)
+    return LOCAL_SCOPE if operation == "local-project-checks" else SCOPE
+
+
+def project_result(report, used: dict, *, operation: str = "offline-preflight") -> dict:
     from .reporting import Report, Finding, Status
     require(type(report) is Report and len(report.findings) <= 4096)
     rows, counts = [], {status: 0 for status in STATUSES}
@@ -180,17 +188,17 @@ def project_result(report, used: dict) -> dict:
             check, index = project_finding(finding.code, finding.category)
             rows.append({"ordinal": ordinal, "check": check, "status": finding.status.value,
                          "message": check, "projectCheckIndex": index})
-    result = {"schemaVersion": 1, "scope": SCOPE, "usedConfig": content(used), "findings": rows,
+    result = {"schemaVersion": 1, "scope": result_scope(operation), "usedConfig": content(used), "findings": rows,
               "summary": {"total": len(report.findings), "shown": len(rows),
                           "omitted": len(report.findings) - len(rows), "counts": counts},
               "limitations": list(LIMITATIONS)}
-    validate_result(result)
+    validate_result(result, operation=operation)
     return result
 
 
-def validate_result(value: object) -> None:
+def validate_result(value: object, *, operation: str = "offline-preflight") -> None:
     value = _keys(value, {"schemaVersion", "scope", "usedConfig", "findings", "summary", "limitations"})
-    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == SCOPE
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == result_scope(operation)
             and type(value["limitations"]) is list and value["limitations"] == list(LIMITATIONS))
     content(value["usedConfig"])
     summary = _keys(value["summary"], {"total", "shown", "omitted", "counts"})
@@ -227,7 +235,7 @@ def validate_terminal(value: object, request: PreflightRequest) -> None:
                and life["handlersRestored"] and life["invocationClosed"] and life["commandDispatched"] is not None)
     if value["outcome"] == "complete":
         require(settled and life["stopObserved"] == "none" and value["reason"] == "none")
-        validate_result(value["result"])
+        validate_result(value["result"], operation=request.context["operation"])
         require(value["result"]["usedConfig"] == request.context["savedConfig"])
     else:
         require(value["result"] is None and value["reason"] != "none")

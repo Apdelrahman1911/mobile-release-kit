@@ -100,6 +100,7 @@ class OfflinePreflightRun:
                         config = self._saved()
                         self.budget.checkpoint()
                         self.report = _preflight(config, mode="offline", platforms=("android",), run_builds=False,
+                            scope="local-project" if self.request.context["operation"] == "local-project-checks" else "release",
                             artifacts=None, credentials_file=None, credentials_from_env=False, require_tools=False,
                             signing_lease=None, invocation=invocation)
                         self.budget.checkpoint()
@@ -157,7 +158,7 @@ class OfflinePreflightRun:
         else:
             outcome, reason = "complete", "none"
             try:
-                result = project_result(self.report, self.request.context["savedConfig"])
+                result = project_result(self.report, self.request.context["savedConfig"], operation=self.request.context["operation"])
             except (ProtocolError, ValueError, TypeError, RecursionError):
                 self.source.failure_observed()
                 outcome, reason = "failed", "result-limit"

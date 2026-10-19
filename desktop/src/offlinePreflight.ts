@@ -3,9 +3,9 @@
 import { isDirty } from './drafts.ts';
 import type { ProjectSession, WorkspaceAction } from './drafts.ts';
 import type { ApiError, BridgeMode } from './types.ts';
-import type { OfflinePreflightApi, OfflinePreflightContext, OfflinePreflightIdentity, OfflinePreflightOperation,
+import type { OfflineCheckOperation, OfflinePreflightApi, OfflinePreflightContext, OfflinePreflightIdentity, OfflinePreflightOperation,
   OfflinePreflightStatus, PrepareOfflinePreflight, SavedConfigContent } from './offlinePreflightTypes.ts';
-import { OFFLINE_PREFLIGHT_CONSENT, OFFLINE_PREFLIGHT_CONSENT_MS, OFFLINE_PREFLIGHT_COUNTER_MAX, copyOfflinePreflightRequest,
+import { OFFLINE_CHECK_OPERATIONS, offlineCheckConsent, OFFLINE_PREFLIGHT_CONSENT_MS, OFFLINE_PREFLIGHT_COUNTER_MAX, copyOfflinePreflightRequest,
   offlineAvailabilityText, offlineCounter, offlineOperationProgress, offlinePreflightError, parseOfflinePreflightStatus,
   parseSavedConfigContent, sameOfflineData, sameOfflineIdentity } from './offlinePreflightProtocol.ts';
 
@@ -22,6 +22,7 @@ export interface OfflinePreflightConsent extends OfflinePreflightIdentity {
 }
 export interface OfflinePreflightState {
   mode: BridgeMode; project: OfflinePreflightProject | null; visible: boolean; selectionPending: boolean;
+  selectedOperation: OfflineCheckOperation;
   connectionGeneration: number; selectionGeneration: number; contextGeneration: number; requestGeneration: number;
   listening: boolean; initialized: boolean; readPending: boolean; status: OfflinePreflightStatus | null;
   consent: OfflinePreflightConsent | null; pending: 'prepare' | 'start' | null; originalUnconfirmed: boolean;
@@ -54,6 +55,7 @@ export function offlinePreflightOwnerReason(state: OfflinePreflightState): strin
 
 export class OfflinePreflightController {
   private state: OfflinePreflightState = freeze<OfflinePreflightState>({ mode: 'unavailable', project: null, visible: false, selectionPending: false,
+    selectedOperation: 'offline-preflight',
     connectionGeneration: 0, selectionGeneration: 0, contextGeneration: 0, requestGeneration: 0,
     listening: false, initialized: false, readPending: false, status: null, consent: null, pending: null, originalUnconfirmed: false,
     historical: false, cancelClaimed: null, error: null, observationIssue: null, nativeBlocked: false, integrityFailed: false, generationLost: false });
@@ -101,6 +103,12 @@ export class OfflinePreflightController {
       this.retire(this.advance('contextGeneration'));
   }
   selectionIntent(): void { if (!this.disposed) this.retire(this.advance('selectionGeneration')); }
+  setOperation(operation: OfflineCheckOperation): void {
+    if (this.disposed || !OFFLINE_CHECK_OPERATIONS.includes(operation) || operation === this.state.selectedOperation) return;
+    // Changing the requested scope is not consent and cannot rearm an old run.
+    // Original status/STOP/Promises remain owned even when the selection moves.
+    this.retire({ ...this.advance('contextGeneration'), selectedOperation: operation });
+  }
   snapshotIntent(projectId: string): void {
     if (!this.disposed && (projectId === this.state.project?.projectId || projectId === this.attempt?.binding.context.projectId))
       this.retire(this.advance('contextGeneration'));
@@ -174,6 +182,7 @@ export class OfflinePreflightController {
     return !this.disposed && !attempt.retired && this.attempt === attempt && this.observer === attempt.observer && attempt.observer.active &&
       b.connectionGeneration === this.state.connectionGeneration && b.selectionGeneration === this.state.selectionGeneration &&
       b.contextGeneration === this.state.contextGeneration && b.requestGeneration === this.state.requestGeneration &&
+      b.context.operation === this.state.selectedOperation &&
       p !== null && b.observationGeneration === p.observationGeneration && b.context.projectId === p.projectId &&
       b.context.draftRevision === p.draftRevision && b.context.baselineGeneration === p.baselineGeneration && sameOfflineData(b.context.savedConfig, p.savedConfig);
   }
@@ -303,13 +312,14 @@ export class OfflinePreflightController {
     if (this.prepareReason() || !this.observer || !this.state.project?.savedConfig) return;
     const project = this.state.project;
     const request = copyOfflinePreflightRequest('prepare_offline_preflight', { projectId: project.projectId, draftRevision: project.draftRevision,
-      baselineGeneration: project.baselineGeneration, savedConfig: project.savedConfig }) as PrepareOfflinePreflight | null;
+      baselineGeneration: project.baselineGeneration, savedConfig: project.savedConfig,
+      ...(this.state.selectedOperation === 'local-project-checks' ? { operation: this.state.selectedOperation } : {}) }) as PrepareOfflinePreflight | null;
     const now = this.now();
     if (!request || !Number.isFinite(now) || now < 0 || !Number.isFinite(now + OFFLINE_PREFLIGHT_CONSENT_MS)) { this.fail({ code: 'offline_preflight_invalid' }, true); return; }
     const counters = this.advance('requestGeneration');
     if (counters.generationLost) { this.retire(counters); return; }
     const observer = this.observer;
-    const binding: OfflinePreflightBinding = freeze({ context: { ...request, platform: 'android', operation: 'offline-preflight' },
+    const binding: OfflinePreflightBinding = freeze({ context: { ...request, platform: 'android', operation: request.operation ?? 'offline-preflight' },
       observationGeneration: project.observationGeneration, connectionGeneration: this.state.connectionGeneration,
       selectionGeneration: this.state.selectionGeneration, contextGeneration: this.state.contextGeneration, requestGeneration: counters.requestGeneration! });
     const attempt: Attempt = { observer, binding, previous: observer.status?.operation ? id(observer.status.operation) : null,
@@ -380,7 +390,7 @@ export class OfflinePreflightController {
     this.update({ consent: null, pending: 'start', originalUnconfirmed: true, historical: false, error: null });
     if (!this.matches(attempt) || this.commonReason()) { this.retire(); return; }
     try {
-      const value = await attempt.observer.api.startOfflinePreflight({ operationId, ownerGeneration, consentVersion: OFFLINE_PREFLIGHT_CONSENT });
+      const value = await attempt.observer.api.startOfflinePreflight({ operationId, ownerGeneration, consentVersion: offlineCheckConsent(attempt.binding.context.operation) });
       if (!attempt.observer.active || this.attempt !== attempt) return;
       const status = parseOfflinePreflightStatus(value);
       if (!status?.operation || !sameOfflineIdentity(status.operation, attempt.identity) || status.operation.phase === 'awaiting-consent') {

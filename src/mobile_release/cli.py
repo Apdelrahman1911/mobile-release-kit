@@ -148,6 +148,8 @@ def build_parser() -> argparse.ArgumentParser:
     preflight_parser.add_argument("--credentials-file", type=Path)
     preflight_parser.add_argument("--credentials-from-env", action="store_true")
     preflight_parser.add_argument("--require-tools", action="store_true")
+    preflight_parser.add_argument("--local-project-checks", action="store_true",
+        help="Run Android local prerequisites and configured project checks without Store setup; requires --offline --skip-builds and no credential/artifact options. Project commands may have file/network effects.")
     preflight_parser.add_argument(
         "--artifact",
         action="append",
@@ -429,8 +431,12 @@ def _credentials(args: argparse.Namespace) -> int:
 
 
 def _preflight(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
     mode = "signing" if args.signing else "online" if args.online else "offline"
+    local_checks = bool(getattr(args, "local_project_checks", False))
+    if local_checks and (mode != "offline" or not args.offline or args.run_builds or args.artifact
+            or args.credentials_file is not None or args.credentials_from_env or args.require_tools):
+        raise ValidationError("--local-project-checks requires --offline --skip-builds and no artifact or credential options")
+    config = load_config(args.config)
     artifacts = _parse_artifacts(args.artifact, config.root)
     for name, path in tuple(artifacts.items()):
         artifacts[name] = _repository_path(
@@ -441,10 +447,11 @@ def _preflight(args: argparse.Namespace) -> int:
         mode=mode,
         platforms=_platforms(args.platform, config.enabled_platforms),
         run_builds=args.run_builds and mode != "online",
-        artifacts=artifacts,
+        artifacts=None if local_checks and not args.artifact else artifacts,
         credentials_file=args.credentials_file,
         credentials_from_env=args.credentials_from_env,
         require_tools=args.require_tools,
+        scope="local-project" if local_checks else "release",
     )
     return _emit(result, args, config)
 

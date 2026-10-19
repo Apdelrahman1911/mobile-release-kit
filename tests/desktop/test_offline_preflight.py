@@ -62,7 +62,7 @@ def request_data(raw=None):
 
 def terminal(req, report=None):
     return {"schemaVersion": 1, "context": req.context, "outcome": "complete", "reason": "none",
-        "result": wire.project_result(Report("inert") if report is None else report, req.context["savedConfig"]),
+        "result": wire.project_result(Report("inert") if report is None else report, req.context["savedConfig"], operation=req.context["operation"]),
         "lifetime": {"complete": True, "fatal": False, "contained": True, "commandDispatched": False,
             "commands": 0, "profileCalls": 0, "inputClosed": True, "handlersRestored": True,
             "invocationClosed": True, "stopObserved": "none"}}
@@ -80,6 +80,28 @@ def inert_source():
 
 
 class PreflightProtocolTests(unittest.TestCase):
+    def test_local_scope_is_bound_to_original_request_not_a_release_result(self):
+        for operation in wire.OPERATIONS:
+            value = request_data()
+            value["context"]["operation"] = operation
+            req = wire.parse_request(encoded(value))
+            data = terminal(req)
+            wire.validate_terminal(data, req)
+            self.assertEqual(data["result"]["scope"], wire.result_scope(operation))
+            other = "offline-preflight" if operation == "local-project-checks" else "local-project-checks"
+            data["result"]["scope"] = wire.result_scope(other)
+            with self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(data, req)
+            data = terminal(req)
+            data["context"] = {**data["context"], "operation": other}
+            with self.assertRaises(wire.ProtocolError):
+                wire.validate_terminal(data, req)
+        for bad in ("online", "local-project", None, {}):
+            value = request_data()
+            value["context"]["operation"] = bad
+            with self.assertRaises(wire.ProtocolError):
+                wire.parse_request(encoded(value))
+
     def test_private_request_has_exact_context_and_no_renderer_input_surface(self):
         value = request_data()
         parsed = wire.parse_request(encoded(value))
@@ -277,8 +299,15 @@ class PreflightServiceTests(unittest.TestCase):
                     policy.assert_not_called()
 
     def test_fixed_saved_selection_uses_shared_policy_and_same_original_invocation(self):
+        for operation in wire.OPERATIONS:
+            with self.subTest(operation=operation):
+                self._fixed_saved_selection(operation)
+
+    def _fixed_saved_selection(self, operation):
         raw = encoded(saved_data())
-        req = wire.parse_request(encoded(request_data(raw)))
+        value = request_data(raw)
+        value["context"]["operation"] = operation
+        req = wire.parse_request(encoded(value))
         with inert_source() as (guard, source), ExitStack() as patches:
             run = service.OfflinePreflightRun(req, guard, source)
             owners = []
@@ -303,7 +332,10 @@ class PreflightServiceTests(unittest.TestCase):
             patches.enter_context(patch.object(service.os, "getcwd", return_value="/inert/runtime"))
             patches.enter_context(patch.object(run.budget, "read", return_value=raw))
             patches.enter_context(patch.object(preflight, "doctor", side_effect=lambda config, *args, **kwargs: Report("inert", budget=config._preflight_budget)))
-            patches.enter_context(patch.object(preflight, "metadata_findings", return_value=[]))
+            patches.enter_context(patch.object(preflight, "metadata_findings", return_value=[],
+                side_effect=AssertionError("local metadata read") if operation == "local-project-checks" else None))
+            if operation == "local-project-checks":
+                patches.enter_context(patch.object(preflight, "resolve_credential_values", side_effect=AssertionError("local credential resolution")))
             patches.enter_context(patch.object(ReleaseConfig, "release_version", return_value=types.SimpleNamespace(name="1.2.3", build=7)))
             command = patches.enter_context(patch.object(preflight, "run_owned", return_value=subprocess.CompletedProcess([], 1)))
             policy = patches.enter_context(patch.object(service, "_preflight", wraps=preflight._preflight))
@@ -318,7 +350,7 @@ class PreflightServiceTests(unittest.TestCase):
             self.assertIs(run.budget.invocation, owners[0])
             self.assertEqual(policy.call_args.kwargs, {"mode": "offline", "platforms": ("android",), "run_builds": False,
                 "artifacts": None, "credentials_file": None, "credentials_from_env": False, "require_tools": False,
-                "signing_lease": None, "invocation": owners[0]})
+                "signing_lease": None, "invocation": owners[0], "scope": "local-project" if operation == "local-project-checks" else "release"})
             self.assertEqual(command.call_args.args[0], ["inert-project-check", "PRIVATE_ARG"])
             self.assertIs(command.call_args.kwargs["cancellation"], guard)
             self.assertFalse(command.call_args.kwargs["capture"])
@@ -333,4 +365,3 @@ class PreflightServiceTests(unittest.TestCase):
         owner.project_started = True
         owner.project_owner = None
         self.assertFalse(owner._offline_preflight_closed(guard))
-

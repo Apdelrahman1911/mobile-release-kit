@@ -1,11 +1,14 @@
 // Closed comparison/result DATA only. Native owns admission, execution and finality.
 export interface SavedConfigContent { bytes: number; sha256: string }
+export type OfflineCheckOperation = 'offline-preflight' | 'local-project-checks';
+export type OfflineCheckConsentVersion = 'saved-offline-android-v1' | 'saved-local-android-checks-v1';
 export interface PrepareOfflinePreflight {
   projectId: string; draftRevision: number; baselineGeneration: number; savedConfig: SavedConfigContent;
+  operation?: OfflineCheckOperation;
 }
 export interface OfflinePreflightIdentity { operationId: string; ownerGeneration: string }
-export interface StartOfflinePreflight extends OfflinePreflightIdentity { consentVersion: 'saved-offline-android-v1' }
-export interface OfflinePreflightContext extends PrepareOfflinePreflight { platform: 'android'; operation: 'offline-preflight' }
+export interface StartOfflinePreflight extends OfflinePreflightIdentity { consentVersion: OfflineCheckConsentVersion }
+export interface OfflinePreflightContext extends PrepareOfflinePreflight { platform: 'android'; operation: OfflineCheckOperation }
 export type OfflinePreflightAvailability = 'available' | 'busy' | 'shutdown' | 'cleanup-unknown' | 'document-lost' | 'unsupported-platform' | 'runtime-unqualified';
 export type OfflinePreflightPhase = 'awaiting-consent' | 'starting' | 'running' | 'stopping' | 'terminal' | 'unknown';
 export type OfflinePreflightOutcome = 'complete' | 'refused' | 'cancelled' | 'timed-out' | 'failed' | 'unknown';
@@ -23,7 +26,7 @@ export interface OfflinePreflightFinding {
   ordinal: number; check: OfflineCheckId; status: OfflineCoreStatus; message: OfflineCheckId; projectCheckIndex: number | null;
 }
 export interface OfflinePreflightResult {
-  schemaVersion: 1; scope: 'saved-offline-android-no-core-build'; usedConfig: SavedConfigContent;
+  schemaVersion: 1; scope: 'saved-offline-android-no-core-build' | 'saved-local-android-project-checks'; usedConfig: SavedConfigContent;
   findings: OfflinePreflightFinding[];
   summary: { total: number; shown: number; omitted: number; counts: Record<OfflineCoreStatus, number> };
   limitations: OfflineLimitation[];
