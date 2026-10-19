@@ -3,10 +3,13 @@
 ## Status and user-facing boundary
 
 Implemented: the actual bounded cache/download/extraction service, projection of
-the existing checked public supplier, and a staged-source picker presentation.
-**Not enabled:** the original native acquisition/runtime/cache admission facet
-and its fixed bootstrap are not wired. There is no new renderer or CLI download
-endpoint, production fallback owner, automatic Start, or installation claim.
+the existing checked public supplier, staged-source presentation, and the
+original saved-owner acquisition/runtime/cache facet, same-Document adapter and
+fixed bootstrap entry. **Not enabled:** original Document/central routing,
+Root's separate memory admission and packaging still require integration and
+native profile verification.
+`NATIVE_QUALIFIED` remains false. No renderer or CLI download endpoint,
+production fallback owner, automatic Start, or installation claim was enabled.
 No real downloads, tool executions, installation, TLS qualification or hosted
 dispatch were performed for this slice.
 
@@ -51,8 +54,10 @@ service; parsing DATA never admits a profile or supplies missing-tool facts.
 ### Actual staging service
 
 `ToolAcquisition(original_owner).run() -> PreparedSources` is one-use. The
-`NativeAcquisitionOwner` protocol is a **required original-native seam**, not an
-implemented production owner and not a caller-provided callback endpoint:
+`NativeAcquisitionOwner` protocol is implemented by the fixed admitted
+`desktop_tool_acquisition.ToolAcquisitionRun`, not a caller-provided callback
+endpoint. Its native counterpart remains unavailable until independently
+qualified and wired:
 
 | Required owner method | Meaning |
 | --- | --- |
@@ -93,8 +98,15 @@ an offer until the original native parent accepts its real joins/final checks.
 
 ### Cache, disk and extraction
 
-The native facet admits a preexisting private 0700 cache anchor and its exclusive
-operation lease. Each attempt creates one exclusive `tool-<operation>/` directory
+The native facet owns private0700 `tool-cache-v1/` beneath the native application
+data directory, with `.lease`, `origins/` and `archives/`. It creates an absent
+cache through held ancestors only after the original SourceBook's complete
+native-project-roster physical exclusion and exact parent/app-data rematch.
+Missing app-data is explicitly unavailable; this slice does not initialize it.
+An existing cache requires this process's joined
+original predecessors. Its descriptor-bound exclusive lease covers both native
+controls and the child archive directory. Each attempt in `archives/` creates
+one exclusive `tool-<operation>/` directory
 with `origin.json`, optional `<component>.archive`, `sources/`, and (only after
 full reinspection) `result.json`. Existing jobs are never renamed, overwritten,
 truncated, recursively deleted or chmod-ed. At most 32 job directories are
@@ -131,7 +143,12 @@ These private-cache checks coordinate admitted operations and detect ordinary
 changes; they are not protection from a compromised OS/unlocked same-user
 process maliciously rewriting the namespace between system calls.
 
-## Exact Root-owned wiring still required (no feature enable before this)
+## Earlier staging-slice wiring outline
+
+The original facet/slot/control/cache source in this outline is now implemented.
+The current exact integration and qualification requirements superseding it are
+in [Original native acquisition owner](tool-acquisition-native-owner-20261019.md).
+No earlier proposal or DATA test constitutes native availability.
 
 1. Add a distinct closed **ToolAcquisition** facet to the existing
    `saved_command_owner.rs` Domain/Context/Profile/Frame/Terminal sums. Reuse

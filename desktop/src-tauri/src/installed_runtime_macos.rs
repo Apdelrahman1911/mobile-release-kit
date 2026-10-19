@@ -570,6 +570,7 @@ impl Drop for RemovalRequestOriginal {fn drop(&mut self){
 
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
 struct Book { records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
+    tool_ca_required: bool, tool_ca: Option<(usize,u64,String)>,
     history_nomination: Option<HistoryProviderNomination>, history_provider: Option<usize>,
     store: Option<store_runtime::Originals>,
     #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -612,7 +613,7 @@ fn metadata(s: &FileStat, directory: bool) -> Result<Identity> {
 }
 impl Book {
     fn new() -> Self { Self { records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
-        history_nomination: None, history_provider: None,
+        history_nomination: None, history_provider: None, tool_ca_required:false, tool_ca:None,
         store: None,
         #[cfg(not(feature = "macos-android-registration-helper"))]
         registration_gate: None,
@@ -772,6 +773,7 @@ impl Book {
         let mut bytes = self.records.capacity().checked_mul(std::mem::size_of::<Record>())?.checked_add(frame)?;
         for record in &self.records { bytes = bytes.checked_add(record.name.capacity())?; }
         if let Some(nomination)=&self.history_nomination{bytes=bytes.checked_add(nomination.retained_bytes()?)?;}
+        if let Some((_,_,sha))=&self.tool_ca{bytes=bytes.checked_add(sha.capacity())?;}
         #[cfg(not(feature = "macos-android-registration-helper"))]
         if let Some(gate)=&self.removal_gate{bytes=bytes.checked_add(gate.retained_bytes()?)?;}
         Some(bytes)
@@ -972,6 +974,10 @@ impl Book {
                     let expected = files.get(&path).ok_or(AdmissionFailure::Inventory)?;
                     if self.read(index, expected.size, false, end, stop)?.0 != expected.sha256 { return Err(AdmissionFailure::Inventory); }
                     history_runtime::provider_observed(self,&path,index,Some(expected))?;
+                    if self.tool_ca_required && path=="github-ca.pem" {
+                        if self.tool_ca.is_some() || expected.size==0 || expected.size>512*1024 {return Err(AdmissionFailure::Inventory);}
+                        self.tool_ca=Some((index,expected.size,expected.sha256.clone()));
+                    }
                 }
                 if let Some(store) = &mut self.store { store.observed(&path, index)?; }
                 // Original records survive every close. Keep the launch roots
@@ -980,6 +986,7 @@ impl Book {
                 let absolute = selection.cwd.join(&path);
                 let retain = [&selection.python, &selection.core, &selection.bootstrap].iter().any(|p| p.starts_with(&absolute))
                     || history_runtime::provider_retained(self,&path)
+                    || self.tool_ca_required && path=="github-ca.pem"
                     || self.store.is_some() && store_runtime::retained(&path);
                 if !retain {
                     self.point(end, stop)?;
@@ -1327,7 +1334,49 @@ slots!(MetadataImagesRuntimeSlots, MetadataImagesInstalledRuntime, runtime::Meta
 slots!(ReleaseVersionRuntimeSlots, ReleaseVersionInstalledRuntime, runtime::ReleaseVersionInstalledProfile);
 slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveInstalledProfile);
 slots!(LocalHistoryRuntimeSlots, LocalHistoryInstalledRuntime, runtime::LocalReleaseHistoryInstalledProfile);
+slots!(ToolAcquisitionRuntimeSlots, ToolAcquisitionInstalledRuntime, runtime::ToolAcquisitionInstalledProfile);
 slots!(ArtifactInspectionRuntimeSlots, ArtifactInspectionInstalledRuntime, runtime::ArtifactInspectionInstalledProfile);
+
+impl ToolAcquisitionRuntimeSlots {
+    pub(crate) fn arm_public_ca_once(&mut self)->Result<()> {
+        if !self.never_started(){return Err(AdmissionFailure::AlreadyUsed);}
+        let book=self.inspection.as_mut().ok_or(AdmissionFailure::Unknown)?;
+        if book.tool_ca_required||book.tool_ca.is_some(){return Err(AdmissionFailure::AlreadyUsed);}
+        book.tool_ca_required=true;Ok(())
+    }
+    pub(crate) fn public_ca(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<Vec<u8>> {
+        if self.settlement{return Err(AdmissionFailure::AlreadyUsed);}
+        let book=match(&mut self.inspection,&mut self.acquisition){(Some(b),None)=>b,(None,Some(c))=>&mut c.original,_=>return Err(AdmissionFailure::Unknown)};
+        if !book.inspected||!book.tool_ca_required{return Err(AdmissionFailure::Inventory);}
+        let (index,size,sha)=book.tool_ca.as_ref().ok_or(AdmissionFailure::Inventory)?.clone();
+        if size==0||size>512*1024{return Err(AdmissionFailure::Bounds);}
+        book.check_name(index,end,stop)?;
+        let(actual,bytes)=book.read(index,size,true,end,stop)?;
+        if actual!=sha{return Err(AdmissionFailure::Inventory);}
+        book.check_name(index,end,stop)?;Ok(bytes)
+    }
+}
+impl ToolAcquisitionInstalledRuntime {
+    pub(crate) fn check_before_or_after_use(&self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        self.original.point(end,stop)?;
+        if !self.claimed||self.no_effect||!self.original.inspected||!self.original.prepared
+            ||self.original.retained_original_count().is_none_or(|n|n==0){return Err(AdmissionFailure::AlreadyUsed);}
+        let result=(||{for(index,record)in self.original.records.iter().enumerate(){
+            if record.state==State::Owned{self.original.check_name(index,end,stop)?;}
+        }self.original.point(end,stop)})();
+        if let Err(failure)=result{self.original.note_acl(failure,Instant::now());}result
+    }
+    pub(crate) fn check_before_settlement(&self,expired:&mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool)->Result<()> {
+        if !self.claimed||self.no_effect||!self.original.inspected||!self.original.prepared
+            ||self.original.retained_original_count().is_none_or(|n|n==0){return Err(AdmissionFailure::AlreadyUsed);}
+        for(index,record)in self.original.records.iter().enumerate(){
+            if expired(self.original.first_failure()){return Err(AdmissionFailure::Deadline);}
+            if record.state==State::Owned{self.original.check_name_with(index,&mut||if expired(self.original.first_failure()){
+                Err(AdmissionFailure::Deadline)}else{Ok(())})?;}
+        }
+        Ok(())
+    }
+}
 
 impl LocalHistoryInstalledRuntime {
     // These are audits of this domain's SAME original Book, not a new loan or

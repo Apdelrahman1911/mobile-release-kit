@@ -420,6 +420,12 @@ class DefaultCancellation:
             raise self.restore_error("invalid history cancellation source ownership")
         self._install_saved_command_source(source)
 
+    def _install_tool_acquisition_source(self, source: Any) -> None:
+        from ._desktop_tool_acquisition_control import ToolAcquisitionInput
+        if type(source) is not ToolAcquisitionInput:
+            raise ValueError("Invalid original tool preparation input")
+        self._install_saved_command_source(source)
+
     def _install_artifact_inspection_source(self, source: Any) -> None:
         from ._desktop_artifact_inspection_control import ArtifactInspectionInput
         if type(source) is not ArtifactInspectionInput:

@@ -18,6 +18,18 @@ pub(super) struct Catalog {
 }
 pub(super) struct Selection {produced:Arc<Published>,data:android_wire::MacToolchainSelection}
 struct Published {original:Arc<Operation>,entries:Vec<wire::Row>}
+/// Retains the actual empty publication and its original worker/close joins.
+/// A zero-row Status or a copied generation can never construct this loan.
+pub(super) struct EmptyLoan {published:Arc<Published>,generation:u32}
+impl EmptyLoan {
+    pub(super) fn joined_for(&self,inner:&Inner)->bool {
+        let original=&self.published.original;
+        self.generation>0 && original.generation==self.generation && self.published.entries.is_empty()
+            && original.final_seen.load(Ordering::SeqCst) && original.accepted_final.load(Ordering::SeqCst)
+            && original.original_matches(inner) && original.known_originals() && original.failure().is_none()
+    }
+    pub(super) fn generation(&self)->u32{self.generation}
+}
 #[derive(Clone,Copy,PartialEq,Eq)]
 enum RowKind {Busy,Interrupted,Refused,Metadata,Recovered}
 struct FrozenRow {instance:String,occupants:u8,kind:RowKind,metadata:Option<wire::Entry>}
@@ -243,6 +255,15 @@ impl Selection {
     }
 }
 impl Catalog {
+    pub(super) fn empty_acquisition_loan(&self)->Option<EmptyLoan>{
+        if self.generation==0||self.active.is_some()||self.selected.is_some()||self.retired.is_some(){return None;}
+        let published=self.published.as_ref().filter(|p|p.entries.is_empty())?.clone();
+        Some(EmptyLoan{published,generation:self.generation})
+    }
+    pub(super) fn same_empty_acquisition_loan(&self,loan:&EmptyLoan)->bool{
+        self.generation==loan.generation&&self.active.is_none()&&self.selected.is_none()&&self.retired.is_none()
+            &&self.published.as_ref().is_some_and(|p|Arc::ptr_eq(p,&loan.published)&&p.entries.is_empty())
+    }
     /// Finite prior/current Catalog holdings for the app-M2 admission census.
     /// No lifecycle mutation, native/book access or post-tail probing. The
     /// worker froze its positive retained charge BEFORE moving the close tail;

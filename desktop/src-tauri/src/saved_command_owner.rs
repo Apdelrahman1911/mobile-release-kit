@@ -11,7 +11,7 @@ use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, Child
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
     all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 use {std::process::Stdio, tokio::process::Command};
-use crate::{asset_source::RegisteredRoot, offline_preflight_protocol as wire, android_build_protocol as android_wire, project_recovery_protocol as recovery_wire, ios_archive_protocol as ios_wire, artifact_inspection_protocol as artifact_wire, local_store_preflight_protocol as store_wire, local_store_prepare_protocol as prepare_wire, local_store_reconcile_protocol as reconcile_wire, local_store_execute_protocol as execute_wire, local_release_history_protocol as history_wire,
+use crate::{asset_source::RegisteredRoot, offline_preflight_protocol as wire, android_build_protocol as android_wire, project_recovery_protocol as recovery_wire, ios_archive_protocol as ios_wire, artifact_inspection_protocol as artifact_wire, local_store_preflight_protocol as store_wire, local_store_prepare_protocol as prepare_wire, local_store_reconcile_protocol as reconcile_wire, local_store_execute_protocol as execute_wire, local_release_history_protocol as history_wire, tool_acquisition_protocol as tools_wire,
     error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}, android_toolchain::AndroidToolchainProfile, asset_session::{IOSSigningMaterial, AndroidSigningMaterial, SelectedStoreMaterial}};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 use crate::{android_toolchain::AndroidToolchainCustody,
@@ -20,6 +20,10 @@ use crate::{android_toolchain::AndroidToolchainCustody,
 use crate::installed_runtime::{OfflinePreflightRuntimeSlots, ProjectRecoveryRuntimeSlots};
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 use crate::{installed_runtime::{AdmissionFailure, CloseOutcome, IOSArchiveRuntimeSlots, ArtifactInspectionRuntimeSlots, StoreRuntimeSlots, LocalHistoryRuntimeSlots}, ios_toolchain::IOSXcodeSlots};
+
+#[path = "saved_command_tool_acquisition.rs"]
+mod tool_acquisition;
+pub(crate) use tool_acquisition::{Admitted as ToolAcquisitionAdmitted, Census as ToolAcquisitionCensus};
 
 #[path = "saved_command_local_history.rs"]
 mod local_history;
@@ -163,9 +167,10 @@ fn publish_macos_returned_failure(
 // This private closed sum is not a runner API. No operation descriptors,
 // callbacks, extension traits, caller argv or caller deadlines enter the owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SavedCommandDomain { LocalReleaseHistory, LocalStoreExecute, LocalStoreReconcile, LocalStorePrepare, LocalStorePreflight, OfflinePreflight, AndroidBuild, ProjectRecovery, IOSArchive, ArtifactInspection }
+enum SavedCommandDomain { ToolAcquisition, LocalReleaseHistory, LocalStoreExecute, LocalStoreReconcile, LocalStorePrepare, LocalStorePreflight, OfflinePreflight, AndroidBuild, ProjectRecovery, IOSArchive, ArtifactInspection }
 impl SavedCommandDomain {
     fn unavailable(self) -> BridgeError { match self {
+        Self::ToolAcquisition => BridgeError::new("tool_acquisition_unavailable", "Check this computer and choose existing tools first; automatic downloads require the supported native owner."),
         Self::LocalReleaseHistory => BridgeError::new("local_release_history_unavailable", "Local release history requires this original Mac document and bundled runtime."),
         Self::LocalStoreExecute => BridgeError::new("local_store_execute_unavailable", "Local Store execution checks require this original Mac document and bundled runtime."),
         Self::LocalStorePrepare => BridgeError::new("local_store_prepare_unavailable", "Local Store preparation checks require this original Mac document and bundled runtime."),
@@ -178,6 +183,7 @@ impl SavedCommandDomain {
         Self::ArtifactInspection => BridgeError::new("artifact_inspection_unavailable", "Artifact inspection is unavailable for this original document and runtime."),
     } }
     fn busy(self) -> BridgeError { match self {
+        Self::ToolAcquisition => BridgeError::new("tool_acquisition_busy", "Finish or cancel the current build-tool operation first."),
         Self::LocalReleaseHistory => BridgeError::new("local_release_history_busy", "Finish or cancel the current operation before local release history."),
         Self::LocalStoreExecute => BridgeError::new("local_store_execute_busy", "Finish or cancel the current operation before checking local Store execution."),
         Self::LocalStorePrepare => BridgeError::new("local_store_prepare_busy", "Finish or cancel the current operation before checking local Store preparation."),
@@ -190,6 +196,7 @@ impl SavedCommandDomain {
         Self::ArtifactInspection => BridgeError::new("artifact_inspection_busy", "Finish or cancel the original operation before artifact inspection."),
     } }
     fn invalid_owner(self) -> BridgeError { match self {
+        Self::ToolAcquisition => tools_wire::invalid(),
         Self::LocalReleaseHistory => BridgeError::new("local_release_history_invalid_owner", "This request does not identify the unused original local release history intent."),
         Self::LocalStoreExecute => BridgeError::new("local_store_execute_owner", "This request does not identify the unused original local Store execution intent."),
         Self::LocalStorePrepare => BridgeError::new("local_store_prepare_owner", "This request does not identify the unused original local Store preparation intent."),
@@ -202,24 +209,28 @@ impl SavedCommandDomain {
         Self::ArtifactInspection => BridgeError::new("artifact_inspection_owner", "This request does not identify the original artifact-inspection intent."),
     } }
     fn request_limit(self) -> usize { match self {
+        Self::ToolAcquisition => tools_wire::REQUEST_LIMIT,
         Self::LocalReleaseHistory => history_wire::REQUEST_LIMIT, Self::LocalStoreExecute => execute_wire::REQUEST_LIMIT, Self::LocalStorePrepare => prepare_wire::REQUEST_LIMIT, Self::LocalStoreReconcile => reconcile_wire::REQUEST_LIMIT, Self::LocalStorePreflight => store_wire::REQUEST_LIMIT, Self::OfflinePreflight => wire::REQUEST_LIMIT, Self::AndroidBuild => android_wire::REQUEST_LIMIT, Self::ProjectRecovery => recovery_wire::REQUEST_LIMIT, Self::IOSArchive => ios_wire::REQUEST_LIMIT, Self::ArtifactInspection => artifact_wire::REQUEST_LIMIT,
     } }
     fn response_limit(self) -> usize { match self {
+        Self::ToolAcquisition => tools_wire::RESPONSE_LIMIT,
         Self::LocalReleaseHistory => history_wire::RESPONSE_LIMIT, Self::LocalStoreExecute => execute_wire::RESPONSE_LIMIT, Self::LocalStorePrepare => prepare_wire::RESPONSE_LIMIT, Self::LocalStoreReconcile => reconcile_wire::RESPONSE_LIMIT, Self::LocalStorePreflight => store_wire::RESPONSE_LIMIT, Self::OfflinePreflight => wire::RESPONSE_LIMIT, Self::AndroidBuild => android_wire::RESPONSE_LIMIT, Self::ProjectRecovery => recovery_wire::RESPONSE_LIMIT, Self::IOSArchive => ios_wire::RESPONSE_LIMIT, Self::ArtifactInspection => artifact_wire::RESPONSE_LIMIT,
     } }
-    fn frame_limit(self) -> usize { match self { Self::LocalReleaseHistory => 8, Self::LocalStoreExecute => 6, Self::LocalStorePrepare => 6, Self::LocalStoreReconcile => 4, Self::LocalStorePreflight => 2, Self::OfflinePreflight => 2, Self::AndroidBuild => 8, Self::ProjectRecovery => 2, Self::IOSArchive => ios_wire::MAX_FRAMES, Self::ArtifactInspection => 2 } }
+    fn frame_limit(self) -> usize { match self { Self::ToolAcquisition => 2, Self::LocalReleaseHistory => 8, Self::LocalStoreExecute => 6, Self::LocalStorePrepare => 6, Self::LocalStoreReconcile => 4, Self::LocalStorePreflight => 2, Self::OfflinePreflight => 2, Self::AndroidBuild => 8, Self::ProjectRecovery => 2, Self::IOSArchive => ios_wire::MAX_FRAMES, Self::ArtifactInspection => 2 } }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Context { LocalReleaseHistory(history_wire::Context), LocalStoreExecute(execute_wire::Context), LocalStoreReconcile(reconcile_wire::Context), LocalStorePrepare(prepare_wire::Context), LocalStorePreflight(store_wire::Context), OfflinePreflight(wire::Context), AndroidBuild(android_wire::Context), ProjectRecovery(recovery_wire::Context), IOSArchive(ios_wire::Context), ArtifactInspection(artifact_wire::Context) }
+enum Context { ToolAcquisition(tools_wire::Context), LocalReleaseHistory(history_wire::Context), LocalStoreExecute(execute_wire::Context), LocalStoreReconcile(reconcile_wire::Context), LocalStorePrepare(prepare_wire::Context), LocalStorePreflight(store_wire::Context), OfflinePreflight(wire::Context), AndroidBuild(android_wire::Context), ProjectRecovery(recovery_wire::Context), IOSArchive(ios_wire::Context), ArtifactInspection(artifact_wire::Context) }
 impl Context {
     fn signed_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signed()) }
     fn requires_private_material(&self) -> bool { self.signed_ios() || matches!(self, Self::AndroidBuild(c) if c.signed()) || matches!(self, Self::LocalStorePreflight(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_)) }
     fn recovery_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.recovery()) }
     fn frame_limit(&self) -> usize { match self { Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), Self::LocalStoreReconcile(context)=>context.frame_limit(), _ => self.domain().frame_limit() } }
     fn domain(&self) -> SavedCommandDomain { match self {
+        Self::ToolAcquisition(_) => SavedCommandDomain::ToolAcquisition,
         Self::LocalReleaseHistory(_) => SavedCommandDomain::LocalReleaseHistory, Self::LocalStoreExecute(_) => SavedCommandDomain::LocalStoreExecute, Self::LocalStorePrepare(_) => SavedCommandDomain::LocalStorePrepare, Self::LocalStoreReconcile(_) => SavedCommandDomain::LocalStoreReconcile, Self::LocalStorePreflight(_) => SavedCommandDomain::LocalStorePreflight, Self::OfflinePreflight(_) => SavedCommandDomain::OfflinePreflight, Self::AndroidBuild(_) => SavedCommandDomain::AndroidBuild, Self::ProjectRecovery(_) => SavedCommandDomain::ProjectRecovery, Self::IOSArchive(_) => SavedCommandDomain::IOSArchive, Self::ArtifactInspection(_) => SavedCommandDomain::ArtifactInspection,
     } }
     fn project_id(&self) -> &str { match self {
+        Self::ToolAcquisition(c) => &c.project_id,
         Self::LocalReleaseHistory(c) => &c.project_id, Self::LocalStoreExecute(c) => &c.project_id, Self::LocalStorePrepare(c) => &c.project_id, Self::LocalStoreReconcile(c) => &c.project_id, Self::LocalStorePreflight(c) => &c.project_id, Self::OfflinePreflight(c) => &c.project_id, Self::AndroidBuild(c) => &c.project_id, Self::ProjectRecovery(c) => &c.project_id, Self::IOSArchive(c) => &c.project_id, Self::ArtifactInspection(c) => &c.project_id,
     } }
 }
@@ -252,9 +263,10 @@ impl PrivateSigningMaterial {
     } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Profile { LocalReleaseHistory(history_wire::Profile), LocalStoreExecute(execute_wire::Profile), LocalStoreReconcile(reconcile_wire::Profile), LocalStorePrepare(prepare_wire::Profile), LocalStorePreflight(store_wire::Profile), OfflinePreflight(wire::Profile), AndroidBuild(android_wire::Profile), ProjectRecovery(recovery_wire::Profile), IOSArchive(ios_wire::Profile), ArtifactInspection(artifact_wire::Profile) }
+enum Profile { ToolAcquisition(tools_wire::Profile), LocalReleaseHistory(history_wire::Profile), LocalStoreExecute(execute_wire::Profile), LocalStoreReconcile(reconcile_wire::Profile), LocalStorePrepare(prepare_wire::Profile), LocalStorePreflight(store_wire::Profile), OfflinePreflight(wire::Profile), AndroidBuild(android_wire::Profile), ProjectRecovery(recovery_wire::Profile), IOSArchive(ios_wire::Profile), ArtifactInspection(artifact_wire::Profile) }
 impl Profile {
     fn current(domain: SavedCommandDomain) -> Option<Self> { match domain {
+        SavedCommandDomain::ToolAcquisition => tools_wire::Profile::current().map(Self::ToolAcquisition),
         SavedCommandDomain::LocalReleaseHistory => history_wire::Profile::current().map(Self::LocalReleaseHistory),
         SavedCommandDomain::LocalStoreExecute => execute_wire::Profile::current().map(Self::LocalStoreExecute),
         SavedCommandDomain::LocalStorePrepare => prepare_wire::Profile::current().map(Self::LocalStorePrepare), SavedCommandDomain::LocalStoreReconcile => reconcile_wire::Profile::current().map(Self::LocalStoreReconcile),
@@ -399,7 +411,7 @@ impl Outcome {
     } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Reason { RecoverySettleUnavailable, ReconcileUnavailable, PrepareUnavailable, ExecuteUnavailable, CandidateInputsUnavailable, JournalUnavailable, EnrollmentExists, RecoveryRequired,
+enum Reason { ToolAcquisition(tools_wire::Reason), RecoverySettleUnavailable, ReconcileUnavailable, PrepareUnavailable, ExecuteUnavailable, CandidateInputsUnavailable, JournalUnavailable, EnrollmentExists, RecoveryRequired,
     SavedSourceChanged, SavedSourceInvalid, CredentialsUnavailable, QueryPrerequisites,
     None, Cancelled, ContextChanged, DocumentLost, Shutdown,
     TimedOut, ProtocolError, RuntimeUnavailable, IntentExpired, StaleIntent,
@@ -513,6 +525,7 @@ impl Reason {
         store_wire::Reason::CleanupUnknown => Self::CleanupUnknown,
     } }
     fn history(self) -> Result<history_wire::Reason, BridgeError> { Ok(match self {
+        Self::ToolAcquisition(_) => return Err(BridgeError::protocol()),
         Self::ProjectBusy => history_wire::Reason::ProjectBusy,
         Self::RecoveryRequired => history_wire::Reason::RecoveryRequired,
         Self::EnrollmentExists => history_wire::Reason::EnrollmentExists,
@@ -536,6 +549,7 @@ impl Reason {
         _ => return Err(BridgeError::protocol()),
     }) }
     fn prepare(self) -> Result<prepare_wire::Reason, BridgeError> { Ok(match self {
+        Self::ToolAcquisition(_) => return Err(BridgeError::protocol()),
         Self::PrepareUnavailable => prepare_wire::Reason::PrepareUnavailable,
         Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::None => prepare_wire::Reason::None,
@@ -557,6 +571,7 @@ impl Reason {
         _ => return Err(BridgeError::protocol()),
     }) }
     fn reconcile(self) -> Result<reconcile_wire::Reason, BridgeError> { Ok(match self {
+        Self::ToolAcquisition(_) => return Err(BridgeError::protocol()),
         Self::ReconcileUnavailable => reconcile_wire::Reason::ReconcileUnavailable,
         Self::RecoverySettleUnavailable => reconcile_wire::Reason::RecoverySettleUnavailable,
         Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
@@ -579,6 +594,7 @@ impl Reason {
         _ => return Err(BridgeError::protocol()),
     }) }
     fn execute(self) -> Result<execute_wire::Reason, BridgeError> { Ok(match self {
+        Self::ToolAcquisition(_) => return Err(BridgeError::protocol()),
         Self::ExecuteUnavailable => execute_wire::Reason::ExecuteUnavailable,
         Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::None => execute_wire::Reason::None,
@@ -600,6 +616,7 @@ impl Reason {
         _ => return Err(BridgeError::protocol()),
     }) }
     fn store(self) -> Result<store_wire::Reason, BridgeError> { Ok(match self {
+        Self::ToolAcquisition(_) => return Err(BridgeError::protocol()),
         Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::None => store_wire::Reason::None,
         Self::Cancelled => store_wire::Reason::Cancelled,
@@ -656,6 +673,7 @@ impl Reason {
         artifact_wire::Reason::ResourcesUnavailable => Self::ResourcesUnavailable,
     } }
     fn artifact(self) -> Result<artifact_wire::Reason,BridgeError> { Ok(match self {
+        Self::ToolAcquisition(_) => return Err(BridgeError::protocol()),
         Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::None => artifact_wire::Reason::None,
@@ -695,6 +713,7 @@ impl Reason {
     }) }
 
     fn recovery(self) -> Result<recovery_wire::Reason, BridgeError> { Ok(match self {
+        Self::ToolAcquisition(_) => return Err(BridgeError::protocol()),
         Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),
@@ -824,6 +843,7 @@ impl Reason {
         ios_wire::Reason::CleanupUnknown => Self::CleanupUnknown,
     } }
     fn ios(self) -> Result<ios_wire::Reason, BridgeError> { Ok(match self {
+        Self::ToolAcquisition(_) => return Err(BridgeError::protocol()),
         Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::EnrollmentExists=>return Err(BridgeError::protocol()),
         Self::JournalUnavailable=>ios_wire::Reason::JournalUnavailable,Self::RecoveryRequired=>ios_wire::Reason::RecoveryRequired,Self::CandidateInputsUnavailable=>ios_wire::Reason::CandidateInputsUnavailable,
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
@@ -902,6 +922,7 @@ impl Reason {
         })
     }
     fn android(self) -> Result<android_wire::Reason, BridgeError> { Ok(match self {
+        Self::ToolAcquisition(_) => return Err(BridgeError::protocol()),
         Self::JournalUnavailable=>android_wire::Reason::JournalUnavailable,Self::RecoveryRequired=>android_wire::Reason::RecoveryRequired,
         Self::CandidateInputsUnavailable=>android_wire::Reason::CandidateInputsUnavailable,Self::RecoverySettleUnavailable|Self::ReconcileUnavailable|Self::ExecuteUnavailable|Self::PrepareUnavailable|Self::EnrollmentExists=>return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
@@ -1038,24 +1059,27 @@ impl Availability {
     } }
 }
 #[derive(Clone)]
-enum Terminal { LocalReleaseHistory(history_wire::Terminal), LocalStoreExecute(execute_wire::Terminal), LocalStoreReconcile(reconcile_wire::Terminal), LocalStorePrepare(prepare_wire::Terminal), LocalStorePreflight(store_wire::Terminal), OfflinePreflight(wire::Terminal), AndroidBuild(android_wire::Terminal), ProjectRecovery(recovery_wire::Terminal), IOSArchive(ios_wire::Terminal), ArtifactInspection(artifact_wire::Terminal) }
+enum Terminal { ToolAcquisition(tools_wire::Terminal), LocalReleaseHistory(history_wire::Terminal), LocalStoreExecute(execute_wire::Terminal), LocalStoreReconcile(reconcile_wire::Terminal), LocalStorePrepare(prepare_wire::Terminal), LocalStorePreflight(store_wire::Terminal), OfflinePreflight(wire::Terminal), AndroidBuild(android_wire::Terminal), ProjectRecovery(recovery_wire::Terminal), IOSArchive(ios_wire::Terminal), ArtifactInspection(artifact_wire::Terminal) }
 impl Terminal {
     fn outcome(&self) -> Outcome { match self {
+        Self::ToolAcquisition(t) => Outcome::from_tools(t.outcome),
         Self::LocalReleaseHistory(t) => Outcome::from_history(t.outcome), Self::LocalStoreExecute(t) => Outcome::from_store(t.outcome), Self::LocalStorePrepare(t) => Outcome::from_store(t.outcome), Self::LocalStoreReconcile(t) => Outcome::from_store(t.outcome), Self::LocalStorePreflight(t) => Outcome::from_store(t.outcome), Self::OfflinePreflight(t) => Outcome::from_offline(t.outcome), Self::AndroidBuild(t) => Outcome::from_android(t.outcome),
         Self::ProjectRecovery(t) => Outcome::from_recovery(t.outcome), Self::IOSArchive(t) => Outcome::from_ios(t.outcome), Self::ArtifactInspection(t) => Outcome::from_artifact(t.outcome),
     } }
     fn reason(&self) -> Reason { match self {
+        Self::ToolAcquisition(t) => Reason::from_tools(t.reason),
         Self::LocalReleaseHistory(t) => Reason::from_history(t.reason), Self::LocalStoreExecute(t) => Reason::from_execute(t.reason), Self::LocalStorePrepare(t) => Reason::from_prepare(t.reason), Self::LocalStoreReconcile(t) => Reason::from_reconcile(t.reason), Self::LocalStorePreflight(t) => Reason::from_store(t.reason), Self::OfflinePreflight(t) => Reason::from_offline(t.reason), Self::AndroidBuild(t) => Reason::from_android(t.reason),
         Self::ProjectRecovery(t) => Reason::from_recovery(t.reason), Self::IOSArchive(t) => Reason::from_ios(t.reason), Self::ArtifactInspection(t) => Reason::from_artifact(t.reason),
     } }
     fn settled(&self) -> bool { match self {
+        Self::ToolAcquisition(t) => t.lifetime.settled(),
         Self::LocalReleaseHistory(t) => t.lifetime.settled(), Self::LocalStoreExecute(t) => t.lifetime.settled(), Self::LocalStorePrepare(t) => t.lifetime.settled(), Self::LocalStoreReconcile(t) => t.lifetime.settled(), Self::LocalStorePreflight(t) => t.lifetime.settled(), Self::OfflinePreflight(t) => t.lifetime.settled(), Self::AndroidBuild(t) => t.settled(),
         Self::ProjectRecovery(t) => t.settled(), Self::IOSArchive(t) => t.settled(), Self::ArtifactInspection(t) => t.lifetime.settled(),
     } }
 }
-enum Frame { LocalReleaseHistory(history_wire::Frame), LocalStoreExecute(execute_wire::Frame), LocalStoreReconcile(reconcile_wire::Frame), LocalStorePrepare(prepare_wire::Frame), LocalStorePreflight(store_wire::Frame), OfflinePreflight(wire::Frame), AndroidBuild(android_wire::Frame), ProjectRecovery(recovery_wire::Frame), IOSArchive(ios_wire::Frame), ArtifactInspection(artifact_wire::Frame) }
+enum Frame { ToolAcquisition(tools_wire::Frame), LocalReleaseHistory(history_wire::Frame), LocalStoreExecute(execute_wire::Frame), LocalStoreReconcile(reconcile_wire::Frame), LocalStorePrepare(prepare_wire::Frame), LocalStorePreflight(store_wire::Frame), OfflinePreflight(wire::Frame), AndroidBuild(android_wire::Frame), ProjectRecovery(recovery_wire::Frame), IOSArchive(ios_wire::Frame), ArtifactInspection(artifact_wire::Frame) }
 struct Start { operation_id: String, owner_generation: String }
-enum Status { LocalReleaseHistory(history_wire::Status), LocalStoreExecute(execute_wire::Status), LocalStoreReconcile(reconcile_wire::Status), LocalStorePrepare(prepare_wire::Status), LocalStorePreflight(store_wire::Status), OfflinePreflight(wire::Status), AndroidBuild(android_wire::Status), ProjectRecovery(recovery_wire::Status), IOSArchive(ios_wire::Status), ArtifactInspection(artifact_wire::Status) }
+enum Status { ToolAcquisition(tools_wire::Status), LocalReleaseHistory(history_wire::Status), LocalStoreExecute(execute_wire::Status), LocalStoreReconcile(reconcile_wire::Status), LocalStorePrepare(prepare_wire::Status), LocalStorePreflight(store_wire::Status), OfflinePreflight(wire::Status), AndroidBuild(android_wire::Status), ProjectRecovery(recovery_wire::Status), IOSArchive(ios_wire::Status), ArtifactInspection(artifact_wire::Status) }
 impl Status {
     fn history(self)->Result<history_wire::Status,BridgeError>{match self{Self::LocalReleaseHistory(v)=>Ok(v),_=>Err(BridgeError::protocol())}}
     fn prepare(self)->Result<prepare_wire::Status,BridgeError>{match self{Self::LocalStorePrepare(v)=>Ok(v),_=>Err(BridgeError::protocol())}}
@@ -1067,13 +1091,13 @@ impl Status {
         Self::ProjectRecovery(status) => Ok(status), _ => Err(BridgeError::protocol()),
     } }
     fn offline(self) -> Result<wire::Status, BridgeError> { match self {
-        Self::OfflinePreflight(status) => Ok(status), Self::AndroidBuild(_) | Self::ProjectRecovery(_) | Self::IOSArchive(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) => Err(BridgeError::protocol()),
+        Self::OfflinePreflight(status) => Ok(status), Self::AndroidBuild(_) | Self::ProjectRecovery(_) | Self::IOSArchive(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) | Self::ToolAcquisition(_) => Err(BridgeError::protocol()),
     } }
     fn android(self) -> Result<android_wire::Status, BridgeError> { match self {
-        Self::AndroidBuild(status) => Ok(status), Self::OfflinePreflight(_) | Self::ProjectRecovery(_) | Self::IOSArchive(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) => Err(BridgeError::protocol()),
+        Self::AndroidBuild(status) => Ok(status), Self::OfflinePreflight(_) | Self::ProjectRecovery(_) | Self::IOSArchive(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) | Self::ToolAcquisition(_) => Err(BridgeError::protocol()),
     } }
     fn ios(self) -> Result<ios_wire::Status, BridgeError> { match self {
-        Self::IOSArchive(status) => Ok(status), Self::OfflinePreflight(_) | Self::AndroidBuild(_) | Self::ProjectRecovery(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) => Err(BridgeError::protocol()),
+        Self::IOSArchive(status) => Ok(status), Self::OfflinePreflight(_) | Self::AndroidBuild(_) | Self::ProjectRecovery(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) | Self::ToolAcquisition(_) => Err(BridgeError::protocol()),
     } }
 }
 
@@ -1081,7 +1105,7 @@ impl Status {
 struct Clocks { admitted: Instant, work: Instant, finality: Instant, cleanup: Instant, signed: bool, recovery: bool, local_history: bool }
 impl Clocks {
     fn new(domain: SavedCommandDomain, admitted: Instant) -> Self {
-        let (work, hard) = match domain { SavedCommandDomain::LocalReleaseHistory => (Duration::from_secs(60),Duration::from_secs(62)), SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStoreExecute => (Duration::from_secs(1200),Duration::from_secs(1210)), SavedCommandDomain::OfflinePreflight => (OFFLINE_WORK, OFFLINE_HARD),
+        let (work, hard) = match domain { SavedCommandDomain::ToolAcquisition => (Duration::from_secs(1200),Duration::from_secs(1210)), SavedCommandDomain::LocalReleaseHistory => (Duration::from_secs(60),Duration::from_secs(62)), SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStoreExecute => (Duration::from_secs(1200),Duration::from_secs(1210)), SavedCommandDomain::OfflinePreflight => (OFFLINE_WORK, OFFLINE_HARD),
             SavedCommandDomain::AndroidBuild => (ANDROID_WORK, ANDROID_HARD), SavedCommandDomain::IOSArchive => (IOS_WORK, IOS_HARD), SavedCommandDomain::ProjectRecovery => (RECOVERY_WORK, RECOVERY_HARD), SavedCommandDomain::ArtifactInspection => (Duration::from_secs(900),Duration::from_secs(910)) };
         Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false, local_history: domain == SavedCommandDomain::LocalReleaseHistory }
     }
@@ -1145,6 +1169,7 @@ struct InstalledIOSOriginal {
 #[path = "saved_command_recovery_observation.rs"]
 mod recovery_observation;
 struct Inner {
+    tool_acquisition: std::sync::OnceLock<tool_acquisition::Binding>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     observation: Mutex<Option<InstalledObservation>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
@@ -1165,6 +1190,7 @@ struct Inner {
     fixture: Mutex<Option<std::sync::Weak<offline_tests::hosted::Permit>>>,
 }
 struct Registry {
+    tool_acquisition: tool_acquisition::Registry,
     revision: u32, exhausted: bool, disabled: bool, stopping: bool, document_lost: bool,
     capability: Availability, ios_mode_capabilities: Option<ios_wire::ModeCapabilities>,
     prepared: Option<Prepared>, active: Option<Active>, last: Option<RunProjection>, recovery_review: Option<RecoveryReview>,
@@ -1172,7 +1198,7 @@ struct Registry {
     android_registration: android_registration::Registration, artifact_inputs: artifact_inputs::Inputs,
     identity_vetoes: identity_continuity::Vetoes,
 }
-struct Prepared { local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
+struct Prepared { tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
     android_selection: Option<Arc<android_catalog::Selection>>, artifact_selection: Option<Arc<artifact_inputs::Loan>>, artifact_tools: Option<Arc<ArtifactToolLoan>> }
 struct RecoveryReview { context: recovery_wire::Context, observation: recovery_wire::Observation, stamp: String, expires: Instant, registration: u32, project: RegisteredRoot }
@@ -1313,7 +1339,7 @@ impl RunProjection {
         if self.stage.is_some() { return Err(BridgeError::protocol()); }
         let result = match self.result {
             Some(Terminal::OfflinePreflight(t)) => t.result,
-            None => None, Some(Terminal::AndroidBuild(_) | Terminal::ProjectRecovery(_) | Terminal::IOSArchive(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_)) => return Err(BridgeError::protocol()),
+            None => None, Some(Terminal::AndroidBuild(_) | Terminal::ProjectRecovery(_) | Terminal::IOSArchive(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_) | Terminal::ToolAcquisition(_)) => return Err(BridgeError::protocol()),
         };
         Ok(wire::Projection { operation_id: self.operation_id, owner_generation: self.owner_generation, context,
             phase: self.phase.offline(), intent_usable: self.intent_usable, outcome: self.outcome.map(Outcome::offline),
@@ -1334,7 +1360,7 @@ impl RunProjection {
         let Context::AndroidBuild(context) = self.context else { return Err(BridgeError::protocol()); };
         let (result, activity, disposition) = match self.result {
             Some(Terminal::AndroidBuild(t)) => (t.result, Some(t.activity), Some(t.disposition)),
-            None => (None, None, None), Some(Terminal::OfflinePreflight(_) | Terminal::IOSArchive(_) | Terminal::ProjectRecovery(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_)) => return Err(BridgeError::protocol()),
+            None => (None, None, None), Some(Terminal::OfflinePreflight(_) | Terminal::IOSArchive(_) | Terminal::ProjectRecovery(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_) | Terminal::ToolAcquisition(_)) => return Err(BridgeError::protocol()),
         };
         Ok(android_wire::Projection { operation_id: self.operation_id, owner_generation: self.owner_generation, context,
             phase: self.phase.android(), intent_usable: self.intent_usable, outcome: self.outcome.map(Outcome::android),
@@ -1344,7 +1370,7 @@ impl RunProjection {
         let Context::IOSArchive(context) = self.context else { return Err(BridgeError::protocol()); };
         let (result, activity, disposition, report) = match self.result {
             Some(Terminal::IOSArchive(t)) => (t.result, Some(t.activity), t.disposition, t.report),
-            None => (None, None, None, None), Some(Terminal::OfflinePreflight(_)) | Some(Terminal::AndroidBuild(_)) | Some(Terminal::ProjectRecovery(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_)) => return Err(BridgeError::protocol()),
+            None => (None, None, None, None), Some(Terminal::OfflinePreflight(_)) | Some(Terminal::AndroidBuild(_)) | Some(Terminal::ProjectRecovery(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_) | Terminal::ToolAcquisition(_)) => return Err(BridgeError::protocol()),
         };
         Ok(ios_wire::Projection { operation_id: self.operation_id, owner_generation: self.owner_generation, context,
             phase: self.phase.ios(), intent_usable: self.intent_usable, outcome: self.outcome.map(Outcome::ios),
@@ -1352,6 +1378,7 @@ impl RunProjection {
     }
 }
 struct Session {
+    tools: tool_acquisition::State,
     local_history_consent:Option<Arc<crate::asset_session::LocalHistoryConsent>>,
     history:local_history::State,
     domain: SavedCommandDomain, id: String, generation: String, context: Context, profile: Profile, clocks: Clocks,
@@ -1509,6 +1536,7 @@ struct Pipe<T> { io: Option<T>, close: Close }
 impl<T> Default for Pipe<T> { fn default() -> Self { Self { io: None, close: Close::New } } }
 #[derive(Default)]
 struct Resources {
+    tools: tool_acquisition::Resources,
     inspection: Option<JoinHandle<Result<VerifiedRuntime, BridgeError>>>, inspection_joined: bool, inspection_failed: bool,
     inspection_started: bool, inspection_error: Option<tokio::task::JoinError>,
     acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, acquisition_failed: bool,
@@ -1800,6 +1828,7 @@ fn final_clock_clear(r: &Registry, owner: &Session, now: Instant) -> bool {
         && r.active.as_ref().is_some_and(|a| !a.unknown && now < owner.finality_end(a.first_stop))
 }
 fn native_worker_lost(book: &Resources, owner: &Session) {
+    if owner.domain==SavedCommandDomain::ToolAcquisition { tool_acquisition::worker_lost(book,owner); return; }
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if owner.domain==SavedCommandDomain::LocalReleaseHistory {
         if let Some(native)=&book.history_installed {match native.lock(){Ok(mut slots)=>slots.mark_interrupted(),Err(error)=>error.into_inner().mark_interrupted()}}
@@ -1852,6 +1881,7 @@ fn native_worker_lost(book: &Resources, owner: &Session) {
 }
 fn native_final(book: &Resources, owner: &Session) -> bool {
     let domain=owner.domain;
+    if domain==SavedCommandDomain::ToolAcquisition{return tool_acquisition::native_final(book,owner);}
     if domain==SavedCommandDomain::LocalReleaseHistory{return local_history::installed_final(book)&&local_history::sources_final(owner);}
     if matches!(domain,SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile){return store::installed_final(book)&&local_history::sources_final(owner);}
     if domain==SavedCommandDomain::LocalStorePreflight{return store::installed_final(book);}
@@ -2104,7 +2134,7 @@ impl SavedCommandOwner {
         }
         let android_original_owner = domain == SavedCommandDomain::AndroidBuild && runtime.claim_original_android_owner();
         let (changes, _) = watch::channel(0);
-        Self { inner: Arc::new(Inner {
+        Self { inner: Arc::new(Inner { tool_acquisition:std::sync::OnceLock::new(),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             observation: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
@@ -2119,7 +2149,7 @@ impl SavedCommandOwner {
             android_registration_control: Arc::new(android_registration::ControlSlot::default()),
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
             android_service_dispatcher:std::sync::OnceLock::new(),
-            domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
+            domain, runtime, toolchain, registry: Mutex::new(Registry { tool_acquisition:tool_acquisition::Registry::default(), revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified, ios_mode_capabilities: None,
             prepared: None, active: None, last: None, recovery_review: None, recovery: None, android_catalog: android_catalog::Catalog::default(), android_sources: android_sources::Sources::default(),
             android_registration: android_registration::Registration::default(), artifact_inputs: artifact_inputs::Inputs::default(),
@@ -2188,7 +2218,7 @@ impl SavedCommandOwner {
             observation.control.claim(match self.inner.domain {
                 SavedCommandDomain::OfflinePreflight => crate::shell::installed_observation::commands::Domain::Offline,
                 SavedCommandDomain::AndroidBuild => crate::shell::installed_observation::commands::Domain::Android,
-                SavedCommandDomain::ProjectRecovery | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory => return Err(self.inner.domain.unavailable()),
+                SavedCommandDomain::ProjectRecovery | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::ToolAcquisition => return Err(self.inner.domain.unavailable()),
             })?;
         }
         let mut recovery_stamp = None;
@@ -2236,7 +2266,7 @@ impl SavedCommandOwner {
             phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
         if self.inner.domain == SavedCommandDomain::ProjectRecovery { r.recovery_review = None; }
         let android_selection = r.android_catalog.selection().cloned();
-        r.prepared = Some(Prepared { local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
+        r.prepared = Some(Prepared { tools:None, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
         self.inner.bump(&mut r);
         // After commit, only typed status or unknown/lost reply, never the three
         // fixed preallocation refusal codes used by the renderer controller.
@@ -2253,12 +2283,22 @@ impl SavedCommandOwner {
     }
     fn start_bound_checked(&self,input:Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:Availability,
         material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>)->Result<Admitted,BridgeError>{
+        self.start_bound_admitted(input,admitted_at,registered,gate,material,execute_budget,None)
+    }
+    fn start_bound_admitted(&self,input:Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:Availability,
+        material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
+        tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>)->Result<Admitted,BridgeError>{
+        if (self.inner.domain==SavedCommandDomain::ToolAcquisition)!=tools_admission.is_some(){return Err(self.inner.domain.unavailable());}
         if (self.inner.domain==SavedCommandDomain::LocalStoreExecute)!=execute_budget.is_some(){return Err(self.inner.domain.unavailable());}
         let mut r = self.inner.lock();
         if !r.prepared.as_ref().is_some_and(|p| p.projection.operation_id == input.operation_id && p.projection.owner_generation == input.owner_generation) {
             return Err(self.inner.domain.invalid_owner()); // Foreign/replayed Start never stops another owner.
         }
         let prepared = r.prepared.take().ok_or_else(|| self.inner.domain.invalid_owner())?; // One use, before executor/runtime/effects.
+        if !tool_acquisition::start_admitted(&self.inner,&r,&prepared,tools_admission) {
+            r.last=Some(retire(prepared.projection,Reason::StaleIntent));self.inner.bump(&mut r);
+            return Ok(Admitted{status:self.inner.snapshot_locked(&mut r,gate)?,release:None});
+        }
         let clocks = if prepared.projection.context.signed_ios() || prepared.projection.context.recovery_ios() {
             Clocks::for_context(&prepared.projection.context, admitted_at)
         } else { self.inner.start_clocks(admitted_at) };
@@ -2347,7 +2387,7 @@ impl SavedCommandOwner {
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
         let android_close=android_control.as_ref().map(|control|AndroidCloseSlot::reserved(executor.clone(),control.clone()));
         let requires_private_material = context.requires_private_material();
-        let owner = Arc::new(Session { local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
+        let owner = Arc::new(Session { tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
             registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff,
             material: Mutex::new(prepared.material), material_retired: AtomicBool::new(!requires_private_material),
             recovery: prepared.recovery, android_selection: prepared.android_selection.clone(), artifact_selection: prepared.artifact_selection, artifact_tools:prepared.artifact_tools, artifact_binding:Mutex::new(None), native_failure: Mutex::new(None),
@@ -2358,7 +2398,7 @@ impl SavedCommandOwner {
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false),
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
             watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
-            resources: AsyncMutex::new(Resources { frames: Some(receiver),
+            resources: AsyncMutex::new(Resources { frames: Some(receiver), tools:tool_acquisition::Resources::new(self.inner.domain==SavedCommandDomain::ToolAcquisition),
                 history_selected: self.inner.history_installed_selected(),
                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 history_installed: self.inner.history_installed_selected().then(||Arc::new(Mutex::new(LocalHistoryRuntimeSlots::new()))),
@@ -2660,6 +2700,7 @@ impl SavedCommandOwner {
                         };
                     }
                 }
+                tool_acquisition::after_final(&mut r,&active,&owner);
                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
             }
         } else {
@@ -2754,7 +2795,7 @@ mod android_join_slot_data_tests {
 }
 fn set_failure_outcome(p: &mut RunProjection) {
     if p.reason == Reason::None {
-        p.reason = match p.context.domain() { SavedCommandDomain::OfflinePreflight | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory => Reason::CommandIncomplete,
+        p.reason = match p.context.domain() { SavedCommandDomain::OfflinePreflight | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::ToolAcquisition => Reason::CommandIncomplete,
             SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection => Reason::ProtocolError, SavedCommandDomain::ProjectRecovery => Reason::RecoveryIncomplete };
     }
     // Known retained work is not successful cancellation/disposal. Keep the
@@ -2896,6 +2937,7 @@ impl Inner {
         if self.domain == SavedCommandDomain::OfflinePreflight && self.fixture.lock().ok().and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade))
             .is_some_and(|permit| permit.permits(self)) { return true; }
         match self.domain {
+            SavedCommandDomain::ToolAcquisition => self.tool_acquisition_selected(),
             SavedCommandDomain::ArtifactInspection => self.artifact_installed_selected(),
             SavedCommandDomain::LocalReleaseHistory => self.history_installed_selected(),
             SavedCommandDomain::LocalStoreExecute => self.execute_installed_selected(),
@@ -2957,7 +2999,7 @@ impl Inner {
             || r.android_registration.busy() || gate == Availability::Busy { Availability::Busy }
         else if !self.qualified(r.android_catalog.selection()) {
             match self.domain {
-                SavedCommandDomain::OfflinePreflight | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory => Availability::RuntimeUnqualified,
+                SavedCommandDomain::OfflinePreflight | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::ToolAcquisition => Availability::RuntimeUnqualified,
                 SavedCommandDomain::AndroidBuild if !self.android_runtime_selected(None) => Availability::RuntimeUnqualified,
                 SavedCommandDomain::AndroidBuild => Availability::ToolchainUnqualified,
                 SavedCommandDomain::ProjectRecovery => Availability::RuntimeUnqualified,
@@ -2982,6 +3024,11 @@ impl Inner {
         let operation = r.active.as_ref().map(|a| a.projection.public())
             .or_else(|| r.prepared.as_ref().map(|p| p.projection.clone())).or_else(|| r.last.clone());
         match self.domain {
+            SavedCommandDomain::ToolAcquisition => {
+                let status=tools_wire::Status{schema_version:1,status_revision:r.revision,availability:reason.tools(),
+                    operation:operation.map(RunProjection::tools).transpose()?};
+                crate::edit_protocol::bounded(&status,tools_wire::STATUS_LIMIT)?;Ok(Status::ToolAcquisition(status))
+            },
             SavedCommandDomain::ArtifactInspection => {
                 let status = artifact_wire::Status {schema_version:1,status_revision:r.revision,availability:reason.artifact()?,
                     selection:r.artifact_inputs.status(),operation:operation.map(RunProjection::artifact).transpose()?};
@@ -3119,6 +3166,8 @@ impl Inner {
         // failure, never a reinterpretation of an Offline terminal as Android.
         enum Incoming { IOSCandidate(ios_wire::CandidateEvent), Accepted(Option<Stage>), Progress(Stage), History(history_wire::Event), Candidate(android_wire::CandidateEvent), Prepare(prepare_wire::Event), Reconcile(reconcile_wire::Event), Execute(execute_wire::Event), Terminal(Terminal) }
         let incoming = match (owner.domain, frame) {
+            (SavedCommandDomain::ToolAcquisition,Frame::ToolAcquisition(tools_wire::Frame::Accepted))=>Incoming::Accepted(None),
+            (SavedCommandDomain::ToolAcquisition,Frame::ToolAcquisition(tools_wire::Frame::Terminal(t)))=>Incoming::Terminal(Terminal::ToolAcquisition(t)),
             (SavedCommandDomain::LocalReleaseHistory,Frame::LocalReleaseHistory(history_wire::Frame::Accepted))=>Incoming::Accepted(None),
             (SavedCommandDomain::LocalReleaseHistory,Frame::LocalReleaseHistory(history_wire::Frame::Event(e)))=>Incoming::History(e),
             (SavedCommandDomain::LocalReleaseHistory,Frame::LocalReleaseHistory(history_wire::Frame::Terminal(t)))=>Incoming::Terminal(Terminal::LocalReleaseHistory(t)),
@@ -3190,7 +3239,7 @@ impl Inner {
             Incoming::Terminal(terminal) if a.accepted && !a.terminal => {
                 let stage = match &terminal { Terminal::AndroidBuild(t) => Some(Stage::AndroidBuild(t.activity.stage)),
                     Terminal::IOSArchive(t) => Some(Stage::IOSArchive(t.activity.stage)),
-                    Terminal::OfflinePreflight(_) | Terminal::ProjectRecovery(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_) => None };
+                    Terminal::OfflinePreflight(_) | Terminal::ProjectRecovery(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_) | Terminal::ToolAcquisition(_) => None };
                 if let Some(stage) = stage {
                     if a.projection.stage.is_none_or(|previous| !stage.at_or_after(previous)) {
                         owner.resource_unknown.store(true, Ordering::SeqCst);
@@ -3348,6 +3397,7 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
 // Decoder state is original per stdout reader; it is never reconstructed from
 // a terminal or from the public projection. This is DATA validation only.
 enum OutputDecoder {
+    ToolAcquisition {frames:usize,failed:bool},
     LocalStoreExecute(execute_wire::Decoder), LocalStorePrepare(prepare_wire::Decoder), LocalStoreReconcile(reconcile_wire::Decoder),
     LocalReleaseHistory(history_wire::Decoder),
     LocalStorePreflight { frames: usize, failed: bool },
@@ -3360,6 +3410,7 @@ enum OutputDecoder {
 impl OutputDecoder {
     fn new(owner: &Session) -> Result<Self, BridgeError> {
         match (owner.domain, &owner.context) {
+            (SavedCommandDomain::ToolAcquisition,Context::ToolAcquisition(_))=>Ok(Self::ToolAcquisition{frames:0,failed:false}),
             (SavedCommandDomain::LocalReleaseHistory, Context::LocalReleaseHistory(_)) => Ok(Self::LocalReleaseHistory(history_wire::Decoder::new())),
             (SavedCommandDomain::LocalStoreExecute,Context::LocalStoreExecute(_))=>Ok(Self::LocalStoreExecute(local_history::execute_decoder(owner)?)),
             (SavedCommandDomain::LocalStorePrepare,Context::LocalStorePrepare(_))=>Ok(Self::LocalStorePrepare(prepare_wire::Decoder::new())),
@@ -3392,6 +3443,22 @@ impl OutputDecoder {
             Self::LocalStoreExecute(decoder)=>local_history::decode_execute(owner,decoder,bytes).map(Frame::LocalStoreExecute),
             Self::LocalStorePrepare(decoder)=>local_history::decode_prepare(owner,decoder,bytes).map(Frame::LocalStorePrepare),
             Self::LocalStoreReconcile(decoder)=>local_history::decode_reconcile(owner,decoder,bytes).map(Frame::LocalStoreReconcile),
+            Self::ToolAcquisition { frames, failed } => {
+                let result = match &owner.context {
+                    Context::ToolAcquisition(context) if owner.domain == SavedCommandDomain::ToolAcquisition && !*failed && *frames < 2 =>
+                        tools_wire::decode(bytes, &owner.id, &owner.generation, context).and_then(|frame|tool_acquisition::check_frame(owner,frame)),
+                    _ => Err(BridgeError::protocol()),
+                };
+                let result = result.and_then(|frame| {
+                    if (*frames == 0 && matches!(&frame, tools_wire::Frame::Accepted))
+                        || (*frames == 1 && matches!(&frame, tools_wire::Frame::Terminal(_))) { Ok(frame) }
+                    else { Err(BridgeError::protocol()) }
+                });
+                match result {
+                    Ok(frame) => { *frames += 1; Ok(Frame::ToolAcquisition(frame)) },
+                    Err(error) => { *failed = true; Err(error) },
+                }
+            }
             Self::LocalStorePreflight { frames, failed } => {
                 let result = match &owner.context {
                     Context::LocalStorePreflight(context) if owner.domain == SavedCommandDomain::LocalStorePreflight && !*failed && *frames < 2 =>
@@ -3467,7 +3534,7 @@ impl OutputDecoder {
         Self::LocalReleaseHistory(decoder)=>decoder.finish(),
         Self::LocalStoreExecute(decoder)=>decoder.finish(),
         Self::LocalStorePrepare(decoder)=>decoder.finish(), Self::LocalStoreReconcile(decoder)=>decoder.finish(),
-        Self::LocalStorePreflight { frames, failed } | Self::OfflinePreflight { frames, failed } | Self::ProjectRecovery { frames, failed } | Self::ArtifactInspection { frames, failed } => { if *frames != 2 { *failed = true; } !*failed },
+        Self::ToolAcquisition {frames,failed} | Self::LocalStorePreflight { frames, failed } | Self::OfflinePreflight { frames, failed } | Self::ProjectRecovery { frames, failed } | Self::ArtifactInspection { frames, failed } => { if *frames != 2 { *failed = true; } !*failed },
         Self::AndroidBuild(decoder) => decoder.finish().is_ok() && decoder.settled(),
         Self::IOSArchive(decoder) => decoder.finish().is_ok() && decoder.settled(),
     } }
@@ -3475,7 +3542,7 @@ impl OutputDecoder {
 async fn enqueue_frame(inner: &Inner, owner: &Session, frame: Frame) -> bool {
     match owner.domain {
         // Preserve the original two-frame Offline transport behavior exactly.
-        SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::OfflinePreflight | SavedCommandDomain::ProjectRecovery | SavedCommandDomain::ArtifactInspection => owner.frames.try_send(frame).is_ok(),
+        SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::OfflinePreflight | SavedCommandDomain::ProjectRecovery | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::ToolAcquisition => owner.frames.try_send(frame).is_ok(),
         SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive => {
             // A valid finite activity stream must not overflow a two-slot
             // queue just because multiple frames arrived in the same read. The
@@ -4306,6 +4373,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     inner.endpoint(owner);
     if *owner.stop.borrow() || Instant::now() >= owner.clocks.work { return; }
     let runtime = inner.runtime.clone(); let end = owner.clocks.work; let domain = owner.domain;
+    let tools_original=book.tools.original();let tools_inspection_owner=owner.clone();let tools_inspection_inner=inner.clone();
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let native = book.native.clone();
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -4336,6 +4404,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
             domain.unavailable()
         })?;
         match domain {
+            SavedCommandDomain::ToolAcquisition=>tool_acquisition::inspect(&tools_inspection_inner,&tools_inspection_owner,tools_original.as_ref(),&runtime),
             SavedCommandDomain::LocalStoreExecute=>{
                 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
                 {let original=execute_native.ok_or_else(||domain.unavailable())?;
@@ -4525,6 +4594,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     inner.endpoint(owner);
     if *owner.stop.borrow() || Instant::now() >= owner.clocks.work || !original_session(&inner.lock(), owner) { return; }
     let bytes = match (&owner.context, owner.profile) {
+        (Context::ToolAcquisition(context),Profile::ToolAcquisition(profile))=>tool_acquisition::request(owner,&book,context,profile,&runtime),
         (Context::ArtifactInspection(context),Profile::ArtifactInspection(profile)) => {
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             { artifact_inputs::request(owner,&book,context,profile,&runtime) }
@@ -4643,9 +4713,12 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if matches!(owner.domain,SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile|SavedCommandDomain::LocalStorePreflight) && store::transfer_installed(&book,inner,owner).is_err(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    if owner.domain==SavedCommandDomain::ToolAcquisition && tool_acquisition::transfer(&book,inner,owner).is_err(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     if owner.domain==SavedCommandDomain::LocalReleaseHistory && local_history::transfer_installed(&book,inner,owner).is_err(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
     let acquisition_execute=book.execute_native.clone();
+    let tools_original=book.tools.original();
     let (acquire_start, acquire_enter) = oneshot::channel();
     book.acquisition_started = true;
     book.acquisition = Some(tokio::task::spawn_blocking(move || {
@@ -4657,6 +4730,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                     #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
                     acquisition_inner.stop(&acquisition_owner,Reason::RuntimeUnavailable);
                 },
+                SavedCommandDomain::ToolAcquisition => {drop(runtime);tool_acquisition::acquire(&acquisition_inner,&acquisition_owner,tools_original.as_ref());return;},
                 SavedCommandDomain::LocalReleaseHistory => {
                     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                     if let Some(native)=history_installed{drop(runtime);local_history::acquire_installed(&acquisition_inner,&acquisition_owner,&native);return;}
@@ -4817,6 +4891,7 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if matches!(owner.domain, SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive | SavedCommandDomain::LocalStoreExecute) { settle_native(&mut book, inner, owner).await; }
     local_history::settle_installed(&mut book,inner,owner).await;
+    tool_acquisition::settle_runtime(&mut book,inner,owner).await;
     store::settle_installed(&mut book,inner,owner).await;
     settle_artifact_installed(&mut book,inner,owner).await;
     settle_offline_installed(&mut book, inner, owner).await;
@@ -4874,6 +4949,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
         // repair of the lost receipt or successful result after manager loss.
         monitor_original(&inner, &owner).await;
     }
+    tool_acquisition::settle_cache_after_manager(&inner,&owner).await;
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
     let mut android_close_started=false;
     let settled = {
@@ -5137,7 +5213,7 @@ pub(crate) fn installed_project_recovery_owner_data_check() -> bool {
         let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
         let project = RegisteredRoot { path: std::path::PathBuf::from("/inert-mrk-recovery-project-not-opened"),
             identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
-        let owner = Arc::new(Session { local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
+        let owner = Arc::new(Session { tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
             context: context.clone(), profile: Profile::current(domain).unwrap(), clocks, registration: 1, project,
             recovery_stamp: None, request: AsyncMutex::new(None), material: Mutex::new(None), material_retired: AtomicBool::new(true),
             recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None, artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
@@ -5332,7 +5408,7 @@ pub(crate) fn installed_project_recovery_owner_data_check() -> bool {
     let expiry = SavedCommandOwner::project_recovery(runtime);
     {
         let mut r = expiry.inner.lock(); let expires = t + INTENT;
-        r.prepared = Some(Prepared { local_history:None, projection: RunProjection { operation_id: original.id.clone(), owner_generation: original.generation.clone(),
+        r.prepared = Some(Prepared { tools:None, local_history:None, projection: RunProjection { operation_id: original.id.clone(), owner_generation: original.generation.clone(),
             context: original.context.clone(), phase: Phase::AwaitingConsent, intent_usable: true, outcome: None,
             reason: Reason::None, result: None, stage: None }, expires, registration: original.registration, project: original.project.clone(),
             recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });

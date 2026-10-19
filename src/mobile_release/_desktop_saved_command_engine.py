@@ -45,7 +45,8 @@ class _SavedCommandEngine:
         _protocol(domain)  # Reject undeclared domains before constructing owners.
         self._domain = domain
         self.started = started
-        message = {SavedCommandDomain.OfflinePreflight: "Saved offline preflight custody did not settle",
+        message = {SavedCommandDomain.ToolAcquisition: "Tool preparation custody did not settle",
+                   SavedCommandDomain.OfflinePreflight: "Saved offline preflight custody did not settle",
                    SavedCommandDomain.AndroidBuild: "Saved Android build custody did not settle",
                    SavedCommandDomain.ProjectRecovery: "Project recovery custody did not settle",
                    SavedCommandDomain.IOSArchive: "Saved build custody did not settle",
@@ -56,7 +57,10 @@ class _SavedCommandEngine:
                    SavedCommandDomain.LocalStoreReconcile: "Local Store reconciliation custody did not settle",
                    SavedCommandDomain.LocalReleaseHistory: "Local history custody did not settle"}[domain]
         self.guard = DefaultCancellation(ProcessCleanupError, message)
-        if domain is SavedCommandDomain.OfflinePreflight:
+        if domain is SavedCommandDomain.ToolAcquisition:
+            from ._desktop_tool_acquisition_control import ToolAcquisitionInput
+            self.input = ToolAcquisitionInput(started)
+        elif domain is SavedCommandDomain.OfflinePreflight:
             from ._desktop_preflight_control import PreflightInput
             self.input = PreflightInput(started)
         elif domain is SavedCommandDomain.AndroidBuild:
@@ -136,7 +140,7 @@ class _SavedCommandEngine:
             except BaseException as error:
                 first = error
                 self.guard._abort(error)
-        elif (self.domain in {SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile} and self.input.operation is not None
+        elif (self.domain in {SavedCommandDomain.ToolAcquisition, SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile} and self.input.operation is not None
               and not self._android_handoff_close_claimed):
             self._android_handoff_close_claimed = True
             try:
@@ -163,7 +167,7 @@ class _SavedCommandEngine:
         wire = _protocol(self.domain)
         self._require(type(raw) is bytes and not self.terminal_claimed
                       and self.output_bytes + len(raw) <= wire.RESPONSE_LIMIT)
-        if self.domain in (SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
+        if self.domain in (SavedCommandDomain.ToolAcquisition, SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
             self._require(self.frames == (1 if terminal else 0))
         elif self.domain in (SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
             from ._desktop_store_prepare_protocol import request_phases
@@ -210,7 +214,7 @@ class _SavedCommandEngine:
         wire = _protocol(self.domain)
         if self.domain in (SavedCommandDomain.LocalReleaseHistory,SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
             return wire.response(self.request, kind, payload, self.frames)
-        if self.domain in (SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
+        if self.domain in (SavedCommandDomain.ToolAcquisition, SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
             return wire.response(self.request, kind, payload)
         if self.domain is SavedCommandDomain.AndroidBuild:
             self._require(type(self._android_frames) is wire.AndroidBuildFrames)
@@ -236,7 +240,9 @@ class _SavedCommandEngine:
         self._require(source_domain(self.input) is self.domain)
         self.guard.install()
         self.input.acquire()
-        if self.domain is SavedCommandDomain.OfflinePreflight:
+        if self.domain is SavedCommandDomain.ToolAcquisition:
+            self.guard._install_tool_acquisition_source(self.input)
+        elif self.domain is SavedCommandDomain.OfflinePreflight:
             self.guard._install_preflight_source(self.input)
         elif self.domain is SavedCommandDomain.AndroidBuild:
             self.guard._install_android_build_source(self.input)
@@ -256,7 +262,10 @@ class _SavedCommandEngine:
         self._acquire_output(self.error_output)
         self.guard.activate()
         self.request = self.input.request()
-        if self.domain is SavedCommandDomain.OfflinePreflight:
+        if self.domain is SavedCommandDomain.ToolAcquisition:
+            from .desktop_tool_acquisition import ToolAcquisitionRun
+            self.service = ToolAcquisitionRun(self.request, self.guard, self.input)
+        elif self.domain is SavedCommandDomain.OfflinePreflight:
             from .desktop_preflight import OfflinePreflightRun
             self.service = OfflinePreflightRun(self.request, self.guard, self.input)
         elif self.domain is SavedCommandDomain.AndroidBuild:
@@ -337,7 +346,7 @@ class _SavedCommandEngine:
             return self.service is None or self.service.budget.closed
         if self.domain is SavedCommandDomain.ProjectRecovery:
             return self.input.resources_closed()
-        self._require(self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile))
+        self._require(self.domain in (SavedCommandDomain.ToolAcquisition, SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile))
         if self.service is None and self.input.operation is None:
             # A constructor's lost handoff must not discard an already-bound
             # original operation, even though no terminal can then be emitted.
@@ -363,7 +372,9 @@ class _SavedCommandEngine:
 
 
 def run_engine(engine: _SavedCommandEngine) -> int:
-    if engine.domain is SavedCommandDomain.OfflinePreflight:
+    if engine.domain is SavedCommandDomain.ToolAcquisition:
+        from ._desktop_tool_acquisition_engine import _Engine as ExpectedEngine
+    elif engine.domain is SavedCommandDomain.OfflinePreflight:
         from ._desktop_preflight_engine import _Engine as ExpectedEngine
     elif engine.domain is SavedCommandDomain.AndroidBuild:
         from ._desktop_android_build_engine import _Engine as ExpectedEngine

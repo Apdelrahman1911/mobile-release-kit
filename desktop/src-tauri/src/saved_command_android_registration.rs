@@ -898,6 +898,11 @@ impl Operation {
     }
 }
 impl Registration {
+    /// Read-only first-slice comparison. Any service/registration history,
+    /// pending review or unresolved native state requires its ordinary flow.
+    pub(super) fn pristine_tool_acquisition_generation(&self)->Option<u32>{
+        (self.installation_empty()&&!self.busy()&&!self.unknown()).then_some(self.generation)
+    }
     pub(super) fn sources_match(&self,sources:&android_sources::Sources)->bool{
         self.maintenance.sources_match(sources) && self.service.sources_match(sources) && self.active.as_ref().is_none_or(|original|sources.same_snapshot(&original.source))
             && self.review.as_ref().is_none_or(|review|sources.same_snapshot(&review.original.source))
@@ -2144,4 +2149,16 @@ pub(super) fn execute_owner_census(inner:&Inner,document:&Arc<()>)->Option<(usiz
     let originals=registry.android_sources.census_originals()?;
     let bytes=original_owner_retained_bytes(inner,&registry,document,0,registration,0)?;
     Some((bytes,originals))
+}
+
+/// The same original allocation census, narrowed to pristine registration and
+/// an actually empty selected-source set. No Execute/tool permission is lent.
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+pub(super) fn tool_acquisition_owner_bytes(inner:&Inner,document:&Arc<()>)->Option<usize>{
+    if !inner.android_original_document_matches(Some(document)){return None;}
+    let registry=inner.registry.try_lock().ok()?;
+    registry.android_registration.pristine_tool_acquisition_generation()?;
+    if registry.android_sources.census_originals()?.iter().any(Option::is_some){return None;}
+    let registration=registry.android_registration.maintenance_retained_bytes()?;
+    original_owner_retained_bytes(inner,&registry,document,0,registration,0)
 }

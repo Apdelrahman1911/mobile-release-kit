@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 
 class SavedCommandDomain(Enum):
+    ToolAcquisition = "tool-acquisition"
     OfflinePreflight = "offline-preflight"
     AndroidBuild = "android-build"
     ProjectRecovery = "project-recovery"
@@ -40,6 +41,9 @@ class SavedCommandDomain(Enum):
 
 def _protocol(domain: SavedCommandDomain):
     # Fixed imports, not a module name, factory or callback supplied by a caller.
+    if domain is SavedCommandDomain.ToolAcquisition:
+        from . import _desktop_tool_acquisition_protocol
+        return _desktop_tool_acquisition_protocol
     if domain is SavedCommandDomain.OfflinePreflight:
         from . import _desktop_preflight_protocol
         return _desktop_preflight_protocol
@@ -81,6 +85,9 @@ def _protocol(domain: SavedCommandDomain):
 
 def source_domain(source: object) -> SavedCommandDomain:
     """A subclass/lookalike or changed domain is not an original source."""
+    from ._desktop_tool_acquisition_control import ToolAcquisitionInput
+    if type(source) is ToolAcquisitionInput and source.domain is SavedCommandDomain.ToolAcquisition:
+        return SavedCommandDomain.ToolAcquisition
     from ._desktop_preflight_control import PreflightInput
     if type(source) is PreflightInput and source.domain is SavedCommandDomain.OfflinePreflight:
         return SavedCommandDomain.OfflinePreflight
@@ -177,7 +184,7 @@ class _SavedCommandInput:
 
     def remaining_timeout(self, timeout: int) -> int:
         self._owner()
-        self._require(self.domain is not SavedCommandDomain.ProjectRecovery)
+        self._require(self.domain not in (SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ToolAcquisition))
         self._require(self.guard is not None and type(timeout) is int and timeout > 0)
         self.guard.check()
         if self.domain is SavedCommandDomain.OfflinePreflight:
@@ -195,7 +202,7 @@ class _SavedCommandInput:
 
     def command_limits(self, timeout: int, capture: bool, output_limit: int) -> tuple[int, int]:
         """Clamp only an original domain; no change to C/A/W command ownership."""
-        self._require(self.domain is not SavedCommandDomain.ProjectRecovery)
+        self._require(self.domain not in (SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ToolAcquisition))
         timeout = self.remaining_timeout(timeout)
         if self.domain is SavedCommandDomain.OfflinePreflight:
             from ._desktop_preflight_budget import budget_for
@@ -260,7 +267,8 @@ class _SavedCommandInput:
             value = os.fstat(self.fd)
             if (value.st_dev, value.st_ino, value.st_mode) != self.identity:
                 self.custody_unknown = True
-                message = {SavedCommandDomain.OfflinePreflight: "Original preflight input changed",
+                message = {SavedCommandDomain.ToolAcquisition: "Original tool preparation input changed",
+                           SavedCommandDomain.OfflinePreflight: "Original preflight input changed",
                            SavedCommandDomain.AndroidBuild: "Original Android build input changed",
                            SavedCommandDomain.ProjectRecovery: "Original project recovery input changed",
                            SavedCommandDomain.IOSArchive: "Original saved build input changed",

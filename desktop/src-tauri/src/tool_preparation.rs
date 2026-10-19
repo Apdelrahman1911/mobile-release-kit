@@ -105,6 +105,15 @@ impl Requirements {
 /// Compiled supplier DATA, not a new policy and not a native qualification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Policy { pub(crate) host: Host, pub(crate) versions: Versions, pub(crate) distribution: Distribution }
+impl Policy {
+    /// Pure exact-pin comparison only, never native tool/installation authority.
+    pub(crate) fn permits(&self,requirements:&Requirements)->bool {
+        requirements.valid()&&requirements.complete&&requirements.platform==Platform::Android
+            &&self.versions.valid()&&self.distribution.valid()
+            &&requirements.android.as_ref().is_some_and(|a|a.resolved()&&a.matches(&self.versions)
+                &&a.distribution.as_ref()==Some(&self.distribution))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) struct Stamp {
@@ -335,6 +344,18 @@ mod tests {
         let plan = prepare(context, &requirements, &observation).unwrap();
         assert_eq!((plan.state, plan.action), (State::CanReuse, Action::UseSelectedCopy));
         assert!(plan.unselected_sources.is_empty());
+    }
+    #[test]
+    fn acquisition_pin_comparison_rejects_workflow_java_and_unresolved_wrapper() {
+        let (_,mut requirements,observation)=fixture();let policy=&observation.policies[0];
+        assert!(policy.permits(&requirements));
+        requirements.android.as_mut().unwrap().jdk=Constraint::Literal("21".into());
+        assert!(!policy.permits(&requirements));
+        requirements.android.as_mut().unwrap().jdk=Constraint::Literal("17".into());
+        requirements.android.as_mut().unwrap().distribution=None;
+        assert!(!policy.permits(&requirements));
+        requirements.android.as_mut().unwrap().distribution=Some(policy.distribution.clone());
+        requirements.complete=false;assert!(!policy.permits(&requirements));
     }
     #[test]
     fn picked_and_partial_sources_do_not_become_a_review_or_protected_copy() {

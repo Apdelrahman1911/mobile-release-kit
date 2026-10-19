@@ -1,0 +1,530 @@
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -2737,7 +2737,7 @@
+         self.inner.bridge.edits.document_lost(MAIN);
+         self.inner.bridge.diagnostics.document_lost();
+         self.inner.bridge.preflight.document_lost(); self.inner.bridge.local_store.document_lost(); self.inner.bridge.local_store_prepare.document_lost(); self.inner.bridge.local_store_reconcile.document_lost(); self.inner.bridge.local_store_execute.document_lost(); self.inner.bridge.local_history.document_lost();
+-        self.inner.bridge.android_build.document_lost_published(None); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost();
++        self.inner.bridge.android_build.document_lost_published(None); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost(); self.inner.bridge.tool_acquisition.document_lost();
+         state.revision = u32::MAX; self.inner.changes.send_replace(u32::MAX);
+     }
+     fn next_operation(&self, state: &mut DocumentState) -> Result<u32, AssetError> {
+@@ -2758,7 +2758,7 @@
+         // EditOwner's first-loss tombstone was preallocated, with no loss RNG.
+         self.inner.bridge.edits.document_lost_published(MAIN, publisher);
+         self.inner.bridge.diagnostics.document_lost(); self.inner.bridge.preflight.document_lost(); self.inner.bridge.local_store.document_lost(); self.inner.bridge.local_store_prepare.document_lost(); self.inner.bridge.local_store_reconcile.document_lost(); self.inner.bridge.local_store_execute.document_lost(); self.inner.bridge.local_history.document_lost();
+-        self.inner.bridge.android_build.document_lost_published(publisher); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost(); self.bump(state);
++        self.inner.bridge.android_build.document_lost_published(publisher); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost(); self.inner.bridge.tool_acquisition.document_lost(); self.bump(state);
+     }
+     fn apply(&self, state: &mut DocumentState, action: DocumentAction, publisher: Option<&RegistrationPublisher>) {
+         match action {
+@@ -2807,16 +2807,16 @@
+     fn environment_gate(&self, state: &DocumentState) -> crate::environment_diagnostics_protocol::Availability {
+         use crate::environment_diagnostics_protocol::Availability;
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+-            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled())))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return Availability::Shutdown; }
++            || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())))) { return Availability::Shutdown; }
+         if !state.lifetime.original_bound() || state.lost_observed
+             || !self.inner.bridge.diagnostics.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
+         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed()
+             || state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
+             || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()
+             || !self.inner.bridge.supervisor.can_exit() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))
+-            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()))) { return Availability::Busy; }
++            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy())))) { return Availability::Busy; }
+         Availability::Available
+     }
+     pub(crate) fn environment_diagnostics_status(&self) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+@@ -2831,9 +2831,9 @@
+         use crate::offline_preflight_protocol::Availability;
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())
+-            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled())))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping()) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping()) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())))) { return Availability::Shutdown; }
+         if let Some(reason) = preflight_document_gate(state, crate::offline_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+@@ -2842,7 +2842,7 @@
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())
+-            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()))) { return Availability::Busy; }
++            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy())))) { return Availability::Busy; }
+         Availability::Available
+     }
+     fn local_store_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
+@@ -2853,9 +2853,9 @@
+
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled()
+-            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled())))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())))) { return Availability::Shutdown; }
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+@@ -2864,7 +2864,7 @@
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
+-            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()))) { return Availability::Busy; }
++            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy())))) { return Availability::Busy; }
+         Availability::Available
+     }
+     fn local_store_prepare_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
+@@ -2875,9 +2875,9 @@
+
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled()
+-            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled())))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())))) { return Availability::Shutdown; }
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+@@ -2886,7 +2886,7 @@
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
+-            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()))) { return Availability::Busy; }
++            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy())))) { return Availability::Busy; }
+         Availability::Available
+     }
+     fn local_store_reconcile_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
+@@ -2897,9 +2897,9 @@
+
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled()
+-            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled())))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())))) { return Availability::Shutdown; }
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+@@ -2908,7 +2908,7 @@
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
+-            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()))) { return Availability::Busy; }
++            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy())))) { return Availability::Busy; }
+         Availability::Available
+     }
+     fn local_store_execute_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
+@@ -2919,9 +2919,9 @@
+
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled()
+-            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled())))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())))) { return Availability::Shutdown; }
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+@@ -2930,16 +2930,16 @@
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
+-            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()))) { return Availability::Busy; }
++            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy())))) { return Availability::Busy; }
+         Availability::Available
+     }
+     fn artifact_gate(&self, state: &DocumentState) -> crate::artifact_inspection_protocol::Availability {
+         use crate::artifact_inspection_protocol::Availability;
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+-            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))))) { return Availability::CleanupUnknown; }
++            || ((self.inner.bridge.android_build.disabled() || self.inner.bridge.tool_acquisition.disabled()) || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping()))))) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || ((self.inner.bridge.android_build.stopping() || self.inner.bridge.tool_acquisition.stopping()) || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping()))))) { return Availability::Shutdown; }
+         if crate::artifact_inspection_protocol::Profile::current().is_none(){return Availability::UnsupportedPlatform;}
+         if state.lost_observed{return Availability::DocumentLost;}if !state.lifetime.original_bound(){return Availability::Busy;}
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+@@ -2949,7 +2949,7 @@
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+-            || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))))) { return Availability::Busy; }
++            || ((self.inner.bridge.android_build.busy() || self.inner.bridge.tool_acquisition.busy()) || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))))) { return Availability::Busy; }
+         Availability::Available
+     }
+
+@@ -3052,9 +3052,9 @@
+         use crate::android_build_protocol::Availability;
+         if state.unknown || state.exhausted || self.inner.android_registration_control.is_unknown() || self.inner.bridge.supervisor.disabled()
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+-            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled())) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled()))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping())) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping()))) { return Availability::Shutdown; }
+         if let Some(reason) = android_build_document_gate(state, crate::android_build_protocol::Profile::current()) { return reason; }
+         if !self.inner.bridge.android_build.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+@@ -3065,7 +3065,7 @@
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+-            || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy())) { return Availability::Busy; }
++            || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy()))) { return Availability::Busy; }
+         Availability::Available
+     }
+
+@@ -3202,9 +3202,9 @@
+         use crate::project_recovery_protocol::Availability;
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+-            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || self.inner.bridge.android_build.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || self.inner.bridge.android_build.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled())) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || self.inner.bridge.android_build.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || self.inner.bridge.android_build.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())) { return Availability::Shutdown; }
+         if let Some(reason) = project_recovery_document_gate(state, crate::project_recovery_protocol::Profile::current()) { return reason; }
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+         // Asset phase AND original resources must settle, as must all edits,
+@@ -3214,7 +3214,7 @@
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+-            || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || self.inner.bridge.android_build.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()) { return Availability::Busy; }
++            || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || self.inner.bridge.android_build.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy())) { return Availability::Busy; }
+         Availability::Available
+     }
+     pub(crate) fn project_recovery_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.project_recovery.subscribe() }
+@@ -3262,9 +3262,9 @@
+         use crate::ios_archive_protocol::Availability;
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+-            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.artifact_inspection.disabled()) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled())) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || self.inner.bridge.artifact_inspection.stopping()) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())) { return Availability::Shutdown; }
+         if let Some(reason) = ios_archive_document_gate(state, crate::ios_archive_protocol::Profile::current()) { return reason; }
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+         // Asset phase AND original resources must settle, as must all edits,
+@@ -3274,7 +3274,7 @@
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+-            || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || self.inner.bridge.artifact_inspection.busy()) { return Availability::Busy; }
++            || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy())) { return Availability::Busy; }
+         Availability::Available
+     }
+     pub(crate) fn ios_archive_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.ios_archive.subscribe() }
+@@ -3340,7 +3340,7 @@
+         self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+         self.inner.bridge.project_recovery.ensure_idle()?;
+-        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
++        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?;
+         self.inner.bridge.diagnostics.ensure_idle()?;
+         Ok(())
+     }
+@@ -3351,11 +3351,11 @@
+         let state = self.lock();
+         if state.unknown || state.exhausted || !state.lifetime.original_bound() || state.lost_observed || state.stopping { return Err(BridgeError::cleanup_unknown()); }
+         self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+-        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
++        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed();
+         self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+         self.inner.bridge.project_recovery.ensure_idle()?;
+-        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
++        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?;
+         self.inner.bridge.environment_fixture_registration(permit, change)
+     }
+     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+@@ -3461,13 +3461,13 @@
+         publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?;
+         state.saved_input = None;
+         self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+-        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
++        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed();
+         state.github.setup_context_changed();
+         state.github.setup_ensure_idle()?;
+         self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+         self.inner.bridge.project_recovery.ensure_idle()?;
+-        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
++        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?;
+         self.inner.bridge.diagnostics.ensure_idle()?;
+         action(&self.inner.bridge, &publisher)
+         })();
+@@ -3483,11 +3483,11 @@
+         state.saved_input = None;
+         self.inner.bridge.diagnostics.context_changed();
+         self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+-        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
++        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed();
+         self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+         self.inner.bridge.project_recovery.ensure_idle()?;
+-        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
++        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?;
+         self.inner.bridge.diagnostics.ensure_idle()?;
+         if state.stopping { return Err(BridgeError::shutdown()); }
+         if state.compatibility_picker_pending { return Err(BridgeError::new("busy", "A native project picker is already open.")); }
+@@ -3510,7 +3510,7 @@
+         self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+         self.inner.bridge.project_recovery.ensure_idle()?;
+-        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
++        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?;
+         self.inner.bridge.diagnostics.ensure_idle()?;
+         self.inner.bridge.register_picked_project(path)
+     }
+@@ -3529,7 +3529,7 @@
+             if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::Shutdown); }
+             state.saved_input = None;
+             state.stopping = true; self.inner.bridge.diagnostics.request_shutdown();
+-            self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.local_store.request_shutdown(); self.inner.bridge.local_store_prepare.request_shutdown(); self.inner.bridge.local_store_reconcile.request_shutdown(); self.inner.bridge.local_store_execute.request_shutdown(); self.inner.bridge.local_history.request_shutdown(); self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref().filter(|publisher| publisher.accepted())); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown();
++            self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.local_store.request_shutdown(); self.inner.bridge.local_store_prepare.request_shutdown(); self.inner.bridge.local_store_reconcile.request_shutdown(); self.inner.bridge.local_store_execute.request_shutdown(); self.inner.bridge.local_history.request_shutdown(); self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref().filter(|publisher| publisher.accepted())); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown(); self.inner.bridge.tool_acquisition.request_shutdown();
+         }
+         self.bump(&mut state);
+         }
+@@ -3539,11 +3539,11 @@
+         common_document_gate(state, session, || {
+             if self.inner.bridge.diagnostics.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
+             if (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) { return Err(AssetError::new(Reason::CleanupUnknown)); }
+-            if (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return Err(AssetError::new(Reason::CleanupUnknown)); }
++            if (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled())))) { return Err(AssetError::new(Reason::CleanupUnknown)); }
+             if self.inner.bridge.diagnostics.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
+             if (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) { return Err(AssetError::new(Reason::Shutdown)); }
+-            if (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return Err(AssetError::new(Reason::Shutdown)); }
+-            if self.inner.bridge.diagnostics.busy() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy()))) {
++            if (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())))) { return Err(AssetError::new(Reason::Shutdown)); }
++            if self.inner.bridge.diagnostics.busy() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy())))) {
+                 return Err(AssetError::new(Reason::Busy));
+             }
+             Ok(())
+@@ -3640,12 +3640,12 @@
+         if state.maintenance.closed() { return GitHubReason::Busy; }
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+             || self.inner.bridge.diagnostics.disabled() || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))
+-            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled()))) { return GitHubReason::CleanupUnknown; }
++            || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled())))) { return GitHubReason::CleanupUnknown; }
+         if !self.github_qualified() { return GitHubReason::Unqualified; }
+         if !state.lifetime.original_bound() || state.lost_observed || state.stopping
+             || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() || self.inner.bridge.diagnostics.stopping()
+-            || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping()))) { return GitHubReason::Cancelled; }
+-        if self.inner.bridge.diagnostics.busy() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy())))
++            || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())))) { return GitHubReason::Cancelled; }
++        if self.inner.bridge.diagnostics.busy() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy()))))
+             || state.compatibility_picker_pending { return GitHubReason::Busy; }
+         if state.quit_pending || state.retiring || state.lock_pending || state.slot.as_ref().is_some_and(|slot|
+             slot.operation.blocks_context() && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return GitHubReason::Busy; }
+@@ -3955,7 +3955,7 @@
+         // Do not consume a ready G1 receipt before this registration change.
+         // The next actual status/reconciliation rechecks this registry first.
+         // This supplied event is not native picker-admission/callback evidence.
+-        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
++        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed();
+         self.inner.bridge.android_build.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+         self.inner.bridge.project_recovery.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+         self.inner.bridge.ios_archive.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+@@ -4088,11 +4088,11 @@
+         if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?; }
+         state.saved_input = None;
+         self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+-        self.inner.bridge.android_build.context_changed_published(Some(&*publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
++        self.inner.bridge.android_build.context_changed_published(Some(&*publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed();
+         self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+         self.inner.bridge.project_recovery.ensure_idle()?;
+-        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
++        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?;
+         self.inner.bridge.diagnostics.ensure_idle()?;
+         if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
+         if state.retiring || state.lock_pending || state.compatibility_picker_pending || state.slot.as_ref().is_some_and(|slot|
+@@ -4151,7 +4151,7 @@
+             || !permitted {
+             return Err(AssetError::new(Reason::Unqualified));
+         }
+-        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
++        self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed();
+         self.inner.bridge.android_build.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+         self.inner.bridge.project_recovery.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+         self.inner.bridge.ios_archive.ensure_idle().map_err(|_| AssetError::new(Reason::Unqualified))?;
+@@ -4328,7 +4328,7 @@
+         publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged).map_err(|_|AssetError::new(Reason::CleanupUnknown))?;
+         state.saved_input=None;
+         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+-        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.gate(&state, true)?;
++        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.gate(&state, true)?;
+         let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id), None)?;
+         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+         vault::context_gate(&state, registry_generation)?;
+@@ -4377,7 +4377,7 @@
+         state.saved_input = None;
+         // Lock retires context DATA; STOP does not claim either saved-command
+         // owner's resources settled or turn vault lock into GitHub Disconnect.
+-        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed(); self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed();
++        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed(); self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed();
+         invalidate_all(&mut state); state.lock_pending = true;
+         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+         vault::revoke_all(&mut state);
+@@ -4827,7 +4827,7 @@
+                 state.github.retire(GitHubReason::Cancelled);
+                 self.inner.bridge.diagnostics.request_shutdown();
+                 self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.local_store.request_shutdown(); self.inner.bridge.local_store_prepare.request_shutdown(); self.inner.bridge.local_store_reconcile.request_shutdown(); self.inner.bridge.local_store_execute.request_shutdown(); self.inner.bridge.local_history.request_shutdown();
+-                self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref()); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown();
++                self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref()); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown(); self.inner.bridge.tool_acquisition.request_shutdown();
+                 if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::Shutdown, now); }
+                 stop_quit(&mut state, now);
+                 fixture_event!(owner, QuitStop, 1);
+@@ -6022,7 +6022,7 @@
+         if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged).map_err(|_|AssetError::new(Reason::CleanupUnknown))?; }
+         state.saved_input=None;
+         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+-        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.common_gate(&state, false)?;
++        self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.common_gate(&state, false)?;
+         if !self.project_selection_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
+         idle(&state)?;
+         // Acquire the registry's checked generation before any native work;
+@@ -6207,7 +6207,7 @@
+         self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+         self.inner.bridge.project_recovery.ensure_idle()?;
+-        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?;
++        self.inner.bridge.ios_archive.ensure_idle()?; self.inner.bridge.artifact_inspection.ensure_idle()?; self.inner.bridge.tool_acquisition.ensure_idle()?;
+         self.inner.bridge.diagnostics.ensure_idle()?;
+         Ok(())
+     }
+@@ -6242,7 +6242,7 @@
+         // Only this already-ended quit original is joined here.
+         ready && quit.is_some_and(|quit| quit.join_if_ended() == Some(true) && quit.resources_settled())
+             && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+-            && (self.inner.bridge.preflight.can_exit() && ((self.inner.bridge.local_store.can_exit() && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && self.inner.bridge.artifact_inspection.can_exit()))
++            && (self.inner.bridge.preflight.can_exit() && ((self.inner.bridge.local_store.can_exit() && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && (self.inner.bridge.artifact_inspection.can_exit() && self.inner.bridge.tool_acquisition.can_exit())))
+     }
+     #[cfg(any(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+         all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
+@@ -6307,7 +6307,7 @@
+     // join! does not short-circuit an error or abandon any original future.
+     let settlement = async {
+         let gui = async { if !dialog_ended { let _ = dialog.as_mut().await; } };
+-        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown(), document.inner.bridge.preflight.shutdown(), document.inner.bridge.local_store.shutdown(), document.inner.bridge.local_store_prepare.shutdown(), document.inner.bridge.local_store_reconcile.shutdown(), document.inner.bridge.local_store_execute.shutdown(), document.inner.bridge.local_history.shutdown(), document.inner.bridge.android_build.shutdown(), document.inner.bridge.project_recovery.shutdown(), document.inner.bridge.ios_archive.shutdown(), document.inner.bridge.artifact_inspection.shutdown());
++        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown(), document.inner.bridge.preflight.shutdown(), document.inner.bridge.local_store.shutdown(), document.inner.bridge.local_store_prepare.shutdown(), document.inner.bridge.local_store_reconcile.shutdown(), document.inner.bridge.local_store_execute.shutdown(), document.inner.bridge.local_history.shutdown(), document.inner.bridge.android_build.shutdown(), document.inner.bridge.project_recovery.shutdown(), document.inner.bridge.ios_archive.shutdown(), document.inner.bridge.artifact_inspection.shutdown(), document.inner.bridge.tool_acquisition.shutdown());
+     };
+     tokio::pin!(settlement);
+     loop {
+@@ -7058,10 +7058,10 @@
+             self.inner.bridge.edits.installed_macos_document_live(&witness.edit)
+                 && !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.edits.disabled()
+                 && !self.inner.bridge.diagnostics.disabled() && !(self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))
+-                && !self.inner.bridge.android_build.disabled() && !self.inner.bridge.project_recovery.disabled() && !(self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled())
++                && !self.inner.bridge.android_build.disabled() && !self.inner.bridge.project_recovery.disabled() && !(self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled()))
+                 && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+                 && (self.inner.bridge.preflight.can_exit() && ((self.inner.bridge.local_store.can_exit() && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && self.inner.bridge.android_build.can_exit()
+-                && self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && self.inner.bridge.artifact_inspection.can_exit()
++                && self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && (self.inner.bridge.artifact_inspection.can_exit() && self.inner.bridge.tool_acquisition.can_exit())
+         }
+         pub(crate) fn installed_macos_final(&self, id: u32, project: Option<&ProjectWitness>, picker: Option<&PickerWitness>, lost: bool) -> bool {
+             let Ok(state) = self.inner.state.try_lock() else { return false; }; let Some(quit) = &state.quit else { return false; };
+@@ -7086,9 +7086,9 @@
+                 _ => false,
+             };
+             original && !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.edits.disabled()
+-                && !self.inner.bridge.diagnostics.disabled() && !(self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) && !(self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled())))
++                && !self.inner.bridge.diagnostics.disabled() && !(self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) && !(self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled()))))
+                 && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+-                && (self.inner.bridge.preflight.can_exit() && ((self.inner.bridge.local_store.can_exit() && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && self.inner.bridge.artifact_inspection.can_exit()))
++                && (self.inner.bridge.preflight.can_exit() && ((self.inner.bridge.local_store.can_exit() && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && (self.inner.bridge.artifact_inspection.can_exit() && self.inner.bridge.tool_acquisition.can_exit())))
+         }
+         pub(crate) fn installed_macos_safe_quit(&self) -> bool {
+             // Existing ordinary admission only; never reset Unknown/STOP,
+--- a/desktop/src-tauri/src/asset_session_local_history.rs
++++ b/desktop/src-tauri/src/asset_session_local_history.rs
+@@ -73,11 +73,11 @@
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+             || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled() || (self.inner.bridge.local_store.disabled() || self.inner.bridge.local_store_prepare.disabled())
+             || self.inner.bridge.android_build.disabled() || self.inner.bridge.project_recovery.disabled()
+-            || self.inner.bridge.ios_archive.disabled() || self.inner.bridge.artifact_inspection.disabled(){return Availability::CleanupUnknown;}
++            || self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || self.inner.bridge.tool_acquisition.disabled()){return Availability::CleanupUnknown;}
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+             || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.local_store.stopping() || self.inner.bridge.local_store_prepare.stopping())
+             || self.inner.bridge.android_build.stopping() || self.inner.bridge.project_recovery.stopping()
+-            || self.inner.bridge.ios_archive.stopping() || self.inner.bridge.artifact_inspection.stopping(){return Availability::Shutdown;}
++            || self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping()){return Availability::Shutdown;}
+         if wire::Profile::current().is_none(){return Availability::UnsupportedPlatform;}
+         if state.lost_observed{return Availability::DocumentLost;}
+         if !state.lifetime.original_bound(){return Availability::Busy;}
+@@ -87,7 +87,7 @@
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
+             || (self.inner.bridge.local_store.busy() || self.inner.bridge.local_store_prepare.busy()) || self.inner.bridge.android_build.busy() || self.inner.bridge.project_recovery.busy()
+-            || self.inner.bridge.ios_archive.busy() || self.inner.bridge.artifact_inspection.busy(){return Availability::Busy;}
++            || self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy()){return Availability::Busy;}
+         Availability::Available
+     }
+ }
+--- a/desktop/src-tauri/src/bridge.rs
++++ b/desktop/src-tauri/src/bridge.rs
+@@ -458,7 +458,7 @@
+         self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
+         self.android_build.ensure_idle()?;
+         self.project_recovery.ensure_idle()?;
+-        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
++        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?;
+         self.diagnostics.ensure_idle()?;
+         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
+         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+@@ -472,7 +472,7 @@
+         self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
+         self.android_build.ensure_idle()?;
+         self.project_recovery.ensure_idle()?;
+-        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
++        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?;
+         self.diagnostics.ensure_idle()?;
+         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
+         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+@@ -738,7 +738,7 @@
+         self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
+         self.android_build.ensure_idle()?;
+         self.project_recovery.ensure_idle()?;
+-        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?;
++        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?;
+         self.diagnostics.ensure_idle()?;
+         if self.supervisor.stopping() || self.edits.stopping() { return Err(BridgeError::shutdown()); }
+         if self.supervisor.disabled() || self.edits.disabled() { return Err(BridgeError::cleanup_unknown()); }
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1052,6 +1052,7 @@
+     }
+     state.bridge.preflight.ensure_idle()?;
+     state.bridge.android_build.ensure_idle()?;
++    state.bridge.tool_acquisition.ensure_idle()?;
+     state.bridge.project_recovery.ensure_idle()?;
+     state.bridge.ios_archive.ensure_idle()?;
+     Ok(())
+@@ -2610,11 +2611,11 @@
+         }
+         app.state::<ShellState>().document.compatibility_quit_result(true);
+         // No short circuit can skip another original owner's shutdown.
+-        let (passive, edit, diagnostics, preflight, android_build, project_recovery, ios_archive, artifact_inspection) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown(), bridge.diagnostics.shutdown(), bridge.preflight.shutdown(), bridge.android_build.shutdown(), bridge.project_recovery.shutdown(), bridge.ios_archive.shutdown(), bridge.artifact_inspection.shutdown());
+-        if passive.is_ok() && edit.is_ok() && diagnostics.is_ok() && preflight.is_ok() && android_build.is_ok() && project_recovery.is_ok() && ios_archive.is_ok() && artifact_inspection.is_ok()
+-            && bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() && bridge.project_recovery.can_exit() && bridge.ios_archive.can_exit() && bridge.artifact_inspection.can_exit() {
++        let (passive, edit, diagnostics, preflight, android_build, project_recovery, ios_archive, artifact_inspection, tool_acquisition) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown(), bridge.diagnostics.shutdown(), bridge.preflight.shutdown(), bridge.android_build.shutdown(), bridge.project_recovery.shutdown(), bridge.ios_archive.shutdown(), bridge.artifact_inspection.shutdown(), bridge.tool_acquisition.shutdown());
++        if passive.is_ok() && edit.is_ok() && diagnostics.is_ok() && preflight.is_ok() && android_build.is_ok() && project_recovery.is_ok() && ios_archive.is_ok() && artifact_inspection.is_ok() && tool_acquisition.is_ok()
++            && bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() && bridge.project_recovery.can_exit() && bridge.ios_archive.can_exit() && (bridge.artifact_inspection.can_exit() && bridge.tool_acquisition.can_exit()) {
+             if !settle_relay(&app).await { return; }
+-            if !(bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() && bridge.project_recovery.can_exit() && bridge.ios_archive.can_exit() && bridge.artifact_inspection.can_exit()) { return; }
++            if !(bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() && bridge.project_recovery.can_exit() && bridge.ios_archive.can_exit() && (bridge.artifact_inspection.can_exit() && bridge.tool_acquisition.can_exit())) { return; }
+             app.state::<ShellState>().exit_ready.store(true, Ordering::SeqCst);
+             app.exit(0);
+         } else {
