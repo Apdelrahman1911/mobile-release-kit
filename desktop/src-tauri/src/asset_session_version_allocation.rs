@@ -14,6 +14,16 @@ const COMPLETING: u8 = 2;
 const RETURNED: u8 = 3;
 const UNKNOWN: u8 = 4;
 
+fn lock<'a, T>(slot: &'a Mutex<T>, stage: &AtomicU8) -> std::sync::LockResult<MutexGuard<'a, T>> {
+    let result = slot.lock();
+    if result.is_err() {
+        // Preserve the original slot and its poison. Only STOP/first ticket
+        // installation may recover its guard; poison never grants retirement.
+        stage.store(UNKNOWN, Ordering::SeqCst);
+    }
+    result
+}
+
 pub(super) struct Lane {
     saved: Arc<SavedObservationLane>,
     input: Arc<VersionAllocationSourceInput>,
@@ -28,14 +38,15 @@ impl Lane {
     fn returned(&self) -> bool {
         self.stage.load(Ordering::SeqCst) == RETURNED
             && self.completion_returned.load(Ordering::SeqCst)
-            && lock(&self.result).is_some()
-            && lock(&self.ticket).is_none()
+            && lock(&self.result, &self.stage).is_ok_and(|result| result.is_some())
+            && lock(&self.ticket, &self.stage).is_ok_and(|ticket| ticket.is_none())
     }
     fn retained_bytes(&self) -> Option<usize> {
         // The whole original fixed reservation stays charged while this ticket
         // is retained, even if its public result is much smaller. No shrinking
         // clone or early FIN releases native/code backing for another owner.
-        let original = if lock(&self.ticket).is_some() {
+        let has_ticket = lock(&self.ticket, &self.stage).ok()?.is_some();
+        let original = if has_ticket {
             self.reservation_bytes
         } else if self.returned() {
             self.input.retained_bytes()?.checked_add(4096)?
@@ -68,7 +79,8 @@ pub(super) fn stop(state: &DocumentState) {
     if let Some(lane) = &state.version_allocation_source {
         // This is STOP on the same actual ticket; no fabricated terminal or
         // lane removal. Unknown/late result keeps ordinary operations blocked.
-        if let Some(ticket) = lock(&lane.ticket).as_ref() {
+        let ticket = lock(&lane.ticket, &lane.stage).unwrap_or_else(|poison| poison.into_inner());
+        if let Some(ticket) = ticket.as_ref() {
             ticket.stop();
         }
     }
@@ -110,7 +122,7 @@ impl VersionAllocationSourceGoGate {
         if !request.same_input(input) || !crate::protocol::valid_id(id) {
             return Err(changed());
         }
-        let mut slot = lane.request.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        let mut slot = lock(&lane.request, &lane.stage).map_err(|_| BridgeError::cleanup_unknown())?;
         if slot.is_some() {
             return Err(BridgeError::cleanup_unknown());
         }
@@ -131,7 +143,7 @@ impl VersionAllocationSourceGoGate {
         // Only this exact retained source lane is exempt from the busy gate.
         let edit = document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)?;
         document.version_source_current_with_edit(&state, &lane, &edit)?;
-        let original = lane.request.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        let original = lock(&lane.request, &lane.stage).map_err(|_| BridgeError::cleanup_unknown())?;
         if !original.as_ref().is_some_and(|(original_id, original)| original_id == id && Arc::ptr_eq(original, request))
             || !request.same_input(input)
         {
@@ -312,7 +324,9 @@ impl DocumentBinding {
             let result = self.inner.bridge.supervisor.start_version_allocation_source(admission);
             match result {
                 Ok(ticket) => {
-                    *lock(&lane.ticket) = Some(ticket);
+                    // Retain this first actual ticket even if bookkeeping was
+                    // poisoned; the helper leaves its lane absorbing UNKNOWN.
+                    *lock(&lane.ticket, &lane.stage).unwrap_or_else(|poison| poison.into_inner()) = Some(ticket);
                     drop(edit);
                     drop(state);
                     self.inner.changes.send_modify(|_| {});
@@ -342,7 +356,11 @@ impl DocumentBinding {
         reference: &str,
     ) -> Result<VersionAllocationSource, BridgeError> {
         let lane = self.start_version_allocation_source(project_id, reference)?;
-        let wait = lock(&lane.ticket).as_ref().ok_or_else(BridgeError::cleanup_unknown)?.wait_original();
+        let wait = lock(&lane.ticket, &lane.stage)
+            .map_err(|_| BridgeError::cleanup_unknown())?
+            .as_ref()
+            .ok_or_else(BridgeError::cleanup_unknown)?
+            .wait_original();
         // No Document/Edit/native/state lock crosses this actual original
         // observer join. The lane retains the ticket and full code reservation.
         let mut result = wait.returned().await;
@@ -362,9 +380,23 @@ impl DocumentBinding {
                 }
                 // Only after the genuine final-observer join may the actual
                 // ticket/code reservation retire to bounded comparison DATA.
-                *lock(&lane.result) = Some(result.clone());
-                lock(&lane.ticket).take();
-                lock(&lane.request).take();
+                // Acquire every original bookkeeping slot before changing any
+                // of them; poison must not publish then discard a live ticket.
+                let mut stored_result = lock(&lane.result, &lane.stage).map_err(|_| BridgeError::cleanup_unknown())?;
+                let mut ticket = lock(&lane.ticket, &lane.stage).map_err(|_| BridgeError::cleanup_unknown())?;
+                let mut request = lock(&lane.request, &lane.stage).map_err(|_| BridgeError::cleanup_unknown())?;
+                if lane.stage.load(Ordering::SeqCst) != RETURNED
+                    || !lane.completion_returned.load(Ordering::SeqCst)
+                {
+                    lane.fail_unknown(self);
+                    return Err(BridgeError::cleanup_unknown());
+                }
+                *stored_result = Some(result.clone());
+                ticket.take();
+                request.take();
+                drop(request);
+                drop(ticket);
+                drop(stored_result);
                 drop(state);
                 self.inner.changes.send_modify(|_| {});
                 match result {
@@ -383,9 +415,13 @@ impl DocumentBinding {
     pub(crate) fn version_allocation_source_status(&self) -> Option<VersionAllocationSourceReceipt> {
         let state = self.lock();
         let lane = state.version_allocation_source.as_ref()?;
-        let receipt = lock(&lane.result)
-            .clone()
-            .or_else(|| lock(&lane.ticket).as_ref().map(VersionAllocationSourceTicket::receipt));
+        let Ok(result) = lock(&lane.result, &lane.stage) else {
+            return Some(VersionAllocationSourceReceipt::RetainedUnknown);
+        };
+        let receipt = result.clone().or_else(|| match lock(&lane.ticket, &lane.stage) {
+            Ok(ticket) => ticket.as_ref().map(VersionAllocationSourceTicket::receipt),
+            Err(_) => Some(VersionAllocationSourceReceipt::RetainedUnknown),
+        });
         if lane.stage.load(Ordering::SeqCst) == UNKNOWN {
             Some(VersionAllocationSourceReceipt::RetainedUnknown)
         } else {
@@ -400,6 +436,27 @@ impl DocumentBinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_bookkeeping_retains_data_and_latches_unknown() {
+        // Inert bookkeeping DATA, not a constructed native ticket or return.
+        let stage = AtomicU8::new(RETURNED);
+        let original = Mutex::new(Some(37_u64));
+        assert_eq!(*lock(&original, &stage).unwrap(), Some(37));
+        assert_eq!(stage.load(Ordering::SeqCst), RETURNED);
+        let caught = std::panic::catch_unwind(|| {
+            let _held = original.lock().unwrap();
+            panic!("inert source bookkeeping poison");
+        });
+        assert!(caught.is_err());
+        let retained = lock(&original, &stage).unwrap_err().into_inner();
+        assert_eq!(*retained, Some(37));
+        assert_eq!(stage.load(Ordering::SeqCst), UNKNOWN);
+        assert!(original.is_poisoned());
+        drop(retained);
+        assert!(lock(&original, &stage).is_err());
+        assert_eq!(stage.load(Ordering::SeqCst), UNKNOWN);
+    }
 
     #[tokio::test]
     async fn invalid_or_unbound_source_read_has_no_native_operation() {
