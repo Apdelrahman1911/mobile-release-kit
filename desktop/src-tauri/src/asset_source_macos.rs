@@ -6,6 +6,9 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+#[path = "credential_backup_sources_macos.rs"]
+mod backup_sources;
+pub(crate) use backup_sources::BackupSources;
 #[path = "github_history_sources_macos.rs"]
 mod history_sources;
 pub(crate) use history_sources::HistorySources;

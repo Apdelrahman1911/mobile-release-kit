@@ -95,7 +95,7 @@ impl Work {
 
 /// Created by the locked, native document preparation below; no serialized
 /// budget/context or result-shaped message constructs this original request.
-pub(super) struct Request {
+pub(in crate::asset_session) struct Request {
     owner_id: u32,
     identity: format::Identity,
     roster: ProjectRoster,
@@ -116,6 +116,31 @@ impl Request {
             RequestKind::ImportNew => true,
         }
     }
+}
+
+/// The sole exception to this original's pending-private-data allocation
+/// fence. Its already-retained, one-use closed Request may enter its own child;
+/// unrelated Tokens/Load/Mutate work cannot borrow that permission.
+pub(super) fn child_admitted(owner: &OriginalWork, request: &Request) -> bool {
+    if owner.id != request.owner_id || owner.interrupted() || owner.installation.is_some()
+        || !owner.retired.load(Ordering::SeqCst)
+        || !owner.keyring.try_lock().is_ok_and(|book| !book.memory_held())
+        || !owner.source.try_lock().is_ok_and(|source| source.not_started()) { return false; }
+    let Ok(work) = owner.vault.try_lock() else { return false; };
+    if work.first.is_some() || work.release || work.store.is_none()
+        || work.key.as_ref().is_none_or(|key| key.identity() != request.identity) { return false; }
+    work.backup.inner.as_ref().is_some_and(|inner| inner.try_lock().is_ok_and(|custody| {
+        if custody.owner_id != owner.id || custody.phase != Phase::Reserved || custody.first.is_some() { return false; }
+        match (&custody.content, request.kind) {
+            (Content::Export { reference, output: None }, RequestKind::Export) =>
+                reference.identity == request.identity && work.outcome.is_none(),
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            (Content::ImportNew { identity, sources, .. }, RequestKind::ImportNew) =>
+                *identity == request.identity && sources.not_started() && work.outcome == Some(store::StorageOutcome {
+                    effect: store::Effect::NotStarted, durability: store::Durability::NotRun, cleanup: store::Cleanup::Pending }),
+            _ => false,
+        }
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -283,9 +308,22 @@ fn import_new(owner: &Arc<OriginalWork>, book: &mut store::StoreBook, custody: &
     Ok(ChildResult::Mutated { record, row: Some(row) })
 }
 
+/// Before child GO, compare the exact retained unentered import, not a caller
+/// preference or result-shaped mutation outcome. Linux has no such content.
+pub(super) fn reserved_import(work: &Work, owner_id: u32, identity: format::Identity) -> bool {
+    work.inner.as_ref().is_some_and(|inner| inner.try_lock().is_ok_and(|custody| {
+        if custody.owner_id != owner_id || custody.phase != Phase::Reserved || custody.first.is_some()
+            || custody.saved.is_some() || custody.outcome.is_some() { return false; }
+        match &custody.content {
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            Content::ImportNew { identity: retained, sources, .. } => *retained == identity && sources.not_started(),
+            _ => { let _ = identity; false },
+        }
+    }))
+}
+
 /// A saved descriptor is publishable only for the exact retained import. This
-/// predicate supplements, NEVER replaces, the parent's actual original joins,
-/// current document/vault/registry gate and KnownApplied+durable+cleanup checks.
+/// supplements, NEVER replaces, actual original joins/current gates/outcome.
 pub(super) fn new_publication(work: &Work, identity: format::Identity, record: format::Id, row: &Descriptor) -> bool {
     work.inner.as_ref().is_some_and(|inner| inner.try_lock().is_ok_and(|custody|
         custody.phase == Phase::StoredNew && custody.first.is_none()
@@ -334,7 +372,10 @@ pub(super) fn retirement_ready(owner: &Arc<OriginalWork>) -> bool {
         return false;
     }
     let Ok(work) = owner.vault.try_lock() else { return false; };
-    if !work.settled() { return false; }
+    // A successful cleanup-only continuation must not rehabilitate the first
+    // coordinator/child failure that the existing vault owner preserved.
+    if !work.settled() || work.original_join.is_some_and(|receipt| receipt != JoinReceipt::Returned)
+        || work.failed_child_join.is_some() { return false; }
     let Some(inner) = &work.backup.inner else { return true; };
     if Arc::strong_count(inner) != 1 { return false; }
     inner.try_lock().is_ok_and(|custody| custody.native_settled()
@@ -430,11 +471,15 @@ pub(super) async fn run(document: &DocumentBinding, owner: &Arc<OriginalWork>, r
     let mutation = request.mutation();
     let generation = request.roster.generation;
     {
-        let state = document.lock();
+        let mut state = document.lock();
         current_gate(document, &state, owner)?;
         let operation = state.slot.as_ref().map(|slot| slot.operation);
         let expected = if mutation { Operation::ImportBackup } else { Operation::PrepareBackupExport };
         if operation != Some(expected) { return Err(Reason::SourceChanged); }
+        // The original request is already retained. Mark this one New intent
+        // before its actual child GO, after native selection/preparation and
+        // while holding the genuine current document gate. No second install.
+        if mutation { begin_backup_import(&mut state, owner)?; }
     }
     let result = native(document, owner, Child::Backup(request)).await?;
     let state = document.lock(); current_gate(document, &state, owner)?;
@@ -468,6 +513,32 @@ mod tests {
         Work { inner: Some(Arc::new(Mutex::new(Custody { owner_id: 7,
             content: Content::Export { reference: reference(), output }, phase,
             first: None, saved: None, outcome: None }))) }
+    }
+    fn owner_data(phase: Phase) -> (DocumentState, Arc<OriginalWork>) {
+        // Inert native-book DATA only. No worker, descriptor, picker, account,
+        // process or native close is entered by this fixture constructor.
+        let owner = OriginalWork::artifact_unentered_original_data();
+        owner.set_endpoint(None);
+        let holding = held(Some(synthetic_output()), phase);
+        holding.inner.as_ref().unwrap().lock().unwrap().owner_id = owner.id;
+        owner.vault.lock().unwrap().backup = holding;
+        let mut state = crate::asset_session::tests::empty_state();
+        state.session = false;
+        let mut slot = Slot::new(owner.clone(), Operation::PrepareBackupExport, None, None, None);
+        slot.phase = crate::asset_session::Phase::Selected;
+        state.slot = Some(slot);
+        (state, owner)
+    }
+    fn live(state: &DocumentState, owner: &Arc<OriginalWork>) -> usize {
+        let source = owner.source.lock().unwrap();
+        let retirement = owner.retirement.lock().unwrap();
+        lookup_memory::live_bytes(state, owner, &source, &retirement).unwrap()
+    }
+    fn joined_data(owner: &Arc<OriginalWork>) {
+        // Predicate DATA only, not a producer/finality fixture. The production
+        // path still obtains these from original retained handle joins.
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        owner.child.try_lock().unwrap().receipt = JoinReceipt::Returned;
     }
 
     #[test]
@@ -546,5 +617,242 @@ mod tests {
         assert!(owner.coordinator.lock().unwrap().receipt == JoinReceipt::New);
         assert!(owner.child.try_lock().unwrap().receipt == JoinReceipt::New);
         assert!(!retirement_ready(&owner));
+    }
+
+    #[test]
+    fn parent_census_retains_same_backup_across_off_lock_holding_and_restore() {
+        let (mut state, owner) = owner_data(Phase::PendingPrivateSink);
+        let (bytes, original) = {
+            let work = owner.vault.lock().unwrap();
+            (work.backup_retained_bytes().unwrap(), Arc::downgrade(work.backup.inner.as_ref().unwrap()))
+        };
+        let occupied = live(&state, &owner);
+        assert!(bytes > 0 && super::super::backup_pending(&state));
+        joined_data(&owner);
+        let mut slot = state.slot.take().unwrap();
+        slot.discard = true; // A generic STOP/discard flag is not this consent.
+        let refused = super::super::take_retirement(&mut state, &mut slot);
+        assert!(refused.backup.empty() && owner.vault.lock().unwrap().backup_blocks_reuse());
+        super::super::request_backup_discard(&mut slot);
+        let retired = super::super::take_retirement(&mut state, &mut slot);
+        assert!(!retired.empty() && retired.backup.retained_bytes() == Some(bytes));
+        assert!(owner.vault.lock().unwrap().backup.empty());
+        assert!(owner.retain_retirement(crate::asset_session::Retirement {
+            vault: retired, ..Default::default()
+        }).is_ok());
+        state.slot = Some(slot);
+        assert_eq!(live(&state, &owner), occupied); // A move is not memory credit.
+        let mut slot = state.slot.take().unwrap();
+        let retired = {
+            let mut holding = owner.retirement.lock().unwrap();
+            std::mem::take(&mut holding.vault)
+        };
+        owner.retired.store(true, Ordering::SeqCst);
+        super::super::restore_retirement(&mut state, &mut slot, retired);
+        state.slot = Some(slot);
+        assert_eq!(live(&state, &owner), occupied);
+        assert_eq!(Arc::as_ptr(owner.vault.lock().unwrap().backup.inner.as_ref().unwrap()), original.as_ptr());
+        let mut slot = state.slot.take().unwrap();
+        let retired = super::super::take_retirement(&mut state, &mut slot);
+        assert!(owner.retain_retirement(crate::asset_session::Retirement {
+            vault: retired, ..Default::default()
+        }).is_ok());
+        state.slot = Some(slot);
+        assert_eq!(live(&state, &owner), occupied);
+        assert!(owner.release_retirement()); // Actual off-lock private DATA drop.
+        assert!(original.upgrade().is_none());
+        assert_eq!(live(&state, &owner), occupied - bytes);
+    }
+
+    #[test]
+    fn explicit_discard_cannot_dispose_failed_join_or_unknown_original_outcome() {
+        let (mut state, owner) = owner_data(Phase::Failed);
+        joined_data(&owner);
+        let mut slot = state.slot.take().unwrap();
+        super::super::request_backup_discard(&mut slot);
+        let bytes = owner.vault.lock().unwrap().backup_retained_bytes();
+        owner.child.try_lock().unwrap().receipt = JoinReceipt::Failed;
+        assert!(!retirement_ready(&owner));
+        assert!(super::super::take_retirement(&mut state, &mut slot).backup.empty());
+        owner.child.try_lock().unwrap().receipt = JoinReceipt::Returned;
+        for outcome in [
+            store::StorageOutcome { effect: store::Effect::Unknown, durability: store::Durability::Confirmed, cleanup: store::Cleanup::Known },
+            store::StorageOutcome { effect: store::Effect::KnownApplied, durability: store::Durability::Unknown, cleanup: store::Cleanup::Known },
+            store::StorageOutcome { effect: store::Effect::KnownApplied, durability: store::Durability::Confirmed, cleanup: store::Cleanup::Unknown },
+            store::StorageOutcome { effect: store::Effect::NotStarted, durability: store::Durability::NotRun, cleanup: store::Cleanup::Pending },
+        ] {
+            owner.vault.lock().unwrap().backup.inner.as_ref().unwrap().lock().unwrap().outcome = Some(outcome);
+            assert!(!retirement_ready(&owner));
+            assert!(super::super::take_retirement(&mut state, &mut slot).backup.empty());
+            assert_eq!(owner.vault.lock().unwrap().backup_retained_bytes(), bytes);
+        }
+    }
+
+    #[test]
+    fn quiescent_private_custody_is_not_an_empty_session_or_exit() {
+        for phase in [Phase::PendingPrivateSink, Phase::Failed] {
+            let (mut state, owner) = owner_data(phase);
+            state.session = true; state.lock_pending = true;
+            joined_data(&owner);
+            if phase == Phase::Failed {
+                owner.vault.lock().unwrap().backup.inner.as_ref().unwrap().lock().unwrap().outcome = Some(store::StorageOutcome {
+                    effect: store::Effect::Unknown, durability: store::Durability::Unknown, cleanup: store::Cleanup::Known });
+            }
+            assert!(owner.resources_settled()); // Producer predicate DATA, not secret disposal.
+            assert!(!crate::asset_session::slot_private_data_empty(state.slot.as_ref().unwrap()));
+            assert!(!crate::asset_session::session_data_empty(&state));
+            assert!(!crate::asset_session::assets_can_exit_locked(&state));
+            assert!(!crate::asset_session::complete_empty_session_lock(&mut state));
+            assert!(state.session && state.lock_pending);
+            let mut slot = state.slot.take().unwrap();
+            slot.stop(Reason::Shutdown, Instant::now()); // Generic STOP does not grant private disposal.
+            let refused = super::super::take_retirement(&mut state, &mut slot);
+            assert!(refused.backup.empty());
+            super::super::request_backup_discard(&mut slot);
+            let retired = super::super::take_retirement(&mut state, &mut slot);
+            if phase == Phase::Failed {
+                assert!(retired.backup.empty()); state.slot = Some(slot);
+                assert!(!crate::asset_session::session_data_empty(&state));
+                assert!(!crate::asset_session::complete_empty_session_lock(&mut state));
+                continue; // Unknown effects keep the SAME private holding.
+            }
+            assert!(!retired.backup.empty());
+            let original = Arc::downgrade(retired.backup.inner.as_ref().unwrap());
+            assert!(owner.retain_retirement(crate::asset_session::Retirement { vault: retired, ..Default::default() }).is_ok());
+            state.slot = Some(slot);
+            assert!(owner.vault.lock().unwrap().backup.empty());
+            assert!(!crate::asset_session::slot_private_data_empty(state.slot.as_ref().unwrap()));
+            assert!(!crate::asset_session::session_data_empty(&state));
+            assert!(!crate::asset_session::assets_can_exit_locked(&state));
+            assert!(original.upgrade().is_some());
+            assert!(owner.release_retirement()); // Actual off-lock private DATA drain, not a flag-only refund.
+            assert!(original.upgrade().is_none());
+            assert!(crate::asset_session::slot_private_data_empty(state.slot.as_ref().unwrap()));
+            assert!(crate::asset_session::session_data_empty(&state));
+            assert!(crate::asset_session::assets_can_exit_locked(&state));
+            assert!(crate::asset_session::complete_empty_session_lock(&mut state));
+            assert!(!state.session && !state.lock_pending);
+            let work = owner.vault.lock().unwrap();
+            assert!(!crate::asset_session::slot_private_data_empty(state.slot.as_ref().unwrap()));
+            drop(work);
+            let retirement = owner.retirement.lock().unwrap();
+            assert!(!crate::asset_session::slot_private_data_empty(state.slot.as_ref().unwrap()));
+            drop(retirement);
+        }
+    }
+
+    #[test]
+    fn successful_cleanup_cannot_rehabilitate_a_retained_failed_original_join() {
+        for (coordinator, child) in [
+            (Some(JoinReceipt::Failed), None), (Some(JoinReceipt::New), None),
+            (Some(JoinReceipt::Pending), None), (Some(JoinReceipt::Returned), Some(JoinReceipt::Failed)),
+        ] {
+            let (mut state, owner) = owner_data(Phase::Failed);
+            joined_data(&owner); // Current cleanup Returned DATA only.
+            {
+                let mut work = owner.vault.lock().unwrap();
+                work.original_join = coordinator; work.failed_child_join = child;
+            }
+            assert!(owner.resources_settled()); // Native quiescence stays separate.
+            assert!(!retirement_ready(&owner));
+            let mut slot = state.slot.take().unwrap();
+            super::super::request_backup_discard(&mut slot);
+            assert!(super::super::take_retirement(&mut state, &mut slot).backup.empty());
+            assert!(owner.vault.lock().unwrap().backup_blocks_reuse());
+        }
+        let (_, owner) = owner_data(Phase::PendingPrivateSink); joined_data(&owner);
+        owner.vault.lock().unwrap().original_join = Some(JoinReceipt::Returned);
+        assert!(retirement_ready(&owner)); // Preserved *normal* original is not a failure.
+    }
+
+    #[test]
+    fn retained_request_exception_never_admits_other_work_or_reuses_output() {
+        let (state, owner) = owner_data(Phase::Reserved);
+        {
+            let mut work = owner.vault.lock().unwrap();
+            work.store = Some(Arc::new(Mutex::new(store::StoreBook::new())));
+            work.key = Some(Arc::new(crypto::lifecycle_data_key(reference().identity)));
+            let mut custody = work.backup.inner.as_ref().unwrap().lock().unwrap();
+            // Reserved export has not allocated output yet. This constructor's
+            // synthetic output is disposed here only for admission DATA tests.
+            custody.content = Content::Export { reference: reference(), output: None };
+        }
+        let mut request = Request { owner_id: owner.id, identity: reference().identity,
+            roster: ProjectRoster { generation: 1, roots: Vec::new() },
+            budget: Budget { resident: 1024, working: 2048 }, kind: RequestKind::Export };
+        assert!(!owner.lookup_allocations_allowed());
+        assert!(super::super::backup_pending(&state));
+        assert!(!crate::asset_session::child_allocation_admitted(&owner, &ChildJob::Tokens));
+        assert!(child_admitted(&owner, &request)); // DATA gate, not an entered child.
+        request.owner_id += 1; assert!(!child_admitted(&owner, &request)); request.owner_id = owner.id;
+        assert!(!reserved_import(&owner.vault.lock().unwrap().backup, owner.id, request.identity));
+        for phase in [Phase::Running, Phase::PendingPrivateSink, Phase::StoredNew, Phase::Failed] {
+            owner.vault.lock().unwrap().backup.inner.as_ref().unwrap().lock().unwrap().phase = phase;
+            assert!(!child_admitted(&owner, &request));
+        }
+        assert!(!owner.lookup_allocations_allowed());
+        assert!(crate::asset_session::idle(&state).is_err());
+    }
+
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn unentered_import_never_copies_a_different_store_outcome() {
+        // Actual parent dispatch, but the wrong original ID refuses before
+        // any native file acquisition or mutation. The inert StoreBook has
+        // no outcome; it must not replace this original's initial New intent.
+        let owner = OriginalWork::artifact_unentered_original_data();
+        owner.set_endpoint(None);
+        let initial = store::StorageOutcome { effect: store::Effect::NotStarted,
+            durability: store::Durability::NotRun, cleanup: store::Cleanup::Pending };
+        {
+            let mut work = owner.vault.lock().unwrap();
+            work.store = Some(Arc::new(Mutex::new(store::StoreBook::new())));
+            work.key = Some(Arc::new(crypto::lifecycle_data_key(reference().identity)));
+            work.outcome = Some(initial);
+            work.backup.inner = Some(Arc::new(Mutex::new(Custody { owner_id: owner.id,
+                content: Content::ImportNew { identity: reference().identity, record: id(8),
+                    sources: asset_source::BackupSources::new([
+                        "/private/synthetic-backup.mrkbackup".into(),
+                        "/private/synthetic-recovery.mrkcode".into(),
+                    ]).unwrap() }, phase: Phase::Reserved, first: None, saved: None, outcome: None })));
+        }
+        let request = Request { owner_id: owner.id + 1, identity: reference().identity,
+            roster: ProjectRoster { generation: 1, roots: Vec::new() },
+            budget: Budget { resident: 1024, working: 2048 }, kind: RequestKind::ImportNew };
+        assert!(matches!(super::super::execute(&owner, Child::Backup(request)), Err(Reason::UserCancelled)));
+        let work = owner.vault.lock().unwrap();
+        assert!(work.outcome == Some(initial));
+        assert!(work.store.as_ref().unwrap().lock().unwrap().storage_outcome().is_none());
+        assert!(work.backup.native_settled() && work.backup.blocks_reuse());
+    }
+
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[test]
+    fn unknown_import_custody_cannot_be_an_empty_session_after_cleanup() {
+        let (mut state, owner) = owner_data(Phase::Failed);
+        state.session = true; state.lock_pending = true;
+        state.slot.as_mut().unwrap().operation = Operation::ImportBackup;
+        joined_data(&owner);
+        {
+            // Input paths and unknown outcome DATA only; no actual filesystem,
+            // encrypted import or store mutation is entered by this fixture.
+            let mut work = owner.vault.lock().unwrap();
+            work.original_join = Some(JoinReceipt::Returned);
+            let mut custody = work.backup.inner.as_ref().unwrap().lock().unwrap();
+            custody.content = Content::ImportNew { identity: reference().identity, record: id(8),
+                sources: asset_source::BackupSources::new(["/private/synthetic-backup.mrkbackup".into(),
+                    "/private/synthetic-recovery.mrkcode".into()]).unwrap() };
+            custody.outcome = Some(store::StorageOutcome { effect: store::Effect::Unknown,
+                durability: store::Durability::Unknown, cleanup: store::Cleanup::Known });
+        }
+        assert!(owner.resources_settled());
+        assert!(!crate::asset_session::slot_private_data_empty(state.slot.as_ref().unwrap()));
+        assert!(!crate::asset_session::session_data_empty(&state));
+        assert!(!crate::asset_session::assets_can_exit_locked(&state));
+        assert!(!crate::asset_session::complete_empty_session_lock(&mut state));
+        let mut slot = state.slot.take().unwrap();
+        super::super::request_backup_discard(&mut slot);
+        assert!(super::super::take_retirement(&mut state, &mut slot).backup.empty());
+        assert!(owner.vault.lock().unwrap().backup_blocks_reuse());
     }
 }
