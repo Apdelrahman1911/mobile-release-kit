@@ -125,6 +125,8 @@ all links/hardlinks, extra/duplicate members, absolute/drive/dot/traversal paths
 NFC/case-fold collisions and unexpected modes refuse. The existing public
 supplier has no source aliases. Its archived JDK setgid directory mode maps
 only to the existing admitted source 0755 mode on newly created candidate paths.
+Regular files preserve the exact single compiled 0444/0644/0755 mode, including
+the JDK's read-only legal notices; no existing source mode is changed.
 These private-cache checks coordinate admitted operations and detect ordinary
 changes; they are not protection from a compromised OS/unlocked same-user
 process maliciously rewriting the namespace between system calls.

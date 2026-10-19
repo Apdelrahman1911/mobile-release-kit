@@ -27,12 +27,12 @@ from mobile_release._tool_acquisition_files import OutputTree, directory_identit
 from mobile_release.tool_acquisition import Admission, LOOKUP_SCOPE, ToolAcquisition
 
 
-def fixtures():
+def fixtures(*, jdk_mode=0o644):
     archives, payloads = [], {}
     for component in COMPONENTS:
         content = ("Synthetic, inert fixture for " + component.value + "\n").encode("ascii")
         if component is Component.JDK:
-            wrapper, name, destination, file_mode = "jdk-17.0.0+0", "jdk-17.0.0+0/Contents/Home/release", "Contents/Home/release", 0o644
+            wrapper, name, destination, file_mode = "jdk-17.0.0+0", "jdk-17.0.0+0/Contents/Home/release", "Contents/Home/release", jdk_mode
             url = "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.0%2B0/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.0_0.tar.gz"
             output = io.BytesIO()
             with tarfile.open(fileobj=output, mode="w", format=tarfile.USTAR_FORMAT) as tar:
@@ -207,6 +207,35 @@ class ToolAcquisitionTests(unittest.TestCase):
         self.assertEqual(offer.reused_archives, COMPONENTS)
         self.assertEqual(offer.downloaded_archives, ())
         self.assertTrue(second.files.settled)
+
+    def test_exact_readonly_source_mode_survives_extraction_and_final_reinspection(self):
+        self.manifest, self.payloads = fixtures(jdk_mode=0o444)
+        owner = FixtureOwner(self.root, self.manifest, missing=(Component.JDK,))
+        service, offer = self.run_service(owner)
+        member = decode_manifest(owner.manifest).archives[0].members[-1]
+        path = self.root / offer.cache_job / "sources/jdk.jdk" / member.source_relative
+        self.assertEqual(member.source_mode, 0o444)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o444)
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), member.sha256)
+        self.assertTrue(service.files.settled)
+        self.assertEqual(self.calls, [Component.JDK])
+        self.assertFalse(offer.to_data()["assurance"]["nativeFinality"])
+        owner.settle_for_test(service)
+        self.calls.clear()
+        next_owner = FixtureOwner(self.root, self.manifest, name="operation2", missing=(Component.JDK,), book=owner.book)
+        changed = self.root / "tool-operation2/sources/jdk.jdk" / member.source_relative
+        original_verify = OutputTree.verify
+
+        def changed_mode(tree):
+            changed.chmod(0o644)  # A later external edit, never repaired by the service.
+            return original_verify(tree)
+
+        with patch.object(OutputTree, "verify", changed_mode), self.assertRaises(AcquisitionError):
+            self.run_service(next_owner, transfer=lambda **_: self.fail("cache hit constructed downloader"))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(stat.S_IMODE(changed.stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o444)
+        self.assertFalse((self.root / "tool-operation2/result.json").exists())
 
     def test_existing_compatible_tools_mean_no_cache_open_or_download(self):
         owner = FixtureOwner(self.root, self.manifest, missing=())

@@ -221,7 +221,7 @@ def decode_manifest(data: bytes) -> Manifest:
                 require(kind == "directory" and target_mode is None)
             else:
                 relative(destination)
-                require(type(target_mode) is int and target_mode in ((0o755,) if kind == "directory" else (0o644, 0o755)))
+                require(type(target_mode) is int and target_mode in ((0o755,) if kind == "directory" else (0o444, 0o644, 0o755)))
                 key = name_key(destination)
                 require(key not in destinations, "archive-layout")
                 destinations[key] = kind

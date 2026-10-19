@@ -69,10 +69,11 @@ fn component_name(component: Component) -> Option<&'static str> {
 }
 fn source_mode(source: &SourceMemberSpec) -> Option<u32> {
     // Do not loosen source policy or carry archived JDK setgid onto new paths.
-    // Current public profiles specify one exact 0644/0755 source mode.
+    // Current public profiles specify one exact 0444/0644/0755 file mode,
+    // including the read-only JDK legal notices. Preserve that exact pin.
     match source.kind {
         SourceKindSpec::Directory { modes: [0o755] } => Some(0o755),
-        SourceKindSpec::File { modes: [mode], .. } if *mode == 0o644 || *mode == 0o755 => Some(*mode),
+        SourceKindSpec::File { modes: [mode], .. } if *mode == 0o444 || *mode == 0o644 || *mode == 0o755 => Some(*mode),
         _ => None, // Including aliases and any future ambiguous mode policy.
     }
 }
@@ -195,17 +196,35 @@ mod tests {
             let data: serde_json::Value = serde_json::from_slice(&output.bytes).unwrap();
             let archives = data["archives"].as_array().unwrap();
             assert_eq!(archives.len(), 4);
+            let mut readonly = 0;
             for (item, original) in archives.iter().zip(reference.archives) {
                 assert_eq!(item["url"], original.official_source);
                 assert_eq!(item["sha256"], original.archive.sha256);
                 assert_eq!(item["bytes"], original.archive.bytes);
                 assert_eq!(item["members"].as_array().unwrap().len(), original.member_count as usize);
-                for member in item["members"].as_array().unwrap() {
+                for (member, original_member) in item["members"].as_array().unwrap().iter().zip(original.members) {
                     assert!(member["kind"] == "file" || member["kind"] == "directory");
-                    assert!(member["sourceMode"].is_null() || member["sourceMode"] == 0o644 || member["sourceMode"] == 0o755);
+                    assert!(member["sourceMode"].is_null() || member["sourceMode"] == 0o444
+                        || member["sourceMode"] == 0o644 || member["sourceMode"] == 0o755);
                     assert_eq!(member["sourceRelative"].is_null(), member["sourceMode"].is_null());
+                    if let ArchiveDisposition::Picked { source_index } = original_member.disposition {
+                        let source = &reference.source_members[source_index as usize];
+                        let modes = match source.kind {
+                            SourceKindSpec::Directory { modes } | SourceKindSpec::File { modes, .. } => modes,
+                            SourceKindSpec::Alias { .. } => panic!("public acquisition cannot project an alias"),
+                        };
+                        assert_eq!(modes.len(), 1);
+                        assert_eq!(member["sourceMode"], modes[0]);
+                        assert_eq!(member["sourceRelative"], source.relative);
+                        if let SourceKindSpec::File { bytes, sha256, .. } = source.kind {
+                            assert_eq!(member["bytes"], bytes);
+                            assert_eq!(member["sha256"], sha256);
+                        }
+                        if member["sourceMode"] == 0o444 { readonly += 1; }
+                    }
                 }
             }
+            assert_eq!(readonly, match profile { Profile::MacArm64 => 247, Profile::MacX64 => 245, _ => unreachable!() });
             assert!(data.get("ready").is_none() && data.get("registered").is_none());
         }
     }
@@ -222,6 +241,11 @@ mod tests {
         let unsupported = SourceMemberSpec { group: SourceGroup::Jdk, relative: "Contents",
             kind: SourceKindSpec::Directory { modes: &[0o2755] } };
         assert!(source_mode(&unsupported).is_none());
+        for modes in [&[0o444, 0o644][..], &[0o400][..], &[0o777][..], &[0o4644][..]] {
+            let unsupported = SourceMemberSpec { group: SourceGroup::Jdk, relative: "Contents/legal.txt",
+                kind: SourceKindSpec::File { bytes: 1, sha256: "unused", modes } };
+            assert!(source_mode(&unsupported).is_none());
+        }
         let mut writer = Bounded(Vec::new());
         writer.0.resize(MANIFEST_BYTES, 0);
         assert!(writer.write(b"x").is_err());
