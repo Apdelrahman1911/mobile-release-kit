@@ -1,0 +1,431 @@
+// Operation-specific renderer transport/custody for the ORIGINAL native
+// ProjectIdentity EditOwner. A returned true means one original request was
+// handed off and retained, never native admission, completed work or a save.
+import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+import { identityDataEqual, identityPreviewMatches, identityValueFits, parseIdentityContext,
+  parseIdentityOwnerSnapshot } from './projectIdentity.ts';
+import type { IdentityApplyRequest, IdentityIntent, IdentityNativePort, IdentityOwnerSnapshot,
+  IdentityOwnerStatus, IdentityProjection, IdentitySelection, IdentitySessionRequest, IdentityUiContext } from './projectIdentity.ts';
+
+export const PROJECT_IDENTITY_EVENT = 'project-identity-state-changed';
+export type ProjectIdentityCommand = 'project_identity_open' | 'project_identity_prepare' |
+  'project_identity_apply' | 'project_identity_close' | 'project_identity_status';
+type Target = Omit<IdentitySelection, 'continuity'>;
+export type IdentityOpenRequest = { intent: 'edit'; projectId: string; selection: Target } | { intent: 'recover'; projectId: string };
+export type IdentityPrepareRequest = IdentitySessionRequest &
+  ({ intent: 'edit'; desiredIdentity: string; identityIntent: IdentityIntent } | { intent: 'recover' });
+export type IdentitySendRequest = IdentityApplyRequest & { intent: 'edit' | 'recover' };
+type Invoke = (command: ProjectIdentityCommand, body: Uint8Array) => Promise<unknown>;
+type Listen = (event: typeof PROJECT_IDENTITY_EVENT, listener: (value: unknown) => void) => Promise<() => void>;
+export interface ProjectIdentityApi {
+  readonly mode: 'native';
+  open(request: IdentityOpenRequest): Promise<unknown>;
+  prepare(request: IdentityPrepareRequest): Promise<unknown>;
+  apply(request: IdentitySendRequest): Promise<unknown>;
+  close(request: { sessionId: string }): Promise<unknown>;
+  status(): Promise<unknown>;
+  subscribe(listener: (value: unknown) => void): Promise<() => void>;
+}
+const failure = () => ({ code: 'ProjectIdentityUnconfirmed', message: 'The original app ID request could not be confirmed. Check its status; do not repeat the change.', retryable: false as const });
+const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const keys = (v: unknown, names: string[]): v is Record<string, unknown> => record(v) &&
+  Object.keys(v).length === names.length && names.every((name) => Object.hasOwn(v, name));
+const token = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{32}$/.test(v);
+function uiArguments(input: unknown, names: string[]): Record<string, unknown> | null {
+  try { const safe = copyBoundedComparisonData(input, 4096, 128); return keys(safe, names) ? safe : null; }
+  catch { return null; }
+}
+
+/** Exact RAW JSON boundary. This validates syntax, not roots or continuity. */
+export function encodeProjectIdentityRequest(command: ProjectIdentityCommand, input: unknown): Uint8Array | null {
+  try {
+    const v = copyBoundedComparisonData(input, 16 * 1024, 128);
+    let valid = false;
+    if (command === 'project_identity_status') valid = keys(v, []);
+    else if (command === 'project_identity_close') valid = keys(v, ['sessionId']) && token(v.sessionId);
+    else if (command === 'project_identity_open' && record(v)) {
+      const id = typeof v.projectId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(v.projectId);
+      if (v.intent === 'recover') valid = id && keys(v, ['intent', 'projectId']);
+      else if (v.intent === 'edit' && keys(v, ['intent', 'projectId', 'selection']) && keys(v.selection, ['platform', 'target', 'project'])) {
+        // UNKNOWN here is only an input grammar check. It is NOT sent. Native
+        // supplies its own continuity and independently vetoes existing apps.
+        valid = id && parseIdentityContext({ projectId: v.projectId, selection: { ...v.selection, continuity: 'unknown' },
+          contextEpoch: 0, preview: false, blocked: false }) !== null;
+      }
+    } else if (command === 'project_identity_prepare' && record(v)) {
+      const binding = token(v.sessionId) && token(v.revision);
+      valid = binding && (v.intent === 'recover' ? keys(v, ['intent', 'sessionId', 'revision']) :
+        v.intent === 'edit' && keys(v, ['intent', 'sessionId', 'revision', 'desiredIdentity', 'identityIntent']) &&
+        (v.identityIntent === 'preserve' || v.identityIntent === 'new-application') &&
+        (identityValueFits(v.desiredIdentity, 'android') || identityValueFits(v.desiredIdentity, 'ios')));
+    } else if (command === 'project_identity_apply') valid = keys(v, ['intent', 'sessionId', 'revision', 'planToken']) &&
+      (v.intent === 'edit' || v.intent === 'recover') && token(v.sessionId) && token(v.revision) && token(v.planToken) && v.revision !== v.planToken;
+    return valid ? new TextEncoder().encode(JSON.stringify(v)) : null;
+  } catch { return null; }
+}
+
+/** Root injects only its real native invoke/listen; no preview or HTTP fallback. */
+export function createProjectIdentityApi(mode: string, invoke: Invoke, listen?: Listen): ProjectIdentityApi | null {
+  if (mode !== 'native' || !listen) return null;
+  const call = (command: ProjectIdentityCommand, request: unknown): Promise<unknown> => {
+    const body = encodeProjectIdentityRequest(command, request);
+    if (!body) throw { code: 'ProjectIdentityRequestInvalid', message: 'The app ID request is invalid. Nothing was sent.', retryable: false };
+    return invoke(command, body);
+  };
+  return Object.freeze({ mode: 'native' as const,
+    open: (r: IdentityOpenRequest) => call('project_identity_open', r),
+    prepare: (r: IdentityPrepareRequest) => call('project_identity_prepare', r),
+    apply: (r: IdentitySendRequest) => call('project_identity_apply', r),
+    close: (r: { sessionId: string }) => call('project_identity_close', r),
+    status: () => call('project_identity_status', {}),
+    subscribe: (listener: (value: unknown) => void) => listen(PROJECT_IDENTITY_EVENT, listener) });
+}
+
+type Issue = 'unconfirmed' | 'protocol' | 'generation-changed' | 'cleanup-unknown';
+export interface ProjectIdentityNativeState {
+  status: IdentityOwnerStatus | null; original: IdentityProjection | null; projectId: string | null;
+  pendingCount: number; reading: boolean; initialized: boolean; listening: boolean;
+  issue: Issue | null; closeRequested: boolean; closeSent: boolean;
+}
+interface Source {
+  current(): unknown; // The existing IdentityUiContext, never an authority token.
+  otherOperationReason?(projectId: string): string | null;
+  onMutationSubmitted?(projectId: string, intent: 'edit' | 'recover'): void;
+  onOutcome?(original: IdentityProjection): void; // Invalidate observations, never adopt a draft.
+}
+interface Attempt {
+  context: IdentityUiContext; stamp: number; window: string; after: number; previous: string | null;
+  request: IdentityOpenRequest; sessionId: string | null; projection: IdentityProjection | null;
+  preparation: IdentityPrepareRequest | null;
+  retired: boolean; sent: boolean; prepareClaimed: boolean; applyClaimed: boolean; applySent: boolean;
+  closeRequested: boolean; closeSent: boolean; outcomePublished: boolean;
+}
+interface Work { kind: 'open' | 'prepare' | 'apply' | 'close' | 'status'; promise: Promise<unknown> | null }
+const phases = ['opening', 'editing', 'preparing', 'reviewing', 'applying', 'finalizing', 'final', 'unknown'];
+const terminal = (p: IdentityProjection | null) => p?.phase === 'final' || p?.phase === 'unknown';
+const facts = (p: IdentityProjection) => ({ ...p, reviewRemainingMs: 0 });
+function progresses(a: IdentityProjection, b: IdentityProjection): boolean {
+  if (a.domain !== b.domain || a.intent !== b.intent || a.projectId !== b.projectId || a.sessionId !== b.sessionId ||
+    a.ownerGeneration !== b.ownerGeneration || a.checkout && !identityDataEqual(a.checkout, b.checkout) ||
+    a.prepared && !identityDataEqual(a.prepared, b.prepared) || a.diagnostic && !identityDataEqual(a.diagnostic, b.diagnostic) ||
+    a.applySubmitted && !b.applySubmitted || a.lateSettled && !b.lateSettled ||
+    a.nativeReason !== 'none' && a.nativeReason !== b.nativeReason || phases.indexOf(b.phase) < phases.indexOf(a.phase)) return false;
+  if (a.phase === 'final') return identityDataEqual(facts(a), facts(b));
+  if (a.phase === 'unknown' && b.phase !== 'unknown') return false;
+  if (a.coreOutcome) {
+    if (!b.coreOutcome) return false;
+    // A complete core receipt is immutable, independently of native finality.
+    for (const key of ['effect', 'journal', 'resources', 'reason'] as const) {
+      if (a.coreOutcome[key] !== 'unknown' && a.coreOutcome[key] !== b.coreOutcome[key]) return false;
+    }
+  }
+  return true;
+}
+const parseStatus = (v: unknown): IdentityOwnerStatus | null => parseIdentityOwnerSnapshot({ busy: false, status: v })?.status ?? null;
+
+export class ProjectIdentityNativeController implements IdentityNativePort {
+  readonly mode = 'native' as const;
+  readonly #api: ProjectIdentityApi;
+  readonly #source: Source;
+  #status: IdentityOwnerStatus | null = null;
+  #buffer: IdentityOwnerStatus | null = null;
+  #initialized = false;
+  #off: (() => void) | null = null;
+  #read: Work | null = null;
+  #works = new Set<Work>();
+  #attempt: Attempt | null = null;
+  #seen = new Map<string, IdentityProjection>();
+  #issue: Issue | null = null;
+  #stamp = 0;
+  #disposed = false;
+  #notifying = false;
+  #listeners = new Set<() => void>();
+  #snapshot: IdentityOwnerSnapshot = Object.freeze({ busy: false, status: null });
+  #state!: ProjectIdentityNativeState;
+
+  constructor(api: ProjectIdentityApi, source: Source) {
+    // Capture one original connection. Later method/property replacement is
+    // never a route for a pending token; Root retains this controller on rebind.
+    const { open, prepare, apply, close, status, subscribe } = api;
+    if (api.mode !== 'native' || ![open, prepare, apply, close, status, subscribe].every((f) => typeof f === 'function')) throw failure();
+    this.#api = Object.freeze({ mode: 'native' as const,
+      open: (r: IdentityOpenRequest) => open.call(api, r), prepare: (r: IdentityPrepareRequest) => prepare.call(api, r),
+      apply: (r: IdentitySendRequest) => apply.call(api, r), close: (r: { sessionId: string }) => close.call(api, r),
+      status: () => status.call(api), subscribe: (listener: (v: unknown) => void) => subscribe.call(api, listener) });
+    this.#source = source; this.#publish();
+  }
+  getSnapshot = (): IdentityOwnerSnapshot => this.#snapshot;
+  getState = (): ProjectIdentityNativeState => this.#state;
+  subscribe = (listener: () => void): (() => void) => { this.#listeners.add(listener); return () => { this.#listeners.delete(listener); }; };
+  #current(): IdentityUiContext | null { try { return parseIdentityContext(this.#source.current()); } catch { return null; } }
+  #other(projectId: string): boolean { try { return !!this.#source.otherOperationReason?.(projectId); } catch { return true; } }
+  #original(): IdentityProjection | null { return this.#attempt ? this.#attempt.projection : this.#status?.active ?? this.#status?.lastTerminal ?? null; }
+  #publish(): void {
+    const visible = this.#issue === null ? this.#status : null;
+    this.#snapshot = Object.freeze({ busy: this.#works.size !== 0, status: this.#initialized ? visible : null });
+    this.#state = Object.freeze({ status: this.#status, original: this.#original(), projectId: this.#attempt?.context.projectId ?? this.#original()?.projectId ?? null,
+      pendingCount: this.#works.size,
+      reading: this.#read !== null, initialized: this.#initialized, listening: this.#off !== null, issue: this.#issue,
+      closeRequested: this.#attempt?.closeRequested ?? false, closeSent: this.#attempt?.closeSent ?? false });
+    if (this.#notifying) return;
+    this.#notifying = true;
+    try { for (const listener of [...this.#listeners]) { try { listener(); } catch { /* A view cannot release original work. */ } } }
+    finally { this.#notifying = false; }
+  }
+  #fail(issue: Issue): void {
+    if (this.#issue === null || this.#issue === 'unconfirmed') this.#issue = issue;
+    this.#publish();
+  }
+  /** Root includes this in other-action, reconnect and passive-read admission. */
+  ownerReason(projectId?: string): string | null {
+    if (this.#issue) return 'The original app ID status needs attention. Check that original request; do not repeat the change or reconnect to dismiss it.';
+    if (this.#works.size) return 'An app ID request is still finishing. Its original status and cancellation controls remain available.';
+    if (this.#status?.active || this.#attempt?.sent && !terminal(this.#attempt.projection)) return 'Finish or close the original app ID review before starting another task.';
+    const p = this.#original();
+    return p?.coreOutcome?.journal === 'recovery_required' && (!projectId || p.projectId === projectId)
+      ? 'This project has an interrupted app ID change. Preserve its files and review the separate recovery.' : null;
+  }
+  /** Explicit setup only. Component subscriptions never start native work. */
+  connect(): boolean { return !this.#initialized && this.checkStatus(); }
+  checkStatus(): boolean {
+    if (this.#disposed || this.#read) return false;
+    const work: Work = { kind: 'status', promise: null };
+    this.#read = work; this.#works.add(work); this.#publish();
+    if (this.#disposed) { this.#finish(work); return false; }
+    try {
+      const subscribing = this.#off === null;
+      const original = subscribing ? this.#api.subscribe((value) => this.#receive(value, 'event')) : this.#api.status();
+      if (!original || typeof original.then !== 'function') throw failure();
+      work.promise = original;
+      void this.#readOriginal(work, original, subscribing);
+      return true;
+    } catch { this.#fail('unconfirmed'); this.#finish(work); return false; }
+  }
+  async #readOriginal(work: Work, original: Promise<unknown>, subscribing: boolean): Promise<void> {
+    try {
+      let value = await original;
+      if (subscribing) {
+        if (typeof value !== 'function') { this.#fail('protocol'); return; }
+        this.#off = value as () => void;
+        if (this.#disposed && !this.#attempt?.sent) return;
+        // Subscribe before the first read; events alone cannot initialize.
+        const read = this.#api.status(); work.promise = read;
+        value = await read;
+      }
+      this.#receive(value, 'read');
+    } catch { this.#fail('unconfirmed'); }
+    finally { this.#finish(work); }
+  }
+  #finish(work: Work): void {
+    this.#works.delete(work);
+    if (this.#read === work) this.#read = null;
+    this.#publish(); this.#closeOriginal(); this.#detachIfFinished();
+  }
+  #receive(value: unknown, source: 'event' | 'read' | 'reply'): void {
+    const s = parseStatus(value);
+    if (!s) { this.#fail('protocol'); return; }
+    if (this.#status && s.windowGeneration !== this.#status.windowGeneration) { this.#fail('generation-changed'); return; }
+    if (!this.#initialized && source !== 'read') {
+      const old = this.#buffer;
+      if (old && old.windowGeneration !== s.windowGeneration) { this.#fail('generation-changed'); return; }
+      if (old && old.statusRevision === s.statusRevision && !identityDataEqual(
+        { ...old, active: old.active && facts(old.active), lastTerminal: old.lastTerminal && facts(old.lastTerminal) },
+        { ...s, active: s.active && facts(s.active), lastTerminal: s.lastTerminal && facts(s.lastTerminal) })) { this.#fail('protocol'); return; }
+      if (old && s.statusRevision > old.statusRevision) for (const before of [old.active, old.lastTerminal]) {
+        const after = before && [s.active, s.lastTerminal].find((p) => p?.sessionId === before.sessionId);
+        if (before && after && !progresses(before, after)) { this.#fail('protocol'); return; }
+      }
+      if (!old || s.statusRevision >= old.statusRevision) {
+        const clamp = (p: IdentityProjection | null) => {
+          const before = p && old && [old.active, old.lastTerminal].find((v) => v?.sessionId === p.sessionId);
+          return p && before ? Object.freeze({ ...p, reviewRemainingMs: Math.min(p.reviewRemainingMs, before.reviewRemainingMs) }) : p;
+        };
+        this.#buffer = Object.freeze({ ...s, active: clamp(s.active), lastTerminal: clamp(s.lastTerminal) });
+      }
+      if (s.capability.reason === 'cleanup_unknown' || [s.active, s.lastTerminal].some((p) => p?.nativeFinality === 'unknown')) this.#fail('cleanup-unknown');
+      return;
+    }
+    const prior = this.#status;
+    // Even delayed negative evidence cannot become a fresh positive result.
+    if (s.capability.reason === 'cleanup_unknown' || [s.active, s.lastTerminal].some((p) => p?.nativeFinality === 'unknown')) this.#fail('cleanup-unknown');
+    if (prior && s.statusRevision < prior.statusRevision) return;
+    if (prior && s.statusRevision === prior.statusRevision && !identityDataEqual(
+      { ...prior, active: prior.active && facts(prior.active), lastTerminal: prior.lastTerminal && facts(prior.lastTerminal) },
+      { ...s, active: s.active && facts(s.active), lastTerminal: s.lastTerminal && facts(s.lastTerminal) })) { this.#fail('protocol'); return; }
+    for (const p of [s.active, s.lastTerminal]) if (p) {
+      const old = this.#seen.get(p.sessionId);
+      if (old && !progresses(old, p) || !old && this.#seen.size >= 128) { this.#fail('protocol'); return; }
+    }
+    const clamp = (p: IdentityProjection | null): IdentityProjection | null => {
+      if (!p) return null;
+      const old = this.#seen.get(p.sessionId);
+      const kept = old ? Object.freeze({ ...p, reviewRemainingMs: Math.min(old.reviewRemainingMs, p.reviewRemainingMs) }) : p;
+      this.#seen.set(kept.sessionId, kept); return kept;
+    };
+    this.#status = Object.freeze({ ...s, active: clamp(s.active), lastTerminal: clamp(s.lastTerminal) });
+    if (source === 'read') this.#initialized = true;
+    if (this.#issue === 'unconfirmed') this.#issue = null;
+    const a = this.#attempt;
+    if (a?.sent && a.window === s.windowGeneration && s.statusRevision > a.after) {
+      const p = [this.#status.active, this.#status.lastTerminal].find((p) => p && p.projectId === a.context.projectId &&
+        p.intent === a.request.intent && (a.sessionId ? p.sessionId === a.sessionId : p.sessionId !== a.previous));
+      if (p) {
+        if (a.request.intent === 'edit' && p.checkout?.view.kind === 'project-identity' && !identityDataEqual(a.request.selection,
+          { platform: p.checkout.view.selection.platform, target: p.checkout.view.selection.target, project: p.checkout.view.selection.project })) {
+          this.#fail('protocol'); return;
+        }
+        if (p.prepared && (!a.preparation || a.preparation.intent === 'edit' && (p.checkout?.view.kind !== 'project-identity' ||
+          p.prepared.view.kind !== 'project-identity-preview' || !identityPreviewMatches(p.prepared.view, p.checkout.view,
+            a.preparation.desiredIdentity, a.preparation.identityIntent)))) { this.#fail('protocol'); return; }
+        a.sessionId = p.sessionId; a.projection = p;
+        if (terminal(p) && !a.outcomePublished && (p.phase === 'unknown' || this.#issue === null)) {
+          a.outcomePublished = true;
+          try { this.#source.onOutcome?.(p); } catch { this.#fail('unconfirmed'); }
+        }
+      }
+    }
+    if (a && !a.retired && !identityDataEqual(a.context, this.#current())) this.beforeContextIntent();
+    this.#publish(); this.#closeOriginal();
+    const buffered = this.#buffer; this.#buffer = null;
+    if (buffered) this.#receive(buffered, 'event');
+  }
+  #ready(): IdentityUiContext | null {
+    const c = this.#current();
+    return !this.#disposed && this.#initialized && this.#off && !this.#issue && !this.#works.size &&
+      this.#status?.capability.available && this.#status.statusRevision < 0xffff_ffff && c?.projectId &&
+      c.contextEpoch < Number.MAX_SAFE_INTEGER && !c.preview && !c.blocked && !this.#other(c.projectId) ? c : null;
+  }
+  #bound(): Attempt | null {
+    const a = this.#attempt, c = this.#ready();
+    return a && c && !a.retired && a.sent && a.stamp === this.#stamp && identityDataEqual(a.context, c) &&
+      a.window === this.#status?.windowGeneration && a.sessionId === this.#status?.active?.sessionId ? a : null;
+  }
+  #send(kind: Exclude<Work['kind'], 'status'>, a: Attempt, call: () => Promise<unknown>, guard: () => boolean): boolean {
+    const work: Work = { kind, promise: null };
+    this.#works.add(work); this.#publish();
+    if (!guard()) { this.#finish(work); return false; }
+    // This is a local handoff latch, not a manufactured native phase/session.
+    if (kind === 'open') a.sent = true;
+    if (kind === 'apply') a.applySent = true;
+    if (kind === 'close') a.closeSent = true;
+    let original: Promise<unknown>;
+    try {
+      original = call();
+      if (!original || typeof original.then !== 'function') throw failure();
+      work.promise = original;
+    } catch { this.#fail('unconfirmed'); this.#finish(work); throw failure(); }
+    void Promise.resolve(original).then((value) => this.#receive(value, 'reply'), () => {
+      // A late transport error cannot erase an original settled receipt.
+      if (!(a.projection?.phase === 'final' && a.projection.nativeFinality === 'settled')) this.#fail('unconfirmed');
+    }).finally(() => this.#finish(work));
+    if (kind === 'apply') { try { this.#source.onMutationSubmitted?.(a.context.projectId!, a.request.intent); } catch { this.#fail('unconfirmed'); } }
+    this.#publish();
+    return true;
+  }
+  #guard(a: Attempt, status: IdentityOwnerStatus | null, stamp: number): boolean {
+    // Read caller-owned context/gates FIRST: they may synchronously retire this
+    // very intent. The final local stamp checks must follow those callbacks.
+    const current = this.#current(), blocked = this.#other(a.context.projectId!);
+    return !this.#disposed && !this.#issue && this.#works.size === 1 && this.#attempt === a && !a.retired &&
+      this.#stamp === stamp && this.#status === status && identityDataEqual(a.context, current) && !blocked;
+  }
+  #open(request: IdentityOpenRequest): boolean {
+    if (!encodeProjectIdentityRequest('project_identity_open', request)) return false;
+    const c = this.#ready(), status = this.#status;
+    if (!c || !status || c.projectId !== request.projectId || status.active ||
+      this.#attempt?.sent && !terminal(this.#attempt.projection) || request.intent === 'edit' &&
+      (!c.selection || !identityDataEqual(request.selection, { platform: c.selection.platform, target: c.selection.target, project: c.selection.project }) ||
+        this.#original()?.projectId === c.projectId && this.#original()?.coreOutcome?.journal === 'recovery_required')) return false;
+    const a: Attempt = { context: c, stamp: this.#stamp, window: status.windowGeneration, after: status.statusRevision,
+      previous: status.lastTerminal?.sessionId ?? null, request, sessionId: null, projection: null, retired: false, sent: false,
+      preparation: null, prepareClaimed: false, applyClaimed: false, applySent: false, closeRequested: false, closeSent: false, outcomePublished: false };
+    this.#attempt = a;
+    const sent = this.#send('open', a, () => this.#api.open(request), () => this.#guard(a, status, a.stamp));
+    if (!sent && this.#attempt === a && !a.sent) { this.#attempt = null; this.#publish(); }
+    return sent;
+  }
+  analyze(request: { projectId: string; selection: IdentitySelection }): boolean {
+    const args = uiArguments(request, ['projectId', 'selection']);
+    if (!args) return false;
+    const c = parseIdentityContext({ ...args, contextEpoch: 0, preview: false, blocked: false });
+    if (!c?.projectId || !c.selection) return false;
+    const { platform, target, project } = c.selection;
+    return this.#open({ intent: 'edit', projectId: c.projectId, selection: { platform, target, project } });
+  }
+  inspectRecovery(request: { projectId: string }): boolean {
+    const args = uiArguments(request, ['projectId']);
+    return args ? this.#open({ intent: 'recover', projectId: args.projectId as string }) : false;
+  }
+  #prepare(request: IdentityPrepareRequest): boolean {
+    if (!encodeProjectIdentityRequest('project_identity_prepare', request)) return false;
+    const a = this.#bound(), p = a?.projection, status = this.#status;
+    if (!a || !p?.checkout || p.phase !== 'editing' || p.nativeReason !== 'none' || p.diagnostic || a.prepareClaimed || request.intent !== p.intent ||
+      request.sessionId !== p.sessionId || request.revision !== p.checkout.revision) return false;
+    if (request.intent === 'edit' && (p.checkout.view.kind !== 'project-identity' || p.checkout.view.state !== 'supported' ||
+      !identityValueFits(request.desiredIdentity, p.checkout.view.selection.platform) || request.desiredIdentity !== p.checkout.view.identity &&
+      (request.identityIntent !== 'new-application' || p.checkout.view.selection.continuity !== 'unknown' || p.checkout.view.identityStatus !== 'unverified'))) return false;
+    if (request.intent === 'recover' && (p.checkout.view.kind !== 'project-identity-recovery' || p.checkout.view.state !== 'recoverable')) return false;
+    a.prepareClaimed = true; a.preparation = Object.freeze(request);
+    return this.#send('prepare', a, () => this.#api.prepare(request), () => this.#guard(a, status, a.stamp));
+  }
+  prepare(request: IdentitySessionRequest & { desiredIdentity: string; intent: IdentityIntent }): boolean {
+    const args = uiArguments(request, ['sessionId', 'revision', 'desiredIdentity', 'intent']);
+    return args ? this.#prepare({ intent: 'edit', sessionId: args.sessionId as string, revision: args.revision as string,
+      desiredIdentity: args.desiredIdentity as string, identityIntent: args.intent as IdentityIntent }) : false;
+  }
+  prepareRecovery(request: IdentitySessionRequest): boolean {
+    const args = uiArguments(request, ['sessionId', 'revision']);
+    return args ? this.#prepare({ sessionId: args.sessionId as string, revision: args.revision as string, intent: 'recover' }) : false;
+  }
+  #apply(request: IdentitySendRequest): boolean {
+    if (!encodeProjectIdentityRequest('project_identity_apply', request)) return false;
+    const a = this.#bound(), p = a?.projection, status = this.#status;
+    if (!a || !a.prepareClaimed || !a.preparation || !p?.prepared || p.phase !== 'reviewing' || p.nativeReason !== 'none' ||
+      p.reviewRemainingMs === 0 || a.applyClaimed || p.applySubmitted ||
+      request.intent !== p.intent || request.sessionId !== p.sessionId || request.revision !== p.prepared.revision || request.planToken !== p.prepared.planToken) return false;
+    a.applyClaimed = true;
+    return this.#send('apply', a, () => this.#api.apply(request), () => this.#guard(a, status, a.stamp) && !a.closeRequested);
+  }
+  #sendApply(request: IdentityApplyRequest, intent: 'edit' | 'recover'): boolean {
+    const args = uiArguments(request, ['sessionId', 'revision', 'planToken']);
+    return args ? this.#apply({ sessionId: args.sessionId as string, revision: args.revision as string, planToken: args.planToken as string, intent }) : false;
+  }
+  apply(request: IdentityApplyRequest): boolean { return this.#sendApply(request, 'edit'); }
+  recover(request: IdentityApplyRequest): boolean { return this.#sendApply(request, 'recover'); }
+  /** BEFORE every context/API/selection intent, even no-op or ABA intents. */
+  beforeContextIntent(): void {
+    if (this.#stamp === Number.MAX_SAFE_INTEGER) this.#fail('protocol'); else this.#stamp += 1;
+    const a = this.#attempt;
+    if (a) { a.retired = true; if (!a.applySent) a.closeRequested = true; }
+    this.#publish(); this.#closeOriginal();
+  }
+  /** Explicit original cancellation, independent of selected project/busy. */
+  requestClose(): boolean {
+    const a = this.#attempt;
+    if (!a?.sent || terminal(a.projection) || a.closeRequested) return false;
+    a.retired = true; a.closeRequested = true; this.#publish(); this.#closeOriginal(); return true;
+  }
+  discard(request: { sessionId: string }): boolean {
+    const args = uiArguments(request, ['sessionId']);
+    if (!args || args.sessionId !== this.#attempt?.sessionId || !this.requestClose()) return false;
+    const sent = [...this.#works].some((w) => w.kind === 'close' && w.promise !== null);
+    if (!sent && this.#issue) throw failure();
+    return sent;
+  }
+  #closeOriginal(): void {
+    const a = this.#attempt, p = a?.projection;
+    if (!a?.closeRequested || a.closeSent || !a.sessionId || !p || terminal(p) || a.window !== this.#status?.windowGeneration ||
+      this.#issue === 'generation-changed' || this.#issue === 'cleanup-unknown' || [...this.#works].some((w) => w.kind === 'close')) return;
+    try { this.#send('close', a, () => this.#api.close({ sessionId: a.sessionId! }), () => this.#attempt === a &&
+      !a.closeSent && !terminal(a.projection) && a.window === this.#status?.windowGeneration); }
+    catch { /* The original lost request remains retained; never retry Close. */ }
+  }
+  dispose(): void {
+    this.#disposed = true; this.beforeContextIntent(); this.#listeners.clear(); this.#detachIfFinished();
+  }
+  #detachIfFinished(): void {
+    if (!this.#disposed || this.#works.size || this.#status?.active || this.#attempt?.sent && !terminal(this.#attempt.projection) || this.#issue) return;
+    const off = this.#off; this.#off = null;
+    try { off?.(); } catch { this.#fail('unconfirmed'); }
+  }
+}

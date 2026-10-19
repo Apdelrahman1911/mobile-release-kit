@@ -168,8 +168,13 @@ export class ProjectIdentityController {
     return p && p.projectId === frame.context?.projectId ? p : null;
   }
   #selected(p: IdentityProjection | null, frame: Frame): boolean {
+    const selected = frame.context?.selection;
+    const actual = p?.checkout?.view.kind === 'project-identity' ? p.checkout.view.selection : null;
+    // Selection identifies the source only. Continuity and identity status
+    // come from the native checkout, which stays exact in every review binding.
     return p !== null && p.projectId === frame.context?.projectId && (p.intent === 'recover' ||
-      p.checkout?.view.kind === 'project-identity' && identityDataEqual(p.checkout.view.selection, frame.context?.selection));
+      !!selected && actual !== null && selected.platform === actual.platform &&
+      selected.target === actual.target && selected.project === actual.project);
   }
   #binding(frame: Frame): ReviewBinding | null {
     const p = this.#active(frame), request = this.#request;
