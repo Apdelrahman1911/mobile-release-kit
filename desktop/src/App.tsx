@@ -29,6 +29,7 @@ import { ConfigEditController } from './configEditController.ts';
 import { GitHubSetupController } from './githubSetupController.ts';
 import { EnvironmentController } from './environment.ts';
 import { ReleaseVersionController } from './releaseVersion.ts';
+import { ExternalProjectObservationController } from './externalProjectObservationController.ts';
 import { ReleaseVersionEditController, versionOwnerReason, versionProjectDirty, versionRetainsDraft } from './releaseVersionEditController.ts';
 import { versionEditError } from './releaseVersionEdit.ts';
 import { ReleaseInputGuidanceController } from './releaseInputGuidance.ts';
@@ -135,6 +136,8 @@ export function App() {
   // Original passive promises outlive retired display request bindings.
   const passivePending = useRef(0);
   const [, setPassivePending] = useState(0);
+  const externalObserverRef = useRef<ExternalProjectObservationController | null>(null);
+  const externalBusy = useCallback(() => externalObserverRef.current?.passiveBusyReason() ?? null, []);
   const connectionControllerRef = useRef<GitHubConnectionController | null>(null);
   const githubPublicationControllerRef = useRef<GitHubPublicationController | null>(null);
   const githubRemoteSetupControllerRef = useRef<GitHubRemoteSetupController | null>(null);
@@ -169,7 +172,7 @@ export function App() {
   const historyBusy = useCallback(() => githubHistoryControllerRef.current ? githubHistoryOwnerReason(githubHistoryControllerRef.current.getSnapshot()) : null, []);
   // Existing reciprocal admission callbacks also retain the original path
   // picker, even after its display eligibility was retired by a local edit.
-  const savedCommandBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
+  const savedOwnersBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
     (excludeHistory ? null : historyBusy()) ??
     (!excludePublication && githubPublicationControllerRef.current ? githubPublicationOwnerReason(githubPublicationControllerRef.current.getSnapshot()) : null) ??
     (!excludeRemoteSetup && githubRemoteSetupControllerRef.current ? githubRemoteSetupOwnerReason(githubRemoteSetupControllerRef.current.getSnapshot()) : null) ??
@@ -178,6 +181,10 @@ export function App() {
     (!excludeInitialization && initializationControllerRef.current ? initializationOwnerReason(initializationControllerRef.current.getSnapshot(),workspaceRef.current.selectedId??'') : null) ??
     (!excludeVersion && versionEditControllerRef.current ? versionOwnerReason(versionEditControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null) ??
     (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy]);
+  // Every existing new-action/read admission includes the actual passive
+  // original. Only the observer itself uses the underlying owner-only helper.
+  const savedCommandBusy = useCallback((...args: Parameters<typeof savedOwnersBusy>) =>
+    savedOwnersBusy(...args) ?? externalBusy(), [savedOwnersBusy, externalBusy]);
   const syncConnectionContext = useCallback(() => {
     const selected = workspaceRef.current.selectedId;
     const project = selected && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] : null;
@@ -196,6 +203,7 @@ export function App() {
   // Keep the reducer's latest state synchronously visible to save admission.
   // A React render/effect delay must not let an older review authorize Apply.
   const dispatch = useCallback((action: WorkspaceAction) => {
+    externalObserverRef.current?.beforeWorkspaceAction();
     // Intent/event retirement must precede even an unchanged reducer result:
     // failed refresh and unchanged/older saves need not advance generations.
     retirePathPicker();
@@ -228,6 +236,7 @@ export function App() {
       applicationRepositoryRef.current = ''; setApplicationRepository('');
     }
     workspaceRef.current = next;
+    externalObserverRef.current?.syncContext();
     environmentControllerRef.current?.syncProject();
     releaseVersionControllerRef.current?.syncProject();
     versionEditControllerRef.current?.syncProject();
@@ -255,8 +264,8 @@ export function App() {
       (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null),
     selectedProject: () => { const w = workspaceRef.current; return w.selectedId ? w.projects[w.selectedId] ?? null : null; },
-    recoveryUnavailable: () => passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
-      !pathService.current.api || !pathService.current.info ? 'Wait for the current service capabilities.' : null,
+    recoveryUnavailable: () => externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
+      !pathService.current.api || !pathService.current.info ? 'Wait for the current service capabilities.' : null),
     onRecovered: (completion) => dispatch({ type: 'config-recovery-final', projectId: completion.binding.projectId, completion }),
     onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
     onRecoveryRequired: (attention) => dispatch({ type: 'config-save-recovery', projectId: attention.projectId, attention }),
@@ -439,7 +448,7 @@ export function App() {
   // Evidence selection has deliberately no source-project or draft callback.
   const [releaseEvidence] = useState(() => new LifecycleEvidenceController(savedCommandBusy));
   const evidenceState = useSyncExternalStore(releaseEvidence.subscribe, releaseEvidence.getSnapshot, releaseEvidence.getSnapshot);
-  const savedCommandPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeInitialization = false, forHistoryRead = false): string | null => {
+  const savedOwnersPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeInitialization = false, forHistoryRead = false): string | null => {
     const pathOwner = projectPathOwnerReason(pathPickerRef.current); if (pathOwner) return pathOwner;
     if (bootstrapPending.current || connectionPicking.current) return 'Finish the original service or project-selection request before browsing or reviewing saved checks.';
     const projectId = workspaceRef.current.selectedId ?? '';
@@ -471,6 +480,8 @@ export function App() {
       return 'An original passive project query is still pending. Wait for it to settle before reviewing saved checks.';
     return null;
   };
+  const savedCommandPrerequisiteReason = (...args: Parameters<typeof savedOwnersPrerequisiteReason>): string | null =>
+    savedOwnersPrerequisiteReason(...args) ?? externalBusy();
   const [artifactInspection] = useState(() => new ArtifactInspectionController({
     selectedProject: () => {
       const current=workspaceRef.current;
@@ -569,6 +580,32 @@ export function App() {
   const localStoreReconcileState=useSyncExternalStore(localStoreReconcile.subscribe,localStoreReconcile.getSnapshot,localStoreReconcile.getSnapshot);
   const requests = useRef(0);
   const bootGeneration = useRef(0);
+  const [externalObserver] = useState(() => new ExternalProjectObservationController({
+    current: () => {
+      const current = workspaceRef.current;
+      return { api: pathService.current.api, session: current.selectedId ? current.projects[current.selectedId] ?? null : null,
+        versionState: releaseVersionControllerRef.current?.getSnapshot() ?? null };
+    },
+    otherOperationReason: () => savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ??
+      (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
+        ? 'Review or retire the prepared GitHub task before refreshing saved files.' : null) ??
+      methodReason(pathService.current.info, 'project.snapshot', pathService.current.api?.mode ?? 'unavailable'),
+    onObservation: (outcome, stillCurrent) => {
+      // The original read is already settled. Check once before this entirely
+      // synchronous batch; its own intent/reducer changes legitimately retire
+      // the old scope. Unchanged polls never reach this callback.
+      if (!stillCurrent()) return false;
+      snapshotIntentBatch(outcome.projectId);
+      const requestId = ++requests.current;
+      dispatch({ type: 'snapshot-start', projectId: outcome.projectId, requestId });
+      if (outcome.kind === 'observed') dispatch({ type: 'snapshot-done', projectId: outcome.projectId, requestId,
+        snapshot: outcome.snapshot, observedAt: outcome.observedAt });
+      else dispatch({ type: 'snapshot-failed', projectId: outcome.projectId, requestId, error: outcome.error });
+      return true;
+    },
+  }));
+  externalObserverRef.current = externalObserver;
+  const externalObservation = useSyncExternalStore(externalObserver.subscribe, externalObserver.getSnapshot, externalObserver.getSnapshot);
   const main = useRef<HTMLElement>(null);
   const offlineCheckSection = useRef<HTMLDivElement>(null);
   const androidSigningSection = useRef<HTMLDivElement>(null);
@@ -599,6 +636,7 @@ export function App() {
   const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
 
   const bootstrap = useCallback(async () => {
+    externalObserverRef.current?.beforeWorkspaceAction();
     versionEdit.beginConnection();
     metadataImages.beginConnection();
     retirePathPicker();
@@ -701,7 +739,7 @@ export function App() {
       }
     } finally {
       passivePending.current -= 1; setPassivePending(passivePending.current);
-      if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); }
+      if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); }
     }
   }, [githubSetup, githubConnection, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, androidBuild, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker]);
 
@@ -733,7 +771,7 @@ export function App() {
 
   useEffect(() => {
     void bootstrap();
-    return () => { bootGeneration.current += 1; pathService.current = { api: null, info: null }; retirePathPicker(); connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
+    return () => { externalObserverRef.current?.beforeWorkspaceAction(); bootGeneration.current += 1; pathService.current = { api: null, info: null }; retirePathPicker(); connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
   }, [bootstrap]);
 
   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
@@ -787,11 +825,25 @@ export function App() {
   useEffect(() => () => assetSession.dispose(), [assetSession]);
 
   useEffect(() => {
+    const visibility = () => externalObserver.setVisible(!document.hidden);
+    const focus = () => { void externalObserver.focus(); };
+    document.addEventListener('visibilitychange', visibility);
+    window.addEventListener('focus', focus);
+    visibility();
+    return () => {
+      document.removeEventListener('visibilitychange', visibility);
+      window.removeEventListener('focus', focus);
+      void externalObserver.dispose();
+    };
+  }, [externalObserver]);
+
+  useEffect(() => {
     document.title = `${currentNavigation.label} · Mobile Release Kit${preview ? ' · Browser preview' : ''}`;
   }, [currentNavigation, preview]);
 
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
+      externalObserverRef.current?.beforeWorkspaceAction();
       initializationControllerRef.current?.requestClose();
       editControllerRef.current?.shutdownIntent();
       versionEditControllerRef.current?.shutdownIntent();
@@ -809,7 +861,7 @@ export function App() {
     return () => window.removeEventListener('beforeunload', warn);
   }, []);
 
-  const navigate = (next: Page) => { initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localStoreReconcile.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
+  const navigate = (next: Page) => { externalObserver.beforeWorkspaceAction(); initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localStoreReconcile.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
   const reviewCredentialChecks = (kind: 'offline' | 'android-signing') => {
     if (savedCommandBusy() || diagnosticsOwnerReason(diagnostics.getSnapshot())) return;
     // Navigation selects a review only. The existing controller still owns
@@ -832,7 +884,8 @@ export function App() {
         ? 'The application is shutting down.' : null);
   const chooseDisabled = chooseReason !== null;
 
-  const loadSnapshot = async (projectId: string, recoveryReload = false) => {
+  function snapshotIntentBatch(projectId: string) {
+    externalObserverRef.current?.beforeWorkspaceAction();
     githubHistory.beforeWorkspaceAction();
     initialization.snapshotIntent();
     configEdit.snapshotIntent(projectId);
@@ -845,6 +898,9 @@ export function App() {
     androidBuild.snapshotIntent(projectId);
     projectRecovery.snapshotIntent(projectId);
     iosArchive.snapshotIntent(projectId);
+  }
+  const loadSnapshot = async (projectId: string, recoveryReload = false) => {
+    snapshotIntentBatch(projectId);
     if (!api || savedCommandBusy() || (refreshReason !== null && !preview)) return;
     const requestId = ++requests.current;
     passivePending.current += 1; setPassivePending(passivePending.current);
@@ -852,12 +908,14 @@ export function App() {
       dispatch({ type: 'snapshot-start', projectId, requestId, recoveryReload });
       const snapshot = await api.snapshot(projectId);
       dispatch({ type: 'snapshot-done', projectId, requestId, snapshot, observedAt: Date.now() });
+      externalObserver.dismissNotice();
     } catch (error) {
       dispatch({ type: 'snapshot-failed', projectId, requestId, error: apiError(error) });
     } finally { passivePending.current -= 1; setPassivePending(passivePending.current); }
   };
 
   const chooseProject = async () => {
+    externalObserver.beforeWorkspaceAction();
     githubHistory.beforeWorkspaceAction();
     initialization.selectionIntent();
     configEdit.selectionIntent();
@@ -898,12 +956,14 @@ export function App() {
 
   const changeApplicationRepository = (value: string) => {
     if (value === applicationRepositoryRef.current) return;
+    externalObserver.beforeWorkspaceAction();
     advanceConnectionContext(); applicationRepositoryRef.current = value;
     // Invalidate synchronously, before React can publish this input edit.
     syncConnectionContext(); setApplicationRepository(value);
   };
 
   const validate = async () => {
+    externalObserver.beforeWorkspaceAction();
     if (!api || savedCommandBusy() || !session?.draft || validateReason !== null || session.validationRequest || session.reviewRequest) return;
     const projectId = session.project.id;
     const requestId = ++requests.current;
@@ -920,6 +980,7 @@ export function App() {
   };
 
   const review = async () => {
+    externalObserver.beforeWorkspaceAction();
     if (!api || savedCommandBusy() || !session?.draft || reviewReason !== null || session.reviewRequest || session.validationRequest) return;
     const projectId = session.project.id;
     const binding = { id: ++requests.current, revision: session.revision, baselineGeneration: session.baselineGeneration };
@@ -935,6 +996,7 @@ export function App() {
   };
 
   const suggest = async () => {
+    externalObserver.beforeWorkspaceAction();
     if (!api || savedCommandBusy() || !session || session.draft !== null || suggestReason !== null || session.suggestionRequest || session.snapshotRequest) return;
     const projectId = session.project.id;
     const projection = suggestionHints(session.snapshot?.discovery.hints ?? null);
@@ -1045,6 +1107,23 @@ export function App() {
         {bootError && <><ErrorNotice error={bootError} title="The native service is unavailable" /><div className="bridge-retry"><button className="button small secondary" disabled={loading || savedCommandBusy() !== null} onClick={() => void bootstrap()}><Icon name="refresh" size={15} />Retry connection</button><span>No browser fallback or mock engine has been enabled.</span></div></>}
         {catalogError && <ErrorNotice error={catalogError} title="The field catalogue could not be loaded" />}
         {chooseError && <ErrorNotice error={chooseError} title="The project could not be selected" />}
+        {externalObservation.recovery && <div className="notice notice-warning" role="alert"><Icon name="info" />
+          <div><strong>A saved-file check needs attention</strong>
+            <p>The earlier check for {workspace.projects[externalObservation.recovery.projectId]?.project.name ?? 'a previously selected project'} could not confirm cleanup.
+              Your drafts are preserved. New checks and tasks are paused. Keep the app open and preserve the project files; do not repeat the check or reconnect to dismiss this warning.</p>
+          </div></div>}
+        {!externalObservation.recovery && externalObservation.projectId === session?.project.id && externalObservation.notice &&
+          <div className={`notice ${externalObservation.notice.kind === 'unavailable' ? 'notice-warning' : 'notice-info'}`} role="status">
+            <Icon name="info" /><span>{externalObservation.notice.message}</span>
+            <div className="button-row">
+              {externalObservation.notice.next === 'review-settings' && <button type="button" className="button small secondary" onClick={() => navigate('settings')}>Review project settings</button>}
+              {externalObservation.notice.next === 'read-saved-version' && <button type="button" className="button small secondary" disabled={releaseVersion.startReason() !== null}
+                onClick={() => { navigate('dashboard'); externalObserver.beforeWorkspaceAction(); void releaseVersion.read(); }}>Read updated version</button>}
+              {externalObservation.notice.next === 'refresh-project' && <button type="button" className="button small secondary" disabled={loading || refreshReason !== null}
+                onClick={() => { if (session) void loadSnapshot(session.project.id); }}>Check saved files again</button>}
+              <button type="button" className="button small secondary" onClick={() => externalObserver.dismissNotice()}>Dismiss</button>
+            </div>
+          </div>}
         {(pathPicker.pending || pathPicker.unverified || pathPicker.message) && <div className={`notice ${pathPicker.unverified ? 'notice-warning' : 'notice-info'}`} role={pathPicker.unverified ? 'alert' : 'status'}>
           <Icon name="info" /><span>{projectPathOwnerReason(pathPicker) ?? pathPicker.message}{pathPicker.pending ? ' If the original picker is still open, its Cancel button leaves the draft unchanged.' : ''}</span></div>}
         {info?.runtime.state !== 'available' && info && !preview && <div className="notice notice-warning"><Icon name="info" /><div><strong>{info.runtime.state === 'disabled' ? 'The engine is disabled' : 'Bundled engine unavailable'}</strong><p>{info.runtime.reason ?? 'A trusted packaged runtime has not been supplied. The app will not select an ambient Python or a mock engine.'} Folder selection does not establish a project observation.</p></div></div>}
@@ -1089,7 +1168,7 @@ export function App() {
           initializationState={initializationState} versionEditState={versionEditState}
           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
           versionEditor={<ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} />}
-          releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); void releaseVersion.read(); }}
+          releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { externalObserver.beforeWorkspaceAction(); artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); void releaseVersion.read(); }}
           onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="A little clarity before the next release." description="Edit a practical, schema-driven draft. The bundled core provides every field, requirement, and validation rule." />{editor()}</>}
         {page === 'environment' && <Environment info={info} api={api} preview={preview} session={session} state={environmentState} controller={environment}
@@ -1114,12 +1193,12 @@ export function App() {
           androidBuild={<div ref={androidSigningSection} tabIndex={-1} aria-label="Android build and signing review"><AndroidBuild state={androidBuildState} controller={androidBuild}
             projectName={session?.project.name ?? null} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
-            onReadVersion={() => void releaseVersion.read()} versionReason={releaseVersion.startReason()} onHelp={setHelp}
+            onReadVersion={() => { externalObserver.beforeWorkspaceAction(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
             onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /></div>}
           iosArchive={<IOSArchive state={iosArchiveState} controller={iosArchive}
             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
-            onReadVersion={() => void releaseVersion.read()} versionReason={releaseVersion.startReason()} onHelp={setHelp}
+            onReadVersion={() => { externalObserver.beforeWorkspaceAction(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
             onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />} />}
         {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} inspectionState={artifactInspectionState} inspectionController={artifactInspection} projectName={session?.project.name ?? null} onHelp={setHelp} />
           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} />

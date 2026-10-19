@@ -129,7 +129,7 @@ export const releaseVersionHelp: HelpContent = {
   why: 'See the version name and build number that shared core release policy resolves from saved files, not from an unsaved draft.',
   where: 'Choose the project root with the native folder picker. Save configuration separately; this action cannot select another path or save your draft.',
   format: 'The saved version.source points to a public UTF-8 KEY=VALUE file. Saved nameKey, buildKey and enabled platforms select the existing core version policy.',
-  failure: 'Missing, invalid, unsafe, changed or unavailable inputs produce no current observation. Reads are non-atomic and external changes are not monitored. Byte comparisons are not file custody or build consent. This is not an artifact check, full preflight, native-tool check or release-readiness result.',
+  failure: 'Missing, invalid, unsafe, changed or unavailable inputs produce no current observation. Reads are non-atomic. While the app is visible and idle, saved-file checks can flag changes; they are not a filesystem lock or a complete source-code watcher. Byte comparisons are not file custody or build consent. This is not an artifact check, full preflight, native-tool check or release-readiness result.',
 };
 
 interface ProjectBinding {
