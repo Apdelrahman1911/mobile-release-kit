@@ -1,0 +1,219 @@
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -533,6 +533,38 @@
+     result
+ }
+ #[tauri::command]
++async fn prepare_tool_acquisition(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::tool_acquisition_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    edit_window(&webview).map_err(|_| crate::tool_acquisition_protocol::invalid())?;
++    let value = tool_acquisition_request_body(request.body())?;
++    let args = crate::tool_acquisition_protocol::prepare(&value)?;
++    state.document.prepare_tool_acquisition(args)
++}
++#[tauri::command]
++async fn start_tool_acquisition(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::tool_acquisition_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    edit_window(&webview).map_err(|_| crate::tool_acquisition_protocol::invalid())?;
++    let value = tool_acquisition_request_body(request.body())?;
++    let args = crate::tool_acquisition_protocol::start(&value)?;
++    state.document.start_tool_acquisition(args)
++}
++#[tauri::command]
++async fn tool_acquisition_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::tool_acquisition_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    edit_window(&webview).map_err(|_| crate::tool_acquisition_protocol::invalid())?;
++    let value = tool_acquisition_request_body(request.body())?;
++    crate::tool_acquisition_protocol::status_request(&value)?;
++    state.document.tool_acquisition_status()
++}
++#[tauri::command]
++async fn cancel_tool_acquisition(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::tool_acquisition_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    edit_window(&webview).map_err(|_| crate::tool_acquisition_protocol::invalid())?;
++    let value = tool_acquisition_request_body(request.body())?;
++    let args = crate::tool_acquisition_protocol::cancel(&value)?;
++    state.document.cancel_tool_acquisition(args)
++}
++#[tauri::command]
+ async fn prepare_android_build(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_build_protocol::Status, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     edit_window(&webview).map_err(|_| crate::android_build_protocol::invalid())?;
+@@ -999,6 +1031,14 @@
+         tauri::ipc::InvokeBody::Json(_) => Err(crate::offline_preflight_protocol::invalid()),
+     }
+ }
++fn tool_acquisition_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, BridgeError> {
++    match body {
++        // The original 8192-byte limit and duplicate-aware parser run before
++        // any DTO. Tauri Json has already lost evidence and is not a fallback.
++        tauri::ipc::InvokeBody::Raw(bytes) => crate::tool_acquisition_protocol::raw_request(bytes),
++        tauri::ipc::InvokeBody::Json(_) => Err(crate::tool_acquisition_protocol::invalid()),
++    }
++}
+ fn android_build_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, BridgeError> {
+     match body {
+         // Preserve the original IPC byte limit and duplicate keys; a Tauri
+@@ -1049,6 +1089,28 @@
+ #[cfg(test)]
+ #[path = "android_build_shell_tests.rs"]
+ mod android_build_shell_tests;
++
++#[cfg(test)]
++mod tool_acquisition_shell_tests {
++    use super::tool_acquisition_request_body;
++    use tauri::ipc::InvokeBody;
++
++    // Original InvokeBody DATA only: no window, native owner or dispatch.
++    #[test]
++    fn raw_tool_commands_refuse_json_and_preserve_original_limits() {
++        assert!(tool_acquisition_request_body(&InvokeBody::Json(serde_json::json!({}))).is_err());
++        assert!(tool_acquisition_request_body(&InvokeBody::Raw(b"{}".to_vec())).is_ok());
++        for raw in [b"".as_slice(), b"{\"a\":1,\"a\":2}", b"{\"a\":{\"b\":1,\"b\":2}}", b"{}{}", b"{\"a\":1e0}"] {
++            assert!(tool_acquisition_request_body(&InvokeBody::Raw(raw.to_vec())).is_err());
++        }
++        assert_eq!(crate::tool_acquisition_protocol::IPC_LIMIT, 8192);
++        let mut boundary = vec![b' '; crate::tool_acquisition_protocol::IPC_LIMIT - 2];
++        boundary.extend_from_slice(b"{}");
++        assert!(tool_acquisition_request_body(&InvokeBody::Raw(boundary.clone())).is_ok());
++        boundary.push(b' ');
++        assert!(tool_acquisition_request_body(&InvokeBody::Raw(boundary)).is_err());
++    }
++}
+ fn not_closing(state: &ShellState) -> Result<(), BridgeError> {
+     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+     { return state.document.not_quitting(); }
+@@ -2138,6 +2200,10 @@
+ impl Drop for ProjectRecoveryRelayGuard {
+     fn drop(&mut self) { if !self.closed { self.document.project_recovery_relay_lost(); } }
+ }
++struct ToolAcquisitionRelayGuard { document: DocumentBinding, closed: bool }
++impl Drop for ToolAcquisitionRelayGuard {
++    fn drop(&mut self) { if !self.closed { self.document.tool_acquisition_relay_lost(); } }
++}
+ struct AndroidBuildRelayGuard { document: DocumentBinding, closed: bool }
+ impl Drop for AndroidBuildRelayGuard {
+     fn drop(&mut self) { if !self.closed { self.document.android_build_relay_lost(); } }
+@@ -2171,6 +2237,8 @@
+     let project_recovery_guard = ProjectRecoveryRelayGuard { document: document.clone(), closed: false };
+     let mut android_build = document.android_build_subscribe();
+     let android_build_guard = AndroidBuildRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
++    let mut tool_acquisition = document.tool_acquisition_subscribe();
++    let tool_acquisition_guard = ToolAcquisitionRelayGuard { document: document.clone(), closed: false }; // Same retained relay, before spawn.
+     let mut artifact_inspection = document.artifact_inspection_subscribe();
+     let artifact_inspection_guard = ArtifactInspectionRelayGuard { document: document.clone(), closed: false };
+     let mut ios_archive = document.ios_archive_subscribe();
+@@ -2196,6 +2264,7 @@
+         let mut local_store_reconcile_relay_failed = false;
+         let mut preflight_guard = preflight_guard;
+         let mut android_build_guard = android_build_guard;
++        let mut tool_acquisition_guard = tool_acquisition_guard;
+         let mut project_recovery_guard = project_recovery_guard;
+         let mut artifact_inspection_guard = artifact_inspection_guard;
+         let mut ios_archive_guard = ios_archive_guard;
+@@ -2222,6 +2291,8 @@
+         let mut android_registration_revision = None;
+         let mut android_service_revision = None;
+         let mut android_build_relay_failed = false;
++        let mut tool_acquisition_revision = None;
++        let mut tool_acquisition_relay_failed = false;
+         let mut artifact_inspection_revision = None;
+         let mut artifact_inspection_relay_failed = false;
+         let mut ios_archive_revision = None;
+@@ -2229,7 +2300,7 @@
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
+         let mut removal_notice_open=removal_notice.is_some();
+         loop {
+-            if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; }
++            if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
+             document.finish_macos_maintenance(app.clone());
+             // status() releases its native locks before any renderer callback.
+@@ -2496,6 +2567,19 @@
+                     Err(_) => { ios_archive_relay_failed = true; document.ios_archive_relay_lost(); },
+                 }
+             }
++            if !tool_acquisition_relay_failed {
++                match document.tool_acquisition_status() {
++                    Ok(status) => {
++                        if tool_acquisition_revision != Some(status.status_revision) {
++                            tool_acquisition_revision = Some(status.status_revision);
++                            if app.emit_to(MAIN_WINDOW, crate::tool_acquisition_protocol::EVENT, &status).is_err() {
++                                tool_acquisition_relay_failed = true; document.tool_acquisition_relay_lost();
++                            }
++                        }
++                    },
++                    Err(_) => { tool_acquisition_relay_failed = true; document.tool_acquisition_relay_lost(); },
++                }
++            }
+             if !artifact_inspection_relay_failed {
+                 match document.artifact_inspection_status() {
+                     Ok(status) => {
+@@ -2521,7 +2605,7 @@
+             };
+             tokio::select! {
+                 biased;
+-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; } },
++                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
+                 result = revisions.changed() => { if result.is_err() { return; } },
+                 result = assets.changed() => { if result.is_err() { return; } },
+                 result = diagnostics.changed() => { if result.is_err() { return; } },
+@@ -2532,6 +2616,7 @@
+                 result = local_store_reconcile.changed() => { if result.is_err() { return; } },
+                 result = preflight.changed() => { if result.is_err() { return; } },
+                 result = android_build.changed() => { if result.is_err() { return; } },
++                result = tool_acquisition.changed() => { if result.is_err() { return; } },
+                 result = project_recovery.changed() => { if result.is_err() { return; } },
+                 result = artifact_inspection.changed() => { if result.is_err() { return; } },
+                 result = ios_archive.changed() => { if result.is_err() { return; } },
+@@ -3832,6 +3917,13 @@
+             } else { DocumentBinding::new(bridge.clone()) };
+             #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+             let document = DocumentBinding::new(bridge.clone());
++            // One native-only nomination on this original Document. Resolver
++            // or binding failure leaves only tool acquisition unavailable;
++            // no alternate path, retry, directory creation or action is used.
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
++            if let Ok(application_data) = app.path().app_local_data_dir() {
++                let _ = document.bind_tool_acquisition(&application_data);
++            }
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+             if let Some(q) = &observation { q.bind_diagnostic_document(document.clone()); }
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -4051,6 +4143,7 @@
+             prepare_local_store_execute, start_local_store_execute, local_store_execute_status, cancel_local_store_execute,
+             prepare_local_store_reconcile, start_local_store_reconcile, local_store_reconcile_status, cancel_local_store_reconcile,
+             prepare_offline_preflight, start_offline_preflight, offline_preflight_status, cancel_offline_preflight,
++            prepare_tool_acquisition, start_tool_acquisition, tool_acquisition_status, cancel_tool_acquisition,
+             prepare_android_build, start_android_build, android_build_status, cancel_android_build,
+             android_toolchain_catalog_status, refresh_android_toolchain_catalog, recover_android_toolchain, select_android_toolchain, cancel_android_toolchain_catalog,
+             android_tool_sources_status, choose_android_tool_source, cancel_android_tool_source,
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -294,6 +294,7 @@
+             "prepare_offline_preflight", "start_offline_preflight", "offline_preflight_status", "cancel_offline_preflight",
+             "artifact_inspection_pick", "artifact_inspection_prepare", "artifact_inspection_start",
+             "artifact_inspection_cancel", "artifact_inspection_status", "artifact_inspection_discard",
++            "prepare_tool_acquisition", "start_tool_acquisition", "tool_acquisition_status", "cancel_tool_acquisition",
+             "prepare_android_build", "start_android_build", "android_build_status", "cancel_android_build",
+             "android_toolchain_catalog_status", "refresh_android_toolchain_catalog", "recover_android_toolchain", "select_android_toolchain", "cancel_android_toolchain_catalog",
+             "android_tool_sources_status", "choose_android_tool_source", "cancel_android_tool_source",
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -1,7 +1,7 @@
+ {
+   "$schema": "../gen/schemas/desktop-schema.json",
+   "identifier": "main",
+-  "description": "Fixed passive queries, fixed macOS installation-location Finder requests and explicit original-owned read-only installation checks; explicitly confirmed installed-helper preparation and normal Quit, not Installer changes; finite local configuration, workflows, public metadata and saved-version edits; explicitly confirmed nonpublishing Store access checks using assigned local credentials, separately authorized local release-history and Store preparation/execution/reconciliation through original native owners, reviewed saved offline checks, Android builds, unsigned full-Xcode Mac archives and owned build-input recovery; qualified session or encrypted credential management. Store mutations still require project opt-in, reviewed original intent, assigned credentials and one-use confirmation; this capability grants no general Store or network authority. GitHub preflight permits only publisher-bound caller review, one-use nonpublishing dispatch and exact original-run observation. Build tools can execute trusted project code only under native runtime/tool custody. GitHub repository settings permit only separately reviewed, one-use Actions-enabled or workflow-token-policy changes on the same connected registered project. Setup publication permits only separately reviewed saved configuration plus four canonical callers on a new branch and draft PR, and read-only reconciliation of original durable intents. No general HTTP, arbitrary remote writes, event emission, filesystem, shell or opener authority; listen/unlisten is for owner status only.",
++  "description": "Fixed passive queries, fixed macOS installation-location Finder requests and explicit original-owned read-only installation checks; explicitly confirmed installed-helper preparation and normal Quit, not Installer changes; finite local configuration, workflows, public metadata and saved-version edits; explicitly confirmed nonpublishing Store access checks using assigned local credentials, separately authorized local release-history and Store preparation/execution/reconciliation through original native owners, reviewed saved offline checks, Android builds, unsigned full-Xcode Mac archives and owned build-input recovery; qualified session or encrypted credential management. Store mutations still require project opt-in, reviewed original intent, assigned credentials and one-use confirmation; this capability grants no general Store or network authority. GitHub preflight permits only publisher-bound caller review, one-use nonpublishing dispatch and exact original-run observation. Build-tool preparation permits only separately admitted fixed public-source staging with one-use Start, not arbitrary download URLs or automatic installation. Build tools can execute trusted project code only under native runtime/tool custody. GitHub repository settings permit only separately reviewed, one-use Actions-enabled or workflow-token-policy changes on the same connected registered project. Setup publication permits only separately reviewed saved configuration plus four canonical callers on a new branch and draft PR, and read-only reconciliation of original durable intents. No general HTTP, arbitrary remote writes, event emission, filesystem, shell or opener authority; listen/unlisten is for owner status only.",
+   "windows": ["main"],
+   "local": true,
+   "permissions": [
+@@ -21,6 +21,7 @@
+     "allow-prepare-offline-preflight", "allow-start-offline-preflight", "allow-offline-preflight-status", "allow-cancel-offline-preflight",
+     "allow-artifact-inspection-pick", "allow-artifact-inspection-prepare", "allow-artifact-inspection-start",
+     "allow-artifact-inspection-cancel", "allow-artifact-inspection-status", "allow-artifact-inspection-discard",
++    "allow-prepare-tool-acquisition", "allow-start-tool-acquisition", "allow-tool-acquisition-status", "allow-cancel-tool-acquisition",
+     "allow-prepare-android-build", "allow-start-android-build", "allow-android-build-status", "allow-cancel-android-build",
+     "allow-android-toolchain-catalog-status", "allow-refresh-android-toolchain-catalog", "allow-recover-android-toolchain", "allow-select-android-toolchain", "allow-cancel-android-toolchain-catalog",
+     "allow-android-tool-sources-status", "allow-choose-android-tool-source", "allow-cancel-android-tool-source",
