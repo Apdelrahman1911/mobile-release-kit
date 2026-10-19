@@ -7,6 +7,7 @@ physically closes the original private descriptions after dialogue completion.
 from __future__ import annotations
 
 import os
+import math
 import stat
 import threading
 import time
@@ -26,6 +27,9 @@ class BorrowedAllocationInput:
         self.identity = self.output_identity = None
         self.acquired = self.borrow_ended = self.unknown = False
         self.first_failure = None
+        self.first_failure_raw = None
+        self.failure_claimed = False
+        self.failure_error = None
 
     @property
     def domain(self):
@@ -61,14 +65,36 @@ class BorrowedAllocationInput:
     def _identity(self):
         self._owner()
         wire.require(self.acquired and not self.unknown and not self.borrow_ended)
+        self._descriptor_identity()
+
+    def _descriptor_identity(self):
         first, second = os.fstat(self.dialogue.control), os.fstat(self.dialogue.output)
         wire.require((first.st_dev, first.st_ino, first.st_mode) == self.identity
                      and (second.st_dev, second.st_ino, second.st_mode) == self.output_identity)
 
     def failure_observed(self):
         self._owner()
-        if self.first_failure is None:
-            self.first_failure = time.monotonic()
+        if self.failure_claimed:
+            return
+        self.failure_claimed = True  # A return-lost clock observation is not retryable.
+        try:
+            now = time.monotonic()
+            raw = time.clock_gettime_ns(self.dialogue.raw_clock)
+            wire.require(type(now) in (int, float) and math.isfinite(now)
+                         and self.dialogue.last_time <= now and type(raw) is int
+                         and self.dialogue.last_raw is not None and self.dialogue.last_raw <= raw
+                         and 0 < raw < self.dialogue.raw_hard_end)
+            self.first_failure, self.first_failure_raw = now, raw
+            self.dialogue.last_time, self.dialogue.last_raw = now, raw
+        except BaseException as error:
+            self.unknown = True
+            self.dialogue.poisoned = True
+            self.failure_error = error
+            if self.guard is not None:
+                # The enclosing original CleanupScope has not remembered its
+                # incoming primary yet. Latch fatal WITHOUT replacing it with
+                # this diagnostic; no later work or FIN can pass this latch.
+                self.guard.lifetime_ledger._abort()
 
     def poll(self, guard):
         self._owner()
@@ -137,3 +163,19 @@ class BorrowedAllocationInput:
         self._identity()
         self.borrow_ended = True
         self.guard._remove_saved_command_source(self)
+
+    def terminal_bounds(self):
+        """Actual SOURCE-only closed originals; never a caller-supplied grace."""
+        self._owner()
+        wire.require(type(self.dialogue.initial) is wire.Initial and self.dialogue.initial.source is self.request
+                     and self.acquired and self.borrow_ended and not self.unknown
+                     and self.guard is not None and self.guard.handler_state == "RESTORED"
+                     and self.guard._saved_command_input() is None and self.originals_closed())
+        self._descriptor_identity()  # These ORIGINAL bootstrap FDs are still open.
+        wire.require(self.failure_claimed == (self.first_failure is not None)
+                     and self.failure_claimed == (self.first_failure_raw is not None))
+        end, raw_end = self.dialogue.hard_end, self.dialogue.raw_hard_end
+        if self.first_failure is not None:
+            end = min(end, self.first_failure + 10.0)
+            raw_end = min(raw_end, self.first_failure_raw + 10_000_000_000)
+        return end, raw_end

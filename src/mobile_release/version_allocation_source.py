@@ -16,14 +16,38 @@ import sys
 from . import _desktop_version_allocation_source_protocol as wire
 from . import version_policy as policy
 from ._desktop_version_allocation_source_control import BorrowedAllocationInput
-from .build_inputs import InvocationCustody, invocation_custody
+from .build_inputs import BuildInputRootChanged, InvocationCustody, invocation_custody
 from .cancellation import CleanupScope, DefaultCancellation
 from .checked_files import _Reader, _Policy, _directory_identity
 from .config import MAX_CONFIG_BYTES, MAX_VERSION_BYTES, parse_config_text, validate_config_data
-from .local_release_source import LocalSourceObservation, _retain_source, source_descriptor_quote
-from .owned_process import ProcessCleanupError, fatal_lifetime_error
+from .errors import ConfigurationError
+from .local_release_source import LocalSourceError, LocalSourceObservation, _retain_source, source_descriptor_quote
+from .owned_process import ProcessCleanupError, ProcessInterrupted, fatal_lifetime_error
 
 _RETAINED = []
+
+
+class SourceRefused(ValueError):
+    """Only explicit saved-byte/policy comparisons, not generic protocol errors."""
+
+    def __init__(self):
+        super().__init__("The saved version source no longer matches")
+
+
+def _saved_need(condition):
+    if not condition:
+        raise SourceRefused()
+
+
+def _refusal_reason(error, guard):
+    if type(error) in (SourceRefused, BuildInputRootChanged):
+        return "source-refused"
+    if type(error) is LocalSourceError and error.reason in {
+            "path", "input", "repository", "configuration", "index", "source", "dirty", "changed", "budget"}:
+        return "source-refused"
+    if type(error) in (KeyboardInterrupt, ProcessInterrupted) and guard.cancelled:
+        return "cancelled"
+    return None  # In particular, an unclassified ProtocolError has no clean FIN.
 
 
 class AllocationSourceRun:
@@ -70,7 +94,10 @@ class AllocationSourceRun:
         self.failed = True
         if self.primary is None:
             self.primary = error
-        self.input.failure_observed()
+        try:
+            self.input.failure_observed()
+        except BaseException as diagnostic:
+            self.guard._abort(diagnostic)  # Bad F is unknown; keep the original primary.
         self.guard.lifetime_ledger._remember(error)
         if fatal_lifetime_error(error, "Original allocation source cleanup did not settle") is not None:
             self.guard._abort(error)
@@ -105,19 +132,20 @@ class AllocationSourceRun:
         try:
             with scope:
                 node = reader.acquire(path, _Policy(False, 1, maximum), None)
-                wire.require(len(reader.descriptors) <= len(path.parts)
-                             and node.observed.st_size == size and node.observed.st_uid == os.geteuid()
-                             and node.observed.st_nlink == 1 and not node.observed.st_mode & 0o022)
+                wire.require(len(reader.descriptors) <= len(path.parts))
+                _saved_need(node.observed.st_size == size and node.observed.st_uid == os.geteuid()
+                            and node.observed.st_nlink == 1 and not node.observed.st_mode & 0o022)
                 roots = [item for item in reader.nodes if item.canonical == self.root]
-                wire.require(len(roots) == 1 and _directory_identity(roots[0].observed) == self.request.identity
-                             == _directory_identity(os.fstat(self.invocation.project_owner.fd)))
+                wire.require(len(roots) == 1)
+                _saved_need(_directory_identity(roots[0].observed) == self.request.identity
+                            == _directory_identity(os.fstat(self.invocation.project_owner.fd)))
                 raw = reader.read(node)
                 # Retain bytes on the same run BEFORE postchecks/close may fail.
                 if index == 0:
                     self.configuration_bytes = raw
                 else:
                     self.version_bytes = raw
-                wire.require(len(raw) == size and hashlib.sha256(raw).hexdigest() == digest)
+                _saved_need(len(raw) == size and hashlib.sha256(raw).hexdigest() == digest)
                 reader.terminal()
         finally:
             scope.__exit__(*sys.exc_info())
@@ -127,9 +155,12 @@ class AllocationSourceRun:
     def _saved(self):
         r = self.request
         self._read_saved("release/mobile-release.json", MAX_CONFIG_BYTES, r.configuration_size, r.configuration_sha256)
-        config = parse_config_text(self.configuration_bytes.decode("utf-8"))
-        validate_config_data(config)
-        wire.require(config["version"]["source"] == r.version_path)
+        try:
+            config = parse_config_text(self.configuration_bytes.decode("utf-8"))
+            validate_config_data(config)
+        except (ConfigurationError, UnicodeError) as error:
+            raise SourceRefused() from error
+        _saved_need(config["version"]["source"] == r.version_path)
         self._read_saved(r.version_path, MAX_VERSION_BYTES, r.version_size, r.version_sha256)
         # No descriptor credit for a return-lost close. Both preliminary reads
         # must actually close before the continuous LocalSource scope opens.
@@ -271,7 +302,7 @@ class AllocationSourceRun:
                         observed = self.observation.observed
                         binding = policy.SourceBinding(observed.commit, observed.tree, observed.ref,
                             hashlib.sha256(self.configuration_bytes).hexdigest(), hashlib.sha256(self.version_bytes).hexdigest())
-                        wire.require(self.request.matches(binding) and (self.selected is None or self.selected.source == binding))
+                        _saved_need(self.request.matches(binding) and (self.selected is None or self.selected.source == binding))
                         self.binding = binding
                         self.phase = "holding"
                         yield binding
@@ -329,6 +360,9 @@ class _SourceCall:
         self.guard = DefaultCancellation(ProcessCleanupError, "Original version source cleanup did not settle")
         self.input = BorrowedAllocationInput(dialogue, initial.source)
         self.operation = None
+        self.primary = None
+        self.scope_error = None
+        self.terminal_error = None
 
     def cleanup(self):
         operation = self.operation or self.input.operation
@@ -378,11 +412,48 @@ def run_owned(control: int, output: int, raw_initial: bytes, *, started: float, 
     _RETAINED.append(call)  # Original scope/run survives a lost acquire/return.
     scope = CleanupScope(call.guard, call.cleanup, owns_cancellation=True, first_primary=True)
     try:
-        with scope:
-            call.run()
-    finally:
-        scope.__exit__(*sys.exc_info())
-    operation = call.operation
-    wire.require(type(operation) is AllocationSourceRun and operation.binding is not None and not operation.failed
-                 and operation.originals_closed() and call.input.borrow_ended and call.guard.handler_state == "RESTORED")
-    dialogue.finish(wire.finish_frame(initial, operation.binding))
+        try:
+            with scope:
+                call.run()
+        finally:
+            scope.__exit__(*sys.exc_info())
+    except BaseException as error:
+        # InvocationCustody may return a typed fatal wrapper after cleanup.
+        # Retain both originals: that wrapper cannot erase the same ledger's
+        # first body error, and retaining a body error never clears fatal facts.
+        call.scope_error = error
+        call.primary = call.guard.lifetime_ledger._primary or error
+    operation = call.operation or call.input.operation
+    if call.primary is not None:
+        reason = _refusal_reason(call.primary, call.guard)
+        if reason is None:
+            raise call.scope_error
+        try:
+            wire.require(type(operation) is AllocationSourceRun and not dialogue.poisoned
+                         and call.input.first_failure is not None and operation.originals_closed())
+            call.input.terminal_bounds()
+        except BaseException as error:
+            # A classified body refusal cannot erase unknown cleanup/clock facts.
+            call.terminal_error = error
+            call.input.unknown = True
+            dialogue.poisoned = True
+            call.guard._abort(error)
+            raise call.scope_error
+        binding = None
+    else:
+        reason = "none"
+        wire.require(type(operation) is AllocationSourceRun and operation.binding is not None and not operation.failed
+                     and operation.originals_closed() and call.input.first_failure is None)
+        call.input.terminal_bounds()
+        binding = operation.binding
+    facts = call.guard.lifetime_ledger.verdict()
+    try:
+        raw = wire.finish_frame(initial, binding, reason=reason, commands=facts.commands,
+                               first_failure_ns=call.input.first_failure_raw)
+        dialogue.finish_source(raw, call.input)
+    except BaseException as error:
+        call.terminal_error = error
+        call.guard._abort(error)
+        if call.primary is not None:
+            raise call.scope_error
+        raise

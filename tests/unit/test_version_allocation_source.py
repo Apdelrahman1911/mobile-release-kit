@@ -338,6 +338,11 @@ class VersionAllocationSourceTests(unittest.TestCase):
             source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir="/inert/runtime")
         self.assertEqual(len(f.calls), 7)
         self.assertEqual([set(row) - {"protocol", "id"} for row in f.frames], [{"ready"}, {"finished"}])
+        terminal = f.frames[-1]["finished"]
+        self.assertEqual(terminal["reason"], "none")
+        self.assertIsNone(terminal["firstFailureNs"])
+        self.assertEqual(terminal["lifetime"], {"originalsClosed": True, "borrowEnded": True,
+                         "handlersRestored": True, "commands": 7, "profileCalls": 0})
         self.assertEqual(f.control_closes, 0)
         self.assertFalse((self.root / ".mobile-release").exists())
         for argv, kw in f.calls:
@@ -555,6 +560,163 @@ class VersionAllocationSourceTests(unittest.TestCase):
         self.assertEqual(call.guard.handler_state, "RESTORED")
         with self.assertRaises(ProcessCleanupError):
             call.operation.originals_closed()
+        self.assertFalse(any("finished" in row for row in f.frames))
+
+    def test_source_fin_refusal_and_success_cannot_contradict_counts_or_first_failure(self):
+        f = self.fixture
+        initial_value, binding = wire.parse_initial(f.initial()), f.binding()
+        wire.finish_frame(initial_value, binding, reason="none", commands=7, first_failure_ns=None)
+        wire.finish_frame(initial_value, None, reason="source-refused", commands=0, first_failure_ns=10_000_000_000)
+        for value, reason, count, first in [
+                (None, "none", 7, None), (binding, "source-refused", 7, 10_000_000_000),
+                (binding, "none", 6, None), (binding, "none", 7, 10_000_000_000),
+                (None, "source-refused", 8, 10_000_000_000), (None, "source-refused", True, 1),
+                (None, "source-refused", 0, None), (None, "cancelled", 0, 80_000_000_000),
+                (None, "expired", 0, 10_000_000_000)]:
+            with self.subTest(reason=reason, count=count, first=first), self.assertRaises(ValueError):
+                wire.finish_frame(initial_value, value, reason=reason, commands=count, first_failure_ns=first)
+
+    def test_changed_saved_hash_has_clean_refusal_fin_only_after_real_closure(self):
+        f = self.fixture
+        requested = replace(f.source_request(), configuration_sha256="0" * 64)
+        def before_fin(call):
+            self.assertIs(type(call.primary), source.SourceRefused)
+            self.assertTrue(call.operation.originals_closed())
+            self.assertTrue(call.input.borrow_ended)
+            self.assertEqual(call.guard.handler_state, "RESTORED")
+        f.before_fin = before_fin
+        with f.mocks():
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(requested), started=f.now, runtime_dir="/inert/runtime")
+        terminal = f.frames[-1]["finished"]
+        self.assertIsNone(terminal["source"])
+        self.assertEqual(terminal["reason"], "source-refused")
+        self.assertEqual(terminal["firstFailureNs"], "10000000000")
+        self.assertEqual(terminal["lifetime"]["commands"], 0)
+        self.assertEqual(f.calls, [])
+        self.assertEqual(f.control_closes, 0)
+
+    def test_invalid_saved_policy_is_refused_without_turning_it_into_protocol_finality(self):
+        f = self.fixture
+        f.data["schemaVersion"] = 999
+        f.save()
+        with f.mocks():
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir="/inert/runtime")
+        self.assertIs(type(source._RETAINED[-1].primary), source.SourceRefused)
+        self.assertEqual(f.frames[-1]["finished"]["reason"], "source-refused")
+        self.assertEqual(f.calls, [])
+
+    def test_dirty_final_source_keeps_binding_private_and_returns_only_clean_refusal(self):
+        f = self.fixture
+        def change_after_capture(run):
+            if len(f.calls) == 6:
+                f.status = b"?? changed-after-source.txt\0"
+        f.after_command = change_after_capture
+        with f.mocks():
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir="/inert/runtime")
+            self.assertTrue(source._RETAINED[-1].operation.originals_closed())
+        call = source._RETAINED[-1]
+        self.assertEqual(call.operation.binding, f.binding())
+        self.assertEqual(call.primary.reason, "dirty")
+        self.assertIsNone(f.frames[-1]["finished"]["source"])
+        self.assertEqual(f.frames[-1]["finished"]["reason"], "source-refused")
+        self.assertEqual(f.frames[-1]["finished"]["lifetime"]["commands"], 7)
+
+    def test_known_original_cancellation_can_return_refusal_after_all_originals_close(self):
+        f = self.fixture
+        f.after_command = lambda run: setattr(run.guard, "cancelled", True)
+        with f.mocks():
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir="/inert/runtime")
+            self.assertTrue(source._RETAINED[-1].operation.originals_closed())
+        call = source._RETAINED[-1]
+        self.assertIs(type(call.primary), KeyboardInterrupt)
+        self.assertTrue(call.guard.cancelled and call.input.borrow_ended)
+        self.assertEqual(f.frames[-1]["finished"]["reason"], "cancelled")
+        self.assertIsNone(f.frames[-1]["finished"]["source"])
+
+    def test_unclassified_protocol_error_never_gains_a_refusal_fin_from_clean_closes(self):
+        f = self.fixture
+        original = wire.ProtocolError("inert unclassified protocol failure")
+        with f.mocks(), patch.object(source.AllocationSourceRun, "_saved", side_effect=original), self.assertRaises(ValueError) as caught:
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir="/inert/runtime")
+        self.assertIs(caught.exception, original)
+        call = source._RETAINED[-1]
+        self.assertIs(call.primary, original)
+        self.assertTrue(call.operation.originals_closed() and call.input.borrow_ended)
+        self.assertFalse(any("finished" in row for row in f.frames))
+
+    def test_first_failure_samples_both_clocks_once_and_never_renews_source_tail(self):
+        f = self.fixture
+        with f.mocks():
+            with f.owned() as run:
+                original_end = run.input.dialogue.hard_end
+                f.now = 12.0
+                run.input.failure_observed()
+                f.now = 15.0
+                run.input.failure_observed()
+            self.assertEqual((f.input.first_failure, f.input.first_failure_raw), (12.0, 12_000_000_000))
+            self.assertEqual(f.input.terminal_bounds(), (22.0, 22_000_000_000))
+            f.now = 25.0
+            f.input.failure_observed()
+            self.assertEqual(f.input.terminal_bounds(), (22.0, 22_000_000_000))
+            self.assertEqual(f.dialogue.hard_end, original_end)  # Only source FIN may contract it.
+            self.assertEqual(f.control_reads, 0)
+
+    def test_late_refusal_finish_keeps_primary_and_does_not_renew_or_reset_poison(self):
+        f = self.fixture
+        requested = replace(f.source_request(), configuration_sha256="0" * 64)
+        original_close = source.AllocationSourceRun.close
+        def delayed_close(run):
+            original_close(run)
+            f.now = 25.0  # Actual retained F=10; its SOURCE finality allowance ended at20.
+        with f.mocks(), patch.object(source.AllocationSourceRun, "close", delayed_close), self.assertRaises(source.SourceRefused) as caught:
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(requested), started=10.0, runtime_dir="/inert/runtime")
+        call = source._RETAINED[-1]
+        self.assertIs(caught.exception, call.primary)
+        self.assertIsNotNone(call.terminal_error)
+        self.assertTrue(call.dialogue.poisoned)
+        self.assertEqual(call.dialogue.hard_end, 20.0)
+        self.assertEqual(call.dialogue.raw_hard_end, 20_000_000_000)
+        self.assertFalse(any("finished" in row for row in f.frames))
+
+    def test_dirty_primary_survives_original_close_uncertainty_without_refusal_fin(self):
+        f = self.fixture
+        f.status = b"?? dirty.txt\0"
+        original_close = checked_files._Reader.close
+        def lose_close(reader):
+            original_close(reader)
+            run = source._RETAINED[-1].operation
+            if run is not None and run.observation is not None and reader in run.observation.readers:
+                f.now = 12.0
+                raise ProcessCleanupError("inert original close uncertainty")
+        with f.mocks(), patch.object(checked_files._Reader, "close", lose_close), self.assertRaises(ProcessError) as caught:
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=10.0, runtime_dir="/inert/runtime")
+        call = source._RETAINED[-1]
+        self.assertIs(caught.exception, call.scope_error)
+        self.assertEqual(call.primary.reason, "dirty")
+        self.assertIsInstance(call.scope_error, ProcessError)
+        self.assertFalse(call.scope_error.cleanup_complete)
+        self.assertEqual((call.input.first_failure, call.input.first_failure_raw), (10.0, 10_000_000_000))
+        self.assertTrue(call.guard.lifetime_ledger.fatal)
+        self.assertFalse(any("finished" in row for row in f.frames))
+
+    def test_invalid_first_raw_failure_sample_is_unknown_not_resampled_or_reclassified(self):
+        f = self.fixture
+        requested = replace(f.source_request(), configuration_sha256="0" * 64)
+        bad_samples = []
+        def raw_clock(clock):
+            if source._RETAINED and source._RETAINED[-1].input.failure_claimed:
+                bad_samples.append(clock)
+                return 1  # Earlier than the original bind/checkpoint; never substitute now.
+            return int(f.now * 1e9)
+        with f.mocks(), patch.object(time, "clock_gettime_ns", raw_clock), self.assertRaises(ProcessError) as caught:
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(requested), started=10.0, runtime_dir="/inert/runtime")
+        call = source._RETAINED[-1]
+        self.assertIs(call.scope_error, caught.exception)
+        self.assertIs(type(call.primary), source.SourceRefused)
+        self.assertTrue(call.input.unknown and call.dialogue.poisoned)
+        self.assertEqual(len(bad_samples), 1)
+        self.assertIsNone(call.input.first_failure_raw)
+        self.assertIsNotNone(call.input.failure_error)
         self.assertFalse(any("finished" in row for row in f.frames))
 
 

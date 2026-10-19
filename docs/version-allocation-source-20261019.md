@@ -41,6 +41,20 @@ original child/IO/runtime joins. `LocalSourceObservation.closed` is an attempted
 close flag; the adapter also checks **each original reader's descriptor state**
 and actual invocation/ledger closure. A failed close never grants a retry or FIN.
 
+A known dirty/saved-byte/policy refusal can now send a **null source** with a
+closed refusal reason, but only after those same real closure checks. Success
+requires exactly seven source commands; refusal allows zero through seven, with
+no profile calls. Original cancellation may return a settled refusal; malformed
+GO, unsolicited input/EOF, descriptor/clock uncertainty, generic protocol errors
+and fatal cleanup cannot. The same guard retains the first body error and any
+typed fatal wrapper; a refusal never erases their cleanup facts.
+
+The first failure samples both original clocks once, before cleanup. A bad
+sample latches unknown and is never resampled. Refusal FIN/EOF is bounded by
+`min(original hard end, first failure + 10 seconds)` on **both** clocks. Only the
+named source terminal arm can use this contraction; ordinary allocation runtime
+finish/checkpoints are unchanged and no poisoned dialogue is reopened.
+
 ## Limits and allocation handoff
 
 * Source INITIAL <=8,192 bytes; READY/GO <=512 each; FIN <=2,048. Original work
@@ -76,6 +90,12 @@ final source acceptance re-match those originals under short pure Doc/Edit gates
 All Host/service mapping, state read/CAS/fsync and account IO remain **outside**
 those locks. Only the real Supervisor's original completion/joins can publish
 source DATA; that DATA is not a continuing source lease for a later allocation.
+For a clean refusal, the native reader must retain the typed null-source/F
+terminal, map F through its same original ClockBridge and only contract the
+cleanup endpoint. Calling ordinary `Owner.fail` before the EOF handshake would
+kill that child prematurely. Fold the original refusal after actual IO/child
+return, before native settlement; external STOP/work expiry remain vetoes. No
+FIN/nonzero exit by itself proves nested C-A-W settlement.
 
 Allocation requires a distinct original Connection session/account/repository
 nomination and consent, retaining its admitted credential Instant/expiry/cooldown
@@ -94,7 +114,7 @@ the explicit version edit/commit is separate from the retained pre-edit request.
 
 `PYTHONPATH=src python3 -B -m unittest discover -s tests/unit -p test_version_allocation_source.py`
 
-18 synthetic cases use task-owned temporary input files, the real fixed readers,
+28 synthetic cases use task-owned temporary input files, the real fixed readers,
 invocation scopes, command admission and pre-IO original slot binding. Git output,
 C-A-W outcomes, private descriptors and native state ACKs are explicitly fake.
 They cover wrong roots before private reads; saved hash/path and full selected
@@ -103,3 +123,8 @@ Pending ACK ordering; post-PUT failure preserving pending state; GO/ACK/EOF curs
 ordering; no borrowed pipe close; and a real file close return-loss injection
 after the source's close flag is set. They do not exercise native jobs, real Git,
 HTTP, Store state, installed runtime availability or remote durability.
+The additional refusal cases cover exact success/refusal/count coherence, dirty
+final source without publishing its earlier binding, known cancellation,
+unclassified errors, first-clock failure, nonrenewed tails and retained first
+errors through uncertain cleanup. The 13 existing allocation runtime tests also
+check that its default terminal/ACK behavior remains unchanged.

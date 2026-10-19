@@ -23,6 +23,8 @@ RESPONSE_LIMIT = 2048
 WORK_SECONDS = allocation_wire.WORK_SECONDS
 FINALITY_SECONDS = allocation_wire.FINALITY_SECONDS
 MAX_SOURCE_CALLS = 8
+SOURCE_ONLY_CALLS = 7
+FIN_REASONS = frozenset({"none", "source-refused", "cancelled"})
 
 
 def require(condition: bool) -> None:
@@ -126,8 +128,19 @@ def parse_go(raw: bytes, initial: Initial) -> None:
     require(row["protocol"] == PROTOCOL and row["id"] == initial.id and go["requestSha256"] == initial.digest)
 
 
-def finish_frame(initial: Initial, source: policy.SourceBinding) -> bytes:
-    require(type(initial) is Initial and initial.source.matches(source))
-    # Only DATA. The parent still needs actual bootstrap/child/IO/native joins.
+def finish_frame(initial: Initial, source: policy.SourceBinding | None, *, reason: str,
+                 commands: int, first_failure_ns: int | None) -> bytes:
+    require(type(initial) is Initial and type(reason) is str and reason in FIN_REASONS
+            and type(commands) is int and 0 <= commands <= SOURCE_ONLY_CALLS)
+    require((source is not None) == (reason == "none"))
+    if source is not None:
+        require(initial.source.matches(source) and commands == SOURCE_ONLY_CALLS and first_failure_ns is None)
+    else:
+        require(type(first_failure_ns) is int and 0 < first_failure_ns < int(initial.clock["hardEndNs"]))
+    # Only DATA. The sole caller checks its ACTUAL originals before encoding;
+    # the parent still needs bootstrap/child/IO/native/management joins.
     return allocation_wire.encoded({"protocol": PROTOCOL, "id": initial.id,
-        "finished": {"requestSha256": initial.digest, "source": source.value()}}, RESPONSE_LIMIT)
+        "finished": {"requestSha256": initial.digest, "source": source.value() if source is not None else None,
+            "reason": reason, "firstFailureNs": str(first_failure_ns) if first_failure_ns is not None else None,
+            "lifetime": {"originalsClosed": True, "borrowEnded": True, "handlersRestored": True,
+                         "commands": commands, "profileCalls": 0}}}, RESPONSE_LIMIT)
