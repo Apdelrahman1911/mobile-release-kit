@@ -65,6 +65,7 @@ class TypedEditProfile(Enum):
     RELEASE_VERSION = "release-version"
     METADATA_IMAGES = "metadata-images"
     PROJECT_INITIALIZATION = "project-initialization"
+    PROJECT_IDENTITY = "project-identity"
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -397,6 +398,8 @@ class InitWorkspace:
         self._image_targets: Any = None
         self._initialization_targets: Any = None
         self._initialization_input: Any = None  # Strict restart DATA, not writable targets.
+        self._identity_targets: Any = None
+        self._identity_input: Any = None  # Strict restart DATA, never a path grant.
         self._image_recovery: Any = None
         self._saved_text_recovery: Any = None
         self._saved_text_current: Any = None  # One fresh borrowed attempt, never serialized.
@@ -446,6 +449,7 @@ class InitWorkspace:
         workspace._version_targets = scope.lease._version_targets
         workspace._image_targets = scope.lease._image_targets
         workspace._initialization_targets = scope.lease._initialization_targets
+        workspace._identity_targets = scope.lease._identity_targets
         workspace._image_recovery = scope.lease._image_recovery
         workspace._saved_text_recovery = scope.lease._saved_text_recovery
         workspace._saved_text_recovery_mode = scope.lease._saved_text_recovery_mode
@@ -459,7 +463,8 @@ class InitWorkspace:
         from .init_workspace_custody import LockedInitScope
         _require(type(scope) is LockedInitScope and scope.lease._workflow_recovery_mode
                  and not scope.lease._image_recovery_mode and not scope.lease._saved_text_recovery_mode
-                 and scope.lease.profile is (TypedEditProfile.PROJECT_INITIALIZATION if scope.lease._initialization_recovery_mode else
+                 and scope.lease.profile is (TypedEditProfile.PROJECT_IDENTITY if scope.lease._identity_recovery_mode else
+                     TypedEditProfile.PROJECT_INITIALIZATION if scope.lease._initialization_recovery_mode else
                      TypedEditProfile.CONFIGURATION if scope.lease._configuration_recovery_mode else TypedEditProfile.GITHUB_WORKFLOWS),
                  "workflow recovery requires its original registered lock scope")
         scope.check()
@@ -524,7 +529,7 @@ class InitWorkspace:
 
     @property
     def _original_controls_required(self) -> bool:
-        return self._typed_profile in (TypedEditProfile.PROJECT_INITIALIZATION, TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
+        return self._typed_profile in (TypedEditProfile.PROJECT_IDENTITY, TypedEditProfile.PROJECT_INITIALIZATION, TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
                                        TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES)
 
 
@@ -535,7 +540,7 @@ class InitWorkspace:
 
     @property
     def _original_facts_required(self) -> bool:
-        return self._typed_profile is TypedEditProfile.PROJECT_INITIALIZATION or self._saved_text_profile or (self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS
+        return self._typed_profile in (TypedEditProfile.PROJECT_IDENTITY, TypedEditProfile.PROJECT_INITIALIZATION) or self._saved_text_profile or (self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS
                                             and bool(self._workflow_updates))
 
     @property
@@ -549,6 +554,20 @@ class InitWorkspace:
         from .initialization_targets import InitializationTargets
         value = self._initialization_targets
         _require(type(value) is InitializationTargets, "original initialization targets are required")
+        value._check_workspace(self)
+        return value
+
+    @property
+    def _identity_profile(self) -> bool:
+        return (self._typed_profile is TypedEditProfile.PROJECT_IDENTITY or
+                self._workflow_recovery_mode and self._scope is not None
+                and self._scope.lease._identity_recovery_mode
+                and self._scope.lease.profile is TypedEditProfile.PROJECT_IDENTITY)
+
+    def _identity_target(self):
+        from .project_identity_targets import IdentityTargets
+        value = self._identity_targets
+        _require(type(value) is IdentityTargets, "original identity targets are required")
         value._check_workspace(self)
         return value
 
@@ -1088,6 +1107,8 @@ class InitWorkspace:
         saved = self._saved_text_restoration()
         saved_receipt = (saved.before_move(self, source_fd, source, destination_fd, destination,
                                           expected, directory, directory_path) if saved is not None else None)
+        if self._typed_profile is TypedEditProfile.PROJECT_IDENTITY:
+            self._identity_target().check_publication(self, source_fd, destination_fd)
         failure: BaseException | None = None
         try:
             if self._guard is not None and not self._cleanup_mode:
@@ -1160,6 +1181,11 @@ class InitWorkspace:
         self._expect_unchanged(captured is not None and self._binding(destination_fd, destination, directory=directory) == expected,
                                "exclusive move did not produce its exact expected object")
         self._namespace_check(changing=directory_path)
+        if self._typed_profile is TypedEditProfile.PROJECT_IDENTITY:
+            # The original terminal decision, if any, is already latched. A
+            # late control change preserves that decision and the journal; it
+            # must never be reported as a clean identity save or undone here.
+            self._identity_target().check_publication(self, source_fd, destination_fd)
         self._fsync(source_fd)
         self._fsync(destination_fd)
         if restoration is not None:
@@ -1256,6 +1282,20 @@ class InitWorkspace:
                     self._initialization_input = from_context(header.get("initialization"))
                 _require(header.get("initialization") == self._initialization_input.context(),
                          "inspected initialization context changed")
+        if self._identity_profile:
+            from .project_identity_targets import DOMAIN, from_context
+            schema = 2
+            header_keys.update(("domain", "identity"))
+            _require(header.get("domain") == DOMAIN and _json(header) == item[1],
+                     "identity header is not canonical or belongs to another domain")
+            if self._typed_profile is TypedEditProfile.PROJECT_IDENTITY:
+                _require(header.get("identity") == self._identity_target().journal_context(),
+                         "original identity context changed")
+            else:
+                if self._identity_input is None:
+                    self._identity_input = from_context(header.get("identity"))
+                _require(header.get("identity") == self._identity_input.context(),
+                         "inspected identity context changed")
         _require(set(header) == header_keys
                  and type(header["schemaVersion"]) is int and header["schemaVersion"] == schema
                  and isinstance(header["transactionId"], str)
@@ -1355,6 +1395,15 @@ class InitWorkspace:
             if self._typed_profile is TypedEditProfile.PROJECT_INITIALIZATION:
                 _require(all(row["before"] == self._captured[row["path"]].before for row in plan["files"]),
                          "initialization plan differs from original captured inputs")
+        if self._identity_profile:
+            from .project_identity_targets import plan_shape
+            data = (self._identity_target()._input if self._typed_profile is TypedEditProfile.PROJECT_IDENTITY
+                    else self._identity_input)
+            plan_shape(data, plan)
+            _require(_json(plan) == item[1], "identity plan is not canonical")
+            if self._typed_profile is TypedEditProfile.PROJECT_IDENTITY:
+                _require(all(row["before"] == self._captured[row["path"]].before for row in plan["files"]),
+                         "identity plan differs from original captured inputs")
         if self._typed_profile is TypedEditProfile.METADATA_IMAGES or self._saved_text_recovery_mode:
             # Recovery and image validation traverses the selected folder. A newly
             # staged directory identity is not yet its public parent identity;
@@ -1452,6 +1501,7 @@ class InitWorkspace:
     def _locations(self, fd: int, plan: dict[str, Any], *, final: str | None = None) -> None:
         self._inventory(fd, plan)
         self._metadata_dependencies_check()
+        identity_public: list[str] | None = [] if self._typed_profile is TypedEditProfile.PROJECT_IDENTITY else None
         # Missing new parents are valid only while their recorded empty inode is staged.
         self.parents = self._dependency_only_parents()
         for i, entry in enumerate(plan["directories"]):
@@ -1472,6 +1522,8 @@ class InitWorkspace:
                 self.parents[path] = current
         for i, entry in enumerate(plan["files"]):
             current = self._current(entry["path"])
+            if identity_public is not None and current is not None:
+                identity_public.append(entry["path"])
             before, after = entry["before"], entry["after"]
             if after is None:
                 self._expect_unchanged(current == before, "preserved input changed")
@@ -1496,6 +1548,10 @@ class InitWorkspace:
                     assert parent is not None
                     self._expect_unchanged(all(entry["path"] + "/" + name in expected for name in self._list(parent)),
                                            "created directory contains unrelated user content; preserve it")
+        if identity_public is not None:
+            # Only this original before/new/backup graph can explain a missing
+            # public identity file. Discovery alone cannot license the gap.
+            self._identity_target().check_public_inventory(self, tuple(identity_public))
 
     def _prepare(self, changes: list[tuple[ObservedFile, bytes | None]]) -> dict[str, Any]:
         self.require_clean()
@@ -1510,6 +1566,9 @@ class InitWorkspace:
             # Exact escaped header/full-plan quote and retained-copy aggregate
             # are checked before even the first private namespace effect.
             self._initialization_target().check_changes(self, changes)
+        if self._typed_profile is TypedEditProfile.PROJECT_IDENTITY:
+            self._identity_target().check_changes(self, changes)
+            self._identity_target().check_inventory(self)
         self._mkdir(self._state_names[0], 0o700, dir_fd=self.fd)
         with self._private(self._state_names[0]) as fd:
             header = {"schemaVersion": 1, "transactionId": uuid.uuid4().hex, "root": self.root_identity}
@@ -1524,6 +1583,10 @@ class InitWorkspace:
                 header.update(schemaVersion=2, domain="project-initialization",
                               initialization=self._initialization_target().journal_context())
                 _require(len(_json(header)) <= MAX_CONTROL_BYTES, "initialization header exceeds its byte bound")
+            if self._typed_profile is TypedEditProfile.PROJECT_IDENTITY:
+                header.update(schemaVersion=2, domain="project-identity",
+                              identity=self._identity_target().journal_context())
+                _require(len(_json(header)) <= MAX_CONTROL_BYTES, "identity header exceeds its byte bound")
             self._write(fd, "header.tmp", _json(header))
             self._control_rename(fd, "header.tmp", fd, "header.json")
             self._fsync(fd)
@@ -1706,7 +1769,7 @@ class InitWorkspace:
                                             ROLLED_BACK=workflow_entries["rollback.pending"])
                     workflow_entries.update({f"new-{i}": (False, entry["after"])
                                              for i, entry in enumerate(original["files"]) if entry["after"]})
-                    if self._typed_profile is TypedEditProfile.PROJECT_INITIALIZATION or self._saved_text_profile or self._workflow_updates:
+                    if self._typed_profile in (TypedEditProfile.PROJECT_IDENTITY, TypedEditProfile.PROJECT_INITIALIZATION) or self._saved_text_profile or self._workflow_updates:
                         workflow_entries.update({f"old-{i}": (False, entry["before"])
                                                  for i, entry in enumerate(original["files"])
                                                  if entry["before"] is not None and entry["after"] is not None})
@@ -1933,6 +1996,16 @@ class InitWorkspace:
                  "initialization restoration requires its own inspected profile")
         return self.apply_workflow_recovery(revision)
 
+    def apply_identity_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
+        """Only the original source-derived identity span descriptor."""
+        return self._apply_typed(changes, TypedEditProfile.PROJECT_IDENTITY)
+
+    def apply_identity_recovery(self, revision: Any) -> InitApplyOutcome:
+        _require(self._scope is not None and self._scope.lease._identity_recovery_mode
+                 and self._scope.lease.profile is TypedEditProfile.PROJECT_IDENTITY,
+                 "identity restoration requires its own inspected profile")
+        return self.apply_workflow_recovery(revision)
+
     def apply_workflows_typed(self, changes: list[tuple[ObservedFile, bytes | None]], *,
                               resource_sha256: str | None = None) -> InitApplyOutcome:
         """Four fixed callers; replacements require original canonical proof."""
@@ -2031,12 +2104,14 @@ class InitWorkspace:
                          "metadata Apply requires its original rechecked revision")
                 paths = targets.paths
                 limits = targets.payload_limits if profile is TypedEditProfile.METADATA_IMAGES else targets.observation_limits[2:]
-            elif profile is TypedEditProfile.PROJECT_INITIALIZATION:
+            elif profile in (TypedEditProfile.PROJECT_IDENTITY, TypedEditProfile.PROJECT_INITIALIZATION):
                 from .init_workspace_custody import RootedRevision
-                targets = self._initialization_target()
+                targets = self._identity_target() if profile is TypedEditProfile.PROJECT_IDENTITY else self._initialization_target()
+                original_targets = (getattr(self._rooted_revision, "_identity_targets" if profile is TypedEditProfile.PROJECT_IDENTITY
+                                            else "_initialization_targets", None))
                 _require(type(self._rooted_revision) is RootedRevision
                          and self._scope.lease._revision is self._rooted_revision
-                         and self._rooted_revision._initialization_targets is targets,
+                         and original_targets is targets,
                          "initialization Apply requires its original complete rechecked revision")
                 paths, limits = targets.paths, targets.observation_limits
             elif profile in (TypedEditProfile.CONFIGURATION, TypedEditProfile.GITHUB_WORKFLOWS):
@@ -2070,7 +2145,7 @@ class InitWorkspace:
                          "metadata capture is not the original target/dependency domain")
                 if profile is TypedEditProfile.METADATA_IMAGES:
                     targets.check_payloads(changes)
-            if profile is TypedEditProfile.PROJECT_INITIALIZATION:
+            if profile in (TypedEditProfile.PROJECT_IDENTITY, TypedEditProfile.PROJECT_INITIALIZATION):
                 _require(set(self._captured) == set(targets.paths) and set(self.parents) == set(targets.directories),
                          "initialization capture is not its complete original inventory")
                 targets.check_changes(self, changes)
@@ -2113,7 +2188,7 @@ class InitWorkspace:
         if self._workflow_recovery_mode:
             _require(self._typed_claimed and self._workflow_restoration() is not None,
                      "workflow recovery cannot run without its inspected one-use guard")
-        if self._typed_profile is TypedEditProfile.PROJECT_INITIALIZATION or self._saved_text_profile:
+        if self._typed_profile in (TypedEditProfile.PROJECT_IDENTITY, TypedEditProfile.PROJECT_INITIALIZATION) or self._saved_text_profile:
             _require(self._scope is not None and self._cleanup_mode and self._recovery_claimed
                      and self._creation["state"] == "CREATED" and self._workflow_complete,
                      "metadata recovery belongs only to the original one-use transaction")
@@ -2148,7 +2223,7 @@ class InitWorkspace:
         _require(not self._saved_text_recovery_mode, "saved-text restoration requires its explicit capability")
         if self._workflow_recovery_mode or self._saved_text_recovery_mode:
             raise InitOperationFailure(self.current_outcome("invalid_params"))
-        _require(not self._saved_text_profile and self._typed_profile is not TypedEditProfile.PROJECT_INITIALIZATION,
+        _require(not self._saved_text_profile and self._typed_profile not in (TypedEditProfile.PROJECT_IDENTITY, TypedEditProfile.PROJECT_INITIALIZATION),
                  "typed targets require their original facade, not legacy apply")
         validate_paths([item.path for item, _ in changes])
         _require(all(payload is None or type(payload) is bytes for _, payload in changes), "invalid staged content")

@@ -201,7 +201,7 @@ class VersionTargets:
 class RootedRevision:
     """Exact private immutable capture; a token string cannot reconstruct it."""
     __slots__ = ("_lease", "_profile", "_token", "_parents", "_parent_facts", "_files", "_raw", "_absent",
-                 "_metadata_targets", "_version_targets", "_image_targets", "_initialization_targets")
+                 "_metadata_targets", "_version_targets", "_image_targets", "_initialization_targets", "_identity_targets")
 
     def __new__(cls, *args: Any, **kwargs: Any):
         raise TypeError("rooted revisions are bound only by the original lease")
@@ -391,7 +391,7 @@ class InitRootLease:
                  registered_identity: dict[str, int] | None = None,
                  image_recovery: bool = False, workflow_recovery: bool = False,
                  saved_text_recovery: bool = False, configuration_recovery: bool = False,
-                 initialization_recovery: bool = False) -> None:
+                 initialization_recovery: bool = False, identity_recovery: bool = False) -> None:
         if type(cancellation) is not DefaultCancellation or type(profile) is not TypedEditProfile:
             raise _failure("invalid_params")
         if type(image_recovery) is not bool or image_recovery and profile is not TypedEditProfile.METADATA_IMAGES:
@@ -411,10 +411,14 @@ class InitRootLease:
                 (image_recovery or workflow_recovery or saved_text_recovery or configuration_recovery
                  or profile is not TypedEditProfile.PROJECT_INITIALIZATION)):
             raise _failure("invalid_params")
+        if (type(identity_recovery) is not bool or identity_recovery and
+                (image_recovery or workflow_recovery or saved_text_recovery or configuration_recovery
+                 or initialization_recovery or profile is not TypedEditProfile.PROJECT_IDENTITY)):
+            raise _failure("invalid_params")
         cancellation._check_owner()
         if threading.current_thread() is not threading.main_thread():
             raise _failure("invalid_params")
-        if configuration_recovery or profile in (TypedEditProfile.PROJECT_INITIALIZATION, TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
+        if configuration_recovery or profile in (TypedEditProfile.PROJECT_IDENTITY, TypedEditProfile.PROJECT_INITIALIZATION, TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
                        TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
             if (type(registered_identity) is not dict
                     or set(registered_identity) != {"device", "inode", "mode", "uid", "gid"}
@@ -440,10 +444,12 @@ class InitRootLease:
         self._image_targets: ImageTargets | None = None
         self._initialization_targets: Any = None
         self._initialization_recovery_mode = initialization_recovery
+        self._identity_targets: Any = None
+        self._identity_recovery_mode = identity_recovery
         self._image_recovery_mode = image_recovery
         self._image_recovery: Any = None
         self._configuration_recovery_mode = configuration_recovery
-        self._workflow_recovery_mode = workflow_recovery or configuration_recovery or initialization_recovery
+        self._workflow_recovery_mode = workflow_recovery or configuration_recovery or initialization_recovery or identity_recovery
         self._workflow_recovery: Any = None
         self._workflow_recovery_journal = "unknown"
         self._workflow_recovery_effect = "not_started"
@@ -516,7 +522,7 @@ class InitRootLease:
             raise _failure("custody_unknown", unknown=True)
         try:
             self.directory.check()
-            if self._configuration_recovery_mode or self._profile in (TypedEditProfile.PROJECT_INITIALIZATION, TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
+            if self._configuration_recovery_mode or self._profile in (TypedEditProfile.PROJECT_IDENTITY, TypedEditProfile.PROJECT_INITIALIZATION, TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
                                 TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
                 # Rust registration carries full st_mode, not S_IMODE. Read the
                 # original retained root descriptor before any target capture;
@@ -662,7 +668,19 @@ class InitRootLease:
         from .initialization_targets import bind_targets
         return bind_targets(self, workspace, data)
 
+    def bind_identity_targets(self, workspace: InitWorkspace, selection: Any, inventory: Any,
+                              originals: tuple[ObservedFile, ...]):
+        from .project_identity_targets import bind_targets
+        return bind_targets(self, workspace, selection, inventory, originals)
+
     def _observation_roster(self, workspace: InitWorkspace) -> tuple[tuple[str, ...], tuple[int, ...], set[str]]:
+        if self._profile is TypedEditProfile.PROJECT_IDENTITY:
+            from .project_identity_targets import IdentityTargets
+            targets = self._identity_targets
+            if type(targets) is not IdentityTargets:
+                raise _failure("invalid_params")
+            targets._check_workspace(workspace)
+            return targets.paths, targets.observation_limits, set(targets.directories)
         if self._profile is TypedEditProfile.PROJECT_INITIALIZATION:
             from .initialization_targets import InitializationTargets
             targets = self._initialization_targets
@@ -719,6 +737,7 @@ class InitRootLease:
             ("_absent", self._profile is TypedEditProfile.CONFIGURATION and workspace.parents["release"] is None),
             ("_metadata_targets", self._metadata_targets), ("_version_targets", self._version_targets),
             ("_image_targets", self._image_targets), ("_initialization_targets", self._initialization_targets),
+            ("_identity_targets", self._identity_targets),
         ):
             object.__setattr__(revision, name, value)
         self._revision = revision
@@ -735,14 +754,20 @@ class InitRootLease:
             raise _failure("invalid_params")
         if self._profile is TypedEditProfile.PROJECT_INITIALIZATION and revision._initialization_targets is not self._initialization_targets:
             raise _failure("invalid_params")
+        if self._profile is TypedEditProfile.PROJECT_IDENTITY and revision._identity_targets is not self._identity_targets:
+            raise _failure("invalid_params")
         paths, limits, _ = self._observation_roster(workspace)
         workspace.parents = {path: dict(value) if value is not None else None
                              for path, value in revision._parents}
         try:
+            if self._profile is TypedEditProfile.PROJECT_IDENTITY:
+                self._identity_targets.check_inventory(workspace)
             if self._profile is TypedEditProfile.METADATA_IMAGES:
                 self._image_targets.check_roster(workspace, initial=True)
             current = tuple(workspace.observe(path, limit=limit)
                             for path, limit in zip(paths, limits))
+            if self._profile is TypedEditProfile.PROJECT_IDENTITY:
+                self._identity_targets.check_inventory(workspace)
         except (KeyboardInterrupt, InitOperationFailure):
             raise
         except BaseException as error:
@@ -811,7 +836,8 @@ class InitRootLease:
         """Same original custody, disjoint current-inspection recovery intent."""
         from .github_workflow_recovery import WorkflowRecoveryRevision
         self.check()
-        selected = (TypedEditProfile.PROJECT_INITIALIZATION if self._initialization_recovery_mode else
+        selected = (TypedEditProfile.PROJECT_IDENTITY if self._identity_recovery_mode else
+                    TypedEditProfile.PROJECT_INITIALIZATION if self._initialization_recovery_mode else
                     TypedEditProfile.CONFIGURATION if self._configuration_recovery_mode
                     else TypedEditProfile.GITHUB_WORKFLOWS)
         if (not self._workflow_recovery_mode or self._profile is not selected

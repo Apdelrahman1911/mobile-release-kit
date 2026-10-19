@@ -79,12 +79,17 @@ class _Inspection:
     entries: tuple[tuple[str, _Entry], ...]
     public: tuple[tuple[str, _Fact], ...]
     parents: tuple[tuple[str, _Fact], ...]
+    identity_inventory: Any = None  # Identity-only read-only discovery facts.
 
 
 def _observed(workspace: tx.InitWorkspace, fd: int, name: str, *,
               directory: bool = False, limit: int | None = None) -> tuple[_Fact, bytes | None]:
     if limit is None:
-        limit = tx.MAX_FILE_BYTES if workspace._initialization_profile else 1024 * 1024
+        if workspace._identity_profile:
+            from .project_identity import MAX_FILE_BYTES
+            limit = MAX_FILE_BYTES
+        else:
+            limit = tx.MAX_FILE_BYTES if workspace._initialization_profile else 1024 * 1024
     workspace._checkpoint()
     if directory:
         value = tx._stat(fd, name)
@@ -153,24 +158,34 @@ def _inspect(workspace: tx.InitWorkspace) -> _Inspection | None:
         private = _Fact(_freeze(workspace.private_identity), _full9(os.fstat(fd)))
         names = set(workspace._list(fd))
         initializing = profile is tx.TypedEditProfile.PROJECT_INITIALIZATION
+        identity = profile is tx.TypedEditProfile.PROJECT_IDENTITY
+        identity_inventory = None
         if initializing:
             from .initialization_recovery import header_data, suffix
             _need(len(names) <= 2 * tx.MAX_FILES + len(_CONTROLS))
+        elif identity:
+            from .project_identity import MAX_FILES
+            from .project_identity_recovery import header_data, suffix
+            _need(len(names) <= 2 * MAX_FILES + len(_CONTROLS))
         else:
             _need(len(names) <= 16 and {"header.json", "plan.json"} <= names,
                   "The legacy journal lacks a complete fixed-profile plan; preserve it without guessing")
         header_fact, header_raw = _observed(workspace, fd, "header.json", limit=tx.MAX_CONTROL_BYTES)
-        if initializing:
+        if initializing or identity:
             header_data(header_raw)
             if "plan.json" not in names:
                 return suffix(workspace, state, fd, private, names, header_fact, header_raw)
         plan_fact, plan_raw = _observed(workspace, fd, "plan.json", limit=tx.MAX_CONTROL_BYTES)
         plan = workspace._load(fd)
-        if not initializing:
+        if not initializing and not identity:
             _plan_shape(plan, profile)
-        paths = workspace._initialization_input.paths if initializing else profile.paths
-        directories = workspace._initialization_input.directories if initializing else profile.directories
-        keys = ("schemaVersion", "transactionId", "root", "domain", "initialization") if initializing else ("schemaVersion", "transactionId", "root")
+        paths = (workspace._identity_input.paths if identity else
+                 workspace._initialization_input.paths if initializing else profile.paths)
+        directories = (workspace._identity_input.directories if identity else
+                       workspace._initialization_input.directories if initializing else profile.directories)
+        keys = (("schemaVersion", "transactionId", "root", "domain", "identity") if identity else
+                ("schemaVersion", "transactionId", "root", "domain", "initialization") if initializing else
+                ("schemaVersion", "transactionId", "root"))
         _need(header_raw == tx._json({key: plan[key] for key in keys}) and plan_raw == tx._json(plan))
         terminal_names = names & {"COMMITTED", "ROLLED_BACK"}
         _need(len(terminal_names) <= 1)
@@ -200,6 +215,9 @@ def _inspect(workspace: tx.InitWorkspace) -> _Inspection | None:
                 if initializing and not directory:
                     from .initialization_recovery import private_payload
                     private_payload(workspace._initialization_input, plan, name, raw)
+                if identity and not directory:
+                    from .project_identity_recovery import private_payload
+                    private_payload(workspace._identity_input, plan, name, raw)
                 if directory:
                     with workspace._descriptor(name, workspace.flags, dir_fd=fd) as child:
                         _need(not workspace._list(child))
@@ -238,8 +256,14 @@ def _inspect(workspace: tx.InitWorkspace) -> _Inspection | None:
             if initializing:
                 from .initialization_recovery import nonterminal_payloads
                 nonterminal_payloads(workspace, fd, plan)
+            if identity:
+                from .project_identity_recovery import nonterminal_payloads
+                identity_inventory = nonterminal_payloads(workspace, fd, plan)
             public = {path: _current(workspace, path) for path in paths}
             parents = {path: _current(workspace, path, directory=True) for path in directories}
+            if identity:
+                from .project_identity_recovery import check_current_inventory
+                check_current_inventory(workspace, identity_inventory, public)
         _need(set(workspace._list(fd)) == names)
         for name, entry in entries.items():
             fact, raw = _observed(workspace, fd, name, directory=entry.directory,
@@ -255,7 +279,7 @@ def _inspect(workspace: tx.InitWorkspace) -> _Inspection | None:
         _need(_full9(os.fstat(fd)) == private.raw)
     return _Inspection(profile, state, action, _full9(os.fstat(workspace.fd)), private,
                        header_raw, plan_raw, tuple(sorted(entries.items())),
-                       tuple(sorted(public.items())), tuple(sorted(parents.items())))
+                       tuple(sorted(public.items())), tuple(sorted(parents.items())), identity_inventory)
 
 
 class _RestorationGuard:
@@ -331,6 +355,9 @@ class _RestorationGuard:
             _need(self._same(current, self.private, "private"))
             self._private_entries(workspace, fd)
         if self.public:
+            if self.revision._profile is tx.TypedEditProfile.PROJECT_IDENTITY:
+                from .project_identity_recovery import check_current_inventory
+                check_current_inventory(workspace, self.revision._inspection.identity_inventory, self.public)
             # Use only our fixed observed/owned parent locations for this check;
             # _load's generic before-or-after map is not restoration authority.
             original = workspace.parents
@@ -612,12 +639,14 @@ class PreparedWorkflowRecovery(_shared._PrivateAuthority):
 
 def _lease_matches(lease: object, profile: tx.TypedEditProfile = _PROFILE) -> bool:
     from .init_workspace_custody import InitRootLease
-    return (profile in (_PROFILE, tx.TypedEditProfile.CONFIGURATION, tx.TypedEditProfile.PROJECT_INITIALIZATION)
+    return (profile in (_PROFILE, tx.TypedEditProfile.CONFIGURATION, tx.TypedEditProfile.PROJECT_INITIALIZATION,
+                        tx.TypedEditProfile.PROJECT_IDENTITY)
             and type(lease) is InitRootLease and lease.profile is profile
             and lease._workflow_recovery_mode and not lease._image_recovery_mode
             and not lease._saved_text_recovery_mode
             and lease._configuration_recovery_mode is (profile is tx.TypedEditProfile.CONFIGURATION)
-            and lease._initialization_recovery_mode is (profile is tx.TypedEditProfile.PROJECT_INITIALIZATION))
+            and lease._initialization_recovery_mode is (profile is tx.TypedEditProfile.PROJECT_INITIALIZATION)
+            and lease._identity_recovery_mode is (profile is tx.TypedEditProfile.PROJECT_IDENTITY))
 
 
 def _workspace_profile(workspace: tx.InitWorkspace) -> tx.TypedEditProfile:
@@ -667,6 +696,9 @@ def _invalid(lease: object, reason: str = "invalid_params", *, profile: tx.Typed
 
 
 def _view(captured: _Inspection | None, conflict: bool | str, profile: tx.TypedEditProfile) -> dict[str, Any]:
+    if profile is tx.TypedEditProfile.PROJECT_IDENTITY:
+        from .project_identity_recovery import view as identity_view
+        return identity_view(captured, conflict)
     if profile is tx.TypedEditProfile.PROJECT_INITIALIZATION:
         from .initialization_recovery import view as initialization_view
         return initialization_view(captured, conflict)
@@ -708,6 +740,9 @@ def _capture_recovery(lease: InitRootLease, profile: tx.TypedEditProfile) -> Wor
                 if profile is tx.TypedEditProfile.PROJECT_INITIALIZATION:
                     from .initialization_recovery import conflict_reason
                     conflict = conflict_reason(error)
+                elif profile is tx.TypedEditProfile.PROJECT_IDENTITY:
+                    from .project_identity_recovery import conflict_reason
+                    conflict = conflict_reason(error)
                 else:
                     conflict = True
             if captured is not None:
@@ -722,7 +757,8 @@ def _capture_recovery(lease: InitRootLease, profile: tx.TypedEditProfile) -> Wor
                     object.__setattr__(revision, name, value)
                 lease._workflow_recovery = revision
         view = tx._json(_view(captured, conflict, profile))
-        _need(len(view) <= (768 * 1024 if profile is tx.TypedEditProfile.PROJECT_INITIALIZATION else 4096))
+        _need(len(view) <= (768 * 1024 if profile is tx.TypedEditProfile.PROJECT_INITIALIZATION else
+                           128 * 1024 if profile is tx.TypedEditProfile.PROJECT_IDENTITY else 4096))
         if profile is tx.TypedEditProfile.PROJECT_INITIALIZATION:
             from .initialization_targets import INVENTORY_BYTES
             _need(len(tx._json(json.loads(view)["files"])) <= INVENTORY_BYTES)
@@ -777,7 +813,9 @@ def _apply_recovery(lease: InitRootLease, plan: PreparedWorkflowRecovery, profil
         return _invalid(lease, profile=profile)
     try:
         with lease.workflow_recovery_scope(checkout._revision) as workspace:
-            result = (workspace.apply_initialization_recovery(checkout._revision)
+            result = (workspace.apply_identity_recovery(checkout._revision)
+                      if profile is tx.TypedEditProfile.PROJECT_IDENTITY else
+                      workspace.apply_initialization_recovery(checkout._revision)
                       if profile is tx.TypedEditProfile.PROJECT_INITIALIZATION else
                       workspace.apply_workflow_recovery(checkout._revision))
     except BaseException as error:
