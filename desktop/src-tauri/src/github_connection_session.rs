@@ -12,6 +12,8 @@ use crate::{error::BridgeError, github_connection_protocol::{self as wire, Accou
 // document/project registration, per-request runtime custody or finality.
 #[path = "github_publication_session.rs"]
 pub(crate) mod publication;
+#[path = "github_auth_provider.rs"]
+pub(crate) mod auth_provider;
 
 const GITHUB_CONNECTION_NATIVE_QUALIFIED: bool = false;
 const LIFETIME: Duration = Duration::from_secs(60 * 60);
@@ -169,7 +171,7 @@ mod tests {
         state.private = Some(PrivateSession { id: "github-session-1".into(), project_id: "project-1".into(), repository: "owner/app".into(),
             generation: 2, stop_id: "github-disconnect-1".into(), unknown_id: "github-unknown-1".into(),
             clock, token: Some("INERT_NOT_A_CREDENTIAL".into()),
-            account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false });
+            gh_selection: None, account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false });
         state.status.session = Some(Session { id: "github-session-1".into(), project_id: "project-1".into(), target_repository: "owner/app".into(),
             state: SessionState::Checking, expires_at: Some("2026-09-17T13:00:00Z".into()) });
         state.status.operation = Some(Operation { id: "original-data-1".into(), kind: OperationKind::Connect, phase: Phase::Running, reason: Reason::None });
@@ -265,6 +267,32 @@ mod tests {
         assert_eq!(state.status.operation.as_ref().unwrap().reason, Reason::TargetChanged);
         assert_eq!(state.private.as_ref().unwrap().repository_pin.as_deref(), Some("22"));
         assert!(state.private.as_ref().unwrap().token.is_none());
+    }
+    #[test]
+    fn gh_selected_login_must_match_original_http_account_before_immutable_pin() {
+        let at = Instant::now(); let mut state = fixture(at);
+        state.private.as_mut().unwrap().gh_selection = Some(auth_provider::SelectedAccount {
+            login: "different-fixture".into(), account_revision: "synthetic-account-revision".into() });
+        settle(&mut state, result(), at, at, false);
+        assert_eq!(state.status.session.as_ref().unwrap().state, SessionState::Failed);
+        assert_eq!(state.status.operation.as_ref().unwrap().reason, Reason::TargetChanged);
+        assert!(state.private.as_ref().unwrap().account_pin.is_none());
+        assert!(state.private.as_ref().unwrap().repository_pin.is_none());
+        assert!(state.private.as_ref().unwrap().token.is_none());
+        assert_ne!(state.status.account.state, FactState::Observed);
+
+        let mut selected = fixture(at);
+        selected.private.as_mut().unwrap().gh_selection = Some(auth_provider::SelectedAccount {
+            login: "OWNER".into(), account_revision: "synthetic-account-revision".into() });
+        settle(&mut selected, result(), at, at, false);
+        assert_eq!(selected.status.session.as_ref().unwrap().state, SessionState::Connected);
+        assert_eq!(selected.private.as_ref().unwrap().account_pin.as_deref(), Some("11"));
+        refresh_data(&mut selected);
+        let mut replaced = result(); replaced.facts.account.value.as_mut().unwrap().id = "12".into();
+        settle(&mut selected, replaced, at, at, false);
+        assert_eq!(selected.status.operation.as_ref().unwrap().reason, Reason::TargetChanged);
+        assert_eq!(selected.private.as_ref().unwrap().account_pin.as_deref(), Some("11"));
+        assert!(selected.private.as_ref().unwrap().token.is_none());
     }
     #[test]
     fn known_cooldown_survives_invalid_expiry_disconnect_and_token_lifetime() {
@@ -464,6 +492,7 @@ fn display_utc(time: SystemTime) -> Option<String> {
 struct PrivateSession {
     id: String, project_id: String, repository: String, generation: u32, stop_id: String, unknown_id: String,
     clock: CredentialClock, token: Option<String>, account_pin: Option<String>, repository_pin: Option<String>,
+    gh_selection: Option<auth_provider::SelectedAccount>,
     ticket: Option<GitHubReadTicket>, retirement: Option<Reason>, remove_after_settlement: bool,
 }
 pub(crate) struct ConnectionState {
@@ -648,7 +677,9 @@ impl ConnectionState {
         }
         let mismatch = result.as_ref().is_ok_and(|v| {
             self.private.as_ref().is_some_and(|s|
-                v.facts.account.value.as_ref().is_some_and(|v| s.account_pin.as_ref().is_some_and(|pin| pin != &v.id))
+                v.facts.account.value.as_ref().is_some_and(|v|
+                    s.account_pin.as_ref().is_some_and(|pin| pin != &v.id)
+                    || s.gh_selection.as_ref().is_some_and(|selected| !selected.login.eq_ignore_ascii_case(&v.login)))
                 || v.facts.repository.value.as_ref().is_some_and(|v| !v.full_name.eq_ignore_ascii_case(&s.repository)
                     || s.repository_pin.as_ref().is_some_and(|pin| pin != &v.id)))
         });
@@ -684,6 +715,28 @@ impl ConnectionState {
     }
     pub(crate) fn connect(&mut self, args: ConnectTokenArgs, generation: u32, supervisor: &Supervisor,
         now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
+        self.connect_selected(args, None, generation, supervisor, now, wall)
+    }
+    /// Native-only handoff: no token getter, renderer DTO, new process/HTTP
+    /// owner or availability flag. The original capture owner checks selection
+    /// again and retains its original leases through this HTTP handoff. Only
+    /// the existing HTTP /user fact can pin immutable ID and mark Connected.
+    pub(crate) fn connect_from_gh<O: auth_provider::CaptureOwner>(&mut self, project_id: String,
+        repository: String, credential: auth_provider::NativeCredential, owner: &mut O,
+        generation: u32, supervisor: &Supervisor, now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
+        let (selected, mut token) = credential.into_connection_parts(owner, &project_id, &repository, generation).map_err(|failure| refused(match failure {
+            auth_provider::Failure::Unknown => Reason::CleanupUnknown,
+            auth_provider::Failure::Unavailable => Reason::RuntimeUnavailable,
+            auth_provider::Failure::TimedOut => Reason::NetworkUnavailable,
+            auth_provider::Failure::InvalidOutput | auth_provider::Failure::OutputLimit => Reason::ResponseInvalid,
+            auth_provider::Failure::Changed => Reason::TargetChanged,
+            auth_provider::Failure::Refused => Reason::InvalidInput,
+        }))?;
+        self.connect_selected(ConnectTokenArgs { project_id, repository, token: std::mem::take(&mut *token) },
+                              Some(selected), generation, supervisor, now, wall)
+    }
+    fn connect_selected(&mut self, args: ConnectTokenArgs, gh_selection: Option<auth_provider::SelectedAccount>,
+        generation: u32, supervisor: &Supervisor, now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
         self.room()?;
         if self.private.is_some() { return Err(refused(Reason::Busy)); }
         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
@@ -697,7 +750,7 @@ impl ConnectionState {
         let mut private = PrivateSession { id, project_id: args.project_id, repository: args.repository,
             generation, stop_id: format!("github-disconnect-{sequence}"), unknown_id: format!("github-unknown-{sequence}"),
             clock, token: Some(args.token),
-            account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false };
+            gh_selection, account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false };
         let mut operation = Operation { id: String::with_capacity(64), kind: OperationKind::Connect, phase: Phase::Running, reason: Reason::None };
         let ticket = supervisor.start_github_readonly(&private.repository, None, None,
             private.token.as_deref().ok_or_else(|| refused(Reason::InvalidInput))?).map_err(admission_error)?;
@@ -1812,6 +1865,9 @@ impl ConnectionState {
             for value in [&private.token, &private.account_pin, &private.repository_pin] {
                 bytes = bytes.checked_add(value.as_ref().map_or(0, String::capacity))?;
             }
+            if let Some(selected) = &private.gh_selection {
+                bytes = bytes.checked_add(selected.login.capacity())?.checked_add(selected.account_revision.capacity())?;
+            }
         }
         Some(bytes)
     }
@@ -1828,11 +1884,14 @@ mod installation_memory_capacity_tests {
             repository: String::with_capacity(23), generation: 0, stop_id: String::with_capacity(29), unknown_id: String::with_capacity(31),
             clock: CredentialClock { admitted: now, wall: UNIX_EPOCH, end: now, display: String::with_capacity(37) },
             token: Some(String::with_capacity(4097)), account_pin: Some(String::with_capacity(41)),
-            repository_pin: Some(String::with_capacity(43)), ticket: None, retirement: None, remove_after_settlement: false };
+            repository_pin: Some(String::with_capacity(43)),
+            gh_selection: Some(auth_provider::SelectedAccount { login: String::with_capacity(47), account_revision: String::with_capacity(53) }),
+            ticket: None, retirement: None, remove_after_settlement: false };
         let extra = private.id.capacity() + private.project_id.capacity() + private.repository.capacity()
             + private.stop_id.capacity() + private.unknown_id.capacity() + private.clock.display.capacity()
             + private.token.as_ref().unwrap().capacity() + private.account_pin.as_ref().unwrap().capacity()
-            + private.repository_pin.as_ref().unwrap().capacity();
+            + private.repository_pin.as_ref().unwrap().capacity() + private.gh_selection.as_ref().unwrap().login.capacity()
+            + private.gh_selection.as_ref().unwrap().account_revision.capacity();
         let original = private.token.as_ref().unwrap().as_ptr();
         state.private = Some(private);
         assert_eq!(state.retained_heap_bytes_if_quiescent(), Some(before + extra));
