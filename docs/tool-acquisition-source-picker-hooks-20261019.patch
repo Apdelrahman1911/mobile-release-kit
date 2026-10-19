@@ -1,0 +1,798 @@
+diff --git a/desktop/native/macos-installed-native/src/lib.rs b/desktop/native/macos-installed-native/src/lib.rs
+--- a/desktop/native/macos-installed-native/src/lib.rs
++++ b/desktop/native/macos-installed-native/src/lib.rs
+@@ -200,6 +200,7 @@
+     fn mrk_panel_reserve_images() -> *mut c_void;
+     fn mrk_panel_start(panel: *mut c_void, kind: c_int) -> c_int;
+     fn mrk_panel_start_project_field(panel: *mut c_void, kind: c_int, initial: *const u8, bytes: usize) -> c_int;
++    fn mrk_panel_start_android_source(panel: *mut c_void, kind: c_int, initial: *const u8, bytes: usize) -> c_int;
+     fn mrk_panel_poll(panel: *mut c_void, result: *mut c_int, path: *mut u8, capacity: usize) -> c_int;
+     fn mrk_panel_poll_images(panel: *mut c_void, result: *mut c_int, selection: *mut c_int,
+         count: *mut usize, paths: *mut u8, capacity: usize) -> c_int;
+@@ -325,10 +326,19 @@
+         Self::EncryptedBackup=>17,Self::RecoveryCode=>18,Self::EncryptedDestination=>19,Self::RecoveryDestination=>20,
+     } }
+     fn project_field(self) -> bool { matches!(self, Self::VersionSource | Self::IosProject | Self::IosWorkspace | Self::MetadataRoot) }
++    fn android_source(self) -> bool { matches!(self,Self::AndroidJdk|Self::AndroidSdk|Self::AndroidGradle) }
+ }
+ fn project_field_initial(kind: PanelKind, initial: &Path) -> io::Result<&[u8]> {
++    if !kind.project_field() { return Err(io::ErrorKind::InvalidInput.into()); }
++    initial_directory(initial)
++}
++fn android_source_initial(kind: PanelKind, initial: &Path) -> io::Result<&[u8]> {
++    if !kind.android_source() { return Err(io::ErrorKind::InvalidInput.into()); }
++    initial_directory(initial)
++}
++fn initial_directory(initial: &Path) -> io::Result<&[u8]> {
+     let bytes = initial.as_os_str().as_bytes();
+-    if !kind.project_field() || bytes.is_empty() || bytes.len() > 4096 || bytes[0] != b'/'
++    if bytes.is_empty() || bytes.len() > 4096 || bytes[0] != b'/'
+         || bytes.contains(&0) || initial.to_str().is_none()
+         || bytes != b"/" && bytes[1..].split(|byte| *byte == b'/').any(|part|
+             part.is_empty() || part == b"." || part == b".." || part.len() > 255) {
+@@ -457,6 +467,11 @@
+         let bytes = project_field_initial(kind, initial)?;
+         self.start_inner(kind, Some(bytes))
+     }
++    /// Only the fixed Android source kinds can nominate a starting directory.
++    /// Same panel/setter/lifetime; this does not select or inspect that folder.
++    pub fn start_android_source(&mut self, kind: PanelKind, initial: &Path) -> io::Result<()> {
++        let bytes=android_source_initial(kind,initial)?;self.start_inner(kind,Some(bytes))
++    }
+     fn start_inner(&mut self, kind: PanelKind, initial: Option<&[u8]>) -> io::Result<()> {
+         #[cfg(feature = "installed-observation")]
+         { self.observation_start = None; }
+@@ -466,6 +481,7 @@
+         let status = unsafe { match initial {
+             // SAFETY: the complete borrowed UTF-8 slice was checked above and
+             // remains live through this synchronous native start/temporary close.
++            Some(bytes) if kind.android_source() => mrk_panel_start_android_source(self.original.as_ptr(),kind.code(),bytes.as_ptr(),bytes.len()),
+             Some(bytes) => mrk_panel_start_project_field(self.original.as_ptr(), kind.code(), bytes.as_ptr(), bytes.len()),
+             None => mrk_panel_start(self.original.as_ptr(), kind.code()),
+         } };
+@@ -3068,3 +3084,21 @@
+ #[cfg(feature="xcode-setup")]
+ #[allow(dead_code)]
+ mod macos_xcode_facts;
++
++#[cfg(test)]
++mod acquired_tool_source_location_tests {
++    use super::*;
++    #[test]
++    fn only_fixed_android_source_purposes_accept_the_bounded_initial_location() {
++        for kind in [PanelKind::AndroidJdk,PanelKind::AndroidSdk,PanelKind::AndroidGradle] {
++            assert_eq!(android_source_initial(kind,Path::new("/native/cache" )).unwrap(),b"/native/cache");
++            assert!(project_field_initial(kind,Path::new("/native/cache")).is_err());
++            for path in ["relative","/bad/../cache","/bad//cache","/bad\0/cache"] {
++                assert!(android_source_initial(kind,Path::new(path)).is_err());
++            }
++        }
++        for kind in [PanelKind::Project,PanelKind::File,PanelKind::Quit,PanelKind::VersionSource,PanelKind::GitHubAuthExecutable,PanelKind::EncryptedDestination] {
++            assert!(android_source_initial(kind,Path::new("/native/cache")).is_err());
++        }
++    }
++}
+diff --git a/desktop/native/macos-installed-native/src/native.m b/desktop/native/macos-installed-native/src/native.m
+--- a/desktop/native/macos-installed-native/src/native.m
++++ b/desktop/native/macos-installed-native/src/native.m
+@@ -506,7 +506,7 @@
+ }
+ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial, size_t length) {
+     if (!pthread_main_np() || !opaque || (!mrk_panel_open_kind(kind) && kind != 2)) return EINVAL;
+-    if (mrk_panel_project_field(kind)) {
++    if (mrk_panel_project_field(kind) || ((kind >= 10 && kind <= 12) && (initial || length))) {
+         if (!initial || !length || length > 4096 || initial[0] != '/' || memchr(initial, 0, length)) return EINVAL;
+     } else if (initial || length) return EINVAL;
+     MRKInstalledPanel *s = opaque;
+@@ -568,7 +568,7 @@
+         // sole source is the original binding. In the instrumented path the
+         // existing parent/prompt tags precede it, preserving the same ordered
+         // partial-return decoder as Project/File. No observation setter is used.
+-        if (mrk_panel_project_field(kind)) {
++        if (initial) {
+             int configured = mrk_panel_initial_directory(s, initial, length);
+             if (configured != 0 || s->unknown) { s->unknown = YES; return EIO; }
+ #ifdef MRK_INSTALLED_OBSERVATION
+@@ -644,6 +644,10 @@
+ }
+ int mrk_panel_start_project_field(void *opaque, int kind, const uint8_t *initial, size_t length) {
+     if (!mrk_panel_project_field(kind)) return EINVAL;
++    return mrk_panel_start_inner(opaque, kind, initial, length);
++}
++int mrk_panel_start_android_source(void *opaque, int kind, const uint8_t *initial, size_t length) {
++    if (kind < 10 || kind > 12 || !initial || !length) return EINVAL;
+     return mrk_panel_start_inner(opaque, kind, initial, length);
+ }
+ int mrk_panel_poll(void *opaque, int *result, uint8_t *path, size_t capacity) {
+diff --git a/desktop/src-tauri/src/android_tool_sources.rs b/desktop/src-tauri/src/android_tool_sources.rs
+--- a/desktop/src-tauri/src/android_tool_sources.rs
++++ b/desktop/src-tauri/src/android_tool_sources.rs
+@@ -33,6 +33,15 @@
+ pub(crate) struct Choose {
+     pub(crate) schema_version: u32, pub(crate) source_generation: u32,
+     pub(crate) project_id: String, pub(crate) role: Role,
++    // Omission preserves ordinary Browse. Explicit null/path/URL is refused.
++    #[serde(default, deserialize_with = "acquired")]
++    pub(crate) acquired: Option<Acquired>,
++}
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub(crate) struct Acquired { pub(crate) operation_id: String, pub(crate) owner_generation: String }
++fn acquired<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Acquired>, D::Error> {
++    Acquired::deserialize(d).map(Some)
+ }
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -64,7 +73,9 @@
+     pub(crate) fn parse(raw: &[u8]) -> Result<Self, BridgeError> {
+         if raw.len() > REQUEST_LIMIT { return Err(invalid()); }
+         let item: Self = serde_json::from_value(strict_json(raw).map_err(|_| invalid())?).map_err(|_| invalid())?;
+-        if item.schema_version != 1 || item.source_generation == u32::MAX || !valid_id(&item.project_id) { return Err(invalid()); }
++        if item.schema_version != 1 || item.source_generation == u32::MAX || !valid_id(&item.project_id)
++            || item.acquired.as_ref().is_some_and(|a| !crate::edit_protocol::token(&a.operation_id)
++                || !crate::edit_protocol::token(&a.owner_generation)) { return Err(invalid()); }
+         Ok(item)
+     }
+ }
+@@ -108,6 +119,17 @@
+         assert!(Cancel::parse(br#"{"schemaVersion":1,"sourceGeneration":0,"operationId":1}"#).is_err());
+     }
+     #[test]
++    fn acquired_source_nomination_is_optional_closed_ids_not_a_path_or_null() {
++        let good = serde_json::json!({"schemaVersion":1,"sourceGeneration":2,"projectId":"project-a","role":"sdk",
++            "acquired":{"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32)}});
++        assert!(Choose::parse(&serde_json::to_vec(&good).unwrap()).unwrap().acquired.is_some());
++        for value in [serde_json::Value::Null,serde_json::json!({}),serde_json::json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"path":"/cache"}),
++            serde_json::json!({"operationId":"https://vendor.invalid/archive","ownerGeneration":"b".repeat(32)})] {
++            let mut bad=good.clone();bad["acquired"]=value;assert!(Choose::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
++        }
++        assert!(Choose::parse(br#"{"schemaVersion":1,"sourceGeneration":0,"projectId":"p","role":"jdk","acquired":{},"acquired":{}}"#).is_err());
++    }
++    #[test]
+     fn status_selector_only_demotes_available_with_an_unqualified_source_picker() {
+         use Availability::*;
+         // Independent 8 x 2 oracle: all seven existing denials survive BOTH
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -194,6 +194,7 @@
+ struct ArtifactBinding {project_id:String,generation:u32,root:asset_source::RegisteredRoot,format:crate::artifact_inspection_protocol::Format,role:crate::artifact_inspection_protocol::Role}
+ struct AndroidSourceBinding {
+     project_id: String, generation: u32, root: asset_source::RegisteredRoot, role: crate::android_tool_sources::Role,
++    acquired: Option<Arc<crate::saved_command_owner::ToolSourceNomination>>,
+ }
+ enum MaterialOrigin {
+     Selected(asset_source::CapturedSource),
+@@ -5327,6 +5328,11 @@
+             slot.staged = Some(staged); slot.error = Some(error.into());
+             slot.stop(error.reason, Instant::now()); return;
+         }
++        let acquired_publication = match &staged {
++            Staged::AndroidSource { binding, .. } => binding.acquired.as_ref().and_then(|nomination|
++                publisher.as_deref().and_then(|publisher| nomination.publication_epoch(&slot.owner,publisher))),
++            _ => None,
++        };
+         if matches!(&staged,Staged::Project{..}|Staged::AndroidSource{..}){
+             let Some(publisher)=publisher.as_deref_mut() else{
+                 self.inner.android_registration_control.poisoned();state.unknown=true;
+@@ -5366,6 +5372,9 @@
+                     .and_then(|publisher| self.inner.bridge.android_build.publish_source(&slot.owner, proof, publisher));
+                 if published.is_err() {
+                     slot.stop(Reason::CleanupUnknown, Instant::now()); state.unknown = true; return;
++                }
++                if let (Some(nomination),Some(publisher))=(&binding.acquired,publisher.as_deref()) {
++                    nomination.published(&slot.owner,publisher,acquired_publication);
+                 }
+                 slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+             }
+@@ -5884,7 +5893,11 @@
+         }
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         Job::AndroidSource { app, binding } => {
+-            let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::AndroidToolSource(binding.role), None).await {
++            let chosen = match &binding.acquired {
++                Some(nomination) => crate::shell::run_owned_acquired_tool_source(&app,owner,nomination).await,
++                None => crate::shell::run_owned_dialog(&app,owner,crate::shell::DialogChoice::AndroidToolSource(binding.role),None).await,
++            };
++            let path = match chosen {
+                 Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
+             };
+             if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
+@@ -6237,11 +6250,17 @@
+                 || before.source_generation != input.source_generation { return Err(crate::android_tool_sources::invalid()); }
+             let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(&input.project_id), None)
+                 .map_err(|_| crate::android_tool_sources::unavailable())?;
++            let acquired = if input.acquired.is_some() {
++                let nomination=self.inner.bridge.tool_acquisition.nominate_acquired_tool_source(
++                    &self.inner.session_identity,&input,generation,&root,&publisher)?;
++                self.tool_source_nomination_current(&state,&nomination,generation,&root,None)?;
++                Some(nomination)
++            } else { None };
+             if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::SourceChanged)?; }
+             state.saved_input=None;
+             let id = self.next_operation(&mut state).map_err(|_| BridgeError::cleanup_unknown())?;
+             if id == u32::MAX { self.exhaust(&mut state, UnknownOrigin::Exhausted); return Err(BridgeError::cleanup_unknown()); }
+-            let binding = Arc::new(AndroidSourceBinding { project_id: input.project_id.clone(), generation, root: root.clone(), role: input.role });
++            let binding = Arc::new(AndroidSourceBinding { project_id: input.project_id.clone(), generation, root: root.clone(), role: input.role, acquired: acquired.clone() });
+             let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
+             let mut slot = Slot::new(owner.clone(), Operation::ChooseAndroidSource, None, None, None);
+             slot.android_source = Some(binding.clone());
+@@ -6249,8 +6268,14 @@
+                 .map_err(|_| BridgeError::cleanup_unknown())?;
+             // Actual asset coordinator/GUI/source/child roster already exists,
+             // with GO still closed. Save that SAME original in Android Registry.
+-            if let Err(error) = self.inner.bridge.android_build.admit_source(&self.inner.session_identity, &input, generation, root, owner, &publisher, gate) {
++            if let Err(error) = self.inner.bridge.android_build.admit_source(&self.inner.session_identity, &input, generation, root.clone(), owner.clone(), &publisher, gate) {
+                 drop(state); drop(start); return Err(error);
++            }
++            if let Some(nomination)=&acquired {
++                if nomination.admitted(&owner,&publisher).is_err()
++                    || self.tool_source_nomination_current(&state,nomination,generation,&root,Some(&owner)).is_err() {
++                    drop(state);drop(start);return Err(crate::android_tool_sources::invalid());
++                }
+             }
+             let status = match self.inner.bridge.android_build.sources_status(self.android_build_gate(&state)) {
+                 Ok(status) => status, Err(error) => { drop(state); drop(start); return Err(error); }
+diff --git a/desktop/src-tauri/src/asset_session_installation_memory.rs b/desktop/src-tauri/src/asset_session_installation_memory.rs
+--- a/desktop/src-tauri/src/asset_session_installation_memory.rs
++++ b/desktop/src-tauri/src/asset_session_installation_memory.rs
+@@ -272,7 +272,9 @@
+         }
+         fn android_source(&mut self, value: &Arc<AndroidSourceBinding>) -> Count<()> {
+             if !self.seen.insert(value)? { return Ok(()); }
+-            self.arc::<AndroidSourceBinding>()?; self.add(value.project_id.capacity())?; self.add(value.root.path.capacity())
++            self.arc::<AndroidSourceBinding>()?; self.add(value.project_id.capacity())?; self.add(value.root.path.capacity())?;
++            if let Some(nomination)=&value.acquired { self.add(capacity(nomination.retained_bytes())?)?; }
++            Ok(())
+         }
+         fn image_binding(&mut self, value: &Arc<images::Binding>) -> Count<()> {
+             if !self.seen.insert(value)? { return Ok(()); }
+@@ -539,7 +541,7 @@
+         slot.project=Some(Project{id:project_id.to_owned(),name:"Catalogue allocation DATA".to_owned(),
+             path:project.path.to_str().unwrap().to_owned()});
+         slot.android_source=Some(Arc::new(AndroidSourceBinding{project_id:project_id.to_owned(),generation:1,
+-            root:project.clone(),role:crate::android_tool_sources::Role::Jdk}));
++            root:project.clone(),role:crate::android_tool_sources::Role::Jdk,acquired:None}));
+         let state=DocumentState{lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
+             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
+             retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,
+diff --git a/desktop/src-tauri/src/asset_session_saved_observation.rs b/desktop/src-tauri/src/asset_session_saved_observation.rs
+--- a/desktop/src-tauri/src/asset_session_saved_observation.rs
++++ b/desktop/src-tauri/src/asset_session_saved_observation.rs
+@@ -22,6 +22,12 @@
+             && self.project_id == project_id
+             && document.android_registration_control.matches_epoch(self.epoch)
+             && document.bridge.registry_generation() == registration
++    }
++    pub(super) fn tool_source_epoch(&self) -> u64 { self.epoch }
++    pub(super) fn tool_source_matches(&self, document: &Inner, edit: &crate::edit_owner::SavedEditGuard<'_>,
++        registration: u32, root: &asset_source::RegisteredRoot, project_id: &str) -> bool {
++        self.returned() && self.registration == registration && self.root == *root && self.project_id == project_id
++            && document.bridge.registry_generation() == registration && edit.matches(&self.stamp)
+     }
+     pub(super) fn returned(&self) -> bool {
+         self.stage.load(Ordering::SeqCst) == RETURNED && self.completion_returned.load(Ordering::SeqCst)
+@@ -288,6 +294,14 @@
+         }
+         Ok(binding.lane.clone())
+     }
++    pub(super) fn tool_source_saved_input_matches(&self, state: &DocumentState, lane: &Arc<SavedObservationLane>,
++        context: &crate::tool_acquisition_protocol::Context, continuing: bool) -> bool {
++        match &state.saved_input {
++            Some(binding) => Arc::ptr_eq(&binding.lane,lane) && binding.comparison.config_bytes == context.saved_config.bytes
++                && SavedComparisonData::digest(&context.saved_config.sha256) == Some(binding.comparison.config_sha256),
++            None => continuing, // Only exact recorded original source picks may clear it.
++        }
++    }
+     pub(super) fn validated_saved_input(&self, state: &DocumentState, input: &crate::android_build_protocol::Prepare) -> Result<ValidatedSavedInput, BridgeError> {
+         let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+         self.validated_saved_input_with_edit(state,input,&edit)
+diff --git a/desktop/src-tauri/src/asset_session_tool_acquisition.rs b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+--- a/desktop/src-tauri/src/asset_session_tool_acquisition.rs
++++ b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+@@ -15,6 +15,7 @@
+     saved: Arc<SavedObservationLane>,
+ }
+ impl ToolAcquisitionDocumentInput {
++    pub(crate) fn source_picker_epoch(&self) -> u64 { self.saved.tool_source_epoch() }
+     pub(crate) fn context(&self) -> &wire::Context {
+         &self.context
+     }
+@@ -142,6 +143,26 @@
+ }
+
+ impl DocumentBinding {
++    /// Same original saved lane/stamp/root/complete registry, without reviving
++    /// its old acquisition epoch. The exact source Publisher owns that check.
++    pub(super) fn tool_source_nomination_current(&self, state: &DocumentState,
++        nomination: &crate::saved_command_owner::ToolSourceNomination,
++        registration: u32, root: &RegisteredRoot, admitted: Option<&Arc<OriginalWork>>) -> Result<(), BridgeError> {
++        let input=nomination.document();
++        let roster=self.inner.bridge.native_roster().map_err(|_| crate::android_tool_sources::invalid())?;
++        if !input.document.upgrade().is_some_and(|document| Arc::ptr_eq(&document,&self.inner))
++            || !same_roster(input,registration,root,&roster)
++            || !state.saved_observation.as_ref().is_some_and(|lane| same_lane(lane,&input.saved)) {
++            return Err(crate::android_tool_sources::invalid());
++        }
++        let edit=self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
++        if !input.saved.tool_source_matches(&self.inner,&edit,registration,root,&input.context.project_id)
++            || !self.tool_source_saved_input_matches(state,&input.saved,&input.context,
++                nomination.continuing() || admitted.is_some_and(|owner| nomination.admitted_to(owner))) {
++            return Err(crate::android_tool_sources::invalid());
++        }
++        Ok(()) // Edit guard drops before any outer gate, GUI, IO, or GO.
++    }
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     pub(super) fn tool_application_exclusion_root(
+         &self,
+diff --git a/desktop/src-tauri/src/saved_command_android_catalog.rs b/desktop/src-tauri/src/saved_command_android_catalog.rs
+--- a/desktop/src-tauri/src/saved_command_android_catalog.rs
++++ b/desktop/src-tauri/src/saved_command_android_catalog.rs
+@@ -263,6 +263,15 @@
+     pub(super) fn same_empty_acquisition_loan(&self,loan:&EmptyLoan)->bool{
+         self.generation==loan.generation&&self.active.is_none()&&self.selected.is_none()&&self.retired.is_none()
+             &&self.published.as_ref().is_some_and(|p|Arc::ptr_eq(p,&loan.published)&&p.entries.is_empty())
++    }
++    /// Source admission deliberately retires this publication. A directory
++    /// nomination may compare the SAME last original only after its separately
++    /// recorded successful picker/epoch transition; this never restores trust.
++    pub(super) fn same_source_picker_empty_loan(&self, loan:&EmptyLoan, continuing:bool)->bool {
++        if !continuing { return self.same_empty_acquisition_loan(loan); }
++        self.generation==loan.generation && self.active.is_none() && self.selected.is_none() && self.published.is_none()
++            && self.retired==Some(wire::Reason::CatalogChanged)
++            && self.last.as_ref().is_some_and(|last| Arc::ptr_eq(last,&loan.published.original))
+     }
+     /// Finite prior/current Catalog holdings for the app-M2 admission census.
+     /// No lifecycle mutation, native/book access or post-tail probing. The
+diff --git a/desktop/src-tauri/src/saved_command_android_registration.rs b/desktop/src-tauri/src/saved_command_android_registration.rs
+--- a/desktop/src-tauri/src/saved_command_android_registration.rs
++++ b/desktop/src-tauri/src/saved_command_android_registration.rs
+@@ -223,6 +223,17 @@
+     pub(crate) fn at(&self) -> Instant { self.at }
+     pub(crate) fn accepted(&self) -> bool { self.accepted && !self.finished }
+     pub(crate) fn same_slot(&self, slot: &Arc<ControlSlot>) -> bool { Arc::ptr_eq(&self.slot, slot) }
++    /// Read-only comparison for the exact ordinary source-picker publisher.
++    /// epoch() remains strict for every other caller. No acceptance or renewal.
++    pub(crate) fn tool_source_epoch(&self) -> Result<u64, BridgeError> {
++        let book = self.slot.book.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
++        if self.finished || self.index >= 8 || self.slot.is_unknown() || book.cancel.is_some()
++            || book.pending.iter().enumerate().any(|(i,p)| i != self.index && p.is_some())
++            || !book.pending[self.index].is_some_and(|p| p.serial == self.serial && p.accepted == self.accepted) {
++            return Err(BridgeError::cleanup_unknown());
++        }
++        Ok(book.epoch)
++    }
+     pub(crate) fn accept(&mut self, reason: wire::Reason) -> Result<(), BridgeError> {
+         if self.accepted || self.finished { self.slot.poisoned(); return Err(BridgeError::cleanup_unknown()); }
+         let mut book = self.slot.book.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+@@ -1973,6 +1984,26 @@
+     }
+
+     #[test]
++    fn tool_source_epoch_only_observes_its_exact_sole_publisher() {
++        let slot=Arc::new(ControlSlot::default());
++        let mut publisher=slot.reserve(PublisherKind::General,false).unwrap();
++        assert!(slot.epoch().is_err());assert_eq!(publisher.tool_source_epoch().unwrap(),0);
++        let other=slot.reserve(PublisherKind::General,false).unwrap();
++        assert!(publisher.tool_source_epoch().is_err());other.reject();
++        { let mut book=slot.book.lock().unwrap();book.cancel=Some(PendingCancel{serial:1,original:Weak::new(),reviewed:None}); }
++        assert!(publisher.tool_source_epoch().is_err());slot.book.lock().unwrap().cancel=None;
++        { let mut book=slot.book.lock().unwrap();book.pending[publisher.index].as_mut().unwrap().serial+=1; }
++        assert!(publisher.tool_source_epoch().is_err());
++        slot.book.lock().unwrap().pending[publisher.index].as_mut().unwrap().serial=publisher.serial;
++        publisher.accept(wire::Reason::SourceChanged).unwrap();
++        assert_eq!(publisher.tool_source_epoch().unwrap(),1);assert!(slot.epoch().is_err());
++        slot.book.lock().unwrap().pending[publisher.index].as_mut().unwrap().accepted=false;
++        assert!(publisher.tool_source_epoch().is_err());
++        slot.book.lock().unwrap().pending[publisher.index].as_mut().unwrap().accepted=true;
++        publisher.resolve(true);assert!(publisher.tool_source_epoch().is_err());
++        assert_eq!(slot.epoch().unwrap(),1);
++    }
++    #[test]
+     fn accepted_event_keeps_original_f_after_pending_projection_finishes() {
+         let (slot,control,_cohort,gate)=control_at(Instant::now());
+         let mut publisher=slot.reserve(PublisherKind::General,false).unwrap();let first=publisher.at();
+diff --git a/desktop/src-tauri/src/saved_command_owner.rs b/desktop/src-tauri/src/saved_command_owner.rs
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -23,7 +23,7 @@
+
+ #[path = "saved_command_tool_acquisition.rs"]
+ mod tool_acquisition;
+-pub(crate) use tool_acquisition::{Admitted as ToolAcquisitionAdmitted, Census as ToolAcquisitionCensus};
++pub(crate) use tool_acquisition::{Admitted as ToolAcquisitionAdmitted, Census as ToolAcquisitionCensus, SourceNomination as ToolSourceNomination};
+
+ #[path = "saved_command_local_history.rs"]
+ mod local_history;
+diff --git a/desktop/src-tauri/src/saved_command_owner_tests.rs b/desktop/src-tauri/src/saved_command_owner_tests.rs
+--- a/desktop/src-tauri/src/saved_command_owner_tests.rs
++++ b/desktop/src-tauri/src/saved_command_owner_tests.rs
+@@ -129,14 +129,16 @@
+     let context = context(application.inner.domain);
+     active_with_context(application, context)
+ }
+-fn active_with_context(application: SavedCommandOwner, context: Context) -> (SavedCommandOwner, Arc<Session>) {
+-    let domain = application.inner.domain; let mut p = projection(domain); p.context = context;
++pub(super) fn active_with_context(application: SavedCommandOwner, context: Context) -> (SavedCommandOwner, Arc<Session>) {
++    let domain = application.inner.domain;
++    let mut p = RunProjection { operation_id: "a".repeat(32), owner_generation: "b".repeat(32), context,
++        phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
+     let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
+     let (frames, receiver) = mpsc::channel(2);
+     let clocks = Clocks::for_context(&p.context, Instant::now());
+     let (native_audit_cutoff, _) = watch::channel(clocks.work);
+     let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
+-    let profile = match domain { SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => Profile::OfflinePreflight(wire::Profile::LinuxX64),
++    let profile = match domain { SavedCommandDomain::ToolAcquisition => Profile::ToolAcquisition(tools_wire::Profile::MacArm64), SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => Profile::OfflinePreflight(wire::Profile::LinuxX64),
+         SavedCommandDomain::AndroidBuild => Profile::AndroidBuild(android_wire::Profile::LinuxX64),
+         SavedCommandDomain::ProjectRecovery => Profile::ProjectRecovery(recovery_wire::Profile::LinuxX64),
+         SavedCommandDomain::IOSArchive => Profile::IOSArchive(ios_wire::Profile::MacArm64),
+diff --git a/desktop/src-tauri/src/saved_command_tool_acquisition.rs b/desktop/src-tauri/src/saved_command_tool_acquisition.rs
+--- a/desktop/src-tauri/src/saved_command_tool_acquisition.rs
++++ b/desktop/src-tauri/src/saved_command_tool_acquisition.rs
+@@ -23,6 +23,9 @@
+ ))]
+ #[path = "saved_command_tool_acquisition_macos.rs"]
+ mod native;
++#[path = "saved_command_tool_acquisition_sources.rs"]
++mod sources;
++pub(crate) use sources::SourceNomination;
+
+ // A complete source implementation is not installed-profile qualification.
+ // Root's native observation/packaging gate must be exercised before enabling.
+@@ -211,6 +214,8 @@
+     // A later known pre-effect refusal must not discard the earlier actual
+     // app-data nomination. This is a second original reference, not a receipt.
+     application_observation: Option<Arc<Session>>,
++    // Only accepted Complete Acquire + positive original joins mint this.
++    completed_sources: Option<Arc<sources::CompletedSources>>,
+ }
+ pub(super) struct State {
+     intent: Option<Arc<Intent>>,
+@@ -437,6 +442,7 @@
+             return Err(wire::invalid());
+         }
+         p.tools = Some(intent);
++        r.tool_acquisition.completed_sources = None;
+         Ok(status)
+     }
+     pub(crate) fn prepared_tool_acquisition_document(
+@@ -708,6 +714,7 @@
+     if owner.domain != SavedCommandDomain::ToolAcquisition {
+         return;
+     }
++    r.tool_acquisition.completed_sources = None;
+     // Retain the SAME attempt even when POST/closure later fails. A pending
+     // attempt is already retained in Active; no guessed path or JSON can stand
+     // in for its original cache book after retirement.
+@@ -760,6 +767,9 @@
+         && active.projection.outcome == Some(Outcome::Complete)
+     {
+         if let Some(Terminal::ToolAcquisition(t)) = &active.projection.result {
++            if t.context.action == wire::Action::Acquire {
++                r.tool_acquisition.completed_sources = sources::CompletedSources::capture(owner, active);
++            }
+             if t.context.action == wire::Action::Inspect
+                 && t.outcome == wire::Outcome::Complete
+                 && t.lifetime.settled()
+@@ -868,6 +878,10 @@
+     }
+     let mut seen = BTreeSet::new();
+     let mut queue = r.tool_acquisition.producers.clone();
++    if let Some(completed) = &r.tool_acquisition.completed_sources {
++        queue.push(completed.original().clone()); // SAME producer, deduplicated below.
++        bytes = bytes.checked_add(completed.retained_bytes()?)?;
++    }
+     if let Some(application) = &r.tool_acquisition.application {
+         queue.push(application.clone());
+     }
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2964,7 +2964,7 @@
+ #[path = "shell_macos_dialog.rs"]
+ mod owned_macos;
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-pub(crate) use owned_macos::{run_owned_dialog, run_owned_images_dialog, run_owned_backup_dialog};
++pub(crate) use owned_macos::{run_owned_dialog, run_owned_images_dialog, run_owned_backup_dialog, run_owned_acquired_tool_source};
+
+ #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+ #[path = "shell_windows.rs"]
+diff --git a/desktop/src-tauri/src/shell_macos_dialog.rs b/desktop/src-tauri/src/shell_macos_dialog.rs
+--- a/desktop/src-tauri/src/shell_macos_dialog.rs
++++ b/desktop/src-tauri/src/shell_macos_dialog.rs
+@@ -530,6 +530,7 @@
+         // Keep the original PANEL borrow, but no Record/GuiFacts guard, across
+         // this SAME start. There is no per-getter observer callback in AppKit.
+         let returned = match initial_folder {
++            Some(root) if matches!(choice,PanelKind::AndroidJdk|PanelKind::AndroidSdk|PanelKind::AndroidGradle) => panel.start_android_source(choice,root),
+             Some(root) => panel.start_project_field(choice, root),
+             None => panel.start(choice),
+         };
+@@ -701,6 +702,19 @@
+         Some(DialogResult::Images(_) | DialogResult::Backup) => Err(Reason::CleanupUnknown),
+     }
+ }
++/// The initial directory comes only from a completed original acquisition.
++/// Generic AndroidToolSource + Some(path) routing above remains refused.
++pub(crate) async fn run_owned_acquired_tool_source(app: &tauri::AppHandle, owner: &Arc<OriginalWork>,
++    nomination: &crate::saved_command_owner::ToolSourceNomination) -> Result<Option<PathBuf>, Reason> {
++    if !nomination.admitted_to(owner) { owner.gui.not_created(Reason::ContextStale);return Err(Reason::ContextStale); }
++    let kind=match panel_kind(DialogChoice::AndroidToolSource(nomination.role()),None) {
++        Ok(kind)=>kind,Err(reason)=>{owner.gui.not_created(reason);return Err(reason);}
++    };
++    match run_owned_panel(app,owner,owner.gui.clone(),kind,Some(nomination.initial_directory().to_path_buf())).await? {
++        Some(DialogResult::Single(path))=>Ok(Some(path)),None=>Ok(None),
++        Some(DialogResult::Images(_)|DialogResult::Backup)=>Err(Reason::CleanupUnknown),
++    }
++}
+ pub(crate) async fn run_owned_images_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>) -> Result<Option<Vec<PathBuf>>, Reason> {
+     match run_owned_choice(app, owner, DialogChoice::PublicImages, None).await? {
+         Some(DialogResult::Images(paths)) => Ok(Some(paths)), None => Ok(None),
+diff --git a/desktop/src-tauri/src/tool_acquisition_cache_macos.rs b/desktop/src-tauri/src/tool_acquisition_cache_macos.rs
+--- a/desktop/src-tauri/src/tool_acquisition_cache_macos.rs
++++ b/desktop/src-tauri/src/tool_acquisition_cache_macos.rs
+@@ -1279,6 +1279,20 @@
+         self.settled_intent = true;
+         self.check_before_use(stop)
+     }
++    /// Location DATA from this original settled cache only. This performs no
++    /// filesystem IO and grants no continuing lease or selected-source proof.
++    pub(super) fn prepared_sources_location(&self, operation: &str) -> Option<PathBuf> {
++        if !self.settled() || !self.settled_intent { return None; }
++        let cache = self.cache.as_ref()?;
++        if cache.operation != operation || !crate::edit_protocol::token(operation)
++            || !self.application.as_ref().is_some_and(|application| application.post_checked) { return None; }
++        let suffix = format!("archives/tool-{operation}/sources");
++        let length = cache.location.cache.as_os_str().len().checked_add(1 + suffix.len())?;
++        if length > 4096 { return None; }
++        let mut result = PathBuf::new(); result.try_reserve_exact(length).ok()?;
++        result.push(&cache.location.cache); result.push(suffix);
++        (result.capacity() <= 4096).then_some(result)
++    }
+     pub(super) fn origin(&self) -> Option<(Origin, Witness)> {
+         if !self.settled() || !self.settled_intent {
+             return None;
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -1432,6 +1432,7 @@
+     state: toolAcquisitionState, controller: toolAcquisition,
+     toolsBusy: loading || choosing || savedCommandBusy() !== null || diagnosticsOwnerReason(diagnosticsState) !== null,
+     chooseSource: (role) => { toolAcquisition.toolInputsIntent(); return androidBuild.chooseToolSource(role); },
++    choosePreparedSource: (role) => toolAcquisition.choosePreparedSource(role,(selected,original) => androidBuild.chooseToolSource(selected,original)),
+     refreshCatalog: () => { toolAcquisition.toolInputsIntent(); return androidBuild.refreshCatalog(); },
+     openRegistration: () => { navigate('releases'); setReleaseCheckFocus('android-signing'); },
+   };
+diff --git a/desktop/src/androidBuild.ts b/desktop/src/androidBuild.ts
+--- a/desktop/src/androidBuild.ts
++++ b/desktop/src/androidBuild.ts
+@@ -2,6 +2,7 @@
+ // observer/one-Start lifetime. A view, Promise or saved comparison is not native
+ // custody, qualification, cancellation settlement or a release approval.
+ import { isDirty } from './drafts.ts';
++import type { PreparedToolSourcePick } from './toolAcquisitionSourcePicker.ts';
+ import { assetStorageWritable } from './assetSessionProtocol.ts';
+ import type { AssetDisplayState } from './assetSessionTypes.ts';
+ import type { ProjectSession, WorkspaceAction } from './drafts.ts';
+@@ -628,17 +629,30 @@
+     if (this.state.toolSources.availability !== 'available') return androidBuildAvailabilityText[this.state.toolSources.availability];
+     return this.context.otherOperationReason();
+   };
+-  async chooseToolSource(role: AndroidToolSourceRole): Promise<void> {
++  async chooseToolSource(role: AndroidToolSourceRole, prepared?: PreparedToolSourcePick): Promise<void> {
+     this.syncProject();
+     if (!['jdk', 'sdk', 'gradle'].includes(role) || this.sourceActionReason() || !this.observer?.sources || !this.state.project) return;
+     const observer = this.observer, previous = observer.sources!;
+     if (previous.sourceGeneration >= ANDROID_BUILD_COUNTER_MAX - 1) { this.retire({ generationLost: true }); return; }
+-    const request = { schemaVersion: 1 as const, sourceGeneration: previous.sourceGeneration, projectId: this.state.project.projectId, role };
++    const acquired = prepared?.claim(this.state.project.projectId,role,previous.sourceGeneration);
++    if (prepared && !acquired) return;
++    const request = { schemaVersion: 1 as const, sourceGeneration: previous.sourceGeneration, projectId: this.state.project.projectId, role,
++      ...(acquired ? { acquired } : {}) };
+     this.retire(this.advance('contextGeneration'));
++    if (prepared && !prepared.stillCurrent()) return;
+     const attempt = { observer, before: previous.sourceGeneration, after: previous.statusRevision, role, projectId: request.projectId, retired: false,
+       identity: null as AndroidToolSourceIdentity | null, settled: false };
+     this.sourcesAttempt = attempt; this.sourcesCancelClaim = null;
+     this.update({ sourcesPending: true, sourcesUnconfirmed: true, sourcesError: null, sourcesCancelClaimed: null });
++    // Rendering/context callbacks above may reenter selection. Check AFTER
++    // them, immediately before this same original invoke; never fall back.
++    if (prepared && !prepared.stillCurrent()) {
++      if (this.sourcesAttempt === attempt && this.observer === observer) {
++        this.sourcesAttempt = null; this.sourcesCancelClaim = null;
++        this.update({ sourcesPending: false, sourcesUnconfirmed: false }); // Known not invoked.
++      }
++      return;
++    }
+     try {
+       const value = await observer.api.chooseAndroidToolSource!(request);
+       if (!observer.active || this.sourcesAttempt !== attempt) return;
+diff --git a/desktop/src/androidToolSources.ts b/desktop/src/androidToolSources.ts
+--- a/desktop/src/androidToolSources.ts
++++ b/desktop/src/androidToolSources.ts
+@@ -3,6 +3,7 @@
+ import type { ApiError, HelpContent } from './types.ts';
+ import type { AndroidBuildAvailability } from './androidBuildTypes.ts';
+ export type AndroidToolSourceRole = 'jdk' | 'sdk' | 'gradle';
++export interface AcquiredToolSource { operationId: string; ownerGeneration: string }
+ export interface AndroidToolSourceIdentity { operationId: number; sourceGeneration: number; role: AndroidToolSourceRole }
+ export interface AndroidToolSourcesStatus {
+   schemaVersion: 1; statusRevision: number; sourceGeneration: number; projectId: string | null;
+@@ -15,7 +16,7 @@
+   // Older/unqualified adapters can omit the entire surface. The controller
+   // never enables a picker when any member is unavailable.
+   androidToolSourcesStatus?(): Promise<AndroidToolSourcesStatus>;
+-  chooseAndroidToolSource?(request: { schemaVersion: 1; sourceGeneration: number; projectId: string; role: AndroidToolSourceRole }): Promise<AndroidToolSourcesStatus>;
++  chooseAndroidToolSource?(request: { schemaVersion: 1; sourceGeneration: number; projectId: string; role: AndroidToolSourceRole; acquired?: AcquiredToolSource }): Promise<AndroidToolSourcesStatus>;
+   cancelAndroidToolSource?(request: { schemaVersion: 1; sourceGeneration: number; operationId: number }): Promise<AndroidToolSourcesStatus>;
+   subscribeAndroidToolSources?(onStatus: (status: unknown) => void): Promise<() => void>;
+ }
+@@ -94,7 +95,10 @@
+       ? ['schemaVersion', 'sourceGeneration', 'projectId', 'role'] : command === 'cancel_android_tool_source'
+       ? ['schemaVersion', 'sourceGeneration', 'operationId'] : null;
+     if (!keys) return null;
+-    const data = record(value, keys);
++    const withAcquired = command === 'choose_android_tool_source' && value !== null && typeof value === 'object' && Object.hasOwn(value,'acquired');
++    const data = record(value, withAcquired ? [...keys,'acquired'] : keys);
++    const acquired = withAcquired && data ? record(data.acquired,['operationId','ownerGeneration']) : null;
++    if (withAcquired && (!acquired || ![acquired.operationId,acquired.ownerGeneration].every((id) => typeof id === 'string' && /^[0-9a-f]{32}$/.test(id)))) return null;
+     if (!data || data.schemaVersion !== 1 || command !== 'android_tool_sources_status' && !count(data.sourceGeneration, command === 'cancel_android_tool_source')
+         || command === 'choose_android_tool_source' && (!project(data.projectId) || !role(data.role))
+         || command === 'cancel_android_tool_source' && !count(data.operationId, true)) return null;
+diff --git a/desktop/src/components/PrepareBuildEnvironment.tsx b/desktop/src/components/PrepareBuildEnvironment.tsx
+--- a/desktop/src/components/PrepareBuildEnvironment.tsx
++++ b/desktop/src/components/PrepareBuildEnvironment.tsx
+@@ -2,6 +2,7 @@
+ import type { ToolAcquisitionController, ToolAcquisitionState } from '../toolAcquisitionController.ts';
+ import { stagedToolSourceGuidance, toolAcquisitionFailureGuidance } from '../toolAcquisitionGuidance.ts';
+ import type { ToolRequirementHint } from '../toolAcquisitionProtocol.ts';
++import { PreparedToolSourceFolders } from './PreparedToolSourceFolders.tsx';
+
+ export interface PrepareBuildEnvironmentProps {
+   state: ToolAcquisitionState;
+@@ -11,6 +12,7 @@
+   // becomes a SourceSnapshot, and no callback approves a protected copy.
+   toolsBusy: boolean;
+   chooseSource(role: AndroidToolSourceRole): void | Promise<void>;
++  choosePreparedSource(role: AndroidToolSourceRole): void | Promise<void>;
+   refreshCatalog(): void | Promise<void>;
+   openRegistration(): void;
+ }
+@@ -18,7 +20,7 @@
+   value.state === 'unspecified' ? 'Exact native profile required' : 'Could not be read safely';
+
+ /** Controlled view: mounting, navigation and checkbox rendering do no work. */
+-export function PrepareBuildEnvironment({ state, controller, compact = false, toolsBusy, chooseSource,
++export function PrepareBuildEnvironment({ state, controller, compact = false, toolsBusy, chooseSource, choosePreparedSource,
+   refreshCatalog, openRegistration }: PrepareBuildEnvironmentProps) {
+   const op = state.status?.operation;
+   const active = op && op.phase !== 'terminal';
+@@ -58,7 +60,7 @@
+   return <section className="card" aria-label="Prepare Android build environment" aria-busy={state.pending !== null || state.requestPending}>
+     <div className="section-heading"><div><h2>{title}</h2><p>Reuse compatible tools first. Downloads are optional and always need your approval.</p></div></div>
+     {problem && <p className="notice notice-warning" role="status">{problem}</p>}
+-    {!consent && !active && (!report || state.historical || state.presentation === 'stale') && <>
++    {!state.preparedFolders && !consent && !active && (!report || state.historical || state.presentation === 'stale') && <>
+       <div className="button-row">
+         <button type="button" className="button primary" disabled={checkReason !== null} onClick={() => void controller.inspect()}>
+           {state.pending === 'inspect' ? 'Checking required tools…' : 'Check required tools'}</button>
+@@ -88,14 +90,9 @@
+         onClick={() => void controller.download(consent.operationId, consent.ownerGeneration)}>Download required tools</button></div>
+       {downloadReason && <p className="save-note">{downloadReason}</p>}
+     </div></div>}
+-    {staged && <div className="notice notice-info" role="status"><div><strong>{staged.title}</strong><p>{staged.body}</p>
+-      {staged.pickers.length > 0 && <>
+-        <p>Choose each prepared folder with the native picker, then inspect the selected sources and review the protected-copy approval. This app build does not open the cache location for you.</p>
+-        <div className="button-row">{staged.pickers.map((picker) => <button type="button" className="button secondary" key={picker.role}
+-          disabled={busy} onClick={() => void chooseSource(picker.role)}>{picker.label}</button>)}
+-          <button type="button" className="button secondary" onClick={openRegistration}>Inspect &amp; review selected tools</button></div>
+-      </>}
+-    </div></div>}
++    {state.preparedFolders ? <PreparedToolSourceFolders folders={state.preparedFolders} busy={busy}
++      choosePrepared={choosePreparedSource} chooseExisting={chooseSource} openRegistration={openRegistration} /> :
++      staged && <div className="notice notice-info" role="status"><div><strong>{staged.title}</strong><p>{staged.body}</p></div></div>}
+     {originalControls}
+     <details><summary>Existing tools &amp; manual setup</summary>
+       <p>Keep your working JDK, Android SDK and Gradle installation. Refresh the protected tool list, or choose complete existing source folders. Inspection and explicit protected-copy approval remain in Build &amp; release.</p>
+diff --git a/desktop/src/toolAcquisitionController.ts b/desktop/src/toolAcquisitionController.ts
+--- a/desktop/src/toolAcquisitionController.ts
++++ b/desktop/src/toolAcquisitionController.ts
+@@ -9,6 +9,9 @@
+ import type { ToolAcquisitionContext, ToolAcquisitionIdentity, ToolAcquisitionOperation, ToolAcquisitionStatus,
+   ToolAcquisitionStart, ToolRequirementsObservation } from './toolAcquisitionProtocol.ts';
+ import type { StagedToolPresentation } from './toolAcquisitionGuidance.ts';
++import { PreparedToolSourceHandoff } from './toolAcquisitionSourcePicker.ts';
++import type { PreparedToolFolders, PreparedToolSourcePick, ToolSourceFolderContext } from './toolAcquisitionSourcePicker.ts';
++import type { AndroidToolSourceRole } from './androidToolSources.ts';
+
+ interface Source {
+   selectedProject(): ProjectSession | null;
+@@ -36,7 +39,7 @@
+   projectId: string | null; status: ToolAcquisitionStatus | null; issue: Issue | null; historical: boolean;
+   inspection: ToolRequirementsObservation | null;
+   consent: (ToolAcquisitionIdentity & { acknowledged: boolean }) | null;
+-  presentation: StagedToolPresentation; cancelRequested: boolean; cancelSent: boolean;
++  presentation: StagedToolPresentation; preparedFolders: PreparedToolFolders | null; cancelRequested: boolean; cancelSent: boolean;
+   checkReason: string | null; reviewReason: string | null; downloadReason: string | null;
+   canRead: boolean; canCancel: boolean;
+ }
+@@ -66,6 +69,7 @@
+   private attempt: Attempt | null = null;
+   private inspection: Inspection | null = null;
+   private witness: Witness | null = null;
++  private readonly sourceFolders = new PreparedToolSourceHandoff();
+   private epoch = 0;
+   private mutation = 0;
+   private action: ToolAcquisitionState['pending'] = null;
+@@ -102,6 +106,11 @@
+         known: [known[0], known[1], known[2]] };
+     } catch { return null; }
+   }
++  private folderContext(witness = this.capture()): ToolSourceFolderContext | null {
++    return witness && this.api && !this.disposed && !this.connectionRetired && !this.selectionPending && this.visible
++      ? { connection: this.api, context: witness.context, observation: witness.observation, draft: witness.draft,
++          baseline: witness.baseline, snapshot: witness.snapshot, catalog: witness.known[0], sources: witness.known[1], registration: witness.known[2] } : null;
++  }
+   private current(a: { witness: Witness; epoch: number }): boolean {
+     return !this.disposed && !this.connectionRetired && !this.selectionPending && a.epoch === this.epoch && sameWitness(a.witness, this.capture());
+   }
+@@ -122,7 +131,7 @@
+       requestPending: this.preparing || this.starting, cancelPending: this.cancelling, projectId: this.projectId(), status: this.status,
+       issue: this.issue, historical: !!op && !current, inspection: this.inspection && this.current(this.inspection) ? this.inspection.result :
+         current ? a.requirements : null,
+-      consent, presentation, cancelRequested: a?.cancelRequested ?? this.cancelIdentity !== null,
++      consent, presentation, preparedFolders: this.sourceFolders.preview(this.folderContext(),op,presentation), cancelRequested: a?.cancelRequested ?? this.cancelIdentity !== null,
+       cancelSent: a?.cancelSent ?? this.cancelIdentity !== null, checkReason: this.checkReason(), reviewReason: this.reviewReason(),
+       downloadReason: this.downloadReason(), canRead: !!this.api && !this.reading && !this.subscribing,
+       canCancel: !!this.api && !!op && active(op) && !this.cancelling && !sameToolAcquisitionIdentity(this.cancelIdentity, op) });
+@@ -131,7 +140,8 @@
+     try { for (const listener of [...this.listeners]) { try { listener(); } catch { /* Rendering cannot release work. */ } } }
+     finally { this.notifying = false; }
+   }
+-  private retire(): void {
++  private retire(preserveSourceFolders = false): void {
++    if (!preserveSourceFolders) this.sourceFolders.retire();
+     if (this.epoch >= 0xffff_fffe) this.issue = 'protocol'; else this.epoch++;
+     this.inspection = null; this.consentOpen = false; this.acknowledged = false;
+     if (this.attempt) {
+@@ -150,11 +160,22 @@
+   }
+   selectionIntent(): void { this.retire(); }
+   toolInputsIntent(): void { this.retire(); }
++  async choosePreparedSource(role: AndroidToolSourceRole,
++    choose: (role: AndroidToolSourceRole, original: PreparedToolSourcePick) => Promise<void>): Promise<void> {
++    this.syncProject();
++    if (this.ownerReason() || this.other()) return;
++    const pick=this.sourceFolders.begin(this.folderContext(),this.status?.operation,this.state.presentation,role,() => this.folderContext());
++    if (!pick) return;
++    this.retire(true); // Only the separate directory nomination survives.
++    try { if (pick.stillCurrent()) await choose(role,pick); }
++    finally { pick.joined(); this.publish(); }
++  }
+   snapshotIntent(projectId: string): void { if (projectId === this.projectId() || projectId === this.attempt?.context.projectId) this.retire(); }
+   versionIntent(): void { this.retire(); }
+   syncProject(): void {
+     const next = this.capture();
+-    if (!sameWitness(this.witness, next)) { this.witness = next; this.retire(); } else this.publish();
++    const preserveFolders = this.sourceFolders.sync(this.folderContext(next));
++    if (!sameWitness(this.witness, next)) { this.witness = next; this.retire(preserveFolders); } else this.publish();
+   }
+   setSelectionPending(value: boolean): void { if (value !== this.selectionPending) { this.selectionPending = value; this.retire(); } }
+   setVisible(value: boolean): void {
+@@ -165,6 +186,7 @@
+     if (!value) this.retire(); else this.publish();
+   }
+   private fail(issue: Issue): void {
++    this.sourceFolders.retire();
+     if (this.issue === null || this.issue === 'unconfirmed') this.issue = issue;
+     this.consentOpen = false; this.acknowledged = false; this.inspection = null;
+     if (this.attempt && !this.attempt.startSent) { this.attempt.retired = true; this.attempt.cancelRequested = true; }
+@@ -320,6 +342,7 @@
+       previous: this.status.operation && identity(this.status.operation), identity: null, prepareSent: false, prepareJoined: false, prepareAccepted: false,
+       startClaimed: false, startSent: false, startJoined: false, retired: false, unconfirmed: false, terminalRead: false, cancelRequested: false, cancelSent: false,
+       requirements: action === 'acquire' ? inspected!.result : null };
++    this.sourceFolders.retire();
+     this.attempt = a; this.cancelIdentity = null; this.consentOpen = false; this.acknowledged = false;
+     this.inspection = null; // A checked observation can prepare at most one download.
+     this.action = action === 'inspect' ? 'inspect' : 'review'; this.publish();
