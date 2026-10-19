@@ -96,10 +96,10 @@ class _Dialogue:
                 self.buffer.clear()
                 return raw
 
-    def _write(self, raw: bytes) -> None:
+    def _write(self, raw: bytes, *, finality: bool = False) -> None:
         remaining = memoryview(raw)
         while remaining:
-            timeout = self._time()
+            timeout = self._time(finality=finality)
             _, ready, _ = select.select([], [self.output], [], min(0.05, timeout))
             if not ready:
                 continue
@@ -109,7 +109,7 @@ class _Dialogue:
                 continue
             wire.require(type(count) is int and 0 < count <= len(remaining))
             remaining = remaining[count:]
-        self._time()
+        self._time(finality=finality)
 
     def checkpoint(self) -> None:
         wire.require(self.phase == "active")
@@ -162,6 +162,53 @@ class _Dialogue:
             self.phase = "eof"
             # FIN -> native stdin-close -> this original EOF -> bootstrap
             # consuming closes -> native stdout EOF/real child and IO joins.
+            while True:
+                remaining = self._time(finality=True)
+                ready, _, _ = select.select([self.control], [], [], min(0.05, remaining))
+                if not ready:
+                    continue
+                try:
+                    block = os.read(self.control, 1)
+                except BlockingIOError:
+                    continue
+                wire.require(block == b"")
+                self._time(finality=True)
+                self.phase = "returned"
+                return
+        except BaseException:
+            self.poisoned = True
+            raise
+
+    def finish_source(self, raw: bytes, source) -> None:
+        """Only the exact settled SOURCE borrower may use its original F tail.
+
+        Allocation runtime finish/checkpoint behavior remains unchanged. This
+        never clears poison, returns a second cursor, or renews an endpoint.
+        """
+        from ._desktop_version_allocation_source_control import BorrowedAllocationInput
+        wire.require(type(source) is BorrowedAllocationInput and source.dialogue is self
+                     and self.phase == "active" and not self.poisoned)
+        end, raw_end = source.terminal_bounds()
+        if source.first_failure is None:
+            self.finish(raw)
+            return
+        try:
+            self.hard_end = min(self.hard_end, end)
+            self.raw_hard_end = min(self.raw_hard_end, raw_end)
+            self._time(finality=True)
+            ready, _, _ = select.select([self.control], [], [], 0)
+            if ready:
+                # Borrowing has ended, but EOF/unsolicited input still vetoes
+                # a FIN. This is the SAME cursor, never an ACK/GO poll.
+                try:
+                    os.read(self.control, 1)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise wire.ProtocolError("Original source control changed")
+            self.phase = "fin"
+            self._write(raw, finality=True)
+            self.phase = "eof"
             while True:
                 remaining = self._time(finality=True)
                 ready, _, _ = select.select([self.control], [], [], min(0.05, remaining))
