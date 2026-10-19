@@ -1,0 +1,1012 @@
+diff --git a/desktop/src-tauri/src/android_build_wiring_tests.rs b/desktop/src-tauri/src/android_build_wiring_tests.rs
+--- a/desktop/src-tauri/src/android_build_wiring_tests.rs
++++ b/desktop/src-tauri/src/android_build_wiring_tests.rs
+@@ -8,7 +8,7 @@
+         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+         quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false,
+         maintenance: macos_maintenance::Closure::default(),
+-        saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
++        saved_observation: None, saved_input: None, version_allocation_source: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
+         quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+         vault: None,
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -20,6 +20,9 @@
+ mod saved_observation;
+ use saved_observation::{SavedObservationLane, SavedInputBinding};
+ pub(crate) use saved_observation::{SavedObservationCompletion, ValidatedSavedInput};
++#[path = "asset_session_version_allocation.rs"]
++mod version_allocation;
++pub(crate) use version_allocation::{VersionAllocationSourceGoGate, VersionAllocationSourceCompletion};
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path = "asset_session_application_service.rs"]
+ pub(crate) mod application_service;
+@@ -761,6 +764,7 @@
+     compatibility_picker_pending: bool,
+     maintenance: macos_maintenance::Closure,
+     saved_observation: Option<Arc<SavedObservationLane>>, saved_input: Option<SavedInputBinding>,
++    version_allocation_source: Option<Arc<version_allocation::Lane>>,
+     session_owner_reason: Option<Reason>,
+     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+     first_origin: Option<installed_session_observation::FirstOrigin>,
+@@ -783,7 +787,7 @@
+ }
+ fn credential_lock_gate(state: &DocumentState) -> Result<(), AssetError> {
+     if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
+-    if project_path_pending(state) || images::pending(state) || installation::pending(state) {
++    if project_path_pending(state) || images::pending(state) || installation::pending(state) || version_allocation::pending(state) {
+         return Err(AssetError::new(if state.unknown { Reason::CleanupUnknown } else { Reason::Busy }));
+     }
+     Ok(())
+@@ -1915,6 +1919,7 @@
+             self.add(crate::agent_identity_requests::document_backing_bytes())?;
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
++            self.add(version_allocation::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
+             self.records(&state.records)?; self.assignments(&state.assignments)?;
+             if let Some(context) = &state.context { self.context(context)?; }
+@@ -2357,13 +2362,14 @@
+     // lock/loss and reconciliation intentionally do not call this predicate.
+     allocation_conflict_gate(
+         state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()),
+-        state.github.setup_secret_work_pending() || state.github.history_work_pending() || gh_auth::pending(state))
++        state.github.setup_secret_work_pending() || state.github.history_work_pending() || gh_auth::pending(state) || version_allocation::pending(state))
+ }
+ fn allocation_conflict_gate(lookup_held:bool,secret_original_pending:bool)->Result<(),AssetError>{
+     if lookup_held||secret_original_pending{return Err(AssetError::new(Reason::Busy))}
+     Ok(())
+ }
+ fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
++    if version_allocation::pending(state) { return Err(BridgeError::new("busy", "Finish the original saved-source inspection first.")); }
+     if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
+     passive_document_state_gate(state)
+ }
+@@ -2398,7 +2404,7 @@
+     if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
+     if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
+     owner_gate()?;
+-    if state.compatibility_picker_pending || installation::pending(state) || gh_auth::pending(state) { return Err(AssetError::new(Reason::Busy)); }
++    if state.compatibility_picker_pending || installation::pending(state) || gh_auth::pending(state) || version_allocation::pending(state) { return Err(AssetError::new(Reason::Busy)); }
+     if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact() || slot.operation.images())
+         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
+     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
+@@ -2554,7 +2560,7 @@
+             github_fixture: None,
+             state: Mutex::new(DocumentState { lifetime: DocumentLifetime::default(), revision: 0,
+             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None,
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, version_allocation_source: None, session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+             github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+@@ -2779,7 +2785,7 @@
+         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+         vault::observe_stop(state, Instant::now());
+         if state.exhausted { return; }
+-        if state.unknown { self.inner.android_registration_control.poisoned(); state.saved_input = None; gh_auth::stop(state, GitHubReason::CleanupUnknown); state.github.unknown(); state.evidence.revoke(true); }
++        if state.unknown { version_allocation::stop(state); self.inner.android_registration_control.poisoned(); state.saved_input = None; gh_auth::stop(state, GitHubReason::CleanupUnknown); state.github.unknown(); state.evidence.revoke(true); }
+         images::refresh(state);
+         let Some(revision) = state.evidence.revision.checked_add(1) else { self.exhaust(state, UnknownOrigin::Exhausted); return; };
+         state.evidence.revision = revision;
+@@ -2878,7 +2884,7 @@
+             || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())))) { return Availability::Shutdown; }
+         if !state.lifetime.original_bound() || state.lost_observed
+             || !self.inner.bridge.diagnostics.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state)
+             || state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
+             || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()
+             || !self.inner.bridge.supervisor.can_exit() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))
+@@ -2903,7 +2909,7 @@
+         if let Some(reason) = preflight_document_gate(state, crate::offline_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -2925,7 +2931,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -2947,7 +2953,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -2969,7 +2975,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -2991,7 +2997,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3010,7 +3016,7 @@
+         if state.lost_observed{return Availability::DocumentLost;}if !state.lifetime.original_bound(){return Availability::Busy;}
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3126,7 +3132,7 @@
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+         // Asset phase AND original resources must settle, as must all edits,
+         // recovery attention, passive queries and the other saved-command owner.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3275,7 +3281,7 @@
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+         // Asset phase AND original resources must settle, as must all edits,
+         // recovery attention, passive queries and the other saved-command owner.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3335,7 +3341,7 @@
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+         // Asset phase AND original resources must settle, as must all edits,
+         // recovery attention, passive queries and the other saved-command owner.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3594,7 +3600,7 @@
+         if accepted {
+             if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::Shutdown); }
+             state.saved_input = None;
+-            state.stopping = true; self.inner.bridge.diagnostics.request_shutdown();
++            state.stopping = true; version_allocation::stop(&state); self.inner.bridge.diagnostics.request_shutdown();
+             self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.local_store.request_shutdown(); self.inner.bridge.local_store_prepare.request_shutdown(); self.inner.bridge.local_store_reconcile.request_shutdown(); self.inner.bridge.local_store_execute.request_shutdown(); self.inner.bridge.local_history.request_shutdown(); self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref().filter(|publisher| publisher.accepted())); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown(); self.inner.bridge.tool_acquisition.request_shutdown();
+         }
+         self.bump(&mut state);
+@@ -3704,11 +3710,12 @@
+     }
+     fn github_gate(&self, state: &DocumentState) -> GitHubReason {
+         let base = self.github_base_gate(state);
+-        if base == GitHubReason::None && gh_auth::pending(state) { GitHubReason::Busy } else { base }
++        if base == GitHubReason::None && (gh_auth::pending(state) || version_allocation::pending(state)) { GitHubReason::Busy } else { base }
+     }
+     // Only the retained gh-auth original uses this companion to avoid treating
+     // its OWN pending capture as unrelated new-work admission.
+     fn github_base_gate(&self, state: &DocumentState) -> GitHubReason {
++        if version_allocation::pending(state) { return GitHubReason::Busy; }
+         if state.maintenance.closed() { return GitHubReason::Busy; }
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+             || self.inner.bridge.diagnostics.disabled() || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))
+@@ -4161,7 +4168,7 @@
+         if state.stopping || self.inner.bridge.supervisor.stopping() { return Err(BridgeError::shutdown()); }
+         if self.inner.bridge.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+         // SAME Document lock: reject reciprocal edits before publisher/context side effects.
+-        if gh_auth::pending(state) { return Err(BridgeError::new("busy", "Finish the original GitHub connection first.")); }
++        if gh_auth::pending(state) || version_allocation::pending(state) { return Err(BridgeError::new("busy", "Finish the original native connection or saved-source inspection first.")); }
+         if domain == crate::edit_protocol::EditDomain::ProjectIdentity {
+             // Retire an already-ready positive Store original BEFORE a context
+             // invalidation could downgrade it and hide its continuity veto.
+@@ -4581,6 +4588,7 @@
+     idle(state)
+ }
+ fn invalidate_all(state: &mut DocumentState) {
++    version_allocation::stop(state);
+     gh_auth::stop(state, if state.unknown { GitHubReason::CleanupUnknown }
+         else if state.stopping || state.lost_observed { GitHubReason::Cancelled }
+         else { GitHubReason::TargetChanged });
+@@ -6374,6 +6382,7 @@
+             let state = self.lock();
+             (state.stopping && state.quit_accepted && assets_can_exit_locked(&state) && state.github.material_settled()
+                 && state.saved_observation.as_ref().is_none_or(|lane| lane.returned())
++                && !version_allocation::pending(&state)
+                 && state.maintenance.can_exit()
+                 && self.inner.android_registration_control.can_exit(), state.quit.clone())
+         };
+@@ -7937,7 +7946,7 @@
+         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
+         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, version_allocation_source: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+@@ -8070,7 +8079,7 @@
+         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
+         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, version_allocation_source: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+@@ -8166,7 +8175,7 @@
+     pub(super) fn empty_state() -> DocumentState {
+         DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None,
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, version_allocation_source: None, session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+             github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+diff --git a/desktop/src-tauri/src/asset_session_installation_memory.rs b/desktop/src-tauri/src/asset_session_installation_memory.rs
+--- a/desktop/src-tauri/src/asset_session_installation_memory.rs
++++ b/desktop/src-tauri/src/asset_session_installation_memory.rs
+@@ -471,7 +471,7 @@
+         fn document_state_gate(&self,state:&DocumentState)->Count<()>{
+             if state.unknown || state.exhausted || state.stopping || state.retiring || state.lock_pending
+                 || state.quit_pending || state.compatibility_picker_pending
+-                || state.session_owner_reason == Some(Reason::CleanupUnknown) { return Err(Reason::Capacity); }
++                || state.session_owner_reason == Some(Reason::CleanupUnknown) || version_allocation::pending(state) { return Err(Reason::Capacity); }
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+                 target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -487,6 +487,7 @@
+             self.add(capacity(state.maintenance.notice_bytes())?)?;
+             if let Some(lane) = &state.saved_observation { self.saved_observation(lane)?; }
+             if let Some(binding) = &state.saved_input { self.saved_observation(&binding.lane)?; }
++            self.add(capacity(version_allocation::retained_bytes(state))?)?;
+             self.records(&state.records)?; self.assignments(&state.assignments)?;
+             if let Some(context) = &state.context { self.context(context)?; }
+             if let Some(slot) = &state.slot { self.slot(slot)?; }
+@@ -544,7 +545,7 @@
+             root:project.clone(),role:crate::android_tool_sources::Role::Jdk,acquired:None}));
+         let state=DocumentState{lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
+             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
+-            retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,
++            retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,version_allocation_source:None,
+             session_owner_reason:None,maintenance:macos_maintenance::Closure::default(),context:Some(context),slot:Some(slot),records,assignments,
+             quit:None,quit_accepted:false,quit_cleanup_end:None,github:ConnectionState::new(),gh_auth:None,
+             evidence:EvidenceRegistry::new(),images:images::Registry::new(),installation:installation::Registry::new(),vault:None};
+@@ -650,7 +651,7 @@
+         fn state() -> DocumentState {
+             DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
+                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+-                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None,
++                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, version_allocation_source: None,
+                 session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+                 quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None,
+                 evidence: EvidenceRegistry::new(), images: images::Registry::new(),
+diff --git a/desktop/src-tauri/src/asset_session_local_history.rs b/desktop/src-tauri/src/asset_session_local_history.rs
+--- a/desktop/src-tauri/src/asset_session_local_history.rs
++++ b/desktop/src-tauri/src/asset_session_local_history.rs
+@@ -81,7 +81,7 @@
+         if wire::Profile::current().is_none(){return Availability::UnsupportedPlatform;}
+         if state.lost_observed{return Availability::DocumentLost;}
+         if !state.lifetime.original_bound(){return Availability::Busy;}
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane|!lane.returned())
+             || state.slot.as_ref().is_some_and(|slot|slot.phase!=Phase::Idle||!slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+diff --git a/desktop/src-tauri/src/asset_session_macos_maintenance.rs b/desktop/src-tauri/src/asset_session_macos_maintenance.rs
+--- a/desktop/src-tauri/src/asset_session_macos_maintenance.rs
++++ b/desktop/src-tauri/src/asset_session_macos_maintenance.rs
+@@ -66,6 +66,7 @@
+         self.macos_maintenance_common_gate(state)
+     }
+     fn macos_maintenance_common_gate(&self,state:&DocumentState)->Result<(),BridgeError>{
++        if version_allocation::pending(state) { return Err(unavailable()); }
+         // Do not call android_build.busy here: the second admission owns its
+         // SAME unentered cohort. Its Saved snapshot/admit gates examine that
+         // exact cohort and every Android original under the existing Registry.
+diff --git a/desktop/src-tauri/src/asset_session_saved_observation.rs b/desktop/src-tauri/src/asset_session_saved_observation.rs
+--- a/desktop/src-tauri/src/asset_session_saved_observation.rs
++++ b/desktop/src-tauri/src/asset_session_saved_observation.rs
+@@ -14,6 +14,14 @@
+     stage: std::sync::atomic::AtomicU8, completion_returned: AtomicBool,
+ }
+ impl SavedObservationLane {
++    // Existing short ControlSlot/registry comparison only, with no Doc or
++    // Supervisor/Resources re-entry and no native/service IO.
++    pub(super) fn current_version_source(&self, document: &Inner,
++        input: &crate::supervisor::VersionAllocationSourceInput) -> bool {
++        self.returned() && self.project_id == input.project_id && self.root == input.root
++            && document.android_registration_control.matches_epoch(self.epoch)
++            && document.bridge.registry_generation() == self.registration
++    }
+     // Called by the same prepared tool Input on its blocking worker. This
+     // never reacquires the Document or Edit Registry held by Start admission.
+     pub(super) fn tool_acquisition_current(&self, document: &Inner, registration: u32,
+@@ -78,6 +86,46 @@
+     }
+ }
+ pub(super) struct SavedInputBinding { pub(super) lane: Arc<SavedObservationLane>, comparison: SavedComparisonData }
++impl SavedInputBinding {
++    pub(super) fn matches_version_source(&self, document: &Inner, original: &Arc<SavedObservationLane>,
++        input: &crate::supervisor::VersionAllocationSourceInput, edit: &crate::edit_owner::SavedEditGuard<'_>) -> bool {
++        Arc::ptr_eq(&self.lane, original) && self.lane.current_version_source(document, input)
++            && edit.matches(&self.lane.stamp)
++            && input.configuration_size == self.comparison.config_bytes
++            && SavedComparisonData::digest(&input.configuration_sha256) == Some(self.comparison.config_sha256)
++            && input.version_size == self.comparison.version_bytes
++            && SavedComparisonData::digest(&input.version_sha256) == Some(self.comparison.version_sha256)
++            && input.version_path.as_bytes() == &self.comparison.source[..usize::from(self.comparison.source_len)]
++            && document.bridge.native_project(&input.project_id).is_ok_and(|(registration, root)|
++                registration == self.lane.registration && root == self.lane.root)
++    }
++    pub(super) fn version_source_input(&self, document: &Inner, project_id: &str, reference: &str,
++        edit: &crate::edit_owner::SavedEditGuard<'_>)
++        -> Result<(Arc<SavedObservationLane>, Arc<crate::supervisor::VersionAllocationSourceInput>), BridgeError> {
++        if self.lane.project_id != project_id || !crate::supervisor::version_allocation_source_branch(reference)
++            || !self.lane.returned() || !edit.matches(&self.lane.stamp)
++            || !document.android_registration_control.matches_epoch(self.lane.epoch)
++            || document.bridge.registry_generation() != self.lane.registration { return Err(stale()); }
++        // These bytes came from the original typed saved-version return. No
++        // renderer hashes, draft, Android Prepare or new private source read.
++        let path = std::str::from_utf8(&self.comparison.source[..usize::from(self.comparison.source_len)]).map_err(|_| stale())?;
++        fn sha(bytes: &[u8; 32]) -> String {
++            const HEX: &[u8; 16] = b"0123456789abcdef";
++            let mut result = String::with_capacity(64);
++            for b in bytes { result.push(HEX[usize::from(b >> 4)] as char); result.push(HEX[usize::from(b & 15)] as char); }
++            result
++        }
++        let input = Arc::new(crate::supervisor::VersionAllocationSourceInput {
++            project_id: project_id.to_owned(), root: self.lane.root.clone(),
++            configuration_size: self.comparison.config_bytes, configuration_sha256: sha(&self.comparison.config_sha256),
++            version_path: path.to_owned(), version_size: self.comparison.version_bytes,
++            version_sha256: sha(&self.comparison.version_sha256), reference: reference.to_owned(),
++        });
++        if !self.matches_version_source(document, &self.lane, &input, edit) { return Err(stale()); }
++        Ok((self.lane.clone(), input))
++    }
++}
++
+
+ /// Move-only witness from original Document state. Prepare stays comparison DATA.
+ pub(crate) struct ValidatedSavedInput {
+diff --git a/desktop/src-tauri/src/asset_session_tool_acquisition.rs b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+--- a/desktop/src-tauri/src/asset_session_tool_acquisition.rs
++++ b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+@@ -278,6 +278,7 @@
+             || state.compatibility_picker_pending
+             || state.maintenance.closed()
+             || gh_auth::pending(state)
++            || version_allocation::pending(state)
+             || state
+                 .saved_observation
+                 .as_ref()
+diff --git a/desktop/src-tauri/src/installed_runtime_macos.rs b/desktop/src-tauri/src/installed_runtime_macos.rs
+--- a/desktop/src-tauri/src/installed_runtime_macos.rs
++++ b/desktop/src-tauri/src/installed_runtime_macos.rs
+@@ -1323,6 +1323,46 @@
+ slots!(PassiveRuntimeSlots, PassiveInstalledRuntime, runtime::PassiveInstalledProfile);
+ slots!(GitHubReadOnlyRuntimeSlots, GitHubReadOnlyInstalledRuntime, runtime::GitHubReadOnlyInstalledProfile);
+ slots!(GitHubAuthRuntimeSlots, GitHubAuthInstalledRuntime, runtime::GitHubAuthInstalledProfile);
++// Distinct SOURCE original, not a Setup or GitRead slot. The existing fixed
++// github_setup_bootstrap.py inventory row is required for every Book inspection.
++slots!(VersionAllocationSourceRuntimeSlots, VersionAllocationSourceInstalledRuntime, runtime::VersionAllocationSourceInstalledProfile);
++impl VersionAllocationSourceRuntimeSlots {
++    pub(crate) fn working_reservation_bytes() -> Option<usize> {
++        crate::macos_history_inventory::code_storage_bytes(std::mem::size_of::<Record>(),
++            native::vault_filesystem::SNAPSHOT_FRAME_BYTES)?;
++        crate::macos_history_inventory::CODE_CONTROL_RESERVE.checked_add(std::mem::size_of::<Self>())?
++            .checked_add(128 * 1024)
++    }
++    pub(crate) fn reserve_once(&mut self) -> Result<usize> {
++        if !self.never_started() { return Err(AdmissionFailure::AlreadyUsed); }
++        let records = crate::macos_install_record::RUNTIME_RECORD_LIMIT;
++        let original = self.inspection.as_mut().ok_or(AdmissionFailure::Unknown)?;
++        if original.records.capacity() != 0 { return Err(AdmissionFailure::AlreadyUsed); }
++        original.records.try_reserve_exact(records).map_err(native_error)?;
++        if original.records.capacity() > records { return Err(AdmissionFailure::Bounds); }
++        Self::working_reservation_bytes().ok_or(AdmissionFailure::Bounds)
++    }
++    pub(crate) fn source_runtime_fd_bound() -> usize { MAC_RUNTIME_FDS }
++}
++impl VersionAllocationSourceInstalledRuntime {
++    pub(crate) fn post_original(&mut self, end: Instant, stop: &watch::Receiver<bool>,
++        publish: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>)) -> Result<()> {
++        let result = (|| {
++            if !self.original.inspected || !self.original.prepared || !self.original.admission_custody_ready() {
++                return Err(AdmissionFailure::AlreadyUsed);
++            }
++            self.original.point(end, stop)?;
++            native::real_user().map_err(native_error)?;
++            for (index, record) in self.original.records.iter().enumerate() {
++                if record.state == State::Owned { self.original.check_name(index, end, stop)?; }
++            }
++            self.original.point(end, stop)
++        })();
++        if let Err(failure) = result.as_ref() { self.original.note_acl(*failure, Instant::now()); }
++        publish(self.original.first_failure()); result
++    }
++}
++
+ #[path = "github_auth_runtime_macos.rs"]
+ mod github_auth_runtime;
+ slots!(GitHubPreflightRuntimeSlots, GitHubPreflightInstalledRuntime, runtime::GitHubPreflightInstalledProfile);
+diff --git a/desktop/src-tauri/src/runtime.rs b/desktop/src-tauri/src/runtime.rs
+--- a/desktop/src-tauri/src/runtime.rs
++++ b/desktop/src-tauri/src/runtime.rs
+@@ -345,6 +345,20 @@
+         self.provider_nomination()?;
+         let cwd=crate::installed_runtime::runtime_root();
+         Ok(VerifiedRuntime{python:cwd.join("python/bin/python3"),bootstrap:cwd.join("github_history_bootstrap.py"),core:cwd.join("core.zip"),cwd})
++    }
++}
++
++// SOURCE uses the existing required bootstrap's closed source-only protocol
++// arm. This profile does not borrow Setup consent, credentials or HTTP roles.
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++pub(crate) struct VersionAllocationSourceInstalledProfile { _private: () }
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++impl VersionAllocationSourceInstalledProfile {
++    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
++        if !macos_bindings() { return Err(unavailable()); }
++        let cwd = crate::installed_runtime::runtime_root();
++        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_setup_bootstrap.py"),
++            core: cwd.join("core.zip"), cwd })
+     }
+ }
+
+@@ -1804,6 +1818,18 @@
+         #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+         { false }
+     }
++    pub(crate) fn version_allocation_source_profile_available(&self) -> bool {
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        { macos_bindings() }
++        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++        { false }
++    }
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    pub(crate) fn resolve_version_allocation_source_installed(&self, originals: &mut crate::installed_runtime::VersionAllocationSourceRuntimeSlots,
++        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
++        if !self.version_allocation_source_profile_available() { return Err(unavailable()); }
++        originals.inspect_once(VersionAllocationSourceInstalledProfile { _private: () }, end, stop)
++    }
+     pub(crate) fn github_auth_profile_available(&self) -> bool {
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         { macos_bindings() && crate::github_auth_nomination::StockGhNomination::compiled().is_some() }
+diff --git a/desktop/src-tauri/src/supervisor.rs b/desktop/src-tauri/src/supervisor.rs
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -38,6 +38,12 @@
+ mod gh_auth;
+ pub(crate) use gh_auth::{GitHubAuthAdmission, GitHubAuthReceipt, GitHubAuthTicket, GitHubAuthWait, GitHubAuthHttpWait};
+ pub(crate) use gh_auth::SourcePost as GitHubAuthSourcePost;
++#[path = "supervisor_version_allocation.rs"]
++mod version_allocation;
++pub(crate) use version_allocation::{VersionAllocationSource, VersionAllocationSourceAdmission,
++    VersionAllocationSourceInput, VersionAllocationSourceReceipt, VersionAllocationSourceRequest,
++    VersionAllocationSourceTicket};
++pub(crate) use version_allocation::source_branch as version_allocation_source_branch;
+ #[path = "supervisor_history.rs"]
+ mod history;
+ pub(crate) use history::{GitHubHistoryAdmission,GitHubHistoryReceipt,GitHubHistoryTicket};
+@@ -230,7 +236,9 @@
+     history_gate: Option<crate::asset_session::GitHubHistoryGoGate>,
+     history_endpoints: Option<history::Endpoints>,
+     gh_auth: Option<gh_auth::Invocation>,
++    version_allocation_source: Option<version_allocation::Invocation>,
+     gh_auth_endpoints: Option<gh_auth::Endpoints>,
++    version_allocation_source_endpoints: Option<version_allocation::Endpoints>,
+     setup_material: Option<SetupMaterial>,
+     setup_first_bound: Option<usize>,
+     secret_sealed: Mutex<Option<SecretSealed>>,
+@@ -248,6 +256,7 @@
+     endpoint: Instant, cleanup_endpoint: Option<Instant>, error: Option<BridgeError>,
+     history_endpoints: Option<history::Endpoints>,
+     gh_auth_endpoints: Option<gh_auth::Endpoints>,
++    version_allocation_source_endpoints: Option<version_allocation::Endpoints>,
+     terminal: bool, unknown: bool,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     native_unknown_pending: bool,
+@@ -271,11 +280,11 @@
+     }
+ }
+ #[derive(Debug, PartialEq)]
+-enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), History(history_protocol::Reply), GitHubAuth }
++enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), History(history_protocol::Reply), GitHubAuth, VersionAllocationSource }
+ enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
+
+ #[derive(Clone, Copy)]
+-enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, GitHubHistory, GitHubAuth }
++enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, GitHubHistory, GitHubAuth, VersionAllocationSource }
+ impl Profile {
+     fn stdout_limit(self) -> usize {
+         match self {
+@@ -288,6 +297,7 @@
+             Self::GitHubPublication => publication_protocol::RESPONSE_LIMIT,
+             Self::GitHubHistory => 64*1024,
+             Self::GitHubAuth => crate::github_auth_capture_wire::RESPONSE_LIMIT,
++            Self::VersionAllocationSource => 2048,
+         }
+     }
+     fn decode(self, bytes: &[u8], id: &str, preflight: Option<&preflight_protocol::Request>, release: Option<&release_protocol::Request>, setup: Option<&setup_protocol::Request>, publication: Option<&publication_protocol::Request>) -> Result<ReadOutcome, BridgeError> {
+@@ -305,7 +315,7 @@
+             Self::GitHubPublication => publication_protocol::decode_reply(id, bytes,
+                 publication.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Publication),
+             // Only drive's actual sealed-source branch may decode History.
+-            Self::GitHubHistory | Self::GitHubAuth => Err(BridgeError::protocol()),
++            Self::GitHubHistory | Self::GitHubAuth | Self::VersionAllocationSource => Err(BridgeError::protocol()),
+         }
+     }
+ }
+@@ -321,17 +331,18 @@
+     Publication { request: publication_protocol::Request, gate: crate::asset_session::GitHubPublicationGoGate, end: Instant },
+     History(GitHubHistoryAdmission),
+     GitHubAuth(GitHubAuthAdmission),
++    VersionAllocationSource(VersionAllocationSourceAdmission),
+ }
+ impl AdmissionRequest<'_> {
+     fn profile(&self) -> Profile {
+         match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly,
+-            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth }
++            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource }
+     }
+     fn encode(self, id: &str) -> Result<(Vec<u8>, Option<preflight_protocol::Request>, Option<crate::asset_session::GitHubPreflightGoGate>,
+         Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>,
+         Option<setup_protocol::Request>, Option<crate::asset_session::GitHubSetupGoGate>, Option<SetupNativeAdmission>), BridgeError> {
+         match self {
+-            Self::History(_) | Self::GitHubAuth(_) | Self::Publication { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
++            Self::History(_) | Self::GitHubAuth(_) | Self::VersionAllocationSource(_) | Self::Publication { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
+             Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None, None, None, None)),
+             Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
+                 Ok((github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?, None, None, None, None, None, None, None)),
+@@ -406,6 +417,7 @@
+     Publication(Arc<Mutex<GitHubPublicationReceipt>>),
+     History(Arc<Mutex<GitHubHistoryReceipt>>),
+     GitHubAuth,
++    VersionAllocationSource,
+ }
+
+ /// A bounded native-only mailbox. Early unknown is not original resource
+@@ -514,7 +526,7 @@
+         Self::with_reply(endpoint, reply.map(|sender| PassiveReply::Value { sender: Some(sender) }))
+     }
+     fn with_reply(endpoint: Instant, reply: Option<PassiveReply>) -> Self {
+-        Self { endpoint, cleanup_endpoint: None, error: None, history_endpoints: None, gh_auth_endpoints: None, terminal: false, unknown: false, reply,
++        Self { endpoint, cleanup_endpoint: None, error: None, history_endpoints: None, gh_auth_endpoints: None, version_allocation_source_endpoints: None, terminal: false, unknown: false, reply,
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             native_unknown_pending: false,
+             driver_join: ManagementJoin::Pending, watchdog_join: ManagementJoin::Pending,
+@@ -535,8 +547,8 @@
+     }
+     fn fail_at(&mut self, error: BridgeError, now: Instant) {
+         if self.terminal { return; }
+-        let end = self.gh_auth_endpoints.map_or_else(|| self.history_endpoints.map_or_else(
+-            || now.min(self.endpoint) + CLEANUP_TIME, |original| original.first_failure(now)), |original| original.first_failure(now));
++        let end = self.version_allocation_source_endpoints.map_or_else(|| self.gh_auth_endpoints.map_or_else(|| self.history_endpoints.map_or_else(
++            || now.min(self.endpoint) + CLEANUP_TIME, |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now));
+         if self.error.is_none() || self.cleanup_endpoint.is_some_and(|prior| end < prior) { self.error = Some(error); }
+         self.cleanup_endpoint = Some(self.cleanup_endpoint.map_or(end, |prior| prior.min(end)));
+     }
+@@ -755,6 +767,7 @@
+     gh_auth_after: Option<JoinHandle<Result<(), BridgeError>>>,
+     gh_auth_after_return: Option<Result<(), BridgeError>>,
+     gh_auth_after_failed: bool,
++    version_allocation_source: Option<version_allocation::SourceResources>,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     seal: Option<github_seal::SealPhase>,
+ }
+@@ -877,6 +890,7 @@
+             if matches!(&*receipt, GitHubPublicationReceipt::Pending) { *receipt = GitHubPublicationReceipt::RetainedUnknown; }
+         }
+         if let Some(auth) = &self.gh_auth { lock(&auth.mailbox).unknown(); }
++        if let Some(source) = &self.version_allocation_source { source.unknown(); }
+         if let Some(receipt)=&self.history_receipt{
+             let mut receipt=lock(receipt);
+             if matches!(&*receipt,GitHubHistoryReceipt::Pending){*receipt=GitHubHistoryReceipt::RetainedUnknown;}
+@@ -1020,6 +1034,13 @@
+                     }
+                 }
+             }
++            Profile::VersionAllocationSource => {
++                drop(reply);
++                let outcome = result.and_then(|value| match value {
++                    ReadOutcome::VersionAllocationSource => Ok(()), _ => Err(BridgeError::protocol()),
++                });
++                if let Some(source) = &self.version_allocation_source { source.retire(outcome, settled_at, was_unknown); }
++            }
+             Profile::GitHubAuth => {
+                 drop(reply);
+                 let outcome = result.and_then(|value| match value {
+@@ -1214,12 +1235,13 @@
+     }
+
+     fn admit(&self, request: AdmissionRequest<'_>, completion: CompletionTarget) -> Result<Arc<Owner>, BridgeError> {
++        let version_allocation_source_endpoints = match &request { AdmissionRequest::VersionAllocationSource(admission) => Some(admission.endpoints), _ => None };
+         let gh_auth_endpoints = match &request { AdmissionRequest::GitHubAuth(admission) => Some(admission.endpoints), _ => None };
+         let history_endpoints=match &request{AdmissionRequest::History(admission)=>Some(admission.endpoints),_=>None};
+         let publication_end=match &request{AdmissionRequest::Publication{end,..}=>Some(*end),_=>None};
+         let now=Instant::now();
+         if publication_end.is_some_and(|end|end<=now || end>now+Duration::from_secs(60)){return Err(BridgeError::invalid())}
+-        let endpoint = gh_auth_endpoints.map_or_else(|| publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work)), |original| original.work);
++        let endpoint = version_allocation_source_endpoints.map_or_else(|| gh_auth_endpoints.map_or_else(|| publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work)), |original| original.work), |original| original.work);
+         let profile = request.profile();
+         let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt,publication_receipt) = match (profile, completion) {
+             (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
+@@ -1233,6 +1255,7 @@
+             (Profile::GitHubHistory,CompletionTarget::History(receipt))=>(None,None,None,None,None,Some(receipt),None),
+             (Profile::GitHubPublication,CompletionTarget::Publication(receipt))=>(None,None,None,None,None,None,Some(receipt)),
+             (Profile::GitHubAuth, CompletionTarget::GitHubAuth) => (None,None,None,None,None,None,None),
++            (Profile::VersionAllocationSource, CompletionTarget::VersionAllocationSource) => (None,None,None,None,None,None,None),
+             _ => return Err(BridgeError::invalid()),
+         };
+         let executor = tokio::runtime::Handle::try_current()
+@@ -1244,12 +1267,13 @@
+         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
+             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
+         let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}"),
+-            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}") };
+-        let (publication,history,gh_auth,ordinary)=match request{
+-            AdmissionRequest::Publication{request,gate,..}=>(Some((request,gate)),None,None,None),
+-            AdmissionRequest::History(admission)=>(None,Some(admission),None,None),
+-            AdmissionRequest::GitHubAuth(admission)=>(None,None,Some(admission),None),
+-            other=>(None,None,None,Some(other))};
++            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}") };
++        let (publication,history,gh_auth,version_allocation_source,ordinary)=match request{
++            AdmissionRequest::Publication{request,gate,..}=>(Some((request,gate)),None,None,None,None),
++            AdmissionRequest::History(admission)=>(None,Some(admission),None,None,None),
++            AdmissionRequest::GitHubAuth(admission)=>(None,None,Some(admission),None,None),
++            AdmissionRequest::VersionAllocationSource(admission)=>(None,None,None,Some(admission),None),
++            other=>(None,None,None,None,Some(other))};
+         let (mut bytes, preflight_request, preflight_gate, release_request, release_gate, setup_request, setup_gate, material) = match ordinary{
+             Some(request)=>request.encode(&id)?,None=>(Vec::new(),None,None,None,None,None,None,None),
+         };
+@@ -1261,6 +1285,8 @@
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         let gh_auth_slots = gh_auth.as_ref().map(|value| value.slots.clone());
+         let gh_auth = gh_auth.map(|value| value.invocation);
++        let source_resources = version_allocation_source.as_ref().map(version_allocation::SourceResources::from_admission);
++        let version_allocation_source = version_allocation_source.map(|value| value.invocation);
+         let(history_nomination,history_gate)=match history{Some(value)=>(Some(value.nomination),Some(value.gate)),None=>(None,None)};
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         let (setup_material,setup_first_bound,setup_first,secret_seal,secret_cipher)=match material {
+@@ -1282,8 +1308,8 @@
+             key, id, profile, github_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate, setup_receipt, setup_request, setup_gate,
+             publication_receipt,publication_request,publication_gate,
+             setup_material, setup_first_bound, secret_sealed: Mutex::new(secret_cipher),
+-            history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints,
+-            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state}),
++            history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, version_allocation_source, version_allocation_source_endpoints,
++            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state.version_allocation_source_endpoints=version_allocation_source_endpoints;state}),
+             resources: AsyncMutex::new(Resources {
+                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+                 passive: if passive_selected(profile) {
+@@ -1311,6 +1337,7 @@
+                 github_history: history_slots,
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 github_auth: gh_auth_slots,
++                version_allocation_source: source_resources,
+                 ..Resources::default()
+             }), stop, changed: Notify::new(),
+             permit: Mutex::new(Some(permit)), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
+@@ -1331,6 +1358,7 @@
+             // Arm immediately before the original roster insertion. Every normal
+             // Err above is known nonentry; an armed panic/loss retains the lane.
+             if let Some(reply) = lock(&owner.state).reply.as_ref() { reply.arm()?; }
++            if let Some(source) = &owner.version_allocation_source { source.arm()?; }
+             owners.insert(key, owner.clone());
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+@@ -1405,7 +1433,7 @@
+         let mut observer_end=Instant::now()+CLEANUP_TIME;
+         for owner in owners {
+             owner.fail(BridgeError::shutdown());
+-            if matches!(owner.profile,Profile::GitHubHistory | Profile::GitHubAuth){
++            if matches!(owner.profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::VersionAllocationSource){
+                 if let Some(end)=lock(&owner.state).cleanup_endpoint{observer_end=observer_end.max(end);}
+             }
+         }
+@@ -1854,6 +1882,10 @@
+
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+ fn passive_worker_lost(resources: &Resources) {
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    if let Some(native) = resources.version_allocation_source.as_ref().and_then(|s| s.originals.as_ref()) {
++        match native.lock() { Ok(mut original) => original.interrupted(), Err(error) => error.into_inner().interrupted() }
++    }
+     // Only called AFTER this original inspection/acquisition/settlement worker
+     // returned JoinError. Never race a pending borrower because a clock expired.
+     if let Some(native) = &resources.passive {
+@@ -2020,11 +2052,23 @@
+     GitHubHistory(Arc<Mutex<GitHubHistoryRuntimeSlots>>),
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     GitHubAuth(Arc<Mutex<GitHubAuthRuntimeSlots>>),
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    VersionAllocationSource(Arc<Mutex<version_allocation::Originals>>),
+ }
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+ fn installed_settlement_slots(resources: &Resources, profile: Profile) -> Result<Option<InstalledSettlementSlots>, BridgeError> {
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     {
++        if version_allocation::selected(profile) {
++            if resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_preflight.is_some()
++                || resources.github_release.is_some() || resources.github_setup.is_some() || resources.github_history.is_some() || resources.github_auth.is_some() {
++                return Err(BridgeError::cleanup_unknown());
++            }
++            return resources.version_allocation_source.as_ref().and_then(|s| s.originals.as_ref())
++                .map(|original| Some(InstalledSettlementSlots::VersionAllocationSource(original.clone())))
++                .ok_or_else(BridgeError::cleanup_unknown);
++        }
++        if resources.version_allocation_source.is_some() { return Err(BridgeError::cleanup_unknown()); }
+         if github_auth_selected(profile) {
+             if resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_preflight.is_some()
+                 || resources.github_release.is_some() || resources.github_setup.is_some() || resources.github_history.is_some() {
+@@ -2101,11 +2145,18 @@
+             Self::GitHubHistory(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             Self::GitHubAuth(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            Self::VersionAllocationSource(native) => native.try_lock().ok().map(|original| original.no_child_state()),
+         }
+     }
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     fn settle_originals(&self, owner: &Owner) -> CloseOutcome {
+         match self {
++            Self::VersionAllocationSource(native) => {
++                let mut original = match native.lock() { Ok(original) => original,
++                    Err(error) => { let mut original = error.into_inner(); original.interrupted(); original } };
++                original.settle(owner)
++            },
+             Self::Passive(native) => {
+                 let mut slots = match native.lock() { Ok(slots) => slots,
+                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
+@@ -2182,6 +2233,8 @@
+             Self::GitHubHistory(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             Self::GitHubAuth(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            Self::VersionAllocationSource(native) => native.try_lock().is_ok_and(|original| original.settled()),
+         }
+     }
+ }
+@@ -2189,6 +2242,8 @@
+ fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) -> Result<(), BridgeError> {
+     match installed_settlement_slots(resources, owner.profile)? {
+         Some(InstalledSettlementSlots::Passive(_)) => transfer_passive(resources, inner, owner),
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        Some(InstalledSettlementSlots::VersionAllocationSource(_)) => version_allocation::transfer_original(resources, inner, owner),
+         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+         Some(InstalledSettlementSlots::GitHubReadOnly(native)) => {
+             let (inspection, acquisition) = passive_borrows(resources);
+@@ -2482,7 +2537,8 @@
+             Ok(Some(native)) => native, Ok(None) => return true,
+             Err(_) => { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; },
+         };
+-        if resources.history_post.is_some() || resources.history_post_join_failed || resources.gh_auth_after.is_some() || resources.gh_auth_after_failed {
++        if resources.history_post.is_some() || resources.history_post_join_failed || resources.gh_auth_after.is_some() || resources.gh_auth_after_failed
++            || resources.version_allocation_source.as_ref().is_some_and(|s| !s.jobs_settled()) {
+             owner_unknown!(owner, inner, Some(&*resources), Settlement); return false;
+         }
+         let (inspection, acquisition) = passive_borrows(resources);
+@@ -2628,7 +2684,7 @@
+     true
+ }
+
+-enum Event { HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
++enum Event { SourcePostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), SourcePost(Result<Result<(),BridgeError>,tokio::task::JoinError>), HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
+
+ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEnd {
+     let mut resources = owner.resources.lock().await;
+@@ -2653,6 +2709,8 @@
+     let inspection_history = resources.github_history.clone();
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let inspection_auth = resources.github_auth.clone();
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    let inspection_source = resources.version_allocation_source.as_ref().and_then(|s| s.originals.clone());
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+     let inspection_stop = owner.stop.subscribe();
+     #[cfg(all(test, feature = "development-runtime"))]
+@@ -2854,6 +2912,19 @@
+                 }
+                 return Err(BridgeError::unavailable("The GitHub setup action runtime is not qualified."));
+             },
++            Profile::VersionAllocationSource => {
++                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++                if version_allocation::selected(profile) {
++                    let result = (|| {
++                        let original = inspection_owner.version_allocation_source.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
++                        let native = inspection_source.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
++                        original.inspect(&config, &inspection_owner, native)
++                    })();
++                    if let Err(error) = &result { inspection_owner.fail(error.clone()); }
++                    return result;
++                }
++                return Err(BridgeError::unavailable("The fixed saved-source runtime is unavailable."));
++            },
+             Profile::GitHubAuth => {
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 if github_auth_selected(profile) {
+@@ -2892,7 +2963,7 @@
+         #[cfg(all(windows, test, feature = "development-runtime"))]
+         let runtime = match profile {
+             Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
+-            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth => runtime, // Never a passive fixture override for GitHub actions.
++            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
+         };
+         Ok(runtime)
+     }));
+@@ -2954,6 +3025,8 @@
+     let acquisition_history = resources.github_history.clone();
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let acquisition_auth = resources.github_auth.clone();
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    let acquisition_source = resources.version_allocation_source.as_ref().and_then(|s| s.originals.clone());
+     #[cfg(all(test, feature = "development-runtime"))]
+     let acquisition_gate = inner.test.acquisition.clone();
+     let (acquire_start, acquire_enter) = oneshot::channel();
+@@ -2962,7 +3035,7 @@
+         if acquire_enter.blocking_recv().is_err() {
+             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth) {
++            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::VersionAllocationSource) {
+                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
+             }
+             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -3054,6 +3127,20 @@
+             if let Err(error)=&result{acquiring_owner.observe_macos_action_acquisition_failure(error);}
+             return result;
+         }
++        if matches!(acquiring_owner.profile, Profile::VersionAllocationSource) {
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            {
++                let Some(native) = acquisition_source else {
++                    owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
++                    return Err(AcquisitionError::unsupported("The original saved-source custody is missing"));
++                };
++                let result = version_allocation::acquire_original(&acquiring_inner, &acquiring_owner, &native);
++                if let Err(error) = &result { acquiring_owner.observe_macos_action_acquisition_failure(error); }
++                return result;
++            }
++            #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++            return Err(AcquisitionError::unsupported("The fixed saved-source runtime is unavailable"));
++        }
+         if matches!(acquiring_owner.profile, Profile::GitHubAuth) {
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             {
+@@ -3142,6 +3229,18 @@
+     let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth){
+         let (send,receive)=oneshot::channel();(Some(send),Some(receive))
+     }else{(None,None)};
++    let mut source_post_receive = None;
++    if matches!(profile, Profile::VersionAllocationSource) {
++        match (stdin, stdout, stderr) {
++            (Some(stdin), Some(stdout), Some(stderr)) => {
++                match version_allocation::install_io(&mut resources, &inner, &owner, stdin, stdout, stderr, &faults) {
++                    Ok(receive) => source_post_receive = Some(receive),
++                    Err(error) => owner.fail(error),
++                }
++            },
++            _ => owner.fail(BridgeError::cleanup_unknown()),
++        }
++    } else {
+     if let Some(stdin) = stdin {
+         if let Some(ready) = ready_receive.take() {
+             if matches!(profile, Profile::GitHubAuth) {
+@@ -3218,6 +3317,7 @@
+         #[cfg(not(all(test, feature = "development-runtime")))]
+         { resources.stderr = Some(tokio::spawn(read_bounded(stderr, protocol::STDERR_LIMIT, faults.clone()))); }
+         }
++    }
+     }
+     #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
+     windows_passive_tests::after_io_registered(&inner, &owner, &mut resources);
+@@ -3265,10 +3365,16 @@
+         let out_pending = resources.stdout.is_some();
+         let err_pending = resources.stderr.is_some();
+         let post_pending=resources.history_post.is_some();
+-        if !wait_pending && !write_pending && !out_pending && !err_pending && !post_pending && history_post_receive.is_none() { break; }
++        let source_post_pending = resources.version_allocation_source.as_ref().is_some_and(|source| source.before_go_pending());
++        if !wait_pending && !write_pending && !out_pending && !err_pending && !post_pending && history_post_receive.is_none()
++            && !source_post_pending && source_post_receive.is_none() { break; }
+         let event = {
+-            let Resources { child, writer, stdout, stderr, history_post, .. } = &mut *resources;
++            let Resources { child, writer, stdout, stderr, history_post, version_allocation_source, .. } = &mut *resources;
+             tokio::select! {
++                request = async { match &mut source_post_receive { Some(value) => value.await, None => std::future::pending().await } },
++                    if source_post_receive.is_some() => Event::SourcePostRequest(request),
++                result = async { match version_allocation_source { Some(source) => source.join_before_go().await, None => std::future::pending().await } },
++                    if source_post_pending => Event::SourcePost(result),
+                 request = async { match &mut history_post_receive {Some(value)=>value.await,None=>std::future::pending().await} }, if history_post_receive.is_some() => Event::HistoryPostRequest(request),
+                 result = join_slot(history_post), if post_pending => Event::HistoryPost(result),
+                 status = wait_original(child), if wait_pending => Event::Wait(status),
+@@ -3280,6 +3386,20 @@
+             }
+         };
+         match event {
++            Event::SourcePostRequest(request) => {
++                source_post_receive.take();
++                match (request, resources.version_allocation_source.as_mut()) {
++                    (Ok(reply), Some(source)) if matches!(profile, Profile::VersionAllocationSource) => source.request_before_go(reply, &owner),
++                    (Ok(reply), _) => { let error = BridgeError::cleanup_unknown(); owner.fail(error.clone()); let _ = reply.send(Err(error)); },
++                    (Err(_), _) => owner.fail(BridgeError::cleanup_unknown()),
++                }
++            },
++            Event::SourcePost(result) => {
++                let Some(source) = resources.version_allocation_source.as_mut() else {
++                    owner.unknown(&inner); return DriverEnd::RetainedUnknown;
++                };
++                if !source.before_go_returned(result, &owner, &inner) { return DriverEnd::RetainedUnknown; }
++            },
+             Event::HistoryPostRequest(request)=>{
+                 history_post_receive.take();
+                 match request {
+@@ -3409,6 +3529,10 @@
+         }
+         if !gh_auth::post_after_work(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
+     }
++    if matches!(profile, Profile::VersionAllocationSource)
++        && !version_allocation::before_native_close(&mut resources, &inner, &owner).await {
++        return DriverEnd::RetainedUnknown;
++    }
+     // History can have original descendants and borrowed source/native state.
+     // A child wait/EOF alone is NOT its custody proof. Decode the original
+     // terminal while ALL actual Resources/source originals are still retained,
+@@ -3474,6 +3598,10 @@
+             },
+             Err(e)=>{owner.fail(e.clone());resources.child.take();resources.out_end.take();resources.err_end.take();return DriverEnd::Ready(Err(e))},
+         }
++    }
++    if matches!(profile, Profile::VersionAllocationSource) {
++        resources.out_end.take(); resources.err_end.take(); resources.child.take();
++        return DriverEnd::Ready(Ok(ReadOutcome::VersionAllocationSource)); // Typed terminal retained by this original, never passive output.
+     }
+     if matches!(profile, Profile::GitHubAuth) {
+         resources.out_end.take(); resources.err_end.take(); resources.child.take();
+@@ -5771,7 +5899,7 @@
+             key: 1, id: "query-1".into(), profile: Profile::Passive(Method::Capabilities), github_receipt: None,
+             preflight_receipt: None, preflight_request: None, preflight_gate: None, release_receipt: None, release_request: None, release_gate: None, setup_receipt: None, setup_request: None, setup_gate: None,
+             publication_receipt:None,publication_request:None,publication_gate:None,
+-            history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
++            history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, version_allocation_source:None, version_allocation_source_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
+             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
+             resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),
+             permit: Mutex::new(None), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
+diff --git a/desktop/src-tauri/src/supervisor_gh_auth.rs b/desktop/src-tauri/src/supervisor_gh_auth.rs
+--- a/desktop/src-tauri/src/supervisor_gh_auth.rs
++++ b/desktop/src-tauri/src/supervisor_gh_auth.rs
+@@ -504,11 +504,11 @@
+     Returned,
+     Unknown,
+ }
+-struct FinalObserverReturn {
++pub(super) struct FinalObserverReturn {
+     state: Mutex<ObserverReturn>,
+ }
+ impl FinalObserverReturn {
+-    fn new() -> Self {
++    pub(super) fn new() -> Self {
+         Self {
+             state: Mutex::new(ObserverReturn::Fresh),
+         }
+@@ -524,7 +524,7 @@
+             Err(_) => GitHubAuthReceipt::RetainedUnknown,
+         }
+     }
+-    async fn join_original(&self, owner: &Owner) -> bool {
++    pub(super) async fn join_original(&self, owner: &Owner) -> bool {
+         {
+             let Ok(mut state) = self.state.lock() else {
+                 return false;
