@@ -73,7 +73,8 @@ impl GhAuthSources {
         SOURCE_LIMIT
             .checked_mul(std::mem::size_of::<Descriptor>() + 255)?
             .checked_add(std::mem::size_of::<Self>())?
-            .checked_add(32768 + 3 * 4096 + 2048)?
+            // Hash scratch + private full config snapshot + finite parser stack.
+            .checked_add(32768 + wire::CONFIG_LIMIT as usize + 3 * 4096 + 4096)?
             .checked_add(mrk_macos_installed_native::vault_filesystem::SNAPSHOT_FRAME_BYTES)
     }
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
@@ -134,6 +135,13 @@ impl GhAuthSources {
         unistd::lseek(self.book.fd(index)?, 0, unistd::Whence::SeekSet)
             .map_err(|_| Reason::SourceRefused)?;
         let mut buffer = Zeroizing::new([0u8; 32768]);
+        // The same held bytes/hash, never a later path reopen or claimed schema.
+        // Retain no plaintext beyond this bounded native call; parser borrows.
+        let mut config = if Some(index) == self.indices[1] {
+            Some(Zeroizing::new(vec![0u8; id.size as usize]))
+        } else {
+            None
+        };
         let mut count = 0u64;
         let mut hash = Sha256::new();
         loop {
@@ -151,6 +159,9 @@ impl GhAuthSources {
                 return Err(Reason::SourceChanged);
             }
             hash.update(&buffer[..used]);
+            if let Some(config) = config.as_mut() {
+                config[count as usize - used..count as usize].copy_from_slice(&buffer[..used]);
+            }
         }
         if count != id.size {
             return Err(Reason::SourceChanged);
@@ -160,6 +171,12 @@ impl GhAuthSources {
         checkpoint(stop)?;
         if file_identity(&after)? != id {
             return Err(Reason::SourceChanged);
+        }
+        if config
+            .as_ref()
+            .is_some_and(|raw| !wire::config_schema_one(raw))
+        {
+            return Err(Reason::SourceRefused);
         }
         Ok(wire::Snapshot {
             identity,

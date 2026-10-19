@@ -1322,6 +1322,9 @@ macro_rules! slots {
 }
 slots!(PassiveRuntimeSlots, PassiveInstalledRuntime, runtime::PassiveInstalledProfile);
 slots!(GitHubReadOnlyRuntimeSlots, GitHubReadOnlyInstalledRuntime, runtime::GitHubReadOnlyInstalledProfile);
+slots!(GitHubAuthRuntimeSlots, GitHubAuthInstalledRuntime, runtime::GitHubAuthInstalledProfile);
+#[path = "github_auth_runtime_macos.rs"]
+mod github_auth_runtime;
 slots!(GitHubPreflightRuntimeSlots, GitHubPreflightInstalledRuntime, runtime::GitHubPreflightInstalledProfile);
 slots!(GitHubSetupRuntimeSlots, GitHubSetupInstalledRuntime, runtime::GitHubSetupInstalledProfile);
 slots!(GitHubReleaseRuntimeSlots, GitHubReleaseInstalledRuntime, runtime::GitHubReleaseInstalledProfile);

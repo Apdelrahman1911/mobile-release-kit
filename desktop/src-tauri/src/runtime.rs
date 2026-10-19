@@ -348,6 +348,22 @@ impl GitHubHistoryInstalledProfile {
     }
 }
 
+// Selected-account authentication has its OWN fixed stock-provider nomination.
+// The patched History provider and a supplied version/path cannot select it.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubAuthInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubAuthInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() || crate::github_auth_nomination::StockGhNomination::compiled().is_none() {
+            return Err(unavailable());
+        }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_auth_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
 // Two separate action families. Fixed installed selection is DATA, not
 // read-only authority, native/service qualification, or permission to dispatch.
 // No launch-time environment or renderer value selects a publisher binding.
@@ -1787,6 +1803,18 @@ impl RuntimeConfig {
         { macos_bindings() }
         #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { false }
+    }
+    pub(crate) fn github_auth_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() && crate::github_auth_nomination::StockGhNomination::compiled().is_some() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_github_auth_installed(&self, originals: &mut crate::installed_runtime::GitHubAuthRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !self.github_auth_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(GitHubAuthInstalledProfile { _private: () }, end, stop)
     }
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn resolve_github_setup_installed(&self, originals: &mut crate::installed_runtime::GitHubSetupRuntimeSlots,

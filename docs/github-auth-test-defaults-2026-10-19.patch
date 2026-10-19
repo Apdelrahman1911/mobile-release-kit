@@ -1,0 +1,20 @@
+--- a/desktop/src-tauri/src/asset_session_installation_memory.rs
++++ b/desktop/src-tauri/src/asset_session_installation_memory.rs
+@@ -518,7 +518,7 @@
+             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
+             retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,
+             session_owner_reason:None,maintenance:macos_maintenance::Closure::default(),context:Some(context),slot:Some(slot),records,assignments,
+-            quit:None,quit_accepted:false,quit_cleanup_end:None,github:ConnectionState::new(),
++            quit:None,quit_accepted:false,quit_cleanup_end:None,github:ConnectionState::new(),gh_auth:None,
+             evidence:EvidenceRegistry::new(),images:images::Registry::new(),installation:installation::Registry::new(),vault:None};
+         // Two mentions of one identity proxy, not two made-up returned lanes.
+         // Its smaller layout is never used: saved_observation_rows charges the
+@@ -624,7 +624,7 @@
+                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+                 quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None,
+                 session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+-                quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(),
++                quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None,
+                 evidence: EvidenceRegistry::new(), images: images::Registry::new(),
+                 installation: installation::Registry::new(), vault: None }
+         }

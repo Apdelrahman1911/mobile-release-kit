@@ -18,6 +18,7 @@ import unittest
 from unittest.mock import patch
 
 from mobile_release import _desktop_github_auth_protocol as wire
+from mobile_release._desktop_github_auth_config import schema_one
 from mobile_release._desktop_github_auth_control import GhAuthInput
 from mobile_release._desktop_saved_command_control import SavedCommandDomain, source_domain
 from mobile_release.cancellation import DefaultCancellation
@@ -141,8 +142,24 @@ class ProtocolTests(unittest.TestCase):
                     wire.terminal(request, "ok", invalid)
 
 
+class ConfigSchemaTests(unittest.TestCase):
+    def test_shared_native_python_closed_schema_cases(self):
+        rows = json.loads((Path(__file__).parents[1] / "fixtures/gh_auth_schema_one.json").read_text())
+        self.assertEqual(len(rows), 50)
+        for row in rows:
+            with self.subTest(case=row["name"]):
+                self.assertIs(schema_one(row["text"].encode()), row["accepted"])
+
+    def test_bounded_private_config_lines_aliases_and_raw_bytes(self):
+        for value in (b'version: 1\n' + b'#' * 65536, b'version: 1\n' + b'\n' * 256,
+                      b'version: 1\naliases:\n' + b''.join(f'  a{i}: fixture\n'.encode() for i in range(65)),
+                      b'version: 1\neditor: \xff\n', 'version: 1', None):
+            self.assertFalse(schema_one(value))
+        self.assertTrue(schema_one(bytearray(b'version: 1\n')))
+
+
 @contextmanager
-def synthetic_operation(*, role="token"):
+def synthetic_operation(*, role="token", config_bytes=b'version: 1\naliases:\n  co: pr checkout\n'):
     """Actual private files/pipe and original guard, NOT native nomination.
 
     The request is deliberately constructed DATA because this Linux test user
@@ -159,7 +176,7 @@ def synthetic_operation(*, role="token"):
         tool.chmod(0o700)
         for name in ("config.yml", "hosts.yml"):
             target = config / name
-            target.write_bytes(b"synthetic private file, no credentials or account\n")
+            target.write_bytes(config_bytes if name == "config.yml" else b"synthetic private file, no credentials or account\n")
             target.chmod(0o600)
         def snapshot(path):
             return wire.FileSnapshot(path, wire.identity(path.stat()), hashlib.sha256(path.read_bytes()).hexdigest())
@@ -204,6 +221,36 @@ class OperationTests(unittest.TestCase):
 
     def completed(self, operation, output=b"synthetic-private-output-not-a-credential\n", error=b"", code=0):
         return subprocess.CompletedProcess(operation.request.arguments(), code, output, error)
+
+    def test_legacy_unknown_and_malformed_current_config_never_launch_even_version(self):
+        cases = (b"editor: vim\n", b'version: 0\n', b'version: 1\nversion: 0\n',
+                 b'aliases:\n  version: 1\n', b'"version": 1\n', b'version: !!str 1\n',
+                 b'version: 1\n---\nversion: 0\n', b'version: 1\neditor: "private-fixture-secret',
+                 b'editor: |\n  version: 1\n')
+        for role in ("version", "token"):
+            for value in cases:
+                with self.subTest(role=role), synthetic_operation(role=role, config_bytes=value) as (operation, _):
+                    with patch("mobile_release._command_process.run_command") as command:
+                        with self.assertRaises(wire.ProtocolError) as caught:
+                            operation.admit()
+                        self.assertFalse(operation.entered or operation.command_admitted)
+                        self.assertIsNone(operation.output)
+                        self.assertNotIn("private-fixture", str(caught.exception))
+                        command.assert_not_called()
+
+    def test_final_owned_command_seam_rechecks_original_config_before_caw(self):
+        with synthetic_operation(role="version") as (operation, writer):
+            self.begin(operation, writer)
+            operation.entered = True  # Exercise the actual shared owned seam directly.
+            operation.request.files[0].path.write_bytes(b'editor: "private-fixture-changed"\n')
+            with patch("mobile_release._command_process.run_command") as command:
+                with self.assertRaises(wire.ProtocolError) as caught:
+                    run_owned(operation.request.arguments(), environ=operation.request.environment(),
+                              cwd=operation.request.home, timeout=15, capture=True, text=False,
+                              output_limit=8192, cancellation=operation.guard)
+                command.assert_not_called()
+                self.assertFalse(operation.command_admitted)
+                self.assertNotIn("private-fixture", str(caught.exception))
 
     def test_fixed_source_domain_rejects_subclass_and_changed_domain(self):
         self.assertIs(source_domain(GhAuthInput(time.monotonic())), SavedCommandDomain.GitHubAuth)

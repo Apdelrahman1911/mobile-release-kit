@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 
 from . import _desktop_github_auth_protocol as wire
+from ._desktop_github_auth_config import schema_one
 from ._desktop_github_auth_control import GhAuthInput
 from ._desktop_saved_command_engine import _Output, _SavedCommandEngine
 from .cancellation import CleanupScope, DefaultCancellation
@@ -57,6 +58,10 @@ class GhAuthOperation:
                      and wire.identity(os.stat(expected.path, follow_symlinks=False)) == expected.identity)
         os.lseek(original.fd, 0, os.SEEK_SET)
         digest, count = hashlib.sha256(), 0
+        # Private bounded snapshot of the SAME original being hashed. Stock gh
+        # migrates before dispatch, including --version: a later POST refusal
+        # cannot undo network/keyring/config effects of an unsafe prelaunch.
+        config = bytearray() if original is self.originals[1] else None
         while True:
             self.checkpoint()
             block = os.read(original.fd, min(32768, expected.identity[6] + 1 - count))
@@ -65,9 +70,13 @@ class GhAuthOperation:
             count += len(block)
             wire.require(count <= expected.identity[6])
             digest.update(block)
+            if config is not None:
+                config.extend(block)
         wire.require(count == expected.identity[6] and digest.hexdigest() == expected.sha256
                      and wire.identity(os.fstat(original.fd)) == expected.identity
                      and wire.identity(os.stat(expected.path, follow_symlinks=False)) == expected.identity)
+        if config is not None:
+            wire.require(schema_one(config))  # Fixed error, never parser/input text.
         self.checkpoint()
 
     def admit(self) -> None:
@@ -100,6 +109,7 @@ class GhAuthOperation:
                      and capture is True and text is False and output_limit == wire.COMMAND_OUTPUT_LIMIT
                      and on_start is None and cleanup is False and execution_scope is None and journal_binding is None
                      and evidence is None)
+        self.source_post()  # Last original-byte/schema check before existing C/A/W.
         self.command_admitted = True  # Even a subsequent startup failure spends it.
 
     def run(self) -> None:

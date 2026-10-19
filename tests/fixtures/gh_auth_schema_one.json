@@ -1,0 +1,252 @@
+[
+  {
+    "name": "numeric-one",
+    "text": "version: 1\n",
+    "accepted": true
+  },
+  {
+    "name": "double-quoted-one",
+    "text": "version: \"1\"\n",
+    "accepted": true
+  },
+  {
+    "name": "single-quoted-one",
+    "text": "version: '1'",
+    "accepted": true
+  },
+  {
+    "name": "crlf-comments",
+    "text": "# retained synthetic options\r\nversion: \"1\" # migrated\r\n",
+    "accepted": true
+  },
+  {
+    "name": "default-options",
+    "text": "version: 1\ngit_protocol: https\neditor:\nprompt: enabled\nprefer_editor_prompt: disabled\npager:\naliases:\n  co: pr checkout\nhttp_unix_socket:\nbrowser:\ncolor_labels: disabled\naccessible_colors: disabled\naccessible_prompter: disabled\nspinner: enabled\n",
+    "accepted": true
+  },
+  {
+    "name": "four-space-alias-and-unrelated-nested-version",
+    "text": "aliases:\n    version: fixture alias\n    co: pr checkout\nversion: 1\n",
+    "accepted": true
+  },
+  {
+    "name": "single-line-quotes",
+    "text": "editor: \"/Applications/Synthetic Editor --wait\"\nversion: 1\naliases: # ordinary aliases\n  co: \"pr checkout\" # comment\n",
+    "accepted": true
+  },
+  {
+    "name": "empty",
+    "text": "",
+    "accepted": false
+  },
+  {
+    "name": "legacy",
+    "text": "editor: vim\n",
+    "accepted": false
+  },
+  {
+    "name": "old-zero",
+    "text": "version: 0\n",
+    "accepted": false
+  },
+  {
+    "name": "future",
+    "text": "version: 2\n",
+    "accepted": false
+  },
+  {
+    "name": "decimal",
+    "text": "version: 1.0\n",
+    "accepted": false
+  },
+  {
+    "name": "leading-zero",
+    "text": "version: 01\n",
+    "accepted": false
+  },
+  {
+    "name": "explicit-positive",
+    "text": "version: +1\n",
+    "accepted": false
+  },
+  {
+    "name": "boolean",
+    "text": "version: true\n",
+    "accepted": false
+  },
+  {
+    "name": "only-nested-version",
+    "text": "aliases:\n  version: 1\n",
+    "accepted": false
+  },
+  {
+    "name": "duplicate-root-version",
+    "text": "version: 1\nversion: 0\n",
+    "accepted": false
+  },
+  {
+    "name": "duplicate-same-root-version",
+    "text": "version: 1\nversion: 1\n",
+    "accepted": false
+  },
+  {
+    "name": "duplicate-other-key",
+    "text": "version: 1\neditor: vim\neditor: nano\n",
+    "accepted": false
+  },
+  {
+    "name": "duplicate-alias",
+    "text": "version: 1\naliases:\n  co: pr checkout\n  co: issue list\n",
+    "accepted": false
+  },
+  {
+    "name": "quoted-root-key",
+    "text": "\"version\": 1\n",
+    "accepted": false
+  },
+  {
+    "name": "explicit-mapping-key",
+    "text": "? version\n: 1\n",
+    "accepted": false
+  },
+  {
+    "name": "tagged-version",
+    "text": "version: !!str 1\n",
+    "accepted": false
+  },
+  {
+    "name": "anchor",
+    "text": "version: &schema 1\n",
+    "accepted": false
+  },
+  {
+    "name": "alias-reference",
+    "text": "version: *schema\n",
+    "accepted": false
+  },
+  {
+    "name": "merge",
+    "text": "<<: {version: 1}\n",
+    "accepted": false
+  },
+  {
+    "name": "second-document",
+    "text": "version: 1\n---\nversion: 0\n",
+    "accepted": false
+  },
+  {
+    "name": "first-document-marker",
+    "text": "---\nversion: 1\n",
+    "accepted": false
+  },
+  {
+    "name": "document-end",
+    "text": "version: 1\n...\n",
+    "accepted": false
+  },
+  {
+    "name": "yaml-directive",
+    "text": "%YAML 1.2\n---\nversion: 1\n",
+    "accepted": false
+  },
+  {
+    "name": "flow-map",
+    "text": "{version: 1}\n",
+    "accepted": false
+  },
+  {
+    "name": "flow-value",
+    "text": "version: [1]\n",
+    "accepted": false
+  },
+  {
+    "name": "block-scalar",
+    "text": "version: |\n  1\n",
+    "accepted": false
+  },
+  {
+    "name": "root-key-hidden-in-block",
+    "text": "editor: |\n  version: 1\n",
+    "accepted": false
+  },
+  {
+    "name": "continuation",
+    "text": "version: 1\n  other text\n",
+    "accepted": false
+  },
+  {
+    "name": "multiline-quote",
+    "text": "version: \"1\n\"\n",
+    "accepted": false
+  },
+  {
+    "name": "quoted-escape",
+    "text": "version: \"\\u0031\"\n",
+    "accepted": false
+  },
+  {
+    "name": "quote-followed-by-content",
+    "text": "version: \"1\" trailing\n",
+    "accepted": false
+  },
+  {
+    "name": "unclosed-quote",
+    "text": "version: \"private-fixture-value\n",
+    "accepted": false
+  },
+  {
+    "name": "colon-without-separation",
+    "text": "version:1\n",
+    "accepted": false
+  },
+  {
+    "name": "tab-indent",
+    "text": "version: 1\naliases:\n\tco: pr checkout\n",
+    "accepted": false
+  },
+  {
+    "name": "mixed-alias-indent",
+    "text": "version: 1\naliases:\n  co: pr checkout\n    other: issue list\n",
+    "accepted": false
+  },
+  {
+    "name": "deeper-nesting",
+    "text": "version: 1\naliases:\n  nested:\n    co: pr checkout\n",
+    "accepted": false
+  },
+  {
+    "name": "non-alias-map",
+    "text": "version: 1\neditor:\n  co: pr checkout\n",
+    "accepted": false
+  },
+  {
+    "name": "config-hosts-shadow",
+    "text": "version: 1\nhosts:\n  github.com:\n",
+    "accepted": false
+  },
+  {
+    "name": "unknown-root",
+    "text": "version: 1\nfuture_option: enabled\n",
+    "accepted": false
+  },
+  {
+    "name": "cr-inside-line",
+    "text": "version: 1\redit: vim\n",
+    "accepted": false
+  },
+  {
+    "name": "bom",
+    "text": "\ufeffversion: 1\n",
+    "accepted": false
+  },
+  {
+    "name": "nul",
+    "text": "version: 1\n\u0000",
+    "accepted": false
+  },
+  {
+    "name": "aliases-quoted-null",
+    "text": "version: 1\naliases: \"\"\n  co: pr checkout\n",
+    "accepted": false
+  }
+]

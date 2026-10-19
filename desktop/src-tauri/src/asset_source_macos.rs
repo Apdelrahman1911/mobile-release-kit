@@ -12,6 +12,9 @@ pub(crate) use backup_sources::BackupSources;
 #[path = "github_history_sources_macos.rs"]
 mod history_sources;
 pub(crate) use history_sources::HistorySources;
+#[path = "github_auth_sources_macos.rs"]
+mod github_auth_sources;
+pub(crate) use github_auth_sources::GhAuthSources;
 #[path = "local_history_sources_macos.rs"]
 mod local_history_sources;
 pub(crate) use local_history_sources::LocalHistorySources;

@@ -8,6 +8,10 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use zeroize::Zeroizing;
 
+#[path = "github_auth_config.rs"]
+mod config;
+pub(crate) use config::schema_one as config_schema_one;
+
 pub(crate) const PROTOCOL: &str = "mrk-gh-auth/1";
 pub(crate) const REQUEST_LIMIT: usize = 32768;
 pub(crate) const READY_LIMIT: usize = 512;

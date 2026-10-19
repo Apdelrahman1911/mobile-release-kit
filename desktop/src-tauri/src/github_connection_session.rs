@@ -2,6 +2,7 @@
 //! This is not another process owner. Only the existing Supervisor's final
 //! mailbox receipt releases an active read; a reply or Unknown never does.
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use crate::asset_session::{GitHubAuthConnectionHold, GitHubAuthCustody};
 use crate::{error::BridgeError, github_connection_protocol::{self as wire, Account, Automation,
     Capability, ConnectTokenArgs, DeviceLogin, Fact, FactState, GitHubReadControl, GitHubReadFacts,
     GitHubReadOutcome, Operation, OperationKind, Phase, Reason, Repository, Session, SessionState,
@@ -170,6 +171,24 @@ fn parse_utc(text: &str) -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_gh_idle_epoch_ignores_own_status_churn_but_not_connection_generation() {
+        let mut state = ConnectionState::new();
+        let now = Instant::now();
+        let original = state.gh_auth_idle_epoch().unwrap();
+        let before = state.snapshot().revision;
+        state.reconcile(now, Reason::None);
+        state.reconcile(now, Reason::Busy); // The pending gh operation's own gate.
+        assert!(state.snapshot().revision > before);
+        assert_eq!(state.gh_auth_idle_epoch(), Some(original));
+        state.reconcile(now, Reason::None);
+        assert_eq!(state.gh_auth_idle_epoch(), Some(original));
+        // Generation DATA only; no HTTP ticket or native settlement is forged.
+        state.next_session += 1;
+        assert_ne!(state.gh_auth_idle_epoch(), Some(original));
+        state.unknown = true;
+        assert_eq!(state.gh_auth_idle_epoch(), None);
+    }
     use crate::github_connection_protocol::{Coverage, Permission, Permissions, Presence, Visibility, Workflow, WorkflowState};
     use crate::github_workflow_edit_protocol::WorkflowId;
 
@@ -181,7 +200,7 @@ mod tests {
         state.private = Some(PrivateSession { id: "github-session-1".into(), project_id: "project-1".into(), repository: "owner/app".into(),
             generation: 2, stop_id: "github-disconnect-1".into(), unknown_id: "github-unknown-1".into(),
             clock, token: Some("INERT_NOT_A_CREDENTIAL".into()),
-            gh_selection: None, account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false });
+            gh_selection: None, gh_hold: None, account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false });
         state.status.session = Some(Session { id: "github-session-1".into(), project_id: "project-1".into(), target_repository: "owner/app".into(),
             state: SessionState::Checking, expires_at: Some("2026-09-17T13:00:00Z".into()) });
         state.status.operation = Some(Operation { id: "original-data-1".into(), kind: OperationKind::Connect, phase: Phase::Running, reason: Reason::None });
@@ -503,6 +522,7 @@ struct PrivateSession {
     id: String, project_id: String, repository: String, generation: u32, stop_id: String, unknown_id: String,
     clock: CredentialClock, token: Option<String>, account_pin: Option<String>, repository_pin: Option<String>,
     gh_selection: Option<auth_provider::SelectedAccount>,
+    gh_hold: Option<GitHubAuthConnectionHold>,
     ticket: Option<GitHubReadTicket>, retirement: Option<Reason>, remove_after_settlement: bool,
 }
 pub(crate) struct ConnectionState {
@@ -521,13 +541,38 @@ impl ConnectionState {
             preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), publication:publication::State::new(), history: crate::github_history_session::State::new() }
     }
     pub(crate) fn snapshot(&self) -> Status { self.status.clone() }
+    // Original idle-session generation, not a public status revision. Ordinary
+    // capability reconciliation may change the latter while gh is pending.
+    // A connect/disconnect ABA still advances this retained native generation.
+    pub(crate) fn gh_auth_idle_epoch(&self) -> Option<u32> {
+        (self.private.is_none() && !self.unknown && !self.exhausted && !self.native_work_pending())
+            .then_some(self.next_session)
+    }
+    pub(crate) fn gh_auth_current(&self, original: &std::sync::Arc<crate::asset_session::OriginalWork>,
+        context: &crate::github_auth_capture_wire::Context) -> bool {
+        self.private.as_ref().is_some_and(|session| session.project_id == context.project_id
+            && session.repository == context.repository && session.generation == context.generation
+            && session.retirement.is_none() && session.ticket.is_some()
+            && session.gh_hold.as_ref().is_some_and(|hold| hold.matches(original, context))
+            && session.gh_selection.as_ref().is_some_and(|selected| selected.login == context.login && selected.account_revision == context.revision))
+    }
+    pub(crate) fn gh_auth_wait(&self, original: &std::sync::Arc<crate::asset_session::OriginalWork>,
+        context: &crate::github_auth_capture_wire::Context) -> Option<crate::supervisor::GitHubAuthHttpWait> {
+        if !self.gh_auth_current(original, context) { return None; }
+        self.private.as_ref()?.ticket.as_ref().map(GitHubReadTicket::gh_auth_wait)
+    }
+    pub(crate) fn gh_auth_retains(&self, original: &std::sync::Arc<crate::asset_session::OriginalWork>,
+        context: &crate::github_auth_capture_wire::Context) -> bool {
+        self.private.as_ref().and_then(|session| session.gh_hold.as_ref())
+            .is_some_and(|hold| hold.matches(original, context))
+    }
     pub(crate) fn registration(&self) -> Option<(&str, u32)> {
         self.private.as_ref().map(|s| (s.project_id.as_str(), s.generation))
     }
     pub(crate) fn material_settled(&self) -> bool {
-        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !self.publication.native_work_pending()
+        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !self.publication.native_work_pending()
     }
-    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || self.publication.native_work_pending() }
+    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.gh_hold.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || self.publication.native_work_pending() }
     fn fact_retirement(&mut self, reason: Reason) {
         stale(&mut self.status.account, reason); stale(&mut self.status.repository, reason); stale(&mut self.status.automation, reason);
     }
@@ -593,6 +638,7 @@ impl ConnectionState {
         let first = private.retirement.is_none();
         if first { private.retirement = Some(reason); }
         if let Some(ticket) = &private.ticket { ticket.stop(); }
+        if let Some(hold) = &private.gh_hold { hold.stop(reason); }
         if !self.unknown && (first || remove && self.status.operation.as_ref().is_none_or(|op| op.kind != OperationKind::Disconnect)) {
             self.status.operation = Some(Operation { id: private.stop_id.clone(), kind: OperationKind::Disconnect,
                 phase: Phase::Running, reason: Reason::None });
@@ -604,7 +650,7 @@ impl ConnectionState {
     }
     fn complete_retirement(&mut self) {
         let Some(private) = &mut self.private else { return; };
-        if private.ticket.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || self.publication.native_work_pending() { return; }
+        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || self.publication.native_work_pending() { return; }
         private.token = None;
         if self.unknown {
             if let Some(session) = &mut self.status.session { session.state = SessionState::CleanupUnknown; }
@@ -652,6 +698,8 @@ impl ConnectionState {
     pub(crate) fn reconcile(&mut self, now: Instant, external: Reason) {
         let before = self.status.clone();
         if self.private.as_ref().is_some_and(|s| s.retirement.is_none() && now >= s.clock.end) { self.retire_inner(Reason::Expired, false); }
+        let custody = self.private.as_ref().and_then(|s| s.gh_hold.as_ref()).map(GitHubAuthConnectionHold::custody);
+        if custody == Some(GitHubAuthCustody::Unknown) { self.unknown_inner(); }
         let receipt = self.private.as_ref().and_then(|s| s.ticket.as_ref()).map(GitHubReadTicket::receipt);
         match receipt {
             Some(GitHubReadReceipt::RetainedUnknown) => self.unknown_inner(),
@@ -659,7 +707,8 @@ impl ConnectionState {
                 let retiring = self.private.as_ref().is_some_and(|s| s.retirement.is_some());
                 // A pending quit question can delay positive publication; Cancel
                 // does not destroy the earlier connection or extend any clock.
-                if external == Reason::None || retiring || self.unknown || was_unknown {
+                if !matches!(custody, Some(GitHubAuthCustody::Pending | GitHubAuthCustody::Unknown))
+                    && (external == Reason::None || retiring || self.unknown || was_unknown) {
                     self.accept_final(outcome, settled_at, was_unknown, now);
                 }
             },
@@ -671,7 +720,15 @@ impl ConnectionState {
     fn accept_final(&mut self, mut result: Result<GitHubReadOutcome, BridgeError>, settled_at: Instant, was_unknown: bool, now: Instant) {
         // This function is reached only via the actual Settled mailbox above.
         // It is also tested with explicitly supplied DATA, not a mock OS proof.
-        let Some(private) = &mut self.private else { return; }; private.ticket = None;
+        let Some(private) = &mut self.private else { return; };
+        // Original gh source/management finality is independent of the HTTP
+        // terminal. No early /user pin or Connected while that hold is pending.
+        match private.gh_hold.as_ref().map(GitHubAuthConnectionHold::custody) {
+            Some(GitHubAuthCustody::Pending | GitHubAuthCustody::Unknown) => return,
+            Some(GitHubAuthCustody::Refused(reason)) => { private.retirement.get_or_insert(reason); },
+            Some(GitHubAuthCustody::Ready) | None => {},
+        }
+        private.gh_hold = None; private.ticket = None;
         let mut reason = result.as_ref().map_or_else(outcome_error, |v| v.control.reason);
         if let Ok(outcome) = &result { if !self.apply_control(&outcome.control, settled_at) { reason = Reason::ResponseInvalid; } }
         if was_unknown || reason == Reason::CleanupUnknown || self.unknown { self.unknown_inner(); return; }
@@ -725,7 +782,7 @@ impl ConnectionState {
     }
     pub(crate) fn connect(&mut self, args: ConnectTokenArgs, generation: u32, supervisor: &Supervisor,
         now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
-        self.connect_selected(args, None, generation, supervisor, now, wall)
+        self.connect_selected(args, None, None, generation, supervisor, now, wall)
     }
     /// Native-only handoff: no token getter, renderer DTO, new process/HTTP
     /// owner or availability flag. The original capture owner checks selection
@@ -736,7 +793,7 @@ impl ConnectionState {
         generation: u32, supervisor: &Supervisor, now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
         let (selected, mut token) = credential.into_connection_parts(owner, &project_id, &repository, generation).map_err(gh_capture_error)?;
         self.connect_selected(ConnectTokenArgs { project_id, repository, token: std::mem::take(&mut *token) },
-                              Some(selected), generation, supervisor, now, wall)
+                              Some(selected), None, generation, supervisor, now, wall)
     }
     /// The actual SAME Document has already rematched its retained registration,
     /// session identity, source-work completion and consent while holding its
@@ -745,14 +802,17 @@ impl ConnectionState {
     /// here, only secondary exact binding and the existing HTTP admission.
     pub(crate) fn connect_prepared_gh(&mut self, prepared: auth_provider::PreparedGhConnection,
         project_id: String, repository: String, selected_login: &str, account_revision: &str,
-        generation: u32, supervisor: &Supervisor, now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
+        generation: u32, hold: GitHubAuthConnectionHold, supervisor: &Supervisor, now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
+        if !hold.admitted_target_matches(&project_id, &repository, generation, selected_login, account_revision) {
+            return Err(refused(Reason::TargetChanged));
+        }
         let (selected, mut token) = prepared.into_connection_parts(&project_id, &repository, generation,
             selected_login, account_revision).map_err(gh_capture_error)?;
         self.connect_selected(ConnectTokenArgs { project_id, repository, token: std::mem::take(&mut *token) },
-                              Some(selected), generation, supervisor, now, wall)
+                              Some(selected), Some(hold), generation, supervisor, now, wall)
     }
     fn connect_selected(&mut self, args: ConnectTokenArgs, gh_selection: Option<auth_provider::SelectedAccount>,
-        generation: u32, supervisor: &Supervisor, now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
+        gh_hold: Option<GitHubAuthConnectionHold>, generation: u32, supervisor: &Supervisor, now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
         self.room()?;
         if self.private.is_some() { return Err(refused(Reason::Busy)); }
         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
@@ -766,7 +826,7 @@ impl ConnectionState {
         let mut private = PrivateSession { id, project_id: args.project_id, repository: args.repository,
             generation, stop_id: format!("github-disconnect-{sequence}"), unknown_id: format!("github-unknown-{sequence}"),
             clock, token: Some(args.token),
-            gh_selection, account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false };
+            gh_selection, gh_hold, account_pin: None, repository_pin: None, ticket: None, retirement: None, remove_after_settlement: false };
         let mut operation = Operation { id: String::with_capacity(64), kind: OperationKind::Connect, phase: Phase::Running, reason: Reason::None };
         let ticket = supervisor.start_github_readonly(&private.repository, None, None,
             private.token.as_deref().ok_or_else(|| refused(Reason::InvalidInput))?).map_err(admission_error)?;
@@ -797,7 +857,7 @@ impl ConnectionState {
         self.room()?;
         if revision != self.status.revision { return Err(refused(Reason::TargetChanged)); }
         let private = self.private.as_ref().filter(|s| s.id == id).ok_or_else(|| refused(Reason::InvalidInput))?;
-        if private.ticket.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || self.publication.native_work_pending() { return Err(refused(Reason::Busy)); }
+        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || self.publication.native_work_pending() { return Err(refused(Reason::Busy)); }
         if let Some(reason) = private.retirement { return Err(refused(reason)); }
         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
         if now >= private.clock.end { self.retire(Reason::Expired); return Err(refused(Reason::Expired)); }
@@ -1872,7 +1932,7 @@ impl ConnectionState {
             .checked_add(self.history.retained_heap_bytes_if_quiescent()?)?
             .checked_add(self.publication.heap()?)?;
         if let Some(private) = &self.private {
-            if private.ticket.is_some() || private.retirement == Some(Reason::CleanupUnknown) { return None; }
+            if private.ticket.is_some() || private.gh_hold.is_some() || private.retirement == Some(Reason::CleanupUnknown) { return None; }
             // Borrow the private original. Never clone its token or print bytes.
             for value in [&private.id, &private.project_id, &private.repository, &private.stop_id,
                 &private.unknown_id, &private.clock.display] {
@@ -1901,7 +1961,7 @@ mod installation_memory_capacity_tests {
             clock: CredentialClock { admitted: now, wall: UNIX_EPOCH, end: now, display: String::with_capacity(37) },
             token: Some(String::with_capacity(4097)), account_pin: Some(String::with_capacity(41)),
             repository_pin: Some(String::with_capacity(43)),
-            gh_selection: Some(auth_provider::SelectedAccount { login: String::with_capacity(47), account_revision: String::with_capacity(53) }),
+            gh_selection: Some(auth_provider::SelectedAccount { login: String::with_capacity(47), account_revision: String::with_capacity(53) }), gh_hold: None,
             ticket: None, retirement: None, remove_after_settlement: false };
         let extra = private.id.capacity() + private.project_id.capacity() + private.repository.capacity()
             + private.stop_id.capacity() + private.unknown_id.capacity() + private.clock.display.capacity()

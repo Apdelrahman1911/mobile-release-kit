@@ -208,6 +208,22 @@ impl NativeGhProvider {
             ticket.stop();
         }
     }
+    /// Dispose a failed selection's already-settled private body, never an
+    /// authentication handoff. Pending/unknown original tickets remain owned.
+    /// Called by the original coordinator outside Document, after its wait.
+    pub(crate) fn discard_settled_refusal(&mut self) -> bool {
+        self.stop();
+        let Some(ticket) = self.original.ticket.as_ref() else {
+            return true;
+        };
+        if ticket.receipt() != GitHubAuthReceipt::Settled {
+            return false;
+        }
+        if let Some(ticket) = self.original.ticket.take() {
+            drop(ticket.consume()); // Consume once; private Zeroizing storage drops here.
+        }
+        true
+    }
 }
 impl NativeCapture {
     fn current(&mut self) -> Result<(), Failure> {

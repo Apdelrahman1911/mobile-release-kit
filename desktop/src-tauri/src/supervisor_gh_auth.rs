@@ -6,6 +6,323 @@ use super::*;
 use crate::{github_auth_capture_wire as wire, github_connection_session::auth_provider};
 use zeroize::Zeroizing;
 
+/// Closed DATA allocation followed by the actual Supervisor admission. The
+/// gate is minted only by the retained original Document operation; reserving
+/// storage neither examines a path nor admits a provider from version text.
+pub(crate) struct GitHubAuthAdmission {
+    pub(super) invocation: Invocation,
+    pub(super) endpoints: Endpoints,
+    #[cfg(all(
+        target_os = "macos",
+        target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    pub(super) slots: Arc<Mutex<crate::installed_runtime::GitHubAuthRuntimeSlots>>,
+    bytes: usize,
+}
+pub(super) struct Invocation {
+    pub(super) gate: crate::asset_session::GitHubAuthGoGate,
+    pub(super) context: wire::Context,
+    pub(super) role: wire::Role,
+    pub(super) mailbox: Arc<Mutex<Mailbox>>,
+    request: Mutex<Option<Arc<wire::Request>>>,
+}
+impl GitHubAuthAdmission {
+    pub(crate) fn reservation_bytes() -> Option<usize> {
+        #[cfg(all(
+            target_os = "macos",
+            target_pointer_width = "64",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ))]
+        {
+            crate::installed_runtime::GitHubAuthRuntimeSlots::working_reservation_bytes()?
+                .checked_add(
+                    std::mem::size_of::<Self>()
+                        + std::mem::size_of::<Owner>()
+                        + std::mem::size_of::<Resources>()
+                        + 256 * 1024,
+                )
+        }
+        #[cfg(not(all(
+            target_os = "macos",
+            target_pointer_width = "64",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        )))]
+        {
+            None
+        }
+    }
+    pub(crate) fn reserve(
+        gate: crate::asset_session::GitHubAuthGoGate,
+        context: wire::Context,
+        role: wire::Role,
+        original_end: Instant,
+    ) -> Result<Self, BridgeError> {
+        gate.check_current(&context)?; // Caller is OUTSIDE the Document mutex.
+        let endpoints =
+            Endpoints::at(Instant::now(), original_end).ok_or_else(BridgeError::timeout)?;
+        #[cfg(all(
+            target_os = "macos",
+            target_pointer_width = "64",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ))]
+        {
+            let bytes = Self::reservation_bytes().ok_or_else(BridgeError::invalid)?;
+            let mut slots = crate::installed_runtime::GitHubAuthRuntimeSlots::new();
+            slots
+                .reserve_once()
+                .map_err(|_| BridgeError::unavailable("The fixed gh-auth storage was refused."))?;
+            Ok(Self {
+                invocation: Invocation {
+                    gate,
+                    context,
+                    role,
+                    mailbox: Arc::new(Mutex::new(Mailbox::new())),
+                    request: Mutex::new(None),
+                },
+                endpoints,
+                slots: Arc::new(Mutex::new(slots)),
+                bytes,
+            })
+        }
+        #[cfg(not(all(
+            target_os = "macos",
+            target_pointer_width = "64",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        )))]
+        {
+            let _ = (gate, context, role, endpoints);
+            Err(BridgeError::unavailable(
+                "The fixed gh-auth runtime is unavailable.",
+            ))
+        }
+    }
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+impl Invocation {
+    pub(super) fn request(&self) -> Result<Arc<wire::Request>, BridgeError> {
+        self.request
+            .lock()
+            .map_err(|_| BridgeError::cleanup_unknown())?
+            .clone()
+            .ok_or_else(BridgeError::cleanup_unknown)
+    }
+    #[cfg(all(
+        target_os = "macos",
+        target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    pub(super) fn inspect(
+        &self,
+        runtime: &RuntimeConfig,
+        owner: &Owner,
+        native: &Arc<Mutex<crate::installed_runtime::GitHubAuthRuntimeSlots>>,
+    ) -> Result<VerifiedRuntime, BridgeError> {
+        self.gate.check_current(&self.context)?;
+        let mut slots = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        let stop = owner.stop.subscribe();
+        let armed = slots.arm_acl_once(owner.endpoint(), &stop);
+        owner.observe_native_failure(slots.first_failure());
+        armed.map_err(|_| BridgeError::cleanup_unknown())?;
+        let selected = runtime.resolve_github_auth_installed(&mut slots, owner.endpoint(), &stop);
+        owner.observe_native_failure(slots.first_failure());
+        let selected = selected?;
+        drop(slots);
+        // Called only in Resources.inspection, registered before its worker.
+        // The source set is the SAME set retained by the outer Document.
+        let original =
+            self.gate
+                .source_post(&self.context, self.role, SourcePost::Inspect, &mut || {
+                    owner.failed() || *stop.borrow() || Instant::now() >= owner.endpoint()
+                })?;
+        let clock = owner
+            .gh_auth_endpoints
+            .ok_or_else(BridgeError::cleanup_unknown)?
+            .bridge()?;
+        let request = Arc::new(wire::Request::from_original_snapshot(
+            &owner.id,
+            self.role,
+            &self.context,
+            &original,
+            clock,
+        )?);
+        {
+            let mut slot = self
+                .request
+                .lock()
+                .map_err(|_| BridgeError::cleanup_unknown())?;
+            if slot.is_some() {
+                return Err(BridgeError::cleanup_unknown());
+            }
+            *slot = Some(request.clone()); // Retain before calling the original gate.
+        }
+        self.gate.bind_request(&self.context, &owner.id, request)?;
+        Ok(selected)
+    }
+    #[cfg(all(
+        target_os = "macos",
+        target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    pub(super) fn post(
+        &self,
+        owner: &Owner,
+        native: &Arc<Mutex<crate::installed_runtime::GitHubAuthRuntimeSlots>>,
+        phase: SourcePost,
+    ) -> Result<(), BridgeError> {
+        self.gate.check_current(&self.context)?;
+        let mut slots = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        let runtime = slots
+            .capability()
+            .map_err(|_| BridgeError::cleanup_unknown())?;
+        let stop = owner.stop.subscribe();
+        let result = runtime.post_original(owner.endpoint(), &stop, &mut |first| {
+            owner.observe_native_failure(first)
+        });
+        owner.observe_native_failure(slots.first_failure());
+        result.map_err(|failure| match failure {
+            crate::installed_runtime::AdmissionFailure::Unknown => BridgeError::cleanup_unknown(),
+            crate::installed_runtime::AdmissionFailure::Deadline => BridgeError::timeout(),
+            _ => BridgeError::unavailable("The original gh-auth runtime changed."),
+        })?;
+        drop(slots);
+        self.gate
+            .source_post(&self.context, self.role, phase, &mut || {
+                owner.failed() || *stop.borrow() || Instant::now() >= owner.endpoint()
+            })?;
+        Ok(())
+    }
+}
+
+/// Fixed call positions only. This is not a callback/native operation registry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourcePost {
+    Inspect,
+    BeforeGo,
+    AfterWork,
+}
+
+impl Supervisor {
+    pub(crate) fn github_auth_profile_available(&self) -> bool {
+        github_auth_selected(Profile::GitHubAuth)
+            && self.inner.runtime.github_auth_profile_available()
+    }
+    pub(crate) fn start_github_auth(
+        &self,
+        admission: GitHubAuthAdmission,
+    ) -> Result<GitHubAuthTicket, BridgeError> {
+        if !self.github_auth_profile_available() {
+            return Err(BridgeError::unavailable(
+                "The selected official gh provider is unavailable.",
+            ));
+        }
+        admission
+            .invocation
+            .gate
+            .check_current(&admission.invocation.context)?;
+        let mailbox = admission.invocation.mailbox.clone();
+        let context = admission.invocation.context.clone();
+        let role = admission.invocation.role;
+        let owner = self.admit(
+            AdmissionRequest::GitHubAuth(admission),
+            CompletionTarget::GitHubAuth,
+        )?;
+        Ok(GitHubAuthTicket::new(owner, mailbox, role, context))
+    }
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_pointer_width = "64",
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    feature = "desktop-shell",
+    feature = "custom-protocol",
+    not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher")
+))]
+pub(super) fn acquire_original(
+    inner: &Inner,
+    owner: &Arc<Owner>,
+    native: &Arc<Mutex<crate::installed_runtime::GitHubAuthRuntimeSlots>>,
+) -> Result<Child, AcquisitionError> {
+    let mut slots = native
+        .lock()
+        .map_err(|_| AcquisitionError::unsupported("gh-auth custody was lost"))?;
+    let runtime = slots.capability().map_err(AcquisitionError::capability)?;
+    let stop = owner.stop.subscribe();
+    let mut first = None;
+    let selected = runtime
+        .prepare_once_observed(owner.endpoint(), &stop, &mut |value| {
+            first = value;
+            owner.observe_native_failure(value);
+        })
+        .map_err(|failure| {
+            AcquisitionError::preparation(failure).with_macos_first_failure(first)
+        })?;
+    let mut command = Command::new(&selected.python);
+    command
+        .args(["-I", "-S", "-B"])
+        .arg(&selected.bootstrap)
+        .arg(&selected.core)
+        .current_dir(&selected.cwd)
+        .env_clear()
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(false);
+    crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
+    let owners = lock(&inner.owners);
+    let state = lock(&owner.state);
+    if !preflight_claim_clear(
+        owners
+            .get(&owner.key)
+            .is_some_and(|actual| Arc::ptr_eq(actual, owner)),
+        owner.profile,
+        Profile::GitHubAuth,
+        &state,
+        Instant::now(),
+        inner.stopping.load(Ordering::SeqCst),
+        inner.disabled.load(Ordering::SeqCst),
+        *owner.stop.borrow(),
+    ) {
+        return Err(AcquisitionError::unsupported(
+            "The original gh-auth claim was refused",
+        ));
+    }
+    runtime
+        .claim_once()
+        .map_err(AcquisitionError::final_claim)?;
+    drop(state);
+    drop(owners);
+    // The only child is the fixed protected Python bootstrap. Its unchanged
+    // C/A/W owns gh AND its nested keyring helper, not this direct-child wait.
+    command.spawn().map_err(AcquisitionError::returned_spawn)
+}
+#[cfg(all(
+    target_os = "macos",
+    target_pointer_width = "64",
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    not(all(
+        feature = "desktop-shell",
+        feature = "custom-protocol",
+        not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher")
+    ))
+))]
+pub(super) fn acquire_original(
+    _inner: &Inner,
+    _owner: &Arc<Owner>,
+    _native: &Arc<Mutex<crate::installed_runtime::GitHubAuthRuntimeSlots>>,
+) -> Result<Child, AcquisitionError> {
+    Err(AcquisitionError::unsupported(
+        "The fixed gh-auth runtime is unavailable",
+    ))
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Endpoints {
     pub(crate) work: Instant,
@@ -165,12 +482,120 @@ impl Mailbox {
 pub(crate) struct GitHubAuthTicket {
     owner: Arc<Owner>,
     mailbox: Arc<Mutex<Mailbox>>,
+    observer: Arc<FinalObserverReturn>,
     role: wire::Role,
     context: wire::Context,
 }
 pub(crate) struct GitHubAuthWait {
     owner: Arc<Owner>,
     mailbox: Arc<Mutex<Mailbox>>,
+    observer: Arc<FinalObserverReturn>,
+}
+
+// The Supervisor's existing retirement already joins every required native
+// and management operation. This fixed caller additionally joins its exact
+// final observer tail before a second 128MiB runtime reservation or token
+// consumption. It adds NO task, executor, process owner, or public proof DTO.
+// The actual handle remains in Owner.observer until a positive returned join.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObserverReturn {
+    Fresh,
+    Entered,
+    Returned,
+    Unknown,
+}
+struct FinalObserverReturn {
+    state: Mutex<ObserverReturn>,
+}
+impl FinalObserverReturn {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ObserverReturn::Fresh),
+        }
+    }
+    fn receipt(&self, result: GitHubAuthReceipt) -> GitHubAuthReceipt {
+        match self.state.lock() {
+            Ok(state) => match (*state, result) {
+                (ObserverReturn::Unknown, _) => GitHubAuthReceipt::RetainedUnknown,
+                (ObserverReturn::Returned, value) => value,
+                (_, GitHubAuthReceipt::Settled) => GitHubAuthReceipt::Pending,
+                (_, value) => value,
+            },
+            Err(_) => GitHubAuthReceipt::RetainedUnknown,
+        }
+    }
+    async fn join_original(&self, owner: &Owner) -> bool {
+        {
+            let Ok(mut state) = self.state.lock() else {
+                return false;
+            };
+            if *state == ObserverReturn::Returned {
+                return true;
+            }
+            if *state != ObserverReturn::Fresh {
+                return false;
+            }
+            *state = ObserverReturn::Entered; // Retire the sole join route BEFORE await.
+        }
+        let mut guard = ObserverReturnGuard {
+            original: self,
+            owner,
+            returned: false,
+        };
+        let endpoint = {
+            let state = lock(&owner.state);
+            if !state.terminal || state.unknown {
+                return false;
+            }
+            state.cleanup_endpoint.unwrap_or(state.endpoint)
+        };
+        if Instant::now() >= endpoint {
+            return false;
+        }
+        let deadline = tokio::time::Instant::from_std(endpoint);
+        let mut slot = tokio::select! {
+            slot = owner.observer.lock() => slot,
+            _ = tokio::time::sleep_until(deadline) => return false,
+        };
+        let Some(handle) = slot.as_mut() else {
+            return false;
+        };
+        let joined = tokio::select! {
+            result = handle => result.is_ok(),
+            _ = tokio::time::sleep_until(deadline) => false,
+        };
+        // A consumed failed/late handle remains retained and is never repolled.
+        if !joined || Instant::now() >= endpoint {
+            return false;
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if *state != ObserverReturn::Entered {
+            return false;
+        }
+        slot.take();
+        *state = ObserverReturn::Returned;
+        guard.returned = true;
+        true
+    }
+}
+struct ObserverReturnGuard<'a> {
+    original: &'a FinalObserverReturn,
+    owner: &'a Owner,
+    returned: bool,
+}
+impl Drop for ObserverReturnGuard<'_> {
+    fn drop(&mut self) {
+        if !self.returned {
+            *self
+                .original
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = ObserverReturn::Unknown;
+        }
+        self.owner.changed.notify_waiters();
+    }
 }
 impl GitHubAuthTicket {
     pub(super) fn new(
@@ -182,6 +607,7 @@ impl GitHubAuthTicket {
         Self {
             owner,
             mailbox,
+            observer: Arc::new(FinalObserverReturn::new()),
             role,
             context,
         }
@@ -199,6 +625,7 @@ impl GitHubAuthTicket {
         GitHubAuthWait {
             owner: self.owner.clone(),
             mailbox: self.mailbox.clone(),
+            observer: self.observer.clone(),
         }
     }
     pub(crate) fn stop(&self) {
@@ -208,13 +635,16 @@ impl GitHubAuthTicket {
         ));
     }
     pub(crate) fn receipt(&self) -> GitHubAuthReceipt {
-        receipt(&self.owner, &self.mailbox)
+        self.observer.receipt(receipt(&self.owner, &self.mailbox))
     }
     pub(crate) fn consume(self) -> Result<Zeroizing<Vec<u8>>, auth_provider::Failure> {
         // Full same-original current source/consent checking belongs to the
         // containing native CaptureOwner, immediately before this private take.
         let original = lock(&self.owner.state);
-        if !original.terminal || original.unknown {
+        if !original.terminal
+            || original.unknown
+            || self.observer.receipt(GitHubAuthReceipt::Settled) != GitHubAuthReceipt::Settled
+        {
             return Err(auth_provider::Failure::Unknown);
         }
         self.mailbox
@@ -241,16 +671,165 @@ fn receipt(owner: &Owner, mailbox: &Mutex<Mailbox>) -> GitHubAuthReceipt {
     }
 }
 impl GitHubAuthWait {
+    pub(crate) fn receipt(&self) -> GitHubAuthReceipt {
+        self.observer.receipt(receipt(&self.owner, &self.mailbox))
+    }
+    pub(crate) fn stop(&self) {
+        self.owner.fail(BridgeError::new(
+            "cancelled",
+            "The selected GitHub CLI read was stopped.",
+        ));
+    }
     pub(crate) async fn returned(&self) -> GitHubAuthReceipt {
         loop {
             // Register before sampling to avoid a completion notification race.
             let changed = self.owner.changed.notified();
             let state = receipt(&self.owner, &self.mailbox);
+            if state == GitHubAuthReceipt::Settled {
+                if self.observer.join_original(&self.owner).await {
+                    return self.receipt();
+                }
+                lock(&self.mailbox).unknown();
+                return GitHubAuthReceipt::RetainedUnknown;
+            }
             if state != GitHubAuthReceipt::Pending {
-                return state;
+                return self.observer.receipt(state);
             }
             changed.await;
         }
+    }
+}
+
+/// Nonsecret observer of the EXISTING HTTP owner's original joins. The
+/// ConnectionState keeps the actual ticket and result; no HTTP bytes or token
+/// are copied here, and this handle cannot accept a /user result by itself.
+pub(crate) struct GitHubAuthHttpWait {
+    owner: Arc<Owner>,
+    receipt: Arc<Mutex<GitHubReadReceipt>>,
+    observer: FinalObserverReturn,
+}
+impl GitHubReadTicket {
+    pub(crate) fn gh_auth_wait(&self) -> GitHubAuthHttpWait {
+        GitHubAuthHttpWait {
+            owner: self.owner.clone(),
+            receipt: self.receipt.clone(),
+            observer: FinalObserverReturn::new(),
+        }
+    }
+}
+impl GitHubAuthHttpWait {
+    pub(crate) fn receipt(&self) -> GitHubAuthReceipt {
+        self.observer.receipt(self.owner_receipt())
+    }
+    fn owner_receipt(&self) -> GitHubAuthReceipt {
+        let original = lock(&self.owner.state);
+        if original.unknown {
+            return GitHubAuthReceipt::RetainedUnknown;
+        }
+        match &*lock(&self.receipt) {
+            GitHubReadReceipt::RetainedUnknown
+            | GitHubReadReceipt::Settled {
+                was_unknown: true, ..
+            } => GitHubAuthReceipt::RetainedUnknown,
+            GitHubReadReceipt::Settled { .. } if original.terminal => GitHubAuthReceipt::Settled,
+            _ => GitHubAuthReceipt::Pending,
+        }
+    }
+    pub(crate) async fn returned(&self) -> GitHubAuthReceipt {
+        loop {
+            let changed = self.owner.changed.notified();
+            let result = self.owner_receipt();
+            if result == GitHubAuthReceipt::Settled {
+                return if self.observer.join_original(&self.owner).await {
+                    self.receipt()
+                } else {
+                    GitHubAuthReceipt::RetainedUnknown
+                };
+            }
+            if result != GitHubAuthReceipt::Pending {
+                return self.observer.receipt(result);
+            }
+            changed.await;
+        }
+    }
+    pub(crate) fn stop(&self) {
+        self.owner.fail(BridgeError::new(
+            "cancelled",
+            "The selected-account identity read was stopped.",
+        ));
+    }
+}
+
+pub(super) async fn post_after_work(
+    resources: &mut Resources,
+    inner: &Inner,
+    owner: &Arc<Owner>,
+) -> bool {
+    if resources.gh_auth_after.is_some()
+        || resources.gh_auth_after_return.is_some()
+        || resources.gh_auth_after_failed
+    {
+        owner.unknown(inner);
+        return false;
+    }
+    #[cfg(all(
+        target_os = "macos",
+        target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    {
+        let native = resources.github_auth.clone();
+        let original = owner.clone();
+        let (start, enter) = oneshot::channel();
+        resources.gh_auth_after = Some(tokio::task::spawn_blocking(move || {
+            let result = (|| {
+                enter
+                    .blocking_recv()
+                    .map_err(|_| BridgeError::cleanup_unknown())?;
+                let native = native.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+                original
+                    .gh_auth
+                    .as_ref()
+                    .ok_or_else(BridgeError::cleanup_unknown)?
+                    .post(&original, native, SourcePost::AfterWork)
+            })();
+            if let Err(error) = &result {
+                original.fail(error.clone());
+            }
+            result
+        }));
+        if start.send(()).is_err() {
+            owner.fail(BridgeError::cleanup_unknown());
+        }
+        match join_slot(&mut resources.gh_auth_after).await {
+            Ok(result) => {
+                resources.gh_auth_after.take();
+                let unknown = result
+                    .as_ref()
+                    .is_err_and(|error| error.code == "cleanup_unknown");
+                resources.gh_auth_after_return = Some(result);
+                if unknown {
+                    owner.unknown(inner);
+                    false
+                } else {
+                    true
+                }
+            }
+            Err(_) => {
+                resources.gh_auth_after_failed = true;
+                owner.unknown(inner);
+                false
+            }
+        }
+    }
+    #[cfg(not(all(
+        target_os = "macos",
+        target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )))]
+    {
+        owner.unknown(inner);
+        false
     }
 }
 
@@ -434,6 +1013,50 @@ pub(super) async fn write_private(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn final_observer_missing_or_entered_is_not_a_consumable_original() {
+        // Owner terminal here is DATA only. No native driver/source evidence is
+        // manufactured; absent original handle must still refuse consumption.
+        let owner = super::super::tests::inert_owner();
+        lock(&owner.state).terminal = true;
+        let tail = FinalObserverReturn::new();
+        assert_eq!(
+            tail.receipt(GitHubAuthReceipt::Settled),
+            GitHubAuthReceipt::Pending
+        );
+        assert!(!tail.join_original(&owner).await);
+        assert_eq!(
+            tail.receipt(GitHubAuthReceipt::Settled),
+            GitHubAuthReceipt::RetainedUnknown
+        );
+        assert!(!tail.join_original(&owner).await);
+        let entered = FinalObserverReturn {
+            state: Mutex::new(ObserverReturn::Entered),
+        };
+        assert!(!entered.join_original(&owner).await);
+    }
+    #[tokio::test]
+    async fn fixed_observer_tail_joins_the_same_stored_task_once_not_native_qualification() {
+        let owner = super::super::tests::inert_owner();
+        lock(&owner.state).terminal = true; // Bookkeeping fixture, not OS proof.
+        *owner.observer.lock().await = Some(tokio::spawn(async {}));
+        let tail = FinalObserverReturn::new();
+        assert_eq!(
+            tail.receipt(GitHubAuthReceipt::Settled),
+            GitHubAuthReceipt::Pending
+        );
+        assert!(tail.join_original(&owner).await);
+        assert!(owner.observer.try_lock().unwrap().is_none());
+        assert_eq!(
+            tail.receipt(GitHubAuthReceipt::Settled),
+            GitHubAuthReceipt::Settled
+        );
+        assert!(tail.join_original(&owner).await); // Saved ACTUAL join, no repoll.
+        assert_eq!(
+            tail.receipt(GitHubAuthReceipt::RetainedUnknown),
+            GitHubAuthReceipt::RetainedUnknown
+        );
+    }
     fn request() -> Arc<wire::Request> {
         let snapshot = |mode| wire::Snapshot {
             identity: (1, 2, 0o100000 | mode, 1001, 1001, 1, 12, 123, 456),

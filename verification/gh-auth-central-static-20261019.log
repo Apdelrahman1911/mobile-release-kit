@@ -1,0 +1,13 @@
+Frozen source/doc/test paths: 20
+Rust syntax parse PASS: 13 source files + proposed patched parent (rustfmt; NOT compilation)
+Python AST parse PASS: 3 files
+Initial unstaged tracked-source git diff --check PASS (did not include new untracked patch artifacts).
+Final staged check exposed two literal space-only unified-patch context lines in 0fc72efe; shell incorrectly continued to commit.
+Correction trims only nonessential context at two hunk boundaries; produced parent bytes are IDENTICAL.
+Full bda4da8d-to-corrected-working-tree diff --check PASS; both corrected patch apply checks PASS.
+Root parent + inert-default patches apply --check PASS
+Original Root-owned parent/default files unchanged PASS
+Current passive guard/protocol/operation Python tests: 24 PASS, 0 skips, 0.443s
+Central new Rust tests: 10 DEFINED, NOT RUN (5 Doc DATA + 1 connection epoch + 2 actual in-memory tail joins + 2 grammar DATA)
+No Cargo, installed gh/native/keyring/network/credentials/API calls; no original C/A/W fixture rerun in this batch.
+Manifest SHA256: 6038332a30c3e8596448116c5bb8fd66926358da4d5935df68136dfc0083ab1a
