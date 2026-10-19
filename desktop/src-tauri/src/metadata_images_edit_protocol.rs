@@ -479,7 +479,7 @@ pub(crate) fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeEr
     }
 }
 
-fn base64(raw: &[u8]) -> Result<String, BridgeError> {
+pub(crate) fn base64(raw: &[u8]) -> Result<String, BridgeError> {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let size = raw.len().checked_add(2).and_then(|n| (n / 3).checked_mul(4)).ok_or_else(BridgeError::invalid)?;
     let mut output = String::new(); output.try_reserve_exact(size).map_err(|_| BridgeError::invalid())?;

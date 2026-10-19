@@ -901,6 +901,7 @@ impl Reason {
     }) }
     fn offline(self) -> Result<wire::Reason, BridgeError> {
         Ok(match self {
+        Self::ToolAcquisition(_) => return Err(BridgeError::protocol()),
         Self::RecoverySettleUnavailable | Self::ReconcileUnavailable | Self::ExecuteUnavailable | Self::PrepareUnavailable | Self::JournalUnavailable | Self::EnrollmentExists | Self::RecoveryRequired | Self::CandidateInputsUnavailable => return Err(BridgeError::protocol()),
         Self::SavedSourceChanged | Self::SavedSourceInvalid | Self::CredentialsUnavailable | Self::QueryPrerequisites => return Err(BridgeError::protocol()),
         Self::SelectionMissing | Self::SelectionChanged | Self::SelectionUnsafe | Self::ResourcesUnavailable => return Err(BridgeError::protocol()),

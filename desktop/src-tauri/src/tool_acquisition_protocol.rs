@@ -7,7 +7,6 @@ use crate::{
     protocol::{strict_json, valid_id},
     tool_preparation as plan,
 };
-use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -309,10 +308,16 @@ pub(crate) fn request(
         .posix()
         .map_err(|_| invalid())?
         .preflight_identity();
+    let manifest_base64 = manifest
+        .map(crate::metadata_images_edit_protocol::base64)
+        .transpose()?;
+    let ca_base64 = ca
+        .map(crate::metadata_images_edit_protocol::base64)
+        .transpose()?;
     let value = json!({"protocol":PROTOCOL,"operationId":operation,"ownerGeneration":generation,"context":context,
         "native":{"profile":profile,"projectRoot":native_path(&project.path).ok_or_else(invalid)?,"rootIdentity":identity,
             "cwd":native_path(cwd).ok_or_else(invalid)?,"cache":cache,
-            "manifestBase64":manifest.map(|b|STANDARD.encode(b)),"caBase64":ca.map(|b|STANDARD.encode(b))}});
+            "manifestBase64":manifest_base64,"caBase64":ca_base64}});
     // Charge the actual fixed capacity, not only encoded length: the general
     // edit writer may otherwise geometrically grow beyond this domain's cap.
     let mut writer = RequestWriter(Vec::new());
@@ -970,6 +975,56 @@ mod tests {
         }
         assert!(raw_request(br#"{"projectId":"a","projectId":"b"}"#).is_err());
         assert!(status_request(&json!({"nativeFinality":true})).is_err());
+    }
+    #[test]
+    fn private_request_uses_existing_fallible_encoder_and_preserves_absence() {
+        // Codec DATA only. No path is opened and these bytes do not represent
+        // an admitted vendor manifest, CA or cache source.
+        let project = RegisteredRoot {
+            path: "/inert/project".into(),
+            identity: crate::asset_source::ProjectIdentity::Posix(
+                crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
+            ),
+        };
+        let mut context = prepare(&context_value()).unwrap();
+        let raw = request(
+            &"d".repeat(32),
+            &"e".repeat(32),
+            &context,
+            Profile::MacArm64,
+            &project,
+            Path::new("/inert/project"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(value["native"]["manifestBase64"], Value::Null);
+        assert_eq!(value["native"]["caBase64"], Value::Null);
+        drop(raw);
+        context.action = Action::Acquire;
+        context.review = Some(Review {
+            operation_id: "0".repeat(32),
+            owner_generation: "1".repeat(32),
+            requirements_sha256: "b".repeat(64),
+        });
+        let raw = request(
+            &"d".repeat(32),
+            &"e".repeat(32),
+            &context,
+            Profile::MacArm64,
+            &project,
+            Path::new("/inert/cache"),
+            Some(&json!({})),
+            Some(b"M"),
+            Some(b"Ma"),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(value["native"]["manifestBase64"], "TQ==");
+        assert_eq!(value["native"]["caBase64"], "TWE=");
+        assert_eq!(raw.last(), Some(&b'\n'));
     }
     #[test]
     fn pending_intent_is_canonical_independently_of_json_map_feature_order() {
