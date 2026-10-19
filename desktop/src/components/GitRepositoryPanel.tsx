@@ -4,6 +4,7 @@ import type { GitDiff } from '../gitRepositoryProtocol.ts';
 import type { GitRepositoryController, GitReview } from '../gitRepositoryController.ts';
 import { Badge, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
+import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
 
 const statusLabel: Readonly<Record<string, string>> = Object.freeze({ ' ': '—', M: 'Modified', T: 'Type changed', A: 'Added',
   D: 'Deleted', R: 'Renamed', C: 'Copied', U: 'Conflict', '?': 'Not tracked', '!': 'Ignored' });
@@ -61,7 +62,8 @@ export function GitRepositoryPanel({ controller, projectName, onRecovery }: {
   const next = !observation || state.stale ? 'refresh' : state.selected.some((path) => observation.changes.some((row) => row.path === path && row.worktree !== ' ')) ?
     'stage' : staged.length ? 'commit' : 'select';
   return <section className="card" aria-label="Local Git changes">
-    <SectionHeading title="Source changes" description="Review your local files, stage only what you choose, then create a commit.">
+    <SectionHeading title="Source changes" description={controller.hasWriter() ? 'Review your local files, stage only what you choose, then create a commit.' :
+      'Read changed files and selected differences. Staging and commits are not enabled in this session.'}>
       <Icon name="branch" size={24} />
     </SectionHeading>
     <p>Project: <strong>{projectName}</strong>. {observation && <>{observation.detached ? 'Not on a branch' :
@@ -98,7 +100,7 @@ export function GitRepositoryPanel({ controller, projectName, onRecovery }: {
       {state.stale && <p className="save-note">The previous file list is retained. Refresh before reviewing a new change; this never replaces your commit draft.</p>}
       {observation.restrictions.map((reason) => <p key={reason} className="review-caution">{GIT_ISSUE_HELP[reason]}</p>)}
       {observation.changes.length ? <div className="review-table-wrap"><table className="review-table">
-        <caption>Choose individual files. Staged files are included in the next commit.</caption>
+        <caption>Choose files to inspect. “Staged” means already selected for a future commit, possibly by another Git client.</caption>
         <thead><tr><th scope="col">Select</th><th scope="col">File</th><th scope="col">Staged</th><th scope="col">Working file</th></tr></thead>
         <tbody>{observation.changes.map((row) => <tr key={row.path}>
           <td><input type="checkbox" aria-label={`Select ${row.path}`} checked={state.selected.includes(row.path)}
@@ -108,22 +110,27 @@ export function GitRepositoryPanel({ controller, projectName, onRecovery }: {
         </tr>)}</tbody>
       </table></div> : <p>No changed files were observed.</p>}
       <div className="button-row">
-        <button type="button" className={`button ${next === 'stage' && !state.review ? 'primary' : 'secondary'}`} disabled={stageReason !== null}
-          onClick={() => void controller.prepare('stage')}>Review staging</button>
-        <button type="button" className="button secondary" disabled={unstageReason !== null}
-          onClick={() => void controller.prepare('unstage')}>Review unstaging</button>
         <button type="button" className="text-button" disabled={!state.selected.length} onClick={() => controller.clearSelection()}>Clear selection</button>
       </div>
       {state.selected.length > 0 && <p className="save-note">{state.selected.length} selected. {selectReason && GIT_ISSUE_HELP[selectReason]}</p>}
-      <details className="github-workflow"><summary>Inspect selected differences</summary>
+      <div className="github-workflow"><h3>Inspect selected differences</h3>
         <div className="button-row">
           <button type="button" className="button secondary" disabled={selectReason !== null} onClick={() => void controller.preview(false)}>Working changes</button>
           <button type="button" className="button secondary" disabled={selectReason !== null} onClick={() => void controller.preview(true)}>Staged changes</button>
         </div>
         {state.diff && <DiffPreview diff={state.diff} />}
         <p className="save-note">Only bounded text is displayed. Known sensitive content is withheld; this is not a guarantee that a file contains no secrets.</p>
-      </details>
+      </div>
     </>}
+    <ProgressiveDisclosure title={controller.hasWriter() ? 'Stage files and create a commit' : 'Advanced: local commit draft (writes unavailable)'}
+      needsAttention={!!state.review || !!state.attempt && state.attempt.phase !== 'settled' ||
+        state.busy === 'review' || state.busy === 'discard' || state.busy === 'apply' || !!state.blocked}>
+    <div className="button-row">
+      <button type="button" className={`button ${next === 'stage' && !state.review ? 'primary' : 'secondary'}`} disabled={stageReason !== null}
+        onClick={() => void controller.prepare('stage')}>Review staging</button>
+      <button type="button" className="button secondary" disabled={unstageReason !== null}
+        onClick={() => void controller.prepare('unstage')}>Review unstaging</button>
+    </div>
     <form onSubmit={(event) => { event.preventDefault(); void controller.prepare('commit'); }}>
       <h3>Create a local commit</h3>
       <label htmlFor={messageId}>Commit message</label>
@@ -142,6 +149,7 @@ export function GitRepositoryPanel({ controller, projectName, onRecovery }: {
       <button type="submit" className={`button ${next === 'commit' && !state.review ? 'primary' : 'secondary'}`} disabled={commitReason !== null}>Review commit</button>
       {commitReason && !state.review && <p className="save-note">{GIT_ISSUE_HELP[commitReason]}</p>}
     </form>
+    </ProgressiveDisclosure>
     {state.review && <Review key={state.review.plan.planId} review={state.review} controller={controller} />}
     {observation && <details><summary>Repository details</summary><p>Observed commit: <code>{observation.head ?? 'none yet'}</code>.</p>
       <p>Observation revision: <code>{observation.revision}</code>.</p>

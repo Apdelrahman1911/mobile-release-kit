@@ -23,6 +23,10 @@ export interface GitRepositoryPort {
   // Display consistency only; native independently binds the actual registered
   // root and client/session. This object must never be retargeted/reused.
   readonly projectId: string;
+  // Optional original read-only bridge admission/locally declined handoff.
+  // Absent for the existing mutation port: its behavior is unchanged.
+  readReason?(): GitIssue | null;
+  declined?(error: unknown): GitIssue | null;
   // Only the original native owner may offer a read result/settled failure after
   // its own process/pipe/close/join accounting. Generic exceptions are unknown.
   observe(): Promise<unknown>;
@@ -117,7 +121,7 @@ export class GitRepositoryController {
     if (!this.state.active) return 'inactive';
     if (!this.port) return 'unavailable';
     if (this.state.busy !== null || this.state.checkingStatus) return 'busy';
-    return this.state.blocked;
+    return this.state.blocked ?? this.port.readReason?.() ?? null;
   }
   private currentReason(): GitIssue | null {
     return this.readReason() ?? (!this.state.observation ? 'no-observation' : this.state.stale ? 'stale-observation' : null);
@@ -152,6 +156,8 @@ export class GitRepositoryController {
   private current(flight: Flight): boolean { return this.flight === flight && this.state.active && this.epoch === flight.epoch; }
   private finish(flight: Flight): void { if (this.flight === flight) { this.flight = null; this.patch({ busy: null }); } }
   private fail(error: unknown): void {
+    const declined = this.port?.declined?.(error);
+    if (declined) { this.patch({ issue: declined }); return; }
     const failure = parseGitFailure(error);
     if (!failure || failure.nativeFinality === 'unknown' || failure.reason === 'unknown') {
       this.patch({ blocked: 'unknown', issue: failure?.reason ?? 'acknowledgement-missing', stale: true, review: this.staleReview() }); return;
