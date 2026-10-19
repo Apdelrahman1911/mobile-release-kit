@@ -87,18 +87,29 @@ function recoveryEvent() {
     phase: 'final', nativeFinality: 'settled', coreOutcome: { effect: 'rolled_back', journal: 'recovery_required', resources: 'settled', reason: 'filesystem_error' } } };
 }
 
-test('exact core rows retain all guide families, scalar/file companions, alternatives and project groups without local policy', () => {
-  const supplied = guide.kinds.flatMap((kind) => kind.fields.map((field) => row(field.requirement, kind.platform, 'candidate', {
+test('shared-policy row fixtures retain guide families, companions and groups without selecting local-only roles', () => {
+  // config.validate -> api._catalog.requirement_descriptors ->
+  // credential_requirements.requirements emits shared WIF policy, not local ADC.
+  // Only api._credential_assessment._applicability selects the local JSON role.
+  // The broader static guide must not manufacture a config.validate descriptor.
+  const policyGuides = guide.kinds.filter((kind) => kind.id !== 'google-service-account');
+  const supplied = policyGuides.flatMap((kind) => kind.fields.map((field) => row(field.requirement, kind.platform, 'candidate', {
     kind: field.input === 'text' ? 'variable' : field.input, alternatives: field.alternatives,
   })));
-  const review = row('MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL', 'ios', 'production', { kind: 'variable' });
+  // Exercise catalogue-only fallback with no guide match. Real review-contact
+  // fields now have their own guide and must not be treated as unmatched.
+  const review = row('MOBILE_RELEASE_SYNTHETIC_REVIEW_FIELD', 'ios', 'production', { kind: 'variable' });
   const unknown = row('MOBILE_RELEASE_UNMATCHED_INPUT', 'project', 'candidate');
   const result = parseReleaseInputResult(valid([...supplied, review, unknown]));
   assert.ok(result);
   const help = parseReleaseInputHelp({ credentialGuide: guide, credentials: [catalogRow(review)] });
+  const localGuide = guide.kinds.find((kind) => kind.id === 'google-service-account');
+  assert.ok(localGuide); assert.equal(localGuide.fields[0].requirement, 'GOOGLE_APPLICATION_CREDENTIALS');
+  assert.deepEqual(help.guide.kinds.find((kind) => kind.id === localGuide.id), localGuide);
+  assert.equal(parseReleaseInputResult(valid([guidedRow(localGuide.id)])), null);
   const rows = releaseInputRows(result, 'candidate', help);
   assert.equal(rows.length, supplied.length + 1);
-  for (const kind of guide.kinds) {
+  for (const kind of policyGuides) {
     const expected = kind.fields.length;
     assert.equal(rows.filter((entry) => entry.guideId === kind.id).length, expected, kind.id);
   }
@@ -110,7 +121,7 @@ test('exact core rows retain all guide families, scalar/file companions, alterna
   assert.deepEqual(grouped.map((group) => group.platform), ['android', 'ios', 'project']);
   assert.equal(grouped.reduce((count, group) => count + group.rows.length, 0), rows.length);
   assert.deepEqual(releaseInputGroups({ pending: true, result, stage: 'candidate', help }), []);
-  const alternativeKind = guide.kinds.find((kind) => kind.fields.some((field) => field.alternatives.length));
+  const alternativeKind = policyGuides.find((kind) => kind.fields.some((field) => field.alternatives.length));
   const field = alternativeKind.fields.find((entry) => entry.alternatives.length);
   const alternative = row(field.alternatives[0], alternativeKind.platform, 'candidate', { alternatives: [field.requirement] });
   assert.equal(releaseInputRows(parseReleaseInputResult(valid([alternative])), 'candidate', help)[0].guideId, alternativeKind.id);
