@@ -10,11 +10,15 @@ from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import stat
+from typing import TYPE_CHECKING
 
 from . import _desktop_version_allocation_protocol as allocation_wire
 from . import version_policy as policy
 from ._desktop_github_engine import ProtocolError, _ID
 from .config import MAX_CONFIG_BYTES, MAX_VERSION_BYTES
+
+if TYPE_CHECKING:
+    from ._desktop_version_allocation_source_provider import Provider
 
 PROTOCOL = "mrk-version-allocation-source/1"
 REQUEST_LIMIT = 8192
@@ -104,15 +108,18 @@ class SourceRequest:
 class Initial:
     id: str
     source: SourceRequest
+    provider: Provider
     clock: dict
     digest: str
 
 
 def parse_initial(raw: bytes) -> Initial:
+    from ._desktop_version_allocation_source_provider import Provider
     row = policy._object(allocation_wire.frame(raw, REQUEST_LIMIT, nodes=256, depth=8), {"protocol", "id", "action"})
     require(row["protocol"] == PROTOCOL)
-    action = policy._object(row["action"], {"source", "clock"})
-    return Initial(policy._match(row["id"], _ID), SourceRequest.parse(action["source"]),
+    action = policy._object(row["action"], {"source", "provider", "clock"})
+    source = SourceRequest.parse(action["source"])
+    return Initial(policy._match(row["id"], _ID), source, Provider.parse(action["provider"], source),
                    allocation_wire._clock(action["clock"]), hashlib.sha256(raw).hexdigest())
 
 

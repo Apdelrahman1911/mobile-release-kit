@@ -21,8 +21,38 @@ accepts the explicitly selected `refs/heads/...` branch without inventing
 executes only its six fixed initial Git queries, at most one pre-PUT status and
 one final status. Each command's **original** `_Outer`/outcome slot is bound before
 any command acquisition; command counts or `CompletedProcess` data alone are not
-finality. `/usr/bin/git` is the existing core path, **not** a newly established
-native executable lease.
+finality. Ordinary local/Store callers retain `/usr/bin/git`. The SOURCE-only
+entry instead requires the closed `macos-clt-git/1` provider below; it never
+asserts those two executables are equivalent.
+
+### Fixed native Git facet
+
+SOURCE INITIAL now requires `action.provider = {kind, native}`. The selector is
+exactly `macos-clt-git/1`; it has no executable-path field. The native projection
+contains current account IDs, the same registered root, root/.git/objects
+identities and full identity/hash records for the fixed CLT Git and HEAD/config/
+index. The child compares these DATA to its own actual held originals. They do
+not manufacture a native nomination or a GitRead ticket.
+
+`HeldProvider` belongs to the same `AllocationSourceRun` before any environment
+or root acquisition. It checks the same account, retains an original `_Reader`
+before opening the fixed `/Library/Developer/CommandLineTools/usr/bin/git`, and
+keeps all seven reader descriptors through the source/C-A-W scope. Every fixed
+tool-path component must be root owned and nonwritable by group/others, with no
+aliases. Initial/final hashes stream <=32 KiB blocks through the same descriptor
+and require real EOF/full identity; the tool is never copied into a 128 MiB byte
+array. Each command checks original edges and native control-file pins against
+the actual `LocalSourceObservation` reader/bytes. Terminal and one consuming
+close plus `assert_closed` are mandatory. Stream/close uncertainty cannot FIN.
+
+The native successor must retain its **own instance** of the existing
+`GitReadSources` SourceBook/Account/SnapshotBook facet before inspection, run its
+original pre-GO and post checks outside Doc/Edit, and close it through the same
+Supervisor native-settlement job. It must also reserve that facet's real working
+storage and enforce its combined capacity + runtime live FDs +32 <=256 check.
+That native implementation is still WIP/unqualified, not supplied by the Python
+selector. No arbitrary executable setter, PATH lookup, extra version command,
+new process runner or borrowed GitRead authority is added.
 
 The source-only entry uses `mrk-version-allocation-source/1` and the original
 bootstrap's duplicated private control/output descriptors. It has no token,
@@ -57,10 +87,15 @@ finish/checkpoints are unchanged and no poisoned dialogue is reopened.
 
 ## Limits and allocation handoff
 
-* Source INITIAL <=8,192 bytes; READY/GO <=512 each; FIN <=2,048. Original work
+* Source INITIAL including the provider <=8,192 bytes; READY/GO <=512 each; FIN <=2,048. Original work
   deadline is at most 60 seconds and finality at most 70, never renewed.
 * Configuration <=512 KiB and version file <=64 KiB. Full source topology uses
   the existing <=96 descriptor quote; preliminary readers close before it opens.
+  The separately held fixed tool adds exactly seven (combined <=103). HEAD stays
+  <=1 KiB and a required index <=2 MiB, not GitRead's broader optional index limit.
+  The tool file bound is 128 MiB; only bounded stream blocks, not that many bytes,
+  are retained in Python. Native census must include the tool reader, stream
+  overlap and parsed provider cells as well as its own original source storage.
   Root is <=24 components; the selected version path <=512 UTF-8 bytes /16 parts.
 * At most eight source commands, each <=10 seconds within the original work
   endpoint, with the unchanged C-A-W cleanup allowance. Existing Git output and
@@ -114,9 +149,10 @@ the explicit version edit/commit is separate from the retained pre-edit request.
 
 `PYTHONPATH=src python3 -B -m unittest discover -s tests/unit -p test_version_allocation_source.py`
 
-28 synthetic cases use task-owned temporary input files, the real fixed readers,
+36 synthetic cases use task-owned temporary input files, the real fixed readers,
 invocation scopes, command admission and pre-IO original slot binding. Git output,
-C-A-W outcomes, private descriptors and native state ACKs are explicitly fake.
+C-A-W outcomes, private descriptors, CLT reader observations and native state ACKs
+are explicitly fake. No system Git file is opened or executed.
 They cover wrong roots before private reads; saved hash/path and full selected
 commit drift; no build/signing/metadata permissions; seven/eight-call schedules;
 Pending ACK ordering; post-PUT failure preserving pending state; GO/ACK/EOF cursor
@@ -126,5 +162,7 @@ HTTP, Store state, installed runtime availability or remote durability.
 The additional refusal cases cover exact success/refusal/count coherence, dirty
 final source without publishing its earlier binding, known cancellation,
 unclassified errors, first-clock failure, nonrenewed tails and retained first
-errors through uncertain cleanup. The 13 existing allocation runtime tests also
+errors through uncertain cleanup. The provider cases check a missing/foreign
+selector, legacy default versus fixed CLT argv, account and native control pins,
+bounded streaming and absorbing tool close failure with no FIN. The 13 existing allocation runtime tests also
 check that its default terminal/ACK behavior remains unchanged.

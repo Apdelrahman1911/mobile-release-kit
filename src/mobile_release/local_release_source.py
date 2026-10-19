@@ -273,7 +273,14 @@ class LocalSourceObservation:
         _need(self.calls <= MAX_CALLS, "budget")
         remaining = self.endpoint - _now()
         _need(remaining >= 1, "deadline")
-        argv = ["/usr/bin/git", "--no-pager", "--no-replace-objects",
+        executable = "/usr/bin/git"
+        candidate = self._composition
+        if candidate is not None:
+            from .version_allocation_source import AllocationSourceRun
+            if type(candidate) is AllocationSourceRun:
+                _need(self.invocation.mode == "allocation-read", "owner")
+                executable = candidate.source_executable(self)
+        argv = [executable, "--no-pager", "--no-replace-objects",
                 "--git-dir=" + str(self.root / ".git"), "--work-tree=" + str(self.root),
                 "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
                 "-c", "core.untrackedCache=false", "-c", "core.filemode=true",
@@ -283,7 +290,6 @@ class LocalSourceObservation:
             "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1",
             "GIT_ALLOW_PROTOCOL": "", "GIT_LITERAL_PATHSPECS": "1", "GIT_ATTR_NOSYSTEM": "1", "GIT_PAGER": "cat"}
         timeout = min(10, math.floor(remaining))
-        candidate = self._composition
         if candidate is not None:
             candidate._arm_source(self, arguments, timeout, limit)
             from .local_ios_candidate_source import IOSCandidateComposition

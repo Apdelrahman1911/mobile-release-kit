@@ -7,7 +7,7 @@ Neither a SourceBinding nor this module enables a native allocation profile.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import os
 import re
@@ -69,6 +69,7 @@ class AllocationSourceRun:
         self.request, self.guard, self.input, self.selected, self.kind = request, guard, source, selected, kind
         self.root = request.root
         self.invocation = self.observation = self.binding = None
+        self.provider = None
         self.configuration_bytes = self.version_bytes = None
         self.readers, self.reader_closes, self.commands = [], [], []
         self.pending = None
@@ -77,6 +78,9 @@ class AllocationSourceRun:
         self.primary = None
         # Original operation retained before environment/root acquisition.
         source.bind_operation(self)
+        if selected is None:
+            from ._desktop_version_allocation_source_provider import HeldProvider
+            self.provider = HeldProvider(self, source.dialogue.initial.provider)
 
     def _owner(self):
         self.input._owner()
@@ -200,6 +204,18 @@ class AllocationSourceRun:
         wire.require(source is self.observation and self.pending is not None and self.pending["command"] is None)
         self.pending["command"] = (tuple(argv), dict(environment))
 
+    def source_executable(self, source):
+        self._owner()
+        wire.require(source is self.observation and source._composition is self)
+        if self.provider is not None:
+            wire.require(self.selected is None)
+            return self.provider.executable(source)
+        # Existing held allocation composition is not a native SOURCE launch.
+        # Its native allocating caller remains unavailable; do not silently
+        # change a legacy Store/local invocation or lend the SOURCE provider.
+        wire.require(self.selected is not None)
+        return "/usr/bin/git"
+
     def command_arguments(self, argv, *, environ, cwd, capture, text, output_limit, on_start,
                           cleanup, execution_scope, journal_binding, evidence):
         self.checkpoint()
@@ -252,6 +268,8 @@ class AllocationSourceRun:
         self.pending = None
         if result.returncode != 0:
             self.failed = True
+        elif self.provider is not None:
+            self.provider.command_returned(source)
 
     def _source_error(self, source, error):
         self._owner()
@@ -294,21 +312,22 @@ class AllocationSourceRun:
                 wire.require(invocation is self.invocation)
                 with invocation.project(signing_lease=None):
                     self._saved()
-                    self.observation = LocalSourceObservation(invocation, self.configuration_bytes, self.version_bytes,
-                                                              self.input.work_end, None)
-                    self.observation._composition = self
-                    self.phase = "capture"
-                    with _retain_source(self.observation):
-                        observed = self.observation.observed
-                        binding = policy.SourceBinding(observed.commit, observed.tree, observed.ref,
-                            hashlib.sha256(self.configuration_bytes).hexdigest(), hashlib.sha256(self.version_bytes).hexdigest())
-                        _saved_need(self.request.matches(binding) and (self.selected is None or self.selected.source == binding))
-                        self.binding = binding
-                        self.phase = "holding"
-                        yield binding
-                        self.phase = "final"
-                    for reader in self.observation.readers:
-                        reader.assert_closed()
+                    with self.provider.hold() if self.provider is not None else nullcontext():
+                        self.observation = LocalSourceObservation(invocation, self.configuration_bytes, self.version_bytes,
+                                                                  self.input.work_end, None)
+                        self.observation._composition = self
+                        self.phase = "capture"
+                        with _retain_source(self.observation):
+                            observed = self.observation.observed
+                            binding = policy.SourceBinding(observed.commit, observed.tree, observed.ref,
+                                hashlib.sha256(self.configuration_bytes).hexdigest(), hashlib.sha256(self.version_bytes).hexdigest())
+                            _saved_need(self.request.matches(binding) and (self.selected is None or self.selected.source == binding))
+                            self.binding = binding
+                            self.phase = "holding"
+                            yield binding
+                            self.phase = "final"
+                        for reader in self.observation.readers:
+                            reader.assert_closed()
             self.phase = "closed"
             wire.require(self.originals_closed())
         except BaseException as error:
@@ -332,6 +351,12 @@ class AllocationSourceRun:
             except BaseException as error:
                 if first is None:
                     first = error
+        if self.provider is not None:
+            try:
+                self.provider.close()
+            except BaseException as error:
+                if first is None:
+                    first = error
         if self.invocation is not None and not self.invocation.claimed:
             try:
                 self.invocation.cleanup()
@@ -350,6 +375,7 @@ class AllocationSourceRun:
         return (self.pending is None and self.commands_settled() and facts.complete and facts.cleanup_complete
                 and facts.contained and not facts.fatal and facts.profile_calls == 0
                 and facts.commands == sum(row["settled"] for row in self.commands)
+                and (self.provider is None or self.provider.originals_closed())
                 and (self.observation is None or self.observation.closed)
                 and (not self.started if self.invocation is None else self.invocation._allocation_source_closed(self)))
 

@@ -27,6 +27,7 @@ from mobile_release import _command_process as commands
 from mobile_release import _desktop_version_allocation_protocol as allocation_wire
 from mobile_release import _desktop_version_allocation_runtime as runtime
 from mobile_release import _desktop_version_allocation_source_protocol as wire
+from mobile_release import _desktop_version_allocation_source_provider as provider
 from mobile_release import build_inputs, checked_files, local_release_source
 from mobile_release import version_allocation as allocation
 from mobile_release import version_allocation_source as source
@@ -44,6 +45,7 @@ from test_version_allocation_state import LOCAL_PROJECT, NativePortFixture
 
 class SourceFixture:
     CONTROL, OUTPUT = 3000, 3001  # Inert numbers; never opened, read or closed.
+    TOOL_FIRST = 4000
 
     def __init__(self, root):
         self.root = root
@@ -70,6 +72,19 @@ class SourceFixture:
         self.native = self.native_journal = None
         self.guard = self.input = self.operation = self.dialogue = None
         self.outcomes = {}
+        # Native snapshot/CLT reader fixture DATA only. No real CLT file is
+        # opened. Project/config/version reads still use the real own-temp _Reader.
+        self.tool_body = b"INERT CLT executable snapshot; never executed\n"
+        self.tool_stats = [root_stat := os.stat("/")]
+        for index in range(1, provider.TOOL_FDS):
+            leaf = index == provider.TOOL_FDS - 1
+            self.tool_stats.append(SimpleNamespace(st_dev=root_stat.st_dev, st_ino=9000 + index,
+                st_mode=(stat.S_IFREG | 0o555) if leaf else (stat.S_IFDIR | 0o755), st_uid=0, st_gid=0,
+                st_nlink=1 if leaf else 2, st_size=len(self.tool_body) if leaf else 4096,
+                st_mtime_ns=123000, st_ctime_ns=123000, st_flags=0))
+        self.tool_offset = 0
+        self.tool_acquired = self.tool_closed = 0
+        self.tool_reads = []
 
     def write(self, relative, body):
         path = self.root / relative
@@ -101,14 +116,56 @@ class SourceFixture:
 
     def initial(self, source_request=None):
         return allocation_wire.encoded({"protocol": wire.PROTOCOL, "id": "source-1", "action": {
-            "source": (source_request or self.source_request()).value(), "clock": self.clock()}}, wire.REQUEST_LIMIT)
+            "source": (source_request or self.source_request()).value(), "provider": self.provider_value(),
+            "clock": self.clock()}}, wire.REQUEST_LIMIT)
+
+    def provider_value(self):
+        def snapshot(value, body):
+            return {"identity": list(checked_files._file_identity(value)), "sha256": hashlib.sha256(body).hexdigest()}
+        return {"kind": provider.KIND, "native": {"uid": os.geteuid(), "gid": os.getegid(), "root": str(self.root),
+            "directories": {name: list(checked_files._directory_identity((self.root / relative).stat()))
+                for name, relative in (("root", ""), ("git", ".git"), ("objects", ".git/objects"))},
+            "tool": snapshot(self.tool_stats[-1], self.tool_body),
+            "files": {name: snapshot((self.root / ".git" / name).stat(), (self.root / ".git" / name).read_bytes())
+                      for name in ("HEAD", "config", "index")}}}
+
+    def _acquire(self, reader, path, policy_value, project_root):
+        if path != provider.TOOL_PATH:
+            return self.real_acquire(reader, path, policy_value, project_root)
+        assert not reader.nodes and not reader.descriptors and project_root is None
+        self.tool_acquired += 1
+        parent = None
+        for index, value in enumerate(self.tool_stats):
+            slot = checked_files._Descriptor(self.TOOL_FIRST + index, "OWNED")
+            reader.descriptors.append(slot)
+            canonical = Path(*provider.TOOL_PATH.parts[:index + 1])
+            node = checked_files._Node(slot, parent, canonical.name if index else "/", canonical,
+                                       value, index < provider.TOOL_FDS - 1)
+            reader.nodes.append(node)
+            parent = slot
+        reader.root = reader.descriptors[0]
+        return reader.nodes[-1]
+
+    def _stat(self, path, *, dir_fd=None, follow_symlinks=True):
+        if dir_fd is not None and self.TOOL_FIRST <= dir_fd < self.TOOL_FIRST + provider.TOOL_FDS - 1:
+            index = dir_fd - self.TOOL_FIRST + 1
+            assert str(path) == provider.TOOL_PATH.parts[index] and not follow_symlinks
+            return self.tool_stats[index]
+        return self.real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
     def _fstat(self, fd):
         if fd in (self.CONTROL, self.OUTPUT):
             return SimpleNamespace(st_dev=17, st_ino=fd, st_mode=stat.S_IFIFO | 0o600)
+        if self.TOOL_FIRST <= fd < self.TOOL_FIRST + provider.TOOL_FDS:
+            return self.tool_stats[fd - self.TOOL_FIRST]
         return self.real_fstat(fd)
 
     def _read(self, fd, count):
+        if fd == self.TOOL_FIRST + provider.TOOL_FDS - 1:
+            self.tool_reads.append(count)
+            body = self.tool_body[self.tool_offset:self.tool_offset + count]
+            self.tool_offset += len(body)
+            return body
         if fd != self.CONTROL:
             assert fd != self.OUTPUT
             return self.real_read(fd, count)
@@ -120,6 +177,13 @@ class SourceFixture:
         if self.eof:
             return b""
         raise BlockingIOError()
+
+    def _lseek(self, fd, offset, origin):
+        if fd == self.TOOL_FIRST + provider.TOOL_FDS - 1:
+            assert offset == 0 and origin == os.SEEK_SET
+            self.tool_offset = 0
+            return 0
+        return self.real_lseek(fd, offset, origin)
 
     def _write(self, fd, raw):
         if fd != self.OUTPUT:
@@ -157,6 +221,9 @@ class SourceFixture:
         if fd in (self.CONTROL, self.OUTPUT):
             self.control_closes += 1
             raise AssertionError("A borrower tried to close a bootstrap descriptor")
+        if self.TOOL_FIRST <= fd < self.TOOL_FIRST + provider.TOOL_FDS:
+            self.tool_closed += 1
+            return
         return self.real_close(fd)
 
     def _select(self, readers, writers, exceptional, timeout):
@@ -201,7 +268,12 @@ class SourceFixture:
     @contextmanager
     def mocks(self):
         self.real_fstat, self.real_read, self.real_write, self.real_close = os.fstat, os.read, os.write, os.close
+        self.real_stat, self.real_lseek, self.real_acquire = os.stat, os.lseek, checked_files._Reader.acquire
         with ExitStack() as stack:
+            stack.enter_context(patch.object(os, "stat", self._stat))
+            stack.enter_context(patch.object(os, "lseek", self._lseek))
+            stack.enter_context(patch.object(checked_files._Reader, "acquire",
+                lambda reader, *args, **kwargs: self._acquire(reader, *args, **kwargs)))
             stack.enter_context(patch.object(os, "fstat", self._fstat))
             stack.enter_context(patch.object(os, "read", self._read))
             stack.enter_context(patch.object(os, "write", self._write))
@@ -346,10 +418,12 @@ class VersionAllocationSourceTests(unittest.TestCase):
         self.assertEqual(f.control_closes, 0)
         self.assertFalse((self.root / ".mobile-release").exists())
         for argv, kw in f.calls:
-            self.assertEqual(argv[0], "/usr/bin/git")
+            self.assertEqual(argv[0], str(provider.TOOL_PATH))
             self.assertIs(kw["text"], False)
             self.assertIsNone(kw["execution_scope"])
             self.assertLessEqual(kw["timeout"], 10)
+        self.assertEqual((f.tool_acquired, f.tool_closed), (1, provider.TOOL_FDS))
+        self.assertTrue(f.tool_reads and max(f.tool_reads) <= provider.STREAM_CHUNK)
 
     def test_same_installed_run_denies_other_invocations_signing_environment_and_materialization(self):
         f = self.fixture
@@ -372,7 +446,10 @@ class VersionAllocationSourceTests(unittest.TestCase):
         f = self.fixture
         r = f.source_request()
         r = replace(r, identity=(r.identity[0], r.identity[1] + 1, *r.identity[2:]))
-        with f.mocks(), patch.object(build_inputs, "_init_pending_names_locked") as inventory:
+        original_native = f.provider_value()
+        original_native["native"]["directories"]["root"] = list(r.identity)
+        with f.mocks(), patch.object(f, "provider_value", return_value=original_native), \
+                patch.object(build_inputs, "_init_pending_names_locked") as inventory:
             with self.assertRaises(build_inputs.BuildInputRootChanged), f.owned(requested=r) as run, run.hold():
                 self.fail("Wrong root admitted")
             inventory.assert_not_called()
@@ -718,6 +795,120 @@ class VersionAllocationSourceTests(unittest.TestCase):
         self.assertIsNone(call.input.first_failure_raw)
         self.assertIsNotNone(call.input.failure_error)
         self.assertFalse(any("finished" in row for row in f.frames))
+
+    def test_source_provider_is_required_closed_and_does_not_inherit_broader_gitread_limits(self):
+        f = self.fixture
+        original = json.loads(f.initial())
+        mutations = (
+            lambda row: row["action"].pop("provider"),
+            lambda row: row["action"]["provider"].update(kind="path"),
+            lambda row: row["action"]["provider"].update(path="/usr/bin/git"),
+            lambda row: row["action"]["provider"]["native"]["files"].update(index=None),
+            lambda row: row["action"]["provider"]["native"]["files"]["HEAD"]["identity"].__setitem__(6, 1025),
+            lambda row: row["action"]["provider"]["native"]["files"]["index"]["identity"].__setitem__(6, (2 << 20) + 1),
+            lambda row: row["action"]["provider"]["native"]["tool"]["identity"].__setitem__(5, 2),
+            lambda row: row["action"]["provider"]["native"]["tool"]["identity"].__setitem__(2, stat.S_IFREG | 0o777),
+            lambda row: row["action"]["provider"]["native"].update(root=str(self.root / "other")),
+        )
+        for change in mutations:
+            row = json.loads(json.dumps(original))
+            change(row)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                wire.parse_initial(policy.canonical(row) + b"\n")
+        self.assertEqual((f.tool_acquired, f.calls), (0, []))
+        self.assertEqual(str(provider.TOOL_PATH), "/Library/Developer/CommandLineTools/usr/bin/git")
+
+    def test_original_tool_hash_mismatch_closes_same_reader_and_never_runs_git_or_fin(self):
+        f = self.fixture
+        row = json.loads(f.initial())
+        row["action"]["provider"]["native"]["tool"]["sha256"] = "0" * 64
+        with f.mocks(), self.assertRaises(ValueError):
+            source.run_owned(f.CONTROL, f.OUTPUT, policy.canonical(row) + b"\n", started=f.now, runtime_dir="/inert/runtime")
+        self.assertEqual(f.calls, [])
+        self.assertEqual((f.tool_acquired, f.tool_closed), (1, provider.TOOL_FDS))
+        self.assertTrue(source._RETAINED[-1].operation.provider.originals_closed())
+        self.assertFalse(any("finished" in frame for frame in f.frames))
+
+    def test_original_native_git_control_mismatch_refuses_before_first_command(self):
+        f = self.fixture
+        row = json.loads(f.initial())
+        row["action"]["provider"]["native"]["files"]["config"]["sha256"] = "0" * 64
+        with f.mocks(), self.assertRaises(ValueError):
+            source.run_owned(f.CONTROL, f.OUTPUT, policy.canonical(row) + b"\n", started=f.now, runtime_dir="/inert/runtime")
+        self.assertEqual(f.calls, [])
+        self.assertEqual(f.tool_closed, provider.TOOL_FDS)
+        self.assertFalse(any("finished" in frame for frame in f.frames))
+
+    def test_original_account_mismatch_refuses_before_provider_acquire(self):
+        f = self.fixture
+        raw = f.initial()
+        with f.mocks(), patch.object(os, "getuid", return_value=os.geteuid() + 1), self.assertRaises(ValueError):
+            source.run_owned(f.CONTROL, f.OUTPUT, raw, started=f.now, runtime_dir="/inert/runtime")
+        self.assertEqual((f.tool_acquired, f.calls), (0, []))
+        operation = source._RETAINED[-1].input.operation
+        self.assertIsNone(operation.invocation)
+        self.assertEqual(operation.readers, [])
+        self.assertFalse(any("finished" in frame for frame in f.frames))
+
+    def test_tool_stream_failure_keeps_reader_close_and_cannot_emit_clean_refusal(self):
+        f = self.fixture
+        def read(fd, count):
+            if fd == f.TOOL_FIRST + provider.TOOL_FDS - 1:
+                raise OSError("inert original tool read failure")
+            return f._read(fd, count)
+        with f.mocks(), patch.object(os, "read", read), self.assertRaises((OSError, ProcessError)):
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir="/inert/runtime")
+        self.assertEqual((f.tool_closed, f.calls), (provider.TOOL_FDS, []))
+        self.assertFalse(any("finished" in frame for frame in f.frames))
+
+    def test_tool_return_lost_close_is_absorbing_without_second_close_or_fin(self):
+        f = self.fixture
+        close = checked_files._Reader.close
+        def lose_close(reader):
+            close(reader)
+            run = source._RETAINED[-1].operation
+            if run is not None and run.provider is not None and reader is run.provider.reader:
+                raise ProcessCleanupError("inert tool close return was lost")
+        with f.mocks(), patch.object(checked_files._Reader, "close", lose_close), self.assertRaises(ProcessError):
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir="/inert/runtime")
+        call = source._RETAINED[-1]
+        self.assertIsNotNone(call.operation.provider.close_error)
+        self.assertTrue(call.guard.lifetime_ledger.fatal)
+        self.assertEqual(f.tool_closed, provider.TOOL_FDS)
+        self.assertFalse(any("finished" in frame for frame in f.frames))
+
+    def test_fixed_tool_is_streamed_in_bounded_chunks_initially_and_at_final_source(self):
+        f = self.fixture
+        f.tool_body = b"inert\0" * 11000
+        f.tool_stats[-1].st_size = len(f.tool_body)
+        with f.mocks():
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir="/inert/runtime")
+        self.assertEqual(len(f.calls), 7)  # No hidden version process.
+        self.assertEqual(f.tool_reads.count(1), 2)  # Actual EOF sentinels for two full hashes.
+        self.assertEqual(max(f.tool_reads), provider.STREAM_CHUNK)
+        self.assertEqual(f.tool_closed, provider.TOOL_FDS)
+
+    def test_ordinary_local_source_argv_and_environment_keep_the_legacy_default(self):
+        # Command-spec DATA only; no Invocation or native admission is forged.
+        observed = object.__new__(local_release_source.LocalSourceObservation)
+        observed._composition = None
+        observed._unchanged = lambda: None
+        observed.calls = 0
+        observed.endpoint = time.monotonic() + 60
+        observed.root = self.root
+        observed.guard = object()
+        observed.execution_source = None
+        calls = []
+        def bounded(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        with patch.object(local_release_source, "run_owned", bounded):
+            self.assertEqual(observed._git(["status", "--porcelain=v1"]), b"")
+        argv, kwargs = calls[0]
+        self.assertEqual(argv[0], "/usr/bin/git")
+        self.assertEqual(kwargs["environ"]["PATH"], "/usr/bin:/bin")
+        self.assertEqual(kwargs["environ"]["GIT_ALLOW_PROTOCOL"], "")
+        self.assertIsNone(kwargs["execution_scope"])
 
 
 if __name__ == "__main__":
