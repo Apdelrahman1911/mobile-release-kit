@@ -30,12 +30,15 @@ pub(crate) struct ExportedBackup {
     recovery: RecoveryCode,
 }
 impl ExportedBackup {
+    #[cfg(test)]
     pub(crate) fn encrypted(&self) -> &[u8] { &self.encrypted }
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
         self.encrypted.capacity().checked_add(std::mem::size_of::<Self>())
     }
-    /// One consuming callback, intended only for the original private native
-    /// code/file or TTY owner. Returning a value does not prove durable delivery.
+    /// Synthetic codec fixture extraction only. Production output remains
+    /// opaque until a concrete original private sink is implemented/reviewed.
+    /// In particular a callback result is never durable delivery evidence.
+    #[cfg(test)]
     pub(crate) fn deliver<R>(self, destination: impl FnOnce(&[u8], &[u8]) -> R) -> R {
         let code = self.recovery.encoded();
         destination(&self.encrypted, &code[..])
