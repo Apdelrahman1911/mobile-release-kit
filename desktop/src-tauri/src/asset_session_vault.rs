@@ -3,6 +3,8 @@
 //! book from inspection until explicit release; keys never become IPC DATA.
 use super::*;
 use crate::{vault_crypto as crypto, vault_format as format, vault_store as store};
+#[path = "credential_assignment_native.rs"]
+mod assignment_native;
 
 // Compiler/codec tests and a same-UID service are not native qualification.
 const DURABLE_QUALIFIED: bool = false;

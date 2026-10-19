@@ -100,12 +100,23 @@ compile_error!("installed remover requires its isolated nonsigning LP64 Mac role
 
 pub mod error;
 pub mod protocol;
+mod service_protocol;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod application_state_store;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod application_service;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod installed_cli_ipc;
+mod installed_cli;
 mod environment;
 mod installation;
 mod release_version_protocol;
 mod candidate_evidence_protocol;
 mod lifecycle_evidence_protocol;
 mod environment_diagnostics_protocol;
+mod tool_preparation;
+mod tool_preparation_adapters;
+mod tool_preparation_protocol;
 mod environment_diagnostics_owner;
 mod offline_preflight_protocol;
 mod local_release_history_protocol;
@@ -232,6 +243,8 @@ const _: () = assert!(!mrk_macos_installed_native::VAULT_HELPER_BUILD, "the app 
 mod vault_format;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 mod vault_crypto;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(crate) mod credential_setup;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 mod vault_store;
 pub mod edit_protocol;
