@@ -324,7 +324,7 @@ export class GitHubConnectionController {
       }
       this.finishGhPending(pending, result.auth.reason); return;
     }
-    if (result.outcome === 'unknown') { this.fail('response-invalid', true); return; }
+    if (result.outcome !== 'http-handoff') { this.fail('response-invalid', true); return; }
     const reply = this.receive(pending.observer, result.connection);
     if (!pending.done && (!reply || !this.originMatches(pending, reply))) this.ghRejected(pending, null);
   }
