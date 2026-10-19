@@ -1116,6 +1116,29 @@ pub use crate::android_service_resident::{ServiceBook,ServiceControl,ServiceRegi
 mod tests {
     use super::*;
     fn bounds() -> Bounds { Bounds { origin: 10, work: 10 + WORK_NS, hard: 10 + HARD_NS } }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_prepare_role_predicate_matches_closed_rust_roles() {
+        unsafe extern "C" {
+            fn mrk_android_client_prepare_role_allowed(client_role: u32, prepare_role: u8) -> std::ffi::c_int;
+        }
+        // Calls the SAME production C predicate used before XPC preparation.
+        // No native client, service, clock, credential or tool is acquired.
+        let query = [prepare::Role::Catalog as u8, prepare::Role::Start as u8,
+            prepare::Role::LocalStoreExecute as u8];
+        for client_role in [0, 1, 2, 3, 4, 5, u32::MAX] {
+            for prepare_role in u8::MIN..=u8::MAX {
+                let expected = match client_role {
+                    1 => prepare_role == prepare::Role::Registration as u8,
+                    2 => query.contains(&prepare_role),
+                    _ => false,
+                };
+                // SAFETY: the linked pure predicate takes only two integers.
+                let actual = unsafe { mrk_android_client_prepare_role_allowed(client_role, prepare_role) };
+                assert_eq!(actual, i32::from(expected), "transport={client_role} prepare={prepare_role}");
+            }
+        }
+    }
     #[test]
     fn never_started_client_retires_its_actual_signal_without_arming_or_native_entry() {
         // GO loss / failed installed-service Check occurs before ClockBridge

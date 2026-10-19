@@ -6,8 +6,8 @@
 use crate::{
     asset_commands::Reason,
     asset_source::{self, ApplicationDirectoryExclusion, ProjectProbe, RegisteredRoot, SourceBook},
-    application_service::{ApplicationService, ReadAccessStatus},
-    application_state_store::{ApplicationDirectoryIdentity, Cleanup, Durability, Effect, PrivateStateDirectory, StateError},
+    application_service::{ApplicationService, ProjectBinding, ReadAccessStatus},
+    application_state_store::{ApplicationDirectoryIdentity, Cleanup, Durability, Effect, NativeUse, PrivateStateDirectory, StateError},
     installed_cli_ipc::{self, ServerHandle},
     service_protocol as p,
 };
@@ -15,7 +15,7 @@ use p::Error;
 use std::{
     collections::BTreeMap,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, TryLockError},
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex as AsyncMutex;
@@ -66,6 +66,37 @@ pub(crate) struct AllowTicket {
     owner: Arc<()>, epoch: u64, source_epoch: u64,
     original: NativeProject, expires: Instant, startup_expires: Instant,
 }
+/// Explicit native Desktop setup, not an agent-access grant. The wrapped
+/// ticket is never passed to finish_allow or exposed through IPC.
+pub(crate) struct NativeStateTicket(AllowTicket);
+/// The original initialized storage binding. This is not a worker-finality
+/// receipt: native consumers must separately hold the Store's NativeUse until
+/// their original jobs (including the last journal write) have actually joined.
+pub(crate) struct NativeStateReady {
+    owner: Arc<()>, source_epoch: u64, original: NativeProject,
+    store: Arc<PrivateStateDirectory>, project: ProjectBinding,
+}
+impl NativeStateReady {
+    pub(crate) fn store(&self) -> &Arc<PrivateStateDirectory> { &self.store }
+    pub(crate) fn project_binding(&self) -> &ProjectBinding { &self.project }
+    /// Call OFF document/host guards, in the parent's retained original IO job.
+    /// Retain the returned lease before admitting any subsequent native work.
+    pub(crate) fn begin_use(self) -> Result<NativeStateLease, StateError> {
+        let native_use = Arc::new(self.store.begin_native_use()?);
+        Ok(NativeStateLease { ready: self, native_use })
+    }
+}
+/// No Drop cleanup: a missing original parent must not make an active native
+/// use look joined. The actual all-jobs receipt gates Store token retirement.
+pub(crate) struct NativeStateLease {
+    ready: NativeStateReady, native_use: Arc<NativeUse>,
+}
+impl NativeStateLease {
+    pub(crate) fn context(&self) -> &NativeStateReady { &self.ready }
+    pub(crate) fn store(&self) -> &Arc<PrivateStateDirectory> { &self.ready.store }
+    pub(crate) fn project_binding(&self) -> &ProjectBinding { &self.ready.project }
+    pub(crate) fn native_use(&self) -> &Arc<NativeUse> { &self.native_use }
+}
 pub(crate) struct SnapshotTicket {
     owner: Arc<()>, source_epoch: u64, original: NativeProject,
 }
@@ -107,9 +138,10 @@ impl HostShutdownReport {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Phase { Dormant, Starting, Listening, Retiring, Closed }
+enum Phase { Dormant, Starting, Ready, Listening, Retiring, Closed }
 struct Control {
     phase: Phase, epoch: u64, source_epoch: u64, pending: Option<u64>, prepared: Option<u64>,
+    prepared_binding: Option<ProjectBinding>,
     native_location: Option<PathBuf>, native_roots: Vec<RegisteredRoot>,
     store: Option<Arc<PrivateStateDirectory>>,
     service: Option<Arc<ApplicationService>>,
@@ -123,7 +155,7 @@ impl Control {
         Ok(())
     }
     fn retire_pending(&mut self) -> Result<(), Error> {
-        self.pending = None; self.prepared = None;
+        self.pending = None; self.prepared = None; self.prepared_binding = None;
         self.epoch = match self.epoch.checked_add(1) {
             Some(value) => value,
             None => { self.fail(HostFailure::simple(HostStage::Admission, Error::StateUnknown)); return Err(Error::StateUnknown); }
@@ -138,12 +170,11 @@ impl Control {
     fn fail(&mut self, failure: HostFailure) {
         self.remember(failure);
         self.fence.get_or_insert(failure.code);
-        self.pending = None; self.prepared = None;
-        if let Some(service) = &self.service {
-            if let Err(error) = service.revoke_agent_read() {
-                self.remember(HostFailure::simple(HostStage::Revoke, error));
-            }
-        }
+        self.pending = None; self.prepared = None; self.prepared_binding = None;
+        // A permanent Host failure must revoke reads immediately, without
+        // waiting behind a service mutex whose owner may be doing Store IO.
+        // The original service/listener still perform their actual shutdown.
+        if let Some(service) = &self.service { service.fence_native_history(); }
     }
 }
 #[derive(Default)]
@@ -164,7 +195,7 @@ impl ApplicationHost {
     /// No path lookup, directory, reservation, socket or background task.
     pub(crate) fn new() -> Self {
         Self { identity: Arc::new(()), control: Mutex::new(Control {
-            phase: Phase::Dormant, epoch: 0, source_epoch: 0, pending: None, prepared: None,
+            phase: Phase::Dormant, epoch: 0, source_epoch: 0, pending: None, prepared: None, prepared_binding: None,
             native_location: None, native_roots: Vec::new(), store: None, service: None,
             registered: BTreeMap::new(), fence: None, failures: Vec::new(),
         }), originals: AsyncMutex::new(Originals::default()), history: Arc::new(identity_history::History::default()) }
@@ -172,28 +203,28 @@ impl ApplicationHost {
     fn lock(&self) -> Result<MutexGuard<'_, Control>, Error> {
         match self.control.lock() {
             Ok(state) => Ok(state),
-            Err(poisoned) => {
-                // Cleanup ONLY: a core mutation must not leave an old fresh
-                // observation readable merely because our invalidation book
-                // was poisoned. Never recover an admission from this guard.
-                let service = {
-                    let mut state = poisoned.into_inner();
-                    state.pending = None; state.prepared = None; state.phase = Phase::Retiring;
-                    state.fence.get_or_insert(Error::StateUnknown);
-                    state.remember(HostFailure::simple(HostStage::Admission, Error::StateUnknown));
-                    state.service.clone()
-                };
-                if let Some(service) = service {
-                    if let Err(error) = service.revoke_agent_read() {
-                        let mut state = match self.control.lock() {
-                            Ok(state) => state, Err(poisoned) => poisoned.into_inner(),
-                        };
-                        state.remember(HostFailure::simple(HostStage::Revoke, error));
-                    }
-                }
-                Err(Error::StateUnknown)
-            }
+            Err(poisoned) => Err(Self::reject_poisoned_control(poisoned.into_inner())),
         }
+    }
+    /// Native admission runs under the original document lock. Older service
+    /// callers may hold Control across IO, so never queue behind that work.
+    fn try_native_lock(&self) -> Result<MutexGuard<'_, Control>, Error> {
+        match self.control.try_lock() {
+            Ok(state) => Ok(state),
+            Err(TryLockError::WouldBlock) => Err(Error::Busy),
+            Err(TryLockError::Poisoned(poisoned)) => Err(Self::reject_poisoned_control(poisoned.into_inner())),
+        }
+    }
+    fn reject_poisoned_control(mut state: MutexGuard<'_, Control>) -> Error {
+        // Cleanup ONLY: never recover an admission from a poisoned guard.
+        state.pending = None; state.prepared = None; state.prepared_binding = None;
+        state.phase = Phase::Retiring;
+        state.fence.get_or_insert(Error::StateUnknown);
+        state.remember(HostFailure::simple(HostStage::Admission, Error::StateUnknown));
+        let service = state.service.clone();
+        drop(state);
+        if let Some(service) = service { service.fence_native_history(); }
+        Error::StateUnknown
     }
     fn check_allow(&self, state: &Control, ticket: &AllowTicket) -> Result<(), Error> {
         state.available()?;
@@ -213,6 +244,7 @@ impl ApplicationHost {
     pub(crate) fn reserve_native_location(&self, app_data: &Path,
         registered_roots: &[RegisteredRoot]) -> Result<(), Error> {
         let mut state = self.lock()?; state.available()?;
+        if state.phase == Phase::Starting { return Err(Error::Busy); }
         if !ordinary_absolute(app_data)
             || app_data.file_name().and_then(|v| v.to_str()) != Some("dev.mobile-release-kit.desktop")
             || registered_roots.len() > p::PROJECT_LIMIT { return Err(Error::InvalidRequest); }
@@ -230,6 +262,10 @@ impl ApplicationHost {
     pub(crate) fn check_project_root(&self, proof: &ProjectProbe) -> Result<(), Error> {
         let mut state = self.lock()?;
         state.available()?;
+        // Native creation uses the complete roster captured at admission.
+        // Refuse publication BEFORE probe/create, not after private files may
+        // already have appeared below a newly selected project.
+        if state.phase == Phase::Starting { return Err(Error::Busy); }
         let root = proof.path();
         let (device, inode) = proof.identity().posix().map_err(source_error)?.service_identity();
         if !ordinary_absolute(root) || inode == 0 { return Err(Error::InvalidRequest); }
@@ -265,6 +301,7 @@ impl ApplicationHost {
     pub(crate) fn native_exclusion_root(&self) -> Result<Option<RegisteredRoot>, Error> {
         let mut state = self.lock()?;
         state.available()?;
+        if state.phase == Phase::Starting { return Err(Error::Busy); }
         let Some(store) = state.store.clone() else { return Ok(None); };
         match held_application_root(&store) {
             Ok(root) => Ok(Some(root)),
@@ -272,10 +309,17 @@ impl ApplicationHost {
         }
     }
     pub(crate) fn begin_allow(&self, original: NativeProject) -> Result<AllowTicket, Error> {
-        let mut state = self.lock()?;
+        self.begin_start(original, true)
+    }
+    pub(crate) fn begin_native_state(&self, original: NativeProject) -> Result<NativeStateTicket, Error> {
+        self.begin_start(original, false).map(NativeStateTicket)
+    }
+    fn begin_start(&self, original: NativeProject, revoke_read: bool) -> Result<AllowTicket, Error> {
+        let mut state = if revoke_read { self.lock()? } else { self.try_native_lock()? };
         state.available()?;
+        if state.phase == Phase::Starting { return Err(Error::Busy); }
         state.retire_pending()?;
-        if let Some(service) = state.service.clone() {
+        if let Some(service) = state.service.clone().filter(|_| revoke_read) {
             if let Err(error) = service.revoke_agent_read() {
                 state.fail(HostFailure::simple(HostStage::Revoke, error)); return Err(error);
             }
@@ -304,10 +348,27 @@ impl ApplicationHost {
     /// retained in the same poll, before any subsequent suspension. An observer
     /// cancelled waiting for this async book has not begun construction.
     pub(crate) async fn prepare(&self, ticket: &AllowTicket, app_data: &Path) -> Result<(), Error> {
+        self.prepare_storage(ticket, app_data, true).await
+    }
+    pub(crate) async fn prepare_native_state(&self, ticket: &NativeStateTicket, app_data: &Path) -> Result<(), Error> {
+        self.prepare_storage(&ticket.0, app_data, false).await
+    }
+    fn startup_current(&self, ticket: &AllowTicket) -> Result<(), Error> {
+        let state = self.lock()?;
+        self.check_startup(&state, ticket)?;
+        if state.phase != Phase::Starting { return Err(Error::AccessDenied); }
+        Ok(())
+    }
+    fn startup_failure(&self, failure: HostFailure) -> Error {
+        if let Ok(mut state) = self.lock() { state.fail(failure); }
+        failure.code
+    }
+    async fn prepare_storage(&self, ticket: &AllowTicket, app_data: &Path, start_agent_endpoint: bool) -> Result<(), Error> {
         let mut originals = self.originals.lock().await;
-        {
+        let roots = {
             let mut state = self.lock()?;
             self.check_startup(&state, ticket)?;
+            if state.phase == Phase::Starting { return Err(Error::Busy); }
             if state.native_location.as_deref() != Some(app_data)
                 || overlap(&ticket.original.canonical_root, app_data) {
                 return Err(Error::Conflict);
@@ -321,74 +382,120 @@ impl ApplicationHost {
             originals.location = Some(app_data.to_owned());
             // The original book is retained BEFORE native entry. A panic or
             // cancellation cannot erase its original acquisition/close facts.
-            // Only an explicit new native Allow may replace a KNOWN closed book.
+            // Only explicit native setup/Allow replaces a KNOWN closed book.
             originals.source_epoch = Some(ticket.epoch);
             originals.source = Some(SourceBook::new()); originals.exclusion = None;
+            state.native_roots.clone()
+        };
+        // No Document, Edit or Host.control guard spans source probing, private
+        // Store creation or the service's existing serialized registration IO.
+        // Originals remains the one retained startup/cleanup owner. Starting
+        // fences changes to the complete native roster until this job returns.
+        let result = async {
             let result = asset_source::probe_application_directory_exclusion(originals.source.as_mut().unwrap(),
-                app_data, &state.native_roots, &mut || Instant::now() >= ticket.startup_expires);
+                app_data, &roots, &mut || self.startup_current(ticket).is_err());
             match result {
                 Ok(proof) => originals.exclusion = Some(proof),
                 Err(reason) => {
                     let error = source_error(reason);
-                    state.fail(HostFailure::simple(HostStage::ProbeSources, error)); return Err(error);
+                    return Err(self.startup_failure(HostFailure::simple(HostStage::ProbeSources, error)));
                 }
             }
             if !originals.source.as_ref().is_some_and(SourceBook::settled) {
-                state.fail(HostFailure::simple(HostStage::CloseSources, Error::StateUnknown)); return Err(Error::StateUnknown);
+                return Err(self.startup_failure(HostFailure::simple(HostStage::CloseSources, Error::StateUnknown)));
             }
-            self.check_startup(&state, ticket)?;
+            self.startup_current(ticket)?;
             let exclusion = originals.exclusion.as_ref().ok_or(Error::StateUnknown)?;
-            let (parent, existing) = exclusion.store_expectation(app_data, &state.native_roots).map_err(source_error)?;
+            let (parent, existing) = exclusion.store_expectation(app_data, &roots).map_err(source_error)?;
             let metadata = |(device, inode, mode, uid, gid)| ApplicationDirectoryIdentity { device, inode, mode, uid, gid };
             let expected = (metadata(parent), existing.map(metadata));
-            let excluded_projects: Vec<_> = state.native_roots.iter().map(|root| root.identity.posix()
+            let excluded_projects: Vec<_> = roots.iter().map(|root| root.identity.posix()
                 .map(|id| id.service_identity()).map_err(source_error)).collect::<Result<_, _>>()?;
             if originals.store.is_none() {
                 let store = match PrivateStateDirectory::open_after_exclusion(app_data, &excluded_projects, expected, ticket.startup_expires) {
                     Ok(store) => Arc::new(store),
-                    Err(error) => { state.fail(HostFailure::storage(HostStage::OpenStore, error)); return Err(error.code); }
+                    Err(error) => return Err(self.startup_failure(HostFailure::storage(HostStage::OpenStore, error))),
                 };
+                // Retain BEFORE rechecking a possibly cancelled native ticket.
                 originals.store = Some(store.clone());
-                state.store = Some(store.clone());
-                if let Err(error) = self.check_startup(&state, ticket) {
-                    state.fail(HostFailure::simple(HostStage::OpenService, error)); return Err(error);
-                }
-                let service = match ApplicationService::open(store) {
-                    Ok(service) => Arc::new(service),
-                    Err(error) => { state.fail(HostFailure::simple(HostStage::OpenService, error)); return Err(error); }
-                };
-                originals.service = Some(service.clone()); state.service = Some(service);
+                self.lock()?.store = Some(store);
             } else if let Err(error) = originals.store.as_ref().unwrap().check_application_exclusion(expected) {
-                state.fail(HostFailure::storage(HostStage::Register, error)); return Err(error.code);
+                return Err(self.startup_failure(HostFailure::storage(HostStage::Register, error)));
             }
-            self.check_startup(&state, ticket)?;
-            let store = originals.store.as_ref().ok_or(Error::StateUnknown)?;
+            self.startup_current(ticket)?;
+            let store = originals.store.as_ref().ok_or(Error::StateUnknown)?.clone();
             for (device, inode) in excluded_projects {
                 if let Err(error) = store.excludes_project(device, inode) {
-                    state.fail(HostFailure::storage(HostStage::Register, error)); return Err(error.code);
+                    return Err(self.startup_failure(HostFailure::storage(HostStage::Register, error)));
                 }
             }
+            self.startup_current(ticket)?;
+            // The service is the existing local project/history owner, not an
+            // agent grant. Native setup needs its stable IDs without an IPC
+            // listener; later explicit Allow reuses these same originals.
+            if originals.service.is_none() {
+                let service = match ApplicationService::open(store.clone()) {
+                    Ok(service) => Arc::new(service),
+                    Err(error) => return Err(self.startup_failure(HostFailure::simple(HostStage::OpenService, error))),
+                };
+                originals.service = Some(service.clone());
+                self.lock()?.service = Some(service);
+            }
+            self.startup_current(ticket)?;
             let service = originals.service.as_ref().ok_or(Error::StateUnknown)?;
-            if let Err(error) = service.register_native(&ticket.original.runtime_id, &ticket.original.canonical_root,
-                ticket.original.device, ticket.original.inode) {
-                state.fail(HostFailure::simple(HostStage::Register, error)); return Err(error);
+            let binding = service.register_native(&ticket.original.runtime_id, &ticket.original.canonical_root,
+                ticket.original.device, ticket.original.inode)
+                .map_err(|error| self.startup_failure(HostFailure::simple(HostStage::Register, error)))?;
+            {
+                let mut state = self.lock()?;
+                self.check_startup(&state, ticket)?;
+                state.registered.insert(ticket.original.runtime_id.clone(), ticket.original.clone());
+                state.prepared_binding = Some(binding);
             }
-            state.registered.insert(ticket.original.runtime_id.clone(), ticket.original.clone());
-        }
-        self.check_startup(&*self.lock()?, ticket)?;
-        if originals.server.is_none() {
-            let service = originals.service.as_ref().ok_or(Error::StateUnknown)?.clone();
-            match installed_cli_ipc::start(service).await {
-                Ok(server) => originals.server = Some(server),
-                Err(error) => {
-                    self.lock()?.fail(HostFailure::simple(HostStage::Start, error));
-                    return Err(error);
+            if start_agent_endpoint && originals.server.is_none() {
+                let service = originals.service.as_ref().ok_or(Error::StateUnknown)?.clone();
+                match installed_cli_ipc::start(service).await {
+                    Ok(server) => originals.server = Some(server),
+                    Err(error) => return Err(self.startup_failure(HostFailure::simple(HostStage::Start, error))),
                 }
             }
-        }
+            self.startup_current(ticket)?;
+            Ok(())
+        }.await;
         let mut state = self.lock()?;
+        // Never change Retiring/Closed back into a reusable phase. A cancelled
+        // ticket may leave real initialized storage, but cannot grant access.
+        if state.phase == Phase::Starting {
+            state.phase = if originals.server.is_some() { Phase::Listening }
+                else if originals.store.is_some() { Phase::Ready } else { Phase::Dormant };
+        }
+        result?;
         self.check_startup(&state, ticket)?;
-        state.phase = Phase::Listening; state.prepared = Some(ticket.epoch);
+        state.prepared = Some(ticket.epoch);
+        Ok(())
+    }
+    pub(crate) fn finish_native_state(&self, ticket: NativeStateTicket, current: &NativeProject) -> Result<NativeStateReady, Error> {
+        let mut state = self.try_native_lock()?;
+        self.check_startup(&state, &ticket.0)?;
+        state.pending = None;
+        if state.prepared.take() != Some(ticket.0.epoch)
+            || !matches!(state.phase, Phase::Ready | Phase::Listening)
+            || !ticket.0.original.same_input(current) { return Err(Error::Conflict); }
+        let project = state.prepared_binding.take().ok_or(Error::StateUnknown)?;
+        if project.canonical_root != current.canonical_root.to_str().ok_or(Error::Conflict)?
+            || (project.device, project.inode) != (current.device, current.inode) { return Err(Error::Conflict); }
+        Ok(NativeStateReady { owner: self.identity.clone(), source_epoch: state.source_epoch,
+            original: current.clone(), project, store: state.store.clone().ok_or(Error::Unavailable)? })
+    }
+    /// A TRY-only memory context recheck, not a Store read or operation grant.
+    pub(crate) fn native_state_current(&self, lease: &NativeStateReady, current: &NativeProject) -> Result<(), Error> {
+        let state = self.try_native_lock()?; state.available()?;
+        if !matches!(state.phase, Phase::Ready | Phase::Listening) { return Err(Error::Busy); }
+        if !Arc::ptr_eq(&self.identity, &lease.owner) || state.source_epoch != lease.source_epoch
+            || !lease.original.same_input(current)
+            || !state.store.as_ref().is_some_and(|store| Arc::ptr_eq(store, &lease.store)) {
+            return Err(Error::Conflict);
+        }
         Ok(())
     }
     /// Call at the genuine original passive completion, after rechecking the
@@ -400,6 +507,7 @@ impl ApplicationHost {
         self.check_allow(&state, &ticket)?;
         state.pending = None;
         let prepared = state.prepared.take();
+        state.prepared_binding = None;
         if prepared != Some(ticket.epoch) || state.phase != Phase::Listening || !ticket.original.same_input(current) {
             return Err(Error::Conflict);
         }
@@ -636,7 +744,9 @@ mod tests {
                 originals.location = Some(app.to_owned());
                 let store = Arc::new(PrivateStateDirectory::open(app).map_err(|error| error.code)?);
                 originals.store = Some(store.clone()); state.store = Some(store.clone());
-                let service = match ApplicationService::open(store) {
+            }
+            if originals.service.is_none() {
+                let service = match ApplicationService::open(originals.store.as_ref().unwrap().clone()) {
                     Ok(service) => Arc::new(service),
                     Err(error) => { state.fail(HostFailure::simple(HostStage::OpenService, error)); return Err(error); }
                 };
@@ -685,6 +795,98 @@ mod tests {
                 assert!(report.failures.contains(&failure));
                 assert!(!f.app.exists());
             }
+        });
+    }
+    #[test]
+    fn native_initialized_state_does_not_grant_cli_and_later_allow_reuses_it() {
+        runtime().block_on(async {
+            let f = Fixture::short(); let project = project(&f); let host = ApplicationHost::new();
+            reserve(&host, &f, &project);
+            let ticket = host.begin_native_state(project.clone()).unwrap();
+            // Same scope as seed_lifecycle_fixture above: actual private Store
+            // and IPC behavior, NOT successful native SourceBook qualification.
+            let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+            let service = Arc::new(ApplicationService::open(store.clone()).unwrap());
+            let binding = service.register_native(&project.runtime_id, &project.canonical_root, project.device, project.inode).unwrap();
+            {
+                let mut originals = host.originals.lock().await;
+                originals.location = Some(f.app.clone()); originals.store = Some(store.clone());
+                originals.service = Some(service.clone());
+                let mut state = host.lock().unwrap();
+                state.store = Some(store.clone()); state.phase = Phase::Ready;
+                state.service = Some(service.clone()); state.prepared_binding = Some(binding.clone());
+                state.registered.insert(project.runtime_id.clone(), project.clone());
+                state.prepared = Some(ticket.0.epoch);
+            }
+            let lease = host.finish_native_state(ticket, &project).unwrap();
+            assert!(Arc::ptr_eq(lease.store(), &store));
+            assert!(lease.project_binding() == &binding);
+            host.native_state_current(&lease, &project).unwrap();
+            {
+                let _held = host.control.lock().unwrap();
+                assert_eq!(host.native_state_current(&lease, &project), Err(Error::Busy));
+            }
+            let mut changed = project.clone(); changed.input_revision += 1;
+            assert_eq!(host.native_state_current(&lease, &changed), Err(Error::Conflict));
+            assert!(!host.status().unwrap().enabled);
+            assert_eq!(installed_cli_ipc::request(&f.app, &list()).await.err(), Some(Error::Unavailable));
+            {
+                let originals = host.originals.lock().await;
+                assert!(Arc::ptr_eq(originals.service.as_ref().unwrap(), &service));
+                assert!(originals.server.is_none());
+            }
+            assert!(!f.app.join(DIRECTORY).join("s").exists());
+            assert!(!f.app.join(DIRECTORY).join("agent.connection").exists());
+            enable(&host, &f, &project).await;
+            assert!(Arc::ptr_eq(host.originals.lock().await.store.as_ref().unwrap(), &store));
+            assert!(Arc::ptr_eq(host.originals.lock().await.service.as_ref().unwrap(), &service));
+            assert!(host.status().unwrap().enabled);
+            assert_eq!(host.status().unwrap().project_ids, vec![binding.project_id]);
+            host.invalidate_native(&project.runtime_id).unwrap();
+            assert_eq!(host.native_state_current(&lease, &project), Err(Error::Conflict));
+            drop(lease);
+            assert!(host.shutdown().await.settled());
+        });
+    }
+    #[test]
+    fn starting_fences_roster_changes_and_cancellation_remains_memory_only() {
+        runtime().block_on(async {
+            let f = Fixture::short(); let project = project(&f); let host = ApplicationHost::new();
+            reserve(&host, &f, &project);
+            let ticket = host.begin_native_state(project.clone()).unwrap();
+            {
+                let state = host.control.lock().unwrap();
+                let pending = state.pending;
+                assert_eq!(host.begin_native_state(project.clone()).err(), Some(Error::Busy));
+                assert_eq!(host.finish_native_state(ticket, &project).err(), Some(Error::Busy));
+                assert_eq!(state.pending, pending);
+            }
+            let ticket = host.begin_native_state(project.clone()).unwrap();
+            // Inert admission state only, no made-up source or IO receipt.
+            host.control.lock().unwrap().phase = Phase::Starting;
+            assert_eq!(host.reserve_native_location(&f.app, &[]), Err(Error::Busy));
+            assert_eq!(host.native_exclusion_root().err(), Some(Error::Busy));
+            assert_eq!(host.begin_allow(project.clone()).err(), Some(Error::Busy));
+            host.retire_allow().unwrap();
+            assert_eq!(host.startup_current(&ticket.0), Err(Error::AccessDenied));
+            assert!(!f.app.exists());
+            assert!(host.shutdown().await.settled());
+        });
+    }
+    #[test]
+    fn failed_host_fences_reads_without_waiting_for_service_io_mutex() {
+        runtime().block_on(async {
+            let f = Fixture::short(); let project = project(&f); let host = ApplicationHost::new();
+            enable(&host, &f, &project).await;
+            let service = host.originals.lock().await.service.as_ref().unwrap().clone();
+            crate::application_service::tests::with_state_locked(&service, || {
+                assert_eq!(host.startup_failure(HostFailure::simple(HostStage::OpenStore, Error::Conflict)), Error::Conflict);
+                assert_eq!(service.native_history_current(), Err(Error::StateUnknown));
+            });
+            // The fence is not a shutdown receipt. The original listener and
+            // Store are still retained for the normal actual joined cleanup.
+            assert!(host.originals.lock().await.server.is_some());
+            assert!(host.shutdown().await.settled());
         });
     }
     #[test]

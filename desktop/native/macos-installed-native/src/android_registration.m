@@ -279,6 +279,13 @@ int mrk_android_client_begin(void *raw) {
 done:
     return client_leave(c,ready);
 }
+// Pure transport/prepare-role DATA only. This does not validate a request or
+// admit IPC; client_exchange retains every original framing/custody check.
+// Transport role2 is query, not prepare role2. Execute is query3/prepare4.
+int mrk_android_client_prepare_role_allowed(uint32_t client_role,uint8_t prepare_role) {
+    return (client_role==1 && prepare_role==1)
+        || (client_role==2 && (prepare_role==2 || prepare_role==3 || prepare_role==4));
+}
 // This is the whole original synchronous proxy invocation. Apple's documented
 // contract says both reply/error blocks run ON THIS CALLING THREAD before the
 // message to the proxy returns. The enclosing returned message, not a flag set
@@ -310,7 +317,7 @@ static int client_exchange(void *raw,const uint8_t *input,size_t count,uint32_t 
             || (receipt && (c->maintenance_phase!=4 || !c->tail_valid || c->facts.slots[6]!=2))) return 0;
     } else if (preparing==1) {
         if (cleanup || count!=MRK_ANDROID_PREPARE_BYTES || memcmp(input,"MRKATP01",8)!=0
-            || (c->role==1 && input[32]!=1) || (c->role==2 && input[32]!=2 && input[32]!=3)) return 0;
+            || !mrk_android_client_prepare_role_allowed(c->role,input[32])) return 0;
     } else if (c->role==1) {
         if (count<32 || count>MRK_ANDROID_MAX_FRAME || (cleanup && input[28]==0)) return 0;
     } else {

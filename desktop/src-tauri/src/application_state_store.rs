@@ -24,16 +24,36 @@ pub(crate) type ApplicationDirectoryExpectation = (ApplicationDirectoryIdentity,
 const HEADER: usize = 52;
 const MAGIC: &[u8; 8] = b"MRKST001";
 const RESERVATION: &[u8] = b"MRK application references v1\nprojects\ncredential-references\nversion-allocations\n";
+const RESERVATION_V2: &[u8] = b"MRK application references v2\nprojects\ncredential-references\nversion-allocations\napple-provisioning\n";
+const APPLE_UPGRADE_INTENT: &str = "apple-provisioning.upgrade-intent";
+const RESERVATION_V2_CANDIDATE: &str = ".reservation-v2.next";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Namespace { Projects, CredentialReferences, VersionAllocations }
+pub(crate) enum Namespace { Projects, CredentialReferences, VersionAllocations, AppleProvisioning }
 impl Namespace {
-    fn file(self) -> &'static str { match self { Self::Projects => "projects.state", Self::CredentialReferences => "credential-references.state", Self::VersionAllocations => "version-allocations.state" } }
-    fn candidate(self) -> &'static str { match self { Self::Projects => ".projects.next", Self::CredentialReferences => ".credential-references.next", Self::VersionAllocations => ".version-allocations.next" } }
-    fn intent(self) -> &'static str { match self { Self::Projects => "projects.intent", Self::CredentialReferences => "credential-references.intent", Self::VersionAllocations => "version-allocations.intent" } }
-    fn tag(self) -> u8 { match self { Self::Projects => 1, Self::CredentialReferences => 2, Self::VersionAllocations => 3 } }
+    fn file(self) -> &'static str { match self { Self::Projects => "projects.state", Self::CredentialReferences => "credential-references.state", Self::VersionAllocations => "version-allocations.state", Self::AppleProvisioning => "apple-provisioning.state" } }
+    fn candidate(self) -> &'static str { match self { Self::Projects => ".projects.next", Self::CredentialReferences => ".credential-references.next", Self::VersionAllocations => ".version-allocations.next", Self::AppleProvisioning => ".apple-provisioning.next" } }
+    fn intent(self) -> &'static str { match self { Self::Projects => "projects.intent", Self::CredentialReferences => "credential-references.intent", Self::VersionAllocations => "version-allocations.intent", Self::AppleProvisioning => "apple-provisioning.intent" } }
+    fn tag(self) -> u8 { match self { Self::Projects => 1, Self::CredentialReferences => 2, Self::VersionAllocations => 3, Self::AppleProvisioning => 4 } }
 }
+// Ordinary first initialization deliberately remains exactly v1/old3.
 const NAMESPACES: [Namespace; 3] = [Namespace::Projects, Namespace::CredentialReferences, Namespace::VersionAllocations];
+const NAMESPACES_V2: [Namespace; 4] = [Namespace::Projects, Namespace::CredentialReferences, Namespace::VersionAllocations, Namespace::AppleProvisioning];
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StoreVersion { V1, V2 }
+impl StoreVersion {
+    fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes == RESERVATION { Ok(Self::V1) }
+        else if bytes == RESERVATION_V2 { Ok(Self::V2) }
+        else { Err(Error::RecoveryRequired.into()) }
+    }
+    fn namespaces(self) -> &'static [Namespace] {
+        match self { Self::V1 => &NAMESPACES, Self::V2 => &NAMESPACES_V2 }
+    }
+    fn supports(self, namespace: Namespace) -> bool {
+        self == Self::V2 || namespace != Namespace::AppleProvisioning
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Revision(pub(crate) u64);
@@ -343,7 +363,8 @@ mod native {
 
     struct Book {
         directory: Option<Directory>, lock: Option<File>, lock_key: FileKey,
-        reservation: FileKey, originals: BTreeMap<Namespace, FileKey>, poisoned: bool, endpoint_active: bool,
+        reservation: FileKey, version: StoreVersion, originals: BTreeMap<Namespace, FileKey>, poisoned: bool, endpoint_active: bool,
+        native_use: Option<std::sync::Arc<()>>,
         #[cfg(test)] cut_after_rename: bool,
     }
     impl Book {
@@ -410,10 +431,21 @@ mod native {
                         }
                         sync(directory.file()?)?;
                     }
-                    let (reservation, contents) = read_private(directory.file()?, "reservation", RESERVATION.len(), None)?;
-                    if contents != RESERVATION { return Err(Error::RecoveryRequired.into()); }
+                    let dir = directory.file()?;
+                    // A mixed/unfinished upgrade is never an empty namespace
+                    // or permission to repair it during ordinary startup.
+                    if named(dir, APPLE_UPGRADE_INTENT)?.is_some() || named(dir, RESERVATION_V2_CANDIDATE)?.is_some() {
+                        return Err(Error::RecoveryRequired.into());
+                    }
+                    let (reservation, contents) = read_private(dir, "reservation", RESERVATION_V2.len(), None)?;
+                    let version = StoreVersion::parse(&contents)?;
+                    if version == StoreVersion::V1 {
+                        for name in [Namespace::AppleProvisioning.file(), Namespace::AppleProvisioning.candidate(), Namespace::AppleProvisioning.intent()] {
+                            if named(dir, name)?.is_some() { return Err(Error::RecoveryRequired.into()); }
+                        }
+                    }
                     let mut originals = BTreeMap::new();
-                    for namespace in NAMESPACES {
+                    for &namespace in version.namespaces() {
                         checkpoint(deadline)?;
                         if named(directory.file()?, namespace.candidate())?.is_some() || named(directory.file()?, namespace.intent())?.is_some() {
                             return Err(Error::RecoveryRequired.into());
@@ -422,13 +454,13 @@ mod native {
                         decode(namespace, &raw)?;
                         originals.insert(namespace, key);
                     }
-                    Ok((reservation, originals))
+                    Ok((reservation, version, originals))
                 })();
-                match load { Ok((reservation, originals)) => Ok((file, lock_key, reservation, originals)), Err(error) => { close(file)?; Err(error) } }
+                match load { Ok((reservation, version, originals)) => Ok((file, lock_key, reservation, version, originals)), Err(error) => { close(file)?; Err(error) } }
             })();
             match result {
-                Ok((lock, lock_key, reservation, originals)) => Ok(Self { book: Mutex::new(Book { directory: Some(directory), lock: Some(lock), lock_key,
-                    reservation, originals, poisoned: false, endpoint_active: false, #[cfg(test)] cut_after_rename: false }) }),
+                Ok((lock, lock_key, reservation, version, originals)) => Ok(Self { book: Mutex::new(Book { directory: Some(directory), lock: Some(lock), lock_key,
+                    reservation, version, originals, poisoned: false, endpoint_active: false, native_use: None, #[cfg(test)] cut_after_rename: false }) }),
                 Err(mut error) => {
                     if created && error.effect == Effect::None {
                         error.effect = Effect::Applied;
@@ -478,8 +510,10 @@ mod native {
         }
         pub(crate) fn read(&self, namespace: Namespace) -> Result<Snapshot> {
             let mut book = self.lock()?;
+            if let Err(error) = book.check() { book.poisoned = true; return Err(error); }
+            // Unsupported optional namespace is not corrupt old3 custody.
+            if !book.version.supports(namespace) { return Err(Error::Unavailable.into()); }
             let result = (|| {
-                book.check()?;
                 let expected = *book.originals.get(&namespace).ok_or_else(|| StateError::from(Error::RecoveryRequired))?;
                 let (_, raw) = read_private(book.directory()?.file()?, namespace.file(), MAX_BYTES + HEADER, Some(expected))?;
                 decode(namespace, &raw)
@@ -490,8 +524,9 @@ mod native {
         pub(crate) fn replace(&self, namespace: Namespace, expected: Revision, bytes: &[u8]) -> Result<Snapshot> {
             if bytes.len() > MAX_BYTES { return Err(Error::InvalidRequest.into()); }
             let mut book = self.lock()?;
+            if let Err(error) = book.check() { book.poisoned = true; return Err(error); }
+            if !book.version.supports(namespace) { return Err(Error::Unavailable.into()); }
             let preflight = (|| {
-                book.check()?;
                 let original = *book.originals.get(&namespace).ok_or_else(|| StateError::from(Error::RecoveryRequired))?;
                 let (_, raw) = read_private(book.directory()?.file()?, namespace.file(), MAX_BYTES + HEADER, Some(original))?;
                 Ok((original, decode(namespace, &raw)?))
@@ -546,7 +581,7 @@ mod native {
         }
         pub(crate) fn close(&self) -> Result<()> {
             let mut book = self.lock()?;
-            if book.endpoint_active { return Err(Error::Busy.into()); }
+            if book.endpoint_active || book.native_use.is_some() { return Err(Error::Busy.into()); }
             book.poisoned = true;
             let mut unknown = false;
             if let Some(lock) = book.lock.take() { unknown |= close(lock).is_err(); }
@@ -554,6 +589,11 @@ mod native {
             if unknown { Err(StateError::unknown(Effect::None)) } else { Ok(()) }
         }
     }
+
+    // Extend this SAME private owner; no second directory/flock or visibility
+    // escape for caller-selected filesystem names is introduced.
+    include!("application_state_store_native_use.rs");
+    include!("application_state_store_apple_upgrade.rs");
 
     #[cfg(test)]
     mod tests {
@@ -771,6 +811,6 @@ fn decode(namespace: Namespace, raw: &[u8]) -> Result<Snapshot> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) use native::{create_private, named, read_private, remove_original, sync, uid, Directory, FileKey, PrivateStateDirectory};
+pub(crate) use native::{create_private, named, read_private, remove_original, sync, uid, Directory, FileKey, NativeUse, PrivateStateDirectory};
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use native::Fixture;
