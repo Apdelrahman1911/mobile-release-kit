@@ -53,6 +53,7 @@ class VersionAllocationStateTests(unittest.TestCase):
         self.port = NativePortFixture(self.events)
         self.journal = s.NativeAllocationJournal(self.port, local_project_id=LOCAL_PROJECT)
         self.journal.enroll_authority(self.authority, self.checkpoint)
+        self.journal.select_candidate(self.authority, request())
         self.remote = Repository(self.ledger, self.authority, self.events)
         self.events.clear()
 
@@ -70,7 +71,7 @@ class VersionAllocationStateTests(unittest.TestCase):
         self.assertEqual(s.AllocationState.parse(state.to_bytes()), state)
         row = state.value()
         variants = [b"", state.to_bytes() + b"\n", b" " + state.to_bytes(), b"x" * (s.MAX_STATE_BYTES + 1),
-                    state.to_bytes().replace(b'"schemaVersion":2', b'"schemaVersion":2,"schemaVersion":2')]
+                    state.to_bytes().replace(b'"schemaVersion":3', b'"schemaVersion":3,"schemaVersion":3')]
         for changes in ({"schemaVersion": True}, {"protocol": "other"}, {"extra": 1},
                         {"authorities": row["authorities"] * 2}, {"authorities": row["authorities"] * 9}):
             variants.append(p.canonical({**row, **changes}) + b"\n")
@@ -134,6 +135,7 @@ class VersionAllocationStateTests(unittest.TestCase):
                 port = NativePortFixture()
                 journal = s.NativeAllocationJournal(port, local_project_id=LOCAL_PROJECT)
                 journal.enroll_authority(self.authority, self.checkpoint)
+                journal.select_candidate(self.authority, request())
                 port.ack = lambda snapshot: change(s.NativeStateWriteAck(snapshot, "committed", "durable", "settled"))
                 result = self.allocate(journal=journal)
                 self.assertEqual(result.reason, "journal-unavailable")
@@ -232,8 +234,10 @@ class VersionAllocationStateTests(unittest.TestCase):
         other_port = NativePortFixture()
         other = s.NativeAllocationJournal(other_port, local_project_id=OTHER_LOCAL_PROJECT)
         other.enroll_authority(self.authority, self.checkpoint)
+        other_request = request(candidate="00000000-0000-4000-8000-000000000009")
+        other.select_candidate(self.authority, other_request)
         first = self.allocate()
-        second = self.allocate(journal=other, selected=request(candidate="00000000-0000-4000-8000-000000000009"))
+        second = self.allocate(journal=other, selected=other_request)
         self.assertEqual((first.status, second.status), ("reserved", "reserved"))
         self.assertEqual(second.reservation.version.build, first.reservation.version.build + 1)
         self.assertEqual(len(self.remote.writes), 2)
@@ -277,10 +281,12 @@ class VersionAllocationStateTests(unittest.TestCase):
                 (s.NativeAllocationJournal(self.port, local_project_id=OTHER_LOCAL_PROJECT), self.authority)):
             pending = replace(self.pending(), authority=authority)
             calls = (lambda: journal.checkpoint(authority),
+                     lambda: journal.admit_request(authority, request()),
                      lambda: journal.pending_for(authority, CANDIDATE),
                      lambda: journal.record_checkpoint(authority, self.checkpoint),
                      lambda: journal.record_pending(pending),
                      lambda: journal.mark_resolved(pending, self.checkpoint),
+                     lambda: journal.record_reused(authority, pending.reservation, self.checkpoint),
                      lambda: journal.mark_rejected(pending))
             before = (self.port.writes, self.port.snapshot)
             for call in calls:
@@ -308,12 +314,16 @@ class VersionAllocationStateTests(unittest.TestCase):
         self.assertEqual((port.writes, port.snapshot.payload, self.remote.requests), (0, raw, []))
         journal.enroll_authority(self.authority, self.checkpoint)
         saved = s.AllocationState.parse(port.snapshot.payload)
-        self.assertEqual(saved.value()["schemaVersion"], 2)
+        self.assertEqual(saved.value()["schemaVersion"], 3)
         self.assertEqual(p.canonical(saved.value()["authorities"]), p.canonical(legacy["authorities"]))
+        self.assertEqual(saved.candidates, ())
+        with self.assertRaises(a.VersionAllocationError):
+            journal.pending_for(self.authority, CANDIDATE)
+        journal.select_candidate(self.authority, request(), reconcile_pending=True)
         self.assertEqual(journal.pending_for(self.authority, CANDIDATE).to_bytes(), pending.to_bytes())
         self.assertEqual(journal.checkpoint(self.authority), advanced)
         self.assertEqual(saved.enrollments, (s.ProjectEnrollment(LOCAL_PROJECT, self.authority.project_id),))
-        self.assertEqual((port.writes, port.snapshot.revision), (1, 8))
+        self.assertEqual((port.writes, port.snapshot.revision), (2, 9))
 
     def test_second_local_enrollment_preserves_current_checkpoint_and_original_pending(self):
         pending = self.pending()
@@ -325,8 +335,13 @@ class VersionAllocationStateTests(unittest.TestCase):
         other.enroll_authority(self.authority, self.checkpoint)  # Approve genesis, never reset to it.
         saved = s.AllocationState.parse(self.port.snapshot.payload)
         self.assertEqual(p.canonical(saved.value()["authorities"]), before)
-        self.assertEqual(other.pending_for(self.authority, CANDIDATE).to_bytes(), pending.to_bytes())
-        self.assertEqual(other.checkpoint(self.authority), advanced)
+        self.assertEqual(saved.enrolled(OTHER_LOCAL_PROJECT, self.authority).pending.to_bytes(), pending.to_bytes())
+        self.assertEqual(saved.enrolled(OTHER_LOCAL_PROJECT, self.authority).checkpoint, advanced)
+        self.assertIsNone(saved.candidate(OTHER_LOCAL_PROJECT))
+        with self.assertRaises(a.VersionAllocationError):
+            other.select_candidate(self.authority, request(), reconcile_pending=True)
+        with self.assertRaises(a.VersionAllocationError):
+            other.pending_for(self.authority, CANDIDATE)
         self.assertEqual(len(saved.enrollments), 2)
         writes = self.port.writes
         for authority in (self.authority, replace(self.authority, repository="other/repository")):
@@ -384,13 +399,15 @@ class VersionAllocationStateTests(unittest.TestCase):
     def test_stale_other_local_adapter_cannot_overwrite_original_pending_or_send(self):
         other = s.NativeAllocationJournal(self.port, local_project_id=OTHER_LOCAL_PROJECT)
         other.enroll_authority(self.authority, self.checkpoint)
+        other_request = request(candidate="00000000-0000-4000-8000-000000000009")
+        other.select_candidate(self.authority, other_request)
         current = s.NativeAllocationJournal(self.port, local_project_id=LOCAL_PROJECT)
         pending = self.pending()
         current.record_pending(pending)
         before = self.port.snapshot
         # Other is legitimately enrolled but its snapshot predates this pending.
         # GETs may precede the stale CAS refusal; not a single PUT may follow it.
-        result = self.allocate(journal=other, selected=request(candidate="00000000-0000-4000-8000-000000000009"))
+        result = self.allocate(journal=other, selected=other_request)
         self.assertEqual((result.status, result.reason), ("recovery-required", "journal-unavailable"))
         self.assertEqual(len(self.remote.requests), 4)
         self.assertEqual(self.remote.writes, [])
@@ -428,8 +445,206 @@ class VersionAllocationStateTests(unittest.TestCase):
             return s.NativeStateWriteAck(snapshot, "committed", "durable", "settled")
         port.ack = acknowledge
         journal.enroll_authority(self.authority, self.checkpoint)
-        self.assertEqual(journal.checkpoint(self.authority), self.checkpoint)
+        self.assertEqual(journal._state.enrolled(LOCAL_PROJECT, self.authority).checkpoint, self.checkpoint)
         self.assertEqual(port.writes, 1)
+
+    def test_selected_full_request_is_durable_before_http_and_same_id_changes_refuse(self):
+        stored = self.port.snapshot
+        selected = self.journal.selected_candidate(self.authority)
+        self.assertEqual(selected, s.SelectedCandidate(LOCAL_PROJECT, request()))
+        changes = (replace(request(), identity_revision="b" * 64),
+                   replace(request(), source=replace(request().source, commit="b" * 40)),
+                   request(increment="major"),
+                   replace(request(), base_version=replace(request().base_version, build=8)),
+                   replace(request(), enabled_platforms=("ios",)))
+        for changed in changes:
+            with self.subTest(changed=changed), self.assertRaises(a.VersionAllocationError):
+                self.journal.select_candidate(self.authority, changed, previous_candidate_id=CANDIDATE)
+            result = self.allocate(selected=changed)
+            self.assertEqual(result.reason, "journal-unavailable")
+        self.assertEqual(self.remote.requests, [])
+        self.assertEqual(self.port.snapshot, stored)
+        def before_first_http():
+            retained = s.AllocationState.parse(self.port.snapshot.payload).candidate(LOCAL_PROJECT)
+            self.assertEqual(retained.request, request())
+            self.assertIsNone(retained.reservation)
+        self.remote.hooks["repository-before"] = before_first_http
+        self.assertEqual(self.allocate().status, "reserved")
+
+    def test_selected_candidate_refresh_and_restart_never_change_request_or_write(self):
+        before = (self.port.snapshot, self.port.writes)
+        first = self.journal.select_candidate(self.authority, request())
+        restarted = s.NativeAllocationJournal(self.port, local_project_id=LOCAL_PROJECT)
+        self.assertEqual(restarted.selected_candidate(self.authority), first)
+        self.assertEqual(restarted.select_candidate(self.authority, request()), first)
+        self.assertEqual((self.port.snapshot, self.port.writes), before)
+        changed = request(candidate="00000000-0000-4000-8000-000000000009")
+        with self.assertRaises(a.VersionAllocationError):
+            restarted.select_candidate(self.authority, changed)
+        with self.assertRaises(a.VersionAllocationError):
+            restarted.select_candidate(self.authority, changed, previous_candidate_id=changed.candidate_id)
+        restarted.select_candidate(self.authority, changed, previous_candidate_id=CANDIDATE)
+        self.assertEqual(restarted.selected_candidate(self.authority).request, changed)
+        self.assertEqual(restarted.checkpoint(self.authority), self.checkpoint)
+        self.assertEqual(self.port.writes, before[1] + 1)
+
+    def test_candidate_selection_unknown_ack_retains_request_and_blocks_all_http(self):
+        port = NativePortFixture()
+        journal = s.NativeAllocationJournal(port, local_project_id=LOCAL_PROJECT)
+        journal.enroll_authority(self.authority, self.checkpoint)
+        port.failure = KeyboardInterrupt("synthetic lost selection acknowledgement")
+        with self.assertRaises(KeyboardInterrupt):
+            journal.select_candidate(self.authority, request())
+        retained = s.AllocationState.parse(port.snapshot.payload).candidate(LOCAL_PROJECT)
+        self.assertEqual(retained.request, request())
+        before = port.writes
+        port.failure = None
+        self.assertEqual(self.allocate(journal=journal).reason, "journal-unavailable")
+        with self.assertRaises(a.VersionAllocationError):
+            journal.select_candidate(self.authority, request())
+        self.assertEqual(port.writes, before)
+        self.assertEqual(self.remote.requests, [])
+
+    def test_resolved_candidate_survives_restart_and_identical_reuse_requires_new_cas_ack(self):
+        first = self.allocate()
+        saved = self.port.snapshot
+        restarted = s.NativeAllocationJournal(self.port, local_project_id=LOCAL_PROJECT)
+        self.assertEqual(restarted.selected_candidate(self.authority).reservation, first.reservation)
+        before = self.port.writes
+        result = self.allocate(journal=restarted)
+        self.assertEqual(result.reservation, first.reservation)
+        self.assertEqual(self.port.snapshot.payload, saved.payload)
+        self.assertEqual((self.port.snapshot.revision, self.port.writes), (saved.revision + 1, before + 1))
+        self.assertEqual(len(self.remote.writes), 1)
+        self.assertEqual(self.events[-1], "native-ack")
+
+    def test_remote_existing_without_local_pending_is_retained_before_result(self):
+        remote_ledger = self.ledger.append(request(), observations(), now=NOW)
+        self.remote.commit(remote_ledger.to_bytes())
+        self.assertIsNone(self.journal.selected_candidate(self.authority).reservation)
+        self.assertIsNone(self.journal.pending_for(self.authority, CANDIDATE))
+        result = self.allocate()
+        self.assertEqual((result.status, result.reservation), ("reserved", remote_ledger.reservations[-1]))
+        self.assertEqual(self.journal.selected_candidate(self.authority).reservation, result.reservation)
+        self.assertEqual(self.remote.writes, [])
+        self.assertEqual(self.events[-1], "native-ack")
+
+    def test_reused_ack_loss_after_applied_cas_retains_data_not_success_and_latches(self):
+        remote_ledger = self.ledger.append(request(), observations(), now=NOW)
+        self.remote.commit(remote_ledger.to_bytes())
+        # The preceding checkpoint ACK succeeds. Only the final reserved-row
+        # write loses its acknowledgement after publishing the synthetic bytes.
+        self.remote.hooks["repository-after"] = lambda: setattr(self.port, "failure", "after")
+        result = self.allocate()
+        self.assertEqual((result.status, result.reason), ("recovery-required", "journal-unavailable"))
+        self.assertIsNone(result.reservation)
+        retained = s.AllocationState.parse(self.port.snapshot.payload).candidate(LOCAL_PROJECT)
+        self.assertEqual(retained.reservation, remote_ledger.reservations[-1])
+        self.assertEqual(self.remote.writes, [])
+        before = (len(self.remote.requests), self.port.writes)
+        self.port.failure = None
+        self.assertEqual(self.allocate().reason, "journal-unavailable")
+        self.assertEqual((len(self.remote.requests), self.port.writes), before)
+
+    def test_identical_payload_new_native_revision_refuses_stale_reused_ack(self):
+        self.allocate()
+        stale = s.NativeAllocationJournal(self.port, local_project_id=LOCAL_PROJECT)
+        before = self.port.snapshot
+        self.port.replace_version_allocations(before.revision, before.payload)
+        current = self.port.snapshot
+        self.assertEqual(current.payload, before.payload)
+        result = self.allocate(journal=stale)
+        self.assertEqual((result.status, result.reason), ("recovery-required", "journal-unavailable"))
+        self.assertIsNone(result.reservation)
+        self.assertEqual(self.port.snapshot, current)
+        self.assertEqual(len(self.remote.writes), 1)
+        with self.assertRaises(a.VersionAllocationError):
+            stale.selected_candidate(self.authority)
+
+    def test_each_local_enrollment_retains_own_resolved_candidate_and_new_selection(self):
+        other_request = request(candidate="00000000-0000-4000-8000-000000000009")
+        other = s.NativeAllocationJournal(self.port, local_project_id=OTHER_LOCAL_PROJECT)
+        other.enroll_authority(self.authority, self.checkpoint)
+        other.select_candidate(self.authority, other_request)
+        first = self.allocate(journal=s.NativeAllocationJournal(self.port, local_project_id=LOCAL_PROJECT))
+        second = self.allocate(journal=s.NativeAllocationJournal(self.port, local_project_id=OTHER_LOCAL_PROJECT),
+                               selected=other_request)
+        self.assertEqual((first.status, second.status), ("reserved", "reserved"))
+        for local, result in ((LOCAL_PROJECT, first), (OTHER_LOCAL_PROJECT, second)):
+            restarted = s.NativeAllocationJournal(self.port, local_project_id=local)
+            self.assertEqual(restarted.selected_candidate(self.authority).reservation, result.reservation)
+        restarted = s.NativeAllocationJournal(self.port, local_project_id=LOCAL_PROJECT)
+        before = s.AllocationState.parse(self.port.snapshot.payload)
+        following = request(candidate="00000000-0000-4000-8000-00000000000a")
+        restarted.select_candidate(self.authority, following, previous_candidate_id=CANDIDATE)
+        after = s.AllocationState.parse(self.port.snapshot.payload)
+        self.assertEqual(after.candidate(OTHER_LOCAL_PROJECT), before.candidate(OTHER_LOCAL_PROJECT))
+        self.assertEqual(after.authorities, before.authorities)
+        self.assertEqual(self.remote.ledger.reservations, (first.reservation, second.reservation))
+
+    def test_unresolved_shared_pending_blocks_new_selection_for_every_local_enrollment(self):
+        self.remote.write_mode = "timeout-before"
+        self.assertEqual(self.allocate().status, "recovery-required")
+        other = s.NativeAllocationJournal(self.port, local_project_id=OTHER_LOCAL_PROJECT)
+        other.enroll_authority(self.authority, self.checkpoint)
+        current = s.NativeAllocationJournal(self.port, local_project_id=LOCAL_PROJECT)
+        before = self.port.snapshot
+        following = request(candidate="00000000-0000-4000-8000-000000000009")
+        for journal, previous in ((current, CANDIDATE), (other, None)):
+            with self.assertRaises(a.VersionAllocationError):
+                journal.select_candidate(self.authority, following, previous_candidate_id=previous)
+        with self.assertRaises(a.VersionAllocationError):
+            other.select_candidate(self.authority, request(), reconcile_pending=True)
+        self.assertEqual(self.port.snapshot, before)
+
+    def test_schema2_pending_is_readonly_unowned_until_explicit_exact_reconcile_selection(self):
+        state = s.AllocationState((s.AuthorityState(self.authority, self.checkpoint, self.pending()),),
+                                  (s.ProjectEnrollment(LOCAL_PROJECT, self.authority.project_id),))
+        row = state.value(); row.pop("candidates"); row["schemaVersion"] = 2
+        raw = p.canonical(row) + b"\n"
+        port = NativePortFixture(); port.snapshot = s.NativeStateSnapshot(7, raw)
+        journal = s.NativeAllocationJournal(port, local_project_id=LOCAL_PROJECT)
+        self.assertEqual((port.writes, port.snapshot.payload), (0, raw))
+        self.assertEqual(s.AllocationState.parse(raw).candidates, ())
+        for invalid in (b" " + raw, raw + b"\n", p.canonical({**row, "candidates": []}) + b"\n"):
+            with self.assertRaises(a.VersionAllocationError):
+                s.AllocationState.parse(invalid)
+        with self.assertRaises(a.VersionAllocationError):
+            journal.select_candidate(self.authority, request())
+        with self.assertRaises(a.VersionAllocationError):
+            journal.select_candidate(self.authority, request(increment="major"), reconcile_pending=True)
+        self.assertEqual(port.writes, 0)
+        journal.select_candidate(self.authority, request(), reconcile_pending=True)
+        saved = s.AllocationState.parse(port.snapshot.payload)
+        self.assertEqual(saved.authorities, state.authorities)
+        self.assertEqual(saved.enrollments, state.enrollments)
+        self.assertEqual(saved.candidate(LOCAL_PROJECT).request, request())
+        self.assertEqual(self.allocate(journal=journal).reason, "pending-unresolved")
+        self.assertEqual(self.remote.writes, [])
+
+    def test_candidate_rows_are_closed_unique_enrolled_bounded_and_reservation_bound(self):
+        self.allocate()
+        state = s.AllocationState.parse(self.port.snapshot.payload)
+        row = state.value(); candidate = row["candidates"][0]
+        bad_reservation = {**candidate["reservation"], "requestSha256": "f" * 64}
+        for candidates in ([candidate, candidate], [{**candidate, "extra": True}],
+                           [{**candidate, "localProjectId": OTHER_LOCAL_PROJECT}],
+                           [{**candidate, "localProjectId": "0" * 32}],
+                           [{**candidate, "request": request(increment="major").value()}],
+                           [{**candidate, "reservation": bad_reservation}],
+                           [candidate] * (s.MAX_CANDIDATES + 1)):
+            with self.subTest(rows=len(candidates)), self.assertRaises(a.VersionAllocationError):
+                s.AllocationState.parse(p.canonical({**row, "candidates": candidates}) + b"\n")
+        # Exercise the actual largest row/rule counts, not a source-text test.
+        rules = tuple(p.RefRule(f"refs/heads/release-{i}", "build") for i in range(p.MAX_RULES))
+        policy = p.VersionPolicy("automatic", rules)
+        locals_ = tuple(f"{index:032x}" for index in range(1, s.MAX_CANDIDATES + 1))
+        requests = tuple(request(candidate=f"00000000-0000-4000-8000-{index:012x}", version_policy=policy)
+                         for index in range(1, s.MAX_CANDIDATES + 1))
+        maximum = s.AllocationState((s.AuthorityState(self.authority, self.checkpoint),),
+            tuple(s.ProjectEnrollment(local, self.authority.project_id) for local in locals_),
+            tuple(s.SelectedCandidate(local, selected) for local, selected in zip(locals_, requests)))
+        self.assertEqual(s.AllocationState.parse(maximum.to_bytes()), maximum)
 
 
 if __name__ == "__main__":

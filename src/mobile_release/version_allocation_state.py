@@ -24,7 +24,11 @@ from ._desktop_github_engine import _decode_json
 PROTOCOL = "mrk-version-allocation-state/1"
 MAX_AUTHORITIES = 8
 MAX_ENROLLMENTS = 64
+MAX_CANDIDATES = MAX_ENROLLMENTS
 MAX_STATE_BYTES = 1024 * 1024
+# Includes the full request in each of 64 selections and its optional reserved
+# row, plus eight pending rows. The unchanged byte cap applies before decoding.
+MAX_STATE_NODES = 50_000
 MAX_REVISION = (1 << 64) - 1
 
 
@@ -58,6 +62,35 @@ class ProjectEnrollment:
     def value(self) -> dict[str, str]:
         return {"localProjectId": self.local_project_id,
                 "authorityProjectId": self.authority_project_id}
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedCandidate:
+    """Durable retry DATA for one explicit local enrollment, not an edit grant.
+
+    The original native admission mints the UUID once. Reading or retrying this
+    row must never mint one, infer an enrollment, or change its full request.
+    """
+    local_project_id: str
+    request: allocation.AllocationRequest
+    reservation: allocation.Reservation | None = None
+
+    def __post_init__(self) -> None:
+        _local_project_id(self.local_project_id)
+        _need(type(self.request) is allocation.AllocationRequest
+              and self.request.version_policy.mode == "automatic")
+        _need(self.reservation is None or type(self.reservation) is allocation.Reservation
+              and self.reservation.request == self.request)
+
+    @classmethod
+    def parse(cls, value: object) -> SelectedCandidate:
+        row = policy._object(value, {"localProjectId", "request", "reservation"})
+        return cls(row["localProjectId"], allocation.AllocationRequest.parse(row["request"]),
+                   None if row["reservation"] is None else allocation.Reservation.parse(row["reservation"]))
+
+    def value(self) -> dict[str, Any]:
+        return {"localProjectId": self.local_project_id, "request": self.request.value(),
+                "reservation": None if self.reservation is None else self.reservation.value()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +132,7 @@ class AuthorityState:
 class AllocationState:
     authorities: tuple[AuthorityState, ...] = ()
     enrollments: tuple[ProjectEnrollment, ...] = ()
+    candidates: tuple[SelectedCandidate, ...] = ()
 
     def __post_init__(self) -> None:
         _need(type(self.authorities) is tuple and len(self.authorities) <= MAX_AUTHORITIES
@@ -110,11 +144,31 @@ class AllocationState:
         local_projects = tuple(item.local_project_id for item in self.enrollments)
         _need(local_projects == tuple(sorted(set(local_projects)))
               and all(item.authority_project_id in projects for item in self.enrollments))
+        _need(type(self.candidates) is tuple and len(self.candidates) <= MAX_CANDIDATES
+              and all(type(item) is SelectedCandidate for item in self.candidates))
+        candidate_locals = tuple(item.local_project_id for item in self.candidates)
+        _need(candidate_locals == tuple(sorted(set(candidate_locals))))
+        seen = set()
+        for item in self.candidates:
+            selected = self.enrolled(item.local_project_id, next(
+                (row.authority for row in self.authorities
+                 if row.authority.project_id == item.request.project_id), None))
+            identity = (item.request.project_id, item.request.candidate_id)
+            _need(identity not in seen)
+            seen.add(identity)
+            if item.reservation is not None:
+                _need(item.reservation.sequence <= selected.checkpoint.sequence)
+                if item.reservation.sequence == selected.checkpoint.sequence:
+                    _need(item.reservation.sha256 == selected.checkpoint.head_sha256)
+            pending = selected.pending
+            if pending is not None and pending.reservation.request.candidate_id == item.request.candidate_id:
+                _need(pending.reservation.request == item.request and item.reservation is None)
 
     def value(self) -> dict[str, Any]:
-        return {"schemaVersion": 2, "protocol": PROTOCOL,
+        return {"schemaVersion": 3, "protocol": PROTOCOL,
                 "authorities": [item.value() for item in self.authorities],
-                "enrollments": [item.value() for item in self.enrollments]}
+                "enrollments": [item.value() for item in self.enrollments],
+                "candidates": [item.value() for item in self.candidates]}
 
     def to_bytes(self) -> bytes:
         raw = policy.canonical(self.value()) + b"\n"
@@ -127,25 +181,34 @@ class AllocationState:
             _need(type(raw) is bytes and 0 < len(raw) <= MAX_STATE_BYTES
                   and raw.endswith(b"\n") and raw.count(b"\n") == 1)
             decoded = _decode_json(raw[:-1], limit=MAX_STATE_BYTES - 1,
-                                   nodes=20_000, depth=20, exact=True)
+                                   nodes=MAX_STATE_NODES, depth=20, exact=True)
             _need(type(decoded) is dict and type(decoded.get("schemaVersion")) is int
-                  and decoded["schemaVersion"] in {1, 2})
-            legacy = decoded["schemaVersion"] == 1
+                  and decoded["schemaVersion"] in {1, 2, 3})
+            version = decoded["schemaVersion"]
             names = {"schemaVersion", "protocol", "authorities"}
-            row = policy._object(decoded, names if legacy else names | {"enrollments"})
+            if version >= 2:
+                names.add("enrollments")
+            if version == 3:
+                names.add("candidates")
+            row = policy._object(decoded, names)
             _need(row["protocol"] == PROTOCOL
                   and type(row["authorities"]) is list
                   and len(row["authorities"]) <= MAX_AUTHORITIES)
-            enrollments = [] if legacy else row["enrollments"]
+            enrollments = [] if version == 1 else row["enrollments"]
             _need(type(enrollments) is list and len(enrollments) <= MAX_ENROLLMENTS)
+            candidates = row["candidates"] if version == 3 else []
+            _need(type(candidates) is list and len(candidates) <= MAX_CANDIDATES)
             result = cls(tuple(AuthorityState.parse(item) for item in row["authorities"]),
-                         tuple(ProjectEnrollment.parse(item) for item in enrollments))
+                         tuple(ProjectEnrollment.parse(item) for item in enrollments),
+                         tuple(SelectedCandidate.parse(item) for item in candidates))
             canonical_row = result.value()
-            if legacy:
-                # Validate schema1's OWN exact encoding. Reading legacy bytes
-                # neither writes schema2 nor guesses a local project mapping.
+            if version < 3:
+                canonical_row.pop("candidates")
+            if version == 1:
                 canonical_row.pop("enrollments")
-                canonical_row["schemaVersion"] = 1
+            # Validate each legacy schema's OWN exact encoding. Constructor
+            # reads never upgrade it or infer local/candidate ownership.
+            canonical_row["schemaVersion"] = version
             _need(policy.canonical(canonical_row) + b"\n" == raw)
             return result
         except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
@@ -162,7 +225,7 @@ class AllocationState:
     def replacing(self, selected: AuthorityState) -> AllocationState:
         self.selected(selected.authority)  # Rebinding, removal and reset are not transitions.
         return AllocationState(tuple(selected if item.authority == selected.authority else item
-                                     for item in self.authorities), self.enrollments)
+                                     for item in self.authorities), self.enrollments, self.candidates)
 
     def enrolled(self, local_project_id: str,
                  authority: allocation.AuthorityRegistration) -> AuthorityState:
@@ -171,6 +234,16 @@ class AllocationState:
               and any(item.local_project_id == local_project_id
                       and item.authority_project_id == authority.project_id for item in self.enrollments))
         return self.selected(authority)
+
+    def candidate(self, local_project_id: str) -> SelectedCandidate | None:
+        _local_project_id(local_project_id)
+        return next((item for item in self.candidates if item.local_project_id == local_project_id), None)
+
+    def selecting(self, candidate: SelectedCandidate) -> AllocationState:
+        _need(type(candidate) is SelectedCandidate)
+        rows = tuple(item for item in self.candidates if item.local_project_id != candidate.local_project_id)
+        return AllocationState(self.authorities, self.enrollments,
+                               tuple(sorted((*rows, candidate), key=lambda item: item.local_project_id)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +298,8 @@ class NativeAllocationJournal:
             self._state = (AllocationState() if snapshot.revision == 0 and snapshot.payload == b""
                            else AllocationState.parse(snapshot.payload))
             self._snapshot = snapshot
+            selected = self._state.candidate(self._local_project_id)
+            self._bound_request = None if selected is None else selected.request
         except Exception:
             self._poisoned = True
             raise allocation.VersionAllocationError("journal-unavailable") from None
@@ -234,7 +309,22 @@ class NativeAllocationJournal:
 
     def _selected(self, authority: allocation.AuthorityRegistration) -> AuthorityState:
         self._usable()
-        return self._state.enrolled(self._local_project_id, authority)
+        selected = self._state.enrolled(self._local_project_id, authority)
+        candidate = self._state.candidate(self._local_project_id)
+        _need(candidate is not None and candidate.request == self._bound_request
+              and candidate.request.project_id == authority.project_id)
+        return selected
+
+    def admit_request(self, authority: allocation.AuthorityRegistration,
+                      request: allocation.AllocationRequest) -> None:
+        self._selected(authority)
+        _need(type(request) is allocation.AllocationRequest and request == self._bound_request)
+
+    def selected_candidate(self, authority: allocation.AuthorityRegistration) -> SelectedCandidate:
+        self._selected(authority)
+        candidate = self._state.candidate(self._local_project_id)
+        _need(candidate is not None)
+        return candidate
 
     def _store(self, state: AllocationState) -> None:
         self._usable()
@@ -248,7 +338,9 @@ class NativeAllocationJournal:
             _need(type(ack) is NativeStateWriteAck and type(ack.snapshot) is NativeStateSnapshot
                   and ack.effect == "committed" and ack.durability == "durable" and ack.cleanup == "settled"
                   and ack.snapshot.revision == self._snapshot.revision + 1 and ack.snapshot.payload == raw)
-            self._state, self._snapshot = state, ack.snapshot
+            selected = state.candidate(self._local_project_id)
+            self._state, self._snapshot, self._bound_request = (
+                state, ack.snapshot, None if selected is None else selected.request)
         except Exception:
             # The write might have happened. Never retry, issue HTTP, erase an
             # intent or reconstruct a new native owner based on an exception.
@@ -281,7 +373,42 @@ class NativeAllocationJournal:
         enrollment = ProjectEnrollment(self._local_project_id, authority.project_id)
         enrollments = tuple(sorted((*self._state.enrollments, enrollment),
                                    key=lambda item: item.local_project_id))
-        self._store(AllocationState(authorities, enrollments))
+        self._store(AllocationState(authorities, enrollments, self._state.candidates))
+
+    def select_candidate(self, authority: allocation.AuthorityRegistration,
+                         request: allocation.AllocationRequest, *,
+                         previous_candidate_id: str | None = None,
+                         reconcile_pending: bool = False) -> SelectedCandidate:
+        """Explicit native selection, not a refresh/retry or UUID generator.
+
+        Changing an existing selection requires a NEW native-minted UUID and
+        the exact previous UUID from that original explicit action. Legacy
+        pending data may only be adopted by explicit exact-request read-only
+        reconciliation; a different local selection can never claim it.
+        """
+        self._usable()
+        selected = self._state.enrolled(self._local_project_id, authority)
+        _need(type(request) is allocation.AllocationRequest and request.project_id == authority.project_id
+              and request.version_policy.mode == "automatic" and type(reconcile_pending) is bool)
+        current = self._state.candidate(self._local_project_id)
+        if current is not None and current.request == request:
+            _need(previous_candidate_id is None)
+            if reconcile_pending:
+                _need(selected.pending is not None and selected.pending.reservation.request == request)
+            return current  # A refresh neither writes nor remints.
+        if current is None:
+            _need(previous_candidate_id is None)
+        else:
+            _need(not reconcile_pending and previous_candidate_id == current.request.candidate_id
+                  and request.candidate_id != current.request.candidate_id)
+        pending = selected.pending
+        if pending is not None:
+            _need(current is None and reconcile_pending and pending.reservation.request == request)
+        else:
+            _need(not reconcile_pending)
+        candidate = SelectedCandidate(self._local_project_id, request)
+        self._store(self._state.selecting(candidate))
+        return candidate
 
     def checkpoint(self, authority: allocation.AuthorityRegistration) -> allocation.Checkpoint:
         return self._selected(authority).checkpoint
@@ -290,6 +417,7 @@ class NativeAllocationJournal:
                     candidate_id: str) -> allocation.PendingAllocation | None:
         allocation._uuid(candidate_id)
         pending = self._selected(authority).pending
+        _need(candidate_id == self._bound_request.candidate_id)
         # One unresolved original sender blocks other candidates for this shared
         # authority, including other enrolled local projects in the same host.
         _need(pending is None or pending.reservation.request.candidate_id == candidate_id)
@@ -312,7 +440,9 @@ class NativeAllocationJournal:
     def record_pending(self, pending: allocation.PendingAllocation) -> None:
         _need(type(pending) is allocation.PendingAllocation)
         selected = self._selected(pending.authority)
-        _need(selected.pending is None and pending.checkpoint == selected.checkpoint)
+        candidate = self.selected_candidate(pending.authority)
+        _need(selected.pending is None and pending.checkpoint == selected.checkpoint
+              and pending.reservation.request == self._bound_request and candidate.reservation is None)
         self._store(self._state.replacing(replace(selected, pending=pending)))
 
     def mark_resolved(self, pending: allocation.PendingAllocation,
@@ -320,13 +450,29 @@ class NativeAllocationJournal:
         _need(type(pending) is allocation.PendingAllocation)
         selected = self._selected(pending.authority)
         _need(selected.pending == pending and checkpoint == selected.checkpoint
-              and checkpoint.sequence >= pending.reservation.sequence)
+              and checkpoint.sequence >= pending.reservation.sequence
+              and pending.reservation.request == self._bound_request)
         if checkpoint.sequence == pending.reservation.sequence:
             _need(checkpoint.head_sha256 == pending.reservation.sha256)
-        self._store(self._state.replacing(replace(selected, pending=None)))
+        retained = replace(self.selected_candidate(pending.authority), reservation=pending.reservation)
+        self._store(self._state.replacing(replace(selected, pending=None)).selecting(retained))
+
+    def record_reused(self, authority: allocation.AuthorityRegistration,
+                      reservation: allocation.Reservation, checkpoint: allocation.Checkpoint) -> None:
+        selected = self._selected(authority)
+        candidate = self.selected_candidate(authority)
+        _need(type(reservation) is allocation.Reservation and reservation.request == self._bound_request
+              and selected.pending is None and checkpoint == selected.checkpoint
+              and checkpoint.sequence >= reservation.sequence
+              and (candidate.reservation is None or candidate.reservation == reservation))
+        if checkpoint.sequence == reservation.sequence:
+            _need(checkpoint.head_sha256 == reservation.sha256)
+        # Even identical already-stored bytes require a fresh native CAS ACK.
+        # This is what detects a stale original adapter on the read/reuse path.
+        self._store(self._state.selecting(replace(candidate, reservation=reservation)))
 
     def mark_rejected(self, pending: allocation.PendingAllocation) -> None:
         _need(type(pending) is allocation.PendingAllocation)
         selected = self._selected(pending.authority)
-        _need(selected.pending == pending)
+        _need(selected.pending == pending and pending.reservation.request == self._bound_request)
         self._store(self._state.replacing(replace(selected, pending=None)))

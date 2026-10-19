@@ -395,12 +395,17 @@ class AllocationJournal(Protocol):
     Pending intents survive errors/restart; only this exact controller's positive
     rejection or matching remote reservation can settle them. The application
     must serialize admission/updates for a project across its local clients.
+    Admission compares the FULL durably selected candidate request, not just its
+    UUID. A remote-existing reservation also needs its own durable local ACK;
+    a previously settled checkpoint alone does not retain the retry identity.
     """
+    def admit_request(self, authority: AuthorityRegistration, request: AllocationRequest) -> None: ...
     def checkpoint(self, authority: AuthorityRegistration) -> Checkpoint: ...
     def pending_for(self, authority: AuthorityRegistration, candidate_id: str) -> PendingAllocation | None: ...
     def record_checkpoint(self, authority: AuthorityRegistration, checkpoint: Checkpoint) -> None: ...
     def record_pending(self, pending: PendingAllocation) -> None: ...
     def mark_resolved(self, pending: PendingAllocation, checkpoint: Checkpoint) -> None: ...
+    def record_reused(self, authority: AuthorityRegistration, reservation: Reservation, checkpoint: Checkpoint) -> None: ...
     def mark_rejected(self, pending: PendingAllocation) -> None: ...
 
 
@@ -561,6 +566,7 @@ def allocate_version(request: AllocationRequest, authority: AuthorityRegistratio
         _need(type(authority) is AuthorityRegistration, "authority-unavailable")
         _need(authority.protected_branch, "authority-untrusted")
         _need(authority.project_id == request.project_id, "authority-changed")
+        persist(journal.admit_request, authority, request)
         checkpoint = persist(journal.checkpoint, authority)
         _need(type(checkpoint) is Checkpoint, "journal-unavailable")
         pending = persist(journal.pending_for, authority, request.candidate_id)
@@ -617,6 +623,9 @@ def allocate_version(request: AllocationRequest, authority: AuthorityRegistratio
             if pending is not None:
                 _need(existing is not None and existing == pending.reservation, "pending-unresolved")
                 persist(journal.mark_resolved, pending, checkpoint)
+            else:
+                _need(existing is not None, "response-invalid")
+                persist(journal.record_reused, authority, existing, checkpoint)
             return outcome("reserved", "none", existing)
         after = before.ledger.append(request, observations, now=clock())
         pending = PendingAllocation(authority, before.checkpoint, before.blob, after.reservations[-1])

@@ -55,8 +55,17 @@ class Journal:
         self.authority = authority
         self.saved_checkpoint = p.canonical(checkpoint.value())
         self.pending = {}
+        self.reservations = {}
         self.events = [] if events is None else events
         self.fail = set()
+
+    def admit_request(self, authority, selected):
+        self.events.append("admit_request")
+        assert authority == self.authority and type(selected) is a.AllocationRequest
+        if "admit_request" in self.fail:
+            raise OSError("synthetic selected request refusal")
+        # This generic controller fixture is not the native candidate selector.
+        # Full durable selected-request matching is exercised by its own tests.
 
     def checkpoint(self, authority):
         self.events.append("checkpoint")
@@ -99,7 +108,21 @@ class Journal:
         assert a.Checkpoint.parse(json.loads(self.saved_checkpoint)) == checkpoint
         candidate = pending.reservation.request.candidate_id
         assert a.PendingAllocation.parse(self.pending[candidate]) == pending
+        self.reservations[candidate] = p.canonical(pending.reservation.value())
         del self.pending[candidate]
+
+    def record_reused(self, authority, reservation, checkpoint):
+        self.events.append("record_reused")
+        assert authority == self.authority and not self.pending
+        assert a.Checkpoint.parse(json.loads(self.saved_checkpoint)) == checkpoint
+        if "record_reused" in self.fail:
+            raise OSError("synthetic reused reservation acknowledgement failure")
+        candidate = reservation.request.candidate_id
+        raw = p.canonical(reservation.value())
+        assert candidate not in self.reservations or self.reservations[candidate] == raw
+        self.reservations[candidate] = raw
+        if "record_reused_after" in self.fail:
+            raise OSError("synthetic acknowledgement lost after reservation was retained")
 
     def mark_rejected(self, pending):
         self.events.append("mark_rejected")
@@ -112,6 +135,7 @@ class Journal:
     def restarted(self, events=None):
         result = Journal(self.authority, a.Checkpoint.parse(json.loads(self.saved_checkpoint)), events)
         result.pending = copy.deepcopy(self.pending)
+        result.reservations = copy.deepcopy(self.reservations)
         return result
 
 
@@ -270,6 +294,35 @@ class VersionAllocationTests(unittest.TestCase):
         self.assertIn("record_checkpoint", self.events)
         self.assertEqual(a.AllocationRequest.parse(request().value()), request())
         self.assertEqual(a.Ledger.parse(self.remote.ledger.to_bytes(), self.authority), self.remote.ledger)
+
+    def test_original_selected_request_admission_precedes_every_http_call(self):
+        self.journal.fail.add("admit_request")
+        result = self.allocate()
+        self.assertEqual((result.status, result.reason), ("recovery-required", "journal-unavailable"))
+        self.assertIsNone(result.reservation)
+        self.assertEqual(self.events, ["admit_request"])
+        self.assertEqual(self.remote.requests, [])
+
+    def test_remote_existing_reservation_requires_local_reused_ack_before_result(self):
+        original = self.allocate()
+        for failure in ("record_reused", "record_reused_after"):
+            with self.subTest(failure=failure):
+                journal = self.journal.restarted(self.events)
+                journal.reservations.clear()  # No selected local reserved row yet.
+                journal.fail.add(failure)
+                result = self.allocate(journal=journal)
+                self.assertEqual((result.status, result.reason), ("recovery-required", "journal-unavailable"))
+                self.assertIsNone(result.reservation)
+                self.assertFalse(result.write_claimed)
+                self.assertEqual(len(self.remote.writes), 1)
+                if failure.endswith("after"):
+                    self.assertEqual(journal.reservations[CANDIDATE], p.canonical(original.reservation.value()))
+                resumed = journal.restarted(self.events)
+                result = self.allocate(journal=resumed)
+                self.assertEqual(result.reservation, original.reservation)
+                self.assertEqual(self.events[-1], "record_reused")
+                self.assertEqual(resumed.reservations[CANDIDATE], p.canonical(original.reservation.value()))
+                self.assertEqual(len(self.remote.writes), 1)
 
     def test_same_candidate_changed_identity_policy_source_platform_or_base_is_conflict(self):
         self.allocate()
