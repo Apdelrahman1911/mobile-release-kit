@@ -529,6 +529,8 @@ struct Reference {
 include!("android_supplier_macos_catalogue.rs");
 #[path = "android_supplier_macos_intel_catalogue.rs"]
 mod intel_catalogue;
+#[path = "android_supplier_macos_acquisition.rs"]
+pub(crate) mod acquisition;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

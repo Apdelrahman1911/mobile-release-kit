@@ -5,6 +5,8 @@ import type { EnvironmentDiagnosticsController, EnvironmentDiagnosticsState } fr
 import type { EnvironmentCheckId, EnvironmentCheckReason, EnvironmentDiagnosticsProjection } from '../environmentDiagnosticsTypes.ts';
 import { Badge, ErrorNotice, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
+import { StagedToolSources } from './StagedToolSources.tsx';
+import type { StagedToolSourcesProps } from './StagedToolSources.tsx';
 
 // Known setup guidance only; no host observation or repair authority.
 const xcodePrerequisites = {
@@ -32,8 +34,9 @@ function StateBadges({ row }: { row: EnvironmentDiagnosticsProjection }) {
     <Badge tone={row.finality === 'settled' ? 'info' : 'warning'}>Native finality: {row.finality}</Badge></div>;
 }
 
-export function EnvironmentDiagnostics({ state, controller, compact = false, loading = false, onShow }: {
+export function EnvironmentDiagnostics({ state, controller, compact = false, loading = false, onShow, stagedTools }: {
   state: EnvironmentDiagnosticsState; controller: EnvironmentDiagnosticsController; compact?: boolean; loading?: boolean; onShow?: () => void;
+  stagedTools?: StagedToolSourcesProps; // Unset until the actual native acquisition owner is wired.
 }) {
   const attempt = state.attempt;
   const active = state.status?.active ?? (attempt?.projection?.finality === 'pending' ? attempt.projection : null);
@@ -52,6 +55,7 @@ export function EnvironmentDiagnostics({ state, controller, compact = false, loa
       description={compact ? 'The original native run remains owned outside the Environment page.' : 'Reuse existing tools first. Checking does not install, update or replace them.'} />
     {!compact && <>
       <p><strong>{guidance.title}</strong></p><p>{guidance.body}</p>
+      {stagedTools && <StagedToolSources {...stagedTools} />}
       <details id="environment-xcode-prerequisites">
         <summary>iOS: exact Xcode setup steps</summary>
         <p><strong>Known setup requirements — not a physical or native check.</strong></p>
