@@ -1,29 +1,19 @@
 import { useState } from 'react';
 import { fieldsFor } from '../catalog.ts';
 import { draftStatus } from '../certainty.ts';
-import { saveHelp } from '../configEdit.ts';
 import { isDirty, savedRevisionFresh, validationFresh } from '../drafts.ts';
 import { guidedConfiguration, guidedConfigFieldMatches } from '../guidedConfiguration.ts';
 import type { ProjectSession } from '../drafts.ts';
 import type { ProjectPathControls } from '../projectPaths.ts';
 import type { Catalog, HelpContent, JsonValue } from '../types.ts';
-import { Badge, EmptyState, ErrorNotice, HelpButton, Issues, SectionHeading } from './Common.tsx';
+import { Badge, EmptyState, ErrorNotice, Issues, SectionHeading } from './Common.tsx';
 import { DraftField } from './Fields.tsx';
 import { Icon } from './Icon.tsx';
-import { DraftReview, reviewHelp } from './DraftReview.tsx';
+import { DraftReview } from './DraftReview.tsx';
+import { DraftSaveActions } from './DraftSaveActions.tsx';
 import { DraftSuggestions } from './DraftSuggestions.tsx';
 import { GuidedConfigurationFields } from './GuidedConfigurationFields.tsx';
 import { RemovedFields } from './RemovedFields.tsx';
-
-const validationHelp: HelpContent = {
-  label: 'Validate draft', requiredness: 'optional',
-  requiredWhen: 'Available when a draft and a compatible native core are loaded.',
-  what: 'Check an in-memory draft against the bundled core’s configuration policy.',
-  why: 'Find format and policy errors before a separate native save review, when that capability is available.',
-  where: 'Use Validate draft after editing the project settings or metadata fields.',
-  format: 'The current structured draft is sent to the read-only core. Nothing is saved.',
-  failure: 'An error leaves your draft intact. Format-valid does not verify files, commands, identities, credentials, tools, Git, or Store readiness.',
-};
 
 interface EditorProps {
   catalog: Catalog | null;
@@ -82,7 +72,7 @@ export function DraftEditor({ catalog, session, metadataOnly = false, preview, c
     {session.sourceChanged && <div className="notice notice-warning"><Icon name="info" /><div><strong>Project files changed outside this draft</strong><p>Your draft has been kept. Keep editing, or choose <strong>Discard draft &amp; reload…</strong> below to replace it with the last checked file contents. Nothing is merged automatically.</p></div></div>}
     {session.snapshotError && <ErrorNotice error={session.snapshotError} title="Refresh failed; your draft was preserved" />}
     {session.editError && <ErrorNotice error={session.editError} title="The draft was not changed" />}
-    {metadataOnly && !contextFresh && <p className="context-refresh-note">Current field requirements have not been reviewed. Use <strong>Review draft changes</strong> for core-derived requirements and conflicts. No dependent values are automatically removed.</p>}
+    {metadataOnly && !contextFresh && <p className="context-refresh-note">Current field requirements have not been reviewed. Open <strong>Check without saving</strong> below and choose <strong>Review draft changes</strong> for missing or conflicting settings. No dependent values are automatically removed.</p>}
     <p className="context-refresh-note">{preview ? 'Example folder only: ' : 'Selected project folder: '}<code>{session.project.path}</code>. Browse existing items inside this folder. Choosing one only edits this draft; it does not create or save files.</p>
     {metadataOnly ? <div className="guided-configuration">
       <div className="editor-controls"><label className="search-field"><Icon name="search" size={17} /><span className="sr-only">Search metadata fields</span><input type="search" value={search} disabled={pathPicker.pendingField !== null} placeholder="Find a setting…" onChange={(event) => { if (pathPicker.pendingField === null) setSearch(event.target.value); }} /></label></div>
@@ -93,12 +83,9 @@ export function DraftEditor({ catalog, session, metadataOnly = false, preview, c
       </section>
       {count === 0 && <div className="card"><EmptyState compact icon="search" title="No matching metadata settings" description="Try a different term." /></div>}
     </div> : <GuidedConfigurationFields catalog={catalog} session={session} preview={preview} pathPicker={pathPicker} reviewReason={reviewReason} onReview={onReview} onEdit={onEdit} onHelp={onHelp} />}
-    <div className="draft-toolbar"><div className="draft-toolbar-status"><Badge tone={status.tone}>{statusText}</Badge><span>Changes stay in this draft</span></div><div className="button-row">
-      <button type="button" className="text-button" disabled={discardReason !== null || (!dirty && !session.sourceChanged && session.removedFields.length === 0)} title={discardReason ?? undefined} onClick={onDiscard}>{session.sourceChanged ? 'Discard draft & reload…' : 'Discard draft changes'}</button>
-      <button type="button" className="button secondary" disabled={saveReason !== null} aria-describedby="draft-save-reason" onClick={onPrepareSave}>Review &amp; save…<Icon name={saveReason === null ? 'search' : 'lock'} size={14} /></button><HelpButton content={saveHelp} onHelp={onHelp} />
-      <button type="button" className="button secondary" disabled={validateReason !== null || checking} aria-describedby="draft-validation-reason" onClick={onValidate}><Icon name={session.validationRequest ? 'refresh' : 'check'} size={17} className={session.validationRequest ? 'spin' : ''} />{session.validationRequest ? 'Validating…' : 'Validate only'}</button><HelpButton content={validationHelp} onHelp={onHelp} />
-      <button type="button" className="button primary" disabled={reviewReason !== null || checking} aria-describedby="draft-review-reason" onClick={onReview}><Icon name={session.reviewRequest ? 'refresh' : 'search'} size={17} className={session.reviewRequest ? 'spin' : ''} />{session.reviewRequest ? 'Reviewing…' : 'Review draft changes'}</button><HelpButton content={reviewHelp} onHelp={onHelp} />
-    </div><p id="draft-save-reason" className="toolbar-reason">Saving: {saveReason ?? 'Opens a separate review of the files to be saved. Nothing is written until you confirm Apply in that review.'}</p>{discardReason && <p className="toolbar-reason">Before discarding: {discardReason}</p>}<p id="draft-validation-reason" className="toolbar-reason">Validation: {validateReason ?? 'Checks the draft’s format only. It does not save files or test a build.'}</p><p id="draft-review-reason" className="toolbar-reason">Draft review: {reviewReason ?? 'Shows changes and missing or conflicting settings. It does not save files.'}</p></div>
+    <DraftSaveActions session={session} status={{ tone: status.tone, label: statusText }} saveReason={saveReason} discardReason={discardReason}
+      validateReason={validateReason} reviewReason={reviewReason} onPrepareSave={onPrepareSave} onDiscard={onDiscard}
+      onValidate={onValidate} onReview={onReview} onHelp={onHelp} />
     <RemovedFields session={session} onUndo={onUndoRemoval} onForget={onForgetRemoval} />
     {session.reviewError && <ErrorNotice error={session.reviewError} title="The draft review could not be prepared" />}
     <DraftReview session={session} catalog={catalog} onRemoveForbidden={onRemoveForbidden} onHelp={onHelp} />
