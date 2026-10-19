@@ -6,7 +6,7 @@ import type { ProjectSession } from './drafts.ts';
 import { copyBoundedComparisonData, parseSavedConfigContent, sameSavedConfig } from './offlinePreflightProtocol.ts';
 import { parseReleaseVersionObservation } from './releaseVersion.ts';
 import type { ReleaseVersionObservation, ReleaseVersionState } from './releaseVersion.ts';
-import type { ApiError, ProjectSnapshot } from './types.ts';
+import type { ApiError, JsonObject, ProjectSnapshot } from './types.ts';
 
 export const EXTERNAL_PROJECT_CHECK_INTERVAL_MS = 30_000;
 export const EXTERNAL_PROJECT_FOCUS_THROTTLE_MS = 5_000;
@@ -77,9 +77,16 @@ export function externalSnapshotComparable(snapshot: ProjectSnapshot): boolean {
 // observedAt is known top-level observation metadata. A configuration/hint
 // named observedAt (or timestamp, revision, etc.) is real DATA and stays here.
 export function sameExternalProjectSnapshot(a: ProjectSnapshot, b: ProjectSnapshot): boolean {
-  const { observedAt: _a, ...left } = a;
-  const { observedAt: _b, ...right } = b;
-  return sameJson(left, right);
+  // Explicit JSON projection of the already parsed schema. Interface types
+  // such as SavedConfigContent/Issue need not expose arbitrary index keys.
+  const comparison = (snapshot: ProjectSnapshot): JsonObject => ({
+    root: snapshot.root, observationScope: snapshot.observationScope,
+    config: { ...snapshot.config, content: snapshot.config.content ? { ...snapshot.config.content } : null,
+      issues: snapshot.config.issues.map((issue) => ({ ...issue })) },
+    discovery: { ...snapshot.discovery, scan: { ...snapshot.discovery.scan }, limits: { ...snapshot.discovery.limits } },
+    assurance: { ...snapshot.assurance }, issues: snapshot.issues.map((issue) => ({ ...issue })),
+  });
+  return sameJson(comparison(a), comparison(b));
 }
 
 // Only an already accepted, still-bound GUI version observation is a baseline.
@@ -122,7 +129,7 @@ export function externalUnavailable(projectId: string, failure: ExternalObservat
     failure === 'mismatch' ? 'Saved files changed during the check. Your draft is kept; refresh before using earlier checks.' :
     'Saved files could not be fully checked. Your draft is kept; refresh before using earlier checks.';
   return { kind: 'unavailable', projectId,
-    error: { code: recovery ? 'cleanup_unknown' : `external_project_${failure}`, message, retryable: !recovery },
+    error: { code: recovery ? 'cleanup_unknown' : `external_project_${failure}`, message, retryable: false },
     notice: { kind: recovery ? 'recovery' : 'unavailable', message, next: recovery ? 'original-recovery' : 'refresh-project' } };
 }
 

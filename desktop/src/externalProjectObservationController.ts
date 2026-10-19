@@ -143,6 +143,9 @@ export class ExternalProjectObservationController {
       session.saveRecoveryRequired || session.saveRecoveryNeedsReload || session.recoveryReloadRequest !== null ||
       Boolean(context.versionState?.pending) || this.otherReason() !== null;
   }
+  // Reentrant host callbacks may acquire a scope despite an earlier null read.
+  // Read it again without TypeScript retaining the pre-callback narrowing.
+  private currentFlight(): Scope | null { return this.flight; }
 
   // Focus calls are coalesced into the original flight, then throttled. Hidden
   // windows do no automatic reads. A paused poll waits another 30s or a focus;
@@ -151,14 +154,16 @@ export class ExternalProjectObservationController {
     if (this.flight) return this.flight.completion;
     if (this.disposed || !this.visible || this.state.recovery) return Promise.resolve();
     this.syncContext();
-    if (this.flight) return this.flight.completion;
+    const afterSync = this.currentFlight();
+    if (afterSync) return afterSync.completion;
     if (this.disposed || !this.visible || this.state.recovery) return Promise.resolve();
     const context = this.options.current(), now = this.clock.now();
     if (this.blocked(context) || this.lastSettledAt !== null && now >= this.lastSettledAt && now - this.lastSettledAt < EXTERNAL_PROJECT_FOCUS_THROTTLE_MS) {
       this.schedule();
       return Promise.resolve();
     }
-    if (this.flight) return this.flight.completion;
+    const afterGuard = this.currentFlight();
+    if (afterGuard) return afterGuard.completion;
     // blocked() established native API + selected session. Recheck again
     // after publishing busy: subscribers can synchronously retire this scope.
     const api = context.api!, session = context.session!;
