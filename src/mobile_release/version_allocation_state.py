@@ -23,6 +23,7 @@ from ._desktop_github_engine import _decode_json
 
 PROTOCOL = "mrk-version-allocation-state/1"
 MAX_AUTHORITIES = 8
+MAX_ENROLLMENTS = 64
 MAX_STATE_BYTES = 1024 * 1024
 MAX_REVISION = (1 << 64) - 1
 
@@ -30,6 +31,33 @@ MAX_REVISION = (1 << 64) - 1
 def _need(condition: bool) -> None:
     if not condition:
         raise allocation.VersionAllocationError("journal-unavailable")
+
+
+def _local_project_id(value: object) -> str:
+    # This is the service's install-local preference identity, NOT the shared
+    # ledger project ID. Equal strings/UUID bytes never infer an enrollment.
+    _need(type(value) is str and len(value) == 32 and value != "0" * 32
+          and all(char in "0123456789abcdef" for char in value))
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectEnrollment:
+    local_project_id: str
+    authority_project_id: str
+
+    def __post_init__(self) -> None:
+        _local_project_id(self.local_project_id)
+        allocation._project_id(self.authority_project_id)
+
+    @classmethod
+    def parse(cls, value: object) -> ProjectEnrollment:
+        row = policy._object(value, {"localProjectId", "authorityProjectId"})
+        return cls(row["localProjectId"], row["authorityProjectId"])
+
+    def value(self) -> dict[str, str]:
+        return {"localProjectId": self.local_project_id,
+                "authorityProjectId": self.authority_project_id}
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,16 +98,23 @@ class AuthorityState:
 @dataclass(frozen=True, slots=True)
 class AllocationState:
     authorities: tuple[AuthorityState, ...] = ()
+    enrollments: tuple[ProjectEnrollment, ...] = ()
 
     def __post_init__(self) -> None:
         _need(type(self.authorities) is tuple and len(self.authorities) <= MAX_AUTHORITIES
               and all(type(item) is AuthorityState for item in self.authorities))
         projects = tuple(item.authority.project_id for item in self.authorities)
         _need(projects == tuple(sorted(set(projects))))
+        _need(type(self.enrollments) is tuple and len(self.enrollments) <= MAX_ENROLLMENTS
+              and all(type(item) is ProjectEnrollment for item in self.enrollments))
+        local_projects = tuple(item.local_project_id for item in self.enrollments)
+        _need(local_projects == tuple(sorted(set(local_projects)))
+              and all(item.authority_project_id in projects for item in self.enrollments))
 
     def value(self) -> dict[str, Any]:
-        return {"schemaVersion": 1, "protocol": PROTOCOL,
-                "authorities": [item.value() for item in self.authorities]}
+        return {"schemaVersion": 2, "protocol": PROTOCOL,
+                "authorities": [item.value() for item in self.authorities],
+                "enrollments": [item.value() for item in self.enrollments]}
 
     def to_bytes(self) -> bytes:
         raw = policy.canonical(self.value()) + b"\n"
@@ -91,13 +126,27 @@ class AllocationState:
         try:
             _need(type(raw) is bytes and 0 < len(raw) <= MAX_STATE_BYTES
                   and raw.endswith(b"\n") and raw.count(b"\n") == 1)
-            row = policy._object(_decode_json(raw[:-1], limit=MAX_STATE_BYTES - 1,
-                nodes=20_000, depth=20, exact=True), {"schemaVersion", "protocol", "authorities"})
-            _need(type(row["schemaVersion"]) is int and row["schemaVersion"] == 1
-                  and row["protocol"] == PROTOCOL and type(row["authorities"]) is list
+            decoded = _decode_json(raw[:-1], limit=MAX_STATE_BYTES - 1,
+                                   nodes=20_000, depth=20, exact=True)
+            _need(type(decoded) is dict and type(decoded.get("schemaVersion")) is int
+                  and decoded["schemaVersion"] in {1, 2})
+            legacy = decoded["schemaVersion"] == 1
+            names = {"schemaVersion", "protocol", "authorities"}
+            row = policy._object(decoded, names if legacy else names | {"enrollments"})
+            _need(row["protocol"] == PROTOCOL
+                  and type(row["authorities"]) is list
                   and len(row["authorities"]) <= MAX_AUTHORITIES)
-            result = cls(tuple(AuthorityState.parse(item) for item in row["authorities"]))
-            _need(result.to_bytes() == raw)
+            enrollments = [] if legacy else row["enrollments"]
+            _need(type(enrollments) is list and len(enrollments) <= MAX_ENROLLMENTS)
+            result = cls(tuple(AuthorityState.parse(item) for item in row["authorities"]),
+                         tuple(ProjectEnrollment.parse(item) for item in enrollments))
+            canonical_row = result.value()
+            if legacy:
+                # Validate schema1's OWN exact encoding. Reading legacy bytes
+                # neither writes schema2 nor guesses a local project mapping.
+                canonical_row.pop("enrollments")
+                canonical_row["schemaVersion"] = 1
+            _need(policy.canonical(canonical_row) + b"\n" == raw)
             return result
         except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
             raise allocation.VersionAllocationError("journal-unavailable") from None
@@ -113,7 +162,15 @@ class AllocationState:
     def replacing(self, selected: AuthorityState) -> AllocationState:
         self.selected(selected.authority)  # Rebinding, removal and reset are not transitions.
         return AllocationState(tuple(selected if item.authority == selected.authority else item
-                                     for item in self.authorities))
+                                     for item in self.authorities), self.enrollments)
+
+    def enrolled(self, local_project_id: str,
+                 authority: allocation.AuthorityRegistration) -> AuthorityState:
+        _local_project_id(local_project_id)
+        _need(type(authority) is allocation.AuthorityRegistration
+              and any(item.local_project_id == local_project_id
+                      and item.authority_project_id == authority.project_id for item in self.enrollments))
+        return self.selected(authority)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,8 +211,12 @@ class NativeAllocationJournal:
     no-claim/conditional-rejection fact; absence during reconciliation cannot
     clear an intent. Opening reads only; enrollment is a separate explicit setup
     action after the original native owner verifies the approved remote genesis.
+    The native owner derives local_project_id from its original registered-root
+    binding; accepting an ID here is DATA, not a substitute for that admission.
+    Shared AllocationRequest.project_id always remains the authority's ID.
     """
-    def __init__(self, port: VersionAllocationsPort) -> None:
+    def __init__(self, port: VersionAllocationsPort, *, local_project_id: str) -> None:
+        self._local_project_id = _local_project_id(local_project_id)
         self._port = port
         self._poisoned = False
         try:
@@ -173,35 +234,54 @@ class NativeAllocationJournal:
 
     def _selected(self, authority: allocation.AuthorityRegistration) -> AuthorityState:
         self._usable()
-        return self._state.selected(authority)
+        return self._state.enrolled(self._local_project_id, authority)
 
     def _store(self, state: AllocationState) -> None:
         self._usable()
         _need(self._snapshot.revision < MAX_REVISION)
         raw = state.to_bytes()
+        # Latch BEFORE the original call. BaseException/cancellation and a
+        # reentrant port callback must not leave another usable write path.
+        self._poisoned = True
         try:
             ack = self._port.replace_version_allocations(self._snapshot.revision, raw)
             _need(type(ack) is NativeStateWriteAck and type(ack.snapshot) is NativeStateSnapshot
                   and ack.effect == "committed" and ack.durability == "durable" and ack.cleanup == "settled"
                   and ack.snapshot.revision == self._snapshot.revision + 1 and ack.snapshot.payload == raw)
+            self._state, self._snapshot = state, ack.snapshot
         except Exception:
             # The write might have happened. Never retry, issue HTTP, erase an
             # intent or reconstruct a new native owner based on an exception.
-            self._poisoned = True
             raise allocation.VersionAllocationError("journal-unavailable") from None
-        self._state, self._snapshot = state, ack.snapshot
+        self._poisoned = False  # Only the exact acknowledged state was adopted.
 
     def enroll_authority(self, authority: allocation.AuthorityRegistration,
                          checkpoint: allocation.Checkpoint) -> None:
-        """Explicit local retention of VERIFIED genesis; no remote initialization."""
+        """Explicit native-approved local-to-shared enrollment; no remote IO.
+
+        A new local project may select an already retained identical authority.
+        Its supplied verified genesis NEVER replaces the current checkpoint or
+        pending sender. Legacy schema1 upgrades only on this explicit action.
+        Removing/rebinding a local enrollment needs a separate reviewed design.
+        """
         self._usable()
         _need(type(authority) is allocation.AuthorityRegistration
+              and authority.protected_branch
               and type(checkpoint) is allocation.Checkpoint and checkpoint.sequence == 0
               and checkpoint.head_sha256 == authority.genesis_sha256
-              and all(item.authority.project_id != authority.project_id for item in self._state.authorities))
-        selected = AuthorityState(authority, checkpoint)
-        self._store(AllocationState(tuple(sorted((*self._state.authorities, selected),
-                                                key=lambda item: item.authority.project_id))))
+              and all(item.local_project_id != self._local_project_id for item in self._state.enrollments))
+        existing = next((item for item in self._state.authorities
+                         if item.authority.project_id == authority.project_id), None)
+        if existing is None:
+            authorities = tuple(sorted((*self._state.authorities, AuthorityState(authority, checkpoint)),
+                                       key=lambda item: item.authority.project_id))
+        else:
+            _need(existing.authority == authority)
+            authorities = self._state.authorities
+        enrollment = ProjectEnrollment(self._local_project_id, authority.project_id)
+        enrollments = tuple(sorted((*self._state.enrollments, enrollment),
+                                   key=lambda item: item.local_project_id))
+        self._store(AllocationState(authorities, enrollments))
 
     def checkpoint(self, authority: allocation.AuthorityRegistration) -> allocation.Checkpoint:
         return self._selected(authority).checkpoint
@@ -210,8 +290,8 @@ class NativeAllocationJournal:
                     candidate_id: str) -> allocation.PendingAllocation | None:
         allocation._uuid(candidate_id)
         pending = self._selected(authority).pending
-        # One unresolved original sender blocks other candidates for this local
-        # project; its private intent must not be hidden by a different lookup.
+        # One unresolved original sender blocks other candidates for this shared
+        # authority, including other enrolled local projects in the same host.
         _need(pending is None or pending.reservation.request.candidate_id == candidate_id)
         return pending
 
