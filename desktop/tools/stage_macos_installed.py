@@ -2502,8 +2502,11 @@ observations. Artifact availability is not application or distribution acceptanc
 No fixture-eight, removal/recovery, UI, normal-Quit or downloaded Gatekeeper
 qualification is inferred. Independent checks may be missing, skipped or failed.
 
-Use only a fresh disposable macOS 26 system matching PREVIEW.json's architecture
-and synthetic project data. Do not supply live Store or production credentials.
+Requires macOS 26.0 or newer and the native architecture in PREVIEW.json. No
+arbitrary upper macOS version limit is imposed; newer-version runtime acceptance
+still depends on its actual platform/security checks. A build on macOS 26 is not
+verification on macOS 27. Use a fresh disposable test system and synthetic project
+data. Do not supply live Store or production credentials.
 Open MobileReleaseKit.dmg in Finder, then Install.pkg inside the read-only image.
 Keep producer.json and producer.sig beside it; do not extract a standalone package.
 Installer requires normal administrator approval. After installation, the ordinary

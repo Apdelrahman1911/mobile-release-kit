@@ -4,7 +4,7 @@
   <options customize="never" require-scripts="false" allow-external-scripts="false" rootVolumeOnly="true"/>
   <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
   <volume-check script="true">
-    <allowed-os-versions><os-version min="26.0" before="27.0"/></allowed-os-versions>
+    <allowed-os-versions><os-version min="26.0"/></allowed-os-versions>
   </volume-check>
   <readme file="InstallerReadMe.html"/>
   <choices-outline><line choice="prepare-xcode"/></choices-outline>

@@ -50,11 +50,31 @@ int mrk_platform_native_data(const char *sysname, const char *machine, int retur
     // Apple's documented absent-key native case, after compiled-machine match.
     return returned == -1 && observed_errno == ENOENT ? 0 : ENOTSUP;
 }
+// kern.osproductversion, NOT uname's Darwin kernel release or the OS build ID.
+// Keep the bounded complete major.minor[.patch] representation and a minimum
+// product version only. Saturating the major comparison avoids an upper ceiling
+// or integer overflow; no version string replaces native-machine observation.
+int mrk_platform_product_version_data(const char *version, size_t length) {
+    if (!version || length < 4 || length >= 64 || version[length - 1] != '\0') return ENOTSUP;
+    size_t at = 0; unsigned parts = 0, major = 0;
+    while (at < length - 1) {
+        size_t start = at;
+        while (at < length - 1 && version[at] >= '0' && version[at] <= '9') {
+            if (parts == 0) major = major >= 26 ? 26 : major * 10 + (unsigned)(version[at] - '0');
+            ++at;
+        }
+        if (at == start || (at - start > 1 && version[start] == '0')) return ENOTSUP;
+        ++parts;
+        if (at == length - 1) break;
+        if (version[at++] != '.' || parts == 3 || at == length - 1) return ENOTSUP;
+    }
+    return (parts == 2 || parts == 3) && major >= 26 ? 0 : ENOTSUP;
+}
 int mrk_platform(void) {
     struct utsname u; char version[64] = {0}; size_t length = sizeof(version);
     if (uname(&u) || strcmp(u.sysname, "Darwin") || strcmp(u.machine, MRK_NATIVE_MACHINE)) return ENOTSUP;
-    if (sysctlbyname("kern.osproductversion", version, &length, NULL, 0) || length == 0 || length >= sizeof(version)
-        || strncmp(version, "26.", 3)) return ENOTSUP;
+    if (sysctlbyname("kern.osproductversion", version, &length, NULL, 0)
+        || mrk_platform_product_version_data(version, length)) return ENOTSUP;
     int translated = 0; size_t translated_length = sizeof(translated);
     errno = 0;
     int returned = sysctlbyname("sysctl.proc_translated", &translated, &translated_length, NULL, 0);

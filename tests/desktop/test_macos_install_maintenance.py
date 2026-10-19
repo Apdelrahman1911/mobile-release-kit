@@ -21,12 +21,19 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertEqual(root.find("options").attrib, {"customize": "never", "require-scripts": "false",
                                                      "allow-external-scripts": "false", "rootVolumeOnly": "true"})
         self.assertEqual(root.find("volume-check").attrib, {"script": "true"})
-        self.assertEqual(root.find("volume-check/allowed-os-versions/os-version").attrib, {"min": "26.0", "before": "27"})
+        # The deployment target is a minimum, not an expiry at the next macOS
+        # major. Both installers must allow 27 and later compatible systems.
+        for inputs in (INPUTS, ROOT / "desktop/macos-xcode-setup-inputs"):
+            policy = ET.fromstring((inputs / "Distribution.xml").read_bytes())
+            versions = policy.findall("volume-check/allowed-os-versions/os-version")
+            self.assertEqual(len(versions), 1)
+            self.assertEqual(versions[0].attrib, {"min": "26.0"})
         for node in root.iter():
             self.assertNotIn(node.tag, {"script", "installation-check", "relocate", "locator", "search"})
             self.assertNotIn("customLocation", node.attrib)
         self.assertEqual(root.find("choices-outline/line").attrib, {"choice": "fixed-install"})
-        self.assertEqual(root.find("pkg-ref/must-close/app").attrib, {"id": "dev.mobile-release-kit.desktop"})
+        # App shutdown is coordinated explicitly, never by Installer forcing it.
+        self.assertIsNone(root.find("pkg-ref/must-close/app"))
 
     def test_component_binding_remains_the_fixed_ordinary_fresh_only_package(self):
         root = ET.fromstring((INPUTS / "Distribution.xml").read_bytes())

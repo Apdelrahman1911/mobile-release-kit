@@ -185,6 +185,8 @@ unsafe extern "C" {
     #[cfg(test)]
     fn mrk_platform_native_data(sysname: *const c_char, machine: *const c_char, returned: c_int,
         observed_errno: c_int, length: usize, translated: c_int) -> c_int;
+    #[cfg(test)]
+    fn mrk_platform_product_version_data(version: *const c_char, length: usize) -> c_int;
     fn mrk_user(uid: *mut u32) -> c_int;
     fn mrk_reveal_installation() -> c_int;
     fn mrk_acl_empty(fd: c_int, phase: *mut c_int, call_result: *mut c_int, native_errno: *mut c_int,
@@ -2877,6 +2879,36 @@ mod tests {
                 assert_eq!(check(sysname, machine, returned, observed_errno, width, 0), refused);
             }
         }
+        let version = |bytes: &[u8]| {
+            // SAFETY: the complete slice is readable for its supplied length;
+            // this is the same bounded parser used by the real sysctl caller.
+            unsafe { mrk_platform_product_version_data(bytes.as_ptr().cast(), bytes.len()) }
+        };
+        for accepted in [b"26.0\0".as_slice(), b"26.0.1\0", b"26.9.12\0", b"27.0\0",
+            b"28.1.2\0", b"99.0\0", b"100.0\0", b"999999999999999999999999.0\0"] {
+            assert_eq!(version(accepted), 0, "{accepted:?}");
+        }
+        for rejected in [b"".as_slice(), b"\0", b"25.9.9\0", b"15.0\0", b"0.0\0",
+            b"26\0", b"26.\0", b"26..0\0", b"26.0.\0", b"26.0.0.1\0", b"026.0\0",
+            b"26.00\0", b"26.0.01\0", b"+27.0\0", b"-27.0\0", b"27.0beta\0",
+            b"27.0\n\0", b" 27.0\0", b"26A428\0", b"27.0", b"27.0\0extra\0", b"\xff.0\0"] {
+            assert_eq!(version(rejected), refused, "{rejected:?}");
+        }
+        let maximum = [vec![b'9'; 60], b".0\0".to_vec()].concat();
+        assert_eq!(maximum.len(), 63);
+        assert_eq!(version(&maximum), 0);
+        assert_eq!(version(&[vec![b'9'; 61], b".0\0".to_vec()].concat()), refused);
+        // Invalid returned lengths are refused before any out-of-bounds read.
+        for length in [0, 1, 64, usize::MAX] {
+            assert_eq!(unsafe { mrk_platform_product_version_data(c"27.0".as_ptr(), length) }, refused);
+        }
+        assert_eq!(unsafe { mrk_platform_product_version_data(std::ptr::null(), 5) }, refused);
+    }
+    #[test]
+    fn actual_native_platform_observation_accepts_host() {
+        // Real read-only uname/sysctl observations, no credentials, UI or files.
+        // The hosted native target must satisfy the same shipping admission.
+        platform().expect("native macOS 26.0 or later, matching architecture, without Rosetta");
     }
     #[test]
     fn bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches() {
