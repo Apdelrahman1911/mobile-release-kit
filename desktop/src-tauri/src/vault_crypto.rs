@@ -11,6 +11,11 @@ use sha2::{Digest, Sha256};
 use std::{fmt, io::{self, Write}, ops::Range};
 use zeroize::{Zeroize, Zeroizing};
 
+// A separate, portable encryption domain. It never exports the vault wrapping
+// key and does not turn a restored record into an assessment or assignment.
+#[path = "vault_backup.rs"]
+pub(crate) mod backup;
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 type WrappingKeyCandidate = secret_service::checked_lookup::WrappingKeyCandidate;
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -338,7 +343,10 @@ impl<'de> DeserializeSeed<'de> for ScalarSeed {
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { formatter.write_str("the exact scalar field object") }
             fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> std::result::Result<Self::Value, M::Error> {
                 let names = commands::field_names(self.kind);
-                let mut object = PrivateScalars(Value::Object(Map::new())); let mut seen = [false; 3];
+                // Exact static field roster, not an attacker-controlled count.
+                // AppleReviewContact has four fields; a three-cell array made
+                // an otherwise authenticated current-kind payload panic here.
+                let mut object = PrivateScalars(Value::Object(Map::new())); let mut seen = vec![false; names.len()];
                 while let Some(key) = map.next_key::<PrivateText>()? {
                     let index = names.iter().position(|name| *name == key.0.as_str())
                         .filter(|index| !seen[*index]).ok_or_else(|| de::Error::custom("unknown or repeated scalar key"))?;
