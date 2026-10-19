@@ -8,6 +8,7 @@ import { savedSetupRevision } from '../setupGuidance.ts';
 import type { Catalog, HelpContent, PreparedConfigView, ConfigRecoveryView } from '../types.ts';
 import { Badge, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
+import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
 
 function SaveFiles({ view }: { view: PreparedConfigView }) {
   const labels = { create: 'Create', replace: 'Replace document', append: 'Append fixed rules', preserve: 'Preserve original' };
@@ -97,13 +98,26 @@ export function ConfigSave(props: SaveProps) {
   }, [state, project, confirmation, selectedId, projectId, detailed]);
   if (!notice && !state.recovery && (!detailed || state.mode !== 'native')) return null;
   const reason = nativeStartReason(state);
-  return <section className="card native-save-panel" aria-label="Native configuration save">
-    <SectionHeading title={notice?.title ?? 'Native configuration saving'} description={project ? `Save session for ${project.project.name}. Drafts remain separate for each project.` : 'Native capability and original-owner status; never a browser simulation.'}>
+  const selectedProject = selectedId && Object.hasOwn(projects, selectedId) ? projects[selectedId] : null;
+  // Disclosure affects presentation only. Keep every original control mounted;
+  // a running, failed or uncertain operation can never be folded out of view.
+  const needsAttention = Boolean(state.status?.active || attempt && !attempt.handled || state.recovery || confirmation ||
+    state.readPending && state.initialized || notice?.tone === 'warning' || notice?.tone === 'danger' ||
+    selectedProject?.saveRecoveryRequired || selectedProject?.saveRecoveryNeedsReload ||
+    state.recoveryProjects.some((entry) => entry.projectId === selectedId));
+  return <section id="configuration-save-review" tabIndex={-1} className="card native-save-panel" aria-label="Review and save project settings">
+    <SectionHeading title={notice?.title ?? 'Save project settings'} description={project ? `Save review for ${project.project.name}. Your draft stays separate.` : detailed ? 'Edit the form below, then choose Review & save. You will confirm the proposed file changes before saving.' : 'Your draft is kept. Open Project settings to review a save.'}>
       <HelpButton content={saveHelp} onHelp={onHelp} />
     </SectionHeading>
-    <div className={`notice notice-${notice?.tone === 'danger' ? 'danger' : notice?.tone === 'warning' ? 'warning' : 'info'}`} role={notice?.tone === 'danger' ? 'alert' : 'status'} aria-live="polite"><Icon name="shield" size={18} /><div><p>{notice?.detail ?? reason ?? 'Configuration-only saving is available. Prepare a draft’s native review below; this capability alone performs no write.'}</p>{notice?.code && <span className="error-code">{notice.code}</span>}</div></div>
+    {notice ? <div className={`notice notice-${notice.tone === 'danger' ? 'danger' : notice.tone === 'warning' ? 'warning' : 'info'}`} role={notice.tone === 'danger' ? 'alert' : 'status'} aria-live="polite"><Icon name="shield" size={18} /><div><p>{notice.detail}</p>{notice.code && <span className="error-code">{notice.code}</span>}</div></div>
+      : reason && <p className="save-note" role="status">{reason}</p>}
+    {detailed && project && setupRevision !== null && <div className="review-basis"><Icon name="check" size={18} /><div>
+      <strong>Continue setup</strong><p>Configuration draft revision {setupRevision} was saved. Next, review version values in the separate editor. This link only opens the Dashboard; it does not read or change version files.</p>
+      <button type="button" className="button secondary" onClick={() => onReviewVersion(project.project.id)}>Next: review version values<Icon name="arrow" size={16} /></button>
+    </div></div>}
     {owner && !owned && <p className="review-caution">This is a read-only native session summary. Its tokens do not attach authority or mark the current draft saved.</p>}
     {owner && project?.lastSave?.sessionId === owner.sessionId && project.lastSave.resultingBaselineGeneration === null && <p className="review-caution">That completed operation describes an older submitted revision. Your newer draft and baseline were kept unchanged.</p>}
+    <ProgressiveDisclosure title="Save details & interrupted changes" needsAttention={needsAttention}>
     {showReview && project && <p className="save-project-path save-note">Reviewing the project currently at <code>{project.project.path}</code>. Save checks this folder when the review opens; selecting it earlier does not lock it.</p>}
     {showReview && owner?.prepared && <SaveReview view={owner.prepared.view} catalog={catalog} />}
     {owner && (terminal || owner.phase === 'finalizing') && <dl className="save-outcome-facts" aria-label="Independent native outcome facts"><div><dt>Transaction effect</dt><dd>{owner.coreOutcome?.effect ?? 'Not reported'}</dd></div><div><dt>Journal</dt><dd>{owner.coreOutcome?.journal ?? 'Not reported'}</dd></div><div><dt>Core resources</dt><dd>{owner.coreOutcome?.resources ?? 'Not reported'}</dd></div><div><dt>Native finality</dt><dd>{owner.nativeFinality}{owner.lateSettled ? ' · late settlement recorded' : ''}</dd></div></dl>}
@@ -113,12 +127,9 @@ export function ConfigSave(props: SaveProps) {
       {project && (!detailed || selectedId !== projectId) && <button type="button" className="button secondary" onClick={() => onShowProject(project.project.id)}>View {terminal ? 'submitted review' : 'save session'}<Icon name="arrow" size={16} /></button>}
       {state.mode === 'native' && <button type="button" className="button small secondary" disabled={state.readPending} onClick={onCheck}><Icon name="refresh" size={15} className={state.readPending ? 'spin' : ''} />{state.readPending ? 'Checking status…' : 'Check native status'}</button>}
     </div>
-    {detailed && project && setupRevision !== null && <div className="review-basis"><Icon name="check" size={18} /><div>
-      <strong>Continue setup</strong><p>Configuration draft revision {setupRevision} was saved. Next, review version values in the separate editor. This link only opens the Dashboard; it does not read or change version files.</p>
-      <button type="button" className="button secondary" onClick={() => onReviewVersion(project.project.id)}>Next: review version values<Icon name="arrow" size={16} /></button>
-    </div></div>}
     {showReview && !terminal && <p className="save-note">Editing this draft before Apply invalidates this review and closes its session. Newer edits after submission remain in memory. The native absolute lifetime is nonrenewable; a timer or status read never grants more authority.</p>}
     <ConfigurationRecovery {...props} />
+    </ProgressiveDisclosure>
     {confirmation && owner?.prepared && <ApplyConfirmation view={owner.prepared.view} binding={confirmation} projectPath={project?.project.path ?? null} allowed={canApplyEdit(state, project, confirmation)} onCancel={() => setConfirmation(null)} onConfirm={() => { onApply(confirmation); setConfirmation(null); }} />}
   </section>;
 }

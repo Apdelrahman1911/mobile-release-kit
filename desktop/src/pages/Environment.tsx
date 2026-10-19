@@ -6,6 +6,7 @@ import type { EnvironmentDiagnosticsController, EnvironmentDiagnosticsState } fr
 import { EnvironmentDiagnostics } from '../components/EnvironmentDiagnostics.tsx';
 import { Badge, ErrorNotice, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
+import { ProgressiveDisclosure } from '../components/ProgressiveDisclosure.tsx';
 
 const methodLabels: Record<string, string> = {
   capabilities: 'Read engine capabilities', catalog: 'Load schema & field help',
@@ -47,10 +48,9 @@ export function Environment({ info, api, preview, session, state, controller, di
     controller.setContext(platform, operation);
   };
   return <>
-    <PageHeading eyebrow="ENVIRONMENT" title="Know what your project needs." description="Keep expected prerequisites separate from explicitly requested, bounded local tool observations."><button type="button" className="button secondary" disabled={loading} onClick={onRetry}><Icon name="refresh" size={17} className={loading ? 'spin' : ''} />{loading ? 'Loading…' : 'Reload connection'}</button></PageHeading>
-    <div className="notice notice-info"><Icon name="info" /><div><strong>{preview ? 'Browser design preview — example data only' : 'Requirements are not verification'}</strong><p>{preview ? 'The example rows and baselines below are illustrative, not a core assessment. No host, draft or tool has been checked.' : 'Expected versions describe toolkit policy, not installed versions. Native observations have a separate section and capability; neither proves signing, accounts or release readiness.'}</p></div></div>
+    <PageHeading eyebrow="BUILD TOOLS" title="Check this computer for your project" description="Choose your app platform and activity, then run the tool check below. Nothing is built or installed automatically." />
     <section className="card">
-      <SectionHeading title="Prepare for your next activity" description={session ? `${session.project.name} · current in-memory configuration draft ${session.revision}` : 'Select a project before loading its prerequisites.'} />
+      <SectionHeading title="What are you preparing?" description={session ? session.project.name : 'Choose a project in Home before checking its tools.'} />
       <div className="environment-controls">
         <div><label htmlFor="environment-platform">Release platform <HelpButton content={guide.platform} onHelp={onHelp} /></label>
           <select id="environment-platform" value={state.platform} disabled={loading || !session?.draft} onChange={(event) => setContext(event.target.value as EnvironmentPlatform, state.operation)}><option value="android">Android</option><option value="ios">iOS</option></select>
@@ -59,7 +59,15 @@ export function Environment({ info, api, preview, session, state, controller, di
           <select id="environment-operation" value={state.operation} disabled={loading || !session?.draft} onChange={(event) => setContext(state.platform, event.target.value as EnvironmentOperation)}><option value="build">Build / archive</option><option value="artifact-validation">Validate an existing artifact</option></select>
           <p>Build guidance is not a complete signed-release checklist.</p></div>
       </div>
-      <div className="button-row"><button type="button" className="button primary" disabled={loading || reason !== null} onClick={() => void controller.refresh()}><Icon name="list" size={17} />{state.pending ? 'Loading requirements…' : preview ? 'Show example requirements' : 'Load draft requirements'}</button><button type="button" className="button secondary" onClick={onSettings}>Project settings</button></div>
+    </section>
+    <EnvironmentDiagnostics state={diagnosticsState} controller={diagnosticsController} loading={loading} />
+    <ProgressiveDisclosure title="Required tools & versions"
+      description="See what this project asks for. This list does not check what is installed on your computer."
+      needsAttention={state.pending !== null || state.error !== null || (result !== null && state.stale)}>
+    <div className="notice notice-info"><Icon name="info" /><div><strong>{preview ? 'Browser design preview — example data only' : 'Requirements are not verification'}</strong><p>{preview ? 'The example rows and baselines below are illustrative, not a core assessment. No host, draft or tool has been checked.' : 'Expected versions describe toolkit policy, not installed versions. The computer check above is separate; neither proves signing, accounts or release readiness.'}</p></div></div>
+    <section className="card">
+      <SectionHeading title="Tools required by your draft" description={session ? `${session.project.name} · current draft ${session.revision}` : 'Select a project before loading its requirements.'} />
+      <div className="button-row"><button type="button" className="button secondary" disabled={loading || reason !== null} onClick={() => void controller.refresh()}><Icon name="list" size={17} />{state.pending ? 'Loading requirements…' : preview ? 'Show example requirements' : 'Show required tools'}</button><button type="button" className="button secondary" onClick={onSettings}>Project settings</button></div>
       {reason && <p className="save-note">{reason}</p>}
       {state.error && <ErrorNotice error={state.error} title="Requirements were not loaded" />}
       {state.error?.code === 'environment_draft_invalid' && <p>Correct the current draft in Project settings, then load requirements again. No files were saved.</p>}
@@ -85,8 +93,11 @@ export function Environment({ info, api, preview, session, state, controller, di
       </>}
       <ul className="plain-list">{result.limitations.map((item, index) => <li key={index}><Icon name="shield" size={16} /><span>{item}</span></li>)}</ul>
     </section>}
-    <EnvironmentDiagnostics state={diagnosticsState} controller={diagnosticsController} loading={loading} />
+    </ProgressiveDisclosure>
     <InstallationDetails info={info} api={api} preview={preview} loading={loading} onHelp={onHelp} />
+    <ProgressiveDisclosure title="Advanced · app connection details" description="App and engine information for troubleshooting."
+      needsAttention={!preview && info !== null && runtime?.state !== 'available'}>
+    <div className="button-row"><button type="button" className="button secondary" disabled={loading} onClick={onRetry}><Icon name="refresh" size={17} className={loading ? 'spin' : ''} />{loading ? 'Loading…' : 'Reload connection'}</button></div>
     <div className="environment-summary">
       <section className="card runtime-card"><span className="eyebrow">CORE RUNTIME</span><h2>{preview ? 'Browser preview' : runtime?.state === 'available' ? runtime.mode === 'development' ? 'Development runtime' : 'Bundled runtime' : 'Runtime unavailable'}</h2><Badge tone={runtime?.state === 'available' && !preview ? 'info' : 'warning'}>{preview ? 'No native connection' : runtime?.state ?? 'Not loaded'}</Badge><p>{preview ? 'This page is a design preview. No platform or engine capability has been verified.' : runtime?.reason ?? (runtime?.state === 'available' ? 'A runtime is available for the listed static functions. This does not establish native process finality or packaged release readiness.' : 'No runtime availability has been established. Capabilities and environment state remain unassessed.')}</p>{runtime?.mode === 'development' && <p className="warning-text">An explicit developer runtime is not a standalone end-user distribution.</p>}<div className="runtime-versions"><span>Desktop <strong>{info?.appVersion ?? 'Not loaded'}</strong></span><span>Core <strong>{capabilities?.coreVersion ?? 'Not loaded'}</strong></span><span>Platform <strong>{capabilities?.hostPlatform ?? 'Not observed'}</strong></span></div></section>
       <section className="card platform-note"><div className="soft-icon"><Icon name="environment" size={24} /></div><h2>The right platform for the job</h2><p>The Desktop goal is Linux, macOS and Windows. Native iOS requires macOS; native Android Windows execution has separate unfinished qualification.</p><p>The finished app must bundle its runtime and non-SDK helpers, without manual Python, Rust or CLI setup. Installation and build availability depend on the current native profile; the sections above do not certify distribution or release readiness.</p></section>
@@ -96,5 +107,6 @@ export function Environment({ info, api, preview, session, state, controller, di
       return <div key={capability.method}><span className="capability-icon"><Icon name="list" size={19} /></span><div><strong>{methodLabels[capability.method] ?? capability.method}</strong><p>{preview ? 'Illustration only; no core service is connected.' : capability.reason}</p></div><Badge tone={available ? 'info' : 'neutral'}>{available ? 'Available · passive' : 'Unavailable'}</Badge></div>;
     })}</div>{!capabilities && <p>No core capability inventory has been loaded.</p>}<p className="save-note">Native editing has separate owned-session capabilities. Passive functions never enable signing, builds or release operations.</p></section>
     {capabilities && capabilities.limitations.length > 0 && <section className="card"><SectionHeading title="Engine-reported boundaries" /><ul className="plain-list">{capabilities.limitations.map((limitation, index) => <li key={index}><Icon name="shield" size={16} /><span>{limitation}</span></li>)}</ul></section>}
+    </ProgressiveDisclosure>
   </>;
 }
