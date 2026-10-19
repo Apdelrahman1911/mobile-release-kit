@@ -1,5 +1,6 @@
 import { diagnosticsAvailabilityText } from '../environmentDiagnosticsController.ts';
 import { selectionDiagnosticGuidance } from '../environmentDiagnosticsGuidance.ts';
+import { diagnosticToolGuidance, xcodePreparationSteps } from '../toolPreparationGuidance.ts';
 import type { EnvironmentDiagnosticsController, EnvironmentDiagnosticsState } from '../environmentDiagnosticsController.ts';
 import type { EnvironmentCheckId, EnvironmentCheckReason, EnvironmentDiagnosticsProjection } from '../environmentDiagnosticsTypes.ts';
 import { Badge, ErrorNotice, SectionHeading } from './Common.tsx';
@@ -7,10 +8,10 @@ import { Icon } from './Icon.tsx';
 
 // Known setup guidance only; no host observation or repair authority.
 const xcodePrerequisites = {
-  setup: 'Open the Mac App Store and search for Xcode from Apple. Install full Xcode and complete its normal first-launch setup, including the iOS platform support your project needs. Command Line Tools alone are not full Xcode.',
+  setup: 'Look for an existing full Xcode that matches both the required version and build first. If it is genuinely missing, obtain that exact Apple release from Apple Developer Downloads, not an automatic update to the newest Xcode. Complete its normal first-launch setup and required iOS platform support. Command Line Tools alone are not full Xcode.',
   version: 'Compare both the version and build with the current core requirements. No fixed version is inferred while those requirements are unavailable or stale.',
   selection: 'For archives and IPA uploads, the app uses its prepared Xcode copy when present. Otherwise it checks /Applications/Xcode.app, either the concrete app or a supported direct sibling link. Changing the developer selection in Xcode does not override these checks.',
-  protection: 'If your release includes Prepare Xcode.pkg, open that companion in macOS Installer after completing Xcode setup. Review the installer and approve its administrator prompt. It validates the installed Apple Xcode and creates a separate protected copy for this app; it does not change the original Xcode installation. Allow space for another Xcode copy.',
+  protection: 'Use only the signed Prepare Xcode.pkg companion verified for this app release and macOS version. Finish builds and quit the app before opening it in macOS Installer. Review its administrator prompt yourself. It validates the installed Apple Xcode and creates a separate protected copy without changing the original. Allow space for another full logical copy plus the installer’s reserve. An older macOS-26-only companion is not a macOS 27 installer.',
   boundary: 'A matching version is not proof that building, signing or uploading is ready. The companion does not download Xcode or accept Apple licenses. If setup fails or is interrupted, keep its message and existing files; do not manually delete the prepared copy or change system permissions. A damaged prepared copy is refused, not silently replaced by another Xcode. Do not run this app as root.',
 };
 
@@ -45,22 +46,27 @@ export function EnvironmentDiagnostics({ state, controller, compact = false, loa
   const reason = controller.startReason();
   const observation = state.observation;
   const result = observation?.projection.result ?? null;
+  const guidance = diagnosticToolGuidance(state);
   return <section className="card" aria-label={compact ? 'Retained build-tool diagnostics owner' : 'Observed build-tool checks'} aria-busy={active?.finality === 'pending'}>
-    <SectionHeading title={compact ? 'Build-tool diagnostics owner' : 'Observed build-tool checks'}
-      description={compact ? 'The original native run remains owned outside the Environment page.' : 'Separate from expected requirements. Only an explicit check requests local tool-version commands.'} />
+    <SectionHeading title={compact ? 'Build-tool check' : 'Check this computer'}
+      description={compact ? 'The original native run remains owned outside the Environment page.' : 'Reuse existing tools first. Checking does not install, update or replace them.'} />
     {!compact && <>
+      <p><strong>{guidance.title}</strong></p><p>{guidance.body}</p>
       <details id="environment-xcode-prerequisites">
-        <summary>iOS: Xcode prerequisites and supported layout</summary>
+        <summary>iOS: exact Xcode setup steps</summary>
         <p><strong>Known setup requirements — not a physical or native check.</strong></p>
         <p>{xcodePrerequisites.setup}</p><p>{xcodePrerequisites.version}</p>
         <p>{xcodePrerequisites.selection}</p><p>{xcodePrerequisites.protection}</p>
         <p className="review-caution">{xcodePrerequisites.boundary}</p>
+        <ol>{(state.platform === 'ios' && guidance.steps.length ? guidance.steps : xcodePreparationSteps(null)).map((step) => <li key={step}>{step}</li>)}</ol>
       </details>
+      <details><summary>Advanced: what this check does</summary>
       <p>Startup and all work share a <strong>6-second work limit</strong>. The original native owner has a fixed <strong>10-second total finality cutoff</strong> from admission, including cleanup. Each call gets at most 3 seconds within that shared budget. A slow tool may be incomplete or time out; this is not the full CLI doctor.</p>
       <p className="save-note">At most four commands, with 16 KiB aggregate stdout + stderr per command. No builds, Gradle or wrapper commands, project hooks, SDK inventory, repository queries, signing, credential access, installations, license acceptance, report files or network actions are requested. Administratively trusted host tools can still have OS or tool-cache effects; this is not a malware sandbox.</p>
+      </details>
     </>}
     <div className="button-row">
-      {!compact && <button type="button" className="button primary" disabled={loading || reason !== null} onClick={() => controller.start()}><Icon name="environment" size={17} />Check build tools</button>}
+      {!compact && <button type="button" className="button primary" disabled={loading || reason !== null} onClick={() => controller.start()}><Icon name="environment" size={17} />Check this computer</button>}
       <button type="button" className="button secondary" disabled={!canCancel} onClick={() => { if (active) controller.cancel({ runId: active.runId, ownerGeneration: active.ownerGeneration }); }}><Icon name="close" size={17} />{cancelClaimed ? 'Cancel requested' : 'Cancel observed run'}</button>
       <button type="button" className="button secondary" disabled={state.mode !== 'native' || state.readPending} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={17} />{state.readPending ? 'Reading status…' : 'Read native status'}</button>
       {compact && onShow && <button type="button" className="button secondary" onClick={onShow}>Show Environment</button>}

@@ -311,6 +311,18 @@ fn roster(host: Host, platform: Platform) -> &'static [CheckId] {
 }
 impl Terminal {
     pub(crate) fn completed_rows(&self) -> usize { self.checks.iter().filter(|c| c.state == CheckState::Completed).count() }
+    /// Read-only version observation. The caller must FIRST require the
+    /// existing original owner's settled Projection; a Terminal is not finality.
+    /// Missing is not an exhaustive disk search, and a match is not SDK/copy
+    /// readiness. No executable pathname or command is exposed here.
+    pub(crate) fn xcode_preparation_hint(&self) -> Option<(CheckReason, Option<(&str, &str)>)> {
+        let check = self.checks.iter().find(|check| check.id == CheckId::Xcode)?;
+        let version = if check.state == CheckState::Completed && check.reason == CheckReason::Observed
+            && check.return_code == Some(0) {
+            Some((check.version.as_deref()?, check.build.as_deref()?))
+        } else { None };
+        Some((check.reason, version))
+    }
     fn valid(&self, context: &Context, host: Host) -> bool {
         let roles = roster(host, context.platform);
         let completed = self.completed_rows();

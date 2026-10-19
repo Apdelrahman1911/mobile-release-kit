@@ -1611,6 +1611,32 @@ pub(crate) fn available_for(profile: Profile) -> bool {
         Profile::LinuxX64 => false,
     }
 }
+
+/// Labels from an ALREADY checked compiled supplier. This getter neither warms
+/// the catalogue under an owner lock nor lends its native/tool authority. The
+/// preparation planner must still compare the saved project's requirements.
+pub(crate) struct PreparationPolicy {
+    pub(crate) versions: crate::android_toolchain_catalog::Versions,
+    pub(crate) distribution_url: &'static str,
+    pub(crate) distribution_sha256: &'static str,
+}
+pub(crate) fn preparation_policies_for(profile: Profile) -> Option<Vec<PreparationPolicy>> {
+    if !available_for(profile) { return None; }
+    let catalogue = match profile {
+        Profile::MacArm64 => COMPILED_CATALOGUE.get()?,
+        Profile::MacX64 => INTEL_COMPILED_CATALOGUE.get()?,
+        Profile::LinuxX64 => return None,
+    };
+    if catalogue.len() > 8 { return None; }
+    catalogue.iter().map(|entry| {
+        let reference = entry.as_ref()?.reference;
+        let v = &reference.versions;
+        Some(PreparationPolicy { versions: crate::android_toolchain_catalog::Versions {
+            jdk_vendor: v.jdk_vendor.into(), jdk_version: v.jdk_version.into(), gradle_version: v.gradle_version.into(),
+            agp_version: v.agp_version.into(), sdk_platform: v.sdk_platform.into(), sdk_build_tools_version: v.sdk_build_tools_version.into(),
+        }, distribution_url: reference.gradle_distribution_url, distribution_sha256: reference.gradle_distribution_sha256 })
+    }).collect()
+}
 /// Pure compiled DATA, not a grant or a second64MiB pool. The app source book
 /// adds its concrete layout/capacities and the whole existing caller census.
 #[derive(Clone, Copy)]
