@@ -1,0 +1,58 @@
+/* Scoped to the guided dashboard; no changes to shared forms or native panels. */
+.guided-dashboard { max-width: 1120px; margin-inline: auto; }
+.guided-dashboard .page-heading { margin-bottom: 22px; }
+.guided-dashboard .page-heading p { font-size: 14px; }
+.guided-overview { padding: 25px; }
+.guided-next-grid { display: grid; grid-template-columns: minmax(190px, .85fr) minmax(0, 1.5fr); gap: 28px; }
+.guided-saved-version { border-right: 1px solid var(--line); padding-right: 28px; }
+.guided-saved-version h2 { font-size: 14px; color: var(--muted); }
+.guided-version-value { display: block; margin-block: 10px 5px; font-size: 24px; line-height: 1.35; overflow-wrap: anywhere; }
+.guided-saved-version .text-button { margin-top: 14px; text-align: left; }
+.guided-next-step h2 { font-size: 22px; margin-block: 10px; }
+.guided-next-step .button { margin-top: 17px; font-size: 14px; min-height: 42px; }
+.guided-dashboard .guided-next-step > p, .guided-known p { font-size: 14px; }
+.guided-dashboard .guided-safety { font-size: 12px; margin-top: 13px; }
+.guided-known { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; border-top: 1px solid var(--line); margin-top: 25px; padding-top: 18px; }
+.guided-known h3 { font-size: 13px; margin-bottom: 5px; }
+.guided-dashboard .guided-blocker { color: #825d22; font-size: 13px; margin-top: 8px; overflow-wrap: anywhere; }
+.guided-steps ol { padding: 0; margin: 0; list-style: none; }
+.guided-steps li { display: flex; align-items: flex-start; gap: 13px; padding: 13px 0; border-top: 1px solid var(--line); }
+.guided-steps li > div { flex: 1; min-width: 0; }
+.guided-steps li > .badge { flex-shrink: 0; margin-top: 4px; }
+.guided-step-number { flex-shrink: 0; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--subtle); color: #596d67; font-size: 12px; }
+.guided-current-step .guided-step-number { background: #e8f2ef; color: var(--primary); }
+.guided-step-link { display: inline-flex; align-items: center; gap: 8px; border: 0; padding: 2px 0; background: none; text-align: left; font-size: 14px; font-weight: 600; }
+.guided-step-link:hover:not(:disabled) { color: var(--primary); }
+.guided-step-link:disabled { color: var(--muted); }
+.guided-steps li p { margin-top: 5px; font-size: 13px; }
+.guided-disclosure { margin-block: 16px; padding: 16px 19px; border: 1px solid var(--line); border-radius: 9px; background: white; }
+.guided-disclosure > summary { font-size: 14px; font-weight: 600; cursor: pointer; line-height: 1.5; }
+.guided-disclosure > summary:focus-visible { outline: 3px solid #71b8a9; outline-offset: 4px; border-radius: 2px; }
+.guided-disclosure[open] > summary { margin-bottom: 16px; }
+.guided-disclosure > .card:last-child { margin-bottom: 0; }
+.guided-disclosure-description { margin-bottom: 16px; }
+.guided-attention-label { display: inline-block; color: #825d22; font-size: 12px; font-weight: 500; margin-left: 12px; }
+.guided-details-facts { display: grid; gap: 14px; margin-block: 18px; }
+.guided-details-facts dt { color: var(--muted); font-size: 12px; margin-bottom: 3px; }
+.guided-details-facts dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.guided-later-tasks { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.guided-task-link { display: flex; align-items: flex-start; gap: 12px; padding: 14px; text-align: left; background: var(--subtle); border: 1px solid var(--line); border-radius: 8px; }
+.guided-task-link:hover { border-color: var(--primary); }
+.guided-task-link > svg { margin-top: 2px; color: var(--primary); }
+.guided-task-link strong { display: block; font-size: 14px; }
+.guided-task-link span { display: block; margin-top: 5px; font-size: 12px; line-height: 1.55; color: var(--muted); }
+.guided-inline-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 16px; }
+.guided-dashboard .guided-notice p { font-size: 13px; }
+@media (max-width: 900px) {
+  .guided-next-grid { grid-template-columns: 1fr; gap: 21px; }
+  .guided-saved-version { border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 21px; }
+  .guided-known { grid-template-columns: 1fr; gap: 15px; }
+}
+@media (max-width: 620px) {
+  .guided-overview { padding: 18px; }
+  .guided-later-tasks { grid-template-columns: 1fr; }
+  .guided-steps li { flex-wrap: wrap; }
+  .guided-steps li > .badge { margin: 0 0 0 39px; }
+  .guided-steps li > div { flex-basis: calc(100% - 39px); }
+  .guided-disclosure { padding: 14px; }
+}

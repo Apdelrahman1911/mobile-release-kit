@@ -1,141 +1,160 @@
+import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { getValue, textValue } from '../catalog.ts';
 import { configurationStatus } from '../certainty.ts';
 import type { ConfigEditState } from '../configEdit.ts';
 import { isDirty } from '../drafts.ts';
 import type { ProjectSession } from '../drafts.ts';
-import { releaseVersionHelp, releaseVersionPhase } from '../releaseVersion.ts';
+import type { ProjectInitializationState } from '../projectInitialization.ts';
+import { releaseVersionHelp } from '../releaseVersion.ts';
 import type { ReleaseVersionState } from '../releaseVersion.ts';
-import { configurationSetupNeeded } from '../setupGuidance.ts';
+import type { VersionEditState } from '../releaseVersionEditController.ts';
+import { setupOverview } from '../setupOverview.ts';
+import type { SetupAction, SetupActivity, SetupCheckObservation } from '../setupOverview.ts';
 import type { AppInfo, HelpContent, Page } from '../types.ts';
 import { Badge, EmptyState, ErrorNotice, HelpButton, Issues, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
+import type { IconName } from '../components/Icon.tsx';
+import { ProgressiveDisclosure } from '../components/ProgressiveDisclosure.tsx';
+import { SetupWizard } from '../components/SetupWizard.tsx';
+import { TaskOverview } from '../components/TaskOverview.tsx';
+import '../components/setupOverview.css';
 
 const projectHelp: HelpContent = {
-  label: 'Static project observation', requiredness: 'required',
-  requiredWhen: 'Select a project before requesting a static observation.',
-  what: 'A bounded read of recognized configuration and source hints inside your selected folder.',
-  why: 'Understand what is configured without running project code or assuming that an app is release-ready.',
-  where: 'Choose the project’s actual root using the native folder picker. The app never searches parent repositories.',
-  format: 'An explicitly selected local directory. Symbolic-link, unsupported, changed, or limited inputs may be refused or reported as partial.',
-  failure: 'An incomplete read is not “no project found.” File observations are not atomic, may become stale, and never verify native tools, credentials, Git, or Store state.',
+  label: 'Choose your app folder', requiredness: 'required',
+  requiredWhen: 'Before reading or preparing your project.',
+  what: 'The local folder containing the Android, iOS or Kotlin app you want to work on.',
+  why: 'It keeps this project’s settings and drafts separate from other apps.',
+  where: 'Use Choose project folder and select the root of your app with the native folder picker.',
+  format: 'An explicitly selected local directory. Some linked, unreadable or unsupported files may not be included.',
+  failure: 'An incomplete read is not proof that files are missing. Reading a project never builds it, checks signing, contacts a Store, or changes your draft.',
 };
 
-const setupHelp: HelpContent = {
-  label: 'Release configuration setup', requiredness: 'optional',
-  requiredWhen: 'Use this guide when preparing Mobile Release Kit for a selected app project.',
-  what: 'A guided path through the existing project settings and version editor.',
-  why: 'Keep suggested values, an editable draft, and an explicitly confirmed file save separate.',
-  where: 'Choose your app’s project folder, then use Project settings. Suggested values come from the core; check them against your app and Store accounts.',
-  format: 'Use the labeled fields and file pickers. Each field has its own help; no terminal commands or manual file placement are required for these steps.',
-  failure: 'Nothing changes just by opening this guide. Invalid or changed files require another review. Unavailable save or version controls stay unavailable; the separate Review initialization action creates a complete local configuration/caller/metadata skeleton only after explicit confirmation. It does not build or release an app.',
-};
+const laterTasks: readonly { page: Page; icon: IconName; title: string; description: string }[] = [
+  { page: 'metadata', icon: 'metadata', title: 'Prepare Store text & images', description: 'Edit your listing locally. Review each save; nothing is sent to a Store.' },
+  { page: 'github', icon: 'github', title: 'Connect GitHub automation', description: 'Optional: connect your repository, review workflows and see release history.' },
+  { page: 'releases', icon: 'rocket', title: 'Prepare Store delivery', description: 'Review build and delivery requirements. Uploads require their own approval.' },
+  { page: 'artifacts', icon: 'box', title: 'Inspect a build', description: 'Check a selected app package and its saved release evidence.' },
+];
 
-function SavedVersionCard({ state, reason, onRead, onHelp }: {
-  state: ReleaseVersionState; reason: string | null; onRead: () => void; onHelp: (help: HelpContent) => void;
-}) {
-  const phase = releaseVersionPhase(state);
-  const result = state.result;
-  const labels = { 'not-read': 'Not read', reading: 'Reading…', observed: 'Observed', stale: 'Stale observation',
-    missing: 'Saved input missing', invalid: 'Invalid saved input', unavailable: 'Unavailable' };
-  const earlier = result !== null && phase !== 'observed';
-  return <section className="card summary-card" aria-label="Saved version and build">
-    <div className="summary-label"><span>Version & build</span><HelpButton content={releaseVersionHelp} onHelp={onHelp} /></div>
-    <div aria-live="polite" aria-busy={phase === 'reading'}>
-      <strong className="summary-value compact-value" style={{ overflowWrap: 'anywhere' }}>{phase === 'observed' && result ? result.version.name : labels[phase]}</strong>
-      {phase === 'observed' && result && <><p>Build number {result.version.build}</p><Badge tone="info">Observed from saved version file</Badge></>}
-      {earlier && result && <p style={{ overflowWrap: 'anywhere' }}>Earlier read: {result.version.name} · Build {result.version.build} — stale, not current.</p>}
-      {result && <p>{earlier ? 'Earlier returned source' : 'Returned saved source'}:<br /><code style={{ overflowWrap: 'anywhere', whiteSpace: 'normal' }}>{result.source}</code></p>}
-      {state.stale && <p>Known context changes retired the earlier read. Read again explicitly; returning to this view does not refresh it.</p>}
-      {state.error && <p>{state.error.message}</p>}
-      {reason && reason !== state.error?.message && <p>{reason}</p>}
-    </div>
-    {state.project?.dirtyDraft && <p><strong>Unsaved draft not applied.</strong> This reads saved configuration only and leaves your draft untouched.</p>}
-    <p>One non-atomic read. External changes are not continuously monitored. No artifact check or full preflight; release readiness is not assessed.</p>
-    <button type="button" className="button small secondary" disabled={reason !== null} title={reason ?? undefined} onClick={onRead}>
-      <Icon name="refresh" size={15} className={phase === 'reading' ? 'spin' : ''} />Read saved version
-    </button>
-    <div className="summary-foot"><Icon name="metadata" size={14} /><code style={{ overflowWrap: 'anywhere', whiteSpace: 'normal' }}>Saved config: release/mobile-release.json</code></div>
-  </section>;
-}
-
-export function Dashboard({ session, preview, chooseDisabled, chooseReason, refreshReason, releaseVersionState, releaseVersionReason, versionEditor, initializationPanel, configSaveState, onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
-  session: ProjectSession | null; info: AppInfo | null; preview: boolean; chooseDisabled: boolean; chooseReason: string | null; refreshReason: string | null;
-  versionEditor: ReactNode;
-  initializationPanel: ReactNode;
+export function Dashboard({ session, preview, chooseDisabled, chooseReason, refreshReason, releaseVersionState, releaseVersionReason,
+  versionEditor, versionEditState, initializationPanel, initializationState, configSaveState, checks, activities,
+  onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
+  session: ProjectSession | null; info: AppInfo | null; preview: boolean;
+  chooseDisabled: boolean; chooseReason: string | null; refreshReason: string | null;
+  versionEditor: ReactNode; versionEditState: VersionEditState;
+  initializationPanel: ReactNode; initializationState: ProjectInitializationState;
   configSaveState: ConfigEditState;
-  releaseVersionState: ReleaseVersionState; releaseVersionReason: string | null; onReadVersion: () => void;
-  onChoose: () => void; onRefresh: () => void; onNavigate: (page: Page) => void; onHelp: (help: HelpContent) => void;
+  releaseVersionState: ReleaseVersionState; releaseVersionReason: string | null;
+  checks?: readonly SetupCheckObservation[]; activities?: readonly SetupActivity[];
+  onReadVersion: () => void; onChoose: () => void; onRefresh: () => void;
+  onNavigate: (page: Page) => void; onHelp: (help: HelpContent) => void;
 }) {
-  const status = configurationStatus(session, preview);
-  const needsSetup = configurationSetupNeeded(session, preview, configSaveState);
+  const [versionReveal, setVersionReveal] = useState(0);
+  const [initializationReveal, setInitializationReveal] = useState(0);
+  const overview = setupOverview({ session, preview, configSaveState, releaseVersionState, initializationState, versionEditState,
+    chooseReason: chooseDisabled ? chooseReason ?? 'Finish the current task before choosing a project.' : null,
+    refreshReason, releaseVersionReason, checks, activities });
+  const act = (action: SetupAction) => {
+    switch (action.kind) {
+      case 'choose-project': if (!chooseDisabled) onChoose(); break;
+      case 'refresh-project': if (session && !refreshReason && session.snapshotRequest === null) onRefresh(); break;
+      case 'read-version': if (!releaseVersionReason) onReadVersion(); break;
+      case 'open-version': setVersionReveal((revision) => revision + 1); break;
+      case 'open-initialization': setInitializationReveal((revision) => revision + 1); break;
+      case 'navigate': onNavigate(action.page); break;
+    }
+  };
   const config = session?.snapshot?.config.data ?? null;
-  const configName = session?.snapshot?.config.path ?? 'release/mobile-release.json';
-  const partial = session?.snapshot?.discovery.partial;
-  const observationDate = session?.snapshot?.observedAt ? new Date(session.snapshot.observedAt) : null;
-  const observedLabel = observationDate && Number.isFinite(observationDate.valueOf()) ? observationDate.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : null;
-  return <>
-    <PageHeading eyebrow="YOUR RELEASE WORKSPACE" title={session ? `Let’s get ${session.project.name} ready.` : 'Good releases start here.'} description="A calmer place to prepare your mobile app. Understand the project first; release with evidence, not assumptions.">
-      <button type="button" className="button secondary" disabled={chooseDisabled} aria-describedby={chooseReason ? 'project-choose-reason' : undefined} onClick={onChoose}><Icon name="folder" size={17} />{preview ? 'Load example workspace' : session ? 'Open another project' : 'Choose a project'}</button>
+  const status = configurationStatus(session, preview);
+  const versionResult = session && releaseVersionState.resultBinding?.projectId === session.project.id ? releaseVersionState.result : null;
+  const versionError = session && releaseVersionState.project?.projectId === session.project.id ? releaseVersionState.error : null;
+  const observedAt = session?.snapshot?.observedAt ? new Date(session.snapshot.observedAt) : null;
+  const observedLabel = observedAt && Number.isFinite(observedAt.valueOf()) ? observedAt.toLocaleString() : null;
+
+  return <div className="guided-dashboard">
+    <PageHeading eyebrow={preview ? 'EXAMPLE PROJECT' : 'YOUR APP'} title={session?.project.name ?? 'Get your app ready.'}
+      description="Prepare a local build, one clear step at a time.">
+      {session && <button type="button" className="button secondary" disabled={chooseDisabled}
+        aria-describedby={chooseReason ? 'guided-project-choose-reason' : undefined} onClick={onChoose}>
+        <Icon name="folder" size={17} />{preview ? 'Load example project' : 'Choose another project'}
+      </button>}
+      <HelpButton content={projectHelp} onHelp={onHelp} />
     </PageHeading>
-    {chooseReason && <p id="project-choose-reason" className="toolbar-reason">{chooseReason}</p>}
-    <section className="project-overview card">
-      <div className="project-overview-main"><div className="project-art" aria-hidden="true"><div className="orbit orbit-one" /><div className="orbit orbit-two" /><div className="project-art-mark"><Icon name="rocket" size={32} /></div><span className="art-dot dot-one" /><span className="art-dot dot-two" /></div><div className="project-identity"><div className="inline-heading"><span className="eyebrow">{preview && session ? 'ILLUSTRATIVE PROJECT' : 'CURRENT PROJECT'}</span><HelpButton content={projectHelp} onHelp={onHelp} /></div><h2>{session?.project.name ?? 'Your next release, organized.'}</h2><p className="project-path">{session?.project.path ?? 'Select a project to see its configuration and discover static build hints.'}</p><div className="project-badges"><Badge tone={status.tone} dot>{status.label}</Badge>{config && getValue(config, 'android.enabled') === true && <span className="platform-chip"><Icon name="android" size={15} />Android</span>}{config && getValue(config, 'ios.enabled') === true && <span className="platform-chip"><Icon name="apple" size={15} />iOS</span>}{session && isDirty(session) && <Badge tone="warning">Unsaved draft</Badge>}</div></div></div>
-      <div className="project-overview-action">{session ? <><button type="button" className="button primary" onClick={() => onNavigate('settings')}>{needsSetup ? 'Set up release configuration' : 'Review project settings'}<Icon name="arrow" size={17} /></button><span>{preview ? 'Example values · not validated' : needsSetup ? 'Review first · nothing changes automatically' : 'Configured is not verified'}</span></> : <><button type="button" className="button primary" disabled={chooseDisabled} onClick={onChoose}><Icon name="plus" size={17} />{preview ? 'Explore example workspace' : 'Open project folder'}</button><span>Folder selection does not write files</span></>}</div>
-      {config && <div className="identity-strip"><div className="identity-detail"><Icon name="android" size={20} /><div><span>{preview ? 'Example Android application ID' : 'Configured Android application ID'}</span><strong>{textValue(getValue(config, 'android.applicationId'))}</strong><span className="identity-policy">Identity policy: {textValue(getValue(config, 'android.identityStatus'), 'not configured')} · not native-verified</span></div></div><div className="identity-detail"><Icon name="apple" size={20} /><div><span>{preview ? 'Example iOS bundle ID' : 'Configured iOS bundle ID'}</span><strong>{textValue(getValue(config, 'ios.bundleId'))}</strong><span className="identity-policy">Identity policy: {textValue(getValue(config, 'ios.identityStatus'), 'not configured')} · not service-verified</span></div></div></div>}
+    {chooseReason && <p id="guided-project-choose-reason" className="toolbar-reason">{chooseReason}</p>}
+
+    {session?.snapshotError && <div className="notice notice-danger guided-notice" role="alert"><Icon name="info" />
+      <div><strong>Project settings could not be read</strong><p>{session.snapshotError.message}</p><p>Your draft is kept. Check the problem before reading again.</p></div>
+    </div>}
+    {versionError && <div className="notice notice-warning guided-notice" role="alert"><Icon name="info" />
+      <div><strong>Saved version could not be read</strong><p>{versionError.message}</p></div>
+    </div>}
+    {session?.snapshot?.discovery.partial && <div className="notice notice-warning guided-notice"><Icon name="info" />
+      <div><strong>Some project files could not be checked</strong><p>This read is incomplete. Missing files and release readiness cannot be assumed; see Project details below.</p></div>
+    </div>}
+    {session && (session.snapshotPredatesSave || session.sourceChanged) && <div className="notice notice-info guided-notice"><Icon name="info" />
+      <div><strong>Saved settings need another look</strong><p>Files have changed since the earlier read. Read them again when the current task finishes; your unsaved draft will stay intact.</p></div>
+    </div>}
+    {overview.otherProjectActivities.length > 0 && <div className="notice notice-warning guided-notice" role="status"><Icon name="info" />
+      <div><strong>Another project has unfinished work</strong><p>Use that project’s original task controls shown on this page. Its result does not describe this project, and changing projects does not stop it.</p></div>
+    </div>}
+    {session && isDirty(session) && <p className="guided-blocker">Unsaved release settings are kept in this window. They are not applied to the saved version or a build.</p>}
+
+    <TaskOverview overview={overview} preview={preview} onAction={act} />
+    <SetupWizard overview={overview} onAction={act} onHelp={onHelp} />
+
+    <ProgressiveDisclosure title="Edit version & build number" needsAttention={overview.versionEditorNeedsAttention} reveal={versionReveal}
+      description="Manual by default. Open the saved values, choose a change and review it before saving. This does not build or release the app.">
+      {versionEditor}
+    </ProgressiveDisclosure>
+
+    <section className="card" aria-label="Later release tasks">
+      <SectionHeading title="When you’re ready for the next stage" description="GitHub and Store delivery are separate tasks, not prerequisites for exploring local setup." />
+      <div className="guided-later-tasks">{laterTasks.map((task) => <button type="button" key={task.title} className="guided-task-link" onClick={() => onNavigate(task.page)}>
+        <Icon name={task.icon} size={20} /><div><strong>{task.title}</strong><span>{task.description}</span></div>
+      </button>)}</div>
+      <div className="guided-inline-actions"><button type="button" className="text-button" onClick={() => onNavigate('recovery')}>
+        <Icon name="recovery" size={17} />Recover interrupted work
+      </button><span className="guided-safety">Keep original files and check what happened before repeating an action.</span></div>
     </section>
-    {session?.snapshotError && <ErrorNotice error={session.snapshotError} title="Static observation unavailable" />}
-    {session?.snapshotPredatesSave && <div className="notice notice-info"><Icon name="info" /><div><strong>This static observation predates the last settled save check</strong><p>Saved draft state did not fabricate a new project observation. Refresh explicitly to inspect current files; your draft and baseline will be retained.</p></div></div>}
-    {session && refreshReason && !session.snapshot && !preview && <div className="notice notice-warning"><Icon name="info" /><div><strong>The folder is selected, but it has not been read</strong><p>{refreshReason}</p></div></div>}
-    {partial && <div className="notice notice-warning"><Icon name="info" /><div><strong>Only a partial static observation is available</strong><p>Some input was excluded, unreadable, changed, or limited. This is not a complete snapshot or a verification result.</p></div></div>}
-    <section className="card preparation-card" aria-label="Release configuration setup">
-      <SectionHeading title="New to release setup?" description="Prepare configuration first, then review version values. Every file change needs a separate confirmation.">
-        <HelpButton content={setupHelp} onHelp={onHelp} />
-      </SectionHeading>
-      {needsSetup && <p>No configuration was observed in the latest complete static read. The save review checks the files again before proposing any creation.</p>}
-      <details className="save-change-details"><summary>Show the setup steps</summary>
-        <ol>
-          <li><strong>Choose your app’s folder.</strong> The native folder picker selects a project without changing its files.</li>
-          <li><strong>Prepare a draft in Project settings.</strong> Request suggested values if useful, then explicitly choose whether to use them. Your existing draft is kept.</li>
-          <li><strong>Review and confirm the configuration save.</strong> When native saving is available, inspect the proposed files before applying. Existing files are checked again.</li>
-          <li><strong>Review version values on the Dashboard.</strong> Open the separate version editor when available; any version change needs its own review and Apply.</li>
-        </ol>
-        <p>This sets up configuration only—not workflows, metadata, signing or a release. Opening this guide performs none of those actions.</p>
-        <button type="button" className="button secondary" disabled={!session && chooseDisabled} onClick={session ? () => onNavigate('settings') : onChoose}>
-          {session ? 'Set up release configuration' : preview ? 'Load example workspace' : 'Choose project folder'}<Icon name="arrow" size={16} />
-        </button>
-      </details>
-    </section>
-    {initializationPanel}
-    <div className="summary-grid">
-      <SavedVersionCard state={releaseVersionState} reason={releaseVersionReason} onRead={onReadVersion} onHelp={onHelp} />
-      <div className="card summary-card"><div className="summary-label"><span>Configuration</span><Icon name="settings" size={18} /></div><strong className="summary-value compact-value">{status.label}</strong><p>{preview && session ? 'Inert example · not core validated' : config ? 'Policy and syntax are not release evidence' : 'No configuration facts assumed'}</p><div className="summary-foot"><Icon name="metadata" size={14} /><span>{configName}</span></div></div>
-      <div className="card summary-card"><div className="summary-label"><span>Release readiness</span><Icon name="shield" size={18} /></div><strong className="summary-value compact-value">Not assessed</strong><p>This dashboard does not combine checks into a release approval.</p><div className="summary-foot"><span className="neutral-dot" /><span>Review each operation’s current result</span></div></div>
-    </div>
-    {versionEditor}
-    <div className="dashboard-grid">
-      <section className="card preparation-card"><SectionHeading title="Your preparation checklist" description="Open a step to review its requirements and current results. These links do not start an operation."><Badge>{preview ? 'Inert preview' : 'Guided setup'}</Badge></SectionHeading>
-        <div className="preparation-list">
-          <button type="button" onClick={session ? () => onNavigate('settings') : onChoose} disabled={!session && chooseDisabled}><span className="step-number">01</span><div><strong>Review project configuration</strong><p>Confirm app identities, version source, and branch policy.</p></div><Badge tone={config ? 'info' : 'neutral'}>{session ? config ? 'Review draft' : 'Not loaded' : 'Choose project'}</Badge><Icon name="chevron" size={16} /></button>
-          <button type="button" onClick={() => onNavigate('environment')}><span className="step-number">02</span><div><strong>Check your build environment</strong><p>Review required tools and run the available diagnostics. Missing tools have setup guidance.</p></div><Badge>Open checks</Badge><Icon name="chevron" size={16} /></button>
-          <button type="button" onClick={() => onNavigate('credentials')}><span className="step-number">03</span><div><strong>Configure signing &amp; credentials</strong><p>Use the guided credential fields and native file pickers. Assign inputs to the correct local or GitHub context.</p></div><Badge>Open setup</Badge><Icon name="chevron" size={16} /></button>
-          <button type="button" onClick={() => onNavigate('metadata')}><span className="step-number">04</span><div><strong>Edit metadata and images</strong><p>Choose locales, edit public text and select images. Review each change before saving; nothing is sent to a Store.</p></div><Badge>Open editor</Badge><Icon name="chevron" size={16} /></button>
-        </div>
-      </section>
-      <aside className="foundation-card"><span className="foundation-icon"><Icon name="spark" size={24} /></span><span className="eyebrow">SMALL STEPS. HONEST STATUS.</span><h2>Know what’s configured.<br />Know what isn’t verified.</h2><p>Configuration, saved changes, successful builds and Store results are different kinds of information. Open the relevant step to see its current result, limitations and recovery options.</p><ul><li><span className="legend-dot configured" />Configured: a value is present</li><li><span className="legend-dot format" />Format-valid: policy only</li><li><span className="legend-dot unknown" />Verified: not established here</li></ul><button type="button" className="text-button" onClick={() => onNavigate('environment')}>Open environment and installation details<Icon name="arrow" size={16} /></button></aside>
-    </div>
-    <section className="card observation-card"><SectionHeading title="Latest static observation" description={session?.snapshot ? preview ? 'Example data only. No files have been read.' : `Independent file reads, not an atomic snapshot.${observedLabel ? ` Observed at ${observedLabel}; may become stale.` : ''}` : 'A selected folder is not evidence that its configuration or tools were checked.'}>
-      <button type="button" className="button small secondary" disabled={!session || Boolean(refreshReason) || Boolean(session.snapshotRequest)} title={refreshReason ?? undefined} onClick={onRefresh}><Icon name="refresh" size={15} className={session?.snapshotRequest ? 'spin' : ''} />{session?.snapshotRequest ? 'Reading…' : 'Refresh static view'}</button>
-    </SectionHeading>{session?.snapshot ? <><div className="observation-facts"><div><span>Inputs</span><strong>{preview ? 'None read' : `${session.snapshot.discovery.scan.sourceFiles} recognized files`}</strong></div><div><span>Git branch</span><strong>Not observed</strong></div><div><span>Credentials</span><strong>Not read</strong></div><div><span>Native / Store</span><strong>Not contacted</strong></div></div><Issues issues={[...session.snapshot.config.issues, ...session.snapshot.issues]} /></> : <EmptyState compact icon="folder" title={session?.snapshotRequest ? 'Reading recognized static files…' : 'No observation loaded'} description="No builds, signing tools, user hooks, Git commands, or Store requests are run." />}</section>
-    <section className="card preparation-card" aria-label="Build and release steps">
-      <SectionHeading title="Build, release and recover" description="Choose the next step. Each page checks its own prerequisites and asks for confirmation before sensitive work." />
-      <div className="preparation-list">
-        <button type="button" onClick={() => onNavigate('releases')}><Icon name="rocket" size={20} /><div><strong>Build and validate a candidate</strong><p>Review saved offline checks, Android build/sign, iOS archive/export and protected release requests.</p></div><Icon name="chevron" size={16} /></button>
-        <button type="button" onClick={() => onNavigate('github')}><Icon name="github" size={20} /><div><strong>Set up GitHub automation</strong><p>Connect your repository, preview workflow changes and inspect authenticated release history.</p></div><Icon name="chevron" size={16} /></button>
-        <button type="button" onClick={() => onNavigate('artifacts')}><Icon name="box" size={20} /><div><strong>Inspect artifacts and evidence</strong><p>Read the selected artifact’s results. A build result alone does not prove upload, publication or current Store state.</p></div><Icon name="chevron" size={16} /></button>
-        <button type="button" onClick={() => onNavigate('recovery')}><Icon name="recovery" size={20} /><div><strong>Recover an interrupted operation</strong><p>Keep the original files and operation details. Inspect the available recovery before retrying.</p></div><Icon name="chevron" size={16} /></button>
-      </div>
-      <p className="save-note">{preview ? 'Browser preview: no native operation can run.' : 'Availability depends on this installed app, the selected project and each operation’s checks. Opening a page does not build, change remote configuration, upload or publish.'}</p>
-    </section>
-  </>;
+
+    <ProgressiveDisclosure title="Advanced: prepare release files together" needsAttention={overview.initializationNeedsAttention} reveal={initializationReveal}
+      description="Optional: review the local configuration, GitHub workflow and empty metadata files as one setup. Existing files are checked; nothing is approved by opening this section.">
+      {initializationPanel}
+    </ProgressiveDisclosure>
+
+    <ProgressiveDisclosure title="Project details & saved observations">
+      <div className="guided-inline-actions"><Badge tone={status.tone}>{status.label}</Badge><HelpButton content={projectHelp} onHelp={onHelp} /></div>
+      <dl className="guided-details-facts">
+        <div><dt>Selected project folder</dt><dd>{session?.project.path ?? 'No folder selected'}</dd></div>
+        <div><dt>Saved configuration path</dt><dd><code>{session?.snapshot?.config.path ?? 'release/mobile-release.json'}</code></dd></div>
+        {config && <>
+          <div><dt>Configured Android application ID</dt><dd>{textValue(getValue(config, 'android.applicationId'))}<br />Identity policy: {textValue(getValue(config, 'android.identityStatus'), 'not configured')} · not checked against the app or Store</dd></div>
+          <div><dt>Configured iOS bundle ID</dt><dd>{textValue(getValue(config, 'ios.bundleId'))}<br />Identity policy: {textValue(getValue(config, 'ios.identityStatus'), 'not configured')} · not checked against the app or Store</dd></div>
+        </>}
+        <div><dt>Last file read</dt><dd>{preview ? 'Example data. No files read.' : observedLabel ?? 'No file read recorded'}</dd></div>
+      </dl>
+      <p>Independent file reads can become out of date. This view does not check Git, tools, credentials or Store state.</p>
+      <div className="guided-inline-actions"><button type="button" className="button small secondary" disabled={!session || Boolean(refreshReason) || session.snapshotRequest !== null}
+        aria-describedby={refreshReason ? 'guided-refresh-reason' : undefined} onClick={onRefresh}>
+        <Icon name="refresh" size={15} className={session?.snapshotRequest ? 'spin' : ''} />{session?.snapshotRequest ? 'Reading…' : 'Read project settings again'}
+      </button><button type="button" className="text-button" onClick={() => onNavigate('settings')}>Open all project settings</button></div>
+      {refreshReason && <p id="guided-refresh-reason" className="guided-blocker">{refreshReason}</p>}
+      {session?.snapshotError && <ErrorNotice error={session.snapshotError} title="Project read details" />}
+      {session?.snapshot ? <Issues issues={[...session.snapshot.config.issues, ...session.snapshot.issues]} /> :
+        <EmptyState compact icon="folder" title="No project files have been read" description="Choosing a folder does not verify its configuration, tools or release readiness." />}
+    </ProgressiveDisclosure>
+
+    <ProgressiveDisclosure title="Saved version details">
+      <HelpButton content={releaseVersionHelp} onHelp={onHelp} />
+      {versionResult && <p>{overview.version ? 'Saved values read for these settings' : 'Earlier read — not current for these settings'}: <strong>{versionResult.version.name} · Build {versionResult.version.build}</strong><br />Source: <code>{versionResult.source}</code></p>}
+      {versionError && <ErrorNotice error={versionError} />}
+      <p>This reads saved files, not the draft or Store state. Reads happen only when requested and are not continuously monitored.</p>
+      <div className="guided-inline-actions"><button type="button" className="button small secondary" disabled={releaseVersionReason !== null}
+        aria-describedby={releaseVersionReason ? 'guided-version-reason' : undefined} onClick={onReadVersion}>
+        <Icon name="refresh" size={15} />Read saved version again
+      </button></div>
+      {releaseVersionReason && <p id="guided-version-reason" className="guided-blocker">{releaseVersionReason}</p>}
+    </ProgressiveDisclosure>
+  </div>;
 }
