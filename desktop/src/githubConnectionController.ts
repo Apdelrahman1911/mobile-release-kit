@@ -6,6 +6,8 @@ import type { GitHubConnectionContext, GitHubConnectionObservationPort, GitHubCo
 import { connectionOpaqueId, connectionProgress, connectionRepository, connectionRetryable, connectionRevision,
   githubConnectionError, githubConnectionRequestFits, parseGitHubConnectionHelp, parseGitHubConnectionStatus,
   sameConnectionData } from './githubConnectionProtocol.ts';
+import { ghResultMatches, githubGhFailure, parseGitHubGhRequest, parseGitHubGhResult } from './githubGhEntryProtocol.ts';
+import type { GitHubGhHandoff, GitHubGhRequest } from './githubGhEntryProtocol.ts';
 
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -35,6 +37,7 @@ interface Pending {
   baseRevision: number; oldOperationId: string | null; sessionId: string | null;
   operationId: string | null; admittedRevision: number | null;
   sent: boolean; retiring: boolean; uncertain: boolean; done: boolean;
+  ghRequest: GitHubGhRequest | null; replyPending: boolean; disconnectedBeforeReply: boolean;
 }
 interface Retirement { observer: Observation; sessionId: string; revision: number }
 
@@ -214,7 +217,7 @@ export class GitHubConnectionController {
   private settlePending(status: GitHubConnectionStatus | null): void {
     const pending = this.pending;
     if (!pending || pending.retiring || pending.done || !pending.sent || !status || !this.originMatches(pending, status) ||
-        pending.operationId === null || status.operation?.phase !== 'settled' || this.disposed ||
+        pending.operationId === null || status.operation?.phase !== 'settled' || pending.replyPending || this.disposed ||
         pending.epoch !== this.epoch || pending.observer.port !== this.port || !sameConnectionData(pending.context, this.state.context)) return;
     pending.done = true; this.pending = null;
     this.update({ busy: null, uncertain: false, error: this.state.blocked ? this.state.error : null });
@@ -271,10 +274,73 @@ export class GitHubConnectionController {
     } catch (error) { this.originRejected(pending, error); }
     return true;
   }
+  // The selected-gh route shares this exact original Connect observer. The
+  // separate auth controller reports picker/custody only, never Connected.
+  // A true return means the original handoff Promise was retained, not success.
+  connectSelectedGh(value: GitHubGhRequest, handoff: GitHubGhHandoff): boolean {
+    const request = parseGitHubGhRequest(value);
+    if (!request || !this.canConnect() || handoff.port !== this.port || !this.observer || !this.state.context || !this.state.status ||
+        request.projectId !== this.state.context.projectId || request.repository !== this.state.context.repository ||
+        request.expectedConnectionRevision !== this.state.status.revision) return false;
+    const pending = this.newPending('connect', this.observer, this.state.context, this.state.status);
+    pending.ghRequest = request;
+    this.pending = pending; this.update({ busy: 'connect', uncertain: false, error: null });
+    if (!this.unsentCurrent(pending) || !this.contextReady() || this.state.status?.session !== null || handoff.port !== this.port) {
+      this.discardUnsent(pending); return false;
+    }
+    pending.sent = true; pending.replyPending = true;
+    try {
+      const original = handoff.submit(request);
+      if (!original || typeof original.then !== 'function') throw new Error();
+      void original.then((value) => this.ghReply(pending, value), (error) => this.ghRejected(pending, error))
+        .finally(() => {
+          pending.replyPending = false;
+          if (this.pending === pending && pending.disconnectedBeforeReply && !pending.uncertain) this.finishGhPending(pending);
+          else this.settlePending(pending.observer.accepted);
+          this.maintainObserver();
+        });
+      return true;
+    } catch (error) {
+      pending.replyPending = false; this.ghRejected(pending, error); return false;
+    }
+  }
+  private finishGhPending(pending: Pending, reason?: GitHubConnectionReason): void {
+    if (this.pending !== pending || pending.done) return;
+    pending.done = true; this.pending = null;
+    this.update({ busy: this.retirement ? 'disconnect' : null, retirementPending: !!this.retirement,
+      uncertain: !!this.retirement && this.state.uncertain,
+      error: reason && !pending.retiring && pending.observer.port === this.port && sameConnectionData(pending.context, this.state.context)
+        ? reason : this.state.error });
+    this.maintainObserver();
+  }
+  private ghReply(pending: Pending, value: unknown): void {
+    const result = parseGitHubGhResult(value);
+    // Parsing can reenter a caller-owned Proxy; use the retained original only.
+    if (pending.done || this.pending !== pending || !pending.observer.active) return;
+    if (!result || !pending.ghRequest || !ghResultMatches(result, pending.ghRequest)) { this.ghRejected(pending, null); return; }
+    if (result.outcome === 'no-http') {
+      if (pending.operationId !== null || pending.sessionId !== null || pending.observer.accepted?.session) {
+        this.fail('response-invalid', true); return; // Contradicts an observed HTTP admission.
+      }
+      this.finishGhPending(pending, result.auth.reason); return;
+    }
+    if (result.outcome === 'unknown') { this.fail('response-invalid', true); return; }
+    const reply = this.receive(pending.observer, result.connection);
+    if (!pending.done && (!reply || !this.originMatches(pending, reply))) this.ghRejected(pending, null);
+  }
+  private ghRejected(pending: Pending, error: unknown): void {
+    const failure = githubGhFailure(error);
+    if (pending.done || this.pending !== pending) return;
+    if (failure.notAdmitted && pending.operationId === null && pending.sessionId === null && !pending.observer.accepted?.session) {
+      this.finishGhPending(pending, failure.reason); return;
+    }
+    pending.uncertain = true;
+    this.update({ uncertain: true }); this.fail('response-invalid', failure.notAdmitted);
+  }
   private newPending(kind: Pending['kind'], observer: Observation, context: GitHubConnectionContext, status: GitHubConnectionStatus): Pending {
     return { kind, observer, epoch: this.epoch, context, baseRevision: status.revision, oldOperationId: status.operation?.id ?? null,
       sessionId: kind === 'refresh' ? status.session!.id : null, operationId: null, admittedRevision: null,
-      sent: false, retiring: false, uncertain: false, done: false };
+      sent: false, retiring: false, uncertain: false, done: false, ghRequest: null, replyPending: false, disconnectedBeforeReply: false };
   }
   private unsentCurrent(pending: Pending): boolean {
     return !this.disposed && this.pending === pending && !pending.retiring && !pending.done && pending.epoch === this.epoch &&
@@ -359,6 +425,12 @@ export class GitHubConnectionController {
   private finishRetirement(): void {
     const retirement = this.retirement;
     if (!retirement) return;
+    if (this.pending?.observer === retirement.observer && this.pending.replyPending) {
+      // HTTP retirement can overtake the selected-gh invoke. Its original
+      // observer/Promise remains retained until that invocation actually ends.
+      this.pending.disconnectedBeforeReply = true; this.retirement = null;
+      this.update({ busy: 'disconnect', retirementPending: true }); return;
+    }
     if (this.pending?.observer === retirement.observer) { this.pending.done = true; this.pending = null; }
     this.retirement = null;
     this.update({ busy: null, retirementPending: false, uncertain: false, error: this.state.blocked ? this.state.error : null });
