@@ -1,0 +1,57 @@
+--- a/desktop/native/macos-installed-native/src/android_registration.m
++++ b/desktop/native/macos-installed-native/src/android_registration.m
+@@ -279,6 +279,13 @@
+ done:
+     return client_leave(c,ready);
+ }
++// Pure transport/prepare-role DATA only. This does not validate a request or
++// admit IPC; client_exchange retains every original framing/custody check.
++// Transport role2 is query, not prepare role2. Execute is query3/prepare4.
++int mrk_android_client_prepare_role_allowed(uint32_t client_role,uint8_t prepare_role) {
++    return (client_role==1 && prepare_role==1)
++        || (client_role==2 && (prepare_role==2 || prepare_role==3 || prepare_role==4));
++}
+ // This is the whole original synchronous proxy invocation. Apple's documented
+ // contract says both reply/error blocks run ON THIS CALLING THREAD before the
+ // message to the proxy returns. The enclosing returned message, not a flag set
+@@ -310,7 +317,7 @@
+             || (receipt && (c->maintenance_phase!=4 || !c->tail_valid || c->facts.slots[6]!=2))) return 0;
+     } else if (preparing==1) {
+         if (cleanup || count!=MRK_ANDROID_PREPARE_BYTES || memcmp(input,"MRKATP01",8)!=0
+-            || (c->role==1 && input[32]!=1) || (c->role==2 && input[32]!=2 && input[32]!=3)) return 0;
++            || !mrk_android_client_prepare_role_allowed(c->role,input[32])) return 0;
+     } else if (c->role==1) {
+         if (count<32 || count>MRK_ANDROID_MAX_FRAME || (cleanup && input[28]==0)) return 0;
+     } else {
+--- a/desktop/native/macos-installed-native/src/android_registration.rs
++++ b/desktop/native/macos-installed-native/src/android_registration.rs
+@@ -1116,6 +1116,29 @@
+ mod tests {
+     use super::*;
+     fn bounds() -> Bounds { Bounds { origin: 10, work: 10 + WORK_NS, hard: 10 + HARD_NS } }
++    #[cfg(target_os = "macos")]
++    #[test]
++    fn native_prepare_role_predicate_matches_closed_rust_roles() {
++        unsafe extern "C" {
++            fn mrk_android_client_prepare_role_allowed(client_role: u32, prepare_role: u8) -> std::ffi::c_int;
++        }
++        // Calls the SAME production C predicate used before XPC preparation.
++        // No native client, service, clock, credential or tool is acquired.
++        let query = [prepare::Role::Catalog as u8, prepare::Role::Start as u8,
++            prepare::Role::LocalStoreExecute as u8];
++        for client_role in [0, 1, 2, 3, 4, 5, u32::MAX] {
++            for prepare_role in u8::MIN..=u8::MAX {
++                let expected = match client_role {
++                    1 => prepare_role == prepare::Role::Registration as u8,
++                    2 => query.contains(&prepare_role),
++                    _ => false,
++                };
++                // SAFETY: the linked pure predicate takes only two integers.
++                let actual = unsafe { mrk_android_client_prepare_role_allowed(client_role, prepare_role) };
++                assert_eq!(actual, i32::from(expected), "transport={client_role} prepare={prepare_role}");
++            }
++        }
++    }
+     #[test]
+     fn never_started_client_retires_its_actual_signal_without_arming_or_native_entry() {
+         // GO loss / failed installed-service Check occurs before ClockBridge
