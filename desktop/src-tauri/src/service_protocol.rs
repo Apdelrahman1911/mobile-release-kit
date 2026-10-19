@@ -1,0 +1,350 @@
+//! Closed application-observation protocol shared by the GUI host and CLI.
+//!
+//! These are DATA, not document, filesystem, credential or finality witnesses.
+//! In particular, a deserialized operation status cannot settle original work.
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+pub const VERSION: u32 = 1;
+pub const REQUEST_BYTES: usize = 4096;
+pub const RESPONSE_BYTES: usize = 256 * 1024;
+pub const PROJECT_LIMIT: usize = 64;
+pub const OPERATION_LIMIT: usize = 256;
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Id(String);
+impl Id {
+    pub fn parse(value: &str) -> Result<Self, Error> {
+        if value.len() != 32 || value.bytes().all(|b| b == b'0')
+            || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            return Err(Error::InvalidRequest);
+        }
+        Ok(Self(value.to_owned()))
+    }
+    pub fn as_str(&self) -> &str { &self.0 }
+    pub(crate) fn random() -> Result<Self, Error> {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|_| Error::Unavailable)?;
+        Self::parse(&hex(&bytes)).map_err(|_| Error::Unavailable)
+    }
+}
+impl fmt::Debug for Id {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("Id(..)") }
+}
+impl TryFrom<String> for Id {
+    type Error = Error;
+    fn try_from(value: String) -> Result<Self, Self::Error> { Self::parse(&value) }
+}
+impl From<Id> for String { fn from(value: Id) -> Self { value.0 } }
+
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes { text.push(DIGITS[(byte >> 4) as usize] as char); text.push(DIGITS[(byte & 15) as usize] as char); }
+    text
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Error {
+    InvalidRequest, Unavailable, AccessDenied, Expired, Busy, Conflict,
+    RecoveryRequired, StateUnknown, UnsupportedPlatform,
+}
+impl Error {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "The service request is invalid or unsupported.",
+            Self::Unavailable => "Open Mobile Release Kit Desktop and enable agent read access in Settings.",
+            Self::AccessDenied => "Enable agent read access for this project in Desktop Settings.",
+            Self::Expired => "Agent read access expired. Enable it again in Desktop Settings.",
+            Self::Busy => "The application service is busy. Try again after current work settles.",
+            Self::Conflict => "Saved service state changed. Reopen Desktop and inspect the conflict; do not replace the state files.",
+            Self::RecoveryRequired => "Application service state needs recovery. Preserve its files; it has not been reset.",
+            Self::StateUnknown => "Service storage or shutdown is unconfirmed. Preserve state and do not retry a mutation.",
+            Self::UnsupportedPlatform => "This platform does not yet support the installed agent service.",
+        }
+    }
+}
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.message()) }
+}
+impl std::error::Error for Error {}
+
+/// Exact native-vault reference. A preference never authenticates a payload or
+/// authorizes its use; the original vault must reassess and explicitly bind it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialReference {
+    pub vault_id: Id,
+    pub generation_id: Id,
+    pub record_id: Id,
+    pub revision_id: Id,
+    pub revision_counter: u32,
+}
+impl CredentialReference {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.revision_counter == 0 || self.vault_id == self.generation_id
+            || self.record_id == self.vault_id || self.record_id == self.generation_id
+            || self.revision_id == self.vault_id || self.revision_id == self.generation_id || self.revision_id == self.record_id {
+            Err(Error::InvalidRequest)
+        } else { Ok(()) }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Action {
+    ObserveProject, EditConfiguration, EditProjectIdentity, GitStage, GitUnstage,
+    GitCommit, AssignCredential, GenerateCredential, Build, Release,
+}
+
+/// Future operation-specific adapters may compare this DATA with a genuine
+/// service-owned permit. Receiving this object alone never creates a permit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationContext {
+    pub project_id: Id,
+    pub client_id: Id,
+    pub session_id: Id,
+    pub action: Action,
+    pub expected_observation_revision: u64,
+    pub operation_id: Id,
+    pub authorization_id: Id,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OperationState {
+    Prepared, Running, Succeeded, Failed, CancellationRequested, Cancelled,
+    RecoveryRequired, Unknown,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Settlement { Pending, Settled, Unknown }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationObservation {
+    pub operation_id: Id,
+    pub project_id: Id,
+    pub action: Action,
+    pub state: OperationState,
+    pub settlement: Settlement,
+    pub observation_revision: u64,
+    pub stale: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigurationState { Missing, Invalid, FormatValid, Unavailable }
+
+/// The original passive engine's redacted saved-file summary, not config data,
+/// source text, arbitrary issues, paths, secret values or account identities.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SavedConfiguration {
+    pub state: ConfigurationState,
+    pub bytes: Option<u64>,
+    pub sha256: Option<String>,
+}
+impl SavedConfiguration {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.bytes.is_some() != self.sha256.is_some()
+            || self.bytes.is_some_and(|bytes| bytes > 1024 * 1024)
+            || self.sha256.as_ref().is_some_and(|hash| hash.len() != 64
+                || !hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+            || self.state == ConfigurationState::Missing && self.bytes.is_some() {
+            return Err(Error::InvalidRequest);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SavedObservation {
+    pub revision: u64,
+    pub stale: bool,
+    pub configuration: SavedConfiguration,
+    pub discovery_partial: bool,
+    pub issue_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectObservation {
+    pub project_id: Id,
+    /// Remembered projects are not automatically native registrations.
+    pub registered_in_current_host: bool,
+    pub observation: Option<SavedObservation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectQuery { pub project_id: Id }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationQuery { pub project_id: Id, pub operation_id: Id }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Empty {}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "method", content = "params", deny_unknown_fields)]
+pub enum RequestBody {
+    #[serde(rename = "service.info")] Info(Empty),
+    #[serde(rename = "projects.list")] Projects(Empty),
+    #[serde(rename = "project.observation")] Observe(ProjectQuery),
+    #[serde(rename = "operation.list")] Operations(ProjectQuery),
+    #[serde(rename = "operation.status")] Operation(OperationQuery),
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Request { pub version: u32, pub request_id: Id, pub request: RequestBody }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServiceInfo {
+    pub read_only: bool,
+    pub requires_running_desktop: bool,
+    pub cached_observations_are_authority: bool,
+    pub remaining_access_ms: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ResponseBody {
+    Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
+    Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Response {
+    pub version: u32,
+    pub request_id: Id,
+    pub service_instance: Id,
+    pub client_id: Id,
+    pub session_id: Id,
+    pub response: ResponseBody,
+}
+
+fn nesting(bytes: &[u8]) -> Result<(), Error> {
+    let (mut depth, mut quoted, mut escape) = (0u32, false, false);
+    for byte in bytes {
+        if quoted {
+            if escape { escape = false; } else if *byte == b'\\' { escape = true; } else if *byte == b'"' { quoted = false; }
+        } else {
+            match byte {
+                b'"' => quoted = true,
+                b'{' | b'[' => { depth += 1; if depth > 16 { return Err(Error::InvalidRequest); } }
+                b'}' | b']' => { depth = depth.checked_sub(1).ok_or(Error::InvalidRequest)?; }
+                _ => {}
+            }
+        }
+    }
+    if depth != 0 || quoted { return Err(Error::InvalidRequest); }
+    Ok(())
+}
+pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
+    if bytes.is_empty() || bytes.len() > REQUEST_BYTES { return Err(Error::InvalidRequest); }
+    nesting(bytes)?;
+    let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+    if request.version != VERSION { return Err(Error::InvalidRequest); }
+    Ok(request)
+}
+pub fn encode_request(request: &Request) -> Result<Vec<u8>, Error> {
+    let bytes = serde_json::to_vec(request).map_err(|_| Error::InvalidRequest)?;
+    decode_request(&bytes)?;
+    Ok(bytes)
+}
+pub fn encode_response(response: &Response) -> Result<Vec<u8>, Error> {
+    validate_response(response)?;
+    let bytes = serde_json::to_vec(response).map_err(|_| Error::StateUnknown)?;
+    if bytes.len() > RESPONSE_BYTES { return Err(Error::StateUnknown); }
+    Ok(bytes)
+}
+pub fn decode_response(bytes: &[u8], request_id: &Id, instance: &Id) -> Result<Response, Error> {
+    if bytes.is_empty() || bytes.len() > RESPONSE_BYTES { return Err(Error::InvalidRequest); }
+    nesting(bytes)?;
+    let response: Response = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+    if response.version != VERSION || &response.request_id != request_id || &response.service_instance != instance {
+        return Err(Error::Conflict);
+    }
+    validate_response(&response)?;
+    Ok(response)
+}
+fn validate_response(response: &Response) -> Result<(), Error> {
+    fn project(project: &ProjectObservation) -> Result<(), Error> {
+        if let Some(saved) = &project.observation {
+            if saved.revision == 0 || saved.issue_count > 20_000 { return Err(Error::InvalidRequest); }
+            saved.configuration.validate()?;
+        }
+        Ok(())
+    }
+    fn operation(operation: &OperationObservation) -> Result<(), Error> {
+        use OperationState as S;
+        use Settlement as F;
+        let consistent = match operation.state {
+            S::Prepared | S::Running | S::CancellationRequested => operation.settlement == F::Pending,
+            S::Succeeded | S::Failed | S::Cancelled => operation.settlement == F::Settled,
+            S::Unknown => operation.settlement == F::Unknown,
+            S::RecoveryRequired => matches!(operation.settlement, F::Settled | F::Unknown),
+        };
+        if operation.observation_revision == 0 || !consistent { return Err(Error::InvalidRequest); }
+        Ok(())
+    }
+    if response.version != VERSION { return Err(Error::InvalidRequest); }
+    match &response.response {
+        ResponseBody::Info(info) if !info.read_only || !info.requires_running_desktop || info.cached_observations_are_authority
+            || info.remaining_access_ms > 3_600_000 => return Err(Error::InvalidRequest),
+        ResponseBody::Projects(rows) => {
+            if rows.len() > PROJECT_LIMIT { return Err(Error::InvalidRequest); }
+            let mut seen = std::collections::BTreeSet::new();
+            for row in rows { project(row)?; if !seen.insert(&row.project_id) { return Err(Error::InvalidRequest); } }
+        }
+        ResponseBody::Observation(row) => project(row)?,
+        ResponseBody::Operations(rows) => {
+            if rows.len() > OPERATION_LIMIT { return Err(Error::InvalidRequest); }
+            let mut seen = std::collections::BTreeSet::new();
+            for row in rows { operation(row)?; if !seen.insert(&row.operation_id) { return Err(Error::InvalidRequest); } }
+        }
+        ResponseBody::Operation(row) => operation(row)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn closed_requests_reject_duplicate_unknown_and_generic_commands() {
+        let prefix = r#"{"version":1,"requestId":"11111111111111111111111111111111","request":"#;
+        for bad in [r#"{"method":"shell","params":{}}}"#, r#"{"method":"projects.list","params":{"root":"/"}}}"#,
+            r#"{"method":"projects.list","method":"service.info","params":{}}}"#,
+            r#"{"method":"projects.list","params":{},"params":{}}}"#] {
+            assert!(decode_request(format!("{prefix}{bad}").as_bytes()).is_err());
+        }
+        let valid = format!(r#"{prefix}{{"method":"projects.list","params":{{}}}}}}"#);
+        assert!(decode_request(valid.as_bytes()).is_ok());
+        assert!(decode_request(valid.replace("\"version\":1", "\"version\":1,\"version\":1").as_bytes()).is_err());
+    }
+    #[test]
+    fn bounded_identifiers_and_credential_generations() {
+        assert!(Id::parse("project-1").is_err());
+        assert!(Id::parse(&"0".repeat(32)).is_err());
+        assert!(Id::parse(&"A".repeat(32)).is_err());
+        assert!(decode_request(&vec![b' '; REQUEST_BYTES + 1]).is_err());
+        assert!(nesting(&[vec![b'['; 17], vec![b']'; 17]].concat()).is_err());
+        let id = Id::parse(&"1".repeat(32)).unwrap();
+        let reference = CredentialReference { vault_id: id.clone(), generation_id: id.clone(), record_id: id.clone(),
+            revision_id: id, revision_counter: 0 };
+        assert!(reference.validate().is_err());
+        let valid = CredentialReference { vault_id: Id::parse(&"1".repeat(32)).unwrap(), generation_id: Id::parse(&"2".repeat(32)).unwrap(),
+            record_id: Id::parse(&"3".repeat(32)).unwrap(), revision_id: Id::parse(&"4".repeat(32)).unwrap(), revision_counter: 1 };
+        assert!(valid.validate().is_ok());
+        for alias in [&valid.vault_id, &valid.generation_id, &valid.record_id] {
+            assert!(CredentialReference { revision_id: alias.clone(), ..valid.clone() }.validate().is_err());
+        }
+    }
+}
