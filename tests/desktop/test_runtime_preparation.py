@@ -151,6 +151,7 @@ class RuntimePreparationTests(unittest.TestCase):
         current_only = (
             "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
             "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
+            "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py",
         )
         self.assertEqual(preparation.CURRENT_BOOTSTRAPS, (*preparation.BOOTSTRAPS, *current_only))
         self.assertEqual(set(preparation.CURRENT_BOOTSTRAPS) | {preparation.STORE_BOOTSTRAP,

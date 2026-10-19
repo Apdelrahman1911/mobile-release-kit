@@ -45,6 +45,7 @@ BOOTSTRAPS = (
 CURRENT_BOOTSTRAPS = (
     *BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
+    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py",
 )
 STORE_BOOTSTRAP = "local_store_preflight_bootstrap.py"
 STORE_PREPARE_BOOTSTRAP = "local_store_prepare_bootstrap.py"
@@ -589,7 +590,7 @@ def main(argv=None) -> None:
     parser.add_argument("--runtime-root", required=True, type=Path)
     parser.add_argument("--target", required=True, choices=sorted(TARGETS))
     parser.add_argument("--profile", choices=("historical", "current"), default="historical",
-                        help="Explicit current ten-bootstrap product roster, or backward-compatible historical roster")
+                        help="Explicit current product bootstrap roster, or backward-compatible historical roster")
     parser.add_argument("--store-component", type=Path,
                         help="Already authenticated Mac Store component; current profile only, no native qualification")
     args = parser.parse_args(argv)
