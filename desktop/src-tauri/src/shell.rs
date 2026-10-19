@@ -1738,6 +1738,32 @@ fn github_connection_body<'a>(webview: &Webview, request: &'a tauri::ipc::Reques
     if webview.label() != MAIN_WINDOW { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); }
     request_body(request).map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))
 }
+fn git_read_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::git_read_protocol::Command, BridgeError> {
+    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
+    crate::git_read_protocol::decode_command(name, bytes)
+}
+#[tauri::command]
+async fn git_read_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::git_read_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Git reads have no fixture admission."));
+    git_read_command("git_read_status", &webview, &request)?;
+    Ok(state.document.git_read_status())
+}
+#[tauri::command]
+async fn git_read_start(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::git_read_protocol::StartResult, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Git reads have no fixture admission."));
+    let crate::git_read_protocol::Command::Start(input) = git_read_command("git_read_start", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    state.document.git_read_start(input)
+}
+#[tauri::command]
+async fn git_read_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::git_read_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Git reads have no fixture admission."));
+    let crate::git_read_protocol::Command::Cancel(id) = git_read_command("git_read_cancel", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    state.document.git_read_cancel(&id)
+}
+
 fn github_auth_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::github_auth_entry_protocol::Command, BridgeError> {
     if webview.label() != MAIN_WINDOW { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); }
     // These three new routes admit RAW UTF-8 JSON only. Tauri's JSON Value
@@ -4340,6 +4366,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             project_identity_close, project_identity_status,
             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
             github_auth_status, github_auth_connect, github_auth_cancel,
+            git_read_status, git_read_start, git_read_cancel,
             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
             github_release_status, github_release_prepare, github_release_dispatch, github_release_track,

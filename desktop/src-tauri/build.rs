@@ -320,6 +320,7 @@ fn main() {
             "project_identity_close", "project_identity_status",
             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
             "github_auth_status", "github_auth_connect", "github_auth_cancel",
+            "git_read_status", "git_read_start", "git_read_cancel",
             "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",
             "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
             "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",

@@ -17,6 +17,9 @@ mod history_sources;
 pub(crate) use history_sources::HistorySources;
 #[path = "github_auth_sources_macos.rs"]
 mod github_auth_sources;
+#[path = "git_read_sources_macos.rs"]
+mod git_read_sources;
+pub(crate) use git_read_sources::GitReadSources;
 pub(crate) use github_auth_sources::GhAuthSources;
 #[path = "local_history_sources_macos.rs"]
 mod local_history_sources;

@@ -1128,6 +1128,11 @@ impl Book {
             files.insert(file.path.clone(), file);
         }
         for required in runtime::REQUIRED_RUNTIME_RESOURCES { if !files.contains_key(required) { return Err(AdmissionFailure::Inventory); } }
+        // This closed new profile must find its actual fixed bootstrap BEFORE
+        // claiming the child. The historical mandatory roster stays unchanged.
+        if selection.bootstrap == selection.cwd.join("git_read_bootstrap.py") && !files.contains_key("git_read_bootstrap.py") {
+            return Err(AdmissionFailure::Inventory);
+        }
         if self.history_nomination.is_some() && (!files.contains_key("tools/gh") || !files.contains_key("github_history_bootstrap.py")){
             return Err(AdmissionFailure::Inventory);
         }
@@ -1323,6 +1328,49 @@ macro_rules! slots {
 slots!(PassiveRuntimeSlots, PassiveInstalledRuntime, runtime::PassiveInstalledProfile);
 slots!(GitHubReadOnlyRuntimeSlots, GitHubReadOnlyInstalledRuntime, runtime::GitHubReadOnlyInstalledProfile);
 slots!(GitHubAuthRuntimeSlots, GitHubAuthInstalledRuntime, runtime::GitHubAuthInstalledProfile);
+slots!(GitReadRuntimeSlots, GitReadInstalledRuntime, runtime::GitReadInstalledProfile);
+#[path = "git_read_runtime_macos.rs"]
+mod git_read_runtime;
+// Distinct SOURCE original, not a Setup or GitRead slot. The existing fixed
+// github_setup_bootstrap.py inventory row is required for every Book inspection.
+slots!(VersionAllocationSourceRuntimeSlots, VersionAllocationSourceInstalledRuntime, runtime::VersionAllocationSourceInstalledProfile);
+impl VersionAllocationSourceRuntimeSlots {
+    pub(crate) fn working_reservation_bytes() -> Option<usize> {
+        crate::macos_history_inventory::code_storage_bytes(std::mem::size_of::<Record>(),
+            native::vault_filesystem::SNAPSHOT_FRAME_BYTES)?;
+        crate::macos_history_inventory::CODE_CONTROL_RESERVE.checked_add(std::mem::size_of::<Self>())?
+            .checked_add(128 * 1024)
+    }
+    pub(crate) fn reserve_once(&mut self) -> Result<usize> {
+        if !self.never_started() { return Err(AdmissionFailure::AlreadyUsed); }
+        let records = crate::macos_install_record::RUNTIME_RECORD_LIMIT;
+        let original = self.inspection.as_mut().ok_or(AdmissionFailure::Unknown)?;
+        if original.records.capacity() != 0 { return Err(AdmissionFailure::AlreadyUsed); }
+        original.records.try_reserve_exact(records).map_err(native_error)?;
+        if original.records.capacity() > records { return Err(AdmissionFailure::Bounds); }
+        Self::working_reservation_bytes().ok_or(AdmissionFailure::Bounds)
+    }
+    pub(crate) fn source_runtime_fd_bound() -> usize { MAC_RUNTIME_FDS }
+}
+impl VersionAllocationSourceInstalledRuntime {
+    pub(crate) fn post_original(&mut self, end: Instant, stop: &watch::Receiver<bool>,
+        publish: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>)) -> Result<()> {
+        let result = (|| {
+            if !self.original.inspected || !self.original.prepared || !self.original.admission_custody_ready() {
+                return Err(AdmissionFailure::AlreadyUsed);
+            }
+            self.original.point(end, stop)?;
+            native::real_user().map_err(native_error)?;
+            for (index, record) in self.original.records.iter().enumerate() {
+                if record.state == State::Owned { self.original.check_name(index, end, stop)?; }
+            }
+            self.original.point(end, stop)
+        })();
+        if let Err(failure) = result.as_ref() { self.original.note_acl(*failure, Instant::now()); }
+        publish(self.original.first_failure()); result
+    }
+}
+
 #[path = "github_auth_runtime_macos.rs"]
 mod github_auth_runtime;
 slots!(GitHubPreflightRuntimeSlots, GitHubPreflightInstalledRuntime, runtime::GitHubPreflightInstalledProfile);

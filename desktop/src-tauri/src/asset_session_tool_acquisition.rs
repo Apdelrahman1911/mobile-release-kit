@@ -277,7 +277,7 @@ impl DocumentBinding {
             || state.lock_pending
             || state.compatibility_picker_pending
             || state.maintenance.closed()
-            || gh_auth::pending(state)
+            || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)
             || state
                 .saved_observation
                 .as_ref()

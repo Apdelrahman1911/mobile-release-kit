@@ -14,6 +14,14 @@ pub(super) struct SavedObservationLane {
     stage: std::sync::atomic::AtomicU8, completion_returned: AtomicBool,
 }
 impl SavedObservationLane {
+    // Existing short ControlSlot/registry comparison only, with no Doc or
+    // Supervisor/Resources re-entry and no native/service IO.
+    pub(super) fn current_version_source(&self, document: &Inner,
+        input: &crate::supervisor::VersionAllocationSourceInput) -> bool {
+        self.returned() && self.project_id == input.project_id && self.root == input.root
+            && document.android_registration_control.matches_epoch(self.epoch)
+            && document.bridge.registry_generation() == self.registration
+    }
     // Called by the same prepared tool Input on its blocking worker. This
     // never reacquires the Document or Edit Registry held by Start admission.
     pub(super) fn tool_acquisition_current(&self, document: &Inner, registration: u32,
@@ -78,6 +86,46 @@ impl SavedComparisonData {
     }
 }
 pub(super) struct SavedInputBinding { pub(super) lane: Arc<SavedObservationLane>, comparison: SavedComparisonData }
+impl SavedInputBinding {
+    pub(super) fn matches_version_source(&self, document: &Inner, original: &Arc<SavedObservationLane>,
+        input: &crate::supervisor::VersionAllocationSourceInput, edit: &crate::edit_owner::SavedEditGuard<'_>) -> bool {
+        Arc::ptr_eq(&self.lane, original) && self.lane.current_version_source(document, input)
+            && edit.matches(&self.lane.stamp)
+            && input.configuration_size == self.comparison.config_bytes
+            && SavedComparisonData::digest(&input.configuration_sha256) == Some(self.comparison.config_sha256)
+            && input.version_size == self.comparison.version_bytes
+            && SavedComparisonData::digest(&input.version_sha256) == Some(self.comparison.version_sha256)
+            && input.version_path.as_bytes() == &self.comparison.source[..usize::from(self.comparison.source_len)]
+            && document.bridge.native_project(&input.project_id).is_ok_and(|(registration, root)|
+                registration == self.lane.registration && root == self.lane.root)
+    }
+    pub(super) fn version_source_input(&self, document: &Inner, project_id: &str, reference: &str,
+        edit: &crate::edit_owner::SavedEditGuard<'_>)
+        -> Result<(Arc<SavedObservationLane>, Arc<crate::supervisor::VersionAllocationSourceInput>), BridgeError> {
+        if self.lane.project_id != project_id || !crate::supervisor::version_allocation_source_branch(reference)
+            || !self.lane.returned() || !edit.matches(&self.lane.stamp)
+            || !document.android_registration_control.matches_epoch(self.lane.epoch)
+            || document.bridge.registry_generation() != self.lane.registration { return Err(stale()); }
+        // These bytes came from the original typed saved-version return. No
+        // renderer hashes, draft, Android Prepare or new private source read.
+        let path = std::str::from_utf8(&self.comparison.source[..usize::from(self.comparison.source_len)]).map_err(|_| stale())?;
+        fn sha(bytes: &[u8; 32]) -> String {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut result = String::with_capacity(64);
+            for b in bytes { result.push(HEX[usize::from(b >> 4)] as char); result.push(HEX[usize::from(b & 15)] as char); }
+            result
+        }
+        let input = Arc::new(crate::supervisor::VersionAllocationSourceInput {
+            project_id: project_id.to_owned(), root: self.lane.root.clone(),
+            configuration_size: self.comparison.config_bytes, configuration_sha256: sha(&self.comparison.config_sha256),
+            version_path: path.to_owned(), version_size: self.comparison.version_bytes,
+            version_sha256: sha(&self.comparison.version_sha256), reference: reference.to_owned(),
+        });
+        if !self.matches_version_source(document, &self.lane, &input, edit) { return Err(stale()); }
+        Ok((self.lane.clone(), input))
+    }
+}
+
 
 /// Move-only witness from original Document state. Prepare stays comparison DATA.
 pub(crate) struct ValidatedSavedInput {
@@ -236,7 +284,7 @@ mod saved_observation_control_tests {
 }
 
 impl DocumentBinding {
-    fn saved_observation_gate(&self, state: &DocumentState, exact: Option<&Arc<SavedObservationLane>>) -> Result<(), BridgeError> {
+    pub(super) fn saved_observation_gate(&self, state: &DocumentState, exact: Option<&Arc<SavedObservationLane>>) -> Result<(), BridgeError> {
         passive_document_gate(state)?;
         if !state.lifetime.original_bound() || state.lost_observed { return Err(stale()); }
         if state.saved_observation.as_ref().is_some_and(|lane| !lane.returned()

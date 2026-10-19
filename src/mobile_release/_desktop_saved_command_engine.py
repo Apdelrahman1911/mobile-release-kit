@@ -51,6 +51,7 @@ class _SavedCommandEngine:
                    SavedCommandDomain.ProjectRecovery: "Project recovery custody did not settle",
                    SavedCommandDomain.IOSArchive: "Saved build custody did not settle",
                    SavedCommandDomain.ArtifactInspection: "Artifact inspection custody did not settle",
+                   SavedCommandDomain.AppleProvisioning: "Bundle-ID provisioning custody did not settle",
                    SavedCommandDomain.LocalStorePreflight: "Store access-check custody did not settle",
                    SavedCommandDomain.LocalStorePrepare: "Local Store preparation custody did not settle",
                    SavedCommandDomain.LocalStoreExecute: "Local Store execution custody did not settle",
@@ -75,6 +76,9 @@ class _SavedCommandEngine:
         elif domain is SavedCommandDomain.ArtifactInspection:
             from ._desktop_artifact_inspection_control import ArtifactInspectionInput
             self.input = ArtifactInspectionInput(started)
+        elif domain is SavedCommandDomain.AppleProvisioning:
+            from ._desktop_apple_provisioning_control import AppleProvisioningInput
+            self.input = AppleProvisioningInput(started)
         elif domain is SavedCommandDomain.LocalStorePreflight:
             from ._desktop_store_preflight_control import StorePreflightInput
             self.input = StorePreflightInput(started)
@@ -140,7 +144,7 @@ class _SavedCommandEngine:
             except BaseException as error:
                 first = error
                 self.guard._abort(error)
-        elif (self.domain in {SavedCommandDomain.ToolAcquisition, SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile} and self.input.operation is not None
+        elif (self.domain in {SavedCommandDomain.ToolAcquisition, SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.AppleProvisioning, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile} and self.input.operation is not None
               and not self._android_handoff_close_claimed):
             self._android_handoff_close_claimed = True
             try:
@@ -173,6 +177,8 @@ class _SavedCommandEngine:
             from ._desktop_store_prepare_protocol import request_phases
             phases=request_phases(self.request)
             self._require(1<=self.frames<len(phases)+2 if terminal else self.frames<len(phases)+1)
+        elif self.domain is SavedCommandDomain.AppleProvisioning:
+            self._require(1 <= self.frames <= wire.MAX_EVENTS + 1 if terminal else self.frames <= wire.MAX_EVENTS)
         elif self.domain is SavedCommandDomain.LocalReleaseHistory:
             self._require(1 <= self.frames < 8 if terminal else self.frames < 7)
         elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):
@@ -190,10 +196,14 @@ class _SavedCommandEngine:
         self.output_bytes += len(raw)
         remaining = memoryview(raw)
         while remaining:
-            if not terminal:
+            if self.domain is SavedCommandDomain.AppleProvisioning:
+                self.input.output_checkpoint(terminal=terminal)
+            elif not terminal:
                 self.guard.check()
             endpoint = self.started + (wire.FINALITY_SECONDS if terminal else wire.WORK_SECONDS)
-            if terminal and self.domain in (SavedCommandDomain.IOSArchive,SavedCommandDomain.LocalReleaseHistory,SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
+            if self.domain is SavedCommandDomain.AppleProvisioning:
+                endpoint = self.input.hard_endpoint() if terminal else self.input.audit_endpoint()
+            elif terminal and self.domain in (SavedCommandDomain.IOSArchive,SavedCommandDomain.LocalReleaseHistory,SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
                 endpoint = self.input.hard_endpoint()
             elif terminal and self.candidate is not None:
                 endpoint=self.input.hard_endpoint()
@@ -212,7 +222,7 @@ class _SavedCommandEngine:
 
     def _response(self, kind: str, payload: dict) -> bytes:
         wire = _protocol(self.domain)
-        if self.domain in (SavedCommandDomain.LocalReleaseHistory,SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
+        if self.domain in (SavedCommandDomain.AppleProvisioning,SavedCommandDomain.LocalReleaseHistory,SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
             return wire.response(self.request, kind, payload, self.frames)
         if self.domain in (SavedCommandDomain.ToolAcquisition, SavedCommandDomain.OfflinePreflight, SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight):
             return wire.response(self.request, kind, payload)
@@ -254,7 +264,7 @@ class _SavedCommandEngine:
             self.guard._install_artifact_inspection_source(self.input)
         elif self.domain is SavedCommandDomain.LocalStorePreflight:
             self.guard._install_store_preflight_source(self.input)
-        elif self.domain in (SavedCommandDomain.LocalReleaseHistory,SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
+        elif self.domain in (SavedCommandDomain.AppleProvisioning,SavedCommandDomain.LocalReleaseHistory,SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
             self.guard._install_saved_command_source(self.input)
         else:
             self._require(False)
@@ -294,6 +304,9 @@ class _SavedCommandEngine:
         elif self.domain is SavedCommandDomain.ArtifactInspection:
             from .desktop_artifact_inspection import ArtifactInspectionRun
             self.service = ArtifactInspectionRun(self.request, self.guard, self.input)
+        elif self.domain is SavedCommandDomain.AppleProvisioning:
+            from .desktop_apple_provisioning import AppleProvisioningRun
+            self.service = AppleProvisioningRun(self.request, self.guard, self.input)
         elif self.domain is SavedCommandDomain.LocalStorePreflight:
             from .desktop_store_preflight import StorePreflightRun
             self.service = StorePreflightRun(self.request, self.guard, self.input)
@@ -346,7 +359,7 @@ class _SavedCommandEngine:
             return self.service is None or self.service.budget.closed
         if self.domain is SavedCommandDomain.ProjectRecovery:
             return self.input.resources_closed()
-        self._require(self.domain in (SavedCommandDomain.ToolAcquisition, SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile))
+        self._require(self.domain in (SavedCommandDomain.ToolAcquisition, SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.AppleProvisioning, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile))
         if self.service is None and self.input.operation is None:
             # A constructor's lost handoff must not discard an already-bound
             # original operation, even though no terminal can then be emitted.
@@ -384,6 +397,8 @@ def run_engine(engine: _SavedCommandEngine) -> int:
         from ._desktop_ios_archive_engine import _Engine as ExpectedEngine
     elif engine.domain is SavedCommandDomain.ArtifactInspection:
         from ._desktop_artifact_inspection_engine import _Engine as ExpectedEngine
+    elif engine.domain is SavedCommandDomain.AppleProvisioning:
+        from ._desktop_apple_provisioning_engine import _Engine as ExpectedEngine
     elif engine.domain is SavedCommandDomain.LocalStorePreflight:
         from ._desktop_store_preflight_engine import _Engine as ExpectedEngine
     elif engine.domain is SavedCommandDomain.LocalStoreReconcile:

@@ -1237,7 +1237,7 @@ pub(crate) use macos::{SourceBook, capture, capture_public_images, probe_artifac
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use macos::PUBLIC_IMAGES_SOURCE_CONTROL_BYTES;
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub(crate) use macos::{HistorySources,LocalHistorySources,GhAuthSources};
+pub(crate) use macos::{HistorySources,LocalHistorySources,GhAuthSources,GitReadSources};
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use macos::{BackupSources, BackupDestinations};
 #[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]

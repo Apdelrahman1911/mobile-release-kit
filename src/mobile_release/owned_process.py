@@ -208,6 +208,10 @@ def run_owned(
                 capture=capture, text=text, output_limit=output_limit, on_start=on_start,
                 cleanup=cleanup, execution_scope=execution_scope,
                 journal_binding=journal_binding, evidence=_evidence)
+        if domain is SavedCommandDomain.AppleProvisioning:
+            source.require_operation().command_arguments(argv, environ=environ, cwd=cwd,
+                capture=capture, text=text, output_limit=output_limit, on_start=on_start,
+                cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding, evidence=_evidence)
         if domain in (SavedCommandDomain.LocalStorePreflight,SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute,SavedCommandDomain.LocalStoreReconcile):
             source.require_operation().command_arguments(argv, capture=capture, evidence=_evidence)
         timeout, output_limit = source.command_limits(timeout, capture, output_limit)

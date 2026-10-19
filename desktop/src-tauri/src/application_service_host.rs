@@ -81,15 +81,15 @@ impl NativeStateReady {
     pub(crate) fn project_binding(&self) -> &ProjectBinding { &self.project }
     /// Call OFF document/host guards, in the parent's retained original IO job.
     /// Retain the returned lease before admitting any subsequent native work.
-    pub(crate) fn begin_use(self) -> Result<NativeStateLease, StateError> {
+    pub(crate) fn begin_use(self: &Arc<Self>) -> Result<NativeStateLease, StateError> {
         let native_use = Arc::new(self.store.begin_native_use()?);
-        Ok(NativeStateLease { ready: self, native_use })
+        Ok(NativeStateLease { ready: self.clone(), native_use })
     }
 }
 /// No Drop cleanup: a missing original parent must not make an active native
 /// use look joined. The actual all-jobs receipt gates Store token retirement.
 pub(crate) struct NativeStateLease {
-    ready: NativeStateReady, native_use: Arc<NativeUse>,
+    ready: Arc<NativeStateReady>, native_use: Arc<NativeUse>,
 }
 impl NativeStateLease {
     pub(crate) fn context(&self) -> &NativeStateReady { &self.ready }
@@ -818,7 +818,7 @@ mod tests {
                 state.registered.insert(project.runtime_id.clone(), project.clone());
                 state.prepared = Some(ticket.0.epoch);
             }
-            let lease = host.finish_native_state(ticket, &project).unwrap();
+            let lease = Arc::new(host.finish_native_state(ticket, &project).unwrap());
             assert!(Arc::ptr_eq(lease.store(), &store));
             assert!(lease.project_binding() == &binding);
             host.native_state_current(&lease, &project).unwrap();
@@ -826,6 +826,19 @@ mod tests {
                 let _held = host.control.lock().unwrap();
                 assert_eq!(host.native_state_current(&lease, &project), Err(Error::Busy));
             }
+            // No native worker exists in this Store/Service lifecycle fixture.
+            // Reusing one Ready context still requires distinct serial tokens;
+            // dropping a lease is never the token retirement operation.
+            let first = lease.begin_use().unwrap();
+            assert!(Arc::ptr_eq(&first.ready, &lease));
+            assert_eq!(lease.begin_use().err().unwrap().code, Error::Busy);
+            store.retire_native_use(first.native_use()).unwrap();
+            let second = lease.begin_use().unwrap();
+            assert!(Arc::ptr_eq(&second.ready, &lease));
+            assert!(!Arc::ptr_eq(first.native_use(), second.native_use()));
+            assert_eq!(store.check_native_use(first.native_use()).err().unwrap().code, Error::Conflict);
+            store.retire_native_use(second.native_use()).unwrap();
+            drop((first, second));
             let mut changed = project.clone(); changed.input_revision += 1;
             assert_eq!(host.native_state_current(&lease, &changed), Err(Error::Conflict));
             assert!(!host.status().unwrap().enabled);

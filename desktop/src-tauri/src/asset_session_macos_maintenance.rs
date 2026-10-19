@@ -66,6 +66,7 @@ impl DocumentBinding {
         self.macos_maintenance_common_gate(state)
     }
     fn macos_maintenance_common_gate(&self,state:&DocumentState)->Result<(),BridgeError>{
+        if version_allocation::pending(state) { return Err(unavailable()); }
         // Do not call android_build.busy here: the second admission owns its
         // SAME unentered cohort. Its Saved snapshot/admit gates examine that
         // exact cohort and every Android original under the existing Registry.

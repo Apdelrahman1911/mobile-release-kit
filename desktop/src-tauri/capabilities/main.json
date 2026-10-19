@@ -47,6 +47,7 @@
     "allow-project-identity-close", "allow-project-identity-status",
     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
     "allow-github-auth-status", "allow-github-auth-connect", "allow-github-auth-cancel",
+    "allow-git-read-status", "allow-git-read-start", "allow-git-read-cancel",
     "allow-github-preflight-status", "allow-github-preflight-prepare", "allow-github-preflight-dispatch", "allow-github-preflight-track",
     "allow-github-preflight-reconcile", "allow-github-preflight-pending", "allow-github-preflight-cancel",
     "allow-github-release-status", "allow-github-release-prepare", "allow-github-release-dispatch", "allow-github-release-track",

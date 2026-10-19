@@ -529,6 +529,11 @@ pub(crate) struct AttemptUpdate {
     pub(crate) record: AttemptRecord,
 }
 impl AttemptUpdate {
+    /// Bounded canonical DATA comparison for the original ACK dialogue, not
+    /// proof of authorization, durable publication or native settlement.
+    pub(crate) fn sha256(&self) -> Result<String> {
+        hash(self)
+    }
     pub(super) fn armed(&self, intent: &BundleRegistrationIntent) -> Result<()> {
         self.record.validate(intent)?;
         need(

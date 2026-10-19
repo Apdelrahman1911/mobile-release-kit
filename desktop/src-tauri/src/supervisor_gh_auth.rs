@@ -504,11 +504,11 @@ enum ObserverReturn {
     Returned,
     Unknown,
 }
-struct FinalObserverReturn {
+pub(super) struct FinalObserverReturn {
     state: Mutex<ObserverReturn>,
 }
 impl FinalObserverReturn {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             state: Mutex::new(ObserverReturn::Fresh),
         }
@@ -524,7 +524,7 @@ impl FinalObserverReturn {
             Err(_) => GitHubAuthReceipt::RetainedUnknown,
         }
     }
-    async fn join_original(&self, owner: &Owner) -> bool {
+    pub(super) async fn join_original(&self, owner: &Owner) -> bool {
         {
             let Ok(mut state) = self.state.lock() else {
                 return false;

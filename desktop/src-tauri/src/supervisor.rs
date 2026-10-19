@@ -38,10 +38,19 @@ use crate::installed_runtime::GitHubAuthRuntimeSlots;
 mod gh_auth;
 pub(crate) use gh_auth::{GitHubAuthAdmission, GitHubAuthReceipt, GitHubAuthTicket, GitHubAuthWait, GitHubAuthHttpWait};
 pub(crate) use gh_auth::SourcePost as GitHubAuthSourcePost;
+#[path = "supervisor_version_allocation.rs"]
+mod version_allocation;
+pub(crate) use version_allocation::{VersionAllocationSource, VersionAllocationSourceAdmission,
+    VersionAllocationSourceInput, VersionAllocationSourceReceipt, VersionAllocationSourceRequest,
+    VersionAllocationSourceTicket};
+pub(crate) use version_allocation::source_branch as version_allocation_source_branch;
 #[path = "supervisor_history.rs"]
 mod history;
 pub(crate) use history::{GitHubHistoryAdmission,GitHubHistoryReceipt,GitHubHistoryTicket};
 use crate::github_history_protocol as history_protocol;
+#[path = "supervisor_git_read.rs"]
+mod git_read;
+pub(crate) use git_read::{GitReadAdmission, GitReadTicket, GitReadReceipt};
 use crate::github_publication_protocol as publication_protocol;
 #[path = "supervisor_publication.rs"]
 mod publication;
@@ -229,8 +238,12 @@ struct Owner {
     history_nomination: Option<Arc<crate::github_history_session::Nomination>>,
     history_gate: Option<crate::asset_session::GitHubHistoryGoGate>,
     history_endpoints: Option<history::Endpoints>,
+    git_read: Option<git_read::Invocation>,
+    git_read_endpoints: Option<git_read::Endpoints>,
     gh_auth: Option<gh_auth::Invocation>,
+    version_allocation_source: Option<version_allocation::Invocation>,
     gh_auth_endpoints: Option<gh_auth::Endpoints>,
+    version_allocation_source_endpoints: Option<version_allocation::Endpoints>,
     setup_material: Option<SetupMaterial>,
     setup_first_bound: Option<usize>,
     secret_sealed: Mutex<Option<SecretSealed>>,
@@ -248,6 +261,8 @@ struct OwnerState {
     endpoint: Instant, cleanup_endpoint: Option<Instant>, error: Option<BridgeError>,
     history_endpoints: Option<history::Endpoints>,
     gh_auth_endpoints: Option<gh_auth::Endpoints>,
+    git_read_endpoints: Option<git_read::Endpoints>,
+    version_allocation_source_endpoints: Option<version_allocation::Endpoints>,
     terminal: bool, unknown: bool,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native_unknown_pending: bool,
@@ -271,11 +286,11 @@ impl ManagementJoin {
     }
 }
 #[derive(Debug, PartialEq)]
-enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), History(history_protocol::Reply), GitHubAuth }
+enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), VersionAllocationSource }
 enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
 
 #[derive(Clone, Copy)]
-enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, GitHubHistory, GitHubAuth }
+enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, GitHubHistory, GitHubAuth, GitRead, VersionAllocationSource }
 impl Profile {
     fn stdout_limit(self) -> usize {
         match self {
@@ -288,6 +303,8 @@ impl Profile {
             Self::GitHubPublication => publication_protocol::RESPONSE_LIMIT,
             Self::GitHubHistory => 64*1024,
             Self::GitHubAuth => crate::github_auth_capture_wire::RESPONSE_LIMIT,
+            Self::GitRead => crate::git_read_protocol::RESPONSE_LIMIT,
+            Self::VersionAllocationSource => 2048,
         }
     }
     fn decode(self, bytes: &[u8], id: &str, preflight: Option<&preflight_protocol::Request>, release: Option<&release_protocol::Request>, setup: Option<&setup_protocol::Request>, publication: Option<&publication_protocol::Request>) -> Result<ReadOutcome, BridgeError> {
@@ -305,7 +322,7 @@ impl Profile {
             Self::GitHubPublication => publication_protocol::decode_reply(id, bytes,
                 publication.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Publication),
             // Only drive's actual sealed-source branch may decode History.
-            Self::GitHubHistory | Self::GitHubAuth => Err(BridgeError::protocol()),
+            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::VersionAllocationSource => Err(BridgeError::protocol()),
         }
     }
 }
@@ -321,17 +338,19 @@ enum AdmissionRequest<'a> {
     Publication { request: publication_protocol::Request, gate: crate::asset_session::GitHubPublicationGoGate, end: Instant },
     History(GitHubHistoryAdmission),
     GitHubAuth(GitHubAuthAdmission),
+    GitRead(GitReadAdmission),
+    VersionAllocationSource(VersionAllocationSourceAdmission),
 }
 impl AdmissionRequest<'_> {
     fn profile(&self) -> Profile {
         match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly,
-            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth }
+            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource }
     }
     fn encode(self, id: &str) -> Result<(Vec<u8>, Option<preflight_protocol::Request>, Option<crate::asset_session::GitHubPreflightGoGate>,
         Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>,
         Option<setup_protocol::Request>, Option<crate::asset_session::GitHubSetupGoGate>, Option<SetupNativeAdmission>), BridgeError> {
         match self {
-            Self::History(_) | Self::GitHubAuth(_) | Self::Publication { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
+            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::VersionAllocationSource(_) | Self::Publication { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
             Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None, None, None, None)),
             Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
                 Ok((github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?, None, None, None, None, None, None, None)),
@@ -406,6 +425,8 @@ enum CompletionTarget {
     Publication(Arc<Mutex<GitHubPublicationReceipt>>),
     History(Arc<Mutex<GitHubHistoryReceipt>>),
     GitHubAuth,
+    GitRead,
+    VersionAllocationSource,
 }
 
 /// A bounded native-only mailbox. Early unknown is not original resource
@@ -514,7 +535,7 @@ impl OwnerState {
         Self::with_reply(endpoint, reply.map(|sender| PassiveReply::Value { sender: Some(sender) }))
     }
     fn with_reply(endpoint: Instant, reply: Option<PassiveReply>) -> Self {
-        Self { endpoint, cleanup_endpoint: None, error: None, history_endpoints: None, gh_auth_endpoints: None, terminal: false, unknown: false, reply,
+        Self { endpoint, cleanup_endpoint: None, error: None, history_endpoints: None, gh_auth_endpoints: None, git_read_endpoints: None, version_allocation_source_endpoints: None, terminal: false, unknown: false, reply,
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_unknown_pending: false,
             driver_join: ManagementJoin::Pending, watchdog_join: ManagementJoin::Pending,
@@ -535,8 +556,8 @@ impl OwnerState {
     }
     fn fail_at(&mut self, error: BridgeError, now: Instant) {
         if self.terminal { return; }
-        let end = self.gh_auth_endpoints.map_or_else(|| self.history_endpoints.map_or_else(
-            || now.min(self.endpoint) + CLEANUP_TIME, |original| original.first_failure(now)), |original| original.first_failure(now));
+        let end = self.version_allocation_source_endpoints.map_or_else(|| self.git_read_endpoints.map_or_else(|| self.gh_auth_endpoints.map_or_else(|| self.history_endpoints.map_or_else(
+            || now.min(self.endpoint) + CLEANUP_TIME, |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now));
         if self.error.is_none() || self.cleanup_endpoint.is_some_and(|prior| end < prior) { self.error = Some(error); }
         self.cleanup_endpoint = Some(self.cleanup_endpoint.map_or(end, |prior| prior.min(end)));
     }
@@ -736,6 +757,10 @@ struct Resources {
     github_history: Option<Arc<Mutex<GitHubHistoryRuntimeSlots>>>,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     github_auth: Option<Arc<Mutex<GitHubAuthRuntimeSlots>>>,
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    git_read_slots: Option<Arc<Mutex<crate::installed_runtime::GitReadRuntimeSlots>>>,
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    git_read_sources: Option<Arc<Mutex<crate::asset_source::GitReadSources>>>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     native_settlement: Option<JoinHandle<CloseOutcome>>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
@@ -755,6 +780,7 @@ struct Resources {
     gh_auth_after: Option<JoinHandle<Result<(), BridgeError>>>,
     gh_auth_after_return: Option<Result<(), BridgeError>>,
     gh_auth_after_failed: bool,
+    version_allocation_source: Option<version_allocation::SourceResources>,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     seal: Option<github_seal::SealPhase>,
 }
@@ -877,6 +903,8 @@ impl Owner {
             if matches!(&*receipt, GitHubPublicationReceipt::Pending) { *receipt = GitHubPublicationReceipt::RetainedUnknown; }
         }
         if let Some(auth) = &self.gh_auth { lock(&auth.mailbox).unknown(); }
+        if let Some(read) = &self.git_read { read.unknown(); }
+        if let Some(source) = &self.version_allocation_source { source.unknown(); }
         if let Some(receipt)=&self.history_receipt{
             let mut receipt=lock(receipt);
             if matches!(&*receipt,GitHubHistoryReceipt::Pending){*receipt=GitHubHistoryReceipt::RetainedUnknown;}
@@ -1019,6 +1047,20 @@ impl Owner {
                         };
                     }
                 }
+            }
+            Profile::GitRead => {
+                drop(reply);
+                let outcome = result.and_then(|value| match value {
+                    ReadOutcome::GitRead(value) => Ok(value), _ => Err(BridgeError::protocol()),
+                });
+                if let Some(read) = &self.git_read { read.retire(outcome, was_unknown); }
+            }
+            Profile::VersionAllocationSource => {
+                drop(reply);
+                let outcome = result.and_then(|value| match value {
+                    ReadOutcome::VersionAllocationSource => Ok(()), _ => Err(BridgeError::protocol()),
+                });
+                if let Some(source) = &self.version_allocation_source { source.retire(outcome, settled_at, was_unknown); }
             }
             Profile::GitHubAuth => {
                 drop(reply);
@@ -1214,12 +1256,14 @@ impl Supervisor {
     }
 
     fn admit(&self, request: AdmissionRequest<'_>, completion: CompletionTarget) -> Result<Arc<Owner>, BridgeError> {
+        let git_read_endpoints = match &request { AdmissionRequest::GitRead(value) => Some(value.endpoints), _ => None };
+        let version_allocation_source_endpoints = match &request { AdmissionRequest::VersionAllocationSource(admission) => Some(admission.endpoints), _ => None };
         let gh_auth_endpoints = match &request { AdmissionRequest::GitHubAuth(admission) => Some(admission.endpoints), _ => None };
         let history_endpoints=match &request{AdmissionRequest::History(admission)=>Some(admission.endpoints),_=>None};
         let publication_end=match &request{AdmissionRequest::Publication{end,..}=>Some(*end),_=>None};
         let now=Instant::now();
         if publication_end.is_some_and(|end|end<=now || end>now+Duration::from_secs(60)){return Err(BridgeError::invalid())}
-        let endpoint = gh_auth_endpoints.map_or_else(|| publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work)), |original| original.work);
+        let endpoint = version_allocation_source_endpoints.map_or_else(|| git_read_endpoints.map_or_else(|| gh_auth_endpoints.map_or_else(|| publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work)), |original| original.work), |original| original.work), |original| original.work);
         let profile = request.profile();
         let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt,publication_receipt) = match (profile, completion) {
             (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
@@ -1232,7 +1276,7 @@ impl Supervisor {
             (Profile::GitHubSetup, CompletionTarget::Setup(receipt)) => (None, None, None, None, Some(receipt),None,None),
             (Profile::GitHubHistory,CompletionTarget::History(receipt))=>(None,None,None,None,None,Some(receipt),None),
             (Profile::GitHubPublication,CompletionTarget::Publication(receipt))=>(None,None,None,None,None,None,Some(receipt)),
-            (Profile::GitHubAuth, CompletionTarget::GitHubAuth) => (None,None,None,None,None,None,None),
+            (Profile::GitHubAuth, CompletionTarget::GitHubAuth) | (Profile::GitRead, CompletionTarget::GitRead) | (Profile::VersionAllocationSource, CompletionTarget::VersionAllocationSource) => (None,None,None,None,None,None,None),
             _ => return Err(BridgeError::invalid()),
         };
         let executor = tokio::runtime::Handle::try_current()
@@ -1244,12 +1288,14 @@ impl Supervisor {
         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
         let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}"),
-            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}") };
-        let (publication,history,gh_auth,ordinary)=match request{
-            AdmissionRequest::Publication{request,gate,..}=>(Some((request,gate)),None,None,None),
-            AdmissionRequest::History(admission)=>(None,Some(admission),None,None),
-            AdmissionRequest::GitHubAuth(admission)=>(None,None,Some(admission),None),
-            other=>(None,None,None,Some(other))};
+            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}") };
+        let (publication,history,gh_auth,git_read,version_allocation_source,ordinary)=match request{
+            AdmissionRequest::Publication{request,gate,..}=>(Some((request,gate)),None,None,None,None,None),
+            AdmissionRequest::History(admission)=>(None,Some(admission),None,None,None,None),
+            AdmissionRequest::GitHubAuth(admission)=>(None,None,Some(admission),None,None,None),
+            AdmissionRequest::GitRead(admission)=>(None,None,None,Some(admission),None,None),
+            AdmissionRequest::VersionAllocationSource(admission)=>(None,None,None,None,Some(admission),None),
+            other=>(None,None,None,None,None,Some(other))};
         let (mut bytes, preflight_request, preflight_gate, release_request, release_gate, setup_request, setup_gate, material) = match ordinary{
             Some(request)=>request.encode(&id)?,None=>(Vec::new(),None,None,None,None,None,None,None),
         };
@@ -1260,7 +1306,14 @@ impl Supervisor {
         let history_slots=history.as_ref().map(|value|value.slots.clone());
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         let gh_auth_slots = gh_auth.as_ref().map(|value| value.slots.clone());
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let git_read_slots = git_read.as_ref().map(|value| value.slots.clone());
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let git_read_sources = git_read.as_ref().map(|value| value.invocation.sources.clone());
+        let git_read = git_read.map(|value| value.invocation);
         let gh_auth = gh_auth.map(|value| value.invocation);
+        let source_resources = version_allocation_source.as_ref().map(version_allocation::SourceResources::from_admission);
+        let version_allocation_source = version_allocation_source.map(|value| value.invocation);
         let(history_nomination,history_gate)=match history{Some(value)=>(Some(value.nomination),Some(value.gate)),None=>(None,None)};
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         let (setup_material,setup_first_bound,setup_first,secret_seal,secret_cipher)=match material {
@@ -1282,8 +1335,8 @@ impl Supervisor {
             key, id, profile, github_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate, setup_receipt, setup_request, setup_gate,
             publication_receipt,publication_request,publication_gate,
             setup_material, setup_first_bound, secret_sealed: Mutex::new(secret_cipher),
-            history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints,
-            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state}),
+            history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, git_read, git_read_endpoints, version_allocation_source, version_allocation_source_endpoints,
+            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state.git_read_endpoints=git_read_endpoints;state.version_allocation_source_endpoints=version_allocation_source_endpoints;state}),
             resources: AsyncMutex::new(Resources {
                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                 passive: if passive_selected(profile) {
@@ -1311,6 +1364,11 @@ impl Supervisor {
                 github_history: history_slots,
                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 github_auth: gh_auth_slots,
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                git_read_slots,
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                git_read_sources,
+                version_allocation_source: source_resources,
                 ..Resources::default()
             }), stop, changed: Notify::new(),
             permit: Mutex::new(Some(permit)), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
@@ -1331,6 +1389,7 @@ impl Supervisor {
             // Arm immediately before the original roster insertion. Every normal
             // Err above is known nonentry; an armed panic/loss retains the lane.
             if let Some(reply) = lock(&owner.state).reply.as_ref() { reply.arm()?; }
+            if let Some(source) = &owner.version_allocation_source { source.arm()?; }
             owners.insert(key, owner.clone());
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
@@ -1405,7 +1464,7 @@ impl Supervisor {
         let mut observer_end=Instant::now()+CLEANUP_TIME;
         for owner in owners {
             owner.fail(BridgeError::shutdown());
-            if matches!(owner.profile,Profile::GitHubHistory | Profile::GitHubAuth){
+            if matches!(owner.profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::VersionAllocationSource){
                 if let Some(end)=lock(&owner.state).cleanup_endpoint{observer_end=observer_end.max(end);}
             }
         }
@@ -1816,7 +1875,7 @@ fn preflight_claim_clear(original: bool, profile: Profile, expected: Profile, st
     original && matches!((profile, expected), (Profile::GitHubPreflight, Profile::GitHubPreflight)
         | (Profile::GitHubRelease, Profile::GitHubRelease) | (Profile::GitHubSetup, Profile::GitHubSetup)
         | (Profile::GitHubPublication,Profile::GitHubPublication)
-        | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth)) && !state.terminal && !state.unknown && state.error.is_none()
+        | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth) | (Profile::GitRead, Profile::GitRead)) && !state.terminal && !state.unknown && state.error.is_none()
         && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
 }
 fn claim_preflight_go(inner: &Inner, owner: &Arc<Owner>, expected: Profile) -> bool {
@@ -1854,6 +1913,10 @@ fn passive_borrows(resources: &Resources) -> (OriginalBorrow, OriginalBorrow) {
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn passive_worker_lost(resources: &Resources) {
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    if let Some(native) = resources.version_allocation_source.as_ref().and_then(|s| s.originals.as_ref()) {
+        match native.lock() { Ok(mut original) => original.interrupted(), Err(error) => error.into_inner().interrupted() }
+    }
     // Only called AFTER this original inspection/acquisition/settlement worker
     // returned JoinError. Never race a pending borrower because a clock expired.
     if let Some(native) = &resources.passive {
@@ -2020,11 +2083,38 @@ enum InstalledSettlementSlots {
     GitHubHistory(Arc<Mutex<GitHubHistoryRuntimeSlots>>),
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     GitHubAuth(Arc<Mutex<GitHubAuthRuntimeSlots>>),
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    GitRead(Arc<Mutex<crate::installed_runtime::GitReadRuntimeSlots>>, Arc<Mutex<crate::asset_source::GitReadSources>>),
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    VersionAllocationSource(Arc<Mutex<version_allocation::Originals>>),
 }
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 fn installed_settlement_slots(resources: &Resources, profile: Profile) -> Result<Option<InstalledSettlementSlots>, BridgeError> {
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
+        if git_read::selected(profile) {
+            if resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_preflight.is_some()
+                || resources.github_release.is_some() || resources.github_setup.is_some() || resources.github_history.is_some() || resources.github_auth.is_some() || resources.version_allocation_source.is_some() {
+                return Err(BridgeError::cleanup_unknown());
+            }
+            return resources.git_read_slots.as_ref().zip(resources.git_read_sources.as_ref())
+                .map(|(native, sources)| Some(InstalledSettlementSlots::GitRead(native.clone(), sources.clone())))
+                .ok_or_else(BridgeError::cleanup_unknown);
+        }
+        if resources.git_read_slots.is_some() || resources.git_read_sources.is_some() { return Err(BridgeError::cleanup_unknown()); }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        if version_allocation::selected(profile) {
+            if resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_preflight.is_some()
+                || resources.github_release.is_some() || resources.github_setup.is_some() || resources.github_history.is_some() || resources.github_auth.is_some() || resources.git_read_slots.is_some() || resources.git_read_sources.is_some() {
+                return Err(BridgeError::cleanup_unknown());
+            }
+            return resources.version_allocation_source.as_ref().and_then(|s| s.originals.as_ref())
+                .map(|original| Some(InstalledSettlementSlots::VersionAllocationSource(original.clone())))
+                .ok_or_else(BridgeError::cleanup_unknown);
+        }
+        if resources.version_allocation_source.is_some() { return Err(BridgeError::cleanup_unknown()); }
         if github_auth_selected(profile) {
             if resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_preflight.is_some()
                 || resources.github_release.is_some() || resources.github_setup.is_some() || resources.github_history.is_some() {
@@ -2101,11 +2191,22 @@ impl InstalledSettlementSlots {
             Self::GitHubHistory(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             Self::GitHubAuth(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            Self::GitRead(native, sources) => native.try_lock().ok().zip(sources.try_lock().ok())
+                .map(|(slots, source)| (slots.never_started() && source.not_started(), slots.no_child_effect())),
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            Self::VersionAllocationSource(native) => native.try_lock().ok().map(|original| original.no_child_state()),
         }
     }
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn settle_originals(&self, owner: &Owner) -> CloseOutcome {
         match self {
+            Self::GitRead(native, _) => git_read::settle(owner, native),
+            Self::VersionAllocationSource(native) => {
+                let mut original = match native.lock() { Ok(original) => original,
+                    Err(error) => { let mut original = error.into_inner(); original.interrupted(); original } };
+                original.settle(owner)
+            },
             Self::Passive(native) => {
                 let mut slots = match native.lock() { Ok(slots) => slots,
                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
@@ -2182,6 +2283,11 @@ impl InstalledSettlementSlots {
             Self::GitHubHistory(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             Self::GitHubAuth(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            Self::GitRead(native, sources) => native.try_lock().is_ok_and(|slots| slots.settled())
+                && sources.try_lock().is_ok_and(|source| source.settled()),
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            Self::VersionAllocationSource(native) => native.try_lock().is_ok_and(|original| original.settled()),
         }
     }
 }
@@ -2189,6 +2295,8 @@ impl InstalledSettlementSlots {
 fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) -> Result<(), BridgeError> {
     match installed_settlement_slots(resources, owner.profile)? {
         Some(InstalledSettlementSlots::Passive(_)) => transfer_passive(resources, inner, owner),
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        Some(InstalledSettlementSlots::VersionAllocationSource(_)) => version_allocation::transfer_original(resources, inner, owner),
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Some(InstalledSettlementSlots::GitHubReadOnly(native)) => {
             let (inspection, acquisition) = passive_borrows(resources);
@@ -2264,6 +2372,19 @@ fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) 
             let owners = lock(&inner.owners); let state = lock(&owner.state);
             if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
                 Profile::GitHubAuth, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+            }
+            slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+        },
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        Some(InstalledSettlementSlots::GitRead(native, _)) => {
+            let (inspection, acquisition) = passive_borrows(resources);
+            if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
+                || acquisition.returned.is_some() || !acquisition.positive() { return Err(BridgeError::cleanup_unknown()); }
+            let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            let owners = lock(&inner.owners); let state = lock(&owner.state);
+            if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+                Profile::GitRead, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
                 return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
             }
             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
@@ -2482,7 +2603,8 @@ async fn settle_installed(resources: &mut Resources, inner: &Inner, owner: &Arc<
             Ok(Some(native)) => native, Ok(None) => return true,
             Err(_) => { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; },
         };
-        if resources.history_post.is_some() || resources.history_post_join_failed || resources.gh_auth_after.is_some() || resources.gh_auth_after_failed {
+        if resources.history_post.is_some() || resources.history_post_join_failed || resources.gh_auth_after.is_some() || resources.gh_auth_after_failed
+            || resources.version_allocation_source.as_ref().is_some_and(|s| !s.jobs_settled()) {
             owner_unknown!(owner, inner, Some(&*resources), Settlement); return false;
         }
         let (inspection, acquisition) = passive_borrows(resources);
@@ -2628,7 +2750,7 @@ async fn observe_installed_original(resources: &mut Resources, inner: &Arc<Inner
     true
 }
 
-enum Event { HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
+enum Event { SourcePostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), SourcePost(Result<Result<(),BridgeError>,tokio::task::JoinError>), HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
 
 async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEnd {
     let mut resources = owner.resources.lock().await;
@@ -2653,6 +2775,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let inspection_history = resources.github_history.clone();
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let inspection_auth = resources.github_auth.clone();
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let inspection_git_read = resources.git_read_slots.clone();
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let inspection_source = resources.version_allocation_source.as_ref().and_then(|s| s.originals.clone());
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
     let inspection_stop = owner.stop.subscribe();
     #[cfg(all(test, feature = "development-runtime"))]
@@ -2854,6 +2980,31 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 }
                 return Err(BridgeError::unavailable("The GitHub setup action runtime is not qualified."));
             },
+            Profile::GitRead => {
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                if git_read::selected(profile) {
+                    let result = (|| {
+                        let read = inspection_owner.git_read.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+                        read.inspect(&config, &inspection_owner, inspection_git_read.as_ref().ok_or_else(BridgeError::cleanup_unknown)?)
+                    })();
+                    if let Err(error) = &result { inspection_owner.fail(error.clone()); }
+                    return result;
+                }
+                return Err(BridgeError::unavailable("The fixed local Git read runtime is unavailable."));
+            },
+            Profile::VersionAllocationSource => {
+                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                if version_allocation::selected(profile) {
+                    let result = (|| {
+                        let original = inspection_owner.version_allocation_source.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+                        let native = inspection_source.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+                        original.inspect(&config, &inspection_owner, native)
+                    })();
+                    if let Err(error) = &result { inspection_owner.fail(error.clone()); }
+                    return result;
+                }
+                return Err(BridgeError::unavailable("The fixed saved-source runtime is unavailable."));
+            },
             Profile::GitHubAuth => {
                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 if github_auth_selected(profile) {
@@ -2892,7 +3043,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         #[cfg(all(windows, test, feature = "development-runtime"))]
         let runtime = match profile {
             Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
-            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth => runtime, // Never a passive fixture override for GitHub actions.
+            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
         };
         Ok(runtime)
     }));
@@ -2954,6 +3105,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let acquisition_history = resources.github_history.clone();
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let acquisition_auth = resources.github_auth.clone();
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let acquisition_git_read = resources.git_read_slots.clone();
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let acquisition_source = resources.version_allocation_source.as_ref().and_then(|s| s.originals.clone());
     #[cfg(all(test, feature = "development-runtime"))]
     let acquisition_gate = inner.test.acquisition.clone();
     let (acquire_start, acquire_enter) = oneshot::channel();
@@ -2962,7 +3117,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         if acquire_enter.blocking_recv().is_err() {
             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth) {
+            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::VersionAllocationSource) {
                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
             }
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -3054,6 +3209,34 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             if let Err(error)=&result{acquiring_owner.observe_macos_action_acquisition_failure(error);}
             return result;
         }
+        if matches!(acquiring_owner.profile, Profile::GitRead) {
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            {
+                let Some(native) = acquisition_git_read else {
+                    owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
+                    return Err(AcquisitionError::unsupported("The original Git read custody is missing"));
+                };
+                let result = git_read::acquire_original(&acquiring_inner, &acquiring_owner, &native);
+                if let Err(error) = &result { acquiring_owner.observe_macos_action_acquisition_failure(error); }
+                return result;
+            }
+            #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            return Err(AcquisitionError::unsupported("The fixed Git read runtime is unavailable"));
+        }
+        if matches!(acquiring_owner.profile, Profile::VersionAllocationSource) {
+            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            {
+                let Some(native) = acquisition_source else {
+                    owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
+                    return Err(AcquisitionError::unsupported("The original saved-source custody is missing"));
+                };
+                let result = version_allocation::acquire_original(&acquiring_inner, &acquiring_owner, &native);
+                if let Err(error) = &result { acquiring_owner.observe_macos_action_acquisition_failure(error); }
+                return result;
+            }
+            #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            return Err(AcquisitionError::unsupported("The fixed saved-source runtime is unavailable"));
+        }
         if matches!(acquiring_owner.profile, Profile::GitHubAuth) {
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             {
@@ -3134,17 +3317,41 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         None => { owner_unknown!(owner, &inner, Some(&resources), ChildMissing); return DriverEnd::RetainedUnknown; }
     };
     let (faults, mut fault_rx) = mpsc::channel(4);
-    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth) {
+    let git_read_request = if matches!(profile, Profile::GitRead) {
+        match owner.git_read.as_ref().ok_or_else(BridgeError::cleanup_unknown).and_then(|read| read.request()) {
+            Ok(value) => Some(value),
+            Err(error) => { owner.fail(error); owner_unknown!(owner, &inner, Some(&resources), Io); return DriverEnd::RetainedUnknown; },
+        }
+    } else { None };
+    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead) {
         let (send, receive) = oneshot::channel(); (Some(send), Some(receive))
     } else { (None, None) };
     let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
-    // This existing fixed original POST/wait slot is shared by two closed profiles only.
-    let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth){
+    // History/Auth/GitRead share this fixed POST/wait slot; SOURCE retains its separate posts.
+    let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead){
         let (send,receive)=oneshot::channel();(Some(send),Some(receive))
     }else{(None,None)};
+    let mut source_post_receive = None;
+    if matches!(profile, Profile::VersionAllocationSource) {
+        match (stdin, stdout, stderr) {
+            (Some(stdin), Some(stdout), Some(stderr)) => {
+                match version_allocation::install_io(&mut resources, &inner, &owner, stdin, stdout, stderr, &faults) {
+                    Ok(receive) => source_post_receive = Some(receive),
+                    Err(error) => owner.fail(error),
+                }
+            },
+            _ => owner.fail(BridgeError::cleanup_unknown()),
+        }
+    } else {
     if let Some(stdin) = stdin {
         if let Some(ready) = ready_receive.take() {
-            if matches!(profile, Profile::GitHubAuth) {
+            if matches!(profile, Profile::GitRead) {
+                let (release, wait_returned) = oneshot::channel(); resources.history_wait_release = Some(release);
+                if let (Some(request), Some(post)) = (git_read_request.as_ref(), history_post_send) {
+                    resources.writer = Some(tokio::spawn(git_read::write(stdin, request.clone(), ready, wait_returned, post,
+                        inner.clone(), owner.clone(), faults.clone())));
+                } else { owner.fail(BridgeError::cleanup_unknown()); }
+            } else if matches!(profile, Profile::GitHubAuth) {
                 let (release, wait_returned) = oneshot::channel(); resources.history_wait_release = Some(release);
                 match (owner.gh_auth.as_ref(), auth_request.as_ref(), history_post_send) {
                     (Some(auth), Some(request), Some(post)) => {
@@ -3178,7 +3385,11 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         }
     }
     if let Some(stdout) = stdout {
-        if matches!(profile, Profile::GitHubAuth) {
+        if matches!(profile, Profile::GitRead) {
+            if let (Some(request), Some(ready)) = (git_read_request.as_ref(), ready_send.take()) {
+                resources.stdout = Some(tokio::spawn(git_read::read(stdout, request.clone(), ready, faults.clone())));
+            } else { owner.fail(BridgeError::cleanup_unknown()); }
+        } else if matches!(profile, Profile::GitHubAuth) {
             match (owner.gh_auth.as_ref(), auth_request.as_ref(), ready_send.take()) {
                 (Some(auth), Some(request), Some(ready)) => resources.stdout = Some(tokio::spawn(gh_auth::read_private(
                     stdout, true, request.clone(), auth.mailbox.clone(), Some(ready), faults.clone()))),
@@ -3218,6 +3429,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         #[cfg(not(all(test, feature = "development-runtime")))]
         { resources.stderr = Some(tokio::spawn(read_bounded(stderr, protocol::STDERR_LIMIT, faults.clone()))); }
         }
+    }
     }
     #[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc", not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))]
     windows_passive_tests::after_io_registered(&inner, &owner, &mut resources);
@@ -3265,10 +3477,16 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         let out_pending = resources.stdout.is_some();
         let err_pending = resources.stderr.is_some();
         let post_pending=resources.history_post.is_some();
-        if !wait_pending && !write_pending && !out_pending && !err_pending && !post_pending && history_post_receive.is_none() { break; }
+        let source_post_pending = resources.version_allocation_source.as_ref().is_some_and(|source| source.before_go_pending());
+        if !wait_pending && !write_pending && !out_pending && !err_pending && !post_pending && history_post_receive.is_none()
+            && !source_post_pending && source_post_receive.is_none() { break; }
         let event = {
-            let Resources { child, writer, stdout, stderr, history_post, .. } = &mut *resources;
+            let Resources { child, writer, stdout, stderr, history_post, version_allocation_source, .. } = &mut *resources;
             tokio::select! {
+                request = async { match &mut source_post_receive { Some(value) => value.await, None => std::future::pending().await } },
+                    if source_post_receive.is_some() => Event::SourcePostRequest(request),
+                result = async { match version_allocation_source { Some(source) => source.join_before_go().await, None => std::future::pending().await } },
+                    if source_post_pending => Event::SourcePost(result),
                 request = async { match &mut history_post_receive {Some(value)=>value.await,None=>std::future::pending().await} }, if history_post_receive.is_some() => Event::HistoryPostRequest(request),
                 result = join_slot(history_post), if post_pending => Event::HistoryPost(result),
                 status = wait_original(child), if wait_pending => Event::Wait(status),
@@ -3280,18 +3498,32 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             }
         };
         match event {
+            Event::SourcePostRequest(request) => {
+                source_post_receive.take();
+                match (request, resources.version_allocation_source.as_mut()) {
+                    (Ok(reply), Some(source)) if matches!(profile, Profile::VersionAllocationSource) => source.request_before_go(reply, &owner),
+                    (Ok(reply), _) => { let error = BridgeError::cleanup_unknown(); owner.fail(error.clone()); let _ = reply.send(Err(error)); },
+                    (Err(_), _) => owner.fail(BridgeError::cleanup_unknown()),
+                }
+            },
+            Event::SourcePost(result) => {
+                let Some(source) = resources.version_allocation_source.as_mut() else {
+                    owner.unknown(&inner); return DriverEnd::RetainedUnknown;
+                };
+                if !source.before_go_returned(result, &owner, &inner) { return DriverEnd::RetainedUnknown; }
+            },
             Event::HistoryPostRequest(request)=>{
                 history_post_receive.take();
                 match request {
                     Ok(reply)=>{
-                        if !matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth)||resources.history_post.is_some()||resources.history_post_return.is_some()
+                        if !matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead)||resources.history_post.is_some()||resources.history_post_return.is_some()
                             ||resources.history_post_join_failed||owner.failed()||Instant::now()>=owner.endpoint(){
                             let error=lock(&owner.state).error.clone().unwrap_or_else(BridgeError::timeout);
                             owner.fail(error.clone());let _=reply.send(Err(error));
                         }else{
                             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                             {
-                                let native=resources.github_history.clone();let auth_native=resources.github_auth.clone();
+                                let native=resources.github_history.clone();let auth_native=resources.github_auth.clone();let git_native=resources.git_read_slots.clone();
                                 let original_owner=owner.clone();let source_stop=owner.stop.subscribe();
                                 let (release,enter)=oneshot::channel();
                                 resources.history_post_ack=Some(reply);
@@ -3299,6 +3531,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                                 resources.history_post=Some(tokio::task::spawn_blocking(move||{
                                     let result=(||{
                                         enter.blocking_recv().map_err(|_|BridgeError::cleanup_unknown())?;
+                                        if matches!(original_owner.profile, Profile::GitRead) {
+                                            return original_owner.git_read.as_ref().ok_or_else(BridgeError::cleanup_unknown)?
+                                                .before_go(&original_owner, git_native.as_ref().ok_or_else(BridgeError::cleanup_unknown)?);
+                                        }
                                         if matches!(original_owner.profile, Profile::GitHubAuth) {
                                             return original_owner.gh_auth.as_ref().ok_or_else(BridgeError::cleanup_unknown)?
                                                 .post(&original_owner, auth_native.as_ref().ok_or_else(BridgeError::cleanup_unknown)?, gh_auth::SourcePost::BeforeGo);
@@ -3409,6 +3645,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         }
         if !gh_auth::post_after_work(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
     }
+    if matches!(profile, Profile::VersionAllocationSource)
+        && !version_allocation::before_native_close(&mut resources, &inner, &owner).await {
+        return DriverEnd::RetainedUnknown;
+    }
     // History can have original descendants and borrowed source/native state.
     // A child wait/EOF alone is NOT its custody proof. Decode the original
     // terminal while ALL actual Resources/source originals are still retained,
@@ -3434,6 +3674,17 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         {owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;}
     }else{None};
+    let git_read_reply = if matches!(profile, Profile::GitRead) {
+        let decoded = (|| {
+            let read = owner.git_read.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+            read.decode_before_close(&owner, resources.out_end.as_ref().ok_or_else(BridgeError::cleanup_unknown)?,
+                resources.err_end.as_ref().ok_or_else(BridgeError::cleanup_unknown)?, resources.waited.is_some_and(|status| status.success()))
+        })();
+        match decoded {
+            Ok(value) => Some(value),
+            Err(error) => { owner.fail(error); owner_unknown!(owner, &inner, Some(&resources), Io); return DriverEnd::RetainedUnknown; },
+        }
+    } else { None };
     // Known child custody only permits attempting the SAME native settlement;
     // it never proves the actual source/native closes, joins or success.
     if !settle_installed(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
@@ -3475,9 +3726,17 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             Err(e)=>{owner.fail(e.clone());resources.child.take();resources.out_end.take();resources.err_end.take();return DriverEnd::Ready(Err(e))},
         }
     }
+    if matches!(profile, Profile::VersionAllocationSource) {
+        resources.out_end.take(); resources.err_end.take(); resources.child.take();
+        return DriverEnd::Ready(Ok(ReadOutcome::VersionAllocationSource)); // Typed terminal retained by this original, never passive output.
+    }
     if matches!(profile, Profile::GitHubAuth) {
         resources.out_end.take(); resources.err_end.take(); resources.child.take();
         return DriverEnd::Ready(Ok(ReadOutcome::GitHubAuth)); // Never raw private stdout.
+    }
+    if let Some(reply) = git_read_reply {
+        resources.out_end.take(); resources.err_end.take(); resources.child.take();
+        return DriverEnd::Ready(Ok(ReadOutcome::GitRead(reply)));
     }
     if let Some(reply)=history_reply{
         // The exact previously decoded reply moves only after actual native
@@ -5771,7 +6030,7 @@ mod tests {
             key: 1, id: "query-1".into(), profile: Profile::Passive(Method::Capabilities), github_receipt: None,
             preflight_receipt: None, preflight_request: None, preflight_gate: None, release_receipt: None, release_request: None, release_gate: None, setup_receipt: None, setup_request: None, setup_gate: None,
             publication_receipt:None,publication_request:None,publication_gate:None,
-            history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
+            history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, git_read:None, git_read_endpoints:None, version_allocation_source:None, version_allocation_source_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
             resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),
             permit: Mutex::new(None), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),

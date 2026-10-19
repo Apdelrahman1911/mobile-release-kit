@@ -34,6 +34,7 @@ class SavedCommandDomain(Enum):
     GitHubAuth = "github-auth"
     GitRead = "git-read"
     VersionAllocationSource = "version-allocation-source"
+    AppleProvisioning = "apple-bundle-provisioning"
     LocalStorePreflight = "local-store-preflight"
     LocalReleaseHistory = "local-release-history"
     LocalStorePrepare = "local-store-prepare"
@@ -73,6 +74,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.VersionAllocationSource:
         from . import _desktop_version_allocation_source_protocol
         return _desktop_version_allocation_source_protocol
+    if domain is SavedCommandDomain.AppleProvisioning:
+        from . import _desktop_apple_provisioning_protocol
+        return _desktop_apple_provisioning_protocol
     if domain is SavedCommandDomain.LocalStorePreflight:
         from . import _desktop_store_preflight_protocol
         return _desktop_store_preflight_protocol
@@ -123,6 +127,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_version_allocation_source_control import BorrowedAllocationInput
     if type(source) is BorrowedAllocationInput and source.domain is SavedCommandDomain.VersionAllocationSource:
         return SavedCommandDomain.VersionAllocationSource
+    from ._desktop_apple_provisioning_control import AppleProvisioningInput
+    if type(source) is AppleProvisioningInput and source.domain is SavedCommandDomain.AppleProvisioning:
+        return SavedCommandDomain.AppleProvisioning
     from ._desktop_store_preflight_control import StorePreflightInput
     if type(source) is StorePreflightInput and source.domain is SavedCommandDomain.LocalStorePreflight:
         return SavedCommandDomain.LocalStorePreflight
@@ -204,7 +211,7 @@ class _SavedCommandInput:
         if self.domain is SavedCommandDomain.OfflinePreflight:
             if self.budget is not None:
                 self.budget.checkpoint()
-        elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
+        elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection, SavedCommandDomain.AppleProvisioning, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
             self.require_operation().checkpoint()
         else:
             self._require(False)
@@ -226,7 +233,7 @@ class _SavedCommandInput:
             if capture:
                 output_limit = budget.capture(output_limit)
             return timeout, output_limit
-        if self.domain in (SavedCommandDomain.ArtifactInspection, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
+        if self.domain in (SavedCommandDomain.ArtifactInspection, SavedCommandDomain.AppleProvisioning, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile):
             # The exact operation admits only its fixed inspector role before
             # this existing run_owned callback. No caller role/argv is authority.
             self._require(type(capture) is bool and type(output_limit) is int and output_limit > 0)
@@ -271,7 +278,7 @@ class _SavedCommandInput:
         if time.monotonic() >= self.work_end:
             self.stop("timed-out")
             return
-        material_phase = self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile) and self.material_pending
+        material_phase = self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.AppleProvisioning, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile) and self.material_pending
         active = self.active and not material_phase
         if active and self.buffer:
             self.stop()
@@ -290,6 +297,7 @@ class _SavedCommandInput:
                            SavedCommandDomain.GitHubHistory: "Original History input changed",
                            SavedCommandDomain.GitHubAuth: "Original gh-auth input changed",
                            SavedCommandDomain.GitRead: "Original Git read input changed",
+                           SavedCommandDomain.AppleProvisioning: "Original Bundle-ID provisioning input changed",
                            SavedCommandDomain.LocalStorePreflight: "Original Store access-check input changed",
                            SavedCommandDomain.LocalStorePrepare: "Original Store preparation input changed",
                            SavedCommandDomain.LocalStoreExecute: "Original Store execution input changed",
@@ -301,7 +309,7 @@ class _SavedCommandInput:
                 # another read. A large body is not a large public JSON frame.
                 return
             limit = 1 if active else min(64 * 1024, _protocol(self.domain).REQUEST_LIMIT + 1 - len(self.buffer))
-            if material_phase and self.domain in (SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile) and self.reading:
+            if material_phase and self.domain in (SavedCommandDomain.AppleProvisioning,SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile) and self.reading:
                 self._require(type(self.read_remaining) is int and 1<=self.read_remaining<=2048)
                 limit=min(limit,self.read_remaining)
             if material_phase and self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):
@@ -337,12 +345,12 @@ class _SavedCommandInput:
             if position >= 0:
                 raw = bytes(self.buffer[:position + 1])
                 del self.buffer[:position + 1]
-                if self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.LocalStorePreflight):
+                if self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.AppleProvisioning, SavedCommandDomain.LocalStorePreflight):
                     request = _protocol(self.domain).parse_request(raw)
                     self._request_material(request)
                 self.active = True  # Signed pending input remains inert until account/project admission.
                 self.guard.check()
-                if self.domain not in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.LocalStorePreflight):
+                if self.domain not in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.AppleProvisioning, SavedCommandDomain.LocalStorePreflight):
                     request = _protocol(self.domain).parse_request(raw)
                 self.request_returned = True
                 return request

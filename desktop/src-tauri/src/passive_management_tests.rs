@@ -28,6 +28,7 @@ fn rig_profile(profile: Profile, github_receipt: Option<Arc<Mutex<GitHubReadRece
         publication_receipt: None, publication_request: None, publication_gate: None,
         setup_material: None, setup_first_bound: None, secret_sealed: Mutex::new(None),
         history_receipt: None, history_nomination: None, history_gate: None, history_endpoints: None, gh_auth: None, gh_auth_endpoints: None,
+        git_read: None, git_read_endpoints: None, version_allocation_source: None, version_allocation_source_endpoints: None,
         state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, reply)),
         resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(), permit: Mutex::new(Some(permit)),
         driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
@@ -70,7 +71,7 @@ fn staged_tasks(rig: &Rig) -> (oneshot::Sender<()>, oneshot::Sender<()>) {
     let outcome = match rig.owner.profile {
         Profile::Passive(_) => ReadOutcome::Passive(Value::String("inert-result".into())),
         Profile::GitHubReadOnly => ReadOutcome::GitHub(inert_github_outcome()),
-        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory | Profile::GitHubPublication | Profile::GitHubAuth => panic!("action profiles are not passive/GitHub-read fixtures"),
+        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory | Profile::GitHubPublication | Profile::GitHubAuth | Profile::GitRead | Profile::VersionAllocationSource => panic!("action profiles are not passive/GitHub-read fixtures"),
     };
     *rig.owner.driver.try_lock().unwrap() = Some(tokio::spawn(async move {
         driver.await.unwrap();

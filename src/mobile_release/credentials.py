@@ -1420,7 +1420,14 @@ def _validate_installed_p8(material, runtime):
     from ._desktop_store_preflight_control import StorePreflightInput
     guard = material._scratch.cancellation
     source = guard._store_preflight_source
-    if source is None:
+    if guard._apple_provisioning_source is not None:
+        from ._desktop_apple_provisioning_control import AppleProvisioningInput
+        from .desktop_apple_provisioning import AppleProvisioningRun
+        source = guard._apple_provisioning_source
+        if type(source) is not AppleProvisioningInput or type(source.require_operation()) is not AppleProvisioningRun:
+            raise CredentialError("Bundled Apple validation lacks its original provisioning input")
+        selected_type = AppleProvisioningInput
+    elif source is None:
         from ._desktop_store_prepare_control import StorePrepareInput
         from .local_store_prepare import LocalStorePrepareRun
         source = guard._local_store_source

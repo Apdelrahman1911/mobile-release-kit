@@ -94,7 +94,8 @@ class StoreRuntimeContext:
     def command(self, argv, *, capture: bool):
         # Existing CLI/context callers retain their original checked scope.
         # The exact Desktop source additionally admits its fixed platform roles.
-        source = self._invocation.cancellation._store_preflight_source or self._invocation.cancellation._local_store_source
+        source = (self._invocation.cancellation._apple_provisioning_source or
+                  self._invocation.cancellation._store_preflight_source or self._invocation.cancellation._local_store_source)
         if source is None:
             with self.checked():
                 yield

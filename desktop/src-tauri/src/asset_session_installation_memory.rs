@@ -471,7 +471,7 @@ mod known {
         fn document_state_gate(&self,state:&DocumentState)->Count<()>{
             if state.unknown || state.exhausted || state.stopping || state.retiring || state.lock_pending
                 || state.quit_pending || state.compatibility_picker_pending
-                || state.session_owner_reason == Some(Reason::CleanupUnknown) { return Err(Reason::Capacity); }
+                || state.session_owner_reason == Some(Reason::CleanupUnknown) || version_allocation::pending(state) { return Err(Reason::Capacity); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
                 target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -487,6 +487,7 @@ mod known {
             self.add(capacity(state.maintenance.notice_bytes())?)?;
             if let Some(lane) = &state.saved_observation { self.saved_observation(lane)?; }
             if let Some(binding) = &state.saved_input { self.saved_observation(&binding.lane)?; }
+            self.add(capacity(version_allocation::retained_bytes(state))?)?;
             self.records(&state.records)?; self.assignments(&state.assignments)?;
             if let Some(context) = &state.context { self.context(context)?; }
             if let Some(slot) = &state.slot { self.slot(slot)?; }
@@ -544,7 +545,7 @@ mod known {
             root:project.clone(),role:crate::android_tool_sources::Role::Jdk,acquired:None}));
         let state=DocumentState{lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
-            retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,
+            retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,version_allocation_source:None,
             session_owner_reason:None,maintenance:macos_maintenance::Closure::default(),context:Some(context),slot:Some(slot),records,assignments,
             quit:None,quit_accepted:false,quit_cleanup_end:None,github:ConnectionState::new(),gh_auth:None,
             evidence:EvidenceRegistry::new(),images:images::Registry::new(),installation:installation::Registry::new(),vault:None};
@@ -650,7 +651,7 @@ mod known {
         fn state() -> DocumentState {
             DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
-                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None,
+                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, git_read: None, version_allocation_source: None,
                 session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
                 quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None,
                 evidence: EvidenceRegistry::new(), images: images::Registry::new(),

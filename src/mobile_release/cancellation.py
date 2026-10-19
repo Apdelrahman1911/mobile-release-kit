@@ -369,6 +369,14 @@ class DefaultCancellation:
         return source if source.domain is SavedCommandDomain.GitHubHistory else None
 
     @property
+    def _apple_provisioning_source(self) -> Any:
+        source = self._saved_command_input()
+        if source is None:
+            return None
+        from ._desktop_saved_command_control import SavedCommandDomain
+        return source if source.domain is SavedCommandDomain.AppleProvisioning else None
+
+    @property
     def _store_preflight_source(self) -> Any:
         source = self._saved_command_input()
         if source is None:

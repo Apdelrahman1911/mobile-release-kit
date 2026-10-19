@@ -83,6 +83,7 @@ import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } 
 import { cliReadAccessProjectIdFits } from './cliReadAccess.ts';
 import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdentityNative.ts';
 import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
+import { createGitReadApi } from './gitReadProtocol.ts';
 import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
@@ -386,6 +387,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     projectIdentity: createProjectIdentityApi(mode, invoke, listen),
     agentIdentity: createAgentIdentityApi(mode, invoke),
     githubGhEntry: createGitHubGhApi(mode, invoke),
+    gitRead: createGitReadApi(mode, invoke),
     toolAcquisition: createToolAcquisitionApi(mode, invoke, listen),
     applicationRead: mode === 'native' ? Object.freeze({
       status: () => call<unknown>('application_read_status', {}),

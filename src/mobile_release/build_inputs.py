@@ -749,7 +749,8 @@ class FiniteScratch:
             operation = android.require_operation()
             _need(operation.signing is not None and layout == "build", "Android scratch requires its signing child")
             operation.signing.bind_scratch(self)
-        store = getattr(guard, "_store_preflight_source", None) or getattr(guard, "_local_store_source", None)
+        store = (getattr(guard, "_apple_provisioning_source", None) or
+                 getattr(guard, "_store_preflight_source", None) or getattr(guard, "_local_store_source", None))
         if store is not None:
             store.require_operation().bind_scratch(self)
         if lane_evidence is not None:
@@ -1811,6 +1812,8 @@ class InvocationCustody:
             guard._artifact_inspection_source.require_operation().bind_invocation(self)
         elif getattr(guard, "_local_history_source", None) is not None:
             guard._local_history_source.require_operation().bind_invocation(self)
+        elif getattr(guard, "_apple_provisioning_source", None) is not None:
+            guard._apple_provisioning_source.require_operation().bind_invocation(self)
         elif getattr(guard, "_store_preflight_source", None) is not None:
             guard._store_preflight_source.require_operation().bind_invocation(self)
         elif getattr(guard, "_local_store_source", None) is not None:
@@ -2019,6 +2022,17 @@ class InvocationCustody:
         _need(type(operation) is StorePreflightRun and operation.invocation is self
               and operation.guard is self.cancellation and operation.source.operation is operation,
               "Store access closure requires its original invocation")
+        return self._store_online_closed()
+
+    def _apple_provisioning_closed(self, operation) -> bool:
+        from .desktop_apple_provisioning import AppleProvisioningRun
+        self._owner(cleanup=True)
+        _need(type(operation) is AppleProvisioningRun and operation.invocation is self
+              and operation.guard is self.cancellation and operation.source.operation is operation,
+              "Bundle-ID closure requires its original invocation")
+        return self._store_online_closed()
+
+    def _store_online_closed(self) -> bool:
         return (self.mode == "online" and self.lane_evidence is None and self.claimed
                 and not self.active and self._cleanup_complete and not self.reserved and not self.frames
                 and not self.project_started and self.project_owner is None and self._original_project is None
