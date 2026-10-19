@@ -1,10 +1,11 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ProjectSession } from '../drafts.ts';
 import type { CredentialGuide, CredentialKind, HelpContent } from '../types.ts';
-import type { AssetDisplayState, AssetKind, AssetScope, CredentialAssessment, CredentialIssue } from '../assetSessionTypes.ts';
+import type { AssetDisplayState, AssetKind, AssetRecordRef, AssetScope, CredentialAssessment, CredentialIssue } from '../assetSessionTypes.ts';
 import { AssetSessionController, assetCancellationReason, assetContextReason, assetImageOperationPending, assetIntentPending, assetSessionReason } from '../assetSessionController.ts';
 import { ASSET_KINDS, ASSET_EXECUTION_MODES, ASSET_PLATFORMS, ASSET_PURPOSES, ASSET_REASON_HELP, ASSET_STAGES, SESSION_FIELDS, assetLabelFits, assetStorageWritable, isAssetFileKind } from '../assetSessionProtocol.ts';
 import { sessionControlHelp, sessionKindHelp, sessionTargetLabel } from '../assetSessionHelp.ts';
+import { credentialBackupMessage, credentialBackupReason, isCredentialBackupOperation } from '../credentialBackup.ts';
 import { RELEASE_INPUT_STAGES, preparationScopeChanged, preparationSessionReason, sessionPreparationKind } from '../releaseInputGuidance.ts';
 import type { ReleaseInputPreparationLocal, ReleaseInputPreparationTarget } from '../releaseInputGuidance.ts';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
@@ -142,16 +143,25 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
   const projectPathActive = projectPathOperation && !idle;
   const installationActive = installationOperation && (!idle || state.blocked);
   const intentPending = assetIntentPending(state);
+  const backupActive = state.intent?.type === 'backup' && intentPending || isCredentialBackupOperation(operation?.operation) && !idle;
   const effectiveKindId = intentPending && state.intent?.type === 'record' ? state.intent.kind : kindId;
   const originalKind = guide?.kinds.find((item) => item.id === (operation?.selectionToken ? state.selectionKind : effectiveKindId));
   const kind = originalKind ? sessionKindHelp(originalKind) : null;
   const originalSelectedKind = guide?.kinds.find((item) => item.id === effectiveKindId);
   const selectedKind = originalSelectedKind ? sessionKindHelp(originalSelectedKind) : null;
-  const selectionVisible = !!(nativeAvailable && writable && guide && !projectPathActive && !imageActive && !installationActive);
+  const selectionVisible = !!(nativeAvailable && writable && guide && !projectPathActive && !imageActive && !installationActive && !backupActive);
   // The complete existing outer + inner render condition protects even an
   // unsubmitted private form. Navigation never inspects or resets its values.
   const writeOnlyFormMounted = selectionVisible && !!kind && (!!(operation?.selectionToken && state.selectionKind) ||
     (idle && !intentPending && (kindId === 'google-wif' || kindId === 'project-read-token' || kindId === 'apple-review-contact' || kindId === 'apple-review-demo' || kindId === 'operation-commitment')));
+  const backupReason = nativeBusyReason ?? credentialBackupReason(state) ?? (confirmLock ? 'Finish or close the lock confirmation first.' :
+    writeOnlyFormMounted ? 'Finish the open private-input form before starting a backup action. Backup controls will not clear that form.' : null);
+  const backupMessage = credentialBackupMessage(state, controller.backupExportCompleted(state));
+  const startBackupAction = (record?: AssetRecordRef) => {
+    if (!mounted.current || renderRef.current !== render || localRef.current !== local || controller.getSnapshot() !== state || backupReason !== null) return;
+    if (record) controller.exportBackup(record, state);
+    else controller.importBackup(state);
+  };
   const replacement = controller.replacement(kindId, replacementId);
   const preview = operation?.preview;
   const expired = state.previewDeadline === null || performance.now() >= state.previewDeadline;
@@ -230,6 +240,13 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
       <button className="button secondary" disabled={state.mode !== 'native' || state.observing} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={16} />{state.observing ? 'Checking original status…' : 'Check storage status'}</button>
       {(inSession || encrypted) && <button className="button secondary" disabled={!!state.busy || projectPathActive || imageActive || installationActive} onClick={() => changeLocal({ confirmLock: true })}>{encrypted ? 'Lock vault…' : 'Discard session…'}</button>}
     </div>
+    {encrypted && <div className="session-backup" aria-label="Encrypted backup and restore">
+      <h3>Save an encrypted backup</h3>
+      <p>Use <strong>Back up…</strong> on a saved item below. You will choose one private folder for the encrypted backup and another for its recovery code. Keep both outside your projects and store the code separately—you need both to restore.</p>
+      <p>Restoring adds a new, unassigned copy. It never replaces your existing signing key or assigns a credential automatically.</p>
+      <button type="button" className="button secondary small" disabled={backupReason !== null} onClick={() => startBackupAction()}>Restore a backup…</button>
+      {backupReason && <p className="review-caution" role="status">{backupReason}</p>}
+    </div>}
     {confirmLock && <div className="session-review" role="group" aria-label="Confirm private-input lock"><div className="inline-heading"><h3>{encrypted ? 'Lock vault and revoke all current assignments?' : 'Discard all session copies and assignments?'}</h3>{controlHelp('lock')}</div><p>{encrypted ? 'Saved encrypted records stay on disk. Decrypted copies become unavailable and are released as original work settles. You must explicitly unlock and reassess records before assigning again.' : 'Original files stay untouched. No session record is kept for your next launch.'} This cannot force cleanup of an unsettled operation or guarantee memory erasure.</p><div className="button-row"><button className="button secondary" onClick={() => changeLocal({ confirmLock: false })}>Go back</button><button className="button danger" disabled={!!state.busy || projectPathActive || imageActive || installationActive} onClick={() => { if (controller.lock()) changeLocal({ confirmLock: false }); }}>{encrypted ? 'Lock vault' : 'Discard session copies'}</button></div></div>}
     <div className="session-context">
       <div className="inline-heading"><h3>Release context</h3>{controlHelp('project')}<Badge tone={state.contextCurrent ? 'info' : 'warning'}>{state.contextCurrent ? 'Context submitted · not yet policy-validated' : 'Context not current'}</Badge></div>
@@ -265,7 +282,15 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
       </div>
     </>}
     {cancellationReason && <p className="review-caution" role="status">{cancellationReason}</p>}
-    {operation && (installationOperation ? <div className="session-progress" role="status"><h3>Original installation check</h3><p>Phase: {operation.phase} · Cleanup: {operation.settlement}</p><p>This is a read-only installation check, not a credential or image selection. Observe or cancel the exact check in Environment. These controls cannot discard, replace or cancel it.</p></div>
+    {backupMessage && <div className="session-progress" role="status" aria-live="polite"><h3>{backupMessage.title}</h3><p>{backupMessage.text}</p>
+      {operation && isCredentialBackupOperation(operation.operation) && <>
+        {operation.phase !== 'idle' && <button type="button" className="button secondary small" disabled={!!cancellationReason} onClick={() => controller.discard()}>Request cancel</button>}
+        <details><summary>Technical status</summary><p>Phase: {operation.phase} · Cleanup: {operation.settlement}</p><p>{ASSET_REASON_HELP[operation.reason]}</p>
+          {operation.storageOutcome && <p>Storage effect: {operation.storageOutcome.effect} · Durability: {operation.storageOutcome.durability} · Cleanup: {operation.storageOutcome.cleanup}. These facts alone do not confirm a completed restore.</p>}
+        </details>
+      </>}
+    </div>}
+    {operation && !isCredentialBackupOperation(operation.operation) && (installationOperation ? <div className="session-progress" role="status"><h3>Original installation check</h3><p>Phase: {operation.phase} · Cleanup: {operation.settlement}</p><p>This is a read-only installation check, not a credential or image selection. Observe or cancel the exact check in Environment. These controls cannot discard, replace or cancel it.</p></div>
       : imageOperation ? <div className="session-progress" role="status" aria-live="polite"><div className="credential-row-heading"><h3>Original image selection status</h3><Badge tone={operation.settlement === 'unknown' || operation.settlement === 'late-known' ? 'warning' : 'neutral'}>{operation.phase}</Badge></div><p><strong>Source custody:</strong> {operation.source} · <strong>Settlement:</strong> {operation.settlement} · <strong>Reason:</strong> {operation.reason}</p><p>This is a passive busy and retirement display, not a credential selection or review. Captured images are not imported or Store-validated. Image review, copy consent and Stop remain with the original image operation in Metadata.</p><p>Pending, unknown or late-known status does not confirm cleanup. These controls cannot discard, replace or cancel that image owner.</p></div>
       : projectPathOperation ? <div className="session-progress" role="status" aria-live="polite"><div className="credential-row-heading"><h3>Original project-path picker status</h3><Badge>{operation.phase}</Badge></div><p><strong>Settlement:</strong> {operation.settlement} · <strong>Reason:</strong> {operation.reason}</p><p>This selects a project-relative draft path, not a credential or asset. Only the original picker offers Cancel; a pending or unknown result does not confirm selection or cleanup.</p></div>
       : <div className="session-progress" role="status" aria-label="Original private-input operation" aria-live="polite"><div className="credential-row-heading"><h3>Original operation status</h3><span role="group" aria-label="Private-input operation phase"><Badge tone={operation.settlement === 'unknown' || operation.settlement === 'late-known' ? 'warning' : 'neutral'}>{operation.phase}</Badge></span></div><p><strong>Action:</strong> <span role="group" aria-label="Private-input operation action">{operation.operation}</span> · <strong>Source custody:</strong> {operation.source} · <strong>Settlement:</strong> <span role="group" aria-label="Private-input operation settlement">{operation.settlement}</span></p><p>{ASSET_REASON_HELP[operation.reason]}</p>
@@ -283,9 +308,11 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
       {status.records.map((record, index) => {
         const assigned = usable && status.assignments.some((assignment) => assignment.recordId === record.recordId && assignment.recordRevision === record.revision && assignment.kind === record.kind && assignment.contextRevision === status.context?.revision && assignment.availability === 'available');
         const recordLabel = `${guide?.kinds.find((kind) => kind.id === record.kind)?.label ?? 'Private input'} · item ${index + 1}${record.label ? ` · ${record.label}` : ''}`;
-        return <article key={record.recordId} aria-label={`Private input · ${recordLabel}`}><div><h4>{recordLabel}</h4><p>Revision <span role="group" aria-label="Private-input record revision">{record.revision}</span> · {encrypted ? 'encrypted stored copy' : 'retained only in this session'}</p><Badge tone={assigned ? 'info' : 'neutral'}>{assigned ? 'Assigned to current submitted context' : record.availability === 'mutation-pending' ? 'Change pending · unavailable' : 'Not assigned to the current draft'}</Badge><p>{record.payloadState === 'not-checked' ? 'Payload not checked for the current session and draft. Assess this exact revision before assigning.' : 'Payload assessed for its submitted context; a changed draft needs preparation again. Native signing, account access and release readiness remain unverified.'}</p></div><div className="button-row"><button className="button secondary small" disabled={!usable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareRecord({ recordId: record.recordId, expectedRevision: record.revision })}>{encrypted ? 'Assess and assign…' : 'Review assignment'}</button><button className="button secondary small" disabled={!!baseReason || !writable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareDelete({ recordId: record.recordId, expectedRevision: record.revision })}>Review removal…</button></div></article>;
+        return <article key={record.recordId} aria-label={`Private input · ${recordLabel}`}><div><h4>{recordLabel}</h4><p>Revision <span role="group" aria-label="Private-input record revision">{record.revision}</span> · {encrypted ? 'encrypted stored copy' : 'retained only in this session'}</p><Badge tone={assigned ? 'info' : 'neutral'}>{assigned ? 'Assigned to current submitted context' : record.availability === 'mutation-pending' ? 'Change pending · unavailable' : 'Not assigned to the current draft'}</Badge><p>{record.payloadState === 'not-checked' ? 'Payload not checked for the current session and draft. Assess this exact revision before assigning.' : 'Payload assessed for its submitted context; a changed draft needs preparation again. Native signing, account access and release readiness remain unverified.'}</p></div><div className="button-row">{encrypted && <button type="button" className="button secondary small" disabled={backupReason !== null || record.availability === 'mutation-pending'} onClick={() => startBackupAction({ recordId: record.recordId, expectedRevision: record.revision })}>Back up…</button>}<button className="button secondary small" disabled={!usable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareRecord({ recordId: record.recordId, expectedRevision: record.revision })}>{encrypted ? 'Assess and assign…' : 'Review assignment'}</button><button className="button secondary small" disabled={!!baseReason || !writable || !idle || record.availability === 'mutation-pending'} onClick={() => controller.prepareDelete({ recordId: record.recordId, expectedRevision: record.revision })}>Review removal…</button></div></article>;
       })}
     </div>}
-    <p className="session-limit-note">Input collection and encrypted storage each require their own qualified native profile; UI controls never enable those gates. Windows import and binary plist are unavailable. Admitted Linux or Apple-silicon or Intel Mac sessions can collect supported Android inputs and ASC P8. Apple P12/profile selection needs its separately admitted macOS profile and performs envelope assessment only. Encrypted storage availability for this exact build is shown above; Windows encrypted storage is unavailable. Actual password, identity, Apple profile and artifact checks belong to separately admitted operations in Releases, not this session assessment. iOS Firebase supports XML plist checks only. No Store action is requested.</p>
+    <details className="session-limit-note"><summary>Advanced: platform support and verification limits</summary>
+      <p>Input collection and encrypted storage each require their own qualified native profile; UI controls never enable those gates. Windows import and binary plist are unavailable. Admitted Linux or Apple-silicon or Intel Mac sessions can collect supported Android inputs and ASC P8. Apple P12/profile selection needs its separately admitted macOS profile and performs envelope assessment only. Encrypted storage availability for this exact build is shown above; Windows encrypted storage is unavailable. Actual password, identity, Apple profile and artifact checks belong to separately admitted operations in Releases, not this session assessment. iOS Firebase supports XML plist checks only. No Store action is requested.</p>
+    </details>
   </section>;
 }
