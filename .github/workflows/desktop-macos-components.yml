@@ -38,9 +38,9 @@ on:
         description: Check only the selected native component
         type: choice
         default: all
-        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, app, app-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
+        options: [all, integration, launcher, resident-compile, xcode-setup-compile, xcode-setup-files, installer, installer-tests, installer-recovery, installer-frames, installer-removal-fixtures, installer-restore-fixtures, installer-restore-chain, app, app-typecheck, app-contracts, local-keychain, local-keychain-contracts, store-runtime, store-local-altool, ios-tools-layout, ios-tools, xcode-package-probe, xcode-product-metadata]
       architecture:
-        description: Architecture for Store, iOS tools, package probe and Xcode files; other components use both
+        description: Architecture for app-typecheck (arm64 only), Store, iOS tools, package probe and Xcode files; other components use both
         type: choice
         default: both
         options: [both, arm64, x86_64]
@@ -434,22 +434,27 @@ jobs:
   app-check:
     # This targeted path checks the real packaged Tauri graph without producing
     # another signed/notarized package or rebuilding unrelated native helpers.
-    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-contracts' || inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts')
-    name: ${{ inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
+    if: github.event_name == 'workflow_dispatch' && (inputs.component == 'all' || inputs.component == 'integration' || inputs.component == 'app' || inputs.component == 'app-typecheck' || inputs.component == 'app-contracts' || inputs.component == 'local-keychain' || inputs.component == 'local-keychain-contracts')
+    name: ${{ inputs.component == 'app-typecheck' && 'Typecheck shipping app and three native DATA contracts' || inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include:
-          - runner: macos-26
-            arch: arm64
-            release: macos26-arm64-desktop-02
-          - runner: macos-26-intel
-            arch: x86_64
-            release: macos26-x86_64-desktop-02
+        include: ${{ fromJSON(inputs.component == 'app-typecheck' && '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"}]' || '[{"runner":"macos-26","arch":"arm64","release":"macos26-arm64-desktop-02"},{"runner":"macos-26-intel","arch":"x86_64","release":"macos26-x86_64-desktop-02"}]') }}
     steps:
+      - name: Require the explicit ARM-only typecheck selection
+        if: inputs.component == 'app-typecheck'
+        shell: bash
+        env:
+          SELECTED_ARCHITECTURE: ${{ inputs.architecture }}
+        run: |
+          set -euo pipefail
+          if [[ "$SELECTED_ARCHITECTURE" != arm64 ]]; then
+            printf '%s\n' 'app-typecheck requires architecture=arm64; no other architecture was compiled.' >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -514,7 +519,7 @@ jobs:
           # Exact SDK/Rust/profile/dependency key only. Source changes still
           # run Cargo, including build.rs SOURCE/release env invalidation.
           key: mac-components-v1-${{ matrix.arch }}-rust1.98.1-dev0-test0-inc0-macos26-${{ steps.cache-profile.outputs.sdk }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/build.rs', 'desktop/helpers/macos-desktop-image/Cargo.lock', 'desktop/helpers/macos-desktop-image/Cargo.toml', 'desktop/helpers/macos-desktop-image/build.rs', 'desktop/helpers/macos-vault-helper/Cargo.lock', 'desktop/helpers/macos-vault-helper/Cargo.toml', 'desktop/helpers/macos-vault-helper/build.rs', 'desktop/native/macos-installed-native/Cargo.lock', 'desktop/native/macos-installed-native/Cargo.toml', 'desktop/native/macos-installed-native/build.rs') }}
-      - name: ${{ inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
+      - name: ${{ inputs.component == 'app-typecheck' && 'Check actual shipping APIs and only three native DATA contracts' || inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
         shell: bash
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
@@ -533,8 +538,8 @@ jobs:
             npm --prefix desktop ci --ignore-scripts --no-audit --no-fund
             npm --prefix desktop run build
             # Actual packaged graph including command/ACL generation and native
-            # linking. Never enable the test harness in this shipping image role.
-            if [[ "$APP_CHECKS" == local-keychain ]]; then
+            # compilation. Never enable the test harness in this shipping image role.
+            if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == app-typecheck ]]; then
               # Real Rust/Objective-C compilation, without linking another app.
               rustup run 1.98.1 cargo check --locked --lib \
                 --manifest-path desktop/helpers/macos-desktop-image/Cargo.toml
@@ -542,6 +547,19 @@ jobs:
               rustup run 1.98.1 cargo build --locked --lib \
                 --manifest-path desktop/helpers/macos-desktop-image/Cargo.toml
             fi
+          fi
+          if [[ "$APP_CHECKS" == app-typecheck ]]; then
+            # Fixed DATA only in the ordinary native library graph, separate
+            # from the shipping image check above. No service, tool, credential
+            # or app is launched; do not fall through into the broad suites.
+            rustup run 1.98.1 cargo test --locked --no-default-features \
+              --manifest-path desktop/native/macos-installed-native/Cargo.toml --lib -- \
+              android_registration::tests::native_prepare_role_predicate_matches_closed_rust_roles \
+              android_catalog_query_wire::tests::upload_generation_role_has_only_same_clock_read_intent_and_finish \
+              android_service_prepare::tests::fixed_layout_role_and_reserved_bytes_cannot_alias \
+              --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-native-contracts.log"
+            grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-native-contracts.log"
+            exit 0
           fi
           if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == local-keychain-contracts ]]; then
             # Contracts-only is an explicit retry scope when the unchanged app,
