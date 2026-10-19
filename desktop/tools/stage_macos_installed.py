@@ -53,6 +53,9 @@ INSTALL_ROOT = Path("/Library/Application Support/MobileReleaseKit")
 APP_NAME = "Mobile Release Kit.app"
 ENTRY_BINARY = "Contents/MacOS/mrk-macos-entry"
 ENTRY_BUNDLE_ID = "dev.mobile-release-kit.desktop.entry"
+INSTALLED_CLI_NAME = "mrk"
+INSTALLED_CLI = "Contents/MacOS/" + INSTALLED_CLI_NAME
+INSTALLED_CLI_BYTES = 64 * 1024 * 1024
 LAUNCHER_BUNDLE = "Contents/Helpers/MobileReleaseKitLauncher.app"
 LAUNCHER_EXECUTABLE = LAUNCHER_BUNDLE + "/Contents/MacOS/mrk-macos-launcher"
 LAUNCHER_TICKET = LAUNCHER_BUNDLE + "/Contents/CodeResources"
@@ -845,7 +848,7 @@ def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_own
             for path, (body, mode) in sorted(files.items()):
                 # Signed resident image/helpers are copied unchanged/read-only.
                 # The raw desktop image is executable code for inside-out signing.
-                allowed_modes = (((0o555,) if path in (VAULT_HELPER, ANDROID_HELPER, RESIDENT_IMAGE, REMOVER, GITHUB_SEAL, LAUNCHER_EXECUTABLE)
+                allowed_modes = (((0o555,) if path in (VAULT_HELPER, ANDROID_HELPER, RESIDENT_IMAGE, REMOVER, INSTALLED_CLI, GITHUB_SEAL, LAUNCHER_EXECUTABLE)
                                   else (0o755,) if path == DESKTOP_IMAGE else (0o644, 0o755))
                                  if app_signing else (0o444, 0o555))
                 need(mode in allowed_modes, "output-mode")
@@ -2402,6 +2405,41 @@ def remover_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TAR
             "qualification": "actual-remover-data-not-signed-or-launched"}
 
 
+def installed_cli_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TARGET, package_version):
+    """Fixed read-only CLI graph DATA, not a grant or an installed-service observation."""
+    target = mac_target(target)
+    root = DESKTOP / "src-tauri"
+    binary, target_dir = Path(binary), Path(target_dir)
+    need(binary.is_absolute() and target_dir.is_absolute()
+         and all(part not in (".", "..") for part in binary.parts + target_dir.parts)
+         and binary == target_dir / target / "release" / INSTALLED_CLI_NAME
+         and type(body) is bytes and 32 <= len(body) <= INSTALLED_CLI_BYTES, "installed-cli-cargo-fixed-output")
+    records = cargo_records(messages)
+    selected = [row for row in records if row["target"].get("name") == INSTALLED_CLI_NAME
+                or str(binary) in row.get("filenames", []) or row.get("executable") == str(binary)]
+    need(len(selected) == 1, "installed-cli-cargo-one-binary")
+    row = selected[0]
+    role = row["target"]
+    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@" + package_version
+         and row.get("manifest_path") == str(root / "Cargo.toml") and role.get("name") == INSTALLED_CLI_NAME
+         and role.get("kind") == ["bin"] and role.get("crate_types") == ["bin"]
+         and role.get("src_path") == str(root / "src/installed_cli_main.rs") and role.get("edition") == "2021"
+         and row.get("executable") == str(binary) and row.get("filenames") == [str(binary)], "installed-cli-cargo-source")
+    cargo_profile(row, test=False)
+    cargo_features(row, ["installed-cli"])
+    cargo_library(records, root, "mobile-release-kit-desktop", "mobile_release_desktop", ["installed-cli"],
+                  test=False, package_version=package_version)
+    cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
+                  "mrk_macos_installed_native", ["default"], test=False, package_version="0.1.0")
+    need(not any(item is not row and item["target"].get("kind") in
+                 (["bin"], ["test"], ["example"], ["bench"], ["cdylib"]) for item in records), "installed-cli-cargo-no-mixed-role")
+    macho(body, system_only=True, target=target)
+    return {"schemaVersion": 1, "entrypoint": "src/installed_cli_main.rs", "targetKind": "bin",
+            "binaryRole": INSTALLED_CLI_NAME, "target": target, "features": ["installed-cli"],
+            "cargoMessagesSha256": digest(messages), "binarySha256": digest(body), "binarySize": len(body),
+            "qualification": "installed-cli-data-not-signed-launched-or-authorized"}
+
+
 def removal_product_source(binding, workflow):
     candidate = workflow == _CANDIDATE_REMOVE_WORKFLOW
     need(type(binding) is dict and ((candidate and maintenance_hex(binding.get("productSource"), 40)
@@ -3450,6 +3488,13 @@ def app_with_github_seal(args, seal):
     else:
         remover_compiled = remover_cargo_artifact(read(args.remover_cargo_messages, 8 * 1024 * 1024),
                                                 args.remover, args.remover_cargo_target_dir, remover, target=target, package_version=selection.package_version)
+    need(all(getattr(args, key, None) is not None for key in
+             ("installed_cli", "expected_installed_cli", "installed_cli_cargo_messages", "installed_cli_cargo_target_dir")),
+         "package-role-installed-cli-required")
+    cli = read(args.installed_cli, INSTALLED_CLI_BYTES)
+    need(sha(args.expected_installed_cli) and digest(cli) == args.expected_installed_cli, "installed-cli-final-signed-digest")
+    cli_compiled = installed_cli_cargo_artifact(read(args.installed_cli_cargo_messages, 8 * 1024 * 1024),
+        args.installed_cli, args.installed_cli_cargo_target_dir, cli, target=target, package_version=selection.package_version)
     helper = read(args.vault_helper, 32 * 1024 * 1024)
     need(sha(args.expected_vault_helper) and digest(helper) == args.expected_vault_helper,
          "helper-final-signed-digest")
@@ -3459,6 +3504,7 @@ def app_with_github_seal(args, seal):
     entry_macho(entry, target=target)
     icon = read(DESKTOP / "src-tauri/icons/icon.png", 1024 * 1024)
     files = {ENTRY_BINARY: (entry, 0o755), APP_BINARY: (body, 0o755), VAULT_HELPER: (helper, 0o555), REMOVER: (remover, 0o555),
+             INSTALLED_CLI: (cli, 0o555),
              "Contents/Info.plist": (source_entry_info(selection=selection), 0o644), PAYLOAD_INFO: (source_app_info(selection=selection), 0o644),
              "Contents/PkgInfo": (b"APPL????", 0o644), PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
              "Contents/Resources/icon.png": (icon, 0o644), PAYLOAD_CONTENTS + "Resources/icon.png": (icon, 0o644)}
@@ -3477,6 +3523,7 @@ def app_with_github_seal(args, seal):
     result = {"schemaVersion": 1, "packageRole": role,
               "appBinarySha256BeforeSigning": digest(body), "vaultHelperSha256": digest(helper),
               "removerSha256": digest(remover), "removerCargoArtifact": remover_compiled,
+              "installedCliSha256": digest(cli), "installedCliCargoArtifact": cli_compiled,
               "entryBinarySha256BeforeSigning": digest(entry), "entryBundleIdentifier": ENTRY_BUNDLE_ID,
               "payloadBundleIdentifier": BUNDLE_ID, "androidSupportManifestSha256": support_sha,
               "androidSupportSignedManifestSha256": ANDROID_SIGNED_MANIFEST_SHA,
@@ -3559,7 +3606,7 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
     _support_sha, support_rows = android_support_manifest()
     support = {PAYLOAD_RELATIVE + "/" + row["resourcePath"] for row in support_rows}
     support.update(PAYLOAD_RELATIVE + "/" + notice["resourcePath"] for row in support_rows for notice in row["notices"])
-    expected_names = {ENTRY_BINARY, APP_BINARY, VAULT_HELPER, ANDROID_HELPER, ANDROID_SERVICE_PLIST, RESIDENT_IMAGE, REMOVER,
+    expected_names = {ENTRY_BINARY, APP_BINARY, VAULT_HELPER, ANDROID_HELPER, ANDROID_SERVICE_PLIST, RESIDENT_IMAGE, REMOVER, INSTALLED_CLI,
                       "Contents/Info.plist", PAYLOAD_INFO, "Contents/PkgInfo", PAYLOAD_CONTENTS + "PkgInfo",
                       "Contents/Resources/icon.png", PAYLOAD_CONTENTS + "Resources/icon.png",
                       "Contents/_CodeSignature/CodeResources", PAYLOAD_CONTENTS + "_CodeSignature/CodeResources"} | support
@@ -3592,13 +3639,17 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
     need(sha(getattr(args, "expected_remover", None)) and digest(app[REMOVER][0]) == args.expected_remover
          and app[REMOVER][1] == 0o555, "remover-signature-bytes-or-mode-changed")
     macho(app[REMOVER][0], target=target)
+    need(sha(getattr(args, "expected_installed_cli", None)) and digest(app[INSTALLED_CLI][0]) == args.expected_installed_cli
+         and app[INSTALLED_CLI][1] == 0o555 and 32 <= len(app[INSTALLED_CLI][0]) <= INSTALLED_CLI_BYTES,
+         "installed-cli-signature-bytes-or-mode-changed")
+    macho(app[INSTALLED_CLI][0], system_only=True, target=target)
     android_service_input(app, args.expected_android_helper, expected_resident, target=target)
     support_sha = android_support_input(app)
     files = {}
     for prefix, source in (("runtime/", runtime), ("app/", app)):
         for name, (body, mode) in source.items():
             need(prefix != "app/" or name.startswith("Contents/"), "app-contents-scope")
-            code = ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
+            code = ("app/" + ENTRY_BINARY, "app/" + INSTALLED_CLI, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
                     "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "app/" + LAUNCHER_EXECUTABLE, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3", "runtime/store/bin/ruby", "runtime/store/bin/bundle")
             expected_mode = 0o555 if prefix + name in code else 0o444
             # Normalize only the fresh copy, never the signed original.
@@ -3616,6 +3667,7 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
               "runtimeManifestSha256": args.expected_manifest, "androidSupportManifestSha256": support_sha,
               "androidSupportSignedManifestSha256": ANDROID_SIGNED_MANIFEST_SHA,
               "residentImageSha256": expected_resident, "removerSha256": args.expected_remover, "fileCount": len(rows),
+              "installedCliSha256": args.expected_installed_cli,
               "qualification": "fresh-install-input-not-installed"}
     if role == "ordinary-image":
         result["desktopImageSha256"] = expected_desktop
@@ -5068,7 +5120,7 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest, *, 
              and safe_path(row["path"], mac_store_prefix="runtime/store") and row["path"].startswith(("app/Contents/", "runtime/")) and row["path"] not in rows
              and sha(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= MAX_BYTES
              and type(row["executable"]) is bool
-             and row["executable"] == (row["path"] in ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
+             and row["executable"] == (row["path"] in ("app/" + ENTRY_BINARY, "app/" + INSTALLED_CLI, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
                                                      "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "app/" + LAUNCHER_EXECUTABLE, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3", "runtime/store/bin/ruby", "runtime/store/bin/bundle")), "observation-inventory-row")
         rows[row["path"]] = row
     store_runtime_rows({name.removeprefix("runtime/"): row for name, row in rows.items()
@@ -7351,6 +7403,10 @@ def main(argv=None):
     app.add_argument("--expected-remover", required=True)
     app.add_argument("--remover-cargo-messages", required=True, type=Path)
     app.add_argument("--remover-cargo-target-dir", required=True, type=Path)
+    app.add_argument("--installed-cli", required=True, type=Path)
+    app.add_argument("--expected-installed-cli", required=True)
+    app.add_argument("--installed-cli-cargo-messages", required=True, type=Path)
+    app.add_argument("--installed-cli-cargo-target-dir", required=True, type=Path)
     app.add_argument("--removal-abrupt-fixture", action="store_true",
                      help="NONSHIPPING exact same-engine abrupt graph; never ordinary product qualification")
     app.add_argument("--output", required=True, type=Path)
@@ -7395,6 +7451,7 @@ def main(argv=None):
     inputs.add_argument("--current-runtime", action="store_true",
                         help="Select the fixed current protocol and bootstrap roster; default retains the historical profile")
     inputs.add_argument("--expected-remover", required=True)
+    inputs.add_argument("--expected-installed-cli", required=True)
     inputs.add_argument("--output", required=True, type=Path)
     for command in (app, inputs):
         command.add_argument("--applications-launcher", type=Path,

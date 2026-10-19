@@ -1282,6 +1282,22 @@ jobs:
             exit "$remover_status"
           fi
           [[ "$remover_status_saved" == 0 ]] || exit "$remover_status_saved"
+          # Separate read-only CLI graph; same selected compiler and app-build
+          # budget. It never starts the service or grants a project access.
+          set +e
+          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/installed-cli-target" "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
+            --locked --offline --release --jobs 1 --no-default-features --features installed-cli --bin mrk \
+            --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
+            > "$MRK_MACOS_WORK/installed-cli-build.jsonl" 2> "$MRK_MACOS_WORK/installed-cli-build.stderr"
+          cli_status=$?
+          printf '%s\n' "$cli_status" > "$MRK_MACOS_WORK/installed-cli-build.status"
+          cli_status_saved=$?
+          set -e
+          if [[ "$cli_status" != 0 ]]; then
+            printf 'Fixed installed CLI compiler failed with original status %s; originals remain local.\n' "$cli_status" >&2 || :
+            exit "$cli_status"
+          fi
+          [[ "$cli_status_saved" == 0 ]] || exit "$cli_status_saved"
           if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; then
             # Separate genuine nonshipping observer graph; same24min preparation step.
             # No key/signature/Installer execution and no target inventory substitution.
@@ -1396,6 +1412,12 @@ jobs:
           [[ "$remover_result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
           MRK_MACOS_REMOVER_SHA256=${remover_result#sha256=}
           printf 'MRK_MACOS_REMOVER_SHA256=%s\n' "$MRK_MACOS_REMOVER_SHA256" >> "$GITHUB_ENV"
+          cli_result=$(MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-installed-cli --target "$MRK_MACOS_TARGET")
+          [[ "$cli_result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
+          MRK_MACOS_INSTALLED_CLI_SHA256=${cli_result#sha256=}
+          printf 'MRK_MACOS_INSTALLED_CLI_SHA256=%s\n' "$MRK_MACOS_INSTALLED_CLI_SHA256" >> "$GITHUB_ENV"
           removal_arguments=()
           if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle && "$MRK_MACOS_REMOVAL_CASE" == abrupt ]]; then
             removal_arguments=(--removal-abrupt-fixture)
@@ -1415,6 +1437,10 @@ jobs:
             --expected-remover "$MRK_MACOS_REMOVER_SHA256" \
             --remover-cargo-messages "$MRK_MACOS_WORK/remover-build.jsonl" \
             --remover-cargo-target-dir "$MRK_MACOS_WORK/remover-target" \
+            --installed-cli "$MRK_MACOS_WORK/installed-cli-target/$MRK_MACOS_TARGET/release/mrk" \
+            --expected-installed-cli "$MRK_MACOS_INSTALLED_CLI_SHA256" \
+            --installed-cli-cargo-messages "$MRK_MACOS_WORK/installed-cli-build.jsonl" \
+            --installed-cli-cargo-target-dir "$MRK_MACOS_WORK/installed-cli-target" \
             --android-helper "$MRK_MACOS_WORK/mrk-android-register" \
             --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
             --resident-image "$MRK_MACOS_WORK/libmrk_resident_image.dylib" \
@@ -1464,6 +1490,7 @@ jobs:
             /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/runtime/tools/gh"
           fi
           /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-macos-remove"
+          /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/MacOS/mrk"
           /usr/bin/codesign --verify --strict "$payload"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
           entry_sha=$(/usr/bin/shasum -a 256 "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/MacOS/mrk-macos-entry")
@@ -1526,7 +1553,7 @@ jobs:
                   or proof["appCodeSignVerified"] is not True):
               raise ValueError("app-signature-cleanup-original")
           # Same completed work owner, no shared caches/installation/app/runtime removal.
-          outputs = (root / "cargo-target", root / "vault-helper-target", root / "remover-target", root / "npm-cache",
+          outputs = (root / "cargo-target", root / "vault-helper-target", root / "remover-target", root / "installed-cli-target", root / "npm-cache",
                      workspace / "desktop/node_modules", workspace / "desktop/dist")
           for path in outputs:
               selected = os.lstat(path)
@@ -2212,7 +2239,7 @@ jobs:
           # All producing commands and mandatory native owners returned before
           # candidate staging; no UI app or test process was started. Keep the
           # complete candidate and package evidence, including if upload failed.
-          for path in (root / 'cargo-target', root / 'vault-helper-target', root / 'remover-target', root / 'npm-cache',
+          for path in (root / 'cargo-target', root / 'vault-helper-target', root / 'remover-target', root / 'installed-cli-target', root / 'npm-cache',
                        workspace / 'desktop/node_modules', workspace / 'desktop/dist'):
               try: current = path.lstat()
               except FileNotFoundError: continue
@@ -5294,7 +5321,7 @@ jobs:
           saved_directories = tuple(root / ("normal-ui/" + stem + "-test.xcresult") for stem in stems)
           saved_logs = tuple(name for stem in stems for name in
                              (stem + "-test.log", stem + "-summary.raw.json", stem + "-summary.stderr"))
-          for path in (root / "cargo-target", root / "vault-helper-target", root / "remover-target", root / "npm-cache", workspace / "desktop/node_modules", workspace / "desktop/dist",
+          for path in (root / "cargo-target", root / "vault-helper-target", root / "remover-target", root / "installed-cli-target", root / "npm-cache", workspace / "desktop/node_modules", workspace / "desktop/dist",
                        root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/diagnostics-test.xcresult", *saved_directories, root / "normal-ui/tmp",
                        root / "data-contracts/tmp"):
               try: selected = os.lstat(path)

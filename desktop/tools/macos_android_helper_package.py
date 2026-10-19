@@ -103,7 +103,8 @@ PYTHON_SUPPLIERS = {
 }
 
 
-SIGNING_PHASES = ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover", "sign-applications-launcher", "sign-xcode-setup")
+SIGNING_PHASES = ("sign-vault-helper", "sign-installed-cli", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover", "sign-applications-launcher", "sign-xcode-setup")
+INSTALLED_CLI_IDENTIFIER = "dev.mobile-release-kit.desktop.cli"
 XCODE_SETUP_IDENTIFIER = "dev.mobile-release-kit.desktop.xcode-setup"
 CREDENTIAL_VARIABLES = ("MRK_MACOS_DEVELOPER_ID_P12_BASE64", "MRK_MACOS_DEVELOPER_ID_P12_PASSWORD")
 CREDENTIAL_ROLES = ("search-before", "default-before", "create", "search-created", "settings", "unlock", "import",
@@ -2735,7 +2736,7 @@ def signing_requirement(identity, identifier):
          and (store_identifier or identifier in (IDENTIFIER, IDENTIFIER + ".image", "dev.mobile-release-kit.desktop.distribution",
                             "dev.mobile-release-kit.desktop.observation", "dev.mobile-release-kit.desktop.remove-distribution", PYTHON_IDENTIFIER,
                              "dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry",
-                             "dev.mobile-release-kit.desktop.remove", LAUNCHER_IDENTIFIER, XCODE_SETUP_IDENTIFIER, *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()])), "fixed-signing-requirement")
+                             "dev.mobile-release-kit.desktop.remove", INSTALLED_CLI_IDENTIFIER, LAUNCHER_IDENTIFIER, XCODE_SETUP_IDENTIFIER, *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()])), "fixed-signing-requirement")
     return ('identifier "' + identifier + '" and anchor apple generic'
             ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
             ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
@@ -4259,6 +4260,7 @@ class Operation:
         payload = base + "/Contents/Helpers/MobileReleaseKitPayload.app"
         selected = {
             "sign-vault-helper": "vault-helper-target/" + self.target + "/release/mrk-vault-keychain",
+            "sign-installed-cli": "installed-cli-target/" + self.target + "/release/mrk",
             "sign-desktop-image": payload + "/Contents/Frameworks/libmrk_desktop_image.dylib",
             "sign-desktop-payload": payload,
             "sign-root-app": base,
@@ -4306,7 +4308,8 @@ class Operation:
         self.package_sources.append((entitlements, empty))
         arguments = ["--options", "runtime", "--entitlements",
             str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist")]
-        identifier = (XCODE_SETUP_IDENTIFIER if self.phase == "sign-xcode-setup" else LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove"
+        identifier = (INSTALLED_CLI_IDENTIFIER if self.phase == "sign-installed-cli" else
+                      XCODE_SETUP_IDENTIFIER if self.phase == "sign-xcode-setup" else LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove"
                       if self.phase == "sign-remover" else None)
         if identifier is not None:
             arguments += ["--identifier", identifier]
@@ -4899,6 +4902,7 @@ class Operation:
         arguments = argparse.Namespace(target=self.target, package_role=self.environment["MRK_MACOS_PACKAGE_ROLE"], current_runtime=True,
             expected_entry=self.environment.get("MRK_MACOS_SIGNED_ENTRY_SHA256"), expected_app_binary=self.environment.get("MRK_MACOS_SIGNED_PAYLOAD_SHA256"),
             expected_vault_helper=self.environment.get("MRK_MACOS_VAULT_HELPER_SHA256"),
+            expected_installed_cli=self.environment.get("MRK_MACOS_INSTALLED_CLI_SHA256"),
             expected_github_seal=self.environment.get("MRK_MACOS_GITHUB_SEAL_SHA256"),
             expected_github_seal_bytes=(int(self.environment["MRK_MACOS_GITHUB_SEAL_BYTES"])
                 if "MRK_MACOS_GITHUB_SEAL_BYTES" in self.environment else None),
@@ -10150,10 +10154,10 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     return work
 
 
-# Fixed DATA checkpoint after the eight existing native phase owners. This is
+# Fixed DATA checkpoint after the existing native phase owners. This is
 # not a native operation or a certificate/notary/Installer policy override.
 APP_SIGNATURE_REF = "refs/heads/verify/desktop-macos-app-signature"
-APP_SIGNATURE_PHASES = ("prepare", "sign-vault-helper", "sign-remover", "sign-applications-launcher", "verify-before",
+APP_SIGNATURE_PHASES = ("prepare", "sign-vault-helper", "sign-installed-cli", "sign-remover", "sign-applications-launcher", "verify-before",
                         "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "verify-after")
 APP_SIGNATURE_DATA = ("select-github-tools-signed", "project-history-provider", "project-github-seal")
 # Only produce one current carrier; no fixture, runtime re-signing or UI claim.
@@ -10274,12 +10278,13 @@ def app_signature_summary(target, environment, stager, work):
     need(all(row["imageReleaseSourceSha256"] == digest(release)
              and row["imageReleaseId"] == receipts["prepare"]["imageReleaseId"] for row in receipts.values()),
          "app-signature-same-release")
-    for name in ("normal-build.status", "remover-build.status"):
+    for name in ("normal-build.status", "remover-build.status", "installed-cli-build.status"):
         need(stager.read(work / name, 16) == b"0\n", "app-signature-original-compiler-status")
     app = stager.tree(work / "app/Mobile Release Kit.app")
     prefix = "Contents/Helpers/MobileReleaseKitPayload.app/Contents/"
     anchors = {
         "Contents/MacOS/mrk-macos-entry": ("sign-root-app", "MRK_MACOS_SIGNED_ENTRY_SHA256"),
+        stager.INSTALLED_CLI: ("sign-installed-cli", "MRK_MACOS_INSTALLED_CLI_SHA256"),
         prefix + "MacOS/mobile-release-kit-desktop": ("sign-desktop-payload", "MRK_MACOS_SIGNED_PAYLOAD_SHA256"),
         prefix + "Frameworks/libmrk_desktop_image.dylib": ("sign-desktop-image", "MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256"),
         prefix + "Helpers/mrk-vault-keychain": ("sign-vault-helper", "MRK_MACOS_VAULT_HELPER_SHA256"),
@@ -11178,7 +11183,7 @@ def main():
             print("resident-image-sha256=" + operation.resident_image_sha256, flush=True)
             print("desktop-facade-sha256=" + operation.desktop_facade_sha256, flush=True)
             print("image-release-id=" + operation.image_release, flush=True)
-        if phase in ("sign-remover", "sign-applications-launcher", "sign-xcode-setup"):
+        if phase in ("sign-installed-cli", "sign-remover", "sign-applications-launcher", "sign-xcode-setup"):
             # Only the same completed fixed-sign owner may publish this digest;
             # no caller reopens/rehashes a replacement to infer success.
             need(type(result) is str and re.fullmatch(r"[0-9a-f]{64}", result), "fixed-remover-result")

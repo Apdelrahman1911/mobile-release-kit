@@ -34,6 +34,8 @@ pub const MAINTENANCE_GATE_BYTES: &[u8] = b"MRK-MACOS-MAINTENANCE-GATE-v1\n";
 pub const REGISTRATION_GATE_NAME: &str = "registration-reservation-v1";
 pub const REGISTRATION_GATE_BYTES: &[u8] = b"MRK-MACOS-REGISTRATION-RESERVATION-v1\n";
 pub const ENTRY_INVENTORY_PATH: &str = "app/Contents/MacOS/mrk-macos-entry";
+// Standalone read-only Desktop-service client, not a release or helper authority.
+pub const INSTALLED_CLI_INVENTORY_PATH: &str = "app/Contents/MacOS/mrk";
 pub const PAYLOAD_INVENTORY_PATH: &str = "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop";
 pub const PAYLOAD_INFO_INVENTORY_PATH: &str = "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Info.plist";
 pub const VAULT_HELPER_INVENTORY_PATH: &str = "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-vault-keychain";

@@ -33,6 +33,7 @@ pub const RECORD_LIMIT: usize = 8192;
 pub const PAYLOAD_LIMIT: u64 = 512 * 1024 * 1024;
 pub const FILE_LIMIT: usize = 16_384;
 pub const ENTRY_BINARY: &str = paths::ENTRY_INVENTORY_PATH;
+pub const INSTALLED_CLI: &str = paths::INSTALLED_CLI_INVENTORY_PATH;
 pub const APP_BINARY: &str = paths::PAYLOAD_INVENTORY_PATH;
 pub const VAULT_HELPER: &str = paths::VAULT_HELPER_INVENTORY_PATH;
 pub const ANDROID_HELPER: &str = paths::ANDROID_HELPER_INVENTORY_PATH;
@@ -123,7 +124,7 @@ impl Inventory {
                 && (item.path.starts_with("app/Contents/") || item.path.starts_with("runtime/"))
                 && item.path.as_str() > previous && hex(&item.sha256, 64), "inventory-path")?;
             check(item.executable == (matches!(item.path.as_str(),
-                ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | REMOVER | DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"
+                ENTRY_BINARY | INSTALLED_CLI | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | REMOVER | DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"
                 | paths::HISTORY_PROVIDER_INVENTORY_PATH | paths::GITHUB_SEAL_INVENTORY_PATH
                 | crate::macos_applications_launcher::EXECUTABLE)
                 || item.path.strip_prefix("runtime/").is_some_and(crate::macos_store_runtime::executable)),
@@ -543,9 +544,12 @@ mod tests {
             }
         }
         // Historical authenticated inventories remain parseable. Only this
-        // new fixed executable joins the closed list; current-role admission
+        // fixed executable set joins the closed list; current package assembly
         // must separately require its genuine signed original.
         for (path,executable,accepted) in [(REMOVER,true,true),(REMOVER,false,false),
+            (INSTALLED_CLI,true,true),(INSTALLED_CLI,false,false),
+            ("app/Contents/MacOS/mrk-other",true,false),
+            ("app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mrk",true,false),
             (paths::HISTORY_PROVIDER_INVENTORY_PATH,true,true),(paths::HISTORY_PROVIDER_INVENTORY_PATH,false,false),
             (paths::GITHUB_SEAL_INVENTORY_PATH,true,true),(paths::GITHUB_SEAL_INVENTORY_PATH,false,false),
             ("runtime/tools/gh-other",true,false),

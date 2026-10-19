@@ -7437,7 +7437,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         # These tiny Mach-O/Keychain return values remain inert DATA only.
         _transport, matcher, _parser = self.python_data_functions()
         for target in (module.ARM_TARGET, module.INTEL_TARGET):
-            for phase, failed_verify in ([(value, False) for value in module.SIGNING_PHASES] + [("sign-remover", True), ("sign-applications-launcher", True), ("sign-xcode-setup", True)]):
+            for phase, failed_verify in ([(value, False) for value in module.SIGNING_PHASES] + [("sign-installed-cli", True), ("sign-remover", True), ("sign-applications-launcher", True), ("sign-xcode-setup", True)]):
                 with self.subTest(fixedSigning=phase, target=target, failedVerify=failed_verify), tempfile.TemporaryDirectory() as directory:
                     checkout, work, environment, _owner, _observations = self.fixture(Path(directory), build_target=target)
                     environment["CARGO_TARGET_DIR"] = str(work / ("xcode-setup-target" if phase == "sign-xcode-setup" else "cargo-target"))
@@ -7450,6 +7450,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     app = work / "app/Mobile Release Kit.app"
                     payload = app / "Contents/Helpers/MobileReleaseKitPayload.app"
                     selected = {"sign-vault-helper": work / ("vault-helper-target/" + target + "/release/mrk-vault-keychain"),
+                        "sign-installed-cli": work / ("installed-cli-target/" + target + "/release/mrk"),
                         "sign-desktop-image": payload / "Contents/Frameworks/libmrk_desktop_image.dylib",
                         "sign-desktop-payload": payload, "sign-root-app": app,
                         "sign-root-installer": work / ("cargo-target/" + target + "/release/mrk-macos-install"),
@@ -7480,8 +7481,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                             expected_sign = ["/usr/bin/codesign", "--force", "--sign", credentials.leaf,
                                 "--options", "runtime", "--entitlements",
                                 str(checkout / "desktop/packaging/macos-empty-entitlements.plist")]
-                            if phase in ("sign-remover", "sign-xcode-setup") or launcher:
-                                expected_sign += ["--identifier", module.XCODE_SETUP_IDENTIFIER if phase == "sign-xcode-setup" else module.LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove"]
+                            if phase in ("sign-installed-cli", "sign-remover", "sign-xcode-setup") or launcher:
+                                expected_sign += ["--identifier", module.INSTALLED_CLI_IDENTIFIER if phase == "sign-installed-cli" else module.XCODE_SETUP_IDENTIFIER if phase == "sign-xcode-setup" else module.LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove"]
                             self.assertEqual(argv, expected_sign + ["--timestamp", str(selected)])
                             self.assertIn("--timestamp", argv)
                             replacement = binary.with_name(binary.name + ".replacement")
@@ -7491,9 +7492,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                                 seal.parent.mkdir(); seal.write_bytes(b"INERT launcher signature"); seal.chmod(0o644)
                         else:
                             expected_verify = ["/usr/bin/codesign", "--verify", "--strict"]
-                            if phase in ("sign-remover", "sign-xcode-setup") or launcher:
+                            if phase in ("sign-installed-cli", "sign-remover", "sign-xcode-setup") or launcher:
                                 expected_verify += ["-R", "=" + module.signing_requirement(("TEST000001", credentials.leaf),
-                                                                                   module.XCODE_SETUP_IDENTIFIER if phase == "sign-xcode-setup" else module.LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove")]
+                                                                                   module.INSTALLED_CLI_IDENTIFIER if phase == "sign-installed-cli" else module.XCODE_SETUP_IDENTIFIER if phase == "sign-xcode-setup" else module.LAUNCHER_IDENTIFIER if launcher else "dev.mobile-release-kit.desktop.remove")]
                             self.assertEqual(argv, expected_verify + [str(selected)])
                             self.assertEqual(binary.read_bytes(), signed)
                             if failed_verify:
@@ -8750,7 +8751,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             raw = encode(changed); signed["receiptSha256"] = module.digest(raw)
             with self.assertRaises(module.Refused): module.tool_signed_receipt(raw, row, purpose, target, producer, service, entitlements)
         self.assertEqual(module.MAX_HELPER, 32 * 1024 * 1024)
-        self.assertEqual(module.SIGNING_PHASES, ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload",
+        self.assertEqual(module.SIGNING_PHASES, ("sign-vault-helper", "sign-installed-cli", "sign-desktop-image", "sign-desktop-payload",
             "sign-root-app", "sign-root-installer", "sign-remover", "sign-applications-launcher", "sign-xcode-setup"))
         with self.assertRaises(module.Refused): module.tool_quote("arbitrary-tool")
         # The original epoch is not restarted by a callback or cleanup switch.
@@ -11257,7 +11258,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
         # The application-signature ref selects only fixed signing owners, never a notary/Installer fallback.
         module = ANDROID_HELPER
-        expected = ("prepare", "sign-vault-helper", "sign-remover", "sign-applications-launcher", "verify-before", "sign-desktop-image",
+        expected = ("prepare", "sign-vault-helper", "sign-installed-cli", "sign-remover", "sign-applications-launcher", "verify-before", "sign-desktop-image",
                     "sign-desktop-payload", "sign-root-app", "verify-after")
         self.assertEqual(module.APP_SIGNATURE_PHASES, expected)
         self.assertEqual(module.APP_SIGNATURE_DATA, ("select-github-tools-signed", "project-history-provider", "project-github-seal"))
@@ -18077,6 +18078,15 @@ def remover_cargo_fixture(target=None, *, build_target="aarch64-apple-darwin"):
     return target, binary, rows, entry_macho_fixture(target=build_target) + b"remover-signed-inert-DATA"
 
 
+def installed_cli_cargo_fixture(target=None, *, build_target="aarch64-apple-darwin"):
+    target, _old, rows, _body = remover_cargo_fixture(target, build_target=build_target)
+    binary = target / build_target / "release/mrk"
+    rows[0]["target"].update(name="mrk", src_path=str(TOOL.DESKTOP / "src-tauri/src/installed_cli_main.rs"))
+    rows[0]["features"], rows[1]["features"] = ["installed-cli"], ["installed-cli"]
+    rows[0]["filenames"], rows[0]["executable"] = [str(binary)], str(binary)
+    return target, binary, rows, entry_macho_fixture(target=build_target) + b"cli-signed-inert-DATA"
+
+
 def cargo_lines(*items):
     return b"".join(TOOL.canonical(item) + b"\n" for item in items)
 
@@ -18401,10 +18411,15 @@ class MacNormalPreviewData(unittest.TestCase):
                 remover.write_bytes(remover_body); remover.chmod(0o555)
                 remover_messages = cargo_lines(*remover_rows, {"reason": "build-finished", "success": True})
                 remover_cargo = work / "remover-cargo.jsonl"; remover_cargo.write_bytes(remover_messages)
+                cli_target, cli, cli_rows, cli_body = installed_cli_cargo_fixture(work / "installed-cli-target", build_target=build_target)
+                cli.parent.mkdir(parents=True, mode=0o700)
+                cli.write_bytes(cli_body); cli.chmod(0o555)
+                cli_cargo = work / "installed-cli-cargo.jsonl"
+                cli_cargo.write_bytes(cargo_lines(*cli_rows, {"reason": "build-finished", "success": True}))
                 support = android_support_fixture(work)
                 for path, data in support.values.items(): path.write_bytes(data)
                 originals = {path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
-                             for path in (artifact, facade, helper, entry, resident_facade, resident, cargo, remover, remover_cargo, *support.values)}
+                             for path in (artifact, facade, helper, entry, resident_facade, resident, cargo, remover, remover_cargo, cli, cli_cargo, *support.values)}
                 output = work / "Mobile Release Kit.app"
                 args = SimpleNamespace(target=build_target, package_role=role, binary=facade, expected_app_binary=TOOL.digest(body), output=output,
                     entry_binary=entry, expected_entry=TOOL.digest(entry_macho_fixture(target=build_target)),
@@ -18413,6 +18428,8 @@ class MacNormalPreviewData(unittest.TestCase):
                     vault_helper=helper, expected_vault_helper=TOOL.digest(helper_body),
                     remover=remover, expected_remover=TOOL.digest(remover_body),
                     remover_cargo_messages=remover_cargo, remover_cargo_target_dir=remover_target,
+                    installed_cli=cli, expected_installed_cli=TOOL.digest(cli_body),
+                    installed_cli_cargo_messages=cli_cargo, installed_cli_cargo_target_dir=cli_target,
                     android_helper=resident_facade, expected_android_helper=TOOL.digest(resident_facade_body),
                     resident_image=resident, expected_resident_image=TOOL.digest(resident_body))
                 if role == "ordinary-image":
@@ -18424,6 +18441,7 @@ class MacNormalPreviewData(unittest.TestCase):
                     result = TOOL.app_command(args)
                 icon = (TOOL.DESKTOP / "src-tauri/icons/icon.png").read_bytes()
                 expected = {TOOL.ENTRY_BINARY: (entry_macho_fixture(target=build_target), 0o755), TOOL.APP_BINARY: (body, 0o755),
+                    TOOL.INSTALLED_CLI: (cli_body, 0o555),
                     TOOL.VAULT_HELPER: (helper_body, 0o555), TOOL.REMOVER: (remover_body, 0o555), TOOL.ANDROID_HELPER: (resident_facade_body, 0o555),
                     TOOL.RESIDENT_IMAGE: (resident_body, 0o555), TOOL.ANDROID_SERVICE_PLIST: (TOOL.android_service_plist(), 0o644),
                     "Contents/Info.plist": ((TOOL.DESKTOP / "macos-installed-inputs/EntryInfo.plist").read_bytes(), 0o644),
@@ -18457,6 +18475,11 @@ class MacNormalPreviewData(unittest.TestCase):
                 with synthetic_android_support(support, app_seal={}), self.assertRaisesRegex(TOOL.Refused, "package-role-remover-required"):
                     TOOL.app_command(missing)
                 self.assertFalse(missing.output.exists())
+                missing_cli = SimpleNamespace(**{key: value for key, value in vars(args).items() if key != "installed_cli"})
+                missing_cli.output = work / "missing-cli-app"
+                with synthetic_android_support(support, app_seal={}), self.assertRaisesRegex(TOOL.Refused, "package-role-installed-cli-required"):
+                    TOOL.app_command(missing_cli)
+                self.assertFalse(missing_cli.output.exists())
                 self.assertEqual(result["residentImageSha256"], TOOL.digest(resident_body))
                 self.assertNotIn("normalCargoArtifact", result)
                 for path, original in originals.items():
@@ -18507,7 +18530,7 @@ class MacNormalPreviewData(unittest.TestCase):
                     replacement = original_parent / held_file.name
                     replacement.write_bytes(b"inert-helper"); replacement.chmod(0o555)
 
-        cases = tuple((path, mode) for path in (TOOL.VAULT_HELPER, TOOL.ANDROID_HELPER, TOOL.RESIDENT_IMAGE, TOOL.REMOVER, TOOL.GITHUB_SEAL)
+        cases = tuple((path, mode) for path in (TOOL.VAULT_HELPER, TOOL.ANDROID_HELPER, TOOL.RESIDENT_IMAGE, TOOL.REMOVER, TOOL.INSTALLED_CLI, TOOL.GITHUB_SEAL)
                       for mode in (0o755, 0o644, 0o444)) + (
                       (TOOL.DESKTOP_IMAGE, 0o555), (TOOL.DESKTOP_IMAGE, 0o644),
                       (TOOL.DESKTOP_IMAGE, 0o444), ("Contents/Helpers/other", 0o555))
@@ -18555,12 +18578,18 @@ class MacNormalPreviewData(unittest.TestCase):
         args.remover_cargo_messages, args.remover_cargo_target_dir = Path("/inert/remover-cargo.jsonl"), remover_target
         values[remover] = remover_body
         values[args.remover_cargo_messages] = cargo_lines(*remover_rows, {"reason": "build-finished", "success": True})
+        cli_target, cli, cli_rows, cli_body = installed_cli_cargo_fixture()
+        args.installed_cli, args.expected_installed_cli = cli, TOOL.digest(cli_body)
+        args.installed_cli_cargo_messages, args.installed_cli_cargo_target_dir = Path("/inert/cli-cargo.jsonl"), cli_target
+        values[cli] = cli_body
+        values[args.installed_cli_cargo_messages] = cargo_lines(*cli_rows, {"reason": "build-finished", "success": True})
         with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]), \
                 synthetic_android_support(support, app_seal={}), \
                 mock.patch.object(TOOL, "write_tree") as output:
             staged = TOOL.app_command(args)
         self.assertEqual(staged["desktopImageCargoArtifact"], result)
         self.assertEqual(output.call_args.args[1][TOOL.APP_BINARY], (body, 0o755))
+        self.assertEqual(output.call_args.args[1][TOOL.INSTALLED_CLI], (cli_body, 0o555))
         self.assertEqual(output.call_args.args[1][TOOL.DESKTOP_IMAGE], (image_body, 0o755))
         self.assertEqual(output.call_args.args[1][TOOL.RESIDENT_IMAGE], (resident, 0o555))
         self.assertEqual(output.call_args.args[1][TOOL.VAULT_HELPER], (body, 0o555))
@@ -18833,6 +18862,11 @@ class MacNormalPreviewData(unittest.TestCase):
         args.remover_cargo_messages, args.remover_cargo_target_dir = Path("/inert/remover-cargo.jsonl"), remover_target
         values[remover] = remover_body
         values[args.remover_cargo_messages] = cargo_lines(*remover_rows, {"reason": "build-finished", "success": True})
+        cli_target, cli, cli_rows, cli_body = installed_cli_cargo_fixture()
+        args.installed_cli, args.expected_installed_cli = cli, TOOL.digest(cli_body)
+        args.installed_cli_cargo_messages, args.installed_cli_cargo_target_dir = Path("/inert/cli-cargo.jsonl"), cli_target
+        values[cli] = cli_body
+        values[args.installed_cli_cargo_messages] = cargo_lines(*cli_rows, {"reason": "build-finished", "success": True})
         # This unit reaches the helper digest after an inert independent seal
         # context; it does not claim a signed app/capsule was authenticated.
         with (mock.patch.object(TOOL, "github_seal_files", side_effect=lambda *_:
@@ -18906,10 +18940,12 @@ class MacNormalPreviewData(unittest.TestCase):
         info, entry_info, plist = TOOL.source_app_info(), TOOL.source_entry_info(), TOOL.android_service_plist()
         args = SimpleNamespace(package_role="ordinary-image", runtime=Path("/inert/runtime"), expected_manifest="c" * 64,
             current_runtime=True, app=Path("/inert/app"), expected_vault_helper=TOOL.digest(body), expected_remover=TOOL.digest(body),
+            expected_installed_cli=TOOL.digest(body),
             expected_entry=TOOL.digest(entry), expected_app_binary=TOOL.digest(body), output=Path("/inert/output"),
             expected_android_helper=TOOL.digest(body), expected_resident_image=TOOL.digest(resident),
             expected_desktop_image=TOOL.digest(desktop))
         app = {TOOL.ENTRY_BINARY: (entry, 0o755), TOOL.APP_BINARY: (body, 0o755), TOOL.VAULT_HELPER: (body, 0o555), TOOL.REMOVER: (body, 0o555),
+               TOOL.INSTALLED_CLI: (body, 0o555),
                TOOL.ANDROID_HELPER: (body, 0o555), TOOL.RESIDENT_IMAGE: (resident, 0o555),
                TOOL.DESKTOP_IMAGE: (desktop, 0o755), TOOL.ANDROID_SERVICE_PLIST: (plist, 0o644),
                "Contents/Info.plist": (entry_info, 0o644), TOOL.PAYLOAD_INFO: (info, 0o644),
@@ -18934,7 +18970,7 @@ class MacNormalPreviewData(unittest.TestCase):
             result = TOOL.input_command(args)
             files = output.call_args.args[1]
             self.assertEqual(result["packageRole"], "ordinary-image")
-            for name, data in ((TOOL.VAULT_HELPER, body), (TOOL.ANDROID_HELPER, body), (TOOL.REMOVER, body),
+            for name, data in ((TOOL.VAULT_HELPER, body), (TOOL.ANDROID_HELPER, body), (TOOL.REMOVER, body), (TOOL.INSTALLED_CLI, body),
                                (TOOL.DESKTOP_IMAGE, desktop), (TOOL.RESIDENT_IMAGE, resident)):
                 self.assertEqual(files["app/" + name], (data, 0o555))
             inventory = TOOL.decode(files["install-inventory.json"][0])
@@ -19008,9 +19044,10 @@ class MacNormalPreviewData(unittest.TestCase):
         intel_resident = image_macho_fixture("resident", target=intel_target)
         intel_app = dict(app)
         for path, data in ((TOOL.ENTRY_BINARY, intel_entry), (TOOL.APP_BINARY, intel_body), (TOOL.VAULT_HELPER, intel_body),
-                           (TOOL.ANDROID_HELPER, intel_body), (TOOL.REMOVER, intel_body), (TOOL.DESKTOP_IMAGE, intel_desktop), (TOOL.RESIDENT_IMAGE, intel_resident)):
+                           (TOOL.ANDROID_HELPER, intel_body), (TOOL.REMOVER, intel_body), (TOOL.INSTALLED_CLI, intel_body), (TOOL.DESKTOP_IMAGE, intel_desktop), (TOOL.RESIDENT_IMAGE, intel_resident)):
             intel_app[path] = (data, app[path][1])
         intel_args = SimpleNamespace(**dict(vars(args), target=intel_target,
+            expected_installed_cli=TOOL.digest(intel_body),
             expected_entry=TOOL.digest(intel_entry), expected_app_binary=TOOL.digest(intel_body), expected_vault_helper=TOOL.digest(intel_body),
             expected_android_helper=TOOL.digest(intel_body), expected_remover=TOOL.digest(intel_body), expected_desktop_image=TOOL.digest(intel_desktop), expected_resident_image=TOOL.digest(intel_resident)))
         source[TOOL.DESKTOP / "macos-installed-inputs/build-release-intel.json"] = TOOL.canonical({

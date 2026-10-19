@@ -11,6 +11,49 @@ The five selected regressions below require a complete successful hosted gate.
 Do not push the verification branch or use these commands before separate
 actual-source/command review; integration is not proof that this revision works.
 
+## Installed read-only CLI — packaging source
+
+Current app assembly requires the separate `mrk` executable at the **outer**
+`Contents/MacOS/mrk`. It is not the nested desktop executable, an installer
+alias, or the convenience launcher in `/Applications`. After installation,
+the direct commands are:
+
+```sh
+"/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mrk" --help
+"/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mrk" status --json
+"/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/MacOS/mrk" projects --json
+```
+
+No Python, Cargo, shell wrapper, `/usr/local` copy, symlink, or PATH change is
+installed for this command. Open Desktop, select a project, and explicitly
+allow its CLI reads in Settings for one hour; keep Desktop open. `projects`
+returns the permitted project IDs for the other read commands shown by
+`--help`. There is no automatic grant or renewal. Results are published,
+redacted saved observations and can be stale—not a fresh project scan or
+release validation. This CLI cannot edit, build, sign, access credentials,
+allocate versions, or publish. Missing native host admission remains
+unavailable; bundling the executable does not enable it.
+
+The existing ordinary and Aqua pipelines build only the `installed-cli`
+feature and `mrk` bin, offline with the selected locked Mac target/compiler.
+Cargo output must identify `src/installed_cli_main.rs`, the exact package and
+feature graph, and the selected thin Mach-O with only Apple-system load paths.
+The existing signing owner signs it with the fixed identifier
+`dev.mobile-release-kit.desktop.cli`, hardened runtime and empty entitlements,
+then verifies the exact source-selected Developer ID requirement. Only those
+final bytes are copied as0555 before the outer app is sealed; no `--deep`
+repair is used. Post-sign checks and Installer input staging retain the CLI's
+exact bytes, path, executable mode, architecture and inventory row within the
+unchanged total payload bounds.
+
+The common inventory reader still accepts authenticated historical packages
+without this row, so inspection/removal does not reinterpret their contents.
+New app/input assembly requires it and rejects a renamed or nested substitute.
+Compiler outputs join existing task-owned cleanup only after completed owners.
+These source and synthetic DATA checks do **not** qualify a Mac CLI build,
+codesign, notarization, installation, or a Desktop↔CLI read session; those
+checks must run on the integrated native source before delivery.
+
 
 ## App-owned Android support archives
 
