@@ -1,0 +1,299 @@
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -7,7 +7,7 @@
+ use crate::{application_state_store::{Namespace, PrivateStateDirectory, Revision}, service_protocol as p};
+ use p::{Error, Id};
+ use serde::{Deserialize, Serialize};
+-use std::{collections::{BTreeMap, BTreeSet}, path::{Component, Path}, sync::{Arc, Mutex, MutexGuard}, time::{Duration, Instant}};
++use std::{collections::{BTreeMap, BTreeSet}, path::{Component, Path}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, MutexGuard}, time::{Duration, Instant}};
+
+ const MAX_ACCESS: Duration = Duration::from_secs(60 * 60);
+
+@@ -65,7 +65,7 @@
+ #[serde(rename_all = "camelCase")]
+ pub(crate) struct ReadAccessStatus { pub(crate) enabled: bool, pub(crate) remaining_ms: u64, pub(crate) project_ids: Vec<Id> }
+
+-pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State> }
++pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool }
+ impl ApplicationService {
+     pub(crate) fn open(store: Arc<PrivateStateDirectory>) -> Result<Self, Error> {
+         let snapshot = store.read(Namespace::Projects).map_err(|e| e.code)?;
+@@ -76,18 +76,26 @@
+         // original project, operation, credential or observation authority.
+         for project in &mut saved.projects { if let Some(observation) = &mut project.observation { observation.stale = true; } }
+         for operation in &mut saved.operations { operation.stale = true; }
+-        Ok(Self { store, instance: Id::random()?, state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance: Id::random()?, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+     pub(crate) fn state_directory(&self) -> &Arc<PrivateStateDirectory> { &self.store }
++    /// Permanent original-service read fence. Native observation callbacks must
++    /// not wait for the state mutex, which real store IO can hold. No Allow or
++    /// later successful write clears this flag; original cleanup still runs.
++    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); }
++    pub(crate) fn native_history_current(&self) -> Result<(), Error> {
++        if self.native_history_fenced.load(Ordering::Acquire) { Err(Error::StateUnknown) } else { Ok(()) }
++    }
+     fn lock(&self) -> Result<MutexGuard<'_, State>, Error> { self.state.lock().map_err(|_| Error::StateUnknown) }
+     fn check(&self, state: &State) -> Result<(), Error> {
++        self.native_history_current()?;
+         if state.stopped { return Err(Error::Unavailable); }
+         // Missing/replaced state cannot be concealed by an in-memory cache.
+         let snapshot = self.store.read(Namespace::Projects).map_err(|e| e.code)?;
+         if snapshot.revision != state.revision { return Err(Error::Conflict); }
+-        Ok(())
++        self.native_history_current()
+     }
+     fn save(&self, state: &mut State, next: Persisted) -> Result<(), Error> {
+         let revision = Revision(state.revision.0.checked_add(1).ok_or(Error::StateUnknown)?);
+@@ -189,8 +197,18 @@
+         // need their original domain owners' revocation, wired by the host.
+         self.save(&mut state, next)
+     }
++    /// First publication of a genuine original operation. A fresh native
++    /// session may not adopt an older pending row, even on an ID collision.
++    pub(crate) fn begin_operation(&self, runtime_id: &str, operation_id: Id, action: p::Action, operation_state: p::OperationState,
++        settlement: p::Settlement) -> Result<(), Error> {
++        self.write_operation(runtime_id, operation_id, action, operation_state, settlement, true)
++    }
+     pub(crate) fn publish_operation(&self, runtime_id: &str, operation_id: Id, action: p::Action, operation_state: p::OperationState,
+         settlement: p::Settlement) -> Result<(), Error> {
++        self.write_operation(runtime_id, operation_id, action, operation_state, settlement, false)
++    }
++    fn write_operation(&self, runtime_id: &str, operation_id: Id, action: p::Action, operation_state: p::OperationState,
++        settlement: p::Settlement, require_new: bool) -> Result<(), Error> {
+         if !consistent_status(operation_state, settlement) { return Err(Error::InvalidRequest); }
+         let mut state = self.lock()?; self.check(&state)?;
+         let id = state.runtime_aliases.get(runtime_id).ok_or(Error::Conflict)?.clone();
+@@ -198,7 +216,7 @@
+         let observation = p::OperationObservation { operation_id: operation_id.clone(), project_id: id.clone(), action,
+             state: operation_state, settlement, observation_revision: state.revision.0.checked_add(1).ok_or(Error::StateUnknown)?, stale: false };
+         if let Some(existing) = next.operations.iter_mut().find(|op| op.operation_id == operation_id) {
+-            if existing.project_id != id || existing.action != action { return Err(Error::Conflict); }
++            if require_new || existing.project_id != id || existing.action != action { return Err(Error::Conflict); }
+             // Unknown is absorbing in this cache. Reconciliation belongs to the
+             // original journal/owner and must publish a distinct observation.
+             if existing.state == p::OperationState::Unknown && operation_state != p::OperationState::Unknown { return Err(Error::Conflict); }
+@@ -213,27 +231,37 @@
+     }
+
+     pub(crate) fn allow_agent_read(&self, projects: Vec<Id>, lifetime: Duration) -> Result<ReadAccessStatus, Error> {
++        self.native_history_current()?;
+         if projects.is_empty() || projects.len() > p::PROJECT_LIMIT || lifetime.is_zero() || lifetime > MAX_ACCESS { return Err(Error::InvalidRequest); }
+         let mut state = self.lock()?; self.check(&state)?;
+         let selected: BTreeSet<_> = projects.into_iter().collect();
+         if selected.iter().any(|id| !state.runtime_aliases.values().any(|registered| registered == id)) { return Err(Error::Conflict); }
+         state.grant = Some(Grant { id: Id::random()?, projects: selected, expires: Instant::now().checked_add(lifetime).ok_or(Error::InvalidRequest)? });
+-        Ok(access_status(&state))
++        let status = access_status(&state);
++        self.native_history_current()?; Ok(status)
+     }
+     pub(crate) fn revoke_agent_read(&self) -> Result<(), Error> { self.lock()?.grant = None; Ok(()) }
+-    pub(crate) fn read_access_status(&self) -> Result<ReadAccessStatus, Error> { let state = self.lock()?; Ok(access_status(&state)) }
++    pub(crate) fn read_access_status(&self) -> Result<ReadAccessStatus, Error> {
++        self.native_history_current()?;
++        let state = self.lock()?; let status = access_status(&state);
++        self.native_history_current()?; Ok(status)
++    }
+     pub(crate) fn admit_client(&self) -> Result<ClientSession, Error> {
++        self.native_history_current()?;
+         let state = self.lock()?; self.check(&state)?;
+         let grant = live_grant(&state)?;
+-        Ok(ClientSession { client_id: Id::random()?, session_id: Id::random()?, grant_id: grant.id.clone(), instance: self.instance.clone() })
++        let client = ClientSession { client_id: Id::random()?, session_id: Id::random()?, grant_id: grant.id.clone(), instance: self.instance.clone() };
++        self.native_history_current()?; Ok(client)
+     }
+     pub(crate) fn client_current(&self, client: &ClientSession) -> Result<(), Error> {
++        self.native_history_current()?;
+         let state = self.lock()?; self.check(&state)?;
+         if client.instance != self.instance || live_grant(&state)?.id != client.grant_id { return Err(Error::AccessDenied); }
+-        Ok(())
++        self.native_history_current()
+     }
+     pub(crate) fn dispatch(&self, client: &ClientSession, request: p::Request) -> p::Response {
+         let result = (|| {
++            self.native_history_current()?;
+             let state = self.lock()?; self.check(&state)?;
+             let grant = live_grant(&state)?;
+             if request.version != p::VERSION || client.instance != self.instance || grant.id != client.grant_id { return Err(Error::AccessDenied); }
+@@ -251,6 +279,9 @@
+                 }
+             })
+         })();
++        // Recheck after building the read result; IPC also repeats the same
++        // atomic fence through client_current immediately before sending bytes.
++        let result = self.native_history_current().and(result);
+         p::Response { version: p::VERSION, request_id: request.request_id, service_instance: self.instance.clone(),
+             client_id: client.client_id.clone(), session_id: client.session_id.clone(), response: result.unwrap_or_else(p::ResponseBody::Error) }
+     }
+@@ -297,6 +328,10 @@
+     use super::*;
+     use crate::application_state_store::Fixture;
+     use std::{fs::File, os::unix::fs::MetadataExt, path::PathBuf};
++    /// Test-only real mutex hold; no simulated write or native authority.
++    pub(crate) fn with_state_locked<T>(service: &ApplicationService, body: impl FnOnce() -> T) -> T {
++        let _original = service.state.lock().unwrap(); body()
++    }
+     pub(crate) fn register_fixture(service: &ApplicationService, app: &Path, name: &str, runtime: &str) -> (Id, PathBuf) {
+         let root = app.parent().unwrap().join(name);
+         std::fs::create_dir(&root).unwrap();
+--- a/desktop/src-tauri/src/application_service_host.rs
++++ b/desktop/src-tauri/src/application_service_host.rs
+@@ -20,6 +20,10 @@
+ };
+ use tokio::sync::Mutex as AsyncMutex;
+
++#[path = "application_service_identity_history.rs"]
++mod identity_history;
++pub(crate) use identity_history::{IdentityCapture, IdentityObservation, IdentitySource, identity_history_document_backing_bytes};
++
+ const ACCESS_LIFETIME: Duration = Duration::from_secs(3600);
+ // Work admission is not the user lease. Bounded synchronous native calls have
+ // checkpoints; this does not claim that a stalled kernel call is preemptible.
+@@ -154,6 +158,7 @@
+
+ pub(crate) struct ApplicationHost {
+     identity: Arc<()>, control: Mutex<Control>, originals: AsyncMutex<Originals>,
++    history: Arc<identity_history::History>,
+ }
+ impl ApplicationHost {
+     /// No path lookup, directory, reservation, socket or background task.
+@@ -162,7 +167,7 @@
+             phase: Phase::Dormant, epoch: 0, source_epoch: 0, pending: None, prepared: None,
+             native_location: None, native_roots: Vec::new(), store: None, service: None,
+             registered: BTreeMap::new(), fence: None, failures: Vec::new(),
+-        }), originals: AsyncMutex::new(Originals::default()) }
++        }), originals: AsyncMutex::new(Originals::default()), history: Arc::new(identity_history::History::default()) }
+     }
+     fn lock(&self) -> Result<MutexGuard<'_, Control>, Error> {
+         match self.control.lock() {
+@@ -480,6 +485,7 @@
+     /// Accepted exit/document retirement only. A cancelled quit does not call
+     /// this method, and therefore does not silently destroy existing consent.
+     pub(crate) fn retire_for_exit(&self) -> Result<(), Error> {
++        self.history.retire_capture(); // Memory-only barrier before existing Host/Service work.
+         let mut state = self.lock()?;
+         state.pending = None; state.prepared = None; state.phase = Phase::Retiring;
+         if let Some(service) = state.service.clone() {
+--- a/desktop/src-tauri/src/edit_owner.rs
++++ b/desktop/src-tauri/src/edit_owner.rs
+@@ -758,12 +758,18 @@
+     (now >= end).then_some((end, if !applying && end == review_end { Reason::ReviewExpired } else { Reason::ActiveTimeout }))
+ }
+
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "edit_owner_identity_history.rs"]
++mod identity_history;
++
+ #[derive(Clone)]
+ pub struct EditOwner { inner: Arc<Inner> }
+ struct Inner {
+     runtime: RuntimeConfig, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify,
+     poisoned: AtomicBool,
+     android_registration: std::sync::OnceLock<SavedRegistrationBinding>,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    identity_history: std::sync::OnceLock<identity_history::Binding>,
+     #[cfg(all(test, feature = "development-runtime"))]
+     fixture_authorized: AtomicBool,
+     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -933,6 +939,8 @@
+     session: Arc<Session>, projection: EditProjection, review_end: Instant, phase_end: Option<Instant>,
+     cleanup_start: Option<Instant>, prepare_counters: Option<(u32, u32)>, claimed_seq: u32,
+     opened: bool, prepared: bool, terminal: bool, unknown: bool,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    history: identity_history::Link,
+ }
+
+ #[derive(Clone, Copy, PartialEq, Eq)]
+@@ -1420,6 +1428,8 @@
+         if registry.disabled || registry.exhausted || self.poisoned.load(Ordering::SeqCst) {
+             if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
+         }
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        identity_history::changed(self, registry);
+         self.changes.send_replace(registry.revision);
+         self.changed.notify_waiters();
+     }
+@@ -1679,6 +1689,8 @@
+         let (changes, _) = watch::channel(0);
+         Self { inner: Arc::new(Inner { runtime, changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
+             android_registration: std::sync::OnceLock::new(),
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            identity_history: std::sync::OnceLock::new(),
+             #[cfg(all(test, feature = "development-runtime"))]
+             fixture_authorized: AtomicBool::new(false),
+             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -2273,6 +2285,8 @@
+             *claimed = true;
+             r.active = Some(ActiveOwner { session: session.clone(), review_end: now + REVIEW, phase_end: Some(now + ACTIVE), cleanup_start: None,
+                 prepare_counters: None, claimed_seq: 0, opened: false, prepared: false, terminal: false, unknown: false,
++                #[cfg(any(target_os = "linux", target_os = "macos"))]
++                history: identity_history::Link::default(),
+                 projection: EditProjection { domain, workflow: (domain == EditDomain::GitHubWorkflows).then(||
+                     if workflow_recovery { workflow_wire::Details::recovery() } else { workflow_wire::Details::default() }),
+                     metadata_text: if domain == EditDomain::MetadataText && saved_text_recovery { Some(metadata_wire::Details::recovery()) }
+@@ -4325,6 +4339,8 @@
+         }
+         r.last = Some(a.projection); // Atomic active -> one terminal projection.
+         inner.bump(&mut r, &mut publication);
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        identity_history::retired(&inner, &r, &a.session, &a.history, a.unknown);
+     }
+     guard.completed = true;
+     })();
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -1899,6 +1899,8 @@
+             self.add(std::mem::size_of::<DocumentState>())?;
+             // Both original Store owners retain continuity across idle/context replacement.
+             self.add(crate::saved_command_owner::identity_continuity_document_backing_bytes().ok_or(Problem::Capacity)?)?;
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            self.add(crate::application_service_host::identity_history_document_backing_bytes())?;
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
+@@ -2550,6 +2552,8 @@
+         document.inner.bridge.edits.bind_saved_registration(&document.inner.session_identity, document.inner.android_registration_control.clone());
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         document.inner.android_registration_control.bind_application_service(&document.inner.bridge.application_service);
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        document.inner.bridge.edits.bind_identity_history(&document.inner.session_identity, &document.inner.bridge.application_service);
+         document.inner.bridge.diagnostics.bind_original_document(&document.inner.session_identity);
+         document
+     }
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2306,6 +2306,8 @@
+         let mut artifact_inspection_guard = artifact_inspection_guard;
+         let mut ios_archive_guard = ios_archive_guard;
+         if enter.await.is_err() { return; }
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        let application_history = app.state::<ShellState>().bridge.application_service.clone();
+         let mut initialization_revision = None;
+         let mut metadata_revision = None;
+         let mut images_edit_revision = None;
+@@ -2340,6 +2342,11 @@
+             if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
+             document.finish_macos_maintenance(app.clone());
++            // Optional history performs bounded synchronous service IO only
++            // here, with no Document/Edit registry/Host inbox mutex held. This
++            // SAME retained relay owns the call; no detached writer is created.
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            let _ = application_history.publish_identity_history();
+             // status() releases its native locks before any renderer callback.
+             // Events are best effort: the UI subscribes then fetches status and
+             // orders both by native revision, never by arrival time.
+@@ -2711,6 +2718,11 @@
+                 if !settle_relay(&app).await || !document.can_exit() { return; }
+                 #[cfg(any(target_os = "linux", target_os = "macos"))]
+                 {
++                    // Every original edit is finished and the SAME relay was
++                    // positively joined above. Drain captured terminal facts
++                    // before closing the original service, including on quit.
++                    // A history error remains in Host custody; cleanup MUST run.
++                    app.state::<ShellState>().bridge.application_service.drain_identity_history_for_exit();
+                     let report = app.state::<ShellState>().bridge.application_service.shutdown().await;
+                     if !report.settled() || !document.can_exit() {
+                         diagnostic(b"MRK_CLI_HOST_EXIT=cleanup-unconfirmed\n");
