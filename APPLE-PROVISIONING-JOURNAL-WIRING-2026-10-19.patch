@@ -1,0 +1,11 @@
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -107,6 +107,8 @@
+ mod version_allocation_state_native;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod application_state_store;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++mod apple_provisioning_journal;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod application_service;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
