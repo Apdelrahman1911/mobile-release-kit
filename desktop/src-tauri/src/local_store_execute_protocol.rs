@@ -360,6 +360,15 @@ pub(crate) struct Terminal {
     pub(crate) result: Option<ResultData>, pub(crate) lifetime: Lifetime,
 }
 impl Terminal {
+    /// Read-only identity from this already-decoded original receipt. This
+    /// accessor alone supplies neither native finality nor a continuity permit.
+    pub(crate) fn known_existing_identity<'a>(&'a self, context: &Context) -> Option<&'a str> {
+        let receipt = &self.result.as_ref()?.execution_receipt;
+        if self.outcome != Outcome::Complete || !self.valid(context, receipt.binding().2) { return None; }
+        Some(match receipt { ExecutionReceipt::Android(p) => &p.application_id,
+            ExecutionReceipt::Ios(p) => &p.bundle_id, ExecutionReceipt::AndroidStage(p) => &p.application_id,
+            ExecutionReceipt::IosStage(p) => &p.bundle_id })
+    }
     fn valid(&self, context: &Context, authorization:&str) -> bool {
         if self.schema_version != 1 || &self.context != context || !self.context.valid() || self.lifetime.profile_calls != 0
             || self.lifetime.commands > context.commands() { return false; }
@@ -475,6 +484,20 @@ pub(crate) mod tests {
     fn frames()->Vec<Vec<u8>>{vec![frame(0,"accepted",json!({"schemaVersion":1,"context":context()})),frame(1,"lease-ready",json!({})),
         frame(2,"history-head",json!({"sequence":5,"sha256":"a".repeat(64)})),frame(3,"execute-pending",json!({"sequence":6,"sha256":"b".repeat(64)})),
         frame(4,"execute-settled",json!({"head":{"sequence":7,"sha256":"c".repeat(64)},"phase":"settled-success"})),frame(5,"terminal",complete())]}
+    #[test]
+    fn identity_continuity_accessor_refuses_failed_incomplete_or_different_execute_context() {
+        // Typed fixture DATA is not an original native completion or veto.
+        let original = Terminal::deserialize(&complete()).unwrap();
+        assert_eq!(original.known_existing_identity(&context()),Some("dev.example.app"));
+        let mut other = context(); other.project_id = "9".repeat(32);
+        assert!(original.known_existing_identity(&other).is_none());
+        for mutation in 0..5 {
+            let mut changed = original.clone();
+            match mutation { 0=>changed.outcome=Outcome::Unknown,1=>changed.reason=Reason::CommandIncomplete,
+                2=>changed.result=None,3=>changed.lifetime.handlers_restored=false,_=>changed.lifetime.command_dispatched=Some(false) }
+            assert!(changed.known_existing_identity(&context()).is_none());
+        }
+    }
     #[test]
     fn local_execute_requires_current_intent_tools_and_separate_consent(){
         assert!(context().valid());assert!(crate::local_store_prepare_protocol::prepare(&input()).is_err());

@@ -77,7 +77,7 @@ pub enum NativeFinality { Pending, Settled, Unknown }
 pub enum EditAvailability { Available, UnsupportedPlatform, RuntimeUnqualified, CleanupUnknown, Shutdown, OtherEditActive }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum EditDomain { Configuration, GitHubWorkflows, MetadataText, ReleaseVersion, MetadataImages, ProjectInitialization }
+pub(crate) enum EditDomain { Configuration, GitHubWorkflows, MetadataText, ReleaseVersion, MetadataImages, ProjectInitialization, ProjectIdentity }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +105,8 @@ pub struct EditProjection {
     pub(crate) metadata_images: Option<crate::metadata_images_edit_protocol::Details>,
     #[serde(skip)]
     pub(crate) initialization: Option<crate::project_initialization_edit_protocol::Details>,
+    #[serde(skip)]
+    pub(crate) identity: Option<crate::project_identity_edit_protocol::Details>,
     pub project_id: String, pub session_id: String, pub owner_generation: String,
     pub phase: Phase, pub review_remaining_ms: u32, pub checkout: Option<Checkout>,
     pub prepared: Option<Prepared>,
@@ -121,6 +123,7 @@ impl EditProjection {
                 None => self.checkout.as_ref().map(|c| c.revision.as_str()),
             },
             EditDomain::ProjectInitialization => self.initialization.as_ref()?.revision(),
+            EditDomain::ProjectIdentity => self.identity.as_ref()?.revision(),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.revision(),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.revision(),
             EditDomain::ReleaseVersion => self.release_version.as_ref()?.revision(),
@@ -134,6 +137,7 @@ impl EditProjection {
                 None => self.prepared.as_ref().map(|p| p.plan_token.as_str()),
             },
             EditDomain::ProjectInitialization => self.initialization.as_ref()?.plan_token(),
+            EditDomain::ProjectIdentity => self.identity.as_ref()?.plan_token(),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.plan_token(),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.plan_token(),
             EditDomain::ReleaseVersion => self.release_version.as_ref()?.plan_token(),
@@ -141,14 +145,26 @@ impl EditProjection {
         }
     }
     pub(crate) fn configuration_valid(&self) -> bool {
-        self.domain == EditDomain::Configuration && self.initialization.is_none() && self.workflow.is_none() && self.metadata_text.is_none()
+        self.domain == EditDomain::Configuration && self.identity.is_none() && self.initialization.is_none() && self.workflow.is_none() && self.metadata_text.is_none()
             && self.release_version.is_none() && self.metadata_images.is_none()
             && self.recovery.as_ref().is_none_or(|recovery|
                 self.checkout.is_none() && self.prepared.is_none() && recovery.valid())
     }
+    pub(crate) fn identity_projection(&self) -> Result<crate::project_identity_edit_protocol::Projection, BridgeError> {
+        use crate::project_identity_edit_protocol::{DOMAIN, Projection};
+        if self.domain != EditDomain::ProjectIdentity || self.initialization.is_some() || self.recovery.is_some() || self.workflow.is_some()
+            || self.metadata_text.is_some() || self.release_version.is_some() || self.metadata_images.is_some()
+            || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
+        let detail = self.identity.as_ref().filter(|detail| detail.valid()).ok_or_else(BridgeError::protocol)?;
+        Ok(Projection { domain: DOMAIN, intent: detail.intent, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
+            owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
+            checkout: detail.checkout.clone(), prepared: detail.prepared.clone(), diagnostic: detail.diagnostic.clone(),
+            apply_submitted: self.apply_submitted, core_outcome: self.core_outcome.clone(), native_reason: self.native_reason,
+            native_finality: self.native_finality, late_settled: self.late_settled })
+    }
     pub(crate) fn initialization_projection(&self) -> Result<crate::project_initialization_edit_protocol::Projection, BridgeError> {
         use crate::project_initialization_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::ProjectInitialization || self.recovery.is_some() || self.workflow.is_some()
+        if self.domain != EditDomain::ProjectInitialization || self.identity.is_some() || self.recovery.is_some() || self.workflow.is_some()
             || self.metadata_text.is_some() || self.release_version.is_some() || self.metadata_images.is_some()
             || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.initialization.as_ref().filter(|detail| detail.valid()).ok_or_else(BridgeError::protocol)?;
@@ -160,7 +176,7 @@ impl EditProjection {
     }
     pub(crate) fn workflow_projection(&self) -> Result<crate::github_workflow_edit_protocol::Projection, BridgeError> {
         use crate::github_workflow_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::GitHubWorkflows || self.initialization.is_some() || self.recovery.is_some() || self.metadata_text.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
+        if self.domain != EditDomain::GitHubWorkflows || self.identity.is_some() || self.initialization.is_some() || self.recovery.is_some() || self.metadata_text.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.workflow.as_ref().ok_or_else(BridgeError::protocol)?;
         Ok(Projection { domain: DOMAIN, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
             owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
@@ -170,7 +186,7 @@ impl EditProjection {
     }
     pub(crate) fn metadata_text_projection(&self) -> Result<crate::metadata_text_edit_protocol::Projection, BridgeError> {
         use crate::metadata_text_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::MetadataText || self.initialization.is_some() || self.recovery.is_some() || self.workflow.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() {
+        if self.domain != EditDomain::MetadataText || self.identity.is_some() || self.initialization.is_some() || self.recovery.is_some() || self.workflow.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() {
             return Err(BridgeError::protocol());
         }
         let detail = self.metadata_text.as_ref().ok_or_else(BridgeError::protocol)?;
@@ -185,7 +201,7 @@ impl EditProjection {
     }
     pub(crate) fn release_version_projection(&self) -> Result<crate::release_version_edit_protocol::Projection, BridgeError> {
         use crate::release_version_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::ReleaseVersion || self.initialization.is_some() || self.recovery.is_some() || self.workflow.is_some() || self.metadata_text.is_some() || self.metadata_images.is_some()
+        if self.domain != EditDomain::ReleaseVersion || self.identity.is_some() || self.initialization.is_some() || self.recovery.is_some() || self.workflow.is_some() || self.metadata_text.is_some() || self.metadata_images.is_some()
             || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.release_version.as_ref().ok_or_else(BridgeError::protocol)?;
         if detail.recovery.is_some() && (detail.checkout.is_some() || detail.prepared.is_some() || detail.submission.is_some()) { return Err(BridgeError::protocol()); }
@@ -197,7 +213,7 @@ impl EditProjection {
     }
     pub(crate) fn metadata_images_projection(&self) -> Result<crate::metadata_images_edit_protocol::Projection, BridgeError> {
         use crate::metadata_images_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::MetadataImages || self.initialization.is_some() || self.recovery.is_some() || self.workflow.is_some() || self.metadata_text.is_some()
+        if self.domain != EditDomain::MetadataImages || self.identity.is_some() || self.initialization.is_some() || self.recovery.is_some() || self.workflow.is_some() || self.metadata_text.is_some()
             || self.release_version.is_some() || self.checkout.is_some() || self.prepared.is_some() {
             return Err(BridgeError::protocol());
         }
@@ -450,6 +466,9 @@ pub enum RecoveryIntent { Recover }
 pub struct PrepareConfigurationRecovery { pub session_id: String, pub revision: String, pub intent: RecoveryIntent }
 
 pub enum ChildFrame {
+    IdentityOpened(crate::project_identity_edit_protocol::Opened),
+    IdentityPrepared(crate::project_identity_edit_protocol::PreparedReply),
+    IdentityTerminal(u32, crate::project_identity_edit_protocol::TerminalReply),
     InitializationOpened(crate::project_initialization_edit_protocol::Opened),
     InitializationPrepared(crate::project_initialization_edit_protocol::PreparedReply),
     InitializationTerminal(u32, crate::project_initialization_edit_protocol::TerminalReply),
@@ -485,6 +504,7 @@ impl ChildFrame {
             Self::ReleaseVersionOpened(_) | Self::ReleaseVersionPrepared(_) | Self::ReleaseVersionTerminal(..) | Self::ReleaseVersionRecoveryOpened(_) | Self::ReleaseVersionRecoveryPrepared(_) => EditDomain::ReleaseVersion,
             Self::MetadataImagesOpened(_) | Self::MetadataImagesPrepared(_) | Self::MetadataImagesTerminal(..) => EditDomain::MetadataImages,
             Self::InitializationOpened(_) | Self::InitializationPrepared(_) | Self::InitializationTerminal(..) => EditDomain::ProjectInitialization,
+            Self::IdentityOpened(_) | Self::IdentityPrepared(_) | Self::IdentityTerminal(..) => EditDomain::ProjectIdentity,
         }
     }
 }

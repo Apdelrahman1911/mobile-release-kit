@@ -44,6 +44,10 @@ impl LocalStoreReconcileOwner {
     pub(crate) fn document_lost(&self) { self.saved.document_lost(); }
     pub(crate) fn context_changed(&self) { self.saved.context_changed(); }
     pub(crate) fn registration_matches(&self, registration: u32) -> bool { self.saved.registration_matches(registration) }
+    pub(crate) fn known_existing_identity(&self, project_id: &str, registration: u32, root: &RegisteredRoot,
+        platform: crate::project_identity_edit_protocol::Platform) -> Result<bool, BridgeError> {
+        self.saved.known_existing_identity(project_id, registration, root, platform)
+    }
     pub(crate) fn request_shutdown(&self) { self.saved.request_shutdown(); }
     pub(crate) async fn shutdown(&self) -> Result<(), BridgeError> { self.saved.shutdown().await }
     // Tests borrow this exact original owner. Inner/Session/handle fields remain

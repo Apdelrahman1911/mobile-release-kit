@@ -164,6 +164,8 @@ pub(crate) struct GitHubWorkflowInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct ProjectInitializationInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct ProjectIdentityInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct ArtifactInspectionInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct IOSArchiveInstalledProfile { _private: () }
@@ -469,6 +471,14 @@ impl GitHubWorkflowInstalledProfile {
 }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl ProjectInitializationInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl ProjectIdentityInstalledProfile {
     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
         if !macos_bindings() { return Err(unavailable()); }
         let cwd = crate::installed_runtime::runtime_root();
@@ -1637,6 +1647,22 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         let profile = self.configuration_installed_profile()?; // Refuse other builds before inspection.
         originals.inspect_once(profile, end, stop)
+    }
+    pub(crate) fn project_identity_edit_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { self.project_identity_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn project_identity_installed_profile(&self) -> Result<ProjectIdentityInstalledProfile, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        Ok(ProjectIdentityInstalledProfile { _private: () })
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_project_identity_installed(&self, originals: &mut crate::installed_runtime::ProjectIdentityRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.project_identity_installed_profile()?, end, stop)
     }
     pub(crate) fn project_initialization_edit_profile_available(&self) -> bool {
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]

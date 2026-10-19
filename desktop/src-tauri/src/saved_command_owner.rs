@@ -23,6 +23,9 @@ use crate::{installed_runtime::{AdmissionFailure, CloseOutcome, IOSArchiveRuntim
 
 #[path = "saved_command_local_history.rs"]
 mod local_history;
+#[path = "saved_command_identity_continuity.rs"]
+mod identity_continuity;
+pub(crate) use identity_continuity::document_backing_bytes as identity_continuity_document_backing_bytes;
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 pub(crate) use local_history::{LocalHistoryClaim,LocalHistoryHelperClaim};
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
@@ -1167,6 +1170,7 @@ struct Registry {
     prepared: Option<Prepared>, active: Option<Active>, last: Option<RunProjection>, recovery_review: Option<RecoveryReview>,
     recovery: Option<Arc<IOSRecoveryObservation>>, android_catalog: android_catalog::Catalog, android_sources: android_sources::Sources,
     android_registration: android_registration::Registration, artifact_inputs: artifact_inputs::Inputs,
+    identity_vetoes: identity_continuity::Vetoes,
 }
 struct Prepared { local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
@@ -2118,7 +2122,8 @@ impl SavedCommandOwner {
             domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified, ios_mode_capabilities: None,
             prepared: None, active: None, last: None, recovery_review: None, recovery: None, android_catalog: android_catalog::Catalog::default(), android_sources: android_sources::Sources::default(),
-            android_registration: android_registration::Registration::default(), artifact_inputs: artifact_inputs::Inputs::default() }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
+            android_registration: android_registration::Registration::default(), artifact_inputs: artifact_inputs::Inputs::default(),
+            identity_vetoes: identity_continuity::Vetoes::default() }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
                 any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
             fixture: Mutex::new(None),
@@ -2615,6 +2620,9 @@ impl SavedCommandOwner {
                 if !Arc::ptr_eq(&active.owner, &owner) { r.active = Some(active); return; }
                 active.projection.phase = if active.unknown { Phase::Unknown } else { Phase::Terminal };
                 if active.projection.outcome.is_none() { set_failure_outcome(&mut active.projection); }
+                // Only this exact positive original watchdog retirement may
+                // mint sticky Store continuity. Never parse public Status.
+                r.identity_vetoes.record_original(&active, &owner);
                 if !active.unknown && !active.context_invalidated && !r.document_lost && !r.stopping {
                     if let Some(Terminal::IOSArchive(t)) = &active.projection.result {
                         if t.context.recovery.as_ref().is_some_and(|r| r.action == ios_wire::RecoveryAction::Inspect)

@@ -367,6 +367,19 @@ pub(crate) struct Terminal {
     pub(crate) result: Option<ResultData>, pub(crate) lifetime: Lifetime,
 }
 impl Terminal {
+    /// Current-target receipt DATA only; the original saved-command retirement
+    /// must independently establish native completion before retaining a veto.
+    pub(crate) fn known_existing_identity<'a>(&'a self, context: &Context) -> Option<&'a str> {
+        let result = self.result.as_ref()?;
+        let (authorization, identity) = if let Some(receipt) = &result.reconciliation_receipt {
+            (receipt.binding().2, match receipt { ReconciliationReceipt::Android(p) => p.application_id.as_str(),
+                ReconciliationReceipt::Ios(p) => p.bundle_id.as_str() })
+        } else {
+            let receipt = result.readiness_receipt.as_ref()?;
+            (receipt.authorization_id.as_str(), receipt.bundle_id.as_str())
+        };
+        (self.outcome == Outcome::Complete && self.valid(context, authorization)).then_some(identity)
+    }
     fn valid(&self, context: &Context, authorization:&str) -> bool {
         if self.schema_version != 1 || &self.context != context || !self.context.valid() || self.lifetime.profile_calls != 0
             || self.lifetime.commands > context.platform.commands() { return false; }
@@ -490,6 +503,24 @@ pub(crate) mod tests {
         read(&mut d,0,"accepted",json!({"schemaVersion":1,"context":context()})).unwrap();
         read(&mut d,1,"lease-ready",json!({})).unwrap();
         read(&mut d,2,"history-head",json!({"sequence":head,"sha256":"a".repeat(64)})).unwrap();d}
+    #[test]
+    fn identity_continuity_accessor_requires_current_typed_target_not_history_or_error() {
+        // No native completion is supplied by these private codec fixtures.
+        let original = Terminal::deserialize(&terminal()).unwrap();
+        assert_eq!(original.known_existing_identity(&context()),Some("dev.example.app"));
+        let mut other = context(); other.project_id = "9".repeat(32);
+        assert!(original.known_existing_identity(&other).is_none());
+        for mutation in 0..6 {
+            let mut changed = original.clone();
+            match mutation { 0=>changed.outcome=Outcome::Failed,1=>changed.reason=Reason::ReconcileUnavailable,
+                2=>changed.result=None,3=>changed.lifetime.invocation_closed=false,4=>changed.lifetime.command_dispatched=Some(false),
+                _=>if let Some(ReconciliationReceipt::Android(receipt)) = &mut changed.result.as_mut().unwrap().reconciliation_receipt {
+                    receipt.observation="current-recovery-files-only".into();
+                }
+            }
+            assert!(changed.known_existing_identity(&context()).is_none());
+        }
+    }
     #[test]
     fn local_reconcile_native_request_has_new_authorization_and_no_android_tools(){
         let c=context();assert!(c.valid());assert!(crate::local_store_prepare_protocol::prepare(&input()).is_err());

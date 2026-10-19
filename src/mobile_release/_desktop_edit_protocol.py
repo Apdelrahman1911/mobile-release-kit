@@ -19,6 +19,7 @@ METADATA_PROTOCOL = "mrk-metadata-text/1"
 VERSION_PROTOCOL = "mrk-release-version/1"
 IMAGES_PROTOCOL = "mrk-metadata-images/1"
 INITIALIZATION_PROTOCOL = "mrk-project-initialization/1"
+IDENTITY_PROTOCOL = "mrk-project-identity/1"
 REQUEST_LIMIT = 1024 * 1024
 RESPONSE_LIMIT = 4 * 1024 * 1024
 WORKFLOW_RESPONSE_LIMIT = 256 * 1024
@@ -81,6 +82,9 @@ def _workflow_value(value: object, *, depth_limit: int, byte_limit: int) -> None
 
 def parse_request(raw: bytes, *, sequence: int, session: str | None,
                   protocol: str = PROTOCOL) -> EditRequest:
+    if protocol == IDENTITY_PROTOCOL:
+        from ._desktop_identity_protocol import parse_request as parse_identity
+        return parse_identity(raw, sequence=sequence, session=session)
     if protocol == INITIALIZATION_PROTOCOL:
         from ._desktop_initialization_protocol import parse_request as parse_initialization
         return parse_initialization(raw, sequence=sequence, session=session)
@@ -196,6 +200,9 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
 
 
 def response(request: EditRequest, kind: str, result: dict[str, Any]) -> bytes:
+    if request.protocol == IDENTITY_PROTOCOL:
+        from ._desktop_identity_protocol import response as identity_response
+        return identity_response(request, kind, result)
     if request.protocol == INITIALIZATION_PROTOCOL:
         from ._desktop_initialization_protocol import response as initialization_response
         return initialization_response(request, kind, result)
