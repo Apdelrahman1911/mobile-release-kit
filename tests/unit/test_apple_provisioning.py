@@ -688,8 +688,12 @@ class ProvisioningRecoveryTests(unittest.TestCase):
         after = observed(FakeProvider(certificates=[], profiles=[]), target=target)
         confirmed = first.reconcile(after, owner, bindings=(), now=NOW)
         self.assertEqual(confirmed.status, "succeeded")
+        self.assertEqual(prepare(CONTEXT, target, after, bindings=(), csr=CSR,
+                         pending=(confirmed.pending(),), now=NOW).action, "reconcile")
+        # Synthetic callback DATA only: production requires the original native
+        # parent joins before its journal may supply this separate known axis.
         next_plan = prepare(CONTEXT, target, after, bindings=(), csr=CSR,
-                            pending=(confirmed.pending(),), now=NOW)
+                            pending=(replace(confirmed.pending(), native_settlement="known"),), now=NOW)
         second = ProvisioningAttempt(next_plan, after)
         provider.mutation = response({}, status=403)
         second.execute(approval(next_plan), after, provider, owner, now=NOW)

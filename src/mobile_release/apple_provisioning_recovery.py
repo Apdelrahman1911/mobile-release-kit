@@ -15,7 +15,7 @@ from typing import Protocol
 
 from . import apple_provisioning_api as api
 from .apple_provisioning import (
-    MAX_OBSERVATION_AGE, CertificateBinding, Observation, PendingMutation, ProvisioningContext,
+    BUNDLE_ID_SCOPE, MAX_OBSERVATION_AGE, SIGNING_SCOPE, CertificateBinding, Observation, PendingMutation, ProvisioningContext,
     ProvisioningPlan, ProvisioningProvider,
 )
 
@@ -90,6 +90,13 @@ class ProvisioningAttempt:
                     and self.before.available
                     and self.before.context == self.plan.context and self.before.bundle_id == self.plan.target.bundle_id
                     and self.before.sha256 == self.plan.observation_sha256, "invalid_mutation_plan")
+        api.require(self.before.scope == SIGNING_SCOPE or self.before.scope == BUNDLE_ID_SCOPE
+                    and self.plan.action == "register_bundle_id", "observation_scope_changed")
+        if self.before.scope == BUNDLE_ID_SCOPE:
+            api.require(self.before.bundles == () and self.plan.target.entitlements_json == b"{}"
+                        and all(value is None for value in (self.plan.bundle, self.plan.certificate,
+                                                           self.plan.binding, self.plan.profile, self.plan.csr)),
+                        "invalid_mutation_plan")
         api.validate_request(self.plan.request)
         if self.plan.action == "create_certificate":
             api.require(self.plan.csr is not None and self.plan.bundle is not None
@@ -178,6 +185,7 @@ class ProvisioningAttempt:
         api.require(approval.context == self.plan.context and approval.action == self.plan.action
                     and approval.plan_sha256 == self.plan.sha256 == self.record.plan_sha256, "approval_changed")
         api.require(fresh.available and fresh.context == self.plan.context
+                    and fresh.scope == self.before.scope
                     and fresh.sha256 == self.plan.observation_sha256
                     and fresh.observed_at <= api.utc(now) < self.plan.valid_until, "observation_changed")
         try:
@@ -245,6 +253,8 @@ class ProvisioningAttempt:
                                          response_resource_id=resource_id, response_resource_sha256=resource_sha256))
 
     def _response_identity(self, response: api.AppleResponse) -> tuple[str, str]:
+        if self.before.scope == BUNDLE_ID_SCOPE:
+            api.require(response.status == 201, "unexpected_provider_status")
         value = api.single(response, self.plan.request.resource_type, inspect_page=(
             lambda page: api.validate_profile_included(page, self.before.bundles, self.before.certificates,
                                                        bundle_id=self.plan.target.bundle_id)
@@ -285,7 +295,8 @@ class ProvisioningAttempt:
                     "operation_not_reconcilable")
         if self.record.status == "succeeded":
             return self.record
-        api.require(observation.context == self.plan.context and observation.bundle_id == self.plan.target.bundle_id,
+        api.require(observation.context == self.plan.context and observation.bundle_id == self.plan.target.bundle_id
+                    and observation.scope == self.before.scope,
                     "observation_context_changed")
         now = api.utc(now)
         api.require(observation.observed_at >= self.before.observed_at

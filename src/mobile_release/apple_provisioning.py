@@ -19,6 +19,8 @@ from . import apple_provisioning_api as api
 from .apple_provisioning_api import ProvisioningError
 
 MAX_OBSERVATION_AGE = timedelta(minutes=5)
+SIGNING_SCOPE = "signing-resources"
+BUNDLE_ID_SCOPE = "bundle-identifiers"
 _NATIVE_ID = re.compile(r"[0-9a-f]{32}\Z")
 _BASE_ENTITLEMENTS = frozenset({"application-identifier", "com.apple.developer.team-identifier",
                               "get-task-allow", "beta-reports-active", "keychain-access-groups"})
@@ -136,13 +138,22 @@ class Observation:
     bundles: tuple[api.BundleId, ...] = ()
     certificates: tuple[api.Certificate, ...] = ()
     profiles: tuple[api.Profile, ...] = ()
+    scope: str = SIGNING_SCOPE
+
+    def __post_init__(self) -> None:
+        api.require(type(self.scope) is str and self.scope in {SIGNING_SCOPE, BUNDLE_ID_SCOPE},
+                    "invalid_observation_scope")
+        # A Bundle-ID-only read says NOTHING about certificates or profiles.
+        # Empty defaults cannot be mistaken for a complete signing inventory.
+        if self.scope == BUNDLE_ID_SCOPE:
+            api.require(self.certificates == () and self.profiles == (), "invalid_observation_scope")
 
     @property
     def sha256(self) -> str:
         def when(value: datetime) -> str:
             return api.utc(value).isoformat()
         return api.digest(api.canonical({
-            "context": asdict(self.context), "bundleId": self.bundle_id,
+            "context": asdict(self.context), "bundleId": self.bundle_id, "scope": self.scope,
             "available": self.available, "reason": self.reason,
             "bundles": sorted((b.resource_id, b.identifier, b.platform, b.seed_id) for b in self.bundles),
             "certificates": sorted((c.resource_id, c.certificate_type, when(c.expires_at), api.digest(c.content))
@@ -152,7 +163,7 @@ class Observation:
         }))
 
     def summary(self) -> dict:
-        return {"available": self.available, "reason": self.reason,
+        return {"scope": self.scope, "available": self.available, "reason": self.reason,
                 "bundleCount": len(self.bundles), "certificateCount": len(self.certificates),
                 "profileCount": len(self.profiles), "credentialReady": False}
 
@@ -217,6 +228,19 @@ class PendingMutation:
     operation_id: str
     kind: str
     status: str
+    # The actual durable owner supplies this separate axis after its original
+    # parent joins. A helper's succeeded/failed status alone never frees an
+    # account, and a restored record does not recreate those original joins.
+    native_settlement: str = "unknown"
+
+    def __post_init__(self) -> None:
+        api.require(type(self.native_settlement) is str
+                    and self.native_settlement in {"pending", "known", "unknown"},
+                    "invalid_pending_settlement")
+
+    @property
+    def unresolved(self) -> bool:
+        return self.native_settlement != "known" or self.status not in {"succeeded", "failed", "cancelled"}
 
 
 @dataclass(frozen=True, repr=False)
@@ -274,6 +298,8 @@ def prepare(context: ProvisioningContext, target: ProvisioningTarget, observatio
     account lease/owner remains responsible for cross-client admission.
     """
     now = api.utc(now)
+    api.require(type(observation) is Observation and observation.scope == SIGNING_SCOPE,
+                "observation_scope_changed")
     api.require(observation.context == context and observation.bundle_id == target.bundle_id,
                 "observation_context_changed")
     api.require(observation.observed_at <= now < observation.observed_at + MAX_OBSERVATION_AGE,
@@ -284,8 +310,7 @@ def prepare(context: ProvisioningContext, target: ProvisioningTarget, observatio
     def result(action: str, reason: str, **kwargs) -> ProvisioningPlan:
         return ProvisioningPlan(**common, action=action, reason=reason, **kwargs)
 
-    if any(p.account_ref == context.account_ref and p.status not in {"succeeded", "failed", "cancelled"}
-           for p in pending):
+    if any(p.account_ref == context.account_ref and p.unresolved for p in pending):
         return result("reconcile", "earlier_account_operation_unresolved")
     if not observation.available:
         return result("blocked", observation.reason)
