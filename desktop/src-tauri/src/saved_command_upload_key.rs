@@ -7,6 +7,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 #[path = "saved_command_upload_key_private.rs"]
 mod private;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) use private::GeneratedUploadCandidate;
 #[cfg(all(
     target_os = "macos",
@@ -248,6 +249,7 @@ pub(super) struct State {
     intent: Option<Arc<Intent>>,
     receive: Option<Arc<private::ReceiveBook>>,
     writer: AsyncMutex<Option<PrivateUploadKeyInput>>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     candidate: Mutex<Option<GeneratedUploadCandidate>>,
     invalid: AtomicBool,
     native_bytes: AtomicUsize,
@@ -268,6 +270,7 @@ impl State {
             receive: intent.as_ref().map(|i| i.receive.clone()),
             intent,
             writer: AsyncMutex::new(None),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             candidate: Mutex::new(None),
             invalid: AtomicBool::new(false),
             native_bytes: AtomicUsize::new(0),
@@ -384,6 +387,7 @@ pub(crate) struct UploadKeyRun {
     original: SavedCommandOwner,
     session: Arc<Session>,
 }
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 impl UploadKeyRun {
     pub(crate) fn native_settled(&self) -> bool {
         original_joined(&self.session)
@@ -1141,6 +1145,7 @@ pub(super) async fn write_private(
     }
 }
 
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) fn document_backing_bytes() -> Option<usize> {
     // One original run retained by the vault parent; no unbounded result log.
     // Same source-informed accounting must also charge catalogue/native books.

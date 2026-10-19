@@ -24,6 +24,7 @@ use crate::{installed_runtime::{AdmissionFailure, CloseOutcome, IOSArchiveRuntim
 #[path = "saved_command_upload_key.rs"]
 mod upload_key;
 pub(crate) use upload_key::{UploadKeyPreparation,UploadKeyToolLoan,UploadKeyRun,UploadKeyAdmitted,PrivateUploadKeyInput};
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) use upload_key::document_backing_bytes as upload_key_document_backing_bytes;
 use crate::android_upload_key_protocol as upload_wire;
 

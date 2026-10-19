@@ -81,6 +81,7 @@ impl ReceiveBook {
 
 /// Native candidate stays in this original Session, not a Vec/path/DTO passed
 /// to the vault. Only native retirement below can create this handle.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) struct GeneratedUploadCandidate {
     original: std::sync::Weak<Session>,
     context: wire::UploadKeyContext,
@@ -90,6 +91,7 @@ pub(crate) struct GeneratedUploadCandidate {
     sealed_revision: Option<crate::vault_format::Revision>,
     authenticated: bool,
 }
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 impl GeneratedUploadCandidate {
     #[cfg(all(
         feature = "desktop-shell",

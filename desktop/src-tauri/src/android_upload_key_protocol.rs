@@ -1,9 +1,8 @@
 //! Fixed generation comparison/transport DATA. No process, credential or lease
 //! authority is minted here. In particular a binary terminal is NOT finality.
-use crate::{
-    error::BridgeError,
-    vault_format::{Id, Identity},
-};
+use crate::error::BridgeError;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+use crate::vault_format::{Id, Identity};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -90,7 +89,12 @@ pub(crate) fn unavailable() -> BridgeError {
     BridgeError::new("android_upload_key_unavailable", "Create a new upload key only with this project's unlocked credential storage and supported protected JDK.")
 }
 pub(crate) fn id(value: &str) -> bool {
-    Id::from_token(value).is_ok()
+    // Exactly Id::from_token's syntax, without an unsupported vault backend.
+    value.len() == 32
+        && value.bytes().any(|b| b != b'0')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 pub(crate) fn sha(value: &str) -> bool {
     value.len() == 64
@@ -110,7 +114,9 @@ pub(crate) struct UploadKeyContext {
     pub(crate) draft_sha256: String,
     pub(crate) app_identity_sha256: String,
     pub(crate) observation_revision: u32,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     pub(crate) vault: Identity,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     pub(crate) record: Id,
 }
 impl fmt::Debug for UploadKeyContext {
@@ -118,6 +124,7 @@ impl fmt::Debug for UploadKeyContext {
         f.write_str("UploadKeyContext(private native binding)")
     }
 }
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 impl UploadKeyContext {
     pub(crate) fn valid(&self) -> bool {
         id(&self.project_id)
@@ -153,6 +160,15 @@ impl UploadKeyContext {
         hash.update(self.vault.generation.bytes());
         hash.update(self.record.bytes());
         Ok(format!("{:x}", hash.finalize()))
+    }
+}
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+impl UploadKeyContext {
+    pub(crate) fn valid(&self) -> bool {
+        false
+    }
+    pub(crate) fn digest(&self) -> Result<String, BridgeError> {
+        Err(invalid())
     }
 }
 
@@ -506,6 +522,72 @@ mod tests {
         assert!(!id("fixture"));
         assert!(id(&"1".repeat(32)));
         assert!(generated_container(&[0; 33], &[0x30]).eq(&false));
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        for value in [
+            "".to_owned(),
+            "0".repeat(32),
+            "1".repeat(31),
+            "1".repeat(33),
+            "A".repeat(32),
+            "g".repeat(32),
+            "é".repeat(16),
+            "\0".repeat(32),
+            "00000000000000000000000000000001".to_owned(),
+            "10000000000000000000000000000000".to_owned(),
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        ] {
+            assert_eq!(id(&value), Id::from_token(&value).is_ok());
+        }
+    }
+
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    #[test]
+    fn unsupported_target_refuses_context_digest_and_request_before_admission() {
+        // Predicate DATA only: even otherwise valid comparison fields cannot
+        // authorize a request without this target's existing vault backend.
+        let context = UploadKeyContext {
+            project_id: "1".repeat(32),
+            runtime_project_id: "project-1".to_owned(),
+            config_bytes: 73,
+            config_sha256: "a".repeat(64),
+            draft_sha256: "b".repeat(64),
+            app_identity_sha256: "c".repeat(64),
+            observation_revision: 1,
+        };
+        let path = std::path::PathBuf::from(if cfg!(windows) {
+            r"C:\unopened-upload-key-fixture"
+        } else {
+            "/unopened-upload-key-fixture"
+        });
+        let root = crate::asset_source::RegisteredRoot {
+            path: path.clone(),
+            identity: crate::asset_source::ProjectIdentity::Posix(
+                crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
+            ),
+        };
+        let tool = NativeTool {
+            path: path.join("bin").join("keytool"),
+            identity: [1, 2, 0o100755, 0, 0, 1, 4096, 0, 0],
+            sha256: "d".repeat(64),
+            uid: 123,
+            gid: 123,
+        };
+        assert!(tool.valid());
+        assert!(root.identity.posix().is_ok());
+        assert_eq!(Profile::current(), None);
+        assert!(!context.valid());
+        assert_eq!(context.digest().unwrap_err().code, "android_upload_key_invalid");
+        let error = request(
+            &"2".repeat(32),
+            &"3".repeat(32),
+            &context,
+            &root,
+            &tool,
+            1,
+            10_000_000_001,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "android_upload_key_invalid");
     }
 }
 
