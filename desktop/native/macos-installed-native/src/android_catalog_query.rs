@@ -356,7 +356,7 @@ impl ClientBook {
             || !self.signal.admitted(false){return Err(Failure::Stopped);}
         if !self.request_available(false){return Err(Failure::Stopped);}
         let bounds=self.signal.bounds().ok_or(Failure::Unknown)?;
-        let role=match bounds.role{Role::Catalog=>prepare::Role::Catalog,Role::Start=>prepare::Role::Start,Role::LocalStoreExecute=>prepare::Role::LocalStoreExecute};
+        let role=match bounds.role{Role::Catalog=>prepare::Role::Catalog,Role::Start=>prepare::Role::Start,Role::LocalStoreExecute=>prepare::Role::LocalStoreExecute,Role::GenerateUploadKey=>prepare::Role::GenerateUploadKey};
         let request=prepare::Request{bounds:prepare::Bounds{role,origin:bounds.origin,work:bounds.work,hard:bounds.hard}};
         let input=request.encode().ok_or(Failure::Bounds)?;
         if self.prepare.is_none(){self.prepare=prepare::ClientAttempt::new(request);}

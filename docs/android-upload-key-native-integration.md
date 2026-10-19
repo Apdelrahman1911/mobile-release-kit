@@ -142,14 +142,20 @@ wrong password/alias/extra entry refusal, original EXCL inode and foreign-entry
 preservation, saved raw/canonical/app equality, links/replacement/post-read drift
 and original-close uncertainty. They do **not** run the helper process or JDK.
 
-12 new inline Rust tests are authored but **unrun**: five protocol/peak/charge
+12 new inline Rust tests now **pass in the integrated Linux graph**: five protocol/peak/charge
 checks, four prepared-identity/expiry/active/clock checks, two retained private
 backing/digest checks and one same-bytes replacement-lane check. The Root patch
 adds one pure native query-role test and extends the existing preparation-role
 roundtrip table. Rustfmt/AST checks are syntax only, not compilation.
 
-Root still must compile the combined graph and run its affected tests. Actual
-Mac qualification must verify the nominated JDK writes the authenticated empty
+Root composed both packets with the current Git, version-source and Apple hooks.
+The combined Rust library compiled and 65 focused checks passed, including these
+12 tests, 15 credential-parent tests and 38 shared-owner regressions. The current
+Python worker has 25 passing tests, including the actual worker/input/dispatch
+path with a deliberately fake bottom command boundary. The affected Apple worker
+also passed its 15 checks. Native execution and the public controls remain pending.
+
+Actual Mac qualification must verify the nominated JDK writes the authenticated empty
 JKS **in place**; inode replacement refuses, never weakens custody. Generation
 and certificate export are not a jarsigner usability test, trusted certificate
 assessment, Play upload-key replacement, assignment, backup or Store readiness.

@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn fixed_fields_use_two_independent_full_length_synthetic_entropy_segments() {
         let secrets = fixture();
-        assert_eq!(secrets.fields.vault_kind(), Kind::AndroidKeystore);
+        assert!(secrets.fields.vault_kind() == Kind::AndroidKeystore);
         assert_eq!(secrets.fields.borrow_value("keyAlias"), Some(ALIAS));
         assert_eq!(
             secrets.fields.borrow_value("storePassword"),

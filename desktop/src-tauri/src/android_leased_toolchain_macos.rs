@@ -57,7 +57,7 @@ fn intent_from_reply(lease:&SharedUseLeaseSlots,reply:&mrk_macos_installed_nativ
 /// Original Start tool slot. No owner can reach the existing unleased tool
 /// reader through this API; inspection/pre-spawn/post-use remain under this SH.
 #[derive(Clone,Copy,PartialEq,Eq)]
-enum ToolUse {Build,Execute}
+enum ToolUse {Build,Execute,GenerateUploadKey}
 pub(crate) struct LeasedAndroidToolchainSlots{
     use_kind:ToolUse,
     identity:OriginalUseIdentity,client:QueryClient,lease:[SharedUseLeaseSlots;1],
@@ -73,6 +73,18 @@ impl LeasedAndroidToolchainSlots{
     }
     pub(crate) fn new_execute(selected:MacToolchainSelection,audit:watch::Receiver<Instant>)->Self{
         let mut original=Self::new(selected,audit);original.use_kind=ToolUse::Execute;original
+    }
+    pub(crate) fn new_upload_key(selected:MacToolchainSelection,audit:watch::Receiver<Instant>)->Self{
+        let tools=AndroidToolchainSlots::new_upload_key(selected.clone(),audit.clone());
+        let mut original=Self::new(selected,audit);original.use_kind=ToolUse::GenerateUploadKey;
+        original.tools=tools;original
+    }
+    pub(crate) fn upload_key_inspection_peak(&self)->Option<usize>{
+        if self.use_kind!=ToolUse::GenerateUploadKey||self.entered||self.in_call||self.tail_taken{return None;}
+        // Add the original M2 query/SH control bound, never borrow an intent
+        // packet or numeric catalogue projection as a lease/size grant.
+        self.tools.upload_key_inspection_peak()?.checked_add(QUERY_CONTROL_LIMIT)?
+            .checked_add(crate::android_supplier_macos::CACHE_WORK_BYTES)
     }
     pub(crate) fn original_identity(&self)->OriginalUseIdentity{self.identity.clone()}
     pub(crate) fn query_signal(&self)->Arc<Signal>{self.client.signal()}
@@ -109,10 +121,14 @@ impl LeasedAndroidToolchainSlots{
         if self.use_kind!=ToolUse::Execute{return Err(self.note(Issue::Unknown));}
         self.inspect_selected(t,w,h,first,stop)
     }
+    pub(crate) fn inspect_upload_key_once(&mut self,t:Instant,w:Instant,h:Instant,first:Option<Instant>,stop:&watch::Receiver<bool>)->Result<()>{
+        if self.use_kind!=ToolUse::GenerateUploadKey{return Err(self.note(Issue::Unknown));}
+        self.inspect_selected(t,w,h,first,stop)
+    }
     fn inspect_selected(&mut self,t:Instant,w:Instant,h:Instant,first:Option<Instant>,stop:&watch::Receiver<bool>)->Result<()>{
         if self.entered || self.tail_taken{return Err(self.note(Issue::Unknown));}
         self.entered=true;self.in_call=true;
-        let role=match self.use_kind{ToolUse::Build=>Role::Start,ToolUse::Execute=>Role::LocalStoreExecute};
+        let role=match self.use_kind{ToolUse::Build=>Role::Start,ToolUse::Execute=>Role::LocalStoreExecute,ToolUse::GenerateUploadKey=>Role::GenerateUploadKey};
         let intent=self.client.arm(role,t,w,h,first).and_then(|clock|self.prepare_intent(clock,stop));
         if let Err(issue)=intent.as_ref(){self.note(*issue);}
         // SAME inspector native client retirement before any caller can return,
@@ -138,6 +154,11 @@ impl LeasedAndroidToolchainSlots{
             return Err(Issue::Unknown);
         }
         self.tools.binding_data().map_err(tool_issue)
+    }
+    pub(crate) fn upload_key_binding_data(&self)->Result<crate::android_upload_key_protocol::NativeTool>{
+        if self.use_kind!=ToolUse::GenerateUploadKey||!self.inspected||self.in_call||self.tail_taken||self.observations
+            ||!self.client.successful()||self.failure_data().is_none_or(|f|f.unknown||f.first.is_some()){return Err(Issue::Unknown);}
+        self.tools.upload_key_binding_data().map_err(tool_issue)
     }
     pub(crate) fn check_before_spawn(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()>{
         if !self.inspected || self.in_call || self.tail_taken || self.observations{return Err(self.note(Issue::Unknown));}

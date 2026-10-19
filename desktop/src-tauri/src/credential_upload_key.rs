@@ -2057,7 +2057,7 @@ mod tests {
         // Existing synthetic original receipt DATA only, no private candidate,
         // tool/key generation, source IO, actual producer or grant constructor.
         owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
-        owner.child.lock().unwrap().receipt = JoinReceipt::Returned;
+        owner.child.try_lock().unwrap().receipt = JoinReceipt::Returned;
         let mut slot = Slot::new(
             owner.clone(),
             Operation::GenerateUploadKey,

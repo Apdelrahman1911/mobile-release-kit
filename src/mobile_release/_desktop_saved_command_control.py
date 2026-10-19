@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 
 class SavedCommandDomain(Enum):
+    GenerateUploadKey = "generate-upload-key"
     ToolAcquisition = "tool-acquisition"
     OfflinePreflight = "offline-preflight"
     AndroidBuild = "android-build"
@@ -44,6 +45,9 @@ class SavedCommandDomain(Enum):
 
 def _protocol(domain: SavedCommandDomain):
     # Fixed imports, not a module name, factory or callback supplied by a caller.
+    if domain is SavedCommandDomain.GenerateUploadKey:
+        from . import _desktop_upload_key_protocol
+        return _desktop_upload_key_protocol
     if domain is SavedCommandDomain.ToolAcquisition:
         from . import _desktop_tool_acquisition_protocol
         return _desktop_tool_acquisition_protocol
@@ -97,6 +101,9 @@ def _protocol(domain: SavedCommandDomain):
 
 def source_domain(source: object) -> SavedCommandDomain:
     """A subclass/lookalike or changed domain is not an original source."""
+    from ._desktop_upload_key_control import UploadKeyInput
+    if type(source) is UploadKeyInput and source.domain is SavedCommandDomain.GenerateUploadKey:
+        return SavedCommandDomain.GenerateUploadKey
     from ._desktop_tool_acquisition_control import ToolAcquisitionInput
     if type(source) is ToolAcquisitionInput and source.domain is SavedCommandDomain.ToolAcquisition:
         return SavedCommandDomain.ToolAcquisition
@@ -278,7 +285,7 @@ class _SavedCommandInput:
         if time.monotonic() >= self.work_end:
             self.stop("timed-out")
             return
-        material_phase = self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.AppleProvisioning, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile) and self.material_pending
+        material_phase = self.domain in (SavedCommandDomain.GenerateUploadKey, SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.AppleProvisioning, SavedCommandDomain.LocalStorePreflight, SavedCommandDomain.LocalReleaseHistory, SavedCommandDomain.LocalStorePrepare, SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile) and self.material_pending
         active = self.active and not material_phase
         if active and self.buffer:
             self.stop()
@@ -288,7 +295,8 @@ class _SavedCommandInput:
             value = os.fstat(self.fd)
             if (value.st_dev, value.st_ino, value.st_mode) != self.identity:
                 self.custody_unknown = True
-                message = {SavedCommandDomain.ToolAcquisition: "Original tool preparation input changed",
+                message = {SavedCommandDomain.GenerateUploadKey: "Original upload-key input changed",
+                           SavedCommandDomain.ToolAcquisition: "Original tool preparation input changed",
                            SavedCommandDomain.OfflinePreflight: "Original preflight input changed",
                            SavedCommandDomain.AndroidBuild: "Original Android build input changed",
                            SavedCommandDomain.ProjectRecovery: "Original project recovery input changed",
@@ -309,7 +317,7 @@ class _SavedCommandInput:
                 # another read. A large body is not a large public JSON frame.
                 return
             limit = 1 if active else min(64 * 1024, _protocol(self.domain).REQUEST_LIMIT + 1 - len(self.buffer))
-            if material_phase and self.domain in (SavedCommandDomain.AppleProvisioning,SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile) and self.reading:
+            if material_phase and self.domain in (SavedCommandDomain.GenerateUploadKey,SavedCommandDomain.AppleProvisioning,SavedCommandDomain.LocalStorePrepare,SavedCommandDomain.LocalStoreExecute, SavedCommandDomain.LocalStoreReconcile) and self.reading:
                 self._require(type(self.read_remaining) is int and 1<=self.read_remaining<=2048)
                 limit=min(limit,self.read_remaining)
             if material_phase and self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):

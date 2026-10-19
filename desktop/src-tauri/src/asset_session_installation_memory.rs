@@ -380,6 +380,8 @@ mod known {
                 let work = value.vault.try_lock().map_err(|_| Reason::Capacity)?;
                 if !work.settled() { return Err(Reason::Capacity); }
                 self.add(capacity(work.backup_retained_bytes())?)?;
+                self.add(capacity(work.upload_key_retained_bytes())?)?;
+                if value.upload_key_clock.get().is_some() { self.arc::<vault::UploadKeyClock>()?; }
                 if let Some(store) = work.store_ref() { self.vault_store(store)?; }
                 if let Some(key) = work.key_ref() { self.vault_key(key)?; }
                 if let Some(work) = &value.installation { self.add(capacity(work.retained_bytes_if_settled())?)?; }

@@ -809,6 +809,9 @@ mod frozen_row_data_tests {
 /// a build/inspection capability or accepts a renderer-selected root.
 pub(crate) struct ArtifactToolLoan {original:Arc<Inner>,selected:Arc<Selection>}
 pub(crate) struct ExecuteToolLoan {original:Arc<Inner>,selected:Arc<Selection>,document:std::sync::Weak<()>}
+pub(super) fn upload_selection_current(original:&Arc<Inner>,selected:&Arc<Selection>)->bool{
+    selection_loan_current(original,selected)
+}
 fn selection_loan_current(original:&Arc<Inner>,selected:&Arc<Selection>)->bool {
     let Ok(r)=original.registry.try_lock() else{return false;};
     selection_owner_current(original,&r)
@@ -843,6 +846,10 @@ impl SavedCommandOwner {
         let r=self.inner.lock();
         if !selection_owner_current(&self.inner,&r){return Err(BridgeError::cleanup_unknown());}
         match r.android_catalog.selection(){None=>Ok(None),Some(selected) if selected.matches_owner(&self.inner)=>Ok(Some(selected.clone())),Some(_)=>Err(BridgeError::cleanup_unknown())}
+    }
+    pub(crate) fn upload_key_tool_loan(&self,document:&Arc<()>)->Result<Option<Arc<UploadKeyToolLoan>>,BridgeError>{
+        Ok(self.current_selection_loan(document)?.map(|selected|Arc::new(UploadKeyToolLoan{
+            original:self.inner.clone(),selected,document:Arc::downgrade(document)})))
     }
     pub(crate) fn artifact_tool_loan(&self,document:&Arc<()>)->Result<Option<Arc<ArtifactToolLoan>>,BridgeError>{
         Ok(self.current_selection_loan(document)?.map(|selected|Arc::new(ArtifactToolLoan{original:self.inner.clone(),selected})))

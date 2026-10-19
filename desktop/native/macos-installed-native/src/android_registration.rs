@@ -1125,7 +1125,7 @@ mod tests {
         // Calls the SAME production C predicate used before XPC preparation.
         // No native client, service, clock, credential or tool is acquired.
         let query = [prepare::Role::Catalog as u8, prepare::Role::Start as u8,
-            prepare::Role::LocalStoreExecute as u8];
+            prepare::Role::LocalStoreExecute as u8, prepare::Role::GenerateUploadKey as u8];
         for client_role in [0, 1, 2, 3, 4, 5, u32::MAX] {
             for prepare_role in u8::MIN..=u8::MAX {
                 let expected = match client_role {

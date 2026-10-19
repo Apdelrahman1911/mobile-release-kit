@@ -104,9 +104,10 @@ publication. There is no second supervisor or generic process/result callback.
 
 ## Root hooks
 
-Apply `credential-upload-key-root-hooks.patch` only after distinct actual
-review. It is an **unapplied** five-central-file delta based on Root's current
-public integration source; it preserves the newer acquired-tool picker hooks.
+`credential-upload-key-root-hooks.patch` records the independently reviewed
+five-central-file delta. Root has composed it with the current integration,
+preserving Git, version-source and Apple hooks as well as the tool picker.
+It is a historical integration aid, not a patch to reapply to this checkout.
 
 | Shared file | Narrow addition |
 | --- | --- |
@@ -129,8 +130,8 @@ success never means a backup was delivered.
 
 ## Focused evidence / limitations
 
-Fifteen new Rust regressions are authored but **not executed or compiled** in
-this lane. They use synthetic private/scalar/file/receipt DATA only:
+All fifteen new Rust regressions **passed in Root's integrated Linux graph**.
+They use synthetic private/scalar/file/receipt DATA only:
 
 - three scalar/real-vault-codec tests: distinct fixed entropy, error/no retry,
   maximum-size synthetic file under the fixed allowance, full Field equality;
@@ -143,8 +144,8 @@ this lane. They use synthetic private/scalar/file/receipt DATA only:
   changed random revision/context/duplicate loan refuses; missing assessment or
   unknown/failed original cannot become a durable assignment.
 
-Only Rustfmt syntax checks, whitespace checks and Root `git apply --check` have
-run here. Root must compile the real combined graph and run the focused tests.
-Linux no-default checks will not qualify shell-gated methods, original macOS
+The combined library compiled and all 65 selected Rust checks passed. Two
+test-only compilation mistakes were corrected without changing the production
+credential logic. Linux no-default checks do not qualify shell-gated methods, original macOS
 private process/input/output custody, generated JKS operation, native dialogs,
 signing, App Store/Play behavior, or installed Desktop availability.

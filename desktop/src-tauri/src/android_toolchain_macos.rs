@@ -49,6 +49,7 @@ impl<'a> Membership<'a> {
     }
 }
 pub(crate) struct AndroidToolchainSlots {
+    upload_key_inspection:bool, upload_key:Option<crate::android_upload_key_protocol::NativeTool>,
     selected:Option<MacToolchainSelection>, originals:Vec<Original>, aliases:Vec<OriginalAlias>, root:Option<usize>,
     headers:[Option<usize>;3], inspection_started:bool, inspected:bool, prepared:bool, closed:bool, unknown:bool,
     frame:Option<SnapshotBook>, arm_entered:bool, frame_charge:usize, live_fds:usize, read_bytes:u64, failure:Option<(Failure,Instant)>, audit:watch::Receiver<Instant>,
@@ -70,8 +71,16 @@ impl AndroidToolchainSlots {
     pub(crate) fn new(selected:MacToolchainSelection, audit:watch::Receiver<Instant>) -> Self {
         Self::new_selection(Some(selected), audit)
     }
+    pub(crate) fn new_upload_key(selected:MacToolchainSelection,audit:watch::Receiver<Instant>)->Self{
+        let mut original=Self::new(selected,audit);original.upload_key_inspection=true;original
+    }
+    pub(crate) fn upload_key_inspection_peak(&self)->Option<usize>{
+        if !self.upload_key_inspection||self.inspection_started||self.arm_entered||self.closed||self.unknown{return None;}
+        crate::android_upload_key_protocol::tool_inspection_peak(std::mem::size_of::<Original>(),
+            std::mem::size_of::<OriginalAlias>(),native::vault_filesystem::SNAPSHOT_FRAME_BYTES)
+    }
     fn new_selection(selected:Option<MacToolchainSelection>, audit:watch::Receiver<Instant>) -> Self {
-        Self { selected, originals:Vec::new(), aliases:Vec::new(), root:None, headers:[None;3],
+        Self { upload_key_inspection:false, upload_key:None, selected, originals:Vec::new(), aliases:Vec::new(), root:None, headers:[None;3],
             inspection_started:false, inspected:false, prepared:false, closed:false, unknown:false,
             frame:None, arm_entered:false, frame_charge:0, live_fds:0, read_bytes:0, failure:None, audit }
     }
@@ -94,6 +103,7 @@ impl AndroidToolchainSlots {
                 bytes=bytes.checked_add(value.capacity())?;
             }
         }
+        bytes=bytes.checked_add(self.upload_key.as_ref().map_or(Some(0),|value|value.retained_bytes())?)?;
         Some(bytes)
     }
     fn arm_once(&mut self,end:Instant,stop:&watch::Receiver<bool>) -> Result<()> {
@@ -345,6 +355,16 @@ impl AndroidToolchainSlots {
                     let (hash,prefix)=self.read(index,spec.size,256,end,stop)?;
                     if hash!=spec.sha256 {return Err(Failure::Inventory);}
                     self.native_file(index,spec,&prefix,Some(inventory),end,stop)?;
+                    if self.upload_key_inspection&&inventory.data.roles.java_home().is_some_and(|home|path==format!("{home}/bin/keytool")){
+                        if self.upload_key.is_some(){return Err(Failure::AlreadyUsed);}
+                        let selected=self.selected.as_ref().ok_or(Failure::Inventory)?;
+                        self.upload_key=Some(crate::android_upload_key_protocol::NativeTool{
+                            path:selected.root_data().join(&path),uid:selected.owner_uid,gid:unistd::getgid().as_raw(),
+                            identity:[i64::from(id.device),i64::try_from(id.inode).map_err(|_|Failure::Bounds)?,i64::from(id.mode),
+                                i64::from(id.uid),i64::from(id.gid),i64::from(id.links),id.size,
+                                id.mtime.checked_mul(1_000_000_000).and_then(|v|v.checked_add(id.mtime_ns)).ok_or(Failure::Bounds)?,
+                                id.ctime.checked_mul(1_000_000_000).and_then(|v|v.checked_add(id.ctime_ns)).ok_or(Failure::Bounds)?],sha256:hash});
+                    }
                 }
                 let retain=membership.launch.iter().any(|p|p==&path || p.strip_prefix(&path).is_some_and(|rest|rest.starts_with('/')));
                 if !retain && !self.close(index) {return Err(Failure::Unknown);}
@@ -425,7 +445,9 @@ impl AndroidToolchainSlots {
         let provider_raw=self.header(root,policy::PROVIDER,policy::PROVIDER_LIMIT,&selected.os_provider_sha256,end,stop)?;
         let provider=Provider::parse_for(profile,&provider_raw,selected).ok_or(Failure::Inventory)?;
         let manifest_raw=self.header(root,policy::MANIFEST,policy::MANIFEST_LIMIT,&selected.inventory_sha256,end,stop)?;
-        let inventory=policy::parse_manifest_for(profile,&manifest_raw,selected).ok_or(Failure::Inventory)?;
+        let inventory=if self.upload_key_inspection{
+            policy::parse_manifest_bounded_for(profile,&manifest_raw,selected,crate::android_upload_key_protocol::TOOL_PARSE_RESERVE)
+        }else{policy::parse_manifest_for(profile,&manifest_raw,selected)}.ok_or(Failure::Inventory)?;
         let payload_bytes=inventory.data.files.iter().try_fold(0u64,|n,f|n.checked_add(f.size)).ok_or(Failure::Bounds)?;
         let metadata_bytes=(record.len() as u64).checked_add(provider_raw.len() as u64)
             .and_then(|n|n.checked_add(manifest_raw.len() as u64)).ok_or(Failure::Bounds)?;
@@ -463,6 +485,13 @@ impl AndroidToolchainSlots {
             if target.to_str()!=Some(alias.target.as_str()) {return Err(Failure::Identity);}
         }
         self.point(end,stop)
+    }
+    pub(crate) fn upload_key_binding_data(&self)->Result<crate::android_upload_key_protocol::NativeTool>{
+        if !self.upload_key_inspection||!self.inspected||self.closed||self.unknown||self.failure.is_some(){return Err(Failure::Unknown);}
+        let value=self.upload_key.as_ref().ok_or(Failure::Inventory)?;
+        // The actual fully-hashed named keytool is already a mandatory held
+        // launcher in the protected supplier inventory, never path discovery.
+        Ok(value.clone())
     }
     pub(crate) fn binding_data(&self) -> Result<ToolchainBinding> {
         if !self.inspected || self.closed || self.unknown || self.first_failure().is_some() {return Err(Failure::Unknown);}

@@ -206,6 +206,16 @@ impl LocalReleaseHistoryInstalledProfile {
     }
 }
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(crate) struct UploadKeyInstalledProfile { _private: () }
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+impl UploadKeyInstalledProfile {
+    pub(crate) fn selection(&self)->Result<VerifiedRuntime,BridgeError>{
+        if !macos_bindings(){return Err(unavailable());}
+        let cwd=crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime{python:cwd.join("python/bin/python3"),bootstrap:cwd.join("android_upload_key_bootstrap.py"),core:cwd.join("core.zip"),cwd})
+    }
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 pub(crate) struct ToolAcquisitionInstalledProfile { _private: () }
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 impl ToolAcquisitionInstalledProfile {
@@ -2117,6 +2127,18 @@ impl RuntimeConfig {
     pub(crate) fn resolve_offline_preflight_installed(&self, originals: &mut crate::installed_runtime::OfflinePreflightRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.offline_preflight_installed_profile()?, end, stop)
+    }
+    pub(crate) fn upload_key_installed_profile_available(&self)->bool{
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        {macos_bindings()}
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        {false}
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_upload_key_installed(&self,originals:&mut crate::installed_runtime::UploadKeyRuntimeSlots,
+        end:Instant,stop:&tokio::sync::watch::Receiver<bool>)->Result<VerifiedRuntime,BridgeError>{
+        if !self.upload_key_installed_profile_available(){return Err(unavailable());}
+        originals.inspect_once(UploadKeyInstalledProfile{_private:()},end,stop)
     }
     pub(crate) fn tool_acquisition_installed_profile_available(&self)->bool {
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]

@@ -404,8 +404,8 @@ pub(super) async fn settle_start_observations(book:&mut Resources,inner:&Arc<Inn
             if !native_consumers_returned(book,&startup,inner,owner){inner.unknown(owner);return;}
             startup.attempted
         };
-        let native=book.native.clone();let execute=book.execute_native.clone();
-        if !matches!((owner.domain,native.is_some(),execute.is_some()),(SavedCommandDomain::AndroidBuild,true,false)|(SavedCommandDomain::LocalStoreExecute,false,true)){inner.unknown(owner);return;}
+        let native=book.native.clone();let execute=book.execute_native.clone();let upload_key=book.upload_key_native.clone();
+        if !matches!((owner.domain,native.is_some(),execute.is_some(),upload_key.is_some()),(SavedCommandDomain::AndroidBuild,true,false,false)|(SavedCommandDomain::LocalStoreExecute,false,true,false)|(SavedCommandDomain::GenerateUploadKey,false,false,true)){inner.unknown(owner);return;}
 
         let original=owner.clone();let end=*owner.native_audit_cutoff.borrow();
         let (release,enter)=oneshot::channel();
@@ -413,7 +413,10 @@ pub(super) async fn settle_start_observations(book:&mut Resources,inner:&Arc<Inn
         slot.started=true;
         slot.handle=Some(tokio::task::spawn_blocking(move||{
             if enter.blocking_recv().is_err(){return AndroidObservations::unknown();}
-            if let Some(execute)=execute{
+            if let Some(upload_key)=upload_key{
+                let mut n=match upload_key.lock(){Ok(n)=>n,Err(e)=>{let mut n=e.into_inner();n.interrupted();n}};
+                n.settle_observations(used,&original)
+            }else if let Some(execute)=execute{
                 let mut n=match execute.lock(){Ok(n)=>n,Err(e)=>{let mut n=e.into_inner();n.interrupted();n}};
                 n.settle_observations(used,&original)
             }else if let Some(native)=native{

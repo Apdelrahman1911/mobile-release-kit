@@ -284,7 +284,7 @@ done:
 // Transport role2 is query, not prepare role2. Execute is query3/prepare4.
 int mrk_android_client_prepare_role_allowed(uint32_t client_role,uint8_t prepare_role) {
     return (client_role==1 && prepare_role==1)
-        || (client_role==2 && (prepare_role==2 || prepare_role==3 || prepare_role==4));
+        || (client_role==2 && (prepare_role==2 || prepare_role==3 || prepare_role==4 || prepare_role==5));
 }
 // This is the whole original synchronous proxy invocation. Apple's documented
 // contract says both reply/error blocks run ON THIS CALLING THREAD before the

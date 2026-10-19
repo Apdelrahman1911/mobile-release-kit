@@ -220,6 +220,7 @@ pub struct DesktopBridge {
     pub(crate) ios_archive: crate::ios_archive_owner::IOSArchiveOwner,
     pub(crate) artifact_inspection: crate::saved_command_owner::SavedCommandOwner,
     pub(crate) tool_acquisition: crate::saved_command_owner::SavedCommandOwner,
+    pub(crate) upload_key: crate::saved_command_owner::SavedCommandOwner,
     installed_project_selection_available: bool,
     installed_project_path_selection_available: bool,
     installed_android_source_selection_available: bool,
@@ -290,6 +291,7 @@ impl DesktopBridge {
             android_build: crate::android_build_owner::AndroidBuildOwner::new(runtime.clone(), crate::android_toolchain::AndroidToolchainProfile::compiled()),
             artifact_inspection: crate::saved_command_owner::SavedCommandOwner::artifact_inspection(runtime.clone()),
             tool_acquisition: crate::saved_command_owner::SavedCommandOwner::tool_acquisition(runtime.clone()),
+            upload_key: crate::saved_command_owner::SavedCommandOwner::generate_upload_key(runtime.clone()),
             ios_archive: crate::ios_archive_owner::IOSArchiveOwner::new(runtime),
             installed_project_selection_available,
             installed_project_path_selection_available,
@@ -460,7 +462,7 @@ impl DesktopBridge {
         self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
-        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?; self.upload_key.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -474,7 +476,7 @@ impl DesktopBridge {
         self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
-        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?; self.upload_key.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -755,7 +757,7 @@ impl DesktopBridge {
         self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
-        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?;
+        self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?; self.upload_key.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() || self.edits.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() || self.edits.disabled() { return Err(BridgeError::cleanup_unknown()); }

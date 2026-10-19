@@ -5,6 +5,9 @@ use super::*;
 use crate::{vault_crypto as crypto, vault_format as format, vault_store as store};
 #[path = "credential_assignment_native.rs"]
 mod assignment_native;
+use assignment_native::upload_key;
+pub(crate) use upload_key::{UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal};
+pub(super) use upload_key::parent_stop as upload_key_parent_stop;
 #[path = "credential_backup_native.rs"]
 mod backup_native;
 #[path = "credential_backup_selection.rs"]
@@ -97,12 +100,13 @@ pub(super) struct Session {
     identity: Option<format::Identity>, key: Option<Arc<crypto::VaultKey>>, rows: Vec<Descriptor>, inventory: Vec<format::Id>,
     state: State, reason: Reason, revoked: bool, read_only: bool, registry_generation: u32, release_end: Option<Instant>,
     pub(super) bound: [Option<Box<BoundLoan>>; BOUND_LOAN_LIMIT],
+    upload_key_observation: Option<upload_key::UploadKeyObservation>,
 }
 impl Session {
     fn new(store: Arc<Mutex<store::StoreBook>>, generation: u32) -> Self {
         Self { store, root: None, header: None, identity: None, key: None, rows: Vec::new(), inventory: Vec::new(),
             state: State::Unknown, reason: Reason::None, revoked: false, read_only: false, registry_generation: generation, release_end: None,
-            bound: std::array::from_fn(|_| None) }
+            bound: std::array::from_fn(|_| None), upload_key_observation: None }
     }
     fn writable(&self) -> bool { !self.revoked && !self.read_only && self.state == State::Unlocked && self.key.is_some() }
     fn row(&self, key: &RecordKey) -> Option<&Descriptor> { self.rows.iter().find(|row| row.matches(key)) }
@@ -127,6 +131,7 @@ pub(super) struct Work {
     // Private input/output remains on this original after producer quiescence.
     // It is not a completed export, a second operation or a reusable slot.
     backup: backup_native::Work,
+    upload_key: upload_key::Work,
     // The exact first coordinator receipt survives the one cleanup-only
     // continuation. That continuation reuses this OriginalWork/child slot; it
     // cannot turn failure/STOP into a second work attempt or a renewed lease.
@@ -143,27 +148,32 @@ pub(super) struct Retired {
     pub(super) loaded: Option<Arc<Payload>>, label: Option<String>, rows: Vec<Descriptor>,
     pub(super) bound: [Option<Box<BoundLoan>>; BOUND_LOAN_LIMIT], pub(super) previous_bound: Option<Box<BoundLoan>>,
     backup: backup_native::Work,
+    upload_key: upload_key::Work,
 }
 impl Retired {
+    pub(super) fn upload_key_blocks_reuse(&self) -> bool { self.upload_key.blocks_reuse() }
+    pub(super) fn dispose_private_upload_key(&mut self) -> bool { self.upload_key.dispose_private() }
     pub(super) fn backup_blocks_reuse(&self) -> bool { self.backup.blocks_reuse() }
     pub(super) fn empty(&self) -> bool {
         self.session.is_none() && self.keys.iter().all(Option::is_none) && self.loaded.is_none() && self.label.is_none() && self.rows.capacity() == 0
-            && self.bound.iter().all(Option::is_none) && self.previous_bound.is_none() && self.backup.empty()
+            && self.bound.iter().all(Option::is_none) && self.previous_bound.is_none() && self.backup.empty() && self.upload_key.empty()
     }
     pub(super) fn data_bytes(&self) -> Option<usize> {
         std::mem::size_of::<Self>().checked_add(self.label.as_ref().map_or(0, String::capacity))?.checked_add(rows_bytes(&self.rows)?)?
             .checked_add(self.bound.iter().flatten().count().checked_mul(BOUND_LOAN_BYTES)?)?
             .checked_add(if self.previous_bound.is_some() { BOUND_LOAN_BYTES } else { 0 })?
-            .checked_add(self.backup.retained_bytes()?)
+            .checked_add(self.backup.retained_bytes()?)?.checked_add(self.upload_key.retained_bytes()?)
     }
 }
 impl Work {
+    pub(super) fn upload_key_retained_bytes(&self) -> Option<usize> { self.upload_key.retained_bytes() }
+    pub(super) fn upload_key_blocks_reuse(&self) -> bool { self.upload_key.blocks_reuse() }
     pub(super) fn store_ref(&self) -> Option<&Arc<Mutex<store::StoreBook>>> { self.store.as_ref() }
     pub(super) fn key_ref(&self) -> Option<&Arc<crypto::VaultKey>> { self.key.as_ref() }
     pub(super) fn backup_retained_bytes(&self) -> Option<usize> { self.backup.retained_bytes() }
     pub(super) fn backup_blocks_reuse(&self) -> bool { self.backup.blocks_reuse() }
     pub(super) fn settled(&self) -> bool {
-        self.backup.native_settled()
+        self.backup.native_settled() && self.upload_key.native_settled()
             && self.store.as_ref().is_none_or(|store| store.try_lock().is_ok_and(|book| book.not_started() || book.settled() || !self.release && book.operation_quiescent()))
     }
     fn store(&self) -> Result<Arc<Mutex<store::StoreBook>>, Reason> { self.store.clone().ok_or(Reason::VaultCorrupt) }
@@ -179,6 +189,7 @@ pub(super) struct SlotData {
     // Set only by the original explicit Discard/Lock path or the accepted
     // New-only publisher. Generic STOP/Idle/status never authorizes disposal.
     backup_discard: bool, backup_new_published: bool, backup_export_published: bool,
+    upload_key_new_published: bool,
     // Nonsecret current-display stamp; the ordinary private working reference
     // is cleared by retirement. This grants no loan, retry or disposal right.
     backup_export_context: Option<(u32, StoredRef)>,
@@ -188,7 +199,7 @@ pub(super) fn mode(state: &DocumentState) -> bool { state.vault.is_some() }
 pub(super) fn writable(state: &DocumentState) -> bool { state.vault.as_ref().is_some_and(Session::writable) }
 pub(super) fn backup_pending(state: &DocumentState) -> bool {
     state.slot.as_ref().is_some_and(|slot| slot.owner.vault.try_lock()
-        .map_or(true, |work| work.backup_blocks_reuse()))
+        .map_or(true, |work| work.backup_blocks_reuse() || work.upload_key_blocks_reuse()))
 }
 pub(super) fn request_backup_discard(slot: &mut Slot) {
     if matches!(slot.operation, Operation::PrepareBackupExport | Operation::ImportBackup) {
@@ -343,6 +354,13 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
                             return Err(Reason::SourceChanged);
                         }
                     },
+                    Operation::GenerateUploadKey => {
+                        let context = slot.context.as_ref().ok_or(Reason::ContextStale)?;
+                        if !document.context_matches(state, context).map_err(|error| error.reason)?
+                            || !upload_key::new_publication(&work, session, slot, *record, row.as_ref()) {
+                            return Err(Reason::SourceChanged);
+                        }
+                    },
                     _ => return Err(Reason::SourceChanged),
                 }
             },
@@ -414,6 +432,23 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
         },
         Staged::Mutated { record, row, generation } => {
             if slot.operation == Operation::ImportBackup { slot.vault.backup_new_published = true; }
+            if slot.operation == Operation::GenerateUploadKey {
+                let observed = (|| {
+                    let work = slot.owner.vault.try_lock().map_err(|_| Reason::CleanupUnknown)?;
+                    upload_key::publish_observation(&work, session, slot, record, row.as_ref().ok_or(Reason::SourceChanged)?)
+                })();
+                match observed {
+                    Ok(observation) => {
+                        session.upload_key_observation = Some(observation);
+                        slot.vault.upload_key_new_published = true;
+                    },
+                    Err(reason) => {
+                        slot.staged = Some(super::Staged::Vault(Staged::Mutated { record, row, generation }));
+                        slot.error = Some(AssetError::new(reason).into()); slot.stop(reason, Instant::now()); return;
+                    },
+                }
+            }
+            // No assessment, Bind, replacement, or automatic backup follows.
             publish_saved_revision(session, slot, record, row, generation);
         },
         Staged::BackupPending { .. } => {
@@ -573,7 +608,7 @@ pub(super) fn completed_context_receipt(state: &DocumentState) -> bool {
         && slot.owner.child.try_lock().is_ok_and(|book| matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) && book.handle.is_none())
         && slot.owner.cleanup_end.try_lock().is_ok_and(|end| end.is_none())
         && slot.owner.vault.try_lock().is_ok_and(|work| work.first.is_none() && !work.release && work.release_end.is_none() && work.key.is_none()
-            && !work.backup_blocks_reuse()
+            && !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse()
             && work.store.as_ref().is_some_and(|store| Arc::ptr_eq(store, &session.store)))
 }
 fn request_release(state: &mut DocumentState, at: Instant) -> bool {
@@ -582,9 +617,14 @@ fn request_release(state: &mut DocumentState, at: Instant) -> bool {
     release_lease(session, affected, at)
 }
 fn release_lease(session: &mut Session, affected: Option<&Slot>, at: Instant) -> bool {
-    let mut end = affected.map_or(at + CLEANUP, |slot| slot.cleanup_end.unwrap_or_else(|| first_cleanup_end(at, slot.owner.endpoint(), slot.review_end)));
-    // A native failure can predate this later coordinator/status observer.
-    if let Ok(book) = session.store.try_lock() { if let Some(first) = book.problem_at() { end = end.min(first + CLEANUP); } }
+    let generation_clock = affected.and_then(|slot| slot.owner.upload_key_clock.get()).filter(|clock| clock.endpoint().is_some());
+    let mut end = affected.map_or(at + CLEANUP, |slot| slot.cleanup_end.unwrap_or_else(||
+        generation_clock.map_or_else(|| first_cleanup_end(at, slot.owner.endpoint(), slot.review_end), |clock| clock.cleanup_end(at))));
+    // Only the generation clock uses its original ten-second/hard cap. Every
+    // older role keeps its existing first-failure cleanup interval unchanged.
+    if let Ok(book) = session.store.try_lock() { if let Some(first) = book.problem_at() {
+        end = end.min(generation_clock.map_or(first + CLEANUP, |clock| clock.observe_failure(first)));
+    } }
     let changed = !session.revoked || session.release_end.is_none_or(|old| end < old);
     session.revoked = true; session.release_end = Some(session.release_end.map_or(end, |old| old.min(end)));
     if let Some(slot) = affected {
@@ -631,7 +671,7 @@ pub(super) fn late_cleanup_install(state: &DocumentState, slot: &Slot) -> bool {
         && work.key.is_none() && work.store.as_ref().is_some_and(|store| Arc::ptr_eq(store, &session.store)))
 }
 pub(super) fn preserve_operation(slot: &Slot) -> bool {
-    slot.vault.lease.is_some() && matches!(slot.operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::PrepareBackupExport)
+    slot.vault.lease.is_some() && matches!(slot.operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::PrepareBackupExport | Operation::GenerateUploadKey)
 }
 pub(super) fn controls_released(owner: &OriginalWork) -> bool {
     owner.control_resources_settled() && owner.retired.load(Ordering::SeqCst)
@@ -646,6 +686,7 @@ pub(super) fn take_retirement(state: &mut DocumentState, slot: &mut Slot) -> Ret
     // A generic failed/Idle slot is not an explicit private-output discard.
     let retire_backup = (slot.vault.backup_discard || slot.vault.backup_new_published || slot.vault.backup_export_published)
         && backup_native::retirement_ready(&slot.owner);
+    let retire_upload_key = slot.vault.upload_key_new_published && upload_key::retirement_ready(&slot.owner);
     let mut retired = Retired { loaded: slot.vault.loaded.take(), label: slot.vault.label.take(),
         previous_bound: slot.vault.previous_bound.take(), ..Retired::default() };
     let stale: [bool; BOUND_LOAN_LIMIT] = std::array::from_fn(|index| state.vault.as_ref().is_some_and(|session|
@@ -657,6 +698,7 @@ pub(super) fn take_retirement(state: &mut DocumentState, slot: &mut Slot) -> Ret
     if let Ok(mut work) = slot.owner.vault.try_lock() {
         retired.keys[0] = work.key.take();
         if retire_backup { retired.backup = std::mem::take(&mut work.backup); }
+        if retire_upload_key { retired.upload_key = work.upload_key.take_for_retirement(); }
     }
     if closing {
         if let Some(session) = &mut state.vault {
@@ -676,13 +718,14 @@ pub(super) fn restore_retirement(state: &mut DocumentState, slot: &mut Slot, mut
         if !retired.rows.is_empty() { session.rows = std::mem::take(&mut retired.rows); }
         if retired.keys[1].is_some() { session.key = retired.keys[1].take(); }
     }
-    if retired.keys[0].is_some() || !retired.backup.empty() {
+    if retired.keys[0].is_some() || !retired.backup.empty() || !retired.upload_key.empty() {
         // All original executions were joined before this retirement attempt.
         // Preserve opaque key custody even after a poisoned bookkeeping mutex;
         // the caller records Unknown, never treats this recovery as authority.
         let mut work = match slot.owner.vault.lock() { Ok(work) => work, Err(error) => error.into_inner() };
         if retired.keys[0].is_some() { work.key = retired.keys[0].take(); }
         if !retired.backup.empty() { work.backup = std::mem::take(&mut retired.backup); }
+        if !retired.upload_key.empty() { work.upload_key = std::mem::take(&mut retired.upload_key); }
     }
 }
 pub(super) fn initialize_preview_valid(state: &DocumentState, slot: &Slot, preview: &Preview) -> bool {
@@ -750,10 +793,11 @@ pub(super) enum Child {
     Mutate { operation: format::Mutation, record: format::Id, expected: Option<StoredRef>, payload: Option<Arc<Payload>>, label: Option<String>, roster: ProjectRoster, allowance: usize },
     Check { reference: StoredRef, roster: ProjectRoster },
     Backup(backup_native::Request),
+    GenerateUploadKey(upload_key::SaveRequest),
     Release,
 }
 impl Child {
-    pub(super) fn large(&self) -> bool { matches!(self, Self::List { .. } | Self::Load { .. } | Self::ReviewDelete { .. } | Self::Mutate { .. } | Self::Backup(_)) }
+    pub(super) fn large(&self) -> bool { matches!(self, Self::List { .. } | Self::Load { .. } | Self::ReviewDelete { .. } | Self::Mutate { .. } | Self::Backup(_) | Self::GenerateUploadKey(_)) }
     pub(super) fn cleanup(&self) -> bool { matches!(self, Self::Release) }
 }
 pub(super) enum ChildResult {
@@ -777,7 +821,7 @@ pub(super) enum Job {
     Load { reference: StoredRef, roster: ProjectRoster, context: Arc<NativeContext>, allowance: usize },
     Delete { reference: StoredRef, roster: ProjectRoster, allowance: usize },
     Mutate { operation: format::Mutation, record: format::Id, expected: Option<StoredRef>, payload: Option<Arc<Payload>>, label: Option<String>, roster: ProjectRoster, allowance: usize },
-    Bind { reference: StoredRef, roster: ProjectRoster, assignment: Assignment }, Backup(backup_native::Request), Release,
+    Bind { reference: StoredRef, roster: ProjectRoster, assignment: Assignment }, Backup(backup_native::Request), GenerateUploadKey(upload_key::Request), Release,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     BackupPick { app: tauri::AppHandle, purpose: backup_selection::Purpose },
 }
@@ -785,6 +829,11 @@ pub(super) enum Job {
 pub(super) fn cleanup_expired(owner: &OriginalWork) -> bool {
     let end = owner.vault.try_lock().ok().and_then(|work| work.release_end)
         .or_else(|| owner.cleanup_end.lock().ok().and_then(|end| *end)).or_else(|| owner.endpoint());
+    // The generation-only clock also carries later-delivered earlier native
+    // cutoffs. Cached release/Slot endpoints cannot lengthen that original;
+    // other vault operations keep the exact existing precedence above.
+    let end = owner.upload_key_clock.get().filter(|clock| clock.endpoint().is_some())
+        .and_then(|clock| clock.cleanup_cutoff()).map_or(end, |cutoff| Some(end.map_or(cutoff, |end| end.min(cutoff))));
     end.is_none_or(|end| Instant::now() >= end)
 }
 fn native_store(owner: &Arc<OriginalWork>) -> Result<Arc<Mutex<store::StoreBook>>, Reason> {
@@ -942,6 +991,9 @@ pub(super) fn execute(owner: &Arc<OriginalWork>, child: Child) -> Result<ChildRe
             Ok(ChildResult::Checked)
         },
         Child::Backup(request) => backup_native::execute(owner, &mut book, request),
+        // The fixed child remembers only its own actual NEW mutation, never a
+        // previous StoreBook effect after a pre-seal/capture failure.
+        Child::GenerateUploadKey(request) => upload_key::execute(owner, &mut book, request),
         Child::Release => {
             let settled = book.release(&mut || cleanup_expired(owner));
             let mut work = owner.vault.lock().map_err(|_| Reason::CleanupUnknown)?;
@@ -1009,8 +1061,8 @@ fn begin_backup_import(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> 
     Ok(())
 }
 pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
-    let Some((first, outcome, backup_recovery)) = owner.vault.try_lock().ok()
-        .map(|work| (work.first, work.outcome, work.backup.recovery_required())) else { return; };
+    let Some((first, outcome, backup_recovery, upload_key_recovery)) = owner.vault.try_lock().ok()
+        .map(|work| (work.first, work.outcome, work.backup.recovery_required(), work.upload_key.recovery_required())) else { return; };
     let mut state = document.lock();
     let mut changed = false;
     if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) {
@@ -1019,7 +1071,8 @@ pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
         slot.error = Some(AssetError::new(reason).into()); slot.stop(reason, at);
         let operation = slot.operation;
         let backup_recovery = backup_recovery && matches!(operation, Operation::PrepareBackupExport | Operation::ImportBackup);
-        if backup_recovery {
+        let upload_key_recovery = upload_key_recovery && operation == Operation::GenerateUploadKey;
+        if backup_recovery || upload_key_recovery {
             // Unknown pair effects are not StoreBook mutation outcomes and do
             // not overwrite the first failure. They still prevent a misleading
             // normal failure/retry/closed projection over retained private data.
@@ -1027,8 +1080,8 @@ pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
         }
         if let Some(vault) = &mut state.vault {
             vault.reason = reason;
-            if matches!(operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup) { vault.state = State::Interrupted; vault.read_only = true; }
-            if reason == Reason::CleanupUnknown || backup_recovery { vault.state = State::Unknown; vault.revoked = true; state.unknown = true; }
+            if matches!(operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::GenerateUploadKey) { vault.state = State::Interrupted; vault.read_only = true; }
+            if reason == Reason::CleanupUnknown || backup_recovery || upload_key_recovery { vault.state = State::Unknown; vault.revoked = true; state.unknown = true; }
         }
         invalidate_all(&mut state); document.bump(&mut state);
     }
@@ -1094,6 +1147,10 @@ impl DocumentBinding {
         let state = self.lock(); current_gate(self, &state, owner)?; allowance(&state, owner)
     }
 }
+
+#[cfg(all(test, debug_assertions))]
+#[path = "credential_assignment_native_tests.rs"]
+mod assignment_native_regressions;
 
 #[cfg(all(test, debug_assertions))]
 mod tests {
@@ -1199,7 +1256,7 @@ mod tests {
             context_revision: context.revision, availability: AssignmentAvailability::Available };
         (slot, assignment)
     }
-    fn publish_loan_data(state: &mut DocumentState, kind: Kind, record: u8) -> RecordKey {
+    pub(super) fn publish_loan_data(state: &mut DocumentState, kind: Kind, record: u8) -> RecordKey {
         drop(state.slot.take()); // Prior DATA-only owner; no task/native originals.
         let (mut slot, assignment) = loan_slot(state, kind, record);
         let key = RecordKey { id: assignment.record_id.clone(), revision: assignment.record_revision };
@@ -1210,14 +1267,14 @@ mod tests {
         else { state.assignments.push(assignment); }
         slot.phase = Phase::Idle; slot.settlement = Settlement::Known; state.slot = Some(slot); key
     }
-    fn loan_state() -> DocumentState {
+    pub(super) fn loan_state() -> DocumentState {
         let (mut state, _) = model(Operation::Bind, true);
         state.context = Some(Arc::new(NativeContext { execution_mode: commands::ExecutionMode::Github, revision: 1, project_id: "data-project".into(),
             project: context_data().project.clone(), registry_generation: 7, draft: b"{}".to_vec(),
             platform: Platform::Ios, stage: Stage::Candidate, purpose: Purpose::Signing }));
         state
     }
-    fn same_backing_loan(value: &BoundLoan) -> Box<BoundLoan> {
+    pub(super) fn same_backing_loan(value: &BoundLoan) -> Box<BoundLoan> {
         // Deliberately distinct DATA cells sharing the same four Arc originals.
         // This is not a second published assignment or a native lifetime.
         Box::new(BoundLoan { context: value.context.clone(), payload: value.payload.clone(), reference: value.reference,
@@ -1856,6 +1913,9 @@ pub(super) fn release_child_admitted(owner: &OriginalWork) -> bool {
 pub(super) fn backup_child_admitted(owner: &OriginalWork, request: &backup_native::Request) -> bool {
     backup_native::child_admitted(owner, request)
 }
+pub(super) fn upload_key_child_admitted(owner: &OriginalWork, request: &upload_key::SaveRequest) -> bool {
+    upload_key::child_admitted(owner, request)
+}
 pub(super) fn retain_failed_child_for_release(owner: &OriginalWork) -> bool {
     let Ok(mut work) = owner.vault.try_lock() else { return false; };
     if !work.release || !work.release_claimed || work.failed_child_join.is_some() { return false; }
@@ -2028,6 +2088,7 @@ async fn run_inner(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: J
             match native(document, owner, Child::Check { reference, roster }).await? { ChildResult::Checked => Ok(super::Staged::Bound(assignment)), _ => Err(Reason::CleanupUnknown) }
         },
         Job::Backup(request) => backup_native::run(document, owner, request).await,
+        Job::GenerateUploadKey(request) => upload_key::run(document, owner, request).await,
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         Job::BackupPick { app, purpose } => backup_selection::run_selected(document, owner, &app, purpose).await,
         Job::Release => match native(document, owner, Child::Release).await? {
@@ -2042,8 +2103,17 @@ impl DocumentBinding {
         self.durable_gate_selected(state, write, Qualification::Ordinary, QualifiedAction::Open, None)
     }
     fn durable_gate_selected(&self, state: &DocumentState, write: bool, selection: Qualification,
-        _action: QualifiedAction, _path: Option<&std::path::Path>) -> Result<(), AssetError> {
-        self.gate(state, false)?;
+        action: QualifiedAction, path: Option<&std::path::Path>) -> Result<(), AssetError> {
+        self.durable_gate_with_upload_key(state, write, selection, action, path, None)
+    }
+    fn durable_upload_key_preparation_gate(&self, state: &DocumentState,
+        preparation: &Arc<crate::saved_command_owner::UploadKeyPreparation>) -> Result<(), AssetError> {
+        self.durable_gate_with_upload_key(state, true, Qualification::Ordinary, QualifiedAction::Open, None, Some(preparation))
+    }
+    fn durable_gate_with_upload_key(&self, state: &DocumentState, write: bool, selection: Qualification,
+        _action: QualifiedAction, _path: Option<&std::path::Path>,
+        preparation: Option<&Arc<crate::saved_command_owner::UploadKeyPreparation>>) -> Result<(), AssetError> {
+        self.gate_with_upload_key_preparation(state, false, preparation)?;
         let qualified = match selection {
             Qualification::Ordinary => self.persistence_qualified(),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]

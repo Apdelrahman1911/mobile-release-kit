@@ -1,6 +1,9 @@
 //! Private state of the SAME Document and original typed Supervisor return.
 //! Not another observation runner, public authority DTO, or callback registry.
 use super::*;
+#[path="asset_session_upload_key_saved.rs"]
+mod upload_key_saved;
+pub(crate) use upload_key_saved::UploadKeySavedInput;
 
 const RESERVED: u8 = 0;
 const ARMED: u8 = 1;

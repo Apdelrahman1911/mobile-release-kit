@@ -177,6 +177,7 @@ impl ServiceDomain{
                     let role=match bounds.role{
                         prepare::Role::Catalog=>query::Role::Catalog,prepare::Role::Start=>query::Role::Start,
                         prepare::Role::LocalStoreExecute=>query::Role::LocalStoreExecute,
+                        prepare::Role::GenerateUploadKey=>query::Role::GenerateUploadKey,
                         prepare::Role::Registration=>return None, // Handled above, never a query role.
                     };
                     self.query.prepare_binding(self.account,self.nonce,query::Bounds{role,origin:bounds.origin,work:bounds.work,hard:bounds.hard},now)

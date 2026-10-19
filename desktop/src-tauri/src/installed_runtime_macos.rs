@@ -569,7 +569,7 @@ impl Drop for RemovalRequestOriginal {fn drop(&mut self){
 }}
 
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
-struct Book { records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
+struct Book { upload_key_inspection:bool, records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
     tool_ca_required: bool, tool_ca: Option<(usize,u64,String)>,
     history_nomination: Option<HistoryProviderNomination>, history_provider: Option<usize>,
     store: Option<store_runtime::Originals>,
@@ -612,7 +612,7 @@ fn metadata(s: &FileStat, directory: bool) -> Result<Identity> {
     Ok(Identity::of(s))
 }
 impl Book {
-    fn new() -> Self { Self { records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
+    fn new() -> Self { Self { upload_key_inspection:false, records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
         history_nomination: None, history_provider: None, tool_ca_required:false, tool_ca:None,
         store: None,
         #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -1090,6 +1090,7 @@ impl Book {
     fn inspect(&mut self, selection: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         if !self.inspection_ready(){return Err(AdmissionFailure::AlreadyUsed);}
         self.records.try_reserve_exact(crate::macos_install_record::RUNTIME_RECORD_LIMIT).map_err(native_error)?;
+        if self.upload_key_inspection&&self.records.capacity()>crate::macos_install_record::RUNTIME_RECORD_LIMIT{return Err(AdmissionFailure::Bounds);}
         self.protected_app_once(end, stop)?;
         if selection.cwd != runtime_root() { return Err(AdmissionFailure::Inventory); }
         let root = self.chain(&selection.cwd, end, stop)?;
@@ -1108,7 +1109,7 @@ impl Book {
             || option_env!("MRK_BUNDLED_PROTOCOL_SHA256") != Some(PROTOCOL_SHA)
             || manifest.files.is_empty() || manifest.files.len() > crate::macos_install_record::FILE_LIMIT
             || digest(&serde_json::to_vec(&manifest.files).map_err(native_error)?) != manifest.inventory_sha256 { return Err(AdmissionFailure::Inventory); }
-        if self.history_nomination.is_some(){history_runtime::history_manifest_reserve(&manifest.files)?;}
+        if self.history_nomination.is_some()||self.upload_key_inspection{history_runtime::history_manifest_reserve(&manifest.files)?;}
         let store_present = crate::macos_store_runtime::validate(manifest.files.iter()
             .map(|file| (file.path.as_str(), file.size))).map_err(|_| AdmissionFailure::Inventory)?;
         if self.store.is_some() && !store_present { return Err(AdmissionFailure::Inventory); }
@@ -1122,6 +1123,7 @@ impl Book {
                 || (file.path == "core.zip" && file.sha256 != manifest.core_sha256) { return Err(AdmissionFailure::Inventory); }
             previous = file.path.clone(); let mut name = file.path.as_str();
             while let Some((parent, _)) = name.rsplit_once('/') {
+                if self.upload_key_inspection&&!directories.contains(parent)&&directories.len()>=crate::macos_install_record::ENTRY_LIMIT{return Err(AdmissionFailure::Bounds);}
                 history_runtime::history_prefix_insert_allowed(self,directories.len(),directories.contains(parent))?;
                 directories.insert(parent.to_owned()); name = parent;
             }
@@ -1386,6 +1388,9 @@ slots!(ReleaseVersionRuntimeSlots, ReleaseVersionInstalledRuntime, runtime::Rele
 slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveInstalledProfile);
 slots!(LocalHistoryRuntimeSlots, LocalHistoryInstalledRuntime, runtime::LocalReleaseHistoryInstalledProfile);
 slots!(ToolAcquisitionRuntimeSlots, ToolAcquisitionInstalledRuntime, runtime::ToolAcquisitionInstalledProfile);
+slots!(UploadKeyRuntimeSlots, UploadKeyInstalledRuntime, runtime::UploadKeyInstalledProfile);
+#[path="android_upload_key_runtime_macos.rs"]
+mod upload_key_runtime;
 slots!(ArtifactInspectionRuntimeSlots, ArtifactInspectionInstalledRuntime, runtime::ArtifactInspectionInstalledProfile);
 
 impl ToolAcquisitionRuntimeSlots {

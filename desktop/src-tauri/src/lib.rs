@@ -142,6 +142,7 @@ mod local_store_reconcile_owner;
 mod artifact_inspection_protocol;
 mod offline_preflight_owner;
 mod android_build_protocol;
+mod android_upload_key_protocol;
 mod android_build_owner;
 mod project_recovery_protocol;
 mod project_recovery_owner;

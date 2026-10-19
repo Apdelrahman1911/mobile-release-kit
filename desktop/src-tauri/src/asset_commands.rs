@@ -8,6 +8,11 @@ use crate::protocol;
 #[path = "credential_backup_commands.rs"]
 mod backup;
 pub(crate) use backup::{backup_export, backup_import};
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[path = "credential_upload_key_fields.rs"]
+mod upload_key_fields;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+pub(crate) use upload_key_fields::UploadKeySecrets;
 
 pub(crate) const POLICY: &str = "credential-policy-v1";
 pub(crate) const DRAFT_LIMIT: usize = 512 * 1024;

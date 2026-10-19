@@ -12,12 +12,12 @@ const REPLY_MAGIC: &[u8;8] = b"MRKAQR01";
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 #[repr(u32)]
-pub enum Role { Catalog=1, Start=2, LocalStoreExecute=3 }
+pub enum Role { Catalog=1, Start=2, LocalStoreExecute=3, GenerateUploadKey=4 }
 impl Role {
-    fn decode(v:u32)->Option<Self>{match v{1=>Some(Self::Catalog),2=>Some(Self::Start),3=>Some(Self::LocalStoreExecute),_=>None}}
-    pub fn work_ns(self)->u64 {match self{Self::Catalog=>60_000_000_000,Self::Start=>3_000_000_000_000,Self::LocalStoreExecute=>1_200_000_000_000}}
+    fn decode(v:u32)->Option<Self>{match v{1=>Some(Self::Catalog),2=>Some(Self::Start),3=>Some(Self::LocalStoreExecute),4=>Some(Self::GenerateUploadKey),_=>None}}
+    pub fn work_ns(self)->u64 {match self{Self::Catalog=>60_000_000_000,Self::Start=>3_000_000_000_000,Self::LocalStoreExecute=>1_200_000_000_000,Self::GenerateUploadKey=>180_000_000_000}}
     pub fn hard_ns(self)->u64 {self.work_ns()+CLEANUP_NS}
-    pub fn sequence_limit(self)->u32 {match self{Self::Catalog=>34,Self::Start|Self::LocalStoreExecute=>2}}
+    pub fn sequence_limit(self)->u32 {match self{Self::Catalog=>34,Self::Start|Self::LocalStoreExecute|Self::GenerateUploadKey=>2}}
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub struct Bounds {pub role:Role,pub origin:u64,pub work:u64,pub hard:u64}
@@ -65,7 +65,7 @@ impl Request {
         }else if self.instance!=[0;16]{return false;}
         match self.kind {
             Kind::Scan=>self.bounds.role==Role::Catalog && self.sequence==1,
-            Kind::ReadIntent=>match self.bounds.role{Role::Start|Role::LocalStoreExecute=>self.sequence==1,Role::Catalog=>self.sequence>=2 && self.sequence<self.bounds.role.sequence_limit()},
+            Kind::ReadIntent=>match self.bounds.role{Role::Start|Role::LocalStoreExecute|Role::GenerateUploadKey=>self.sequence==1,Role::Catalog=>self.sequence>=2 && self.sequence<self.bounds.role.sequence_limit()},
             Kind::Finish=>self.sequence>=2,
             Kind::Status=>self.first==0,
             Kind::Stop=>self.first>=self.bounds.origin && self.first<=MAX_RAW,
@@ -224,6 +224,21 @@ mod tests {
         assert!(!b.accepts_event(9,15,14));assert!(!b.accepts_event(16,15,14));assert!(!b.accepts_event(10,15,16));
         assert_eq!(b.cleanup(Some(10)),Some(10+CLEANUP_NS));
         assert_eq!(b.cleanup(Some(0)),None);
+    }
+    #[test]
+    fn upload_generation_role_has_only_same_clock_read_intent_and_finish(){
+        let role=Role::GenerateUploadKey;let original=bounds(role);
+        assert_eq!(original.work-original.origin,180_000_000_000);
+        assert_eq!(original.hard-original.origin,190_000_000_000);
+        for q in [request(role,Kind::ReadIntent,1),request(role,Kind::Finish,2)]{
+            assert_eq!(Request::decode(&q.encode().unwrap()),Some(q));
+        }
+        for q in [request(role,Kind::Scan,1),request(role,Kind::ReadIntent,2),request(role,Kind::Finish,3)]{
+            assert!(q.encode().is_none());
+        }
+        let mut raw=request(role,Kind::ReadIntent,1).encode().unwrap();
+        put(&mut raw,16,Role::LocalStoreExecute as u32);assert!(Request::decode(&raw).is_none());
+        assert_eq!(original.cleanup(Some(original.origin+1)),Some(original.origin+1+CLEANUP_NS));
     }
     #[test]
     fn bounded_union_preserves_orphans_refuses_overflow_duplicates_and_aliases(){
