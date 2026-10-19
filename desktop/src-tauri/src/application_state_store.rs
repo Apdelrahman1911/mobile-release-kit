@@ -169,9 +169,11 @@ mod native {
     struct Edge { file: File, name: OsString, original: FileKey }
     pub(crate) struct Directory { path: PathBuf, edges: Vec<Edge>, parent_reservation: Option<FileKey> }
     impl Directory {
-        fn acquire(app_data: &Path, create: bool) -> Result<(Self, bool)> {
+        fn acquire(app_data: &Path, create: bool, excluded_projects: &[(u64, u64)]) -> Result<(Self, bool)> {
             let text = app_data.as_os_str().as_bytes();
-            if text.len() > 3500 || !app_data.is_absolute() || text.windows(2).any(|v| v == b"//") || text.ends_with(b"/")
+            if excluded_projects.len() > crate::service_protocol::PROJECT_LIMIT
+                || excluded_projects.iter().any(|(_, inode)| *inode == 0)
+                || text.len() > 3500 || !app_data.is_absolute() || text.windows(2).any(|v| v == b"//") || text.ends_with(b"/")
                 || text.split(|b| *b == b'/').any(|part| part == b"." || part == b"..")
                 || app_data.components().any(|v| !matches!(v, Component::RootDir | Component::Normal(_)))
                 || app_data.file_name().and_then(|v| v.to_str()) != Some("dev.mobile-release-kit.desktop") {
@@ -181,21 +183,33 @@ mod native {
             if names.len() < 2 || names.len() > 96 { return Err(Error::InvalidRequest.into()); }
             let root = File::from(fcntl::open("/", OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW, Mode::empty()).map_err(io_error)?);
             let root_key = key(&root)?;
-            if !root_key.directory(false) { close(root)?; return Err(Error::Conflict.into()); }
+            if !root_key.directory(false) || excluded_projects.contains(&(root_key.device, root_key.inode)) {
+                close(root)?; return Err(Error::Conflict.into());
+            }
             let mut this = Self { path: app_data.join(DIRECTORY), edges: vec![Edge { file: root, name: OsString::from("/"), original: root_key }], parent_reservation: None };
             let result = (|| {
                 for (index, name) in names.iter().enumerate() {
                     let parent = &this.edges.last().ok_or_else(|| StateError::from(Error::StateUnknown))?.file;
-                    if create && index + 1 == names.len() {
-                        match stat::mkdirat(parent, name.as_os_str(), Mode::from_bits_truncate(0o700)) {
-                            Ok(()) => sync(parent)?, Err(Errno::EEXIST) => {}, Err(e) => return Err(io_error(e)),
+                    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
+                    // Inspect an existing leaf before any create attempt. All
+                    // SAME held parents were physically excluded when opened;
+                    // an absent app-data leaf is the sole path component we
+                    // may create. Path spelling does not decide exclusion.
+                    let fd = match fcntl::openat(parent, name.as_os_str(), flags, Mode::empty()) {
+                        Ok(fd) => fd,
+                        Err(Errno::ENOENT) if create && index + 1 == names.len() => {
+                            match stat::mkdirat(parent, name.as_os_str(), Mode::from_bits_truncate(0o700)) {
+                                Ok(()) => sync(parent)?, Err(Errno::EEXIST) => {}, Err(e) => return Err(io_error(e)),
+                            }
+                            fcntl::openat(parent, name.as_os_str(), flags, Mode::empty()).map_err(io_error)?
                         }
-                    }
-                    let fd = fcntl::openat(parent, name.as_os_str(), OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW, Mode::empty())
-                        .map_err(|e| if !create && e == Errno::ENOENT { Error::Unavailable.into() } else { io_error(e) })?;
+                        Err(e) => return Err(if !create && e == Errno::ENOENT { Error::Unavailable.into() } else { io_error(e) }),
+                    };
                     let file = File::from(fd);
                     let original = key(&file)?;
-                    if !original.directory(false) { close(file)?; return Err(Error::Conflict.into()); }
+                    if !original.directory(false) || excluded_projects.contains(&(original.device, original.inode)) {
+                        close(file)?; return Err(Error::Conflict.into());
+                    }
                     this.edges.push(Edge { file, name: name.clone(), original });
                 }
                 let parent = &this.edges.last().ok_or_else(|| StateError::from(Error::StateUnknown))?.file;
@@ -215,7 +229,9 @@ mod native {
                 let fd: OwnedFd = fcntl::openat(parent, DIRECTORY, OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW, Mode::empty()).map_err(io_error)?;
                 let file = File::from(fd);
                 let original = key(&file)?;
-                if !original.directory(true) { close(file)?; return Err(Error::Conflict.into()); }
+                if !original.directory(true) || excluded_projects.contains(&(original.device, original.inode)) {
+                    close(file)?; return Err(Error::Conflict.into());
+                }
                 let mut binding = b"MRK service root v1\n".to_vec();
                 binding.extend(original.device.to_be_bytes()); binding.extend(original.inode.to_be_bytes());
                 let (reservation_key, reservation_bytes) = if created {
@@ -230,7 +246,7 @@ mod native {
             })();
             match result { Ok(created) => Ok((this, created)), Err(error) => { this.close()?; Err(error) } }
         }
-        pub(crate) fn for_client(app_data: &Path) -> Result<Self> { Self::acquire(app_data, false).map(|v| v.0) }
+        pub(crate) fn for_client(app_data: &Path) -> Result<Self> { Self::acquire(app_data, false, &[]).map(|v| v.0) }
         pub(crate) fn file(&self) -> Result<&File> { self.edges.last().map(|e| &e.file).ok_or_else(|| Error::Unavailable.into()) }
         pub(crate) fn path(&self) -> &Path { &self.path }
         pub(crate) fn check(&self) -> Result<()> {
@@ -278,7 +294,14 @@ mod native {
     }
     impl PrivateStateDirectory {
         pub(crate) fn open(app_data: &Path) -> Result<Self> {
-            let (directory, created) = Directory::acquire(app_data, true)?;
+            Self::open_excluding_projects(app_data, &[])
+        }
+        /// Native project identities only, supplied by the real registry.
+        /// The original directory acquisition excludes every opened ancestor
+        /// before descending or creating private state; this is not a claim
+        /// about a project that is itself below this directory through aliases.
+        pub(crate) fn open_excluding_projects(app_data: &Path, excluded_projects: &[(u64, u64)]) -> Result<Self> {
+            let (directory, created) = Directory::acquire(app_data, true, excluded_projects)?;
             let result = (|| {
                 let flags = OFlag::O_RDWR | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK
                     | if created { OFlag::O_CREAT | OFlag::O_EXCL } else { OFlag::empty() };
