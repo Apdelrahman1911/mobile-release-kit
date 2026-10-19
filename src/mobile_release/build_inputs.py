@@ -1755,7 +1755,15 @@ def _publish_private_file(owner: _StoreNamespace, name: str, blocks: Iterator[by
 
 class InvocationCustody:
     def __init__(self, root: Path, mode: str, guard: DefaultCancellation, *, lane_evidence=None) -> None:
-        _need(mode in ("build", "online", "store"), "unknown invocation mode")
+        _need(mode in ("build", "online", "store", "allocation-read"), "unknown invocation mode")
+        allocation = getattr(guard, "_version_allocation_source", None)
+        _need((mode == "allocation-read") == (allocation is not None),
+              "allocation source requires its original cancellation borrower")
+        if allocation is not None:
+            from ._desktop_version_allocation_source_control import BorrowedAllocationInput
+            _need(type(guard) is DefaultCancellation and type(allocation) is BorrowedAllocationInput
+                  and allocation.guard is guard and guard._saved_command_input() is allocation,
+                  "allocation source borrower is not original")
         _need((mode == "store") == (lane_evidence is not None),
               "Store invocation requires exactly its original composite record")
         if lane_evidence is not None:
@@ -1807,6 +1815,8 @@ class InvocationCustody:
             guard._store_preflight_source.require_operation().bind_invocation(self)
         elif getattr(guard, "_local_store_source", None) is not None:
             guard._local_store_source.require_operation().bind_invocation(self)
+        elif allocation is not None:
+            allocation.require_operation().bind_invocation(self)
 
     def _owner(self, *, cleanup: bool = False) -> None:
         _need(self.pid == os.getpid() and self.thread is threading.current_thread(),
@@ -1860,6 +1870,7 @@ class InvocationCustody:
 
     @contextmanager
     def environment(self, updates: Mapping[str, str | None]) -> Iterator[None]:
+        _need(self.mode != "allocation-read", "source observation cannot change the invocation environment")
         frame = _EnvironmentFrame(self, updates)
         with _scope(frame, self.cancellation, False):
             yield
@@ -1868,7 +1879,10 @@ class InvocationCustody:
     def project(self, *, signing_lease: SigningLease | None) -> Iterator[None]:
         self._owner()
         prepare=getattr(self.cancellation,"_local_store_source",None)
+        allocation = getattr(self.cancellation, "_version_allocation_source", None)
         admitted=self.mode=="build" or (self.mode=="store" and prepare is not None and prepare.require_operation().invocation is self)
+        admitted = admitted or (self.mode == "allocation-read" and allocation is not None
+            and allocation.require_operation().invocation is self and signing_lease is None)
         _need(admitted and not self.project_started and self.project_owner is None,
               "project admission is not available")
         if signing_lease is not None:
@@ -1892,6 +1906,10 @@ class InvocationCustody:
             _need(operation.invocation is self, "local history requires original invocation")
             expected = operation.request.native["rootIdentity"]
             expected_root = (int(expected["device"]), int(expected["inode"]), expected["mode"], expected["uid"], expected["gid"])
+        if allocation is not None:
+            _need(self.mode == "allocation-read" and allocation.require_operation().invocation is self
+                  and signing_lease is None, "allocation source cannot borrow signing")
+            expected_root = allocation.request.identity
         project = _Project(self.root, self.cancellation, recovery=False, expected_root=expected_root)
         self._original_project = project
         self.project_owner, self.signing_lease = project, signing_lease
@@ -1904,7 +1922,8 @@ class InvocationCustody:
     @contextmanager
     def materialization(self, *, signing_lease: SigningLease | None) -> Iterator[BuildInputs]:
         _need(getattr(self.cancellation, "_artifact_inspection_source", None) is None
-              and getattr(self.cancellation, "_local_history_source", None) is None,
+              and getattr(self.cancellation, "_local_history_source", None) is None
+              and getattr(self.cancellation, "_version_allocation_source", None) is None,
               "observation cannot borrow build materialization")
         self.require(root=self.root, cancellation=self.cancellation, signing_lease=signing_lease)
         _need(self.mode == "build" and self.project_owner is not None and self.child is None,
@@ -2025,6 +2044,23 @@ class InvocationCustody:
                           and project.claimed and project.meta.close_state == "CLOSED"
                           and all(slot.close_state == "CLOSED" for slot in project.directory.slots))
         return (guard is self.cancellation and self.mode == "build" and self.signing_lease is None
+                and self.claimed and not self.active and self._cleanup_complete and not self.reserved
+                and not self.frames and self.child is None and self.project_owner is None and project_closed
+                and self.store_namespace is None and self.reservation_state in {"NEW", "REFUSED", "RELEASED"}
+                and (self.lock_result is None or self.lock_result is False)
+                and _ENV_OWNER is not self and not _ENV_TAINTED)
+
+    def _allocation_source_closed(self, operation) -> bool:
+        from .version_allocation_source import AllocationSourceRun
+        self._owner(cleanup=True)
+        _need(type(operation) is AllocationSourceRun and operation.invocation is self
+              and operation.guard is self.cancellation and operation.input.operation is operation,
+              "source closure requires its original allocation invocation")
+        project = self._original_project
+        project_closed = ((not self.project_started and project is None) or project is not None
+                          and project.claimed and project.meta.close_state == "CLOSED"
+                          and all(slot.close_state == "CLOSED" for slot in project.directory.slots))
+        return (self.mode == "allocation-read" and self.signing_lease is None
                 and self.claimed and not self.active and self._cleanup_complete and not self.reserved
                 and not self.frames and self.child is None and self.project_owner is None and project_closed
                 and self.store_namespace is None and self.reservation_state in {"NEW", "REFUSED", "RELEASED"}
@@ -2188,7 +2224,7 @@ class InvocationCustody:
 
 
 @contextmanager
-def invocation_custody(root: Path, *, mode: Literal["build", "online", "store"],
+def invocation_custody(root: Path, *, mode: Literal["build", "online", "store", "allocation-read"],
                       cancellation: DefaultCancellation | None = None,
                       lane_evidence=None) -> Iterator[InvocationCustody]:
     guard, owns = cancellation_owner(cancellation, ProcessCleanupError,
@@ -2295,7 +2331,8 @@ class _Project:
     def ensure_meta(self) -> int:
         _need(getattr(self.guard, "_artifact_inspection_source", None) is None
               and getattr(self.guard, "_local_history_source", None) is None
-              and getattr(self.guard, "_local_store_source", None) is None,
+              and getattr(self.guard, "_local_store_source", None) is None
+              and getattr(self.guard, "_version_allocation_source", None) is None,
               "observation cannot create project metadata")
         self.check()
         source = getattr(self.guard, "_android_build_source", None)

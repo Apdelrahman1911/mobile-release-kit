@@ -377,6 +377,14 @@ class DefaultCancellation:
         return source if source.domain is SavedCommandDomain.LocalStorePreflight else None
 
     @property
+    def _version_allocation_source(self) -> Any:
+        source = self._saved_command_input()
+        if source is None:
+            return None
+        from ._desktop_saved_command_control import SavedCommandDomain
+        return source if source.domain is SavedCommandDomain.VersionAllocationSource else None
+
+    @property
     def _store_prepare_source(self):
         source=self._saved_command_input()
         from ._desktop_saved_command_control import SavedCommandDomain
@@ -446,9 +454,15 @@ class DefaultCancellation:
 
     def _remove_saved_command_source(self, source: Any) -> None:
         from ._desktop_saved_command_control import source_domain
+        from ._desktop_version_allocation_source_control import BorrowedAllocationInput
         self._check_owner()
         source_domain(source)
-        if self._saved_command_input() is not source or self._saved_command_source_removed or not source.closed:
+        # This one fixed borrower never owns the bootstrap's physical pipe.
+        # Its actual source/invocation cleanup ends only cancellation borrowing;
+        # all ordinary inherited-input owners still require their real close.
+        ended = (source.borrow_ended and source.originals_closed()
+                 if type(source) is BorrowedAllocationInput else source.closed)
+        if self._saved_command_input() is not source or self._saved_command_source_removed or not ended:
             raise self.restore_error("saved-command cancellation source did not settle")
         self._saved_command_source_removed = True
         self._saved_command_source = None

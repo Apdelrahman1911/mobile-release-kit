@@ -28,7 +28,7 @@ import time
 from .build_inputs import InvocationCustody
 from .cancellation import CleanupScope
 from .checked_files import _Reader, _Policy, _Node, _directory_identity, _file_identity
-from .config import MAX_CONFIG_BYTES, MAX_VERSION_BYTES, ReleaseConfig, parse_config_text
+from .config import MAX_CONFIG_BYTES, MAX_VERSION_BYTES, ReleaseConfig, parse_config_text, validate_config_data
 from .discovery import GitContext
 from .errors import ConfigurationError, ValidationError
 from .local_release_intent import LocalStorePolicy
@@ -129,8 +129,10 @@ class LocalSourceObservation:
     """
     def __init__(self, invocation, configuration_bytes, version_bytes, endpoint, execution_source):
         prepare=getattr(invocation.cancellation,"_local_store_source",None) if type(invocation) is InvocationCustody else None
+        allocation = getattr(invocation.cancellation, "_version_allocation_source", None) if type(invocation) is InvocationCustody else None
         _need(type(invocation) is InvocationCustody and (invocation.mode == "build" or
-              invocation.mode=="store" and prepare is not None and prepare.require_operation().invocation is invocation)
+              invocation.mode=="store" and prepare is not None and prepare.require_operation().invocation is invocation or
+              invocation.mode=="allocation-read" and allocation is not None and allocation.require_operation().invocation is invocation)
               and invocation.project_owner is not None, "owner")
         self.invocation, self.guard = invocation, invocation.cancellation
         self.project = invocation.project_owner
@@ -153,11 +155,19 @@ class LocalSourceObservation:
         try:
             self.config = ReleaseConfig(self.root / CONFIG_PATH, self.root,
                                         parse_config_text(configuration_bytes.decode("utf-8")))
-            policy = LocalStorePolicy.from_config(self.config)
+            if allocation is None:
+                policy = LocalStorePolicy.from_config(self.config)
+            else:
+                validate_config_data(self.config.data)
         except (ConfigurationError, ValidationError, ValueError, UnicodeError):
             raise LocalSourceError("input") from None
-        _need(policy.enabled is True, "configuration")
-        self.branch = policy.candidate_branch
+        if allocation is None:
+            _need(policy.enabled is True, "configuration")
+            self.branch = policy.candidate_branch
+        else:
+            _need(execution_source is None and allocation.request.root == self.root
+                  and allocation.request.ref.startswith("refs/heads/") and endpoint == allocation.work_end, "owner")
+            self.branch = allocation.request.ref[len("refs/heads/"):]
         if prepare is not None:
             from .local_store_prepare import LocalStorePrepareRun
             from .local_store_execute import LocalStoreExecuteRun
@@ -167,6 +177,8 @@ class LocalSourceObservation:
                 self.branch=policy.production_branch
         self.version_path = _relative(self.config.section("version")["source"])
         _need(self.version_path != CONFIG_PATH, "path")
+        if allocation is not None:
+            _need(self.version_path == allocation.request.version_path, "input")
 
     def descriptor_quote(self):
         return source_descriptor_quote(self.root, self.version_path, self.branch)
@@ -275,7 +287,8 @@ class LocalSourceObservation:
         if candidate is not None:
             candidate._arm_source(self, arguments, timeout, limit)
             from .local_ios_candidate_source import IOSCandidateComposition
-            if type(candidate) is IOSCandidateComposition:
+            from .version_allocation_source import AllocationSourceRun
+            if type(candidate) in (IOSCandidateComposition, AllocationSourceRun):
                 candidate._bind_source_command(self, argv, environment)
         try:
             result = run_owned(argv, cwd=self.root, environ=environment, capture=True, text=False,

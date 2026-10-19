@@ -32,6 +32,7 @@ class SavedCommandDomain(Enum):
     ArtifactInspection = "artifact-inspection"
     GitHubHistory = "github-history"
     GitHubAuth = "github-auth"
+    VersionAllocationSource = "version-allocation-source"
     LocalStorePreflight = "local-store-preflight"
     LocalReleaseHistory = "local-release-history"
     LocalStorePrepare = "local-store-prepare"
@@ -65,6 +66,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.GitHubAuth:
         from . import _desktop_github_auth_protocol
         return _desktop_github_auth_protocol
+    if domain is SavedCommandDomain.VersionAllocationSource:
+        from . import _desktop_version_allocation_source_protocol
+        return _desktop_version_allocation_source_protocol
     if domain is SavedCommandDomain.LocalStorePreflight:
         from . import _desktop_store_preflight_protocol
         return _desktop_store_preflight_protocol
@@ -109,6 +113,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_github_auth_control import GhAuthInput
     if type(source) is GhAuthInput and source.domain is SavedCommandDomain.GitHubAuth:
         return SavedCommandDomain.GitHubAuth
+    from ._desktop_version_allocation_source_control import BorrowedAllocationInput
+    if type(source) is BorrowedAllocationInput and source.domain is SavedCommandDomain.VersionAllocationSource:
+        return SavedCommandDomain.VersionAllocationSource
     from ._desktop_store_preflight_control import StorePreflightInput
     if type(source) is StorePreflightInput and source.domain is SavedCommandDomain.LocalStorePreflight:
         return SavedCommandDomain.LocalStorePreflight

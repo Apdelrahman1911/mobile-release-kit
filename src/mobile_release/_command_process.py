@@ -3184,6 +3184,11 @@ class _Outer:
             from ._desktop_ios_archive_control import IOSArchiveInput
             _require(type(ios_source) is IOSArchiveInput)
             ios_source.require_operation().bind_command_slot(self, self.slot)
+        allocation_source = guard._version_allocation_source
+        if allocation_source is not None:
+            # Same original slot, rooted before any command acquisition. The
+            # source borrower has no command or finality engine of its own.
+            allocation_source.require_operation().bind_command_slot(self, self.slot)
         self.create_route, self.run_route = _Route(Tag.CREATE_W), _Route(Tag.RUN_TOOL)
         self.ctx.routes.extend((self.create_route, self.run_route))
         self.io: native.Acquisition | None = None
