@@ -30,6 +30,7 @@ class SavedCommandDomain(Enum):
     IOSArchive = "ios-archive"
     ArtifactInspection = "artifact-inspection"
     GitHubHistory = "github-history"
+    GitHubAuth = "github-auth"
     LocalStorePreflight = "local-store-preflight"
     LocalReleaseHistory = "local-release-history"
     LocalStorePrepare = "local-store-prepare"
@@ -57,6 +58,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.GitHubHistory:
         from . import _desktop_github_history_protocol
         return _desktop_github_history_protocol
+    if domain is SavedCommandDomain.GitHubAuth:
+        from . import _desktop_github_auth_protocol
+        return _desktop_github_auth_protocol
     if domain is SavedCommandDomain.LocalStorePreflight:
         from . import _desktop_store_preflight_protocol
         return _desktop_store_preflight_protocol
@@ -95,6 +99,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_github_history_control import HistoryInput
     if type(source) is HistoryInput and source.domain is SavedCommandDomain.GitHubHistory:
         return SavedCommandDomain.GitHubHistory
+    from ._desktop_github_auth_control import GhAuthInput
+    if type(source) is GhAuthInput and source.domain is SavedCommandDomain.GitHubAuth:
+        return SavedCommandDomain.GitHubAuth
     from ._desktop_store_preflight_control import StorePreflightInput
     if type(source) is StorePreflightInput and source.domain is SavedCommandDomain.LocalStorePreflight:
         return SavedCommandDomain.LocalStorePreflight
@@ -259,6 +266,7 @@ class _SavedCommandInput:
                            SavedCommandDomain.IOSArchive: "Original saved build input changed",
                            SavedCommandDomain.ArtifactInspection: "Original artifact inspection input changed",
                            SavedCommandDomain.GitHubHistory: "Original History input changed",
+                           SavedCommandDomain.GitHubAuth: "Original gh-auth input changed",
                            SavedCommandDomain.LocalStorePreflight: "Original Store access-check input changed",
                            SavedCommandDomain.LocalStorePrepare: "Original Store preparation input changed",
                            SavedCommandDomain.LocalStoreExecute: "Original Store execution input changed",

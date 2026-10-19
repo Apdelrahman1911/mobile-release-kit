@@ -73,6 +73,16 @@ fn admission_error(error: BridgeError) -> BridgeError {
         _ => Reason::InvalidInput,
     })
 }
+fn gh_capture_error(failure: auth_provider::Failure) -> BridgeError {
+    refused(match failure {
+        auth_provider::Failure::Unknown => Reason::CleanupUnknown,
+        auth_provider::Failure::Unavailable => Reason::RuntimeUnavailable,
+        auth_provider::Failure::TimedOut => Reason::NetworkUnavailable,
+        auth_provider::Failure::InvalidOutput | auth_provider::Failure::OutputLimit => Reason::ResponseInvalid,
+        auth_provider::Failure::Changed => Reason::TargetChanged,
+        auth_provider::Failure::Refused => Reason::InvalidInput,
+    })
+}
 fn outcome_error(error: &BridgeError) -> Reason {
     match error.code.as_str() {
         "cleanup_unknown" => Reason::CleanupUnknown,
@@ -724,14 +734,20 @@ impl ConnectionState {
     pub(crate) fn connect_from_gh<O: auth_provider::CaptureOwner>(&mut self, project_id: String,
         repository: String, credential: auth_provider::NativeCredential, owner: &mut O,
         generation: u32, supervisor: &Supervisor, now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
-        let (selected, mut token) = credential.into_connection_parts(owner, &project_id, &repository, generation).map_err(|failure| refused(match failure {
-            auth_provider::Failure::Unknown => Reason::CleanupUnknown,
-            auth_provider::Failure::Unavailable => Reason::RuntimeUnavailable,
-            auth_provider::Failure::TimedOut => Reason::NetworkUnavailable,
-            auth_provider::Failure::InvalidOutput | auth_provider::Failure::OutputLimit => Reason::ResponseInvalid,
-            auth_provider::Failure::Changed => Reason::TargetChanged,
-            auth_provider::Failure::Refused => Reason::InvalidInput,
-        }))?;
+        let (selected, mut token) = credential.into_connection_parts(owner, &project_id, &repository, generation).map_err(gh_capture_error)?;
+        self.connect_selected(ConnectTokenArgs { project_id, repository, token: std::mem::take(&mut *token) },
+                              Some(selected), generation, supervisor, now, wall)
+    }
+    /// The actual SAME Document has already rematched its retained registration,
+    /// session identity, source-work completion and consent while holding its
+    /// mutex. `prepared` and these current values are NOT admission authority.
+    /// CaptureOwner checks ran outside that mutex: no callback/re-lock occurs
+    /// here, only secondary exact binding and the existing HTTP admission.
+    pub(crate) fn connect_prepared_gh(&mut self, prepared: auth_provider::PreparedGhConnection,
+        project_id: String, repository: String, selected_login: &str, account_revision: &str,
+        generation: u32, supervisor: &Supervisor, now: Instant, wall: SystemTime) -> Result<Status, BridgeError> {
+        let (selected, mut token) = prepared.into_connection_parts(&project_id, &repository, generation,
+            selected_login, account_revision).map_err(gh_capture_error)?;
         self.connect_selected(ConnectTokenArgs { project_id, repository, token: std::mem::take(&mut *token) },
                               Some(selected), generation, supervisor, now, wall)
     }

@@ -125,6 +125,15 @@ pub(crate) struct PrivateOutput {
     stderr: Zeroizing<Vec<u8>>,
 }
 impl PrivateOutput {
+    /// Concrete Supervisor handoff: its first-read Zeroizing buffers stay
+    /// protected across this move. No intermediate ordinary Vec is required.
+    pub(crate) fn from_private_capture(stdout: Zeroizing<Vec<u8>>) -> Self {
+        Self {
+            exit_code: 0,
+            stdout,
+            stderr: Zeroizing::new(Vec::new()),
+        }
+    }
     /// Only the original native owner calls this AFTER its associated original
     /// capture has genuinely settled; a result-shaped message cannot do so.
     pub(crate) fn from_original_capture(exit_code: i32, stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
@@ -248,6 +257,29 @@ pub(crate) struct NativeCredential {
     token: Zeroizing<String>,
 }
 impl NativeCredential {
+    /// Called outside the actual Document mutex. Original owner checks may
+    /// acquire that mutex and finish native-source currentness checks. This
+    /// private handoff is NOT permission to connect: the SAME Document must
+    /// rematch its retained registration/consent and source work under its
+    /// mutex before consuming it through ConnectionState.
+    pub(crate) fn prepare_connection<O: CaptureOwner>(
+        self,
+        owner: &mut O,
+        project_id: String,
+        repository: String,
+        generation: u32,
+    ) -> Result<PreparedGhConnection, Failure> {
+        let (selected, token) =
+            self.into_connection_parts(owner, &project_id, &repository, generation)?;
+        Ok(PreparedGhConnection {
+            project_id,
+            repository,
+            generation,
+            selected,
+            token,
+        })
+    }
+
     pub(super) fn into_connection_parts<O: CaptureOwner>(
         self,
         owner: &mut O,
@@ -268,6 +300,52 @@ impl NativeCredential {
             repository,
             generation,
         )?;
+        Ok((self.selected, self.token))
+    }
+}
+
+/// Consume-only native memory between original-owner checks OUTSIDE Document
+/// and final current registration/consent checks INSIDE that SAME Document.
+/// No Clone/Debug/serde/token getter and no native admission capability. A
+/// context-shaped value, including a matching one, cannot authorize its use.
+pub(crate) struct PreparedGhConnection {
+    project_id: String,
+    repository: String,
+    generation: u32,
+    selected: SelectedAccount,
+    token: Zeroizing<String>,
+}
+impl PreparedGhConnection {
+    /// Secondary DATA equality only. The original Document gate supplies the
+    /// actual current context; this method does not acquire or invent it.
+    pub(crate) fn matches_context(
+        &self,
+        project_id: &str,
+        repository: &str,
+        generation: u32,
+        login: &str,
+        account_revision: &str,
+    ) -> bool {
+        self.project_id == project_id
+            && self.repository == repository
+            && self.generation == generation
+            && self.selected.login == login
+            && self.selected.account_revision == account_revision
+    }
+
+    /// Parent ConnectionState only. No owner callback, native call, await or
+    /// Document re-lock occurs here. The private value is spent even on refusal.
+    pub(super) fn into_connection_parts(
+        self,
+        project_id: &str,
+        repository: &str,
+        generation: u32,
+        login: &str,
+        account_revision: &str,
+    ) -> Result<(SelectedAccount, Zeroizing<String>), Failure> {
+        if !self.matches_context(project_id, repository, generation, login, account_revision) {
+            return Err(Failure::Changed);
+        }
         Ok((self.selected, self.token))
     }
 }
@@ -390,6 +468,7 @@ mod tests {
         changed: bool,
         unknown: bool,
         handoffs: usize,
+        inside_document: bool,
     }
     impl FakeOwner {
         fn new() -> Self {
@@ -407,6 +486,7 @@ mod tests {
                 changed: false,
                 unknown: false,
                 handoffs: 0,
+                inside_document: false,
             }
         }
     }
@@ -416,6 +496,10 @@ mod tests {
             Ok("synthetic-account-revision".into())
         }
         fn check_current(&mut self, _: &str, _: &str) -> Result<(), Failure> {
+            assert!(
+                !self.inside_document,
+                "owner check must be outside Document mutex"
+            );
             if self.changed {
                 Err(Failure::Changed)
             } else {
@@ -659,5 +743,94 @@ mod tests {
             assert!(!environment.contains_key(key));
         }
         assert_eq!(environment.get("GH_HOST").unwrap(), "github.com");
+    }
+
+    fn prepared_fixture(owner: &mut FakeOwner) -> PreparedGhConnection {
+        let mut provider = Provider::new();
+        let selected = provider.select(owner, "selected-fixture").unwrap();
+        provider
+            .acquire_selected(owner, &selected.login, &selected.revision)
+            .unwrap()
+            .prepare_connection(
+                owner,
+                "synthetic-project".into(),
+                "synthetic-owner/synthetic-repository".into(),
+                3,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn prepared_handoff_does_not_reenter_owner_under_document_mutex() {
+        let mut owner = FakeOwner::new();
+        let prepared = prepared_fixture(&mut owner);
+        assert_eq!(owner.handoffs, 1);
+        owner.inside_document = true;
+        // Parser/handoff DATA test only. No actual Document, permit, HTTP or
+        // native ownership is created by this synthetic currentness flag.
+        let (selected, token) = prepared
+            .into_connection_parts(
+                "synthetic-project",
+                "synthetic-owner/synthetic-repository",
+                3,
+                "selected-fixture",
+                "synthetic-account-revision",
+            )
+            .unwrap();
+        assert_eq!(selected.login, "selected-fixture");
+        assert_eq!(&*token, "INERT_NOT_A_CREDENTIAL");
+        assert_eq!(owner.handoffs, 1);
+        assert_eq!(owner.calls.len(), 2);
+    }
+
+    #[test]
+    fn prepared_handoff_exact_target_and_account_equality_is_not_scope_inference() {
+        for (project, repository, generation, login, revision) in [
+            (
+                "another-project",
+                "synthetic-owner/synthetic-repository",
+                3,
+                "selected-fixture",
+                "synthetic-account-revision",
+            ),
+            (
+                "synthetic-project",
+                "another-owner/another-repository",
+                3,
+                "selected-fixture",
+                "synthetic-account-revision",
+            ),
+            (
+                "synthetic-project",
+                "synthetic-owner/synthetic-repository",
+                4,
+                "selected-fixture",
+                "synthetic-account-revision",
+            ),
+            (
+                "synthetic-project",
+                "synthetic-owner/synthetic-repository",
+                3,
+                "another-fixture",
+                "synthetic-account-revision",
+            ),
+            (
+                "synthetic-project",
+                "synthetic-owner/synthetic-repository",
+                3,
+                "selected-fixture",
+                "another-revision",
+            ),
+        ] {
+            let mut owner = FakeOwner::new();
+            let prepared = prepared_fixture(&mut owner);
+            assert!(!prepared.matches_context(project, repository, generation, login, revision));
+            assert!(matches!(
+                prepared.into_connection_parts(project, repository, generation, login, revision),
+                Err(Failure::Changed)
+            ));
+            assert_eq!(owner.handoffs, 1);
+            assert_eq!(owner.calls.len(), 2);
+        }
     }
 }
