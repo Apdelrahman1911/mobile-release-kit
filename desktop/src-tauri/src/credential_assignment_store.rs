@@ -31,6 +31,14 @@ impl DurableGenerationReservation {
     pub(crate) fn operation_id(&self) -> &str { &self.intent.operation_id }
     pub(crate) fn target_record_id(&self) -> &str { &self.intent.record_id }
     pub(crate) fn store_revision(&self) -> u64 { self.store_revision.0 }
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        let mut bytes = std::mem::size_of::<Self>();
+        for value in [&self.project.project_id, &self.project.canonical_root, &self.intent.operation_id,
+            &self.intent.vault_id, &self.intent.generation_id, &self.intent.record_id, &self.intent.identity_sha256] {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        Some(bytes)
+    }
     /// Recheck the full original reference-only intent, without retrying or
     /// treating absence/corruption as a new generation opportunity.
     pub(crate) fn current(&self, state: &PrivateStateDirectory) -> Result<()> {

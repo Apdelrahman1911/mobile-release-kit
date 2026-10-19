@@ -11,6 +11,9 @@ use setup::{Assessment, Continuity, KeyReference, Observation, Plan, ProjectBind
     Role, SavedAssignment, SetupObservation, SetupStatus, Storage, persistence};
 use sha2::{Digest, Sha256};
 
+#[path = "credential_upload_key.rs"]
+pub(in crate::asset_session) mod upload_key;
+
 fn data_error(error: setup::Error) -> AssetError {
     AssetError::new(match error {
         setup::Error::Shape => Reason::InvalidRequest,
@@ -57,6 +60,28 @@ fn pending(state: &DocumentState) -> bool {
         || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
 }
 
+/// Ordinary retirement clears SlotData.reference. The actual current BoundLoan
+/// remains the owner of an assigned stored record; neither a cleared working
+/// reference nor a descriptor/preference can replace that original loan.
+pub(super) fn remembered_bound_reference(state: &DocumentState, slot: &Slot, selected_kind: Kind) -> Option<StoredRef> {
+    if slot.operation != Operation::Bind || slot.phase != Phase::Idle || slot.settlement != Settlement::Known
+        || slot.reason != Reason::None || slot.error.is_some() || slot.cleanup_end.is_some()
+        || slot.owner.stopped() || !slot.owner.resources_settled()
+        || !slot.owner.coordinator.try_lock().is_ok_and(|book| book.handle.is_none() && book.receipt == JoinReceipt::Returned)
+        || !slot.owner.child.try_lock().is_ok_and(|book| book.handle.is_none() && book.receipt == JoinReceipt::Returned)
+        || !slot.owner.vault.try_lock().is_ok_and(|work| work.first.is_none() && work.original_join.is_none() && work.failed_child_join.is_none())
+        || !slot.assessment.as_ref().is_some_and(SafeAssessment::permits) {
+        return None;
+    }
+    let session = state.vault.as_ref()?;
+    let target = slot.target.as_ref()?;
+    let mut current = session.bound.iter().flatten().filter(|loan|
+        loan.payload.kind == selected_kind && loan.current(state, session) && loan.reference.matches(target));
+    let reference = current.next()?.reference;
+    if current.next().is_some() { return None; }
+    Some(reference)
+}
+
 /// Stable *app identity*, not the entire versioned configuration or an expected
 /// signer fingerprint. Adding the generated public fingerprint must not make
 /// the app appear to be a new empty signing slot. The native admitted draft is
@@ -91,24 +116,31 @@ fn app_policy(draft: &[u8], role: Role) -> Result<(String, Option<String>), Asse
     Ok((crate::service_protocol::hex(&hash.finalize()), expected))
 }
 
-struct RecordFact { reference: KeyReference, assigned: bool, mutation_pending: bool }
+struct RecordFact { reference: KeyReference, assigned: bool, mutation_pending: bool, certificate: Option<String> }
 struct NativeObservation {
     project: ProjectBinding, role: Role, revision: u32, identity: String, expected: Option<String>,
     storage: Storage, vault_identity: Option<format::Identity>, pending: bool, records: Vec<RecordFact>,
 }
 impl NativeObservation {
     fn with<R>(&self, action: impl FnOnce(&Observation<'_>) -> R) -> R {
+        self.with_continuity(Continuity::Unknown, action)
+    }
+    // This stays private to the original native adapter. Only the explicitly
+    // confirmed generation action may use NewApplicationConfirmed; observation
+    // and wizard reruns always use Unknown above.
+    fn with_continuity<R>(&self, continuity: Continuity, action: impl FnOnce(&Observation<'_>) -> R) -> R {
         let records: Vec<_> = self.records.iter().map(|record| RecordObservation {
-            reference: &record.reference, certificate_sha256: None,
+            reference: &record.reference, certificate_sha256: record.certificate.as_deref(),
             assessment: if record.assigned { Assessment::Current } else { Assessment::NotChecked },
             current_assignment: record.assigned, mutation_pending: record.mutation_pending,
         }).collect();
-        // Current format assessment+Bind does NOT prove a certificate
-        // fingerprint. Native signing validation must provide that evidence in
-        // its own admitted facet; never copy the expected fingerprint here.
+        // Format assessment+Bind never prove a certificate fingerprint. A
+        // present fingerprint comes only from the generated key's volatile,
+        // current full-reference native observation below; never an expected
+        // config value or a persisted preference after reopen.
         action(&Observation { project: &self.project, role: self.role, revision: self.revision,
             identity_sha256: &self.identity, expected_certificate_sha256: self.expected.as_deref(),
-            storage: self.storage, vault_identity: self.vault_identity, continuity: Continuity::Unknown,
+            storage: self.storage, vault_identity: self.vault_identity, continuity,
             operation_pending: self.pending, records: &records })
     }
 }
@@ -116,10 +148,17 @@ impl NativeObservation {
 #[cfg(feature = "desktop-shell")]
 impl DocumentBinding {
     fn credential_observation(&self, state: &DocumentState, service: &ApplicationService, role: Role) -> Result<NativeObservation, AssetError> {
+        let runtime_id = &state.context.as_ref().ok_or_else(|| AssetError::new(Reason::ContextStale))?.project_id;
+        let known = service.native_binding(runtime_id).map_err(service_error)?;
+        self.credential_observation_for_binding(state, known, role)
+    }
+    // Generation obtains the shared service binding OFF the document lock,
+    // then uses this same original context/row adapter to rematch it.
+    fn credential_observation_for_binding(&self, state: &DocumentState, known: crate::application_service::ProjectBinding,
+        role: Role) -> Result<NativeObservation, AssetError> {
         if state.revision == 0 || !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
         let context = state.context.as_ref().ok_or_else(|| AssetError::new(Reason::ContextStale))?;
         if !self.context_matches(state, context)? { return Err(AssetError::new(Reason::ContextStale)); }
-        let known = service.native_binding(&context.project_id).map_err(service_error)?;
         let actual = context.project.identity.posix().map_err(AssetError::new)?.preflight_identity();
         if context.project.path.to_str() != Some(known.canonical_root.as_str())
             || actual.device.parse::<u64>().ok() != Some(known.device) || actual.inode.parse::<u64>().ok() != Some(known.inode) {
@@ -152,7 +191,8 @@ impl DocumentBinding {
                             && assignment.record_id == key.id && assignment.record_revision == key.revision
                             && assignment.context_revision == context.revision && assignment_available(state, assignment));
                         records.push(RecordFact { reference: KeyReference::native(vault_identity, row.authenticated.record, row.authenticated.revision),
-                            assigned, mutation_pending: row.mutation_pending });
+                            assigned, mutation_pending: row.mutation_pending,
+                            certificate: upload_key::certificate_for(session, row, &identity).map(|hash| crate::service_protocol::hex(&hash)) });
                     }
                 }
             }
@@ -188,12 +228,11 @@ impl DocumentBinding {
         // Require the actual settled Bind publication, not a newly supplied
         // JSON assessment or an assignment-shaped record from another owner.
         let slot = state.slot.as_ref().ok_or_else(|| AssetError::new(Reason::SourceChanged))?;
-        if slot.operation != Operation::Bind || slot.reason != Reason::None || slot.error.is_some() || slot.cleanup_end.is_some()
-            || !slot.assessment.as_ref().is_some_and(SafeAssessment::permits)
-            || !slot.vault.reference.is_some_and(|bound| KeyReference::native(bound.identity, bound.record, bound.revision) == reference) {
+        if !remembered_bound_reference(&state, slot, kind(role)?).is_some_and(|bound|
+            KeyReference::native(bound.identity, bound.record, bound.revision) == reference) {
             return Err(AssetError::new(Reason::SourceChanged));
         }
-        let saved = SavedAssignment { reference, identity_sha256: native.identity.clone(), certificate_sha256: None,
+        let saved = SavedAssignment { reference, identity_sha256: native.identity.clone(), certificate_sha256: current[0].certificate.clone(),
             operation_id: operation_id.to_owned() };
         native.with(|observation| persistence::remember_bound(service.state_directory(), expected_preference_revision,
             &native.project, role, saved, observation, reassign)).map_err(preference_error)
