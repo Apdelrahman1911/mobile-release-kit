@@ -40,6 +40,7 @@ REASONS = policy.REASONS | frozenset({"none", "authority-unavailable", "authorit
     "authority-changed", "authority-missing", "authority-rewound", "ledger-invalid", "ledger-full",
     "candidate-binding-conflict", "conditional-conflict", "pending-unresolved", "journal-unavailable",
     "source-changed", "invalid-allocation", "unauthorized", "forbidden", "rate-limited",
+    "target-changed", "not-found-or-inaccessible",
     "network-unavailable", "tls-failed", "response-invalid", "response-limit", "expired", "cancelled"})
 
 
@@ -655,7 +656,8 @@ def allocate_version(request: AllocationRequest, authority: AuthorityRegistratio
     if pending is not None or write_claimed or reason == "journal-unavailable":
         return outcome("recovery-required", reason)
     return outcome("unavailable" if reason.startswith("authority-") or reason in
-                   {"network-unavailable", "tls-failed", "unauthorized", "forbidden", "rate-limited"} else "rejected", reason)
+                   {"network-unavailable", "tls-failed", "unauthorized", "forbidden", "rate-limited",
+                    "not-found-or-inaccessible"} else "rejected", reason)
 
 
 def prepare_reserved_version_edit(lease: object, checkout: object, expected_revision: str,
