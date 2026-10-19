@@ -1,0 +1,620 @@
+diff --git a/src/mobile_release/apple_provisioning_bundle_read.py b/src/mobile_release/apple_provisioning_bundle_read.py
+--- a/src/mobile_release/apple_provisioning_bundle_read.py
++++ b/src/mobile_release/apple_provisioning_bundle_read.py
+@@ -32,8 +32,21 @@
+     return context.get("query") == QUERY and context.get("platform") == "ios"
+
+
++def selected_read(context: dict) -> bool:
++    from . import apple_provisioning_profile_read as profiles
++    return selected_query(context) or profiles.selected_query(context)
++
++
+ def fixed_argv(tooling_root: Path) -> tuple[str, ...]:
+     return ("bundle", "exec", "ruby", str(tooling_root / "fastlane/apple_provisioning_bundle_read.rb"))
++
++
++def fixed_read_argv(tooling_root: Path, context: dict) -> tuple[str, ...]:
++    from . import apple_provisioning_profile_read as profiles
++    if selected_query(context):
++        return fixed_argv(tooling_root)
++    api.require(profiles.selected_query(context), "invalid_provisioning_read")
++    return profiles.fixed_argv(tooling_root)
+
+
+ def query_prerequisites(config) -> bool:
+@@ -47,12 +60,11 @@
+         return False
+
+
+-def observation_from_frame(raw: bytes, *, context_sha256: str, bundle_id: str) -> str:
+-    """Validate the ORIGINAL pre-JSON HTTP bytes, not an SDK-normalized Hash.
+-
+-    This describes at most one completed response page. A missing continuation,
+-    count, row or permission cannot imply global availability. Transport/native
+-    finality is deliberately not an input or an output of this DATA parser.
++def _response_from_frame(raw: bytes, *, context_sha256: str, bundle_id: str) -> tuple[str | None, bytes | None]:
++    """Private shared envelope only; both closed queries validate their rows.
++
++    This is not a provider response/finality object or a generic HTTP parser.
++    The native Context hash and fixed seventh command bind which read was used.
+     """
+     api.list_bundle_ids(bundle_id)
+     api.require(type(context_sha256) is str and api.HEX_RE.fullmatch(context_sha256) is not None,
+@@ -70,15 +82,30 @@
+         api.require(failure is None or failure == "provider_request_unconfirmed")
+         if failure is not None:
+             api.require(encoded is None)
+-            return "not-permitted" if status in (401, 403) else "inconclusive"
++            return ("not-permitted" if status in (401, 403) else "inconclusive"), None
+         api.require(type(status) is int and type(encoded) is str and encoded.isascii()
+                     and 0 < len(encoded) <= 4 * ((RAW_LIMIT + 2) // 3))
+         original = base64.b64decode(encoded, validate=True)
+         api.require(0 < len(original) <= RAW_LIMIT and base64.b64encode(original).decode("ascii") == encoded)
+         if status in (401, 403):
+-            return "not-permitted"
++            return "not-permitted", None
+         # A list GET has a 200 response. 404/204/redirects are not an empty list.
+         api.require(status == 200)
++        return None, original
++    except (api.ProvisioningError, ValueError, TypeError, KeyError, UnicodeError, binascii.Error):
++        return "inconclusive", None
++
++
++def observation_from_frame(raw: bytes, *, context_sha256: str, bundle_id: str) -> str:
++    """One saved Bundle ID from ORIGINAL raw bytes, not an SDK-normalized Hash.
++
++    A missing continuation, count, row or permission cannot imply global
++    availability. Native finality is neither an input nor an output here.
++    """
++    reason, original = _response_from_frame(raw, context_sha256=context_sha256, bundle_id=bundle_id)
++    if reason is not None:
++        return reason
++    try:
+         document = api.document(original)
+         api.require("errors" not in document and "error" not in document)
+         rows, links, meta = (document.get(k) for k in ("data", "links", "meta"))
+@@ -118,8 +145,8 @@
+     return value
+
+
+-def read_saved_bundle_id(operation, config, material) -> tuple[list[Finding], str]:
+-    """Called only inside the existing StorePreflightRun's selected-material loan.
++def _read_raw_frame(operation, config, material, *, expected_query: str) -> tuple[list[Finding], bytes | None]:
++    """Two closed metadata reads on the original selected-material loan.
+
+     The final command replaces that run's ordinary Fastfile access query. Its
+     same P8 validator and five installed-runtime probes remain the first six
+@@ -134,8 +161,10 @@
+     from .owned_process import ProcessError, run_owned
+     from .stores import _require_fastlane_bundle, _runtime_environment
+     from .tooling import _complete_tooling_root
+-
+-    api.require(type(operation) is StorePreflightRun and selected_query(operation.request.context)
++    from . import apple_provisioning_profile_read as profiles
++
++    api.require(expected_query in {QUERY, profiles.QUERY} and type(operation) is StorePreflightRun
++                and selected_read(operation.request.context) and operation.request.context.get("query") == expected_query
+                 and operation.source.require_operation() is operation and type(material) is SelectedStoreMaterial,
+                 "bundle_read_original_unavailable")
+     operation.checkpoint()
+@@ -144,29 +173,33 @@
+     material.require(config=config, platforms=("ios",), invocation=invocation)
+     runtime.require(root=config.root, invocation=invocation)
+     bundle_id = config.section("ios")["bundleId"]
+-    request = api.list_bundle_ids(bundle_id)
++    request = api.list_bundle_ids(bundle_id) if expected_query == QUERY else api.list_profiles()
+     context_sha256 = api.digest(api.canonical(operation.request.context))
+     tooling = runtime.tooling_root
++    needed = ("fastlane/apple_provisioning.rb", "fastlane/apple_provisioning_bundle_read.rb")
++    if expected_query == profiles.QUERY:
++        needed += ("fastlane/apple_provisioning_profile_read.rb",)
+     if not _complete_tooling_root(tooling) or any(
+         (tooling / name).is_symlink() or not (tooling / name).is_file()
+-        for name in ("fastlane/apple_provisioning.rb", "fastlane/apple_provisioning_bundle_read.rb")
++        for name in needed
+     ):
+-        return [Finding("store.online.fastfile", Status.FAIL, "Bundled Bundle-ID reader is unavailable.",
+-                        category="store-access")], "not-checked"
++        return [Finding("store.online.fastfile", Status.FAIL, "Bundled provisioning metadata reader is unavailable.",
++                        category="store-access")], None
+     try:
+         _require_fastlane_bundle(tooling, cancellation=operation.guard, runtime_context=runtime)
+     except ProcessError:
+         raise
+     except StoreOperationError:
+         return [Finding("store.online.bundle", Status.FAIL, "Pinned Store dependencies are unavailable.",
+-                        category="store-access")], "not-checked"
++                        category="store-access")], None
+
+     def current():
+         operation._source_post()
+         operation._received_post()
+         material.require(config=config, platforms=("ios",), invocation=invocation)
+         runtime.require(root=config.root, invocation=invocation)
+-        api.require(api.list_bundle_ids(config.section("ios")["bundleId"]) == request,
++        api.require(config.section("ios")["bundleId"] == bundle_id
++                    and (api.list_bundle_ids(bundle_id) if expected_query == QUERY else api.list_profiles()) == request,
+                     "bundle_read_original_changed")
+
+     with finite_scratch(layout="online-runner", cancellation=operation.guard,
+@@ -182,15 +215,23 @@
+                             "FASTLANE_SKIP_DOCS": "true", "FASTLANE_SKIP_UPDATE_CHECK": "true",
+                             "MOBILE_RELEASE_ASC_BUNDLE_ID": bundle_id,
+                             "MOBILE_RELEASE_ASC_BUNDLE_READ_CONTEXT": context_sha256})
+-        argv = fixed_argv(tooling)
++        argv = fixed_read_argv(tooling, operation.request.context)
+         with runtime.command(argv, capture=True):
+             completed = run_owned(argv, cwd=runner._path, environ=environment, capture=True, text=False,
+                                   timeout=QUERY_SECONDS, output_limit=FRAME_LIMIT, cancellation=operation.guard)
+         current()
+         if (type(completed.returncode) is not int or completed.returncode != 0
+                 or type(completed.stdout) is not bytes or completed.stderr != b""):
+-            observation = "inconclusive"
++            raw = None
+         else:
+-            observation = observation_from_frame(completed.stdout, context_sha256=context_sha256, bundle_id=bundle_id)
++            raw = completed.stdout
+     current()
+-    return [], observation
++    return [], raw
++
++
++def read_saved_bundle_id(operation, config, material) -> tuple[list[Finding], str]:
++    findings, raw = _read_raw_frame(operation, config, material, expected_query=QUERY)
++    if findings or raw is None:
++        return findings, "not-checked" if findings else "inconclusive"
++    return findings, observation_from_frame(raw, context_sha256=api.digest(api.canonical(operation.request.context)),
++                                            bundle_id=config.section("ios")["bundleId"])
+diff --git a/src/mobile_release/_desktop_store_preflight_protocol.py b/src/mobile_release/_desktop_store_preflight_protocol.py
+--- a/src/mobile_release/_desktop_store_preflight_protocol.py
++++ b/src/mobile_release/_desktop_store_preflight_protocol.py
+@@ -7,6 +7,7 @@
+                                          _TOKEN, _PROJECT, _DECIMAL, STATUSES)
+ from ._desktop_android_build_protocol import saved_version
+ from . import apple_provisioning_bundle_read as bundle_read
++from . import apple_provisioning_profile_read as profile_read
+
+ PROTOCOL = "mrk-local-store-preflight/1"
+ CONSENT = "local-android-store-access-v1"
+@@ -36,7 +37,9 @@
+ def context(value, *, apple_access=False, bundle_query=False):
+     require(type(apple_access) is bool and type(bundle_query) is bool)
+     query_keys = {"query"} if type(value) is dict and "query" in value else set()
+-    require(not query_keys or apple_access and bundle_query and value.get("platform") == "ios" and value["query"] == bundle_read.QUERY)
++    # This explicit access-only opt-in stays false for Prepare/Execute/Reconcile.
++    require(not query_keys or apple_access and bundle_query and value.get("platform") == "ios"
++            and value["query"] in (bundle_read.QUERY, profile_read.QUERY))
+     value = _keys(value, {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+                          "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "operation"} | query_keys)
+     require(type(value["projectId"]) is str and _PROJECT.fullmatch(value["projectId"]) is not None
+@@ -97,7 +100,8 @@
+
+ def validate_result(value, *, platform="android", query=None):
+     if query is not None:
+-        require(platform == "ios" and query == bundle_read.QUERY and bundle_read.valid_result(value))
++        require(platform == "ios" and (query == bundle_read.QUERY and bundle_read.valid_result(value)
++                or query == profile_read.QUERY and profile_read.valid_result(value)))
+         return
+     require(platform in ("android", "ios"))
+     value=_keys(value,{"schemaVersion","scope","findings","limitations"})
+diff --git a/src/mobile_release/desktop_store_preflight.py b/src/mobile_release/desktop_store_preflight.py
+--- a/src/mobile_release/desktop_store_preflight.py
++++ b/src/mobile_release/desktop_store_preflight.py
+@@ -31,6 +31,7 @@
+ from .reporting import Finding, Status, FAILING_STATUSES
+ from .stores import _fastlane_probe_commands, online_preflight_findings
+ from . import apple_provisioning_bundle_read as bundle_read
++from . import apple_provisioning_profile_read as profile_read
+
+
+ class _Refused(Exception):
+@@ -88,7 +89,7 @@
+
+     def bind_scratch(self, scratch):
+         layouts = ("online-runner", "store-selection", "store-selection", "online-runner", "online-readback")
+-        if bundle_read.selected_query(self.request.context):
++        if bundle_read.selected_read(self.request.context):
+             layouts = layouts[:4]  # Private capture, never a Store-access output file.
+         require(type(scratch) is FiniteScratch and scratch.cancellation is self.guard
+                 and len(self.scratches) < len(layouts) and scratch.layout == layouts[len(self.scratches)]
+@@ -222,8 +223,8 @@
+         self.checkpoint()
+         require(runtime is self.runtime and type(runtime) is StoreRuntimeContext and self._pending is None
+                 and self._next_command <= self._lane_index and type(capture) is bool)
+-        query = bundle_read.selected_query(self.request.context)
+-        final = (bundle_read.fixed_argv(runtime.tooling_root) if query else
++        query = bundle_read.selected_read(self.request.context)
++        final = (bundle_read.fixed_read_argv(runtime.tooling_root, self.request.context) if query else
+                  ("bundle", "exec", "ruby", str(runtime.tooling_root / "fastlane/run_lane.rb"), self.request.context["platform"] + "_online_preflight"))
+         expected = (*_fastlane_probe_commands(runtime.tooling_root), final)
+         index = self._next_command
+@@ -248,13 +249,13 @@
+         require(self._pending is not None and not self._command_claimed
+                 and tuple(argv) == self._pending_argv and capture is self._pending_capture
+                 and (type(evidence) is CommandCallEvidence if self._pending == self._lane_index
+-                     and not bundle_read.selected_query(self.request.context) else evidence is None))
++                     and not bundle_read.selected_read(self.request.context) else evidence is None))
+         self._command_claimed = True
+
+     def command_limits(self, timeout, capture, output_limit):
+         self.checkpoint()
+         require(self._pending is not None and capture is self._pending_capture and self._command_claimed)
+-        query = self._pending == self._lane_index and bundle_read.selected_query(self.request.context)
++        query = self._pending == self._lane_index and bundle_read.selected_read(self.request.context)
+         maximum = 60 if self._pending < self._lane_index or query else 900
+         return min(timeout, maximum), min(output_limit, bundle_read.FRAME_LIMIT if query else 2 * 1024 * 1024)
+
+@@ -290,16 +291,21 @@
+                         with _selected_store_material(config, values=values, platforms=(platform,),
+                                                       invocation=invocation, scratch_parent=home._path) as material:
+                             findings.extend(material.validate(runtime_context=self.runtime) if platform == "ios" else material.validate())
+-                            if bundle_read.selected_query(self.request.context):
+-                                observation = "not-checked"
++                            if bundle_read.selected_read(self.request.context):
++                                profiles = profile_read.selected_query(self.request.context)
++                                observation = profile_read.unavailable("not-checked") if profiles else "not-checked"
+                                 if not bundle_read.query_prerequisites(config) or any(row.status in FAILING_STATUSES for row in findings):
+                                     findings.append(Finding("store.online.gate", Status.BLOCKED,
+                                         "Configure the saved iOS Bundle ID and selected API key.", category="store-access"))
+                                 else:
+-                                    extra, observation = bundle_read.read_saved_bundle_id(self, config, material)
++                                    if profiles:
++                                        extra, observation = profile_read.read_saved_profiles(self, config, material)
++                                    else:
++                                        extra, observation = bundle_read.read_saved_bundle_id(self, config, material)
+                                     findings.extend(extra)
+                                 self._source_post(); self._received_post()
+-                                self.report = bundle_read.project_result(findings, observation)
++                                self.report = (profile_read.project_result(findings, observation) if profiles else
++                                               bundle_read.project_result(findings, observation))
+                             else:
+                                 blockers = _online_query_blockers(config, (platform,), findings)
+                                 if blockers:
+diff --git a/src/mobile_release/tooling.py b/src/mobile_release/tooling.py
+--- a/src/mobile_release/tooling.py
++++ b/src/mobile_release/tooling.py
+@@ -19,6 +19,7 @@
+     "fastlane/apple_store.rb",
+     "fastlane/apple_provisioning.rb",
+     "fastlane/apple_provisioning_bundle_read.rb",
++    "fastlane/apple_provisioning_profile_read.rb",
+     "fastlane/apple_production.rb",
+     "fastlane/apple_asset_upload.rb",
+     "fastlane/apple_create_retry.rb",
+diff --git a/fastlane/apple_provisioning_bundle_read.rb b/fastlane/apple_provisioning_bundle_read.rb
+--- a/fastlane/apple_provisioning_bundle_read.rb
++++ b/fastlane/apple_provisioning_bundle_read.rb
+@@ -22,6 +22,11 @@
+
+     def self.require!(value)
+       raise Error unless value
++    end
++
++    def self.supported_input?(input)
++      input.instance_of?(Input) ||
++        (defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input))
+     end
+
+     class Input
+@@ -109,7 +114,10 @@
+
+     class ReadOwner
+       def initialize(input, token, client)
++        AppleBundleRead.require!(AppleBundleRead.supported_input?(input))
+         @input, @token, @client, @thread = input, token, client, Thread.current
++        @request = AppleProvisioning::Request.new(input.request)
++        AppleBundleRead.require!(@request.kind == (input.instance_of?(Input) ? "list_bundle_ids" : "list_profiles"))
+         @connection, @builder = client.client, client.client.builder
+         @admitted = @sent = @captured = @finished = false
+         @raw = @status = nil
+@@ -143,9 +151,9 @@
+         url = environment[:url]
+         AppleBundleRead.require!(environment[:method] == :get && environment[:body].nil? && url.is_a?(URI::HTTPS) &&
+           url.scheme == "https" && url.host == "api.appstoreconnect.apple.com" && url.port == 443 &&
+-          url.userinfo.nil? && url.fragment.nil? && url.path == "/v1/bundleIds" && url.to_s.bytesize <= 2048)
++          url.userinfo.nil? && url.fragment.nil? && url.path == @request.path && url.to_s.bytesize <= 2048)
+         pairs = URI.decode_www_form(url.query || "")
+-        AppleBundleRead.require!(pairs.size == 3 && pairs.to_h == @input.request.fetch("query") &&
++        AppleBundleRead.require!(pairs.size == @request.query.size && pairs.to_h == @request.query &&
+           environment[:request_headers]["Authorization"] == "Bearer #{@token.text}")
+         true
+       end
+@@ -188,7 +196,7 @@
+
+     class Operation
+       def initialize(input)
+-        AppleBundleRead.require!(input.instance_of?(Input))
++        AppleBundleRead.require!(AppleBundleRead.supported_input?(input))
+         @input, @used = input, false
+       end
+
+@@ -220,9 +228,17 @@
+         Gem.loaded_specs.fetch("faraday_middleware").version.to_s == "1.2.1")
+     end
+
+-    def self.main(arguments, environment, output)
++    def self.main(arguments, environment, output, query: :bundle)
+       require!(arguments.empty?)
+-      input = Input.new(environment) # Refuse ambient SDK state before loading it.
++      # The fixed entry script selects one of two exact classes; no endpoint,
++      # factory, credential, arbitrary operation or caller-selected URL input.
++      input = case query
++              when :bundle then Input.new(environment)
++              when :profiles
++                require!(defined?(AppleProfileRead::Input))
++                AppleProfileRead::Input.new(environment)
++              else raise Error
++              end # Refuse ambient SDK state before loading it.
+       frame = Operation.new(input).execute
+       require!(frame.bytesize <= FRAME_LIMIT && output.write(frame) == frame.bytesize)
+       output.flush
+diff --git a/desktop/src-tauri/src/apple_provisioning_bundle_read.rs b/desktop/src-tauri/src/apple_provisioning_bundle_read.rs
+--- a/desktop/src-tauri/src/apple_provisioning_bundle_read.rs
++++ b/desktop/src-tauri/src/apple_provisioning_bundle_read.rs
+@@ -11,6 +11,17 @@
+ pub(crate) enum Query {
+     #[serde(rename = "bundle-id-registration")]
+     BundleIdRegistration,
++    #[serde(rename = "app-store-profile-reuse")]
++    AppStoreProfileReuse,
++}
++
++impl Query {
++    pub(super) fn consent(self) -> &'static str {
++        match self {
++            Self::BundleIdRegistration => CONSENT,
++            Self::AppStoreProfileReuse => super::profile_read::CONSENT,
++        }
++    }
+ }
+
+ #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+@@ -53,6 +64,7 @@
+     value.schema_version == 1
+         && value.scope == SCOPE
+         && value.observation.is_some()
++        && value.profile_reuse.is_none()
+         && value.limitations.as_slice() == LIMITATIONS
+         && value.findings.len() <= 16
+         && value
+diff --git a/desktop/src-tauri/src/local_store_preflight_protocol.rs b/desktop/src-tauri/src/local_store_preflight_protocol.rs
+--- a/desktop/src-tauri/src/local_store_preflight_protocol.rs
++++ b/desktop/src-tauri/src/local_store_preflight_protocol.rs
+@@ -7,6 +7,8 @@
+     protocol::{check_value, strict_json, valid_id}};
+ #[path = "apple_provisioning_bundle_read.rs"]
+ mod bundle_read;
++#[path = "apple_provisioning_profile_read.rs"]
++mod profile_read;
+
+ pub(crate) const PROTOCOL: &str = "mrk-local-store-preflight/1";
+ pub(crate) const CONSENT: &str = "local-android-store-access-v1";
+@@ -103,18 +105,18 @@
+         && !(keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+             "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "query"])
+             && value.get("platform").and_then(Value::as_str)==Some("ios")
+-            && value.get("query").and_then(Value::as_str)==Some("bundle-id-registration")) { return Err(invalid()); }
++            && matches!(value.get("query").and_then(Value::as_str),Some("bundle-id-registration"|"app-store-profile-reuse"))) { return Err(invalid()); }
+     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
+     if !input.context().valid() { return Err(invalid()); } Ok(input)
+ }
+ pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
+     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
+     let input = Start::deserialize(value).map_err(|_| invalid())?;
+-    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|bundle_read::CONSENT) { return Err(invalid()); } Ok(input)
++    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|bundle_read::CONSENT|profile_read::CONSENT) { return Err(invalid()); } Ok(input)
+ }
+ impl Start {
+     pub(crate) fn matches_context(&self, context:&Context)->bool {
+-        if context.query.is_some() { return context.platform == AccessPlatform::Ios && self.consent_version == bundle_read::CONSENT; }
++        if let Some(query)=context.query { return context.platform == AccessPlatform::Ios && self.consent_version == query.consent(); }
+         self.consent_version == context.platform.consent()
+     }
+ }
+@@ -189,7 +191,8 @@
+ #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all = "kebab-case")]
+ pub(crate) enum Limitation { NonPublishing, NoProjectCommands, NoBuildOrSigning, NoReleaseReadiness,
+-    PointInTimeAccountAccess, SavedInputsNotAtomic, NoTeamVerification, NoGlobalAvailabilityClaim, NoProvisioningChanges }
++    PointInTimeAccountAccess, SavedInputsNotAtomic, NoTeamVerification, NoGlobalAvailabilityClaim, NoProvisioningChanges,
++    MetadataOnly, NoPrivateKeyMatch, NoProfileAuthentication, NoAccountCertificateInventory }
+ const LIMITATIONS: [Limitation; 6] = [Limitation::NonPublishing, Limitation::NoProjectCommands,
+     Limitation::NoBuildOrSigning, Limitation::NoReleaseReadiness, Limitation::PointInTimeAccountAccess,
+     Limitation::SavedInputsNotAtomic];
+@@ -198,11 +201,16 @@
+ pub(crate) struct ResultData { schema_version: u32, scope: String, findings: Vec<Finding>, limitations: Vec<Limitation>,
+     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "bundle_read::optional_observation")]
+     observation: Option<bundle_read::Observation>,
++    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "profile_read::optional_summary")]
++    profile_reuse: Option<profile_read::Summary>,
+ }
+ impl ResultData {
+     fn valid(&self, context:&Context) -> bool {
+-        if context.query.is_some() { return context.platform == AccessPlatform::Ios && bundle_read::valid_result(self); }
+-        self.observation.is_none() && self.schema_version == 1 && self.scope == context.platform.scope()
++        if let Some(query)=context.query { return context.platform == AccessPlatform::Ios && match query {
++            bundle_read::Query::BundleIdRegistration => bundle_read::valid_result(self),
++            bundle_read::Query::AppStoreProfileReuse => profile_read::valid_result(self),
++        }; }
++        self.observation.is_none() && self.profile_reuse.is_none() && self.schema_version == 1 && self.scope == context.platform.scope()
+             && self.limitations.as_slice() == LIMITATIONS && self.findings.len() <= 16
+     }
+ }
+diff --git a/desktop/src-tauri/src/macos_store_runtime.rs b/desktop/src-tauri/src/macos_store_runtime.rs
+--- a/desktop/src-tauri/src/macos_store_runtime.rs
++++ b/desktop/src-tauri/src/macos_store_runtime.rs
+@@ -13,6 +13,7 @@
+     "store/tooling/Gemfile", "store/tooling/Gemfile.lock", "store/tooling/fastlane/Fastfile",
+     "store/tooling/fastlane/run_lane.rb", "store/tooling/fastlane/native_process_spawn.rb",
+     "store/tooling/fastlane/apple_provisioning.rb", "store/tooling/fastlane/apple_provisioning_bundle_read.rb",
++    "store/tooling/fastlane/apple_provisioning_profile_read.rb",
+     "store/licenses/Ruby-COPYING", "store/licenses/Ruby-BSDL", "store/licenses/Ruby-LEGAL",
+     "store/licenses/OpenSSL-LICENSE.txt", "store/licenses/LibYAML-License",
+     "store/licenses/locked-gem-licenses.txt",
+diff --git a/desktop/src/localStorePreflightTypes.ts b/desktop/src/localStorePreflightTypes.ts
+--- a/desktop/src/localStorePreflightTypes.ts
++++ b/desktop/src/localStorePreflightTypes.ts
+@@ -2,19 +2,20 @@
+ import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome, OfflineCoreStatus, SavedConfigContent } from './offlinePreflightTypes.ts';
+ export interface PrepareLocalStorePreflight {
+   projectId:string; draftRevision:number; baselineGeneration:number; savedConfig:SavedConfigContent; savedVersion:AndroidBuildSavedVersion;
+-  credentialContextRevision:number; recordId:string; recordRevision:number; executionMode:'local'; platform?:'ios';query?:'bundle-id-registration';
++  credentialContextRevision:number; recordId:string; recordRevision:number; executionMode:'local'; platform?:'ios';query?:'bundle-id-registration'|'app-store-profile-reuse';
+ }
+ export interface LocalStoreContext extends Omit<PrepareLocalStorePreflight,'platform'> {platform:'android'|'ios';operation:'local-store-preflight'}
+ export interface LocalStoreIdentity {operationId:string;ownerGeneration:string}
+ export type LocalStoreReason='none'|'cancelled'|'context-changed'|'document-lost'|'shutdown'|'timed-out'|'protocol-error'|'runtime-unavailable'|'intent-expired'|'stale-intent'|'saved-source-changed'|'saved-source-invalid'|'credentials-unavailable'|'query-prerequisites'|'command-incomplete'|'cleanup-unknown';
+ export type StoreCheck='credential-format'|'query-prerequisites'|'runtime-unavailable'|'bundle-unavailable'|'store-access';
+ export type BundleIdObservation='found'|'not-returned'|'not-permitted'|'inconclusive'|'not-checked';
+-export interface LocalStoreResult {schemaVersion:1;scope:'local-android-store-access-no-publishing'|'local-ios-store-access-no-publishing'|'local-ios-bundle-id-registration-read';findings:{check:StoreCheck;status:OfflineCoreStatus}[];limitations:string[];observation?:BundleIdObservation}
++export interface ProfileReuseSummary {observation:BundleIdObservation;counts:{matchingProfiles:number;activeProfiles:number;currentMetadataCandidates:number;relatedCertificates:number}|null;checkedAt:string|null}
++export interface LocalStoreResult {schemaVersion:1;scope:'local-android-store-access-no-publishing'|'local-ios-store-access-no-publishing'|'local-ios-bundle-id-registration-read'|'local-ios-profile-reuse-metadata-read';findings:{check:StoreCheck;status:OfflineCoreStatus}[];limitations:string[];observation?:BundleIdObservation;profileReuse?:ProfileReuseSummary}
+ export interface LocalStoreOperation extends LocalStoreIdentity {context:LocalStoreContext;phase:OfflinePreflightPhase;intentUsable:boolean;outcome:OfflinePreflightOutcome|null;reason:LocalStoreReason;result:LocalStoreResult|null}
+ export interface LocalStoreStatus {schemaVersion:1;statusRevision:number;availability:OfflinePreflightAvailability;operation:LocalStoreOperation|null}
+ export interface LocalStorePreflightApi {
+  prepareLocalStorePreflight(request:PrepareLocalStorePreflight):Promise<LocalStoreStatus>;
+- startLocalStorePreflight(request:LocalStoreIdentity&{consentVersion:'local-android-store-access-v1'|'local-ios-store-access-v1'|'local-ios-bundle-id-read-v1'}):Promise<LocalStoreStatus>;
++ startLocalStorePreflight(request:LocalStoreIdentity&{consentVersion:'local-android-store-access-v1'|'local-ios-store-access-v1'|'local-ios-bundle-id-read-v1'|'local-ios-profile-reuse-read-v1'}):Promise<LocalStoreStatus>;
+  localStorePreflightStatus():Promise<LocalStoreStatus>;
+  cancelLocalStorePreflight(operationId:string,ownerGeneration:string):Promise<LocalStoreStatus>;
+  subscribeLocalStorePreflight(listener:(status:unknown)=>void):Promise<()=>void>;
+diff --git a/desktop/src/localStorePreflightProtocol.ts b/desktop/src/localStorePreflightProtocol.ts
+--- a/desktop/src/localStorePreflightProtocol.ts
++++ b/desktop/src/localStorePreflightProtocol.ts
+@@ -8,10 +8,14 @@
+ export const APPLE_BUNDLE_QUERY='bundle-id-registration' as const;
+ export const APPLE_BUNDLE_CONSENT='local-ios-bundle-id-read-v1' as const;
+ export const APPLE_BUNDLE_SCOPE='local-ios-bundle-id-registration-read' as const;
+-export const storeConsent=(platform?:'android'|'ios',query?:typeof APPLE_BUNDLE_QUERY)=>platform==='ios'?(query===APPLE_BUNDLE_QUERY?APPLE_BUNDLE_CONSENT:APPLE_STORE_CONSENT):STORE_CONSENT;
++export const APPLE_PROFILE_QUERY='app-store-profile-reuse' as const;
++export const APPLE_PROFILE_CONSENT='local-ios-profile-reuse-read-v1' as const;
++export const APPLE_PROFILE_SCOPE='local-ios-profile-reuse-metadata-read' as const;
++export const storeConsent=(platform?:'android'|'ios',query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY)=>platform==='ios'?(query===APPLE_BUNDLE_QUERY?APPLE_BUNDLE_CONSENT:query===APPLE_PROFILE_QUERY?APPLE_PROFILE_CONSENT:APPLE_STORE_CONSENT):STORE_CONSENT;
+ export type StoreCommand='prepare_local_store_preflight'|'start_local_store_preflight'|'local_store_preflight_status'|'cancel_local_store_preflight';
+ const limits=['non-publishing','no-project-commands','no-build-or-signing','no-release-readiness','point-in-time-account-access','saved-inputs-not-atomic'];
+ const bundleLimits=[...limits,'no-team-verification','no-global-availability-claim','no-provisioning-changes'];
++const profileLimits=[...bundleLimits,'metadata-only','no-private-key-match','no-profile-authentication','no-account-certificate-inventory'];
+ const bundleObservations=['found','not-returned','not-permitted','inconclusive','not-checked'];
+ const checks=['credential-format','query-prerequisites','runtime-unavailable','bundle-unavailable','store-access'];
+ const core=['PASS','FAIL','MISSING','BLOCKED','INVALID','SKIP','MANUAL','CONFIGURED','NOT_APPLICABLE'];
+@@ -25,14 +29,25 @@
+ const member=(values:string[],v:unknown)=>typeof v==='string'&&values.includes(v);
+ const contextKeys=['projectId','draftRevision','baselineGeneration','savedConfig','savedVersion','credentialContextRevision','recordId','recordRevision','executionMode'];
+ function request(v:unknown):boolean{
+- return (keys(v,contextKeys)||keys(v,[...contextKeys,'platform'])&&v.platform==='ios'||keys(v,[...contextKeys,'platform','query'])&&v.platform==='ios'&&v.query===APPLE_BUNDLE_QUERY)&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&counter(v.draftRevision)&&counter(v.baselineGeneration)&&!!parseSavedConfigContent(v.savedConfig)&&!!parseAndroidBuildSavedVersion(v.savedVersion)&&counter(v.credentialContextRevision)&&v.credentialContextRevision>0&&counter(v.recordRevision)&&v.recordRevision>0&&token(v.recordId)&&v.executionMode==='local';
++ return (keys(v,contextKeys)||keys(v,[...contextKeys,'platform'])&&v.platform==='ios'||keys(v,[...contextKeys,'platform','query'])&&v.platform==='ios'&&(v.query===APPLE_BUNDLE_QUERY||v.query===APPLE_PROFILE_QUERY))&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&counter(v.draftRevision)&&counter(v.baselineGeneration)&&!!parseSavedConfigContent(v.savedConfig)&&!!parseAndroidBuildSavedVersion(v.savedVersion)&&counter(v.credentialContextRevision)&&v.credentialContextRevision>0&&counter(v.recordRevision)&&v.recordRevision>0&&token(v.recordId)&&v.executionMode==='local';
++}
++function profileSummary(value:unknown):boolean{
++ if(!keys(value,['observation','counts','checkedAt'])||!member(bundleObservations,value.observation))return false;
++ if(value.observation!=='found'&&value.observation!=='not-returned')return value.counts===null&&value.checkedAt===null;
++ const c=value.counts,t=value.checkedAt;
++ if(!keys(c,['matchingProfiles','activeProfiles','currentMetadataCandidates','relatedCertificates'])||!Object.values(c).every(counter)||
++   (c.currentMetadataCandidates as number)>(c.activeProfiles as number)||(c.activeProfiles as number)>(c.matchingProfiles as number)||
++   (c.matchingProfiles as number)>200||(c.relatedCertificates as number)>400||typeof t!=='string'||
++   !/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$/.test(t)||Number(t.slice(0,4))<1970)return false;
++ const date=new Date(t);if(!Number.isFinite(date.getTime())||date.toISOString().slice(0,19)!==t.slice(0,19))return false;
++ return value.observation==='not-returned'?Object.values(c).every(n=>n===0):(c.matchingProfiles as number)>0&&(c.relatedCertificates as number)>0;
+ }
+ export function parseLocalStoreRequest(input:unknown):PrepareLocalStorePreflight|null{
+  try{const v=copyBoundedComparisonData(input,8192);return request(v)?v as PrepareLocalStorePreflight:null;}catch{return null;}
+ }
+ export function encodeLocalStoreRequest(command:StoreCommand,input:unknown):Uint8Array|null{
+  try{const v=copyBoundedComparisonData(input,8192);
+- const valid=command==='prepare_local_store_preflight'?request(v):command==='local_store_preflight_status'?keys(v,[]):keys(v,command==='start_local_store_preflight'?['operationId','ownerGeneration','consentVersion']:['operationId','ownerGeneration'])&&token(v.operationId)&&token(v.ownerGeneration)&&(command!=='start_local_store_preflight'||(v.consentVersion===STORE_CONSENT||v.consentVersion===APPLE_STORE_CONSENT||v.consentVersion===APPLE_BUNDLE_CONSENT));
++ const valid=command==='prepare_local_store_preflight'?request(v):command==='local_store_preflight_status'?keys(v,[]):keys(v,command==='start_local_store_preflight'?['operationId','ownerGeneration','consentVersion']:['operationId','ownerGeneration'])&&token(v.operationId)&&token(v.ownerGeneration)&&(command!=='start_local_store_preflight'||(v.consentVersion===STORE_CONSENT||v.consentVersion===APPLE_STORE_CONSENT||v.consentVersion===APPLE_BUNDLE_CONSENT||v.consentVersion===APPLE_PROFILE_CONSENT));
+  if(!valid)return null;const bytes=new TextEncoder().encode(JSON.stringify(v));return bytes.length<=8192?bytes:null;
+  }catch{return null;}
+ }
+@@ -47,8 +62,8 @@
+  else if(op.phase==='unknown'){if(op.outcome!=='unknown'||op.reason!=='cleanup-unknown'||op.intentUsable||op.result!==null)return null;}
+  else if(op.outcome!==null||op.result!==null||op.intentUsable&&op.phase!=='awaiting-consent')return null;
+  if(op.result!==null){const r=op.result;
+-  const bundle=c.query===APPLE_BUNDLE_QUERY;
+-  if(op.phase!=='terminal'||op.outcome!=='complete'||!keys(r,['schemaVersion','scope','findings','limitations',...(bundle?['observation']:[])])||r.schemaVersion!==1||r.scope!==(bundle?APPLE_BUNDLE_SCOPE:`local-${c.platform}-store-access-no-publishing`)||!sameOfflineData(r.limitations,bundle?bundleLimits:limits)||!Array.isArray(r.findings)||r.findings.length>16||r.findings.some(f=>!keys(f,['check','status'])||!member(checks,f.check)||!member(core,f.status)||bundle&&f.check==='store-access')||bundle&&!member(bundleObservations,r.observation))return null;
++  const bundle=c.query===APPLE_BUNDLE_QUERY,profiles=c.query===APPLE_PROFILE_QUERY;
++  if(op.phase!=='terminal'||op.outcome!=='complete'||!keys(r,['schemaVersion','scope','findings','limitations',...(bundle?['observation']:profiles?['profileReuse']:[])])||r.schemaVersion!==1||r.scope!==(bundle?APPLE_BUNDLE_SCOPE:profiles?APPLE_PROFILE_SCOPE:`local-${c.platform}-store-access-no-publishing`)||!sameOfflineData(r.limitations,bundle?bundleLimits:profiles?profileLimits:limits)||!Array.isArray(r.findings)||r.findings.length>16||r.findings.some(f=>!keys(f,['check','status'])||!member(checks,f.check)||!member(core,f.status)||(bundle||profiles)&&f.check==='store-access')||bundle&&!member(bundleObservations,r.observation)||profiles&&!profileSummary(r.profileReuse))return null;
+  }else if(op.outcome==='complete')return null;
+  return v as unknown as LocalStoreStatus;
+  }catch{return null;}
+diff --git a/desktop/src/localStorePreflight.ts b/desktop/src/localStorePreflight.ts
+--- a/desktop/src/localStorePreflight.ts
++++ b/desktop/src/localStorePreflight.ts
+@@ -7,7 +7,7 @@
+ import type { AssetDisplayState } from './assetSessionTypes.ts';
+ import { assetStorageWritable } from './assetSessionProtocol.ts';
+ import { sameOfflineData } from './offlinePreflightProtocol.ts';
+-import { parseLocalStoreRequest, parseLocalStoreStatus, storeConsent, APPLE_BUNDLE_QUERY } from './localStorePreflightProtocol.ts';
++import { parseLocalStoreRequest, parseLocalStoreStatus, storeConsent, APPLE_BUNDLE_QUERY, APPLE_PROFILE_QUERY } from './localStorePreflightProtocol.ts';
+ import type { BridgeMode } from './types.ts';
+ import type { LocalStoreIdentity, LocalStorePreflightApi, LocalStoreStatus, PrepareLocalStorePreflight } from './localStorePreflightTypes.ts';
+ type Port=LocalStorePreflightApi&{mode:BridgeMode};
+@@ -63,7 +63,7 @@
+  }
+  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading)return;this.reading=true;try{this.receive(await this.api.localStorePreflightStatus());}catch{this.fail();}finally{this.reading=false;}}
+  prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Stores.';if(localStoreOwnerReason(this.state))return localStoreOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for the local Store check.';if(!this.state.request)return this.state.platform==='ios'?'Read the saved version, then in Credentials choose This Mac → iOS → Store (or Full), select an App Store Connect P8 with its Key ID and Issuer ID, keep and assign it.':'Read the saved version, then in Credentials choose This Mac → Android → Store (or Full), select a Google service-account JSON, keep and assign it.';return this.source.otherOperationReason();}
+- async prepare(query?:typeof APPLE_BUNDLE_QUERY){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status||query!==undefined&&(query!==APPLE_BUNDLE_QUERY||this.state.platform!=='ios'))return;const api=this.api,request=query===undefined?this.state.request:parseLocalStoreRequest({...this.state.request,query});if(!request)return;
++ async prepare(query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status||query!==undefined&&((query!==APPLE_BUNDLE_QUERY&&query!==APPLE_PROFILE_QUERY)||this.state.platform!=='ios'))return;const api=this.api,request=query===undefined?this.state.request:parseLocalStoreRequest({...this.state.request,query});if(!request)return;
+   this.attempt={request,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
+   this.update({pending:true,unconfirmed:true,error:null,historical:false});
+   try{this.receive(await api.prepareLocalStorePreflight(request));const op=this.state.status?.operation;
+diff --git a/desktop/src/components/LocalStorePreflight.tsx b/desktop/src/components/LocalStorePreflight.tsx
+--- a/desktop/src/components/LocalStorePreflight.tsx
++++ b/desktop/src/components/LocalStorePreflight.tsx
+@@ -1,8 +1,9 @@
+ import type { LocalStorePreflightController, LocalStoreState } from '../localStorePreflight.ts';
+ import { localStoreOwnerReason } from '../localStorePreflight.ts';
+ import type { StoreCheck } from '../localStorePreflightTypes.ts';
+-import { APPLE_BUNDLE_QUERY } from '../localStorePreflightProtocol.ts';
++import { APPLE_BUNDLE_QUERY, APPLE_PROFILE_QUERY } from '../localStorePreflightProtocol.ts';
+ import { AppleProvisioning } from './AppleProvisioning.tsx';
++import { AppleProvisioningProfiles } from './AppleProvisioningProfiles.tsx';
+ const hints:Record<StoreCheck,string>={
+  'credential-format':'In Credentials, reselect the service-account JSON, keep it and assign it to this exact This Mac context.',
+  'query-prerequisites':'Check the saved Android application ID, version/build number and track configuration, then refresh the saved version.',
+@@ -25,6 +26,7 @@
+  const originalApple=op?.context.platform==='ios',resultHints=originalApple?appleHints:hints;
+  const resultLabels=originalApple?{...labels,'credential-format':'App Store Connect private-key format','store-access':'App Store Connect account access'}:labels;
+  if(op?.context.query===APPLE_BUNDLE_QUERY)return <AppleProvisioning state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
++ if(op?.context.query===APPLE_PROFILE_QUERY)return <AppleProvisioningProfiles state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
+  if(compact&&!retained)return null;
+  return <section className="card" aria-label={`Local ${store} access check`}>
+   <div className="inline-heading"><h2>{store} access · This Mac</h2>{compact&&<button onClick={onShow}>Show check</button>}</div>
+@@ -39,6 +41,7 @@
+    {!state.request&&<button onClick={onCredentials}>Configure local credentials</button>}
+    <button disabled={!!reason||state.pending} onClick={()=>void controller.prepare()}>Review access check</button>{reason&&<p className="save-note">{reason}</p>}
+    {apple&&<AppleProvisioning state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
++   {apple&&<AppleProvisioningProfiles state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
+   </>}
+   {state.consentUntil!==null&&<div className="notice"><p>{originalApple?'Contact App Store Connect to read the saved app identity, existing external TestFlight group and build inventory. Apple may log or rate-limit requests. This does not upload, change testing groups, submit for review or publish a release.':'This creates a temporary, uncommitted Google Play edit, reads app inventory and attempts to delete the edit. It never commits the edit or publishes a release. A cancellation or network failure can leave an uncommitted edit until Google expires it.'}</p><label><input type="checkbox" checked={state.acknowledged} onChange={e=>controller.acknowledge(e.target.checked)}/> I authorize this nonpublishing {originalApple?'App Store Connect':'Google Play'} access check.</label><button disabled={!state.acknowledged||state.pending} onClick={()=>void controller.start()}>Check {originalApple?'App Store Connect':'Google Play'} access</button></div>}
+   {retained&&<div role="status"><p>{op?.phase==='running'?'Checking access. Up to 20 minutes; Cancel stops the original operation.':retained}</p><button onClick={()=>void controller.cancel()}>Cancel original check</button></div>}
+diff --git a/desktop/src/components/AppleProvisioning.tsx b/desktop/src/components/AppleProvisioning.tsx
+--- a/desktop/src/components/AppleProvisioning.tsx
++++ b/desktop/src/components/AppleProvisioning.tsx
+@@ -3,6 +3,7 @@
+ import { APPLE_BUNDLE_QUERY, APPLE_BUNDLE_SCOPE } from '../localStorePreflightProtocol.ts';
+ import type { BundleIdObservation, StoreCheck } from '../localStorePreflightTypes.ts';
+ import { sameOfflineData } from '../offlinePreflightProtocol.ts';
++import { AppleProvisioningProfiles } from './AppleProvisioningProfiles.tsx';
+
+ const observations: Record<BundleIdObservation, { title: string; detail: string }> = {
+   found: { title: 'Matching Bundle ID returned', detail: 'The selected App Store Connect key returned this saved iOS Bundle ID. This does not verify its team, certificate, provisioning profile or signing readiness.' },
+@@ -51,6 +52,7 @@
+       <button disabled={!!reason || state.pending} onClick={() => void controller.prepare()}>Review saved-app access instead</button>
+       {reason && <p className="save-note">{reason}</p>}
+     </>}
++    {!compact && <AppleProvisioningProfiles state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
+     {state.consentUntil !== null && <div className="notice">
+       <p>Contact App Store Connect once to read the saved Bundle ID visible to the selected key. Apple may log or rate-limit this request. This does not create, replace or revoke any signing resource, and an empty result does not authorize creating one.</p>
+       <label><input type="checkbox" checked={state.acknowledged} onChange={event => controller.acknowledge(event.target.checked)} /> I authorize this read-only Bundle ID check.</label>
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -43,6 +43,7 @@
+   "fastlane/apple_store.rb",
+   "fastlane/apple_provisioning.rb",
+   "fastlane/apple_provisioning_bundle_read.rb",
++  "fastlane/apple_provisioning_profile_read.rb",
+   "fastlane/apple_production.rb",
+   "fastlane/apple_asset_upload.rb",
+   "fastlane/apple_create_retry.rb",
