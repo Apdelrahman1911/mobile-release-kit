@@ -9,9 +9,9 @@ const suggestionHelp: HelpContent = {
   requiredWhen: 'Only when this project has no in-memory draft and the core advertises pure suggestions.',
   what: 'Ask the bundled core for a proposed configuration from a small, closed set of static hints and documented defaults.',
   why: 'Provide a starting point without silently initializing files, approving identities or replacing an existing draft.',
-  where: 'Prepare a suggestion, inspect its provenance and validation, then explicitly choose Use as an in-memory draft.',
+  where: 'Choose Prepare suggested draft, check where the suggested values came from and any listed problems, then choose Use as an in-memory draft. This fills the editor without saving files.',
   format: 'Only hinted platforms, singular unambiguous app identifiers, and version-source/key hints are projected. Missing platforms stay disabled and require an explicit decision. Default branches and example identities are not observations.',
-  failure: 'Unverified, incomplete or malformed hints cannot establish a real application or Store identity. Suggestions create no files, workflows, metadata or version values. To save a draft, choose Prepare save review when native saving is available, then review and confirm the changes.',
+  failure: 'Suggestions do not verify your app or Store identity and create no files, workflows, metadata or version values. Correct any missing or invalid settings in the draft. When saving is available, choose Review & save…, check the proposed changes, then confirm the save.',
 };
 
 interface SuggestionProps {

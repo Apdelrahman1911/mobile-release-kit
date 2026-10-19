@@ -79,7 +79,7 @@ function Outcome({ owner }: { owner: VersionEditProjection }) {
       {owner.prepared && <p>Submitted review: {owner.prepared.view.values.name} · Build {owner.prepared.view.values.build} · <code>{owner.prepared.view.source}</code>.</p>}
       <p>Core effect: {owner.coreOutcome?.effect ?? 'not returned'}; journal: {owner.coreOutcome?.journal ?? 'not returned'}; native finality: {owner.nativeFinality}.
         {' '}Reason: {owner.coreOutcome?.reason ?? owner.nativeReason}.</p>
-      {owner.coreOutcome?.reason === 'ignore_conflict' && <p>Use Settings → Prepare save review to add the ten conservative ignore rules. This editor never repairs .gitignore.</p>}
+      {owner.coreOutcome?.reason === 'ignore_conflict' && <p>Open Settings and choose Review &amp; save… to review the missing .gitignore rules before saving. This version editor does not change ignore rules. Conflicting existing rules must be resolved separately.</p>}
       {owner.coreOutcome?.reason === 'invalid_params' && <p>Correct the two proposed strings, then review again after settlement. Empty, ambiguous or unsafe source files are unsupported, not Create permission.</p>}
       {owner.coreOutcome?.reason === 'stale_revision' && <p>The retained baseline changed. Close, then explicitly reload saved values and discard the earlier draft.</p>}
       {(owner.phase === 'unknown' || owner.coreOutcome?.journal === 'recovery_required') && <p>Keep the original evidence. Do not retry, delete control state or treat cancellation as rollback. Once native settlement is known, explicitly Inspect recovery below; legacy/incomplete or changed journals remain protected conflicts.</p>}

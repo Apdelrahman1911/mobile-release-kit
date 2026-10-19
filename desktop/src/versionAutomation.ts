@@ -16,7 +16,7 @@ export interface VersionPolicyDraft {
   mode: 'manual' | 'automatic'; rules: readonly VersionRefRule[];
   buildCeiling: string; storeMaxAgeSeconds: string;
 }
-export const versionAutomationUnavailable = 'Repository version allocation is not available from an original native owner. Manual version controls are separate and retain their own availability checks.';
+export const versionAutomationUnavailable = 'Automatic version reservations are unavailable here. Use the manual version editor if it is enabled.';
 const invalidPolicy = 'Enter unique exact refs/heads/… or refs/tags/… rules, a build ceiling from 1 to 2100000000, and Store observation age from 1 to 3600 seconds.';
 const staleSaved = 'Refresh the saved configuration and explicitly read its current saved version. Drafts, stale observations and earlier editor baselines are not reservation inputs.';
 const unknownSubmission = 'Reservation submission could not be confirmed. Keep the original native operation; do not retry or replace its owner.';
