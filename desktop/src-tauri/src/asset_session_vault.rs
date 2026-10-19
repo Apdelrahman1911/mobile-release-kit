@@ -7,6 +7,10 @@ use crate::{vault_crypto as crypto, vault_format as format, vault_store as store
 mod assignment_native;
 #[path = "credential_backup_native.rs"]
 mod backup_native;
+#[path = "credential_backup_selection.rs"]
+mod backup_selection;
+pub(super) use backup_selection::Selectors as BackupSelectors;
+pub(crate) use backup_selection::Choice as CredentialBackupChoice;
 
 // Compiler/codec tests and a same-UID service are not native qualification.
 const DURABLE_QUALIFIED: bool = false;
@@ -172,7 +176,7 @@ pub(super) struct SlotData {
     outcome: Option<store::StorageOutcome>,
     // Set only by the original explicit Discard/Lock path or the accepted
     // New-only publisher. Generic STOP/Idle/status never authorizes disposal.
-    backup_discard: bool, backup_new_published: bool,
+    backup_discard: bool, backup_new_published: bool, backup_export_published: bool,
 }
 
 pub(super) fn mode(state: &DocumentState) -> bool { state.vault.is_some() }
@@ -250,7 +254,7 @@ impl Staged {
             Self::Unlocked { rows, .. } => rows_bytes(rows)?,
             Self::DeletedPreview { tokens, .. } => token_bytes(tokens)?,
             Self::Mutated { row, .. } => row.as_ref().map_or(Some(0), |row| row.authenticated.descriptor.retained_bytes().ok())?,
-            Self::BackupPending { .. } => 0,
+            Self::BackupPending { .. } | Self::BackupDelivered { .. } => 0,
             Self::Released => 0,
         };
         std::mem::size_of::<Self>().checked_add(dynamic)
@@ -343,6 +347,16 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
                     return Err(Reason::SourceChanged);
                 }
             },
+            Staged::BackupDelivered { generation: checked } => {
+                if slot.operation != Operation::PrepareBackupExport || *checked != generation
+                    || !backup_native::delivered_publication(&slot.owner, &work, session) {
+                    return Err(Reason::SourceChanged);
+                }
+                let context = slot.context.as_ref().ok_or(Reason::ContextStale)?;
+                if !document.context_matches(state, context).map_err(|error| error.reason)? {
+                    return Err(Reason::ContextStale);
+                }
+            },
             Staged::Released => return Err(Reason::UserCancelled), // Cleanup cannot publish work authority.
         }
         Ok(())
@@ -404,6 +418,16 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
             slot.phase = Phase::Selected; slot.settlement = Settlement::Known;
             slot.selection = None; slot.preview = None; slot.assessment = None;
             slot.assessment_context_revision = None; slot.review_end = None; slot.discard = false;
+        },
+        Staged::BackupDelivered { .. } => {
+            // Both concrete originals were published/synced/rechecked/closed,
+            // then this exact parent rematched the vault and native context
+            // after actual joins. Only now may its ordinary off-lock drain
+            // dispose the retained private output. No assessment/Bind follows.
+            slot.vault.backup_export_published = true;
+            slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+            slot.selection = None; slot.preview = None; slot.assessment = None;
+            slot.assessment_context_revision = None; slot.review_end = None; slot.discard = true;
         },
         Staged::Released => unreachable!("cleanup has no publication authority"),
     }
@@ -613,7 +637,7 @@ pub(super) fn take_retirement(state: &mut DocumentState, slot: &mut Slot) -> Ret
     let closing = release_pending(state);
     // Check actual original joins/native custody before taking the Work lock.
     // A generic failed/Idle slot is not an explicit private-output discard.
-    let retire_backup = (slot.vault.backup_discard || slot.vault.backup_new_published)
+    let retire_backup = (slot.vault.backup_discard || slot.vault.backup_new_published || slot.vault.backup_export_published)
         && backup_native::retirement_ready(&slot.owner);
     let mut retired = Retired { loaded: slot.vault.loaded.take(), label: slot.vault.label.take(),
         previous_bound: slot.vault.previous_bound.take(), ..Retired::default() };
@@ -728,14 +752,14 @@ impl Child {
 pub(super) enum ChildResult {
     Opened(store::Observation), Prepared { root: store::RootWitness, identity: format::Identity, tokens: TokenBatch },
     Reserved(format::Identity), Header, Listed(Vec<Descriptor>), Loaded { payload: Arc<Payload>, reference: StoredRef },
-    Delete { reference: StoredRef, tokens: TokenBatch }, Mutated { record: format::Id, row: Option<Descriptor> }, Checked, BackupPrepared, Released,
+    Delete { reference: StoredRef, tokens: TokenBatch }, Mutated { record: format::Id, row: Option<Descriptor> }, Checked, BackupPrepared, BackupPublished, Released,
 }
 pub(super) enum Staged {
     Opened { observation: store::Observation, generation: u32 },
     Prepared { root: store::RootWitness, identity: format::Identity, tokens: TokenBatch, generation: u32 },
     Unlocked { rows: Vec<Descriptor>, initialized_header: Option<[u8; format::HEADER_BYTES]> },
     DeletedPreview { reference: StoredRef, tokens: TokenBatch },
-    Mutated { record: format::Id, row: Option<Descriptor>, generation: u32 }, BackupPending { generation: u32 }, Released,
+    Mutated { record: format::Id, row: Option<Descriptor>, generation: u32 }, BackupPending { generation: u32 }, BackupDelivered { generation: u32 }, Released,
 }
 #[cfg(feature = "desktop-shell")]
 pub(super) enum Job {
@@ -747,6 +771,8 @@ pub(super) enum Job {
     Delete { reference: StoredRef, roster: ProjectRoster, allowance: usize },
     Mutate { operation: format::Mutation, record: format::Id, expected: Option<StoredRef>, payload: Option<Arc<Payload>>, label: Option<String>, roster: ProjectRoster, allowance: usize },
     Bind { reference: StoredRef, roster: ProjectRoster, assignment: Assignment }, Backup(backup_native::Request), Release,
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    BackupPick { app: tauri::AppHandle, purpose: backup_selection::Purpose },
 }
 
 pub(super) fn cleanup_expired(owner: &OriginalWork) -> bool {
@@ -962,7 +988,7 @@ fn begin_backup_import(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> 
         && slot.cleanup_end.is_none() && slot.reason == Reason::None).ok_or(Reason::SourceChanged)?;
     let mut work = owner.vault.try_lock().map_err(|_| Reason::CleanupUnknown)?;
     if !session.writable() || work.release || work.first.is_some() || work.outcome.is_some()
-        || slot.vault.outcome.is_some() || slot.vault.backup_discard || slot.vault.backup_new_published
+        || slot.vault.outcome.is_some() || slot.vault.backup_discard || slot.vault.backup_new_published || slot.vault.backup_export_published
         || work.store.as_ref().is_none_or(|store| !Arc::ptr_eq(store, &session.store))
         || work.key.as_ref().is_none_or(|key| key.identity() != identity
             || session.key.as_ref().is_none_or(|current| !Arc::ptr_eq(key, current)))
@@ -976,7 +1002,8 @@ fn begin_backup_import(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> 
     Ok(())
 }
 pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
-    let Some((first, outcome)) = owner.vault.try_lock().ok().map(|work| (work.first, work.outcome)) else { return; };
+    let Some((first, outcome, backup_recovery)) = owner.vault.try_lock().ok()
+        .map(|work| (work.first, work.outcome, work.backup.recovery_required())) else { return; };
     let mut state = document.lock();
     let mut changed = false;
     if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) {
@@ -984,10 +1011,17 @@ pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
         let Some((reason, at)) = first else { if changed { document.bump(&mut state); } return; };
         slot.error = Some(AssetError::new(reason).into()); slot.stop(reason, at);
         let operation = slot.operation;
+        let backup_recovery = backup_recovery && matches!(operation, Operation::PrepareBackupExport | Operation::ImportBackup);
+        if backup_recovery {
+            // Unknown pair effects are not StoreBook mutation outcomes and do
+            // not overwrite the first failure. They still prevent a misleading
+            // normal failure/retry/closed projection over retained private data.
+            slot.phase = Phase::Unknown; slot.settlement = Settlement::Unknown; state.unknown = true;
+        }
         if let Some(vault) = &mut state.vault {
             vault.reason = reason;
             if matches!(operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup) { vault.state = State::Interrupted; vault.read_only = true; }
-            if reason == Reason::CleanupUnknown { vault.state = State::Unknown; vault.revoked = true; state.unknown = true; }
+            if reason == Reason::CleanupUnknown || backup_recovery { vault.state = State::Unknown; vault.revoked = true; state.unknown = true; }
         }
         invalidate_all(&mut state); document.bump(&mut state);
     }
@@ -1987,6 +2021,8 @@ async fn run_inner(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: J
             match native(document, owner, Child::Check { reference, roster }).await? { ChildResult::Checked => Ok(super::Staged::Bound(assignment)), _ => Err(Reason::CleanupUnknown) }
         },
         Job::Backup(request) => backup_native::run(document, owner, request).await,
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        Job::BackupPick { app, purpose } => backup_selection::run_selected(document, owner, &app, purpose).await,
         Job::Release => match native(document, owner, Child::Release).await? {
             ChildResult::Released => Ok(super::Staged::Vault(Staged::Released)), _ => Err(Reason::CleanupUnknown),
         },

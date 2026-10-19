@@ -311,7 +311,7 @@ int mrk_observation_original_window(uintptr_t original, uint32_t *flags) {
 // Closed ABI result: Other=0, Accept=1, Decline=2. This same pure mapping is
 // exercised by narrow native-crate test definitions; no panel is fabricated.
 static BOOL mrk_panel_project_field(int kind) { return kind >= 4 && kind <= 7; }
-static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || kind == 8 || kind == 9 || (kind >= 10 && kind <= 16) || mrk_panel_project_field(kind); }
+static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || kind == 8 || kind == 9 || (kind >= 10 && kind <= 20) || mrk_panel_project_field(kind); }
 int mrk_panel_response(int kind, int64_t code, int programmatic) {
     if (programmatic) return 0;
     if (mrk_panel_open_kind(kind)) {
@@ -532,15 +532,19 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
                 : kind == 14 ? @"Choose an iOS IPA to inspect"
                 : kind == 15 ? @"Choose its Xcode archive or archive ZIP"
                 : kind == 16 ? @"Choose its dSYM directory or ZIP"
+                : kind == 17 ? @"Choose your encrypted signing backup"
+                : kind == 18 ? @"Choose the matching recovery code file"
+                : kind == 19 ? @"Choose a folder for the encrypted signing backup"
+                : kind == 20 ? @"Choose a different folder for the recovery code"
                 : kind == 9 ? @"Choose up to 10 public PNG or JPEG listing images"
                 : kind == 3 ? @"Choose a signing or iOS build-input file"
                 : kind == 4 ? @"Choose an existing version source inside the project" : kind == 5 ? @"Choose an existing Xcode project directory"
                 : kind == 6 ? @"Choose an existing Xcode workspace directory" : @"Choose an existing metadata directory inside the project";
             [panel setTitle:title];
             // The message displays the purpose inside the sheet; its window title may not.
-            [panel setMessage:title];
-            [panel setCanChooseFiles:kind == 3 || kind == 4 || kind == 9 || (kind >= 13 && kind <= 16)];
-            [panel setCanChooseDirectories:kind == 1 || kind == 8 || (kind >= 5 && kind <= 7) || (kind >= 10 && kind <= 12) || kind == 15 || kind == 16];
+            [panel setMessage:kind == 20 ? @"Keep the recovery code separate from the encrypted backup. You need both files to restore your signing key without this Mac." : title];
+            [panel setCanChooseFiles:kind == 3 || kind == 4 || kind == 9 || (kind >= 13 && kind <= 18)];
+            [panel setCanChooseDirectories:kind == 1 || kind == 8 || (kind >= 5 && kind <= 7) || (kind >= 10 && kind <= 12) || kind == 15 || kind == 16 || kind == 19 || kind == 20];
             [panel setAllowsMultipleSelection:kind == 9]; [panel setCanCreateDirectories:NO];
             [panel setResolvesAliases:NO]; [panel setTreatsFilePackagesAsDirectories:(kind >= 5 && kind <= 7) || kind == 10 || kind == 15 || kind == 16];
         } else {

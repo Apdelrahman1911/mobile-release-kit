@@ -1,5 +1,10 @@
 # Private credential-backup adapter — integration boundary
 
+This document records the **Scope A checkpoint** (`cd7ac643`, `a60527e3`).
+The subsequent concrete picker/private-sink source and its additional unapplied
+Root hooks are described in [Scope B](credential-backup-picker-integration.md).
+That addition does not turn either checkpoint into native qualification.
+
 This is **not an enabled or natively qualified export/import feature**. The
 previous codec/reference slice (`d6abb5b5`) passed Root's actual no-default crate
 compile and 19 focused Rust tests. The source-reviewed native children

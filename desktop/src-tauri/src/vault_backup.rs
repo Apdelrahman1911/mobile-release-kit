@@ -35,6 +35,17 @@ impl ExportedBackup {
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
         self.encrypted.capacity().checked_add(std::mem::size_of::<Self>())
     }
+    /// Sole production export seam: borrow this SAME retained private output
+    /// into the concrete original two-destination owner as one operation. No
+    /// getter, callback or independently writable output is made available.
+    /// Return is not delivery; the native parent still owes current-reference
+    /// checks and original child/coordinator joins before publication/disposal.
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn publish_to(&self, destination: &mut crate::asset_source::BackupDestinations,
+        owner: &std::sync::Arc<crate::asset_session::OriginalWork>) -> std::result::Result<(), crate::asset_commands::Reason> {
+        let code = self.recovery.encoded();
+        destination.publish_pair(&self.encrypted, &code[..], owner)
+    }
     /// Synthetic codec fixture extraction only. Production output remains
     /// opaque until a concrete original private sink is implemented/reviewed.
     /// In particular a callback result is never durable delivery evidence.

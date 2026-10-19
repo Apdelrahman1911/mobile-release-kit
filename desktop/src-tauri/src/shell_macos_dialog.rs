@@ -2,22 +2,49 @@
 //! compatibility future. The actual panel and completion live on the main loop.
 use super::*;
 use std::{cell::RefCell, path::PathBuf};
-use crate::asset_session::{GuiCall, GuiFacts};
+use crate::asset_session::{CredentialBackupChoice, GuiCall, GuiFacts};
 use mrk_macos_installed_native::{self as native, ImagesPanelState, Panel, PanelKind, PanelResponse, PanelState,
     PublicImageRefusal, PublicImageSelection};
 
 type NativeResult = Result<(), ()>;
-enum DialogResult { Single(PathBuf), Images(Vec<PathBuf>) }
+enum DialogResult { Single(PathBuf), Images(Vec<PathBuf>), Backup }
 type DialogOutcome = Result<Option<DialogResult>, Reason>;
 enum DialogPoll { Showing, Responded(PanelResponse, Result<DialogResult, Reason>), Closed }
 struct OriginalPanel {
-    id: u32, panel: Option<Panel>,
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
-        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-    observed_call: std::sync::Weak<GuiCall>,
+    id: u32, panel: Option<Panel>, call: std::sync::Weak<GuiCall>, kind: PanelKind,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
     open_release: Option<Arc<observation::OpenRelease>>,
+}
+impl OriginalPanel {
+    fn matches(&self, call: &Arc<GuiCall>, id: u32, kind: PanelKind) -> bool {
+        self.id == id && self.kind == kind
+            && self.call.upgrade().is_some_and(|original| Arc::ptr_eq(&original, call))
+            && call.owner().is_some_and(|owner| owner.id == id && original_call(&owner, call, kind))
+    }
+}
+fn backup_choice(kind: PanelKind) -> Option<CredentialBackupChoice> {
+    Some(match kind {
+        PanelKind::EncryptedBackup => CredentialBackupChoice::EncryptedBackup,
+        PanelKind::RecoveryCode => CredentialBackupChoice::RecoveryCode,
+        PanelKind::EncryptedDestination => CredentialBackupChoice::EncryptedDestination,
+        PanelKind::RecoveryDestination => CredentialBackupChoice::RecoveryDestination,
+        _ => return None,
+    })
+}
+fn backup_kind(choice: CredentialBackupChoice) -> PanelKind {
+    match choice {
+        CredentialBackupChoice::EncryptedBackup => PanelKind::EncryptedBackup,
+        CredentialBackupChoice::RecoveryCode => PanelKind::RecoveryCode,
+        CredentialBackupChoice::EncryptedDestination => PanelKind::EncryptedDestination,
+        CredentialBackupChoice::RecoveryDestination => PanelKind::RecoveryDestination,
+    }
+}
+fn original_call(owner: &OriginalWork, call: &Arc<GuiCall>, kind: PanelKind) -> bool {
+    match backup_choice(kind) {
+        Some(choice) => owner.credential_backup_dialog_matches(call, choice),
+        None => !owner.has_credential_backup_picker() && Arc::ptr_eq(&owner.gui, call),
+    }
 }
 thread_local! { static PANEL: RefCell<Option<OriginalPanel>> = const { RefCell::new(None) }; }
 
@@ -58,9 +85,12 @@ pub(super) mod observation {
         pub(crate) action_allowed: bool,
     }
     pub(super) fn original(entry: &OriginalPanel) -> Result<(Arc<GuiCall>, Arc<OriginalWork>), ObservationError> {
-        let call = entry.observed_call.upgrade().ok_or(ObservationError::OriginalCall)?;
+        let call = entry.call.upgrade().ok_or(ObservationError::OriginalCall)?;
         let owner = call.owner().ok_or(ObservationError::OriginalOwner)?;
-        if owner.id != entry.id || !Arc::ptr_eq(&owner.gui, &call) { return Err(ObservationError::OriginalBinding); }
+        // Existing installed observer roles remain single-primary only. The
+        // new backup purposes receive no observer/qualification authority.
+        if backup_choice(entry.kind).is_some() || !entry.matches(&call, owner.id, entry.kind)
+            || !Arc::ptr_eq(&owner.gui, &call) { return Err(ObservationError::OriginalBinding); }
         Ok((call, owner))
     }
     fn allowed(call: &GuiCall, owner: &OriginalWork) -> Result<bool, ObservationError> {
@@ -394,7 +424,7 @@ struct DispatchState { cleanup_unknown: bool }
 impl DispatchState {
     fn observe(&mut self, result: NativeResult) { self.cleanup_unknown |= result.is_err(); }
     fn can_continue(&self) -> bool { !self.cleanup_unknown }
-    fn outcome(&mut self, facts: Option<&mut GuiFacts>, quit: bool, images: Option<&GuiCall>, interrupted: bool) -> Option<DialogOutcome> {
+    fn outcome(&mut self, facts: Option<&mut GuiFacts>, quit: bool, images: Option<&GuiCall>, backup: bool, interrupted: bool) -> Option<DialogOutcome> {
         if !self.can_continue() { return None; } // Gate BEFORE any outcome/path consumption.
         let Some(facts) = facts else { self.observe(Err(())); return None; };
         if facts.refusal == Some(Reason::CleanupUnknown) { self.observe(Err(())); return None; }
@@ -407,6 +437,11 @@ impl DispatchState {
                 if facts.selected.is_some() { self.observe(Err(())); None }
                 else { Some(call.take_public_images().and_then(|paths|
                     paths.map(DialogResult::Images).map(Some).ok_or(Reason::SourceRefused))) }
+            }
+            else if backup {
+                // The exact original call keeps its private pathname until
+                // the fixed no-path handoff, after this loop's actual joins.
+                Some(facts.selected.as_ref().map(|_| Some(DialogResult::Backup)).ok_or(Reason::SourceRefused))
             }
             else { Some(facts.selected.take().map(DialogResult::Single).map(Some).ok_or(Reason::SourceRefused)) }
         } else { None }
@@ -448,6 +483,7 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind, initial_folder: Option<&std
     identity_return: &mut Option<(u32, native::IdentityStartReturn)>,
 ) -> NativeResult {
     let Some(owner) = call.owner() else { call.not_created(Reason::DocumentLost); return Ok(()); };
+    if !original_call(&owner, call, choice) { call.not_created(Reason::SourceChanged); return Ok(()); }
     if !native::main_thread() || owner.interrupted() { call.not_created(Reason::UserCancelled); return Ok(()); }
     if let Some(mut facts) = call.facts() { facts.constructing = true; } else { return uncertain(call); }
     let reserved = PANEL.with(|book| {
@@ -456,10 +492,7 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind, initial_folder: Option<&std
         let panel = if choice == PanelKind::PublicImages { Panel::reserve_public_images() } else { Panel::reserve() }
             .map_err(|_| Reason::SourceRefused)?;
         // Store the exact original before constructing/presenting any panel.
-        *book = Some(OriginalPanel { id: owner.id, panel: Some(panel),
-            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
-                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-            observed_call: Arc::downgrade(call),
+        *book = Some(OriginalPanel { id: owner.id, panel: Some(panel), call: Arc::downgrade(call), kind: choice,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
             open_release: None,
@@ -476,10 +509,10 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind, initial_folder: Option<&std
     }
     let started = PANEL.with(|book| {
         let mut book = book.try_borrow_mut().map_err(|_| Reason::CleanupUnknown)?;
-        let entry = book.as_mut().filter(|entry| entry.id == owner.id).ok_or(Reason::CleanupUnknown)?;
+        let entry = book.as_mut().filter(|entry| entry.matches(call, owner.id, choice)).ok_or(Reason::CleanupUnknown)?;
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-        let arm = observer.filter(|q| q.open_identity_scope(owner.id, choice));
+        let arm = observer.filter(|q| backup_choice(choice).is_none() && q.open_identity_scope(owner.id, choice));
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
         if let Some(q) = arm {
@@ -533,13 +566,13 @@ fn tick(call: &Arc<GuiCall>, id: u32, kind: PanelKind,
     let result = PANEL.with(|book| -> NativeResult {
         let mut book = book.try_borrow_mut().map_err(|_| ())?;
         let released = {
-            let entry = book.as_mut().filter(|entry| entry.id == id).ok_or(())?;
+            let entry = book.as_mut().filter(|entry| entry.matches(call, id, kind)).ok_or(())?;
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
             if entry.open_release.as_ref().is_some_and(|r| !r.release_ready()) { return Ok(()); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-            {
+            if backup_choice(kind).is_none() {
                 let (bound_call, bound_owner) = observation::original(entry).map_err(|_| ())?;
                 if !Arc::ptr_eq(&bound_call, call) || bound_owner.id != id { return Err(()); }
             }
@@ -547,7 +580,7 @@ fn tick(call: &Arc<GuiCall>, id: u32, kind: PanelKind,
             let polled = poll_original(panel, kind);
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-            {
+            if backup_choice(kind).is_none() {
                 // Take the saved post-poll DATA even on Err, before close/release
                 // or state conversion here. No native query/owner replacement.
                 *completion_return = panel.take_installed_completion_return().map(|data| (id, data));
@@ -558,7 +591,7 @@ fn tick(call: &Arc<GuiCall>, id: u32, kind: PanelKind,
                     if first {
                         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
-                        if !images {
+                        if !images && backup_choice(kind).is_none() {
                             call.record_installed_native_response(id, response_kind(response), match selected.as_ref().ok() {
                                 Some(DialogResult::Single(path)) => Some(path.as_path()), _ => None,
                             })?;
@@ -664,13 +697,25 @@ pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<Origina
     }
     match run_owned_choice(app, owner, choice, initial_folder).await? {
         Some(DialogResult::Single(path)) => Ok(Some(path)), None => Ok(None),
-        Some(DialogResult::Images(_)) => Err(Reason::CleanupUnknown),
+        Some(DialogResult::Images(_) | DialogResult::Backup) => Err(Reason::CleanupUnknown),
     }
 }
 pub(crate) async fn run_owned_images_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>) -> Result<Option<Vec<PathBuf>>, Reason> {
     match run_owned_choice(app, owner, DialogChoice::PublicImages, None).await? {
         Some(DialogResult::Images(paths)) => Ok(Some(paths)), None => Ok(None),
-        Some(DialogResult::Single(_)) => Err(Reason::CleanupUnknown),
+        Some(DialogResult::Single(_) | DialogResult::Backup) => Err(Reason::CleanupUnknown),
+    }
+}
+/// The new purposes reuse the SAME original native loop and pass no selected
+/// path back to a generic caller. A true result means only that this exact
+/// original retained its selected pathname; it is not source IO/finality.
+pub(crate) async fn run_owned_backup_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: CredentialBackupChoice)
+    -> Result<bool, Reason> {
+    let call = owner.credential_backup_dialog(choice)?;
+    match run_owned_panel(app, owner, call, backup_kind(choice), None).await? {
+        Some(DialogResult::Backup) => { owner.credential_backup_panel_selected(choice)?; Ok(true) },
+        None => Ok(false),
+        Some(DialogResult::Single(_) | DialogResult::Images(_)) => Err(Reason::CleanupUnknown),
     }
 }
 // One original panel/create/poll/close/release loop. Images never use the
@@ -682,6 +727,11 @@ async fn run_owned_choice(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, cho
         Ok(kind) => kind,
         Err(reason) => { call.not_created(reason); return Err(reason); }
     };
+    run_owned_panel(app, owner, call, kind, initial_folder).await
+}
+async fn run_owned_panel(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, call: Arc<GuiCall>, kind: PanelKind,
+    initial_folder: Option<PathBuf>) -> DialogOutcome {
+    if !original_call(owner, &call, kind) { return Err(Reason::SourceChanged); }
     if native::main_thread() { call.not_created(Reason::Unqualified); return Err(Reason::Unqualified); }
     {
         let Some(mut facts) = call.facts() else { return Err(Reason::CleanupUnknown); };
@@ -726,13 +776,13 @@ async fn run_owned_choice(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, cho
         if !dispatch.can_continue() { std::future::pending::<()>().await; }
         let outcome = {
             let mut facts = call.facts();
-            dispatch.outcome(facts.as_deref_mut(), matches!(choice, DialogChoice::Quit),
-                matches!(choice, DialogChoice::PublicImages).then_some(call.as_ref()), owner.interrupted())
+            dispatch.outcome(facts.as_deref_mut(), kind == PanelKind::Quit,
+                (kind == PanelKind::PublicImages).then_some(call.as_ref()), backup_choice(kind).is_some(), owner.interrupted())
         };
         // A failed facts observation also vetoes outcome and the next dispatch.
         if !dispatch.can_continue() { call.failed(Reason::CleanupUnknown); std::future::pending::<()>().await; }
         if let Some(outcome) = outcome {
-            if matches!(choice, DialogChoice::PublicImages) {
+            if kind == PanelKind::PublicImages {
                 // Refusal/cancellation also disposes accepted pathname DATA
                 // only after known original settlement, never after Unknown.
                 drop(call.take_public_images()?);
@@ -806,6 +856,50 @@ pub(crate) fn evidence_folder_routing_data_check() -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn backup_purposes_are_closed_and_cannot_borrow_an_ordinary_primary() {
+        // Native-free routing/pointer DATA, never panel/dispatcher evidence.
+        let owner = OriginalWork::artifact_unentered_original_data();
+        for choice in [CredentialBackupChoice::EncryptedBackup, CredentialBackupChoice::RecoveryCode,
+            CredentialBackupChoice::EncryptedDestination, CredentialBackupChoice::RecoveryDestination] {
+            let kind = backup_kind(choice);
+            assert!(backup_choice(kind) == Some(choice));
+            assert!(!original_call(&owner, &owner.gui, kind));
+            assert!(kind != PanelKind::File && kind != PanelKind::Project && kind != PanelKind::PublicImages);
+        }
+        let original = OriginalPanel { id: owner.id, panel: None, call: Arc::downgrade(&owner.gui), kind: PanelKind::File,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            open_release: None,
+        };
+        assert!(original.matches(&owner.gui, owner.id, PanelKind::File));
+        let other = OriginalWork::artifact_unentered_original_data();
+        assert_eq!(owner.id, other.id);
+        assert!(!original.matches(&other.gui, owner.id, PanelKind::File));
+        assert!(!original.matches(&owner.gui, owner.id, PanelKind::RecoveryCode));
+        assert!(!original.matches(&owner.gui, owner.id + 1, PanelKind::File));
+    }
+    #[test]
+    fn backup_outcome_keeps_the_original_path_and_unknown_never_consumes_it() {
+        // Projection DATA only. The real loop still joins each original
+        // construct/poll/close/release dispatch before consulting this helper.
+        let mut facts = GuiFacts { dispatched: true, constructing: false, created: true,
+            showing: false, response: true, accepted: true, declined: false, accepted_at: Some(std::time::Instant::now()),
+            destroyed: true, released: false, not_created: false, close_queued: true, close_ack: true,
+            release_queued: true, selected: Some("/private/synthetic-backup.mrkbackup".into()), refusal: None };
+        let mut dispatch = DispatchState::default();
+        assert!(dispatch.outcome(Some(&mut facts), false, None, true, false).is_none());
+        assert!(facts.selected.is_some());
+        facts.released = true;
+        assert!(matches!(dispatch.outcome(Some(&mut facts), false, None, true, false), Some(Ok(Some(DialogResult::Backup)))));
+        assert!(facts.selected.is_some());
+        dispatch.observe(Err(()));
+        assert!(dispatch.outcome(Some(&mut facts), false, None, true, false).is_none());
+        assert!(facts.selected.is_some());
+        dispatch.observe(Ok(()));
+        assert!(dispatch.outcome(Some(&mut facts), false, None, true, false).is_none());
+        assert!(facts.selected.is_some());
+    }
+    #[test]
     fn android_source_roles_use_the_original_folder_panel_without_renderer_initial_paths() {
         use crate::artifact_inspection_protocol::{Format as F,Role as A};
         for (format,role,kind) in [(F::Aab,A::Artifact,PanelKind::ArtifactAab),(F::Ipa,A::Artifact,PanelKind::ArtifactIpa),
@@ -859,14 +953,14 @@ mod tests {
                 destroyed: true, released: true, not_created: false, close_queued: true, close_ack: true,
                 release_queued: true, selected: None, refusal: Some(reason) };
             let mut dispatch = DispatchState::default();
-            assert!(dispatch.outcome(Some(&mut facts), true, None, false).is_some());
+            assert!(dispatch.outcome(Some(&mut facts), true, None, false, false).is_some());
             dispatch.observe(Err(()));
             assert!(!dispatch.can_continue());
-            assert!(dispatch.outcome(Some(&mut facts), true, None, false).is_none());
+            assert!(dispatch.outcome(Some(&mut facts), true, None, false, false).is_none());
             dispatch.observe(Ok(())); // A later known return cannot restore admission.
             facts.not_created = true; // Nor can an otherwise-final projection.
             assert!(!dispatch.can_continue());
-            assert!(dispatch.outcome(Some(&mut facts), true, None, false).is_none());
+            assert!(dispatch.outcome(Some(&mut facts), true, None, false, false).is_none());
             assert_eq!(facts.refusal, Some(reason)); // No global first-reason semantics change.
         }
     }
@@ -878,7 +972,7 @@ mod tests {
         assert!(response_kind(PanelResponse::Decline) == NativeResponse::Decline);
         assert!(response_kind(PanelResponse::Other) == NativeResponse::Other);
         let mut dispatch = DispatchState::default();
-        assert!(dispatch.outcome(None, true, None, false).is_none());
+        assert!(dispatch.outcome(None, true, None, false, false).is_none());
         assert!(!dispatch.can_continue());
     }
 }
