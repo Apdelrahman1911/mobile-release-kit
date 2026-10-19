@@ -156,6 +156,8 @@ test('view vocabulary rejects namespace edits, private paths, missing warnings a
 
 test('missing native port, preview and unqualified owner never admit operations', () => {
   const none = new ProjectIdentityController(() => ctx()); allControllers.push(none);
+  const noContext = new ProjectIdentityController(() => null); allControllers.push(noContext);
+  assert.equal(noContext.getSnapshot().session, null);
   for (const action of ['analyze', 'prepare', 'apply', 'inspectRecovery', 'prepareRecovery', 'recover', 'discard', 'checkStatus']) assert.equal(none[action](), false);
   const examples = [harness({ mode: 'preview' }), harness({ context: { ...ctx(), preview: true } }),
     harness({ initial: { busy: false, status: { ...status(), capability: { available: false, reason: 'runtime_unqualified' } } } })];

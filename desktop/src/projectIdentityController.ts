@@ -189,7 +189,7 @@ export class ProjectIdentityController {
     const { context, owner } = frame, status = owner?.status;
     const active = this.#active(frame);
     const terminal = status?.lastTerminal;
-    const session = active ?? (terminal?.projectId === context?.projectId ? terminal : null);
+    const session = active ?? (terminal && terminal.projectId === context?.projectId ? terminal : null);
     const selected = this.#selected(session, frame);
     const analysis = selected && session?.checkout?.view.kind === 'project-identity' ? session.checkout.view : null;
     const preview = selected && session?.prepared?.view.kind === 'project-identity-preview' ? session.prepared.view : null;

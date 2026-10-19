@@ -19,7 +19,7 @@ export function ProjectIdentityEditor({ controller }: { controller: ProjectIdent
   const newInputValid = platform !== undefined && identityValueFits(state.desiredIdentity, platform);
   return <section className="card" aria-labelledby={`${id}-title`}>
     <div id={`${id}-title`}><SectionHeading title={label} description="This ID connects your app to its store listing. Keep it when updating an existing app.">
-      <Badge tone={state.tone}>{state.busy ? 'Working' : state.result ? 'Finished' : state.reviewCurrent ? 'Review' : 'Project setup'}</Badge>
+      <Badge tone={state.tone === 'success' ? 'info' : state.tone}>{state.busy ? 'Working' : state.result ? 'Finished' : state.reviewCurrent ? 'Review' : 'Project setup'}</Badge>
     </SectionHeading></div>
     <p className="subtle-note">Only the recognized app ID and matching saved setting can change. Source packages and namespaces stay as they are. The built app still needs an identity check before release.</p>
     <div className={`notice notice-${state.tone === 'danger' ? 'danger' : 'info'}`} role={state.tone === 'danger' ? 'alert' : 'status'} aria-live="polite">
