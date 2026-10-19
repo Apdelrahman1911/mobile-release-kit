@@ -1,39 +1,47 @@
 # Manual macOS candidate trial
 
-Updated 2026-10-18. **Private candidate trial, not a public release or a claim that
+Updated 2026-10-19. **Private candidate trial, not a public release or a claim that
 every feature works.** The owner will test the interface manually; unfinished
-XCTest journeys are not feature passes. Signed/notarized application installers
-and matching removal images are available for both architectures. Prefer a
-disposable Mac VM or noncritical test installation with backups: actual removal,
-interrupted recovery and update preservation still need verification.
+XCTest journeys are not feature passes. The new Apple Silicon build removes the
+macOS 26-only installer and native runtime restrictions. Actual macOS 27 operation
+still needs the owner's M4 test; hosted verification used macOS 26. Prefer a
+noncritical test installation with backups. The new ARM build does **not** yet
+have a matching removal image; the earlier removers below are not substitutes.
 
 ## Choose the correct download
 
-These are the existing signed/notarized candidates from
+The corrected **Apple Silicon** candidate is application source
+`bf9d397bde641aae4b4cd205f3c962e899557650`, from successful
+[run 39179866174, attempt 1](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39179866174).
+Native platform tests, building/signing/notarization, actual Installer and installed
+file verification, final-image verification and upload passed. This does not
+establish app launch or complete functionality on macOS 27.
+
+The **Intel** download remains the earlier signed/notarized candidate from
 [run 39116948396, attempt 1](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39116948396),
 application source `fcb1aa46fb95e601479078fdc98ba05acb701c05`.
-Both architectures completed their packaging, Installer, final-image and artifact
-retention steps. The later producer UI tests failed; the whole run is **not** a
-successful UI qualification.
+Its packaging, Installer, final-image and artifact retention steps passed, but
+later UI tests failed. It has **not** received the macOS 27 correction.
 
 | Mac | Required system | Download |
 | --- | --- | --- |
-| Apple Silicon | macOS 26.x; native ARM64 | [Artifact 12134468997](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39116948396/artifacts/12134468997) |
+| Apple Silicon | macOS 26.0 or newer; native ARM64; macOS 27 runtime trial pending | [Corrected artifact 12157830080](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39179866174/artifacts/12157830080) |
 | Intel | macOS 26.x; native x86_64 | [Artifact 12134938034](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39116948396/artifacts/12134938034) |
 
-Check **Apple menu → About This Mac** first. The current Installer allows macOS
-26.0 through 26.x, **not** macOS 27 or older systems. Do not substitute the other
-architecture or use Rosetta as a workaround. GitHub access may be required.
-Both artifacts were available on 2026-10-18; their current retention expires on
-2026-11-01 (ARM 11:19:26 UTC; Intel 11:23:45 UTC). Ask for renewed delivery if a
-link expires rather than downloading an unrelated build.
+Check **Apple menu → About This Mac** first. The new ARM installer and runtime
+retain minimum macOS 26.0 without an arbitrary upper version limit; normal native
+architecture and security checks still apply. The old Intel installer allows
+only 26.x. Do not substitute architectures or use Rosetta. GitHub access may be
+required. ARM expires **2026-11-02 01:10:19 UTC**; Intel expires **2026-11-01
+11:23:45 UTC**. The ARM artifact's `macos26` name identifies its build baseline,
+not an upper OS limit. Ask for renewed delivery if a link expires.
 
 The ZIP contains `MobileReleaseKit.dmg`, `README.md` and `PREVIEW.json`. Keep the
 guide and metadata. For independent download verification, the recorded **ZIP**
 SHA-256 values are below; these are not hashes of the individual DMG:
 
 ```text
-ARM   110514695 bytes  b3441b310812d7527f6d5a30e942fd5e26c8a62277f3174fd002db3bdbabc47c
+ARM   110520583 bytes  4216ed3bdaed64fc3cd94f84571ecdecd4d854dee0314c48ac3a52f5f444a5a7
 Intel 113033403 bytes  63bbdae7d00da1609396fd0896dd03d97efced596cfec5dcd4c29654d687b50b
 ```
 
@@ -108,8 +116,10 @@ unknown or unfinished result; do not repeatedly start the same operation.
 
 ### Download the matching Xcode setup package
 
-These existing signed/notarized companions remain compatible with this app's
-managed-Xcode contract; no replacement app installation is needed:
+These earlier signed/notarized companions are **macOS 26-only**. Do not use them
+on macOS 27: their Installer and native setup have the old version restriction.
+A corrected companion for macOS 27 has not yet been delivered. The application's
+OS correction does not modify a previously downloaded setup package.
 
 | Mac | Download | Current expiration (UTC) |
 | --- | --- | --- |
@@ -140,7 +150,9 @@ PKG is not permission to replace this installation.
 
 ### Matching removal downloads
 
-These separate images match application source `fcb1aa46` above. Both passed
+**These images match only the earlier application source `fcb1aa46`. They do not
+match the corrected ARM `bf9d397b` build and cannot run on macOS 27. A new matching
+ARM remover has not yet been delivered.** Both earlier images passed
 package signing/notarization, image signing/notarization/stapling, readonly-image
 verification and Gatekeeper assessment in
 [run 39156454767, attempt 1](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39156454767).
@@ -150,7 +162,7 @@ The cleanup correction does not rebuild or change the application or remover.
 
 | Mac | Download | Current expiration (UTC) |
 | --- | --- | --- |
-| Apple Silicon | [Removal artifact 12146269919](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39156454767/artifacts/12146269919) | November 1, 2026, 19:03 |
+| Earlier Apple Silicon `fcb1aa46` only | [Removal artifact 12146269919](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39156454767/artifacts/12146269919) | November 1, 2026, 19:03 |
 | Intel | [Removal artifact 12147143924](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39156454767/artifacts/12147143924) | November 1, 2026, 19:05 |
 
 The ZIP contains `MobileReleaseKit-Remove.dmg`, `REMOVE.md` and `REMOVAL.json`.
@@ -165,7 +177,9 @@ its metadata correctly records `removalExecuted=false` and `productReady=false`.
   and verify project data, saved credentials and assignments survived. A
   qualified predecessor/successor pair has not yet been established for this
   delivery; do not attempt to manufacture one by editing metadata.
-- **Removal:** use the matching separate download above. Save work and stop app
+- **Removal:** for the new ARM build, wait for its matching remover; do not use
+  the older files above or force-delete the managed installation. For the older
+  `fcb1aa46` installation only, use its matching separate download. Save work and stop app
   operations, mount `MobileReleaseKit-Remove.dmg`, then open **Remove.pkg inside
   the mounted image**, keeping its companion files in place. Follow `REMOVE.md`
   and the app's explicit consent. Do not Trash the Applications entry, delete the
