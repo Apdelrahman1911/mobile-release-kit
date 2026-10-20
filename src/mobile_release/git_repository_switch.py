@@ -480,6 +480,61 @@ class _SwitchSession(branches._BranchSession):
         return result.returncode, result.stdout
 
 
+def _content(session, before, target_oid):
+    """Same bounded content comparison for Switch and clean-tree FF only."""
+    _, source_raw = session.git(["ls-tree", "-r", "-l", "-z", before.public.head], limit=384 * 1024)
+    source_tree = _tree(source_raw)
+    if target_oid == before.public.head:
+        target_tree = source_tree
+    else:
+        _, target_raw = session.git(["ls-tree", "-r", "-l", "-z", target_oid], limit=384 * 1024)
+        target_tree = _tree(target_raw)
+    _require([(item.path, item.mode) for item in source_tree] == [(item.path, item.mode) for item in target_tree],
+             "switch-layout")
+    _require(before.entries == {item.path: (core._Entry(item.mode, item.oid, 0),) for item in source_tree},
+             "switch-dirty")
+    paths = tuple(item.path for item in source_tree)
+    changed = tuple(before.path for before, after in zip(source_tree, target_tree) if before.oid != after.oid)
+    core._need(len(changed) <= MAX_CHANGED, "limit")
+    _require(all(Path(path).name != ".gitattributes" for path in changed), "switch-layout")
+    footprint = _footprint(session, source_tree, changed)
+    # Attribute files may be untracked. Bind every applicable existing
+    # parent before querying them; the execution view later has a fixed
+    # highest-priority no-conversion rule, only after this policy refuses
+    # any actually requested transform. A racing policy cannot execute.
+    attribute_paths = {session.git_dir / "info/attributes", session.root / ".gitattributes"}
+    for path in paths:
+        for parent in (session.root / path).parents:
+            if not parent.is_relative_to(session.root):
+                break
+            attribute_paths.add(parent / ".gitattributes")
+    core._need(len(attribute_paths) <= MAX_PARENTS + 2, "limit")
+    for path in sorted(attribute_paths):
+        before.metadata[path] = core._read(path, 65536)[0]
+    _, flags = session.git(["ls-files", "-v", "-z"], limit=384 * 1024)
+    _flags(flags, paths)
+    if paths:
+        _, attributes = session.git(["check-attr", "--cached", "-z", *ATTRIBUTES, "--", *paths], limit=384 * 1024)
+        _attributes(attributes, paths)
+        _, attributes = session.git(["check-attr", "-z", *ATTRIBUTES, "--", *paths], limit=384 * 1024)
+        _attributes(attributes, paths)
+    source_paths = set(paths)
+    used = sum(item.size for item in source_tree) + sum(
+        s.identity[3] for p, s in footprint.preserved if p not in source_paths and s.kind == "file")
+    hashes = []
+    for item in target_tree:
+        if item.path not in changed:
+            continue
+        core._need(used + item.size <= MAX_BYTES, "limit")
+        _, raw = session.git(["cat-file", "blob", item.oid], limit=max(1024, min(core.MAX_FILE_BYTES, item.size + 1)))
+        core._need(len(raw) == item.size and _blob(raw, item.oid) == item.oid, "response-invalid")
+        _require(not raw.startswith(_LFS), "switch-conversion")
+        core._need(core._SECRET.search(raw) is None, "sensitive-content")
+        used += len(raw)
+        hashes.append((item.path, core._digest(raw)))
+    return source_tree, target_tree, changed, footprint, tuple(hashes)
+
+
 class GitSwitchRepository(branches.GitBranchesRepository):
     """Closed facade; original MutationOwner and target-lock owner required."""
     def __init__(self, *args, _target_lock=None, **kwargs):
@@ -518,56 +573,7 @@ class GitSwitchRepository(branches.GitBranchesRepository):
         _require(len(matches) == 1 and target != before.public.branch, "switch-target")
         session.require_ref_parent(target)
         target_oid = matches[0].oid
-        _, source_raw = session.git(["ls-tree", "-r", "-l", "-z", before.public.head], limit=384 * 1024)
-        source_tree = _tree(source_raw)
-        if target_oid == before.public.head:
-            target_tree = source_tree
-        else:
-            _, target_raw = session.git(["ls-tree", "-r", "-l", "-z", target_oid], limit=384 * 1024)
-            target_tree = _tree(target_raw)
-        _require([(item.path, item.mode) for item in source_tree] == [(item.path, item.mode) for item in target_tree],
-                 "switch-layout")
-        _require(before.entries == {item.path: (core._Entry(item.mode, item.oid, 0),) for item in source_tree},
-                 "switch-dirty")
-        paths = tuple(item.path for item in source_tree)
-        changed = tuple(before.path for before, after in zip(source_tree, target_tree) if before.oid != after.oid)
-        core._need(len(changed) <= MAX_CHANGED, "limit")
-        _require(all(Path(path).name != ".gitattributes" for path in changed), "switch-layout")
-        footprint = _footprint(session, source_tree, changed)
-        # Attribute files may be untracked. Bind every applicable existing
-        # parent before querying them; the execution view later has a fixed
-        # highest-priority no-conversion rule, only after this policy refuses
-        # any actually requested transform. A racing policy cannot execute.
-        attribute_paths = {session.git_dir / "info/attributes", session.root / ".gitattributes"}
-        for path in paths:
-            for parent in (session.root / path).parents:
-                if not parent.is_relative_to(session.root):
-                    break
-                attribute_paths.add(parent / ".gitattributes")
-        core._need(len(attribute_paths) <= MAX_PARENTS + 2, "limit")
-        for path in sorted(attribute_paths):
-            before.metadata[path] = core._read(path, 65536)[0]
-        _, flags = session.git(["ls-files", "-v", "-z"], limit=384 * 1024)
-        _flags(flags, paths)
-        if paths:
-            _, attributes = session.git(["check-attr", "--cached", "-z", *ATTRIBUTES, "--", *paths], limit=384 * 1024)
-            _attributes(attributes, paths)
-            _, attributes = session.git(["check-attr", "-z", *ATTRIBUTES, "--", *paths], limit=384 * 1024)
-            _attributes(attributes, paths)
-        source_paths = set(paths)
-        used = sum(item.size for item in source_tree) + sum(
-            s.identity[3] for p, s in footprint.preserved if p not in source_paths and s.kind == "file")
-        hashes = []
-        for item in target_tree:
-            if item.path not in changed:
-                continue
-            core._need(used + item.size <= MAX_BYTES, "limit")
-            _, raw = session.git(["cat-file", "blob", item.oid], limit=max(1024, min(core.MAX_FILE_BYTES, item.size + 1)))
-            core._need(len(raw) == item.size and _blob(raw, item.oid) == item.oid, "response-invalid")
-            _require(not raw.startswith(_LFS), "switch-conversion")
-            core._need(core._SECRET.search(raw) is None, "sensitive-content")
-            used += len(raw)
-            hashes.append((item.path, core._digest(raw)))
+        source_tree, target_tree, changed, footprint, hashes = _content(session, before, target_oid)
         logging = _logging(session.git_dir, before.config)
         plan = SwitchPlan(name, target_oid, expected_reference_revision, source_tree, target_tree,
                           changed, self._key, before, footprint, logging, tuple(hashes))

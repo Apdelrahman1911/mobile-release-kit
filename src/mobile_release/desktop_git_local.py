@@ -17,6 +17,7 @@ import time
 
 from . import _desktop_git_local_protocol as wire
 from . import _desktop_git_branches as branch
+from . import git_fast_forward_worker as ff
 from . import _desktop_git_switch as switch
 from . import _desktop_git_rename as rename
 from . import _desktop_git_read_protocol as source_fields
@@ -52,6 +53,10 @@ class GitLocalOperation:
         self.entered = self.returned = self.closed = self.unknown = False
         self.calls = 0
         self.pending = self.repository = self.review = self.diff = self.result = None
+        self.fast_forward_state = None
+        if type(request.action) is ff.Action:
+            from .git_fast_forward_sources import State
+            self.fast_forward_state = State(self)
         self.switch_state = None
         if type(request.action) is switch.Action:
             from ._desktop_git_switch_sources import State
@@ -107,6 +112,8 @@ class GitLocalOperation:
     def _check(self, original: _Original, hash_file: bool) -> None:
         if self.rename_state is not None:
             return self.rename_state.check(original, hash_file)
+        if self.fast_forward_state is not None:
+            return self.fast_forward_state.check(original, hash_file)
         if self.switch_state is not None:
             return self.switch_state.check(original, hash_file)
         publication = self._publication()
@@ -142,6 +149,8 @@ class GitLocalOperation:
     def source_post(self, *, hash_files: bool) -> None:
         if self.rename_state is not None:
             return self.rename_state.post(hash_files=hash_files)
+        if self.fast_forward_state is not None:
+            return self.fast_forward_state.post(hash_files=hash_files)
         if self.switch_state is not None:
             return self.switch_state.post(hash_files=hash_files)
         self.checkpoint()
@@ -179,7 +188,8 @@ class GitLocalOperation:
                      and type(timeout) is int and 0 < timeout <= wire.COMMAND_SECONDS)
         sessions = self.repository._active_sessions
         wire.require(len(sessions) == 1
-                     and (rename.local_session(self, sessions[0]) if type(self.request.action) is rename.Action else
+                     and (ff.local_session(self, sessions[0]) if type(self.request.action) is ff.Action else
+                          rename.local_session(self, sessions[0]) if type(self.request.action) is rename.Action else
                           switch.local_session(self, sessions[0]) if type(self.request.action) is switch.Action else
                           branch.local_session(self, sessions[0]) if type(self.request.action) is branch.Action else
                           type(sessions[0]) is local._LocalSession)
@@ -192,7 +202,8 @@ class GitLocalOperation:
         selected_index = environ.get("GIT_INDEX_FILE")
         index = None if selected_index in (None, str(self.request.root / ".git/index")) else Path(selected_index)
         plan = self.repository._active_plan
-        identity = (rename.command_identity(self, session, args) if type(self.request.action) is rename.Action else
+        identity = (ff.command_identity(self, session, args) if type(self.request.action) is ff.Action else
+                    rename.command_identity(self, session, args) if type(self.request.action) is rename.Action else
                     switch.command_identity(self, session, args) if type(self.request.action) is switch.Action else
                     plan._identity if args and args[0] == "commit-tree" and plan is not None else None)
         expected_argv, expected_env = session.command_spec(args, index=index, identity=identity)
@@ -207,6 +218,8 @@ class GitLocalOperation:
             verdict = self.guard.lifetime_ledger.verdict()
             wire.require(pending.claimed and verdict.cleanup_complete and verdict.contained
                          and verdict.commands == self.calls)
+            if type(self.request.action) is ff.Action:
+                ff.returned_command(self, session, args, result)
             if type(self.request.action) is rename.Action:
                 rename.returned_command(self, session, args, result)
             if type(self.request.action) is switch.Action:
@@ -246,7 +259,9 @@ class GitLocalOperation:
         self.entered = True
         action = self.request.action
         try:
-            if type(action) is rename.Action:
+            if type(action) is ff.Action:
+                ff.prepare_or_apply(self)
+            elif type(action) is rename.Action:
                 rename.prepare_or_apply(self)
             elif type(action) is switch.Action:
                 switch.prepare_or_apply(self)
@@ -285,6 +300,8 @@ class GitLocalOperation:
             raise
 
     def publication(self) -> str:
+        if self.fast_forward_state is not None:
+            return self.fast_forward_state.publication()
         if self.rename_state is not None:
             return self.rename_state.publication()
         if self.switch_state is not None:
@@ -379,6 +396,8 @@ class _Engine:
                 values = {"review": operation.review, "diff": operation.diff}
             else:
                 values = {"result": operation.result, "publication": operation.publication()}
+                if operation.fast_forward_state is not None:
+                    values["progress"] = operation.fast_forward_state.progress
                 if operation.switch_state is not None:
                     values["progress"] = operation.switch_state.progress
                 if operation.rename_state is not None:

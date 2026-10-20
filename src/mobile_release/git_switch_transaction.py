@@ -202,6 +202,9 @@ class SwitchTransaction(local._LocalTransaction):
                        "stale-observation")
         self.phase = "locked"
         self.check_original()
+        self._prepare_execution()
+
+    def _prepare_execution(self):
         self._probe_checkout_mode()
         self.exec_view = self.session.exec_view = core._FrozenGitDirectory.__new__(core._FrozenGitDirectory)
         core._FrozenGitDirectory.__init__(self.exec_view)

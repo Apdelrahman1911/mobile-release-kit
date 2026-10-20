@@ -50,7 +50,7 @@ pub(crate) struct GitLocalPublication {
 impl GitLocalPublication {
     pub(crate) fn intent_for(&self,id:&str,native:&wire::Native,review:&wire::Review)
         ->Result<&wire::Intent,crate::asset_commands::Reason> {
-        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename) || self.request.id!=id || &self.request.native!=native
+        if matches!(self.request.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward) || self.request.id!=id || &self.request.native!=native
             || !self.request.binding.as_ref().is_some_and(|b| &b.review==review)
             || !self.candidate.intent.matches(review) {return Err(crate::asset_commands::Reason::SourceChanged)}
         Ok(&self.candidate.intent)
@@ -64,6 +64,16 @@ impl GitLocalPublication {
             return Err(crate::asset_commands::Reason::SourceChanged)
         }
         Ok((self.candidate.intent.rename_details().ok_or(crate::asset_commands::Reason::SourceChanged)?,self.publication))
+    }
+    pub(crate) fn fast_forward_for(&self,id:&str,native:&wire::Native,review:&wire::Review,sources:&crate::git_fast_forward_protocol::Sources)
+        ->Result<(&crate::git_fast_forward_protocol::Intent,wire::Publication),crate::asset_commands::Reason> {
+        if self.request.action.kind()!=wire::Kind::FastForward || self.request.id!=id || &self.request.native!=native
+            || !self.request.binding.as_ref().is_some_and(|b|&b.review==review)
+            || self.request.fast_forward_sources.as_ref()!=Some(sources) || !self.candidate.intent.matches(review)
+            || self.publication==wire::Publication::NotReported || crate::git_fast_forward_protocol::effect(self.publication).is_none() {
+            return Err(crate::asset_commands::Reason::SourceChanged)
+        }
+        Ok((self.candidate.intent.fast_forward_details().ok_or(crate::asset_commands::Reason::SourceChanged)?,self.publication))
     }
     pub(crate) fn switch_for(&self,id:&str,native:&wire::Native,review:&wire::Review,sources:&crate::git_switch_protocol::Sources)
         ->Result<(&crate::git_switch_protocol::Intent,wire::Publication),crate::asset_commands::Reason> {
@@ -84,6 +94,7 @@ pub(crate) struct GitLocalNativeJoined {
     native_use:Arc<NativeUse>,original:Arc<Original>,completion:Completion,
     switch_final:Option<crate::git_switch_protocol::FinalData>,
     rename_final:Option<crate::git_rename_protocol::FinalData>,
+    fast_forward_final:Option<crate::git_fast_forward_protocol::FinalData>,
 }
 #[cfg(any(target_os="linux",target_os="macos"))]
 impl GitLocalNativeJoined {
@@ -92,6 +103,7 @@ impl GitLocalNativeJoined {
     }
     pub(crate) fn completion(&self)->Completion {self.completion}
     pub(crate) fn rename_final(&self)->Option<&crate::git_rename_protocol::FinalData> {self.rename_final.as_ref()}
+    pub(crate) fn fast_forward_final(&self)->Option<&crate::git_fast_forward_protocol::FinalData> {self.fast_forward_final.as_ref()}
     pub(crate) fn switch_final(&self)->Option<&crate::git_switch_protocol::FinalData> {self.switch_final.as_ref()}
 }
 #[derive(Clone)]
@@ -209,11 +221,11 @@ impl Invocation {
             let result=runtime.resolve_git_local_installed(&mut native,owner.endpoint(),&stop);
             owner.observe_native_failure(native.first_failure());result?};
         let review=self.gate.review();
-        let (snapshot,switch_sources,rename_sources)={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+        let (snapshot,switch_sources,rename_sources,fast_forward_sources)={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
             let result=sources.inspect(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),
                 &owner.id,review.as_ref(),&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
             observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;
-            (sources.native_snapshot().map_err(source_error)?.clone(),sources.switch_projection().map_err(source_error)?.cloned(),sources.rename_projection().map_err(source_error)?.cloned())};
+            (sources.native_snapshot().map_err(source_error)?.clone(),sources.switch_projection().map_err(source_error)?.cloned(),sources.rename_projection().map_err(source_error)?.cloned(),sources.fast_forward_projection().map_err(source_error)?.cloned())};
         let binding=match (self.phase,review,preparing) {
             (wire::Phase::Prepare,None,None)=>None,
             (wire::Phase::Apply,Some(review),Some(ack))=>Some(wire::ApplyBinding {review,journal_revision:ack.revision.0}),
@@ -223,7 +235,9 @@ impl Invocation {
         let mut clock=mrk_macos_installed_native::vault_helper_wire::ClockBridge::capture().ok_or_else(BridgeError::cleanup_unknown)?;
         let clock_data=wire::Clock {work_end_ns:clock.endpoint(ends.work).ok_or_else(BridgeError::cleanup_unknown)?,
             hard_end_ns:clock.endpoint(ends.hard).ok_or_else(BridgeError::cleanup_unknown)?};
-        let request=Arc::new(if self.action.kind()==wire::Kind::BranchSwitch {
+        let request=Arc::new(if self.action.kind()==wire::Kind::FastForward {
+            wire::Request::from_fast_forward_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding,fast_forward_sources)?
+        } else if self.action.kind()==wire::Kind::BranchSwitch {
             wire::Request::from_switch_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding,switch_sources)?
         } else if self.action.kind()==wire::Kind::BranchRename {
             wire::Request::from_rename_original(&owner.id,&self.action,&self.context,&snapshot,clock_data,binding,rename_sources)?
@@ -399,6 +413,14 @@ pub(super) async fn finalize(inner:&Inner,owner:&Arc<Owner>)->bool {
         // Historical detail is copied only from this original positive
         // publication after ALL earlier management/source/runtime returns.
         // No candidate/readback/negative result can manufacture this evidence.
+        let fast_forward_final=if invocation.action.kind()==wire::Kind::FastForward {
+            let publication=invocation.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+            match publication.as_ref() {
+                Some(p)=>Some(crate::git_fast_forward_protocol::FinalData::from_returned(&p.request,&p.candidate,
+                    reply.as_ref().ok_or_else(BridgeError::cleanup_unknown)?,p.publication)?),
+                None=>None,
+            }
+        } else {None};
         let switch_final=if invocation.action.kind()==wire::Kind::BranchSwitch {
             let publication=invocation.publication.lock().map_err(|_|BridgeError::cleanup_unknown())?;
             match publication.as_ref() {
@@ -415,7 +437,7 @@ pub(super) async fn finalize(inner:&Inner,owner:&Arc<Owner>)->bool {
                 None=>None,
             }
         } else {None};
-        Ok(Some(GitLocalNativeJoined {native_use,original,completion,switch_final,rename_final}))
+        Ok(Some(GitLocalNativeJoined {native_use,original,completion,switch_final,rename_final,fast_forward_final}))
     })();
     let joined=match joined {Ok(value)=>value,Err(error)=>{owner.fail(error);owner.unknown(inner);return false}};
     let local=r.git_local.as_mut().expect("same retained facet");local.finalizing=true;
@@ -483,9 +505,9 @@ pub(super) fn settle(owner:&Owner,slots:&Arc<Mutex<crate::installed_runtime::Git
     // are known too. All old actions keep their original order. This body is
     // already after process/pipe joins; later management/journal/NativeUse
     // joins are still mandatory, never inferred from a positive publication.
-    let (source_closed,runtime_closed)=if matches!(local.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename) {
+    let (source_closed,runtime_closed)=if matches!(local.action.kind(),wire::Kind::BranchSwitch|wire::Kind::BranchRename|wire::Kind::FastForward) {
         let closed=native.settle_originals(&mut |first|owner.native_cleanup_expired(first));
-        if !matches!(closed,CloseOutcome::Settled) {if local.action.kind()==wire::Kind::BranchRename {sources.retain_rename_unknown();} else {sources.retain_switch_unknown();}return CloseOutcome::Unknown}
+        if !matches!(closed,CloseOutcome::Settled) {if local.action.kind()==wire::Kind::FastForward {sources.retain_fast_forward_unknown();} else if local.action.kind()==wire::Kind::BranchRename {sources.retain_rename_unknown();} else {sources.retain_switch_unknown();}return CloseOutcome::Unknown}
         (sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok(),closed)
     } else {
         let closed=sources.close(&mut |first| {observe_source_failure(owner,first);owner.native_cleanup_expired(None)}).is_ok();
