@@ -139,7 +139,9 @@ class ToolSetupPassive(unittest.TestCase):
     def test_fixed_scope_timeout_and_fixture_no_generated_or_wrapper_executable(self):
         self.assertEqual(PARENT.selected_cases(TOOLS.SCOPE), TOOLS.CASES)
         self.assertEqual(PARENT.argument_scope(["--scope", "tool-setup"]), TOOLS.SCOPE)
-        self.assertEqual(BINDING.root(tool_setup=True).name, "mrk-macos-aqua-" + "a" * 40 + "-123-1-tool-setup")
+        self.assertEqual(BINDING.root(tool_setup=True, native_home="/Users/example").name, "mrk-macos-aqua-" + "a" * 40 + "-123-1-tool-setup")
+        with self.assertRaises(PARENT.Refused):
+            BINDING.root(tool_setup=True)  # No former sticky-/tmp fallback.
         with self.assertRaises(PARENT.Refused):
             BINDING.root(tool_setup=True, vault_helper=True)
         for case in TOOLS.CASES:
@@ -166,6 +168,7 @@ class ToolSetupPassive(unittest.TestCase):
         calls, outputs = [], []
         class InertFixtures:
             cases = TOOLS.CASES
+            path = TOOLS.fixture_path(BINDING, "/Users/example", service=False, need=PARENT.need)
             inflight = False
             last_returned = False
             def recovery_runtime_paths(self):
@@ -189,6 +192,7 @@ class ToolSetupPassive(unittest.TestCase):
     def test_original_invoke_error_retained_without_readback_or_next_case(self):
         class InertFixtures:
             cases = TOOLS.CASES
+            path = TOOLS.fixture_path(BINDING, "/Users/example", service=False, need=PARENT.need)
             inflight = False
             last_returned = False
             def recovery_runtime_paths(self): return ("inert-only",)

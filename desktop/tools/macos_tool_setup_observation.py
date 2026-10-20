@@ -11,6 +11,9 @@ import re
 import stat
 
 SCOPE = "tool-setup"
+SERVICE_SCOPE = SERVICE_CASE = "tool-service-prerequisite"
+SERVICE_CASES = (SERVICE_CASE,)
+SERVICE_TIMEOUT = 765
 CASES = ("tool-setup-missing-sdk", "tool-setup-cancel-transfer", "tool-setup-source-drift")
 # Protected publication is intentionally durable. Run both nonpublishing cuts
 # FIRST, then the positive case, without deleting/adopting any existing row.
@@ -44,6 +47,56 @@ def fixture_data(config, version, keep, ignore):
     return files, directories
 
 
+def service_report(value, need):
+    """Comparison only, after the original invocation and native finalization.
+
+    In particular a lost/admitted request cannot masquerade as known nonentry.
+    The actual prerequisite invocation is separate from the three Check-only
+    journeys and does not require or inspect any supplier input.
+    """
+    flags = ("requestAdmitted", "checkAdmitted", "requestSettled", "checkSettled", "knownNonentry",
+             "sameOriginalBindings", "allOriginalsSettled", "projectSentinelPreserved", "sourceInputsRead",
+             "toolAcquisitionEntered", "settingsOpened", "serviceUnregistered", "productionQualified")
+    keys = frozenset(("mechanism", "execution", "finding", "requestCalls", "checkCalls", "normalQuitOriginal", *flags))
+    need(type(value) is dict and value.keys() == keys
+         and value["mechanism"] == "same-original-tool-service-prerequisite-v1"
+         and all(type(value[k]) is bool for k in flags), "tool-service-report")
+    need(type(value["requestCalls"]) is int and value["requestCalls"] == 1
+         and type(value["checkCalls"]) is int and value["checkCalls"] in (0, 1)
+         and type(value["normalQuitOriginal"]) is int and value["normalQuitOriginal"] == 2
+         and all(value[k] for k in ("sameOriginalBindings", "allOriginalsSettled", "projectSentinelPreserved"))
+         and not any(value[k] for k in ("sourceInputsRead", "toolAcquisitionEntered", "settingsOpened",
+                                      "serviceUnregistered", "productionQualified")), "tool-service-scope")
+    need(value["requestSettled"] == value["requestAdmitted"]
+         and value["checkSettled"] == value["checkAdmitted"]
+         and (not value["checkCalls"] or value["requestAdmitted"])
+         and (not value["checkAdmitted"] or value["checkCalls"] == 1), "tool-service-originals")
+    if value["knownNonentry"]:
+        need((not value["requestAdmitted"] and not value["checkCalls"])
+             or (value["requestSettled"] and value["checkCalls"] == 1 and not value["checkAdmitted"]),
+             "tool-service-nonentry")
+        need(value["finding"] == "service-unavailable", "tool-service-nonentry-finding")
+    else:
+        need(value["requestSettled"] and (not value["checkCalls"] or value["checkSettled"]),
+             "tool-service-no-lost-admission")
+    if value["execution"] == "ready":
+        need(value["finding"] == "ready" and value["checkCalls"] == 1 and value["checkSettled"]
+             and not value["knownNonentry"], "tool-service-ready")
+    else:
+        need(value["execution"] == "not-executed-prerequisite" and value["finding"] in (
+            "approval-required", "approval-denied", "service-not-found", "service-unavailable"),
+            "tool-service-unexecuted")
+    return value
+
+
+def service_readback(fixtures, case, value, need):
+    need(case == SERVICE_CASE and fixtures.cases == SERVICE_CASES
+         and not fixtures.inflight and fixtures.last_returned, "tool-service-readback-order")
+    service_report(value, need)
+    return {**fixtures.readback(case), "toolService": {"projectUnchanged": True,
+        "sourceInputsRead": False, "serviceUnregistered": False}}
+
+
 def application_path(binding, native_home, case, need):
     binding.checked()
     need(case in CASES and type(case) is str and type(native_home) is str, "tool-fixture-case")
@@ -52,6 +105,54 @@ def application_path(binding, native_home, case, need):
          and len(home.parts) <= 17 and len(os.fsencode(home)) <= 4096
          and all(part not in (".", "..") and len(os.fsencode(part)) <= 255 for part in home.parts[1:]), "tool-native-home")
     return home / "Library/Application Support" / f"mrk-macos-aqua-tools-{binding.source}-{binding.run}-{binding.attempt}" / case / APPLICATION
+
+
+def fixture_path(binding, native_home, *, service, need):
+    """Comparison path only. Fixtures supplies pwd; Rust uses the same User.dir."""
+    need(type(service) is bool, "tool-fixture-scope")
+    # Reuse the exact native-home syntax, not a caller environment pathname.
+    support = application_path(binding, native_home, CASES[0], need).parents[2]
+    suffix = SERVICE_SCOPE if service else SCOPE
+    return support / f"mrk-macos-aqua-{binding.source}-{binding.run}-{binding.attempt}-{suffix}"
+
+
+def prepare_namespace(fixtures, need, signature):
+    """Hold protected ancestors before creating the one fixed task namespace.
+
+    No ancestor is created, chmodded, adopted, or exempted for sticky /tmp.
+    Every descriptor belongs to the existing Fixtures close path.
+    """
+    import pwd
+    need(fixtures.cases in (CASES, SERVICE_CASES) and fixtures.path is None
+         and not fixtures.tool_fixture_ancestors and not fixtures.inflight, "tool-fixture-order")
+    account = pwd.getpwuid(fixtures.uid)
+    need(fixtures.uid > 0 and account.pw_uid == fixtures.uid and account.pw_gid == fixtures.gid,
+         "tool-native-user")
+    fixtures.path = fixture_path(fixtures.binding, account.pw_dir,
+                                service=fixtures.cases == SERVICE_CASES, need=need)
+    support = fixtures.path.parent
+    current = fixtures._open("/", directory=True)
+    parent = None
+    for name in ("/", *support.parts[1:]):
+        if name != "/":
+            parent, current = current, fixtures._open(name, current, directory=True)
+        held = signature(os.fstat(current))
+        need(held == signature(os.stat(name, dir_fd=parent, follow_symlinks=False))
+             and stat.S_ISDIR(held[2]) and held[2] & 0o7022 == 0
+             and held[3] in (0, fixtures.uid), "tool-fixture-protected-ancestor")
+        fixtures.tool_fixture_ancestors.append((parent, name, current, held[:5]))
+    fixtures.parent = current
+    namespace_current(fixtures, need, signature)
+
+
+def namespace_current(fixtures, need, signature):
+    need(fixtures.cases in (CASES, SERVICE_CASES) and fixtures.path is not None
+         and fixtures.tool_fixture_ancestors and fixtures.parent == fixtures.tool_fixture_ancestors[-1][2],
+         "tool-fixture-parent-custody")
+    for parent, name, current, original in fixtures.tool_fixture_ancestors:
+        need(signature(os.fstat(current))[:5] == original
+             == signature(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5],
+             "tool-fixture-ancestor-changed")
 
 
 def _sample(value, phase, need):

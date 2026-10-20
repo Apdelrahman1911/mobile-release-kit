@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Four existing identity observations on the current installed observer.
+"""Closed existing identity/tool observations on one current installed observer.
 
 Import is DATA-only. The explicit main entry uses the existing Fixtures and
 run_cases/owned_process owners; it never prepares, signs or installs a runtime.
@@ -12,6 +12,8 @@ import sys
 
 
 SCOPE = "project-identity-native"
+TOOLS_SCOPE = "tool-setup"
+SERVICE_SCOPE = "tool-service-prerequisite"
 ROLE = "installed-shell-observation"
 TARGET = "aarch64-apple-darwin"
 CHECKOUT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
@@ -43,7 +45,7 @@ def package_role(environment, phase, target):
     scope = environment.get("MRK_MACOS_NATIVE_SCOPE", "disabled")
     if scope == "disabled":
         return None  # Preserve every original ordinary/prepared role decision.
-    need(scope == SCOPE and target == TARGET
+    need(scope in (SCOPE, TOOLS_SCOPE) and target == TARGET
          and environment.get("GITHUB_REF") == REF
          and environment.get("MRK_MACOS_PACKAGE_ROLE") == ROLE
          and phase in PACKAGE_PHASES + DATA_PHASES, "identity-native-package-scope")
@@ -52,7 +54,7 @@ def package_role(environment, phase, target):
 
 def current_context(environment, target):
     """Fixed current-job DATA. No caller-selected source, work root or case."""
-    need(environment.get("MRK_MACOS_NATIVE_SCOPE") == SCOPE
+    need(environment.get("MRK_MACOS_NATIVE_SCOPE") in (SCOPE, TOOLS_SCOPE)
          and package_role(environment, "package-install", target) == ROLE,
          "identity-native-entry-scope")
     source = environment.get("GITHUB_SHA", "")
@@ -82,6 +84,29 @@ def current_context(environment, target):
         "MRK_MACOS_XCODE_SETUP_SCOPE", "MRK_MACOS_REMOVAL_CASE")),
         "identity-native-single-scope")
     return source, environment["GITHUB_RUN_ID"], environment["GITHUB_RUN_ATTEMPT"], Path(value)
+
+
+def observation_scope(environment, scope):
+    """One source-selected package, three explicit driver invocations.
+
+    Tool scope keeps the same installed observer for identity first, then its
+    separate service prerequisite and the unchanged three tool journeys. This
+    is not a relay, prerequisite proof, generic case selector, or auto-retry.
+    """
+    native = environment.get("MRK_MACOS_NATIVE_SCOPE")
+    need(type(scope) is str and ((native == SCOPE and scope == SCOPE)
+         or (native == TOOLS_SCOPE and scope in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE))),
+         "current-native-observation-scope")
+    return scope
+
+
+def arguments(argv):
+    if argv == ["--target", TARGET]:
+        return SCOPE  # Preserve the original identity-only invocation.
+    need(type(argv) is list and len(argv) == 4 and argv[:3] == ["--target", TARGET, "--scope"]
+         and type(argv[3]) is str and argv[3] in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE),
+         "identity-native-arguments")
+    return argv[3]
 
 
 def _native_user():
@@ -163,13 +188,16 @@ def _current(aqua, fixtures):
     fixtures.recovery_runtime_paths()
 
 
-def _run(aqua, binding, uid, gid, username, work, environment):
+def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE):
     """One fixed invocation; test doubles never supply production authority."""
     fixtures = owner = error = None
     count = 0
-    cases = aqua.identity_qualification.CASES
+    cases = ()
+    not_executed = ()
     try:
-        fixtures = aqua.Fixtures(binding, uid, gid, SCOPE)
+        observation_scope(environment, scope)
+        cases = aqua.TOOLS.RUN_ORDER if scope == TOOLS_SCOPE else aqua.selected_cases(scope)
+        fixtures = aqua.Fixtures(binding, uid, gid, scope)
         fixtures.prepare()
         _admit_runtime(aqua, fixtures, binding, work, environment)
         owner = aqua.load_owner(CHECKOUT)
@@ -182,8 +210,12 @@ def _run(aqua, binding, uid, gid, username, work, environment):
             aqua.emit_record(value, sys.stdout)
             count += 1
 
-        not_executed = aqua.run_cases(binding, fixtures, owner.run_owned, uid, username, emit_checked, scope=SCOPE)
-        aqua.need(not_executed == () and count == len(cases) == 4, "identity-native-incomplete")
+        not_executed = aqua.run_cases(binding, fixtures, owner.run_owned, uid, username, emit_checked, scope=scope)
+        aqua.need(type(not_executed) is tuple and all(case in cases for case in not_executed)
+                  and len(set(not_executed)) == len(not_executed) and count == len(cases)
+                  and len(cases) == {SCOPE: 4, SERVICE_SCOPE: 1, TOOLS_SCOPE: 3}[scope],
+                  "identity-native-incomplete")
+        aqua.need(not not_executed or scope in (SERVICE_SCOPE, TOOLS_SCOPE), "identity-native-incomplete")
         _current(aqua, fixtures)
     except BaseException as caught:
         error = caught
@@ -200,7 +232,19 @@ def _run(aqua, binding, uid, gid, username, work, environment):
             pass  # No retry or masking of the original unknown/failed call.
         return 130 if isinstance(error, KeyboardInterrupt) else 1
     try:
-        aqua.emit_record({"schemaVersion": 1, "type": "macos-identity-current-complete",
+        kind = "macos-identity-current-complete" if scope == SCOPE else (
+            "macos-tool-service-current-complete" if scope == SERVICE_SCOPE else "macos-tool-setup-current-complete")
+        if not_executed:
+            # A known joined refusal is not a passing tool case. Do not start
+            # the next workflow step or manufacture Ready; leave manual approval
+            # to the owner. Unknown invocations returned above as failures.
+            aqua.emit_record({"schemaVersion": 1, "type": "macos-tool-current-unexecuted",
+                **binding.public(), "target": binding.target, "scope": scope,
+                "notExecuted": list(not_executed), "allOriginalCallsReturned": True,
+                "fixtureHandlesClosed": True, "manualStep": "Resolve the reported service prerequisite before starting the tool cases; no automatic retry was performed.",
+                "shippingBinaryQualified": False, "distributionQualified": False}, sys.stdout)
+            return 78
+        aqua.emit_record({"schemaVersion": 1, "type": kind,
             **binding.public(), "target": binding.target, "cases": list(cases),
             "allOriginalCallsReturned": True, "independentReadbacks": True, "fixtureHandlesClosed": True,
             "currentInstalledRuntime": True, "instrumentedEngineeringApp": True,
@@ -213,14 +257,15 @@ def _run(aqua, binding, uid, gid, username, work, environment):
 
 def main():
     try:
-        need(sys.argv[1:] == ["--target", TARGET], "identity-native-arguments")
+        scope = arguments(sys.argv[1:])
         environment = dict(os.environ)
+        observation_scope(environment, scope)
         source, run, attempt, work = current_context(environment, TARGET)
         uid, gid, username = _native_user()
         aqua = _load_observer()
         binding = aqua.Binding(source, run, attempt, TARGET).checked()
         os.umask(0o077)
-        return _run(aqua, binding, uid, gid, username, work, environment)
+        return _run(aqua, binding, uid, gid, username, work, environment, scope=scope)
     except BaseException as error:
         # No source paths, environment values, transcripts or exception text.
         try:

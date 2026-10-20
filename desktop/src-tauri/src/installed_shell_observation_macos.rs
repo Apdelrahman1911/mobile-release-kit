@@ -1345,7 +1345,7 @@ impl Observation {
         let local_config=if let Case::Identity(c)=case{Some(identity::config(c))}else if let Case::Checks(c)=case{Some(checks::config(c)?)}else if let Case::LocalEdits(c)=case{Some(local_edits::config(c)?)}else{None};
         let base = crate::protocol::strict_json(if let Some(bytes)=local_config.as_deref(){bytes}else if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
         let started = Instant::now();
-        let end = started + Duration::from_secs(if matches!(case,Case::ToolSetup(_)){tool_setup::SECONDS}else if let Case::Identity(c)=case{c.seconds()}else if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
+        let end = started + Duration::from_secs(if let Case::ToolSetup(c)=case{c.seconds()}else if let Case::Identity(c)=case{c.seconds()}else if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
         let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
         let project_fields = (case == Case::ProjectFields).then(project_fields::Control::new);
         let recovery = (case == Case::PendingRecovery).then(recovery::Control::new);
@@ -3911,10 +3911,16 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
     if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread() { return None; }
     let uid = mrk_macos_installed_native::real_user().ok()?;
     let upload_suffix;
-    let suffix = if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
+    let suffix = if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){"-tool-service-prerequisite"}else if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
         else if case == Case::Installation { "-installation-inspection" } else if case == Case::PendingRecovery { "-project-recovery" } else { "" };
-    let root = PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}"));
-    if matches!(case,Case::ToolSetup(_)){
+    let root = if let Case::ToolSetup(tool_case) = case {
+        let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
+        if user.uid.as_raw() != uid { return None; }
+        tool_setup::fixture_root(&user.dir, tool_case)?
+    } else { PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}")) };
+    if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){
+        directory(&root,uid,0o700,&[tool_setup::Case::ServicePreparation.name(),"state"]).ok()?;
+    } else if matches!(case,Case::ToolSetup(_)){
         directory(&root,uid,0o700,&[tool_setup::NAMES[0],tool_setup::NAMES[1],tool_setup::NAMES[2],"state"]).ok()?;
     } else if matches!(case,Case::Identity(_)){
         directory(&root,uid,0o700,&[identity::NAMES[0],identity::NAMES[1],identity::NAMES[2],identity::NAMES[3],"state"]).ok()?;
@@ -4417,7 +4423,7 @@ fn observer_data_checks() -> bool {
         || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check()
         || !original_window_witness_data_check() || !completion_ownership_data_check() || !ios::data_checks()
         || !session::data_checks() || !project_fields::data_checks() || !vault::data_checks()
-        || !installation_check::data_checks() || !recovery::data_checks() || !local_edits::data_checks() || !checks::data_checks() || !identity::data_checks() { return false; }
+        || !installation_check::data_checks() || !recovery::data_checks() || !local_edits::data_checks() || !checks::data_checks() || !identity::data_checks() || !tool_setup::service_data_checks() { return false; }
     let inspection = Case::Installation;
     if inspection.quit_id() != 3 || inspection.rounds() != 0 || inspection.loses_document()
         || inspection.inputs() || inspection.accepted_id(1) || inspection.open_id(Step::OpenProject).is_some()

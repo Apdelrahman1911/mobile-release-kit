@@ -1,0 +1,897 @@
+--- a/desktop/src-tauri/src/installed_shell_observation_macos.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos.rs
+@@ -1345,7 +1345,7 @@
+         let local_config=if let Case::Identity(c)=case{Some(identity::config(c))}else if let Case::Checks(c)=case{Some(checks::config(c)?)}else if let Case::LocalEdits(c)=case{Some(local_edits::config(c)?)}else{None};
+         let base = crate::protocol::strict_json(if let Some(bytes)=local_config.as_deref(){bytes}else if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
+         let started = Instant::now();
+-        let end = started + Duration::from_secs(if matches!(case,Case::ToolSetup(_)){tool_setup::SECONDS}else if let Case::Identity(c)=case{c.seconds()}else if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
++        let end = started + Duration::from_secs(if let Case::ToolSetup(c)=case{c.seconds()}else if let Case::Identity(c)=case{c.seconds()}else if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
+         let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
+         let project_fields = (case == Case::ProjectFields).then(project_fields::Control::new);
+         let recovery = (case == Case::PendingRecovery).then(recovery::Control::new);
+@@ -3911,10 +3911,16 @@
+     if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread() { return None; }
+     let uid = mrk_macos_installed_native::real_user().ok()?;
+     let upload_suffix;
+-    let suffix = if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
++    let suffix = if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){"-tool-service-prerequisite"}else if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
+         else if case == Case::Installation { "-installation-inspection" } else if case == Case::PendingRecovery { "-project-recovery" } else { "" };
+-    let root = PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}"));
+-    if matches!(case,Case::ToolSetup(_)){
++    let root = if let Case::ToolSetup(tool_case) = case {
++        let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
++        if user.uid.as_raw() != uid { return None; }
++        tool_setup::fixture_root(&user.dir, tool_case)?
++    } else { PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}")) };
++    if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){
++        directory(&root,uid,0o700,&[tool_setup::Case::ServicePreparation.name(),"state"]).ok()?;
++    } else if matches!(case,Case::ToolSetup(_)){
+         directory(&root,uid,0o700,&[tool_setup::NAMES[0],tool_setup::NAMES[1],tool_setup::NAMES[2],"state"]).ok()?;
+     } else if matches!(case,Case::Identity(_)){
+         directory(&root,uid,0o700,&[identity::NAMES[0],identity::NAMES[1],identity::NAMES[2],identity::NAMES[3],"state"]).ok()?;
+@@ -4417,7 +4423,7 @@
+         || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check()
+         || !original_window_witness_data_check() || !completion_ownership_data_check() || !ios::data_checks()
+         || !session::data_checks() || !project_fields::data_checks() || !vault::data_checks()
+-        || !installation_check::data_checks() || !recovery::data_checks() || !local_edits::data_checks() || !checks::data_checks() || !identity::data_checks() { return false; }
++        || !installation_check::data_checks() || !recovery::data_checks() || !local_edits::data_checks() || !checks::data_checks() || !identity::data_checks() || !tool_setup::service_data_checks() { return false; }
+     let inspection = Case::Installation;
+     if inspection.quit_id() != 3 || inspection.rounds() != 0 || inspection.loses_document()
+         || inspection.inputs() || inspection.accepted_id(1) || inspection.open_id(Step::OpenProject).is_some()
+--- a/desktop/tools/macos_aqua_qualification.py
++++ b/desktop/tools/macos_aqua_qualification.py
+@@ -1093,7 +1093,7 @@
+ )
+ PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
+                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
+-ALL_CASES = TOOLS.CASES + UPLOAD.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES
++ALL_CASES = TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES
+ EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop"
+ REPOSITORY = "Apdelrahman1911/mobile-release-kit"
+ REF = "refs/heads/verify/desktop-macos-aqua"
+@@ -1684,12 +1684,15 @@
+         need(all(type(v) is str and re.fullmatch(r"[1-9][0-9]{0,19}", v) for v in (self.run, self.attempt)), "run-binding")
+         return self
+
+-    def root(self, *, project_fields=False, vault_helper=False, installation_inspection=False, recovery=False, local_edits=False, local_checks=False, upload_key=None, identity_native=False, tool_setup=False):
++    def root(self, *, project_fields=False, vault_helper=False, installation_inspection=False, recovery=False, local_edits=False, local_checks=False, upload_key=None, identity_native=False, tool_setup=False, tool_service=False, native_home=None):
+         self.checked()
+-        flags = (project_fields, vault_helper, installation_inspection, recovery, local_edits, local_checks, identity_native, tool_setup)
++        flags = (project_fields, vault_helper, installation_inspection, recovery, local_edits, local_checks, identity_native, tool_setup, tool_service)
+         need(all(type(flag) is bool for flag in flags) and sum(flags) + (upload_key is not None) <= 1
+              and (upload_key is None or type(upload_key) is str and upload_key in UPLOAD.CASES), "scope-not-supported")
+-        suffix = ("-tool-setup" if tool_setup else "-" + upload_key if upload_key is not None else "-project-fields" if project_fields else "-vault-helper" if vault_helper
++        if tool_setup or tool_service:
++            return TOOLS.fixture_path(self, native_home, service=tool_service, need=need)
++        need(native_home is None, "scope-not-supported")
++        suffix = ("-" + upload_key if upload_key is not None else "-project-fields" if project_fields else "-vault-helper" if vault_helper
+                   else "-installation-inspection" if installation_inspection else "-project-recovery" if recovery else "-local-edits" if local_edits else "-doctor-preflight" if local_checks else "-project-identity-native" if identity_native else "")
+         return Path("/private/tmp") / f"mrk-macos-aqua-{self.source}-{self.run}-{self.attempt}{suffix}"
+
+@@ -1721,7 +1724,9 @@
+
+
+ def selected_cases(scope=None):
+-    need(scope in (*UPLOAD.CASES, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
++    need(scope in (*UPLOAD.CASES, TOOLS.SERVICE_SCOPE, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
++    if scope == TOOLS.SERVICE_SCOPE:
++        return TOOLS.SERVICE_CASES
+     if scope == TOOLS.SCOPE:
+         return TOOLS.CASES
+     if scope == identity_qualification.SCOPE:
+@@ -1772,6 +1777,8 @@
+
+ def case_timeout(case):
+     need(type(case) is str and case in ALL_CASES, "case-binding")
++    if case == TOOLS.SERVICE_CASE:
++        return TOOLS.SERVICE_TIMEOUT
+     if case in TOOLS.CASES:
+         return TOOLS.TIMEOUT
+     if case in identity_qualification.CASES:
+@@ -2541,10 +2548,10 @@
+         value["native"]["panelAttachments"] = [False, True, False, False]
+         value["reload"] = dict.fromkeys(value["reload"], False)
+         return value
+-    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES:
++    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES or case == TOOLS.SERVICE_CASE:
+         value = expected_result(binding, "noop-stale")
+         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
+-        if case in TOOLS.CASES:
++        if case in TOOLS.CASES or case == TOOLS.SERVICE_CASE:
+             value["toolSetup"] = None  # Actual returned original facts are mandatory.
+         if case in LOCAL_CHECK_CASES:
+             value["localChecks"] = _local_checks_base(case)  # Shape DATA only; actual report required below.
+@@ -2797,6 +2804,9 @@
+     except (ValueError, RecursionError, UnicodeError) as error:
+         raise Refused("result-json") from error
+     expected = expected_result(binding, case)
++    if case == TOOLS.SERVICE_CASE:
++        need(type(value) is dict and "toolSetup" in value, "tool-service-original-report")
++        expected["toolSetup"] = TOOLS.service_report(value["toolSetup"], need)
+     if case in TOOLS.CASES:
+         need(type(value) is dict and "toolSetup" in value, "tool-original-report")
+         expected["toolSetup"] = TOOLS.report(value["toolSetup"], case, need)
+@@ -4380,7 +4390,7 @@
+
+ def fixture_data(case, final, *, ios_output_created=None):
+     need(case in ALL_CASES and type(final) is bool, "fixture-case")
+-    if case in TOOLS.CASES:
++    if case in TOOLS.CASES or case == TOOLS.SERVICE_CASE:
+         need(ios_output_created is None, "fixture-output-kind")
+         return TOOLS.fixture_data(CONFIG, VERSION, KEEP, IGNORE_PREFIX)
+     if case in identity_qualification.CASES:
+@@ -4560,10 +4570,10 @@
+     def __init__(self, binding, uid, gid, scope=None):
+         self.binding, self.uid, self.gid = binding, uid, gid
+         self.cases = selected_cases(scope)
+-        self.path = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
++        self.path = None if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
+                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
+-                                 upload_key=scope if scope in UPLOAD.CASES else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE))
++                                 upload_key=scope if scope in UPLOAD.CASES else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
+         self.fds = set()
+         self.close_errors = 0
+         self.first_close_error = None
+@@ -4576,6 +4586,7 @@
+         self.case = None
+         self.stage = "prepare"
+         self.projects, self.states, self.originals, self.input_originals, self.field_outside_originals = {}, {}, {}, {}, {}
++        self.tool_fixture_ancestors = []
+         self.tool_ancestors, self.tool_parents, self.tool_paths = [], {}, {}
+         self.tool_namespace = self.tool_support = None
+         self.tool_entered, self.tool_completed = set(), set()
+@@ -4684,9 +4695,12 @@
+                  "fixture-write-original")
+
+     def prepare(self):
+-        self.parent = self._open("/private/tmp", directory=True)
+-        p = os.fstat(self.parent)
+-        need(p.st_mode == stat.S_IFDIR | 0o1777 and p.st_uid == 0, "temporary-parent")
++        if self.cases in (TOOLS.CASES, TOOLS.SERVICE_CASES):
++            TOOLS.prepare_namespace(self, need, signature)
++        else:
++            self.parent = self._open("/private/tmp", directory=True)
++            p = os.fstat(self.parent)
++            need(p.st_mode == stat.S_IFDIR | 0o1777 and p.st_uid == 0, "temporary-parent")
+         self.root = self._mkdir(self.parent, self.path.name)
+         self.state = self._mkdir(self.root, "state")
+         for case in self.cases:
+@@ -4738,7 +4752,10 @@
+             self._prepare_account()
+
+     def _namespace(self):
+-        need(signature(os.stat("/private/tmp", follow_symlinks=False))[:6] == signature(os.fstat(self.parent))[:6], "temporary-parent-replaced")
++        if self.cases in (TOOLS.CASES, TOOLS.SERVICE_CASES):
++            TOOLS.namespace_current(self, need, signature)
++        else:
++            need(signature(os.stat("/private/tmp", follow_symlinks=False))[:6] == signature(os.fstat(self.parent))[:6], "temporary-parent-replaced")
+         self._named(self.parent, self.path.name, self.root, 0o700)
+         self._named(self.root, "state", self.state, 0o700)
+         self._roster(self.root, (*self.cases, "state"), "fixture-namespace-roster")
+@@ -5307,7 +5324,7 @@
+
+     def admit_normal_account_runtime(self, source, work, *, application_source):
+         """Same-job installed originals, not a fabricated producer/supplier result."""
+-        need(self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES) and not self.inflight and self.recovery_runtime is None,
++        need(self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES) and not self.inflight and self.recovery_runtime is None,
+              "normal-account-runtime-order")
+         need(isinstance(source, Path) and source == Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+              and isinstance(work, Path) and work.parent == Path("/Users/runner/work/_temp")
+@@ -5702,7 +5719,7 @@
+     cases = selected_cases(scope)
+     need(getattr(fixtures, "cases", cases) == cases, "fixture-scope")
+     not_executed = []
+-    if scope in (identity_qualification.SCOPE, TOOLS.SCOPE):
++    if scope in (identity_qualification.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE):
+         # Root's CURRENT normal-package preparation must call the same original
+         # admit_normal_account_runtime first. No historical Aqua supplier route.
+         fixtures.recovery_runtime_paths()
+@@ -5710,16 +5727,18 @@
+         produce_pending_recovery(fixtures, run_owned, uid, username)
+     if scope == IOS_ACCOUNT_CASE:
+         _run_ios_account_child(fixtures, run_owned, uid, username, "produce")
+-    need(scope != TOOLS.SCOPE or binding.target == ARM_TARGET, "tool-native-arm-only")
++    need(scope not in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE) or binding.target == ARM_TARGET, "tool-native-arm-only")
+     for case in TOOLS.RUN_ORDER if scope == TOOLS.SCOPE else cases:
+         if scope == identity_qualification.SCOPE:
+             identity_qualification.before_invocation(fixtures, case, run_owned,
+                 app_environment(fixtures.path / "state" / case, uid, username))
+         fixtures.before_call(case)
+-        state = binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
++        state_root = fixtures.path if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
+                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
+                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
+-                                 upload_key=scope if scope in UPLOAD.CASES else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE)) / "state" / case
++                                 upload_key=scope if scope in UPLOAD.CASES else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
++        need(isinstance(state_root, Path), "fixture-state-not-prepared")
++        state = state_root / "state" / case
+         argv = [EXECUTABLE, case]
+         fixtures.stage, fixtures.inflight, fixtures.last_returned = "invocation", True, False
+         fixtures.app_returncode = fixtures.inner_failure_step = fixtures.inner_failure_reason = None
+@@ -5764,6 +5783,10 @@
+             fixtures.accept_account_app(report["iosArchive"])
+             _run_ios_account_child(fixtures, run_owned, uid, username, "observe")
+             readback = fixtures.readback_account(report["iosArchive"])
++        elif case == TOOLS.SERVICE_CASE:
++            readback = TOOLS.service_readback(fixtures, case, report["toolSetup"], need)
++            if report["toolSetup"]["execution"] != "ready":
++                not_executed.append(case)
+         elif case in TOOLS.CASES:
+             readback = TOOLS.readback(fixtures, case, report["toolSetup"], need, signature)
+             if report["toolSetup"]["testResult"] == "not-executed":
+--- a/desktop/tools/macos_identity_current_runtime.py
++++ b/desktop/tools/macos_identity_current_runtime.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Four existing identity observations on the current installed observer.
++"""Closed existing identity/tool observations on one current installed observer.
+
+ Import is DATA-only. The explicit main entry uses the existing Fixtures and
+ run_cases/owned_process owners; it never prepares, signs or installs a runtime.
+@@ -12,6 +12,8 @@
+
+
+ SCOPE = "project-identity-native"
++TOOLS_SCOPE = "tool-setup"
++SERVICE_SCOPE = "tool-service-prerequisite"
+ ROLE = "installed-shell-observation"
+ TARGET = "aarch64-apple-darwin"
+ CHECKOUT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+@@ -43,7 +45,7 @@
+     scope = environment.get("MRK_MACOS_NATIVE_SCOPE", "disabled")
+     if scope == "disabled":
+         return None  # Preserve every original ordinary/prepared role decision.
+-    need(scope == SCOPE and target == TARGET
++    need(scope in (SCOPE, TOOLS_SCOPE) and target == TARGET
+          and environment.get("GITHUB_REF") == REF
+          and environment.get("MRK_MACOS_PACKAGE_ROLE") == ROLE
+          and phase in PACKAGE_PHASES + DATA_PHASES, "identity-native-package-scope")
+@@ -52,7 +54,7 @@
+
+ def current_context(environment, target):
+     """Fixed current-job DATA. No caller-selected source, work root or case."""
+-    need(environment.get("MRK_MACOS_NATIVE_SCOPE") == SCOPE
++    need(environment.get("MRK_MACOS_NATIVE_SCOPE") in (SCOPE, TOOLS_SCOPE)
+          and package_role(environment, "package-install", target) == ROLE,
+          "identity-native-entry-scope")
+     source = environment.get("GITHUB_SHA", "")
+@@ -82,6 +84,29 @@
+         "MRK_MACOS_XCODE_SETUP_SCOPE", "MRK_MACOS_REMOVAL_CASE")),
+         "identity-native-single-scope")
+     return source, environment["GITHUB_RUN_ID"], environment["GITHUB_RUN_ATTEMPT"], Path(value)
++
++
++def observation_scope(environment, scope):
++    """One source-selected package, three explicit driver invocations.
++
++    Tool scope keeps the same installed observer for identity first, then its
++    separate service prerequisite and the unchanged three tool journeys. This
++    is not a relay, prerequisite proof, generic case selector, or auto-retry.
++    """
++    native = environment.get("MRK_MACOS_NATIVE_SCOPE")
++    need(type(scope) is str and ((native == SCOPE and scope == SCOPE)
++         or (native == TOOLS_SCOPE and scope in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE))),
++         "current-native-observation-scope")
++    return scope
++
++
++def arguments(argv):
++    if argv == ["--target", TARGET]:
++        return SCOPE  # Preserve the original identity-only invocation.
++    need(type(argv) is list and len(argv) == 4 and argv[:3] == ["--target", TARGET, "--scope"]
++         and type(argv[3]) is str and argv[3] in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE),
++         "identity-native-arguments")
++    return argv[3]
+
+
+ def _native_user():
+@@ -163,13 +188,16 @@
+     fixtures.recovery_runtime_paths()
+
+
+-def _run(aqua, binding, uid, gid, username, work, environment):
++def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE):
+     """One fixed invocation; test doubles never supply production authority."""
+     fixtures = owner = error = None
+     count = 0
+-    cases = aqua.identity_qualification.CASES
++    cases = ()
++    not_executed = ()
+     try:
+-        fixtures = aqua.Fixtures(binding, uid, gid, SCOPE)
++        observation_scope(environment, scope)
++        cases = aqua.TOOLS.RUN_ORDER if scope == TOOLS_SCOPE else aqua.selected_cases(scope)
++        fixtures = aqua.Fixtures(binding, uid, gid, scope)
+         fixtures.prepare()
+         _admit_runtime(aqua, fixtures, binding, work, environment)
+         owner = aqua.load_owner(CHECKOUT)
+@@ -182,8 +210,12 @@
+             aqua.emit_record(value, sys.stdout)
+             count += 1
+
+-        not_executed = aqua.run_cases(binding, fixtures, owner.run_owned, uid, username, emit_checked, scope=SCOPE)
+-        aqua.need(not_executed == () and count == len(cases) == 4, "identity-native-incomplete")
++        not_executed = aqua.run_cases(binding, fixtures, owner.run_owned, uid, username, emit_checked, scope=scope)
++        aqua.need(type(not_executed) is tuple and all(case in cases for case in not_executed)
++                  and len(set(not_executed)) == len(not_executed) and count == len(cases)
++                  and len(cases) == {SCOPE: 4, SERVICE_SCOPE: 1, TOOLS_SCOPE: 3}[scope],
++                  "identity-native-incomplete")
++        aqua.need(not not_executed or scope in (SERVICE_SCOPE, TOOLS_SCOPE), "identity-native-incomplete")
+         _current(aqua, fixtures)
+     except BaseException as caught:
+         error = caught
+@@ -200,7 +232,19 @@
+             pass  # No retry or masking of the original unknown/failed call.
+         return 130 if isinstance(error, KeyboardInterrupt) else 1
+     try:
+-        aqua.emit_record({"schemaVersion": 1, "type": "macos-identity-current-complete",
++        kind = "macos-identity-current-complete" if scope == SCOPE else (
++            "macos-tool-service-current-complete" if scope == SERVICE_SCOPE else "macos-tool-setup-current-complete")
++        if not_executed:
++            # A known joined refusal is not a passing tool case. Do not start
++            # the next workflow step or manufacture Ready; leave manual approval
++            # to the owner. Unknown invocations returned above as failures.
++            aqua.emit_record({"schemaVersion": 1, "type": "macos-tool-current-unexecuted",
++                **binding.public(), "target": binding.target, "scope": scope,
++                "notExecuted": list(not_executed), "allOriginalCallsReturned": True,
++                "fixtureHandlesClosed": True, "manualStep": "Resolve the reported service prerequisite before starting the tool cases; no automatic retry was performed.",
++                "shippingBinaryQualified": False, "distributionQualified": False}, sys.stdout)
++            return 78
++        aqua.emit_record({"schemaVersion": 1, "type": kind,
+             **binding.public(), "target": binding.target, "cases": list(cases),
+             "allOriginalCallsReturned": True, "independentReadbacks": True, "fixtureHandlesClosed": True,
+             "currentInstalledRuntime": True, "instrumentedEngineeringApp": True,
+@@ -213,14 +257,15 @@
+
+ def main():
+     try:
+-        need(sys.argv[1:] == ["--target", TARGET], "identity-native-arguments")
++        scope = arguments(sys.argv[1:])
+         environment = dict(os.environ)
++        observation_scope(environment, scope)
+         source, run, attempt, work = current_context(environment, TARGET)
+         uid, gid, username = _native_user()
+         aqua = _load_observer()
+         binding = aqua.Binding(source, run, attempt, TARGET).checked()
+         os.umask(0o077)
+-        return _run(aqua, binding, uid, gid, username, work, environment)
++        return _run(aqua, binding, uid, gid, username, work, environment, scope=scope)
+     except BaseException as error:
+         # No source paths, environment values, transcripts or exception text.
+         try:
+--- a/desktop/tools/macos_android_dependency_preparation.py
++++ b/desktop/tools/macos_android_dependency_preparation.py
+@@ -63,6 +63,8 @@
+     'desktop/tools/macos_android_supplier_preparation.py',
+     'desktop/tools/macos_android_supplier_correspondence.py',
+     'desktop/tools/macos_normal_ui_runner.py',
++    'desktop/tools/macos_tool_setup_inputs.py',
++    'desktop/tools/macos_identity_current_runtime.py',
+ )
+ ARCHIVES = [{'role': 'jdk', 'bytes': 185851019, 'sha256': '196d13ba5f10414bef7f6a05a9b3f00edacb18ebacef2b99485db9e2ee18f0e8', 'url': 'https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.20.1_1.tar.gz', 'archivePrefix': 'jdk-17.0.20.1+1'}, {'role': 'sdk-platform', 'bytes': 64273788, 'sha256': '0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0', 'url': 'https://dl.google.com/android/repository/platform-35_r02.zip', 'archivePrefix': 'android-35'}, {'role': 'sdk-build-tools', 'bytes': 76857898, 'sha256': '530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48', 'url': 'https://dl.google.com/android/repository/build-tools_r35_macosx.zip', 'archivePrefix': 'android-15'}, {'role': 'gradle', 'bytes': 138068841, 'sha256': '6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854', 'url': 'https://github.com/gradle/gradle-distributions/releases/download/v8.14.5/gradle-8.14.5-bin.zip', 'archivePrefix': 'gradle-8.14.5'}, {'role': 'aapt2', 'bytes': 4339472, 'sha256': '5d0aec6851fffbc9f6c8a8b50390c0bc976aa0ddf57a8a3a39061ed54b609ad1', 'url': 'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar', 'archivePrefix': '8.9.2-12782657-osx'}]
+ RESOURCES = {'desktop/tools/android_dependency_preparation_data/project-v1.json': [5761, '17aaefbea83fb4b389e10d1ac01f9926562712b95253f7af5f2c6fab546b1dd4'], 'desktop/tools/android_dependency_preparation_data/verification-v1.xml': [90045, '5d00856c785363da964e00da72ad38571cfd088da915ebe86cf20640bb1c7545']}
+@@ -184,7 +186,8 @@
+     """Only two closed diagnostic leaves, through the retained private original."""
+     limits = {'sdk-observation.json': 16384, 'observe-sdk-failure.json': 4096,
+               'prepare-b-failure.json': 4096, 'acquire-failure.json': 4096, 'cleanup-failure.json': 4096,
+-              'prepare-ui-inputs-failure.json': 4096, 'acquire-ui-inputs-failure.json': 4096}
++              'prepare-ui-inputs-failure.json': 4096, 'acquire-ui-inputs-failure.json': 4096,
++              'prepare-tool-setup-inputs-failure.json': 4096, 'acquire-tool-setup-inputs-failure.json': 4096}
+     need(name in limits, 'diagnostic-leaf')
+     raw = encoded(value)
+     need(0 < len(raw) <= limits[name], 'diagnostic-bound')
+@@ -226,6 +229,7 @@
+         'acquisition.json': 16384, 'evidence/acquisition-commands.json': 16384,
+         'credentials/scalars.json': 32768, 'ui-commands.json': 16384,
+         'android-input-fixture.json': 16384, 'android-input-status.json': 4096,
++        'tool-setup-origin.json': 16384, 'tool-setup-inputs.json': 16384, 'tool-setup-commands.json': 16384,
+         'evidence/failed-commands.json': 16384, 'evidence/gradle-failure.json': 12 << 10,
+         'evidence/inventory.json': 1 << 20, 'evidence/inventory-drift.json': 1 << 20,
+         'evidence/buildscript-gradle.lockfile': 32 << 10, 'evidence/app-gradle.lockfile': 32 << 10,
+@@ -498,9 +502,9 @@
+
+ class Acquisition:
+     """One fixed acquisition role budget; not a reusable resolver/owner."""
+-    def __init__(self, work):
++    def __init__(self, work, *, clock=None):
+         self.work = work
+-        self.clock = N.PhaseClock(810)
++        self.clock = N.PhaseClock(810) if clock is None else clock
+         self.reads = 0
+         self.writes = 0
+         self.downloads = 0
+@@ -516,6 +520,10 @@
+         self.role = None
+         self.directories = {}
+
++    @property
++    def tools_root(self):
++        return self.work / 'tools'  # Ordinary preparation is unchanged.
++
+     def point(self): self.clock.check()
+
+     def charge_read(self, amount):
+@@ -536,7 +544,7 @@
+
+     def parent(self, relative):
+         parts = P.relative(relative)
+-        fds, originals = chain(self.work / 'tools', retained=True)
++        fds, originals = chain(self.tools_root, retained=True)
+         prefix = []
+         try:
+             for part in parts[:-1]:
+@@ -868,6 +876,8 @@
+
+ # This fixed role is deliberately not selected by RUN_SCOPE. It is prepared for
+ # the ordinary installed and same-source candidate jobs; A/B keep their original five-archive route.
++TOOL_SCOPE = 'prepare-tool-setup-inputs'
++TOOL_COMMANDS = ('prepare-tool-setup-inputs', 'acquire-tool-setup-inputs')
+ UI_SCOPE = 'prepare-ui-inputs'
+ UI_WORKFLOW = '.github/workflows/desktop-macos-installed.yml'
+ UI_CONSUMER_SCOPE = 'prepare-consumer-ui-inputs'
+@@ -1081,7 +1091,7 @@
+                 except BaseException:
+                     if primary is None: raise
+         for relative in sorted(self.directories, key=lambda path: (-path.count('/'), path)):
+-            self.point(); path = self.work / 'tools' / relative
++            self.point(); path = self.tools_root / relative
+             held = chain(path.parent, retained=True); fd = None; primary = None
+             try:
+                 fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+@@ -1112,16 +1122,22 @@
+
+
+ def ui_tool_post(work, clock, expected):
++    return _ui_tool_post(work, clock, expected, work / 'tools')
++
++
++def _ui_tool_post(work, clock, expected, tools):
++    # Private reuse by the fixed tool observer preparer. Existing entry above
++    # still has no root selector; neither result nominates native authority.
+     raw, _ = read(work / 'tool-roster.json', 4 << 20, clock=clock)
+     dirs_raw, _ = read(work / 'directory-roster.json', 4 << 20, clock=clock)
+     rows = json.loads(raw, object_pairs_hook=N.pairs)
+     directories = json.loads(dirs_raw, object_pairs_hook=N.pairs)
+     total = ui_roster_match(rows, directories, expected, sealed=True)
+     found = set()
+-    for root, dirs, files in os.walk(work / 'tools', followlinks=False):
++    for root, dirs, files in os.walk(tools, followlinks=False):
+         clock.check()
+         for name in dirs + files:
+-            path = Path(root) / name; relative = str(path.relative_to(work / 'tools'))
++            path = Path(root) / name; relative = str(path.relative_to(tools))
+             need(relative in expected and relative not in found and len(found) < ENTRIES,
+                  'ui-source-namespace')
+             found.add(relative)
+@@ -1129,7 +1145,7 @@
+                 need(list(nine(os.lstat(path))) == directories[relative], 'ui-source-directory-post')
+     need(found == set(expected), 'ui-source-namespace-incomplete')
+     for row in rows:
+-        clock.check(); path = work / 'tools' / row['path']
++        clock.check(); path = tools / row['path']
+         held = chain(path.parent, retained=True); fd = None; primary = None
+         try:
+             fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held[0][-1])
+@@ -1150,7 +1166,7 @@
+                 if primary is None: raise
+     for relative, state in directories.items():
+         clock.check()
+-        need(list(nine(os.stat(work / 'tools' / relative, follow_symlinks=False))) == state,
++        need(list(nine(os.stat(tools / relative, follow_symlinks=False))) == state,
+              'ui-source-directory-final-post')
+     return digest(raw + dirs_raw), total, len(rows), len(directories)
+
+@@ -2491,22 +2507,25 @@
+         # A safe original work directory is required even for early diagnostics.
+         candidate = os.environ.get('MRK_ANDROID_PREPARATION_WORK', '')
+         ui = RUN_SCOPE in (UI_SCOPE, UI_CONSUMER_SCOPE)
+-        pattern = ('/Users/runner/work/_temp/mrk-macos-installed[.][A-Za-z0-9]{8}' if ui else
++        tool = RUN_SCOPE == TOOL_SCOPE
++        pattern = ('/Users/runner/work/_temp/mrk-macos-installed[.][A-Za-z0-9]{8}' if ui or tool else
+                    '/Users/runner/work/_temp/mrk-android-dependencies[.][A-Za-z0-9]{8}')
+         need(re.fullmatch(pattern, candidate), 'private-work-name')
+         private = admit_work(Path(candidate))
+         stage = 'scope-context'
+         need(len(sys.argv) == 2 and ((RUN_SCOPE == 'observe-sdk' and sys.argv[1] == 'observe-sdk')
+              or (RUN_SCOPE == 'prepare-b' and sys.argv[1] in ('prepare-b', 'acquire', 'cleanup'))
++             or (tool and sys.argv[1] in TOOL_COMMANDS)
+              or (ui and sys.argv[1] in (UI_CONSUMER_COMMANDS if RUN_SCOPE == UI_CONSUMER_SCOPE else ('prepare-ui-inputs', 'acquire-ui-inputs')))), 'fixed-source-scope')
+-        work, target = ui_context() if ui else (context(), None)
++        fixture = load('_mrk_tool_setup_inputs', 'desktop/tools/macos_tool_setup_inputs.py') if tool else None
++        work, target = fixture.context(sys.modules[__name__]) if tool else (ui_context() if ui else (context(), None))
+         need(work == private['path'], 'private-work-context')
+         recheck_chain(private['fds'], private['originals'])
+         stage = 'normal-helper-load'
+         N = load('_mrk_android_preparation_normal', 'desktop/tools/macos_normal_ui_runner.py')
+         stage = 'transport-helper-load'
+         P = load('_mrk_android_preparation_transport', 'desktop/tools/macos_android_supplier_preparation.py')
+-        if sys.argv[1] in ('acquire', 'acquire-ui-inputs', 'acquire-consumer-ui-inputs'):
++        if sys.argv[1] in ('acquire', 'acquire-ui-inputs', 'acquire-consumer-ui-inputs', 'acquire-tool-setup-inputs'):
+             stage = 'archive-helper-load'
+             C = load('_mrk_android_preparation_correspondence', 'desktop/tools/macos_android_supplier_correspondence.py')
+         stage = 'sdk-observation' if sys.argv[1] == 'observe-sdk' else sys.argv[1]
+@@ -2514,6 +2533,8 @@
+             report = observe_sdk_current_use(work, private=private)
+             need(report['status'] == 'observed-not-admitted' and 'reason' not in report
+                  and report.get('originalsClosed') is True, 'sdk-observation-refused')
++        elif tool:
++            final_clock = fixture.run(sys.modules[__name__], work, private, child=sys.argv[1] == TOOL_COMMANDS[1])
+         elif ui:
+             final_clock = {'prepare-ui-inputs': prepare_ui_inputs, 'acquire-ui-inputs': acquire_ui_inputs,
+                            'prepare-consumer-ui-inputs': prepare_ui_inputs, 'acquire-consumer-ui-inputs': acquire_ui_inputs}[sys.argv[1]](
+@@ -2527,10 +2548,13 @@
+         if not re.fullmatch('[a-z0-9-]{1,96}', code): code = 'preparation-original-failure'
+         if private is not None:
+             try:
+-                name = ('acquire-ui-inputs-failure.json' if len(sys.argv) == 2 and sys.argv[1] in ('acquire-ui-inputs', 'acquire-consumer-ui-inputs') else
+-                        'prepare-ui-inputs-failure.json') if RUN_SCOPE in (UI_SCOPE, UI_CONSUMER_SCOPE) else (
+-                        'observe-sdk-failure.json' if RUN_SCOPE == 'observe-sdk' else (sys.argv[1] if len(sys.argv) == 2
+-                        and sys.argv[1] in ('acquire', 'cleanup') else 'prepare-b') + '-failure.json')
++                if RUN_SCOPE == TOOL_SCOPE and len(sys.argv)==2 and sys.argv[1] in TOOL_COMMANDS:
++                    name = sys.argv[1] + '-failure.json'
++                else:
++                    name = ('acquire-ui-inputs-failure.json' if len(sys.argv) == 2 and sys.argv[1] in ('acquire-ui-inputs', 'acquire-consumer-ui-inputs') else
++                            'prepare-ui-inputs-failure.json') if RUN_SCOPE in (UI_SCOPE, UI_CONSUMER_SCOPE) else (
++                            'observe-sdk-failure.json' if RUN_SCOPE == 'observe-sdk' else (sys.argv[1] if len(sys.argv) == 2
++                            and sys.argv[1] in ('acquire', 'cleanup') else 'prepare-b') + '-failure.json')
+                 report = {'status': 'refused', 'stage': stage, 'reason': code,
+                     'scope': RUN_SCOPE, 'nativeOrTaskSuccess': False, 'cleanupAuthorized': False}
+                 try:
+@@ -2568,7 +2592,9 @@
+     # Only these two fixed installed-job entries select the reviewed UI owner.
+     # Import/default B and its acquire/cleanup routes remain unchanged; main
+     # still admits the exact source, host, current run and original work first.
+-    if len(sys.argv) == 2 and sys.argv[1] in ('prepare-ui-inputs', 'acquire-ui-inputs'):
++    if len(sys.argv) == 2 and sys.argv[1] in TOOL_COMMANDS:
++        RUN_SCOPE = TOOL_SCOPE
++    elif len(sys.argv) == 2 and sys.argv[1] in ('prepare-ui-inputs', 'acquire-ui-inputs'):
+         RUN_SCOPE = UI_SCOPE
+     elif len(sys.argv) == 2 and sys.argv[1] in UI_CONSUMER_COMMANDS:
+         RUN_SCOPE = UI_CONSUMER_SCOPE
+--- a/.github/workflows/desktop-macos-installed.yml
++++ b/.github/workflows/desktop-macos-installed.yml
+@@ -82,7 +82,7 @@
+       matrix:
+         # Corrected candidate: ARM only; other routes retain both targets and all removal cases.
+         # native_scope is SOURCE-owned and disabled by default. Only a reviewed
+-        # verification-source change may select the literal project-identity-native.
++        # verification-source change may select project-identity-native or tool-setup.
+         include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-candidate' && '[{"native_scope":"disabled","target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"}]' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"ordinary"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"abrupt"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"abrupt"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635"}]') }}
+     env:
+       RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target] }}
+@@ -93,7 +93,7 @@
+       MRK_EXPECTED_SHA: ${{ github.sha }}
+       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+       MRK_MACOS_NATIVE_SCOPE: ${{ matrix.native_scope || 'disabled' }}
+-      MRK_MACOS_PACKAGE_ROLE: ${{ matrix.native_scope == 'project-identity-native' && 'installed-shell-observation' || 'ordinary-image' }}
++      MRK_MACOS_PACKAGE_ROLE: ${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') && 'installed-shell-observation' || 'ordinary-image' }}
+       # Separate reviewed activation only; baseline and later UI remain independent.
+       MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}
+       MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}
+@@ -124,7 +124,7 @@
+       DEVELOPER_DIR: /Library/Developer/CommandLineTools
+     steps:
+       - name: Admit only this exact disposable-hosted source route
+-        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 1 || 350 }}
++        timeout-minutes: ${{ ((matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 1 || 350 }}
+         shell: bash
+         env:
+           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+@@ -133,7 +133,7 @@
+           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1
+           case "$MRK_MACOS_NATIVE_SCOPE" in
+             disabled) [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image ]] || exit 1 ;;
+-            project-identity-native)
++            project-identity-native|tool-setup)
+               [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate && "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation ]] || exit 1
+               [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_REMOVAL_CASE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+               [[ "${MRK_MACOS_AQUA_SCOPE:-disabled}" == disabled && "${MRK_MACOS_XCODE_SETUP_SCOPE:-disabled}" == disabled ]] || exit 1
+@@ -213,7 +213,7 @@
+           [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+           [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]] || exit 1
+       - name: Check out exact reviewed source without retained credentials
+-        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 3 || 350 }}
++        timeout-minutes: ${{ ((matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 3 || 350 }}
+         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+         env:
+           GIT_CONFIG_COUNT: '1'
+@@ -223,7 +223,7 @@
+           ref: ${{ github.sha }}
+           persist-credentials: false
+       - name: Select DATA stager Python, not the packaged interpreter
+-        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 2 || 350 }}
++        timeout-minutes: ${{ ((matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 2 || 350 }}
+         id: python
+         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+         with:
+@@ -322,13 +322,13 @@
+           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C TZ=UTC \
+             "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py store-signing-selection --target "$MRK_MACOS_TARGET"
+       - name: Select fixed frontend compiler
+-        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 2 || 350 }}
++        timeout-minutes: ${{ ((matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 2 || 350 }}
+         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+         with:
+           node-version: '24.20.0'
+           package-manager-cache: false
+       - name: Reserve fresh work and record exact source and actual tool bindings
+-        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 2 || 350 }}
++        timeout-minutes: ${{ ((matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 2 || 350 }}
+         id: work
+         shell: bash
+         env:
+@@ -408,7 +408,7 @@
+               value.update(scope="current-macos-candidate", fixedFixtureCases=0, aclPrimitiveCases=0,
+                   selectedRegressionGroups=[], instrumented=False, applicationLaunched=False,
+                   fullUIQualified=False, distributionQualified=False, actualAquaSaveGate="not-selected")
+-          if os.environ["MRK_MACOS_NATIVE_SCOPE"] == "project-identity-native":
++          if os.environ["MRK_MACOS_NATIVE_SCOPE"] in ("project-identity-native", "tool-setup"):
+               # Preparation only: actual launch/Apply/recovery is not yet observed.
+               value.update(instrumented=True, applicationLaunched=False)
+           if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-installed":
+@@ -452,7 +452,7 @@
+           finally: os.close(fd)
+           PY
+       - name: Bind the complete reviewed first-party checkout before compilation
+-        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 3 || 350 }}
++        timeout-minutes: ${{ ((matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 3 || 350 }}
+         id: source
+         shell: bash
+         run: &mrk_installed_source_inventory |
+@@ -1259,9 +1259,9 @@
+               output.write("MRK_MACOS_VAULT_HELPER_BYTES=" + str(len(body)) + "\n")
+           PY_HELPER
+           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+-      - name: ${{ matrix.native_scope == 'project-identity-native' && 'Build the current nonshipping observer and embedded frontend' || 'Build the ordinary selected-target desktop image and embedded frontend' }}
++      - name: ${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') && 'Build the current nonshipping observer and embedded frontend' || 'Build the ordinary selected-target desktop image and embedded frontend' }}
+         id: app_build
+-        timeout-minutes: ${{ matrix.native_scope == 'project-identity-native' && 48 || matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
++        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') && 48 || matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
+         shell: bash
+         env:
+           MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
+@@ -1272,7 +1272,7 @@
+           npm run build
+           cd src-tauri
+           set -o noclobber
+-          if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native ]]; then
++          if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native || "$MRK_MACOS_NATIVE_SCOPE" == tool-setup ]]; then
+           # Same fixed observer target and original Cargo artifact checks;
+           # no ordinary cdylib, fallback executable or test execution. Render
+           # diagnostics to stderr, not repeated warning payloads in the artifact JSON.
+@@ -1402,7 +1402,7 @@
+           checkout = Path(os.environ["GITHUB_WORKSPACE"])
+           cwd = checkout / "desktop/src-tauri"
+           root = Path(os.environ["MRK_MACOS_WORK"])
+-          status_name = "observer-build.status" if os.environ["MRK_MACOS_NATIVE_SCOPE"] == "project-identity-native" else "normal-build.status"
++          status_name = "observer-build.status" if os.environ["MRK_MACOS_NATIVE_SCOPE"] in ("project-identity-native", "tool-setup") else "normal-build.status"
+           if (root / status_name).read_bytes() != b"0\n":
+               raise ValueError("effective versions require the original successful build")
+           repository_default = tomllib.loads((checkout / "desktop/rust-toolchain.toml").read_text())["toolchain"]["channel"]
+@@ -1455,7 +1455,7 @@
+         shell: bash
+         run: |
+           builtin source ./desktop/tools/macos_installed_data_contracts.sh
+-      - name: ${{ matrix.native_scope == 'project-identity-native' && 'Assemble the current observer and sign code inside-out (never --deep)' || 'Assemble the ordinary image app and sign code inside-out (never --deep)' }}
++      - name: ${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') && 'Assemble the current observer and sign code inside-out (never --deep)' || 'Assemble the ordinary image app and sign code inside-out (never --deep)' }}
+         id: app_assemble
+         timeout-minutes: 20
+         shell: bash
+@@ -1507,7 +1507,7 @@
+             github_seal_arguments=(--github-seal "$MRK_MACOS_WORK/github-seal-capsule/mrk-github-seal"
+               --expected-github-seal "$MRK_MACOS_GITHUB_SEAL_SHA256" --expected-github-seal-bytes "$MRK_MACOS_GITHUB_SEAL_BYTES")
+           fi
+-          if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native ]]; then
++          if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native || "$MRK_MACOS_NATIVE_SCOPE" == tool-setup ]]; then
+             app_binary_arguments=(--binary "$MRK_MACOS_OBSERVER_BINARY"
+               --expected-app-binary "$MRK_MACOS_OBSERVER_SHA256"
+               --observer-cargo-messages "$MRK_MACOS_WORK/observer-build.jsonl"
+@@ -1588,7 +1588,7 @@
+           entry_sha=$(/usr/bin/shasum -a 256 "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/MacOS/mrk-macos-entry")
+           entry_sha=${entry_sha%% *}
+           [[ "$entry_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
+-          if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native ]]; then
++          if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native || "$MRK_MACOS_NATIVE_SCOPE" == tool-setup ]]; then
+             printf 'MRK_MACOS_SIGNED_ENTRY_SHA256=%s\nMRK_MACOS_SIGNED_PAYLOAD_SHA256=%s\n' "$entry_sha" "$payload_sha" >> "$GITHUB_ENV"
+           else
+           printf 'MRK_MACOS_SIGNED_ENTRY_SHA256=%s\nMRK_MACOS_SIGNED_PAYLOAD_SHA256=%s\nMRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256=%s\n' "$entry_sha" "$payload_sha" "$desktop_image_sha" >> "$GITHUB_ENV"
+@@ -1987,7 +1987,7 @@
+           # This root-owned Scripts component is not final P. The next fixed owner
+           # first productbuilds the SOURCE ReadMe envelope, then signs the outer package.
+           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+-      - name: ${{ matrix.native_scope == 'project-identity-native' && 'Sign and notarize the same completed observer package before final P' || 'Build fixed Installer presentation then sign and notarize the completed outer package before final P' }}
++      - name: ${{ (matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup') && 'Sign and notarize the same completed observer package before final P' || 'Build fixed Installer presentation then sign and notarize the completed outer package before final P' }}
+         if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
+         timeout-minutes: 32
+         shell: bash
+@@ -2228,7 +2228,7 @@
+           phase summary
+
+       - name: Standard Installer only is privileged; never execute the app or Python as root
+-        if: (github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-positive-update' || steps.update_p0_credentials.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation')
++        if: (github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-positive-update' || steps.update_p0_credentials.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-candidate' && (env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' || env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup') && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation')
+         id: package_install
+         timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' && 32 || 18 }}
+         shell: bash
+@@ -2266,7 +2266,7 @@
+           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+       - name: Observe four original identity edits on the current installed observer
+         id: identity_native
+-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'
++        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && (env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' || env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup') && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'
+         timeout-minutes: 15
+         shell: bash
+         env:
+@@ -2283,6 +2283,53 @@
+           # No UI automation, raw output export, compiler deletion, shipping
+           # claim, synthesized completion or retry after an uncertain return.
+           exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET"
++      - name: Request the fixed native service once and confirm its joined readiness
++        id: tool_service
++        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.identity_native.outcome == 'success'
++        timeout-minutes: 13
++        shell: bash
++        env:
++          RUNNER_ENVIRONMENT: ${{ runner.environment }}
++        run: |
++          set -euo pipefail
++          umask 077
++          ulimit -c 0
++          # One explicit RequestRegistration, then a fresh Check on that same
++          # original Document. AlreadyRegistered reuses the fixed service.
++          # RequiresApproval is manual/unexecuted (exit78), never a pass or a
++          # second request. No settings, launchctl or unregister operation.
++          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-service-prerequisite
++      - name: Prepare three isolated platform-only SDK sources with shared JDK and Gradle
++        id: tool_inputs
++        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && steps.tool_service.outcome == 'success'
++        timeout-minutes: 22
++        shell: bash
++        env:
++          RUNNER_ENVIRONMENT: ${{ runner.environment }}
++        run: |
++          set -euo pipefail
++          umask 077
++          ulimit -c 0
++          export MRK_ANDROID_PREPARATION_WORK="$MRK_MACOS_WORK"
++          # Existing bounded download/extraction originals, once per pinned
++          # public archive; never supplier execution or sdkmanager. At least
++          # 8GiB free, unchanged private ancestry and no prior task leaf required.
++          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_dependency_preparation.py prepare-tool-setup-inputs
++      - name: Observe cancellation, source drift and missing-only SDK registration reuse
++        id: tool_native
++        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.tool_inputs.outcome == 'success'
++        timeout-minutes: 122
++        shell: bash
++        env:
++          RUNNER_ENVIRONMENT: ${{ runner.environment }}
++        run: |
++          set -euo pipefail
++          umask 077
++          ulimit -c 0
++          # SAME installed observer/package as identity and service above.
++          # Separate source/cache originals per case; existing2400s bounds do
++          # not renew. Unknown stops the driver and preserves exact originals.
++          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-setup
+       - name: Verify credential continuity and owned-record deletion on P1
+         id: update_p1_credentials
+         if: github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success'
+--- a/tests/desktop/test_macos_identity_current_runtime.py
++++ b/tests/desktop/test_macos_identity_current_runtime.py
+@@ -129,6 +129,23 @@
+         native.assert_not_called()
+         owner.assert_not_called()
+         self.assertEqual(json.loads(stderr.getvalue())["reason"], "entry-refused")
++
++    def test_one_tool_package_permits_only_existing_three_explicit_invocations(self):
++        env = {**environment(), "MRK_MACOS_NATIVE_SCOPE": M.TOOLS_SCOPE}
++        self.assertEqual(M.current_context(env, M.TARGET)[0], BINDING.source)
++        for scope in (M.SCOPE, M.SERVICE_SCOPE, M.TOOLS_SCOPE):
++            self.assertEqual(M.observation_scope(env, scope), scope)
++            self.assertEqual(M.arguments(["--target", M.TARGET, "--scope", scope]), scope)
++        self.assertEqual(M.arguments(["--target", M.TARGET]), M.SCOPE)
++        for scope in (M.SERVICE_SCOPE, M.TOOLS_SCOPE, "all", "../other", "tool-setup-missing-sdk"):
++            with self.subTest(scope=scope), self.assertRaises(M.Refused):
++                M.observation_scope(environment(), scope)
++        with self.assertRaises(M.Refused):
++            M.package_role({**env, "MRK_MACOS_NATIVE_SCOPE": M.SERVICE_SCOPE}, "prepare", M.TARGET)
++        for args in (["--scope", M.TOOLS_SCOPE], ["--target", M.TARGET, "--scope", "all"],
++                     ["--target", A.INTEL_TARGET, "--scope", M.TOOLS_SCOPE]):
++            with self.assertRaises(M.Refused):
++                M.arguments(args)
+
+
+ class CurrentBindingFilesTests(InertOnly):
+@@ -251,10 +268,15 @@
+
+
+ class OriginalCallFlowTests(InertOnly):
+-    def execute(self, *, failure=None, close_failure=None, admission_failure=None, run_cases=None):
++    def execute(self, *, failure=None, close_failure=None, admission_failure=None, run_cases=None, scope=M.SCOPE, not_ready=False):
+         events, errors = [], []
+-        fixtures = A.Fixtures(BINDING, 501, 20, M.SCOPE)
+-        fixtures.prepare = lambda: events.append("prepare")
++        fixtures = A.Fixtures(BINDING, 501, 20, scope)
++        def prepare():
++            events.append("prepare")
++            if scope in (M.TOOLS_SCOPE, M.SERVICE_SCOPE):
++                # Inert comparison only, never native pwd or a created fixture.
++                fixtures.path = A.TOOLS.fixture_path(BINDING, "/Users/runner", service=scope == M.SERVICE_SCOPE, need=A.need)
++        fixtures.prepare = prepare
+         fixtures.recovery_runtime_paths = lambda: events.append("runtime-post")
+         fixtures.before_call = lambda case: (events.append(("before", case)), setattr(fixtures, "case", case))
+
+@@ -281,7 +303,7 @@
+                 raise failure
+             return subprocess.CompletedProcess(argv, 0, b"INERT REPORT", b"")
+
+-        def readback(_fixtures, case, report):
++        def readback(_fixtures, case, report, *extra):
+             self.assertFalse(fixtures.inflight)
+             self.assertTrue(fixtures.last_returned)
+             events.append(("inert-readback", case))
+@@ -298,13 +320,21 @@
+             owner_load = stack.enter_context(patch.object(A, "load_owner", return_value=owner))
+             stack.enter_context(patch.object(A.identity_qualification, "before_invocation", return_value=None))
+             stack.enter_context(patch.object(A.identity_qualification, "readback", side_effect=readback))
+-            stack.enter_context(patch.object(A, "parse_result", return_value={"projectIdentity": {"inertOnly": True}}))
++            stack.enter_context(patch.object(A.TOOLS, "readback", side_effect=readback))
++            stack.enter_context(patch.object(A.TOOLS, "service_readback", side_effect=readback))
++            parsed = {"projectIdentity": {"inertOnly": True}} if scope == M.SCOPE else {"toolSetup": {
++                "execution": "not-executed-prerequisite" if not_ready else "ready",
++                "testResult": "not-executed" if not_ready else "INERT ONLY"}}
++            stack.enter_context(patch.object(A, "parse_result", return_value=parsed))
+             stack.enter_context(patch.object(A, "diagnostic", side_effect=diagnose))
+             if run_cases:
+                 stack.enter_context(patch.object(A, "run_cases", side_effect=run_cases))
+             out, err = io.StringIO(), io.StringIO()
+             stack.enter_context(redirect_stdout(out)); stack.enter_context(redirect_stderr(err))
+-            status = M._run(A, BINDING, 501, 20, "runner", Path(environment()["MRK_MACOS_WORK"]), environment())
++            env = environment()
++            if scope != M.SCOPE:
++                env["MRK_MACOS_NATIVE_SCOPE"] = M.TOOLS_SCOPE
++            status = M._run(A, BINDING, 501, 20, "runner", Path(env["MRK_MACOS_WORK"]), env, scope=scope)
+         return status, events, [json.loads(line) for line in out.getvalue().splitlines()], errors, fixtures, owner_load
+
+     def test_same_run_cases_dispatches_exact_four_after_admission_and_close_precedes_complete(self):
+@@ -353,6 +383,39 @@
+                 self.assertIn("close", events)
+                 self.assertFalse(any(row.get("type") == "macos-identity-current-complete" for row in rows))
+
++    def test_same_driver_uses_one_service_case_and_existing_tool_run_order(self):
++        for scope, cases, kind in ((M.SERVICE_SCOPE, A.TOOLS.SERVICE_CASES, "macos-tool-service-current-complete"),
++                                   (M.TOOLS_SCOPE, A.TOOLS.RUN_ORDER, "macos-tool-setup-current-complete")):
++            with self.subTest(scope=scope):
++                status, events, rows, errors, fixtures, _ = self.execute(scope=scope)
++                self.assertEqual(status, 0)
++                self.assertEqual(errors, [])
++                self.assertEqual([e[1] for e in events if type(e) is tuple and e[0] == "original-inert-call"], list(cases))
++                self.assertEqual(events[-1], "close")
++                self.assertEqual(rows[-1]["type"], kind)
++                self.assertFalse(rows[-1]["shippingBinaryQualified"])
++                self.assertFalse(fixtures.inflight)
++
++    def test_known_unexecuted_service_never_counts_as_pass_or_starts_tool_cases(self):
++        status, events, rows, errors, fixtures, _ = self.execute(scope=M.SERVICE_SCOPE, not_ready=True)
++        self.assertEqual(status, 78)
++        self.assertEqual(errors, [])
++        self.assertEqual(events[-1], "close")
++        self.assertEqual([e[1] for e in events if type(e) is tuple and e[0] == "original-inert-call"], list(A.TOOLS.SERVICE_CASES))
++        self.assertEqual(rows[-1]["type"], "macos-tool-current-unexecuted")
++        self.assertEqual(rows[-1]["notExecuted"], list(A.TOOLS.SERVICE_CASES))
++        self.assertFalse(fixtures.inflight)
++
++    def test_lost_service_original_is_not_known_nonentry_or_retry(self):
++        first = RuntimeError("INERT lost admitted service")
++        status, events, rows, errors, fixtures, _ = self.execute(scope=M.SERVICE_SCOPE, failure=first)
++        self.assertEqual(status, 1)
++        self.assertEqual(errors, [first])
++        self.assertEqual(rows, [])
++        self.assertTrue(fixtures.inflight)
++        self.assertNotIn("close", events)
++        self.assertEqual(len([e for e in events if type(e) is tuple and e[0] == "original-inert-call"]), 1)
++
+
+ if __name__ == "__main__":
+     unittest.main()

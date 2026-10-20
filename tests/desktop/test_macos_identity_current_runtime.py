@@ -130,6 +130,23 @@ class CurrentRouteTests(InertOnly):
         owner.assert_not_called()
         self.assertEqual(json.loads(stderr.getvalue())["reason"], "entry-refused")
 
+    def test_one_tool_package_permits_only_existing_three_explicit_invocations(self):
+        env = {**environment(), "MRK_MACOS_NATIVE_SCOPE": M.TOOLS_SCOPE}
+        self.assertEqual(M.current_context(env, M.TARGET)[0], BINDING.source)
+        for scope in (M.SCOPE, M.SERVICE_SCOPE, M.TOOLS_SCOPE):
+            self.assertEqual(M.observation_scope(env, scope), scope)
+            self.assertEqual(M.arguments(["--target", M.TARGET, "--scope", scope]), scope)
+        self.assertEqual(M.arguments(["--target", M.TARGET]), M.SCOPE)
+        for scope in (M.SERVICE_SCOPE, M.TOOLS_SCOPE, "all", "../other", "tool-setup-missing-sdk"):
+            with self.subTest(scope=scope), self.assertRaises(M.Refused):
+                M.observation_scope(environment(), scope)
+        with self.assertRaises(M.Refused):
+            M.package_role({**env, "MRK_MACOS_NATIVE_SCOPE": M.SERVICE_SCOPE}, "prepare", M.TARGET)
+        for args in (["--scope", M.TOOLS_SCOPE], ["--target", M.TARGET, "--scope", "all"],
+                     ["--target", A.INTEL_TARGET, "--scope", M.TOOLS_SCOPE]):
+            with self.assertRaises(M.Refused):
+                M.arguments(args)
+
 
 class CurrentBindingFilesTests(InertOnly):
     def setUp(self):
@@ -251,10 +268,15 @@ class CurrentBindingFilesTests(InertOnly):
 
 
 class OriginalCallFlowTests(InertOnly):
-    def execute(self, *, failure=None, close_failure=None, admission_failure=None, run_cases=None):
+    def execute(self, *, failure=None, close_failure=None, admission_failure=None, run_cases=None, scope=M.SCOPE, not_ready=False):
         events, errors = [], []
-        fixtures = A.Fixtures(BINDING, 501, 20, M.SCOPE)
-        fixtures.prepare = lambda: events.append("prepare")
+        fixtures = A.Fixtures(BINDING, 501, 20, scope)
+        def prepare():
+            events.append("prepare")
+            if scope in (M.TOOLS_SCOPE, M.SERVICE_SCOPE):
+                # Inert comparison only, never native pwd or a created fixture.
+                fixtures.path = A.TOOLS.fixture_path(BINDING, "/Users/runner", service=scope == M.SERVICE_SCOPE, need=A.need)
+        fixtures.prepare = prepare
         fixtures.recovery_runtime_paths = lambda: events.append("runtime-post")
         fixtures.before_call = lambda case: (events.append(("before", case)), setattr(fixtures, "case", case))
 
@@ -281,7 +303,7 @@ class OriginalCallFlowTests(InertOnly):
                 raise failure
             return subprocess.CompletedProcess(argv, 0, b"INERT REPORT", b"")
 
-        def readback(_fixtures, case, report):
+        def readback(_fixtures, case, report, *extra):
             self.assertFalse(fixtures.inflight)
             self.assertTrue(fixtures.last_returned)
             events.append(("inert-readback", case))
@@ -298,13 +320,21 @@ class OriginalCallFlowTests(InertOnly):
             owner_load = stack.enter_context(patch.object(A, "load_owner", return_value=owner))
             stack.enter_context(patch.object(A.identity_qualification, "before_invocation", return_value=None))
             stack.enter_context(patch.object(A.identity_qualification, "readback", side_effect=readback))
-            stack.enter_context(patch.object(A, "parse_result", return_value={"projectIdentity": {"inertOnly": True}}))
+            stack.enter_context(patch.object(A.TOOLS, "readback", side_effect=readback))
+            stack.enter_context(patch.object(A.TOOLS, "service_readback", side_effect=readback))
+            parsed = {"projectIdentity": {"inertOnly": True}} if scope == M.SCOPE else {"toolSetup": {
+                "execution": "not-executed-prerequisite" if not_ready else "ready",
+                "testResult": "not-executed" if not_ready else "INERT ONLY"}}
+            stack.enter_context(patch.object(A, "parse_result", return_value=parsed))
             stack.enter_context(patch.object(A, "diagnostic", side_effect=diagnose))
             if run_cases:
                 stack.enter_context(patch.object(A, "run_cases", side_effect=run_cases))
             out, err = io.StringIO(), io.StringIO()
             stack.enter_context(redirect_stdout(out)); stack.enter_context(redirect_stderr(err))
-            status = M._run(A, BINDING, 501, 20, "runner", Path(environment()["MRK_MACOS_WORK"]), environment())
+            env = environment()
+            if scope != M.SCOPE:
+                env["MRK_MACOS_NATIVE_SCOPE"] = M.TOOLS_SCOPE
+            status = M._run(A, BINDING, 501, 20, "runner", Path(env["MRK_MACOS_WORK"]), env, scope=scope)
         return status, events, [json.loads(line) for line in out.getvalue().splitlines()], errors, fixtures, owner_load
 
     def test_same_run_cases_dispatches_exact_four_after_admission_and_close_precedes_complete(self):
@@ -352,6 +382,39 @@ class OriginalCallFlowTests(InertOnly):
                 self.assertTrue(errors)
                 self.assertIn("close", events)
                 self.assertFalse(any(row.get("type") == "macos-identity-current-complete" for row in rows))
+
+    def test_same_driver_uses_one_service_case_and_existing_tool_run_order(self):
+        for scope, cases, kind in ((M.SERVICE_SCOPE, A.TOOLS.SERVICE_CASES, "macos-tool-service-current-complete"),
+                                   (M.TOOLS_SCOPE, A.TOOLS.RUN_ORDER, "macos-tool-setup-current-complete")):
+            with self.subTest(scope=scope):
+                status, events, rows, errors, fixtures, _ = self.execute(scope=scope)
+                self.assertEqual(status, 0)
+                self.assertEqual(errors, [])
+                self.assertEqual([e[1] for e in events if type(e) is tuple and e[0] == "original-inert-call"], list(cases))
+                self.assertEqual(events[-1], "close")
+                self.assertEqual(rows[-1]["type"], kind)
+                self.assertFalse(rows[-1]["shippingBinaryQualified"])
+                self.assertFalse(fixtures.inflight)
+
+    def test_known_unexecuted_service_never_counts_as_pass_or_starts_tool_cases(self):
+        status, events, rows, errors, fixtures, _ = self.execute(scope=M.SERVICE_SCOPE, not_ready=True)
+        self.assertEqual(status, 78)
+        self.assertEqual(errors, [])
+        self.assertEqual(events[-1], "close")
+        self.assertEqual([e[1] for e in events if type(e) is tuple and e[0] == "original-inert-call"], list(A.TOOLS.SERVICE_CASES))
+        self.assertEqual(rows[-1]["type"], "macos-tool-current-unexecuted")
+        self.assertEqual(rows[-1]["notExecuted"], list(A.TOOLS.SERVICE_CASES))
+        self.assertFalse(fixtures.inflight)
+
+    def test_lost_service_original_is_not_known_nonentry_or_retry(self):
+        first = RuntimeError("INERT lost admitted service")
+        status, events, rows, errors, fixtures, _ = self.execute(scope=M.SERVICE_SCOPE, failure=first)
+        self.assertEqual(status, 1)
+        self.assertEqual(errors, [first])
+        self.assertEqual(rows, [])
+        self.assertTrue(fixtures.inflight)
+        self.assertNotIn("close", events)
+        self.assertEqual(len([e for e in events if type(e) is tuple and e[0] == "original-inert-call"]), 1)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,8 @@ use std::{
 #[path = "installed_shell_observation_macos_tool_fixture.rs"]
 mod fixture;
 pub(super) use fixture::Fixture;
+#[path = "installed_shell_observation_macos_tool_service.rs"]
+mod service;
 
 pub(crate) const SECONDS: u64 = 2400;
 pub(crate) const NAMES: [&str; 3] = [
@@ -30,6 +32,7 @@ pub(crate) enum Case {
     RoundTrip,
     CancelBeforeTransfer,
     SourceDrift,
+    ServicePreparation,
 }
 impl Case {
     pub(crate) const ALL: [Self; 3] = [
@@ -38,19 +41,28 @@ impl Case {
         Self::SourceDrift,
     ];
     pub(crate) fn name(self) -> &'static str {
-        NAMES[self as usize]
+        if self == Self::ServicePreparation { service::NAME } else { NAMES[self as usize] }
+    }
+    pub(crate) fn seconds(self) -> u64 {
+        if self == Self::ServicePreparation { service::SECONDS } else { SECONDS }
+    }
+    pub(crate) fn service_only(self) -> bool {
+        self == Self::ServicePreparation
     }
     pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> {
-        Self::ALL.into_iter().find(|c| value == c.name())
+        Self::ALL.into_iter().chain([Self::ServicePreparation]).find(|c| value == c.name())
     }
     pub(crate) fn maximum_original(self) -> u32 {
-        if self == Self::RoundTrip {
+        if self.service_only() {
+            2
+        } else if self == Self::RoundTrip {
             6
         } else {
             5
         }
     }
     pub(crate) fn picker(self, id: u32) -> Option<u8> {
+        if self.service_only() { return None; }
         id.checked_sub(2)
             .and_then(|n| u8::try_from(n).ok())
             .filter(|n| *n < if self == Self::RoundTrip { 4 } else { 3 })
@@ -108,10 +120,23 @@ fn tuple() -> Option<(&'static str, &'static str, &'static str)> {
         && decimal(values.2))
     .then_some(values)
 }
-fn sources_root() -> Option<PathBuf> {
+fn sources_root(home: &Path) -> Option<PathBuf> {
     let (source, run, attempt) = tuple()?;
-    Some(PathBuf::from(format!(
-        "/private/tmp/mrk-macos-tool-inputs-{source}-{run}-{attempt}"
+    if !crate::asset_session::installed_macos_selection_path_bounded(home) || home == Path::new("/") {
+        return None;
+    }
+    Some(home.join("Library/Application Support").join(format!(
+        "mrk-macos-tool-inputs-{source}-{run}-{attempt}"
+    )))
+}
+pub(super) fn fixture_root(home: &Path, case: Case) -> Option<PathBuf> {
+    let (source, run, attempt) = tuple()?;
+    if !crate::asset_session::installed_macos_selection_path_bounded(home) || home == Path::new("/") {
+        return None;
+    }
+    let suffix = if case.service_only() { service::NAME } else { "tool-setup" };
+    Some(home.join("Library/Application Support").join(format!(
+        "mrk-macos-aqua-{source}-{run}-{attempt}-{suffix}"
     )))
 }
 fn application_root(home: &Path, case: Case) -> Option<PathBuf> {
@@ -185,17 +210,19 @@ impl Control {
         if user.uid.as_raw() != uid {
             return Err(());
         }
-        let input = sources_root().ok_or(())?;
         let application = application_root(&user.dir, case).ok_or(())?;
+        let inputs = if case.service_only() {
+            std::array::from_fn(|_| PathBuf::new())
+        } else {
+            let input = sources_root(&user.dir).ok_or(())?;
+            let shared = input.join(Case::CancelBeforeTransfer.name());
+            [shared.join("jdk/temurin-17.jdk"), input.join(case.name()).join("sdk"), shared.join("gradle")]
+        };
         Ok(Arc::new(Self {
             case,
             project: project.to_path_buf(),
             application,
-            inputs: [
-                input.join("jdk/temurin-17.jdk"),
-                input.join(case.name()).join("sdk"),
-                input.join("gradle"),
-            ],
+            inputs,
             acquired_sdk: OnceLock::new(),
             original: OnceLock::new(),
             document: OnceLock::new(),
@@ -243,6 +270,7 @@ impl Control {
         &self.application
     }
     pub(crate) fn target(&self, index: u8) -> Option<&Path> {
+        if self.case.service_only() { return None; }
         if index == 3 && self.case == Case::RoundTrip {
             self.acquired_sdk.get().map(PathBuf::as_path)
         } else {
@@ -284,6 +312,7 @@ impl Control {
         Some(n)
     }
     pub(crate) fn claim_prepare(&self, context: &wire::Context) -> bool {
+        if self.case.service_only() { return false; }
         let n = self.next.load(Ordering::SeqCst);
         if n >= if self.case == Case::RoundTrip { 3 } else { 2 }
             || context.action
@@ -382,6 +411,7 @@ impl Control {
         self.complete.load(Ordering::SeqCst)
     }
     fn finish(&self, executed: bool) -> bool {
+        if self.case.service_only() { return false; }
         let Ok(trace) = self.trace.try_lock() else {
             return false;
         };
@@ -397,6 +427,7 @@ impl Control {
                             || !trace.samples[1].is_some_and(|s| s.cancelled_before_transfer())
                     }
                     Case::SourceDrift => !trace.samples[1].is_some_and(|s| s.refused_source()),
+                    Case::ServicePreparation => true,
                 }
         } else {
             self.next.load(Ordering::SeqCst) != 0 || trace.samples.iter().any(Option::is_some)
@@ -415,6 +446,15 @@ impl Control {
             },
             Ordering::SeqCst,
         );
+        true
+    }
+    fn finish_service(&self, ready: bool) -> bool {
+        let Ok(trace) = self.trace.try_lock() else { return false; };
+        if !self.case.service_only() || self.next.load(Ordering::SeqCst) != 0
+            || trace.pairs.iter().any(Option::is_some) || trace.samples.iter().any(Option::is_some)
+            || self.complete.swap(true, Ordering::SeqCst) { return false; }
+        self.unexecuted.store(!ready, Ordering::SeqCst);
+        self.quit.store(2, Ordering::SeqCst);
         true
     }
     fn attach(
@@ -487,6 +527,7 @@ impl Observation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Step {
     Context,
+    Prerequisite(service::Step),
     Service,
     ServiceWait,
     Catalog,
@@ -511,6 +552,7 @@ pub(super) enum Step {
 }
 #[derive(Default)]
 pub(super) struct Record {
+    service: service::Record,
     context: Option<build::Prepare>,
     active: Option<wire::Projection>,
     requirements: Option<String>,
@@ -528,7 +570,7 @@ pub(super) struct Record {
 }
 impl Record {
     fn retained_bytes(&self) -> Option<usize> {
-        let mut n = std::mem::size_of::<Self>();
+        let mut n = std::mem::size_of::<Self>().checked_add(self.service.retained_bytes()?)?;
         if let Some(context) = &self.context {
             n = n.checked_add(context.retained_heap_bytes()?)?;
         }
@@ -565,6 +607,7 @@ impl Record {
         Some(n)
     }
     pub(super) fn report(&self, control: &Control) -> Option<Value> {
+        if control.case.service_only() { return self.service.report(control, self.normal_quit); }
         if !control.completed()
             || !self.normal_quit
             || self.executed == control.unexecuted.load(Ordering::SeqCst)
@@ -575,7 +618,7 @@ impl Record {
         Some(
             json!({"mechanism":"same-original-tool-setup-v1","normalAcquisitionEnabled":false,
             "execution":if self.executed {"executed"} else {"not-executed-prerequisite"},
-            "testResult":if !self.executed {"not-executed"} else {match control.case {Case::RoundTrip=>"registered-reused",Case::CancelBeforeTransfer=>"cancelled-before-transfer",Case::SourceDrift=>"source-refused-before-effects"}},
+            "testResult":if !self.executed {"not-executed"} else {match control.case {Case::RoundTrip=>"registered-reused",Case::CancelBeforeTransfer=>"cancelled-before-transfer",Case::SourceDrift=>"source-refused-before-effects",Case::ServicePreparation=>return None}},
             "initial":trace.samples[0],"acquire":trace.samples[1],"reuse":trace.samples[2],
             "selectedSources":self.sources,"protectedCopyRegistered":self.registered,"selectedCatalogVerified":self.selected,
             "normalQuitOriginal":control.quit_id(),"allOriginalsSettled":true,"projectSentinelPreserved":true,
@@ -584,6 +627,15 @@ impl Record {
         )
     }
     pub(super) fn final_originals(&mut self, control: &Control, quit: u32, finality: bool) -> bool {
+        if control.case.service_only() {
+            if self.normal_quit || !control.completed() || quit!=2 || !finality
+                || self.sources != [false;4] || self.registered || self.selected || self.executed
+                || self.active.is_some() || self.requirements.is_some() || self.review_id.is_some() {
+                return false;
+            }
+            self.normal_quit=true;
+            return self.service.report(control,true).is_some();
+        }
         if self.normal_quit
             || !control.completed()
             || !finality
@@ -692,8 +744,9 @@ impl Observation {
                 Step::Context => {
                     let c=document.installed_tool_setup_saved(&project).await?;
                     self.record().ok_or_else(invalid)?.tool_setup.as_mut().ok_or_else(invalid)?.context=Some(c);
-                    Some(Step::Service)
+                    Some(if control.case.service_only() {Step::Prerequisite(service::Step::Request)}else{Step::Service})
                 },
+                Step::Prerequisite(s) => service::tick(self,document,s).await?,
                 Step::Service => {
                     let before=document.android_tool_service_status()?;
                     if before.operation.is_some() || before.setup_generation!=0 {return Err(invalid());}
@@ -892,3 +945,5 @@ impl Observation {
         }
     }
 }
+
+pub(super) fn service_data_checks() -> bool { service::data_checks() }

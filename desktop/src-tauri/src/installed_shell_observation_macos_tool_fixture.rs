@@ -45,7 +45,7 @@ const PLATFORM_SHA: &str = "2c3764446f335ad2cc44383a0360fe247620b7c774ec100d5087
 pub(crate) struct Fixture {
     files: [FileFact; 7],
     dirs: [[u64; 6]; 5],
-    source: FileFact,
+    source: Option<FileFact>,
     drift_started: bool,
     drifted: bool,
 }
@@ -63,10 +63,13 @@ impl Fixture {
             .collect::<Result<Vec<_>, _>>()?
             .try_into()
             .map_err(|_| ())?;
-        let source = source_file(case, uid, None)?;
-        if source.identity[6] != 257 || source.sha256 != PLATFORM_SHA {
-            return Err(());
-        }
+        // Service preparation needs only the saved project. Do not enter the
+        // tool source reader, require a supplier path, or invent a source fact.
+        let source = if case.service_only() { None } else {
+            let source = source_file(case, uid, None)?;
+            if source.identity[6] != 257 || source.sha256 != PLATFORM_SHA { return Err(()); }
+            Some(source)
+        };
         Ok(Self {
             files,
             dirs,
@@ -86,7 +89,9 @@ impl Fixture {
                 return Err(());
             }
         }
-        if source_file(case, uid, None)? != self.source || self.drift_started != self.drifted {
+        let source_matches = if case.service_only() { self.source.is_none() }
+            else { self.source.as_ref().is_some_and(|before| source_file(case, uid, None).as_ref()==Ok(before)) };
+        if !source_matches || self.drift_started != self.drifted {
             return Err(());
         }
         Ok(())
@@ -109,7 +114,7 @@ impl Fixture {
     pub(super) fn retained_bytes(&self) -> Option<usize> {
         self.files
             .iter()
-            .chain(std::iter::once(&self.source))
+            .chain(self.source.iter())
             .try_fold(std::mem::size_of::<Self>(), |n, f| {
                 n.checked_add(f.sha256.capacity())
             })
@@ -123,38 +128,37 @@ fn source_file(case: Case, uid: u32, change: Option<&FileFact>) -> Result<FileFa
         fcntl::{openat, AtFlags, OFlag},
         sys::stat::Mode,
     };
-    let root = sources_root().ok_or(())?;
-    let name = root.file_name().and_then(|s| s.to_str()).ok_or(())?;
-    let names = [name, case.name(), "sdk", "platforms", "android-35"];
-    let mut held: Vec<File> = Vec::with_capacity(7);
+    if case.service_only() || uid == 0 {return Err(());}
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).map_err(|_|())?.ok_or(())?;
+    if user.uid.as_raw()!=uid {return Err(());}
+    let root = sources_root(&user.dir).ok_or(())?;
+    let selected_depth = root.components().count()-1;
+    let directory = root.join(case.name()).join("sdk/platforms/android-35");
+    let names: Vec<_> = directory.components().skip(1).map(|component| match component {
+        std::path::Component::Normal(name) => Ok(name), _ => Err(()),
+    }).collect::<Result<_,_>>()?;
+    if names.len()>24 {return Err(());}
+    let mut held: Vec<File> = Vec::with_capacity(names.len()+2);
+    let mut original_dirs = Vec::with_capacity(names.len()+1);
     let value = (|| {
-        held.push(
-            OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC | nix::libc::O_DIRECTORY)
-                .open("/private/tmp")
-                .map_err(|_| ())?,
-        );
-        let base = held[0].metadata().map_err(|_| ())?;
-        if !base.is_dir() || base.uid() != 0 || base.mode() & 0o7777 != 0o1777 {
-            return Err(());
-        }
-        for name in names {
-            let fd = openat(
-                held.last().ok_or(())?.as_fd(),
-                name,
-                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| ())?;
+        held.push(OpenOptions::new().read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW|nix::libc::O_CLOEXEC|nix::libc::O_DIRECTORY)
+            .open("/").map_err(|_|())?);
+        let base=held[0].metadata().map_err(|_|())?;
+        if !base.is_dir() || base.uid()!=0 || base.mode()&0o7022!=0 {return Err(());}
+        original_dirs.push(super::super::identity(&base)?);
+        for name in &names {
+            let fd=openat(held.last().ok_or(())?.as_fd(),*name,
+                OFlag::O_RDONLY|OFlag::O_DIRECTORY|OFlag::O_NOFOLLOW|OFlag::O_CLOEXEC,Mode::empty()).map_err(|_|())?;
             held.push(File::from(fd));
-            let file = held.last().ok_or(())?;
-            let m = file.metadata().map_err(|_| ())?;
-            if !m.is_dir() || m.uid() != uid || m.mode() & 0o022 != 0 {
-                return Err(());
+            let file=held.last().ok_or(())?; let m=file.metadata().map_err(|_|())?;
+            if !m.is_dir() || (m.uid()!=0 && m.uid()!=uid) || m.mode()&0o7022!=0 {return Err(());}
+            if held.len()-1>=selected_depth {
+                if m.uid()!=uid {return Err(());}
+                mrk_macos_installed_native::empty_acl(file.as_fd()).map_err(|_|())?;
+                mrk_macos_installed_native::no_xattrs(file.as_fd()).map_err(|_|())?;
             }
-            mrk_macos_installed_native::empty_acl(file.as_fd()).map_err(|_| ())?;
-            mrk_macos_installed_native::no_xattrs(file.as_fd()).map_err(|_| ())?;
+            original_dirs.push(super::super::identity(&m)?);
         }
         let flags = (if change.is_some() {
             OFlag::O_RDWR
@@ -184,13 +188,16 @@ fn source_file(case: Case, uid: u32, change: Option<&FileFact>) -> Result<FileFa
             }
             mrk_macos_installed_native::empty_acl(file.as_fd()).map_err(|_| ())?;
             mrk_macos_installed_native::no_xattrs(file.as_fd()).map_err(|_| ())?;
-            for (i, name) in names
-                .iter()
-                .chain(std::iter::once(&"source.properties"))
-                .enumerate()
-            {
+            if super::super::identity(&std::fs::symlink_metadata("/").map_err(|_|())?)?!=original_dirs[0] {
+                return Err(());
+            }
+            for (file, before) in held.iter().zip(&original_dirs) {
+                if super::super::identity(&file.metadata().map_err(|_|())?)?!=*before {return Err(());}
+            }
+            for (i, name) in names.iter().copied()
+                .chain(std::iter::once(std::ffi::OsStr::new("source.properties"))).enumerate() {
                 let edge =
-                    nix::sys::stat::fstatat(held[i].as_fd(), *name, AtFlags::AT_SYMLINK_NOFOLLOW)
+                    nix::sys::stat::fstatat(held[i].as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW)
                         .map_err(|_| ())?;
                 let next = held[i + 1].metadata().map_err(|_| ())?;
                 if edge.st_dev as u64 != next.dev()
@@ -300,16 +307,16 @@ impl Observation {
                 return Err(());
             }
             f.drift_started = true;
-            (f.source.clone(), uid)
+            (f.source.clone().ok_or(())?, uid)
         };
         let result = source_file(c.case, uid, Some(&before));
         let mut r = self.record().ok_or(())?;
         let f = r.fixture.tools.as_mut().ok_or(())?;
         let after = result?;
-        if !f.drift_started || f.drifted || f.source != before {
+        if !f.drift_started || f.drifted || f.source.as_ref() != Some(&before) {
             return Err(());
         }
-        f.source = after;
+        f.source = Some(after);
         f.drifted = true;
         Ok(())
     }
