@@ -657,7 +657,7 @@ fn worker_joined(inner: &Inner, owner: &Session, book: &Resources) -> bool {
                 active.accepted
                     && active.terminal
                     && matches!(&active.projection.result,
-                    Some(Terminal::AppleProvisioning(terminal)) if terminal.lifetime.settled_for(terminal.context.mode))
+                    Some(Terminal::AppleProvisioning(terminal)) if terminal.settled())
             })
     };
     runtime

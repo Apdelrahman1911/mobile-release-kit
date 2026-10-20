@@ -289,7 +289,10 @@ impl DocumentBinding {
                 state,
                 &owner,
                 sources.p12().clone(),
-                sources.roster().clone(),
+                crate::bridge::ProjectRoster {
+                    generation: sources.roster().generation,
+                    roots: sources.roster().roots.clone(),
+                },
                 crate::vault_crypto::APPLE_PROFILE_CRYPTO_BYTES,
             )
             .map_err(|reason| {
@@ -484,7 +487,7 @@ pub(in crate::asset_session) async fn retired(
             && owner
                 .retirement
                 .try_lock()
-                .is_ok_and(|r| lookup_memory::retirement_empty(r))
+                .is_ok_and(|r| lookup_memory::retirement_empty(&r))
             && dispose_sources(owner)
         {
             return Ok(());
