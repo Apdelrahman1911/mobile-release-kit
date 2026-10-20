@@ -549,6 +549,10 @@ jobs:
             fi
           fi
           if [[ "$APP_CHECKS" == app-typecheck ]]; then
+            # Compile the actual transport-only CLI target, not only the shared
+            # library modules. This does not invoke a CLI or grant Desktop access.
+            rustup run 1.98.1 cargo check --locked --no-default-features \
+              --features installed-cli --manifest-path desktop/src-tauri/Cargo.toml --bin mrk
             # Check the actual nonshipping native observation target before
             # spending time signing or packaging it. This does not run the app
             # or add observation features to the separate shipping invocation.
@@ -565,7 +569,7 @@ jobs:
               android_service_prepare::tests::fixed_layout_role_and_reserved_bytes_cannot_alias \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-native-contracts.log"
             grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-native-contracts.log"
-            # Twelve Mac-only cache, acquisition and Git-source comparisons in
+            # Fourteen Mac-only cache, acquisition and Git-source comparisons in
             # the ordinary library, never in the shipping image. These methods
             # open no files, services or tools; native acquisition is separate.
             rustup run 1.98.1 cargo test --locked --no-default-features \
@@ -580,10 +584,51 @@ jobs:
               installed_runtime::android_registration_source::acquisition::tests::missing_requires_exact_enoent_not_denial_link_or_interruption \
               installed_runtime::android_registration_source::acquisition::tests::both_compiled_rosters_reserve_one_read_phase_not_registration_authority \
               installed_runtime::android_registration_source::acquisition::tests::sdk_scope_never_includes_sibling_packages \
+              saved_command_owner::tool_acquisition::picked::tests::source_diagnostic_keeps_original_first_failure_through_generic_cleanup_normalization \
+              installed_runtime::android_registration_source::acquisition::discovery::tests::fixed_lookup_paths_require_native_account_home_and_keep_unentered_account_settled \
               asset_source::macos::git_local_sources::branch_tests::new_branch_source_head_stays_original_and_only_destination_must_be_absent \
               asset_source::macos::git_local_sources::branch_tests::old_commit_ref_edge_retains_its_own_branch_and_stage_cannot_select_a_ref \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
-            grep -Eq '^test result: ok\. 12 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            grep -Eq '^test result: ok\. 14 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            # Real synthetic-record backup backend, not picker/Keychain/signing
+            # or Desktop lifecycle qualification. The injected lost-close receipt
+            # is retained until this exact, synchronous test process has exited.
+            (
+              umask 077
+              test_name=asset_session::vault::backup_native::component_tests::native_apfs_backup_roundtrip_wrong_code_and_lost_close_receipt
+              rustup run 1.98.1 cargo test --locked --no-default-features \
+                --manifest-path desktop/src-tauri/Cargo.toml --lib "$test_name" -- --exact --ignored --list |
+                grep -Fx "$test_name: test"
+              # Same original private APFS fixture convention as desktop-ci.yml.
+              # This subshell owns its trap; the IPC HOME fixture below is separate.
+              temp_root="$(cd -P -- "$RUNNER_TEMP" && pwd -P)"
+              fixture="$(mktemp -d "$temp_root/mrk-backup-component.XXXXXX")"
+              fixture_identity=''
+              cleanup_backup_fixture() {
+                status=$?
+                trap - EXIT
+                cleanup_status=0
+                if [[ -n "$fixture_identity" && -d "$fixture" && ! -L "$fixture" &&
+                      "$(cd -P -- "$fixture" && pwd -P)" == "$fixture" &&
+                      "$(/usr/bin/stat -f '%d:%i:%u:%Lp' "$fixture")" == "$fixture_identity" ]]; then
+                  rm -rf -- "$fixture" || cleanup_status=$?
+                else
+                  printf '%s\n' 'Private backup fixture identity changed; leave it for disposable-host teardown.' >&2
+                  cleanup_status=1
+                fi
+                if (( status == 0 )); then status=$cleanup_status; fi
+                exit "$status"
+              }
+              trap cleanup_backup_fixture EXIT
+              [[ -d "$fixture" && ! -L "$fixture" && "$(cd -P -- "$fixture" && pwd -P)" == "$fixture" ]]
+              [[ "$(/usr/bin/stat -f '%u:%Lp' "$fixture")" == "$(id -u):700" ]]
+              fixture_identity="$(/usr/bin/stat -f '%d:%i:%u:%Lp' "$fixture")"
+              # No background work: caller cleanup follows the actual test join.
+              MRK_MACOS_VAULT_FIXTURE_ROOT="$fixture" rustup run 1.98.1 cargo test --locked --no-default-features \
+                --manifest-path desktop/src-tauri/Cargo.toml --lib "$test_name" -- --exact --ignored --test-threads=1 |
+                tee "$WORK_ROOT/app-typecheck-backup-component.log"
+              grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-backup-component.log"
+            )
             # Real Darwin AF_UNIX peer credentials, capability/reconnect checks
             # and original socket/task shutdown, using the existing library.
             # No GUI consent, native project operation, cross-UID attack test,
