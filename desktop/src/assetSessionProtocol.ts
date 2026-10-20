@@ -171,7 +171,7 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
     if (value.context !== null && (!keys(value.context, object(value.context) && Object.hasOwn(value.context, 'executionMode') ? ['revision', 'projectId', 'platform', 'stage', 'purpose', 'executionMode'] : ['revision', 'projectId', 'platform', 'stage', 'purpose']) || !assetCounter(value.context.revision) ||
         !projectId(value.context.projectId) || !scope({ platform: value.context.platform, stage: value.context.stage, purpose: value.context.purpose, ...(Object.hasOwn(value.context, 'executionMode') ? { executionMode: value.context.executionMode } : {}) }))) return null;
     if (!list(value.records, encrypted ? 128 : 32, (record) => keys(record, ['recordId', 'revision', 'kind', 'availability', 'storage', 'label', 'payloadState']) && token(record.recordId) &&
-        assetCounter(record.revision) && (one(record.kind, ASSET_KINDS) || record.kind === 'apple-distribution-key' && encrypted &&
+        assetCounter(record.revision) && (one(record.kind, ASSET_KINDS) || record.kind === 'apple-distribution-key' && encrypted === true &&
           record.availability !== 'assigned' && record.payloadState === 'not-checked' && record.label === null) && one(record.availability, ['unassigned', 'assigned', 'mutation-pending']) &&
         one(record.storage, ['session', 'encrypted']) && record.storage === value.mode && assetLabelFits(record.label) && one(record.payloadState, ['not-checked', 'assessed']) &&
         (encrypted ? record.revision > 0 : record.label === null)) ||
