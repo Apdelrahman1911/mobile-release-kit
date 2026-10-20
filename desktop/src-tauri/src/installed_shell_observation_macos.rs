@@ -19,6 +19,8 @@ use super::owned_macos::observation::{observed_panel, observe_panel_action, prep
 
 #[path = "installed_shell_observation_macos_ios.rs"]
 pub(crate) mod ios;
+#[path = "installed_shell_observation_macos_identity.rs"]
+mod identity;
 #[path = "installed_shell_observation_macos_recovery.rs"]
 pub(crate) mod recovery;
 #[path = "installed_shell_observation_macos_session.rs"]
@@ -39,6 +41,7 @@ pub(crate) use session::Command as SessionCommand;
 // no Record lock, native call, path, or arbitrary error text enters this latch.
 const FAILURE_REASONS: &[&str] = &[
     "observer-invariant", "observer-deadline", "observer-record-unavailable", "observer-data-check",
+    "identity-original-contract",
     "local-edits-original-contract", "local-edits-dom-contract", "local-edits-fixture-contract",
     "local-checks-original-contract", "local-checks-dom-contract", "local-checks-fixture-contract",
     "local-checks-unexpected-cancel", "local-checks-start-arrival",
@@ -252,14 +255,14 @@ const CONFIG: &[u8] = br#"{
 "#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields, Vault(vault::Case), Installation, PendingRecovery, LocalEdits(local_edits::Case), Checks(checks::Case) }
+enum Case { FirstSave, NoopStale, PickerLoss, SaveLoss, Ios(ios::Case), ProjectFields, Vault(vault::Case), Installation, PendingRecovery, LocalEdits(local_edits::Case), Checks(checks::Case), Identity(identity::Case) }
 impl Case {
     fn name(self) -> &'static str { match self {
         Self::FirstSave => "first-save", Self::NoopStale => "noop-stale",
         Self::PickerLoss => "picker-loss", Self::SaveLoss => "save-loss",
         Self::Ios(case) => case.name(),
         Self::ProjectFields => project_fields::NAME, Self::Vault(case) => case.name(),
-        Self::Installation => installation_check::NAME, Self::PendingRecovery => recovery::NAME, Self::LocalEdits(case) => case.name(), Self::Checks(case) => case.name(),
+        Self::Installation => installation_check::NAME, Self::PendingRecovery => recovery::NAME, Self::LocalEdits(case) => case.name(), Self::Checks(case) => case.name(), Self::Identity(case) => case.name(),
     }}
     fn project_name(self) -> &'static str { if self == Self::PendingRecovery { "project" } else { self.name() } }
     fn selected_id(self) -> u32 { if self == Self::FirstSave { 2 } else { 1 } }
@@ -291,7 +294,7 @@ impl Case {
     } }
     fn methods(self) -> usize { METHODS.len() }
     fn loses_document(self) -> bool { matches!(self, Self::PickerLoss | Self::SaveLoss) }
-    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) | Self::ProjectFields | Self::Vault(_) | Self::Installation | Self::PendingRecovery | Self::LocalEdits(_) | Self::Checks(_) => 0 } }
+    fn rounds(self) -> usize { match self { Self::FirstSave | Self::NoopStale => 2, Self::SaveLoss => 1, Self::PickerLoss | Self::Ios(_) | Self::ProjectFields | Self::Vault(_) | Self::Installation | Self::PendingRecovery | Self::LocalEdits(_) | Self::Checks(_) | Self::Identity(_) => 0 } }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
@@ -304,7 +307,7 @@ enum Step {
     ReadbackPage, Refresh, Readback, SavedSettings, ChangeDraft, ChangedDraft, MutateIgnore,
     CloseCancel, QuitCancel, QuitCancelled, RetainedReview, Close, Quit, Exit,
     PickerPending, Reload, Lost,
-    Ios(ios::Step), Recovery(recovery::Step), Session(session::Step), ProjectFields(project_fields::Step), Vault(vault::Step), UploadKey(vault::upload_key::Step), Installation(installation_check::Step), LocalEdits(local_edits::Step), Checks(checks::Step),
+    Ios(ios::Step), Recovery(recovery::Step), Session(session::Step), ProjectFields(project_fields::Step), Vault(vault::Step), UploadKey(vault::upload_key::Step), Installation(installation_check::Step), LocalEdits(local_edits::Step), Checks(checks::Step), Identity(identity::Step),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DomDispatch { step: Step, sequence: u16 }
@@ -833,7 +836,7 @@ fn directory_rosters(path: &Path, uid: u32, mode: u32, entries: &[&str], alterna
 struct Fixture {
     root: PathBuf, uid: u32, root_identity: [u64; 6], app_identity: Option<[u64; 6]>,
     untouched: Option<[FileFact; 3]>, ignore: FileFact, config: Option<FileFact>, release: Option<[u64; 6]>,
-    ios: Option<ios::Fixture>, project_fields: Option<project_fields::Fixture>, recovery: Option<recovery::Fixture>, local_edits: Option<local_edits::Fixture>, checks: Option<checks::Fixture>,
+    ios: Option<ios::Fixture>, project_fields: Option<project_fields::Fixture>, recovery: Option<recovery::Fixture>, local_edits: Option<local_edits::Fixture>, checks: Option<checks::Fixture>, identity: Option<identity::Fixture>,
     written: bool, mutated: bool,
 }
 impl Fixture {
@@ -843,37 +846,43 @@ impl Fixture {
         if mutated { bytes.extend_from_slice(STALE_MARKER); } bytes
     }
     fn capture(root: PathBuf, uid: u32, case: Case) -> Result<Self, ()> {
+        if let Case::Identity(case)=case {
+            let fixture=identity::Fixture::capture(&root,uid,case)?;
+            return Ok(Self {root,uid,root_identity:fixture.root_identity()?,app_identity:fixture.dir("app"),untouched:None,
+                ignore:fixture.ignore()?,config:fixture.file("release/mobile-release.json"),release:fixture.dir("release"),
+                ios:None,project_fields:None,recovery:None,local_edits:None,checks:None,identity:Some(fixture),written:false,mutated:false});
+        }
         if let Case::Checks(case)=case {
             let fixture=checks::Fixture::capture(&root,uid,case)?;
             return Ok(Self {root,uid,root_identity:fixture.dir(".").ok_or(())?,app_identity:fixture.dir("app"),
                 untouched:None,ignore:fixture.file(".gitignore").ok_or(())?,config:fixture.file("release/mobile-release.json"),release:fixture.dir("release"),
-                ios:None,project_fields:None,recovery:None,local_edits:None,checks:Some(fixture),written:false,mutated:false});
+                ios:None,project_fields:None,recovery:None,local_edits:None,checks: Some(fixture), identity: None,written:false,mutated:false});
         }
         if let Case::LocalEdits(case)=case {
             let fixture=local_edits::Fixture::capture(&root,uid,case)?;
             return Ok(Self { root,uid,root_identity:fixture.root_identity()?,app_identity:fixture.dir("app"),
                 untouched:None,ignore:fixture.ignore()?,config:fixture.file("release/mobile-release.json"),release:fixture.dir("release"),
-                ios:None,project_fields:None,recovery:None,local_edits:Some(fixture),checks:None,written:false,mutated:false });
+                ios:None,project_fields:None,recovery:None,local_edits:Some(fixture),checks: None, identity: None,written:false,mutated:false });
         }
         if case == Case::PendingRecovery {
             let fixture = recovery::Fixture::capture(&root, uid)?;
             return Ok(Self { root, uid, root_identity: fixture.root_identity(), app_identity: None, untouched: None,
                 ignore: fixture.ignore(), config: None, release: None, ios: None, project_fields: None,
-                recovery: Some(fixture), local_edits: None, checks: None, written: false, mutated: false });
+                recovery: Some(fixture), local_edits: None, checks: None, identity: None, written: false, mutated: false });
         }
         if let Case::Ios(case) = case {
             let fixture = ios::Fixture::capture(&root, uid, case)?;
             let root_identity = directory(&root, uid, 0o700, &fixture.root_entries())?;
             return Ok(Self { root, uid, root_identity, app_identity: fixture.source_identity(), untouched: None,
                 ignore: fixture.ignore(), config: fixture.config(), release: fixture.release_identity(),
-                ios: Some(fixture), project_fields: None, recovery: None, local_edits: None, checks: None, written: false, mutated: false });
+                ios: Some(fixture), project_fields: None, recovery: None, local_edits: None, checks: None, identity: None, written: false, mutated: false });
         }
         if case == Case::ProjectFields {
             let fixture = project_fields::Fixture::capture(&root, uid)?;
             return Ok(Self { root, uid, root_identity: fixture.dir(".").ok_or(())?,
                 app_identity: fixture.dir("app"), untouched: None, ignore: fixture.file(".gitignore").ok_or(())?,
                 config: fixture.file("release/mobile-release.json"), release: fixture.dir("release"),
-                ios: None, project_fields: Some(fixture), recovery: None, local_edits: None, checks: None, written: false, mutated: false });
+                ios: None, project_fields: Some(fixture), recovery: None, local_edits: None, checks: None, identity: None, written: false, mutated: false });
         }
         let saved = case == Case::NoopStale || matches!(case,Case::Vault(vault::Case::UploadKey(_)));
         let root_identity = directory(&root, uid, 0o700, if saved {
@@ -886,9 +895,10 @@ impl Fixture {
         let (config, release) = if saved { (Some(file_fact(&root.join("release/mobile-release.json"), CONFIG, uid)?),
             Some(directory(&root.join("release"), uid, 0o755, &["mobile-release.json"])?)) } else { (None, None) };
         Ok(Self { root, uid, root_identity, app_identity: Some(app_identity), untouched: Some(untouched), ignore, config, release,
-            ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, written: false, mutated: false })
+            ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, identity: None, written: false, mutated: false })
     }
     fn verify(&self, saved: bool) -> Result<(), ()> {
+        if let Some(fixture)=&self.identity{return fixture.verify(&self.root,self.uid);}
         if let Some(fixture)=&self.checks{return fixture.verify(&self.root,self.uid);}
         if let Some(fixture)=&self.local_edits{return fixture.verify(&self.root,self.uid);}
         if let Some(fixture) = &self.recovery { return fixture.verify(&self.root, self.uid); }
@@ -999,7 +1009,7 @@ struct Record {
     loss_seen: bool, loss_settled: bool, relay_joined: bool, actual_exit: bool, originals_final: bool,
     failure_close_requested: bool, failure_quit_attempted: bool,
     ios_record: Option<ios::Record>, session_record: Option<session::Record>, project_field_record: Option<project_fields::Record>,
-    vault_record: Option<vault::Record>, installation_record: Option<installation_check::Record>, recovery_record: Option<recovery::Record>, local_edits: Option<local_edits::Record>, checks: Option<checks::Record>,
+    vault_record: Option<vault::Record>, installation_record: Option<installation_check::Record>, recovery_record: Option<recovery::Record>, local_edits: Option<local_edits::Record>, checks: Option<checks::Record>, identity: Option<identity::Record>,
     panel_history: Vec<OpenHistory>, file_attached: [bool; 7], file_actions: [bool; 7],
     field_attached: [bool; project_fields::COUNT], field_actions: [bool; project_fields::COUNT],
     fixture: Fixture,
@@ -1311,10 +1321,10 @@ pub(crate) struct Observation {
 }
 impl Observation {
     fn new(case: Case, fixture: Fixture) -> Result<Self, ()> {
-        let local_config=if let Case::Checks(c)=case{Some(checks::config(c)?)}else if let Case::LocalEdits(c)=case{Some(local_edits::config(c)?)}else{None};
+        let local_config=if let Case::Identity(c)=case{Some(identity::config(c))}else if let Case::Checks(c)=case{Some(checks::config(c)?)}else if let Case::LocalEdits(c)=case{Some(local_edits::config(c)?)}else{None};
         let base = crate::protocol::strict_json(if let Some(bytes)=local_config.as_deref(){bytes}else if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
         let started = Instant::now();
-        let end = started + Duration::from_secs(if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
+        let end = started + Duration::from_secs(if let Case::Identity(c)=case{c.seconds()}else if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
         let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
         let project_fields = (case == Case::ProjectFields).then(project_fields::Control::new);
         let recovery = (case == Case::PendingRecovery).then(recovery::Control::new);
@@ -1351,6 +1361,7 @@ impl Observation {
                 recovery_record: (case == Case::PendingRecovery).then(recovery::Record::default),
                 local_edits: if let Case::LocalEdits(c)=case{Some(local_edits::Record::new(c))}else{None},
                 checks: if let Case::Checks(c)=case{Some(checks::Record::new(c,started))}else{None},
+                identity: if let Case::Identity(c)=case{Some(identity::Record::new(c))}else{None},
                 panel_history: Vec::new(), file_attached: [false;7], file_actions: [false;7],
                 field_attached: [false;project_fields::COUNT], field_actions: [false;project_fields::COUNT], fixture,
             });
@@ -1611,7 +1622,9 @@ impl Observation {
         let Some(mut r) = self.record() else { return; };
         let saved = matches!(self.case, Case::NoopStale | Case::ProjectFields | Case::LocalEdits(_) | Case::Checks(_) | Case::Vault(vault::Case::UploadKey(_))) || r.snapshot_requests == 2;
         let failure = match result {
-            Ok(value) => if let Case::Checks(case)=self.case {
+            Ok(value) => if let Case::Identity(case)=self.case {
+                    identity::snapshot_failure(value,&self.project_path,case,&self.base)
+                } else if let Case::Checks(case)=self.case {
                     match checks::config(case){Ok(bytes)=>snapshot_value_failure_bytes(value,&self.project_path,true,&self.base,&bytes),Err(())=>Some("snapshot-config-content")}
                 } else if let Case::LocalEdits(case)=self.case {
                     match local_edits::config(case) { Ok(bytes)=>snapshot_value_failure_bytes(value,&self.project_path,true,&self.base,&bytes),Err(())=>Some("snapshot-config-content") }
@@ -1905,6 +1918,7 @@ impl Observation {
             return;
         }
         if !self.timely() { self.report_failure(); self.failure_shutdown(app); return; }
+        if self.identity_tick(app){return;}
         let state = app.state::<super::ShellState>();
         if self.local_case(){
             self.local_poll(&state.bridge.edits);
@@ -1975,6 +1989,12 @@ impl Observation {
                         self.fail(); return;
                     }
                     r.cancel_settled = true; r.step = Step::ReadCancelled; return;
+                },
+                Step::Snapshot if matches!(self.case,Case::Identity(_)) => {
+                    // Retain the unchanged picker-triggered original snapshot,
+                    // then drive the normal identity APIs directly, no new DOM.
+                    if r.snapshot_pending || r.snapshots!=1{return;}
+                    r.step=Step::Identity(identity::Step::Open);return;
                 },
                 Step::ProjectSettled => {
                     let Some(returned) = &r.project else { return; };
@@ -3129,6 +3149,7 @@ impl Observation {
                 vault_snapshot.as_ref().is_some_and(|s|record.final_originals(s, control))))
             || self.checks_case()&&!r.checks.as_ref().zip(r.fixture.checks.as_ref()).is_some_and(|(record,fixture)|record.report(fixture).is_some())
             || self.local_case()&&!r.local_edits.as_ref().zip(r.fixture.local_edits.as_ref()).is_some_and(|(record,fixture)|record.report(fixture).is_some())
+            || matches!(self.case,Case::Identity(_))&&!r.identity.as_ref().zip(r.fixture.identity.as_ref()).is_some_and(|(record,fixture)|record.report(fixture).is_some())
             || self.case == Case::Installation && !r.installation_record.as_mut().is_some_and(|record|
                 record.final_originals(installation_check::QUIT_ID, installation_check::MATCHING_ID, finality)) {
             self.fail_with("exit-finality-contract"); return;
@@ -3165,6 +3186,9 @@ impl Observation {
             && (self.case == Case::FirstSave || r.panel_attached == (if self.case == Case::Installation { [false,true,false,false] } else { [true,true,false,false] }))
             && r.project_calls == (if self.case == Case::Installation { 0 } else if self.case == Case::FirstSave { 2 } else { 1 });
         let specific = match self.case {
+            Case::Identity(_) => r.project_settled&&r.snapshots==1&&r.close_count==1&&!r.quit_cancelled
+                &&r.native_actions_returned==[false,true,false,true]&&r.session_record.is_none()&&r.ios_record.is_none()
+                &&r.identity.as_ref().zip(r.fixture.identity.as_ref()).is_some_and(|(record,fixture)|record.report(fixture).is_some()),
             Case::Checks(_) => r.project_settled&&r.snapshots==1&&r.close_count==1&&!r.quit_cancelled
                 &&r.native_actions_returned==[false,true,false,true]&&r.session_record.is_none()&&r.ios_record.is_none()
                 &&r.checks.as_ref().zip(r.fixture.checks.as_ref()).is_some_and(|(record,fixture)|record.report(fixture).is_some()),
@@ -3274,6 +3298,9 @@ impl Observation {
                 }
                 value
             }).collect::<Vec<_>>());
+        }
+        if matches!(self.case,Case::Identity(_)) {
+            report["projectIdentity"]=r.identity.as_ref()?.report(r.fixture.identity.as_ref()?)?;
         }
         self.timely().then_some(report)
     }
@@ -3825,10 +3852,12 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
     if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread() { return None; }
     let uid = mrk_macos_installed_native::real_user().ok()?;
     let upload_suffix;
-    let suffix = if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.name());upload_suffix.as_str()}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
+    let suffix = if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
         else if case == Case::Installation { "-installation-inspection" } else if case == Case::PendingRecovery { "-project-recovery" } else { "" };
     let root = PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}"));
-    if matches!(case,Case::Checks(_)){
+    if matches!(case,Case::Identity(_)){
+        directory(&root,uid,0o700,&[identity::NAMES[0],identity::NAMES[1],identity::NAMES[2],identity::NAMES[3],"state"]).ok()?;
+    } else if matches!(case,Case::Checks(_)){
         directory(&root,uid,0o700,&[checks::NAMES[0],checks::NAMES[1],"state"]).ok()?;
     } else if matches!(case,Case::LocalEdits(_)){
         directory(&root,uid,0o700,&[local_edits::NAMES[0],local_edits::NAMES[1],local_edits::NAMES[2],"state"]).ok()?;
@@ -4327,7 +4356,7 @@ fn observer_data_checks() -> bool {
         || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check()
         || !original_window_witness_data_check() || !completion_ownership_data_check() || !ios::data_checks()
         || !session::data_checks() || !project_fields::data_checks() || !vault::data_checks()
-        || !installation_check::data_checks() || !recovery::data_checks() || !local_edits::data_checks() || !checks::data_checks() { return false; }
+        || !installation_check::data_checks() || !recovery::data_checks() || !local_edits::data_checks() || !checks::data_checks() || !identity::data_checks() { return false; }
     let inspection = Case::Installation;
     if inspection.quit_id() != 3 || inspection.rounds() != 0 || inspection.loses_document()
         || inspection.inputs() || inspection.accepted_id(1) || inspection.open_id(Step::OpenProject).is_some()
@@ -4573,6 +4602,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(v) if v == OsStr::new(installation_check::NAME) => Case::Installation,
         Some(v) if v == OsStr::new(recovery::NAME) => Case::PendingRecovery,
         Some(v) if v.to_str().and_then(checks::Case::parse).is_some()=>Case::Checks(checks::Case::parse(v.to_str().expect("fixed checks selector")).expect("exact checks selector")),
+        Some(v) if v.to_str().and_then(identity::Case::parse).is_some()=>Case::Identity(identity::Case::parse(v.to_str().expect("fixed ASCII identity selector")).expect("exact identity selector")),
         Some(v) if v.to_str().and_then(local_edits::Case::parse).is_some()=>Case::LocalEdits(local_edits::Case::parse(v.to_str().expect("fixed ASCII local selector")).expect("exact local selector")),
         Some(v) if vault::Case::parse(v).is_some() => Case::Vault(vault::Case::parse(v).expect("exact vault selector")),
         Some(v) if ios::Case::parse(v).is_some() => Case::Ios(ios::Case::parse(v).expect("exact iOS selector")),

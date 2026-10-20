@@ -1108,6 +1108,16 @@ pub(crate) struct InstalledImagesFinality {
     pub(crate) io_joined: bool, pub(crate) driver_joined: bool, pub(crate) watchdog_joined: bool, pub(crate) manager_joined: bool,
     pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
 }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[derive(Clone)]
+pub(crate) struct InstalledIdentityFinality {
+    pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
+    pub(crate) writer_frames: usize, pub(crate) stdout_frames: usize,
+    pub(crate) inspection_joined: bool, pub(crate) acquisition_joined: bool, pub(crate) child_waited_success: bool,
+    pub(crate) stdin_closed: bool, pub(crate) stdout_eof_closed: bool, pub(crate) stderr_eof_closed: bool,
+    pub(crate) io_joined: bool, pub(crate) driver_joined: bool, pub(crate) watchdog_joined: bool, pub(crate) manager_joined: bool,
+    pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
+}
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"),
     any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -1120,6 +1130,8 @@ enum InstalledEditFinality {
     MetadataText(InstalledMetadataFinality),
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
     ReleaseVersion(InstalledVersionFinality),
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    ProjectIdentity(InstalledIdentityFinality),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     MetadataImages(InstalledImagesFinality),
 }
@@ -1148,6 +1160,11 @@ impl InstalledEditFinality {
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
             Self::ReleaseVersion(facts) => {
                 if projection.domain != EditDomain::ReleaseVersion || projection.session_id != facts.session_id { return None; }
+                facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
+            },
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            Self::ProjectIdentity(facts) => {
+                if projection.domain != EditDomain::ProjectIdentity || projection.session_id != facts.session_id { return None; }
                 facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
             },
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1745,6 +1762,8 @@ impl EditOwner {
         let last = r.last.as_ref()?;
         let facts = match r.installed_final.as_ref()? {
             InstalledEditFinality::Configuration(facts) => facts,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            InstalledEditFinality::ProjectIdentity(_) => return None,
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
             InstalledEditFinality::GitHubWorkflows(_) | InstalledEditFinality::MetadataText(_) | InstalledEditFinality::ReleaseVersion(_) => return None,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1773,6 +1792,16 @@ impl EditOwner {
         let last = r.last.as_ref()?;
         let InstalledEditFinality::MetadataText(facts) = r.installed_final.as_ref()? else { return None; };
         (last.domain == EditDomain::MetadataText && last.session_id == session_id && facts.session_id == session_id
+            && facts.project_id == last.project_id && facts.owner_generation == last.owner_generation
+            && last.phase == Phase::Final && last.native_finality == NativeFinality::Settled && !last.late_settled)
+            .then(|| facts.clone())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn installed_identity_observation_final(&self, session_id: &str) -> Option<InstalledIdentityFinality> {
+        let r = self.inner.lock();
+        let last = r.last.as_ref()?;
+        let InstalledEditFinality::ProjectIdentity(facts) = r.installed_final.as_ref()? else { return None; };
+        (last.domain == EditDomain::ProjectIdentity && last.session_id == session_id && facts.session_id == session_id
             && facts.project_id == last.project_id && facts.owner_generation == last.owner_generation
             && last.phase == Phase::Final && last.native_finality == NativeFinality::Settled && !last.late_settled)
             .then(|| facts.clone())
@@ -4256,6 +4285,16 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                     })),
                     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
                     EditDomain::ReleaseVersion => Some(InstalledEditFinality::ReleaseVersion(InstalledVersionFinality {
+                        session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
+                        writer_frames: write.frames, stdout_frames: out.frames,
+                        inspection_joined: book.inspection_joined, acquisition_joined: book.acquisition_joined,
+                        child_waited_success: book.waited.as_ref().is_some_and(ExitStatus::success) && !book.wait_failed,
+                        stdin_closed: write.closed, stdout_eof_closed: out.eof && out.closed, stderr_eof_closed: err.eof && err.closed,
+                        io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
+                        runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.installed_settlement_joined,
+                    })),
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                    EditDomain::ProjectIdentity => Some(InstalledEditFinality::ProjectIdentity(InstalledIdentityFinality {
                         session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
                         writer_frames: write.frames, stdout_frames: out.frames,
                         inspection_joined: book.inspection_joined, acquisition_joined: book.acquisition_joined,
