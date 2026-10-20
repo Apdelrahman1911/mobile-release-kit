@@ -2439,6 +2439,19 @@ async fn upload_key_create(webview: Webview, request: tauri::ipc::Request<'_>, s
 }
 
 #[tauri::command]
+async fn upload_key_recover(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, AssetError> {
+    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
+    asset_window(&webview)?;
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+    {
+        let args = crate::asset_session::upload_key_controls::recovery_request(asset_body(&request)?)?;
+        serde_json::to_value(state.document.recover_upload_key(args)?).map_err(|_| AssetError::invalid())
+    }
+    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
+    { let _ = request; Err(AssetError::new(Reason::UnsupportedPlatform)) }
+}
+
+#[tauri::command]
 async fn vault_backup_export(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
     asset_window(&webview)?;
@@ -4648,7 +4661,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
             github_history_status, github_history_start, github_history_cancel,
             vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,
-            upload_key_status, upload_key_prepare, upload_key_create,
+            upload_key_status, upload_key_prepare, upload_key_create, upload_key_recover,
             vault_prepare_delete, vault_backup_export, vault_backup_import, vault_commit, vault_bind, vault_discard, vault_lock,
             ];
             handler(invoke)

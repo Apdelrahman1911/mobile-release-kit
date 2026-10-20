@@ -337,7 +337,7 @@ fn main() {
             "github_history_status", "github_history_start", "github_history_cancel",
             "vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_backup_export", "vault_backup_import", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
-            "upload_key_status", "upload_key_prepare", "upload_key_create",
+            "upload_key_status", "upload_key_prepare", "upload_key_create", "upload_key_recover",
         ];
         let attributes = tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));

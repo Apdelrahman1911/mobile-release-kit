@@ -288,7 +288,8 @@ impl Holding {
         const ARC_CELLS: usize = 2 * std::mem::size_of::<usize>();
         let mut bytes = std::mem::size_of::<Self>().checked_add(ARC_CELLS)?;
         bytes = bytes.checked_add(self.preparation.retained_bytes()?)?
-            .checked_add(controls::retained_use_bytes(self)?)?;
+            .checked_add(controls::retained_use_bytes(self)?)?
+            .checked_add(persistence::recovery::IO_RESERVATION_BYTES)?;
         for text in [
             &self.observed.project.project_id,
             &self.observed.project.canonical_root,

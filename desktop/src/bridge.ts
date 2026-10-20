@@ -813,6 +813,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     uploadKeyStatus: (request) => uploadKeyCall('upload_key_status', request),
     prepareUploadKey: (request) => uploadKeyCall('upload_key_prepare', request),
     createUploadKey: (request) => uploadKeyCall('upload_key_create', request),
+    recoverUploadKey: (request) => uploadKeyCall('upload_key_recover', request),
     assetStatus: () => assetCall('vault_status', {}),
     openAssetSession: (storageMode = 'session') => assetCall('vault_open', { mode: storageMode }),
     prepareVaultInitialize: () => assetCall('vault_prepare_initialize', {}),

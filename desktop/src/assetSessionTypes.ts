@@ -28,7 +28,7 @@ export interface AssetRecordIntent {
   change: AssetRecordPreviewSubject['change'];
   record: AssetRecordRef | null;
 }
-export type AssetIntent = { type: 'upload-key'; change: 'generate' } | AssetRecordIntent | { type: 'vault'; change: 'open' | 'initialize' | 'unlock' } |
+export type AssetIntent = { type: 'upload-key'; change: 'generate' } | { type: 'upload-key-recovery'; change: import('./credentialUploadKey.ts').UploadKeyRecoveryAction } | AssetRecordIntent | { type: 'vault'; change: 'open' | 'initialize' | 'unlock' } |
   { type: 'backup'; change: 'export'; record: AssetRecordRef } | { type: 'backup'; change: 'import'; record: null };
 export interface AssetChooseRequest { contextRevision: number; kind: AssetFileKind; replacement: AssetRecordRef | null }
 export interface KeystoreFields { storePassword: string | null; keyAlias: string | null; keyPassword: string | null }
@@ -52,7 +52,7 @@ export type CredentialPrepareRequest =
 export type AssetReason = 'none' | 'closed' | 'unqualified' | 'unsupported-platform' | 'unsupported-filesystem' | 'unsupported-format' | 'invalid-request' | 'busy' | 'source-refused' | 'source-changed' | 'material-limit' | 'parser-limit' | 'project-overlap' | 'exclusion-unconfirmed' | 'capacity' | 'context-stale' | 'user-cancelled' | 'review-expired' | 'deadline' | 'document-lost' | 'shutdown' | 'cleanup-unknown' |
   'vault-uninitialized' | 'vault-key-missing' | 'vault-keyring-locked' | 'vault-keyring-denied' | 'vault-keyring-unavailable' | 'vault-provider-unsupported' | 'vault-corrupt' | 'vault-interrupted' | 'vault-durability-unknown';
 export type AssetPhase = 'idle' | 'admitting' | 'picking' | 'capturing' | 'selected' | 'assessing' | 'preview' | 'mutating' | 'stopping' | 'unknown';
-export type AssetOperationName = 'choose-file' | 'choose-images' | 'inspect-installation' | 'choose-project' | 'choose-project-path' | 'choose-android-source' | 'choose-evidence-folder' | 'inspect-evidence' | 'prepare' | 'prepare-delete' | 'commit' | 'bind' | 'discard' | 'lock' | 'open-vault' | 'prepare-initialize' | 'initialize' | 'unlock' | 'prepare-backup-export' | 'import-backup' | 'generate-upload-key';
+export type AssetOperationName = 'choose-file' | 'choose-images' | 'inspect-installation' | 'choose-project' | 'choose-project-path' | 'choose-android-source' | 'choose-evidence-folder' | 'inspect-evidence' | 'prepare' | 'prepare-delete' | 'commit' | 'bind' | 'discard' | 'lock' | 'open-vault' | 'prepare-initialize' | 'initialize' | 'unlock' | 'prepare-backup-export' | 'import-backup' | 'generate-upload-key' | 'recover-upload-key';
 export type CredentialState = 'not-applicable' | 'missing' | 'unknown' | 'invalid' | 'configured' | 'format-valid';
 export type CredentialFieldId = 'file' | 'storePassword' | 'keyAlias' | 'keyPassword' | 'password' | 'keyId' | 'issuerId' | 'provider' | 'serviceAccount' | 'token' | 'contactFirstName' | 'contactLastName' | 'contactEmail' | 'contactPhone' | 'demoUsername' | 'demoPassword' | 'keyBase64' | 'version';
 export type CredentialIssue = 'not-run' | 'incomplete' | 'unsupported-format' | 'unsupported-variant' | 'material-limit' | 'parser-limit' | 'empty-file' | 'suffix-conflict' | 'malformed-container' | 'required-missing' | 'value-nul' | 'scalar-format' | 'pkcs8-algorithm' | 'firebase-shape' | 'identity-mismatch';
@@ -101,6 +101,7 @@ export interface AssetSessionApi {
   uploadKeyStatus?: import('./credentialUploadKey.ts').UploadKeyApi['uploadKeyStatus'];
   prepareUploadKey?: import('./credentialUploadKey.ts').UploadKeyApi['prepareUploadKey'];
   createUploadKey?: import('./credentialUploadKey.ts').UploadKeyApi['createUploadKey'];
+  recoverUploadKey?: import('./credentialUploadKey.ts').UploadKeyApi['recoverUploadKey'];
   assetStatus(): Promise<AssetStatus>;
   openAssetSession(mode?: 'session' | 'encrypted'): Promise<AssetStatus>;
   prepareVaultInitialize(): Promise<AssetStatus>;

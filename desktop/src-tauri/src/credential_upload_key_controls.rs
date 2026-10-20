@@ -5,6 +5,9 @@
 use super::*;
 use crate::application_service_host::{NativeProject, NativeStateLease, NativeStateReady};
 use crate::edit_owner::SavedEditStamp;
+#[path = "credential_upload_key_recovery.rs"]
+pub(in crate::asset_session) mod recovery;
+pub(crate) use recovery::{request as recovery_request, RecoveryRequest};
 
 // Nonshipping selector is consumed INSIDE the same bodies. Registration alone
 // cannot enable renderer status/prepare/create; ordinary qualification is unchanged.
@@ -161,7 +164,7 @@ impl PreparedSetup {
             .map_or(Some(0), |preference| {
                 let mut bytes = std::mem::size_of::<setup::Preference>();
                 match preference {
-                    setup::Preference::GenerationReserved(value) => {
+                    setup::Preference::GenerationReserved(value) | setup::Preference::GenerationStoppedNoGo(value) => {
                         for text in [
                             &value.operation_id,
                             &value.vault_id,
@@ -244,6 +247,7 @@ pub(crate) struct UploadKeyStatus {
     plan: Plan,
     operation: Option<GenerationStatus>,
     saved: Option<KeyReference>,
+    recovery: recovery::RecoveryStatus,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -442,6 +446,7 @@ fn project(document: &DocumentBinding, state: &DocumentState, plan: Plan) -> Upl
         plan,
         operation,
         saved,
+        recovery: recovery::projection(document, state, None),
     }
 }
 
@@ -607,7 +612,7 @@ impl DocumentBinding {
             }
             if setup.pending()
                 || state.slot.as_ref().is_some_and(|slot| {
-                    slot.operation == Operation::GenerateUploadKey
+                    matches!(slot.operation, Operation::GenerateUploadKey | Operation::RecoverUploadKey)
                         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())
                 })
             {
@@ -636,7 +641,9 @@ impl DocumentBinding {
             return Err(AssetError::new(Reason::ContextStale));
         }
         current_prepared(self, &state, &ready)?;
-        Ok(project(self, &state, plan))
+        let mut status = project(self, &state, plan);
+        status.recovery = recovery::projection(self, &state, Some((&preference, &observed)));
+        Ok(status)
     }
 }
 
@@ -1140,10 +1147,12 @@ impl DocumentBinding {
                 .native_state_current(&prepared.ready, &current)
                 .map_err(service_error)?;
             let setup = &mut state.vault.as_mut().unwrap().upload_key_setup;
-            setup.ready = Some(prepared);
+            setup.ready = Some(prepared.clone());
             setup.flight = None;
             self.bump(&mut state);
-            Ok(project(self, &state, plan))
+            let mut status = project(self, &state, plan);
+            status.recovery = recovery::projection(self, &state, Some((&prepared.preference, &observed)));
+            Ok(status)
         }
         .await;
         if let Err(error) = &result {

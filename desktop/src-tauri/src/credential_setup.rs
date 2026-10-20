@@ -10,6 +10,8 @@ use std::path::Path;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "credential_assignment_store.rs"]
 pub(crate) mod persistence;
+#[path = "credential_setup_recovery.rs"]
+pub(crate) mod recovery;
 
 pub(crate) const JOURNAL_LIMIT: usize = 256 * 1024;
 const SLOT_LIMIT: usize = 128;
@@ -133,15 +135,16 @@ impl GenerationIntent {
 #[serde(tag = "state", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum Preference {
     GenerationReserved(GenerationIntent),
+    GenerationStoppedNoGo(GenerationIntent),
     RecordSaved(SavedAssignment),
     Assigned(SavedAssignment),
 }
 impl Preference {
     pub(crate) fn saved(&self) -> Option<&SavedAssignment> {
-        match self { Self::GenerationReserved(_) => None, Self::RecordSaved(value) | Self::Assigned(value) => Some(value) }
+        match self { Self::GenerationReserved(_) | Self::GenerationStoppedNoGo(_) => None, Self::RecordSaved(value) | Self::Assigned(value) => Some(value) }
     }
     fn validate(&self) -> Result<()> {
-        match self { Self::GenerationReserved(value) => value.validate(), Self::RecordSaved(value) | Self::Assigned(value) => value.validate() }
+        match self { Self::GenerationReserved(value) | Self::GenerationStoppedNoGo(value) => value.validate(), Self::RecordSaved(value) | Self::Assigned(value) => value.validate() }
     }
 }
 
@@ -155,11 +158,13 @@ pub(crate) struct Journal {
     schema_version: u8,
     sequence: u32,
     slots: Vec<Slot>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "recovery::history")]
+    cancelled_generations: Option<Vec<recovery::CancelledGeneration>>,
 }
 impl Journal {
     /// Only the shared original app-data initializer may establish empty DATA.
     /// A missing/unreadable previously-known namespace is NOT this constructor.
-    pub(crate) fn initialize() -> Self { Self { schema_version: 1, sequence: 1, slots: Vec::new() } }
+    pub(crate) fn initialize() -> Self { Self { schema_version: 1, sequence: 1, slots: Vec::new(), cancelled_generations: None } }
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.is_empty() || bytes.len() > JOURNAL_LIMIT { return Err(Error::Bounds); }
         let value: Self = serde_json::from_slice(bytes).map_err(|_| Error::Shape)?;
@@ -173,7 +178,8 @@ impl Journal {
         Ok(bytes)
     }
     fn validate(&self) -> Result<()> {
-        if self.schema_version != 1 || self.sequence == 0 || self.slots.len() > SLOT_LIMIT { return Err(Error::Bounds); }
+        if !matches!(self.schema_version, 1 | 2) || self.sequence == 0 || self.slots.len() > SLOT_LIMIT { return Err(Error::Bounds); }
+        self.validate_recovery()?;
         for (index, slot) in self.slots.iter().enumerate() {
             slot.project.validate()?; slot.preference.validate()?;
             for earlier in &self.slots[..index] {
@@ -186,6 +192,7 @@ impl Journal {
     pub(crate) fn sequence(&self) -> u32 { self.sequence }
     pub(crate) fn preference(&self, project: &ProjectBinding, role: Role) -> Result<Option<&Preference>> {
         self.validate()?; project.validate()?;
+        self.recovery_project_current(project)?;
         if self.slots.iter().any(|slot| slot.project.related(project) && slot.project != *project) {
             return Err(Error::Conflict); // Explicit registry migration required.
         }
@@ -209,9 +216,9 @@ impl Journal {
         }
         if self.slots.len() >= SLOT_LIMIT { return Err(Error::Bounds); }
         if self.slots.iter().any(|slot| match &slot.preference {
-            Preference::GenerationReserved(value) => value.operation_id == intent.operation_id || value.record_id == intent.record_id,
+            Preference::GenerationReserved(value) | Preference::GenerationStoppedNoGo(value) => value.operation_id == intent.operation_id || value.record_id == intent.record_id,
             Preference::RecordSaved(value) | Preference::Assigned(value) => value.operation_id == intent.operation_id || value.reference.record_id == intent.record_id,
-        }) { return Err(Error::Conflict); }
+        }) || self.reserved_id_was_cancelled(&intent) { return Err(Error::Conflict); }
         self.slots.push(Slot { project: project.clone(), role, preference: Preference::GenerationReserved(intent) });
         self.sequence = sequence;
         Ok(())
@@ -243,7 +250,7 @@ impl Journal {
                 && record.certificate_sha256 == saved.certificate_sha256.as_deref()) { return Err(Error::Stale); }
         let previous = self.preference(project, role)?;
         match previous {
-            Some(Preference::GenerationReserved(_)) => return Err(Error::RecoveryRequired),
+            Some(Preference::GenerationReserved(_) | Preference::GenerationStoppedNoGo(_)) => return Err(Error::RecoveryRequired),
             Some(Preference::RecordSaved(value) | Preference::Assigned(value))
                 if (value.reference != saved.reference || value.identity_sha256 != saved.identity_sha256) && !reassign => return Err(Error::Conflict),
             _ => {},
@@ -332,7 +339,7 @@ pub(crate) fn classify(observation: &Observation<'_>, preference: Option<&Prefer
     if observation.revision == 0 || !digest(observation.identity_sha256) || observation.records.len() > format_record_limit()
         || observation.expected_certificate_sha256.is_some_and(|value| !digest(value)) { return Err(Error::Shape); }
     if let Some(preference) = preference { preference.validate()?; }
-    if matches!(preference, Some(Preference::GenerationReserved(_))) || observation.operation_pending
+    if matches!(preference, Some(Preference::GenerationReserved(_) | Preference::GenerationStoppedNoGo(_))) || observation.operation_pending
         || observation.storage == Storage::RecoveryRequired || observation.records.iter().any(|record| record.mutation_pending) {
         return Ok(Plan::RecoveryRequired);
     }

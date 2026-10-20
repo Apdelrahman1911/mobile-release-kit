@@ -267,7 +267,7 @@ pub(crate) enum Phase { Idle, Admitting, Picking, Capturing, Selected, Assessing
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseAndroidSource, ChooseArtifact, ChooseImages, InspectInstallation, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
-    OpenVault, PrepareInitialize, Initialize, Unlock, PrepareBackupExport, ImportBackup, GenerateUploadKey }
+    OpenVault, PrepareInitialize, Initialize, Unlock, PrepareBackupExport, ImportBackup, GenerateUploadKey, RecoverUploadKey }
 impl Operation {
     fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
     fn project_path(self) -> bool { self == Self::ChooseProjectPath }
@@ -1877,6 +1877,7 @@ mod lookup_memory {
             }
             if let Some(store) = &slot.vault.lease { self.vault_store(store)?; }
             if let Some(label) = &slot.vault.label { self.add(label.capacity())?; }
+            self.add(slot.vault.recovery_retained_bytes())?;
             if let Some(context) = &slot.context { self.context(context)?; }
             if let Some(key) = &slot.target { self.key(key)?; }
             if let Some(candidate) = &slot.candidate { self.candidate(candidate)?; }

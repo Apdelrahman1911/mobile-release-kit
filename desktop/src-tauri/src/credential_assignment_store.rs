@@ -12,6 +12,8 @@ pub(crate) enum Failure { Storage(StateError), Data(Error) }
 impl From<StateError> for Failure { fn from(value: StateError) -> Self { Self::Storage(value) } }
 impl From<Error> for Failure { fn from(value: Error) -> Self { Self::Data(value) } }
 type Result<T> = std::result::Result<T, Failure>;
+#[path = "credential_assignment_recovery_store.rs"]
+pub(crate) mod recovery;
 
 pub(crate) struct PreferenceSnapshot {
     pub(crate) store_revision: u64,

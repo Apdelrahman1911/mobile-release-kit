@@ -66,7 +66,7 @@
     "allow-github-history-status", "allow-github-history-start", "allow-github-history-cancel",
     "allow-vault-status", "allow-vault-open", "allow-vault-prepare-initialize", "allow-vault-unlock", "allow-asset-context", "allow-asset-choose", "allow-credential-prepare",
     "allow-vault-prepare-delete", "allow-vault-backup-export", "allow-vault-backup-import", "allow-vault-commit", "allow-vault-bind", "allow-vault-discard", "allow-vault-lock",
-    "allow-upload-key-status", "allow-upload-key-prepare", "allow-upload-key-create",
+    "allow-upload-key-status", "allow-upload-key-prepare", "allow-upload-key-create", "allow-upload-key-recover",
     "core:event:allow-listen", "core:event:allow-unlisten"
   ]
 }

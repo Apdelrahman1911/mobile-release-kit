@@ -5,7 +5,7 @@ import type { DesktopApi } from './types.ts';
 import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetPreviewAction, AssetRecordIntent, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, P12Fields, AscP8Fields, TokenFields, WifFields, AppleReviewContactFields, AppleReviewDemoFields, OperationCommitmentFields } from './assetSessionTypes.ts';
 import { ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetRequestFits, assetStorageWritable, parseAssetStatus } from './assetSessionProtocol.ts';
 import { CredentialUploadKeyController } from './credentialUploadKeyController.ts';
-import { parseUploadKeyStatus, UPLOAD_KEY_OPERATION } from './credentialUploadKey.ts';
+import { parseUploadKeyStatus, UPLOAD_KEY_OPERATION, RECOVER_UPLOAD_KEY_OPERATION, type UploadKeyRecoveryAction } from './credentialUploadKey.ts';
 import { BACKUP_EXPORT_OPERATION, BACKUP_IMPORT_OPERATION, credentialBackupExportRequest, credentialBackupImportRequest } from './credentialBackup.ts';
 
 function freeze<T>(value: T): T {
@@ -449,9 +449,9 @@ export class AssetSessionController {
     this.uploadReading = work;
     try { await work; } finally { if (this.uploadReading === work) this.uploadReading = null; }
   }
-  prepareUploadKey(expected: AssetDisplayState): boolean {
+  prepareUploadKey(expected: AssetDisplayState, recovery = false): boolean {
     if (expected !== this.state || !this.contextReady() || expected !== this.state || !this.api?.prepareUploadKey) return false;
-    const request = this.uploadKey.prepareRequest(this.state);
+    const request = this.uploadKey.prepareRequest(this.state, recovery);
     if (!request) return false;
     const api = this.api, localRevision = this.localRevision, failureRevision = this.failureRevision;
     const project = this.selectedProject(), status = this.state.status, intent = this.intentPhase;
@@ -496,6 +496,37 @@ export class AssetSessionController {
       } catch { this.uploadKey.failed('create'); this.update({}); throw { code: 'assessment_context_stale' }; }
     }, phase);
     if (!started) { this.uploadKey.failed('create'); this.update({ originPending: true }); }
+    return started;
+  }
+  canRecoverUploadKey(expected: AssetDisplayState, action: UploadKeyRecoveryAction): boolean {
+    return expected === this.state && !!this.api?.recoverUploadKey && !this.otherOperationReason() && this.uploadKey.canRecover(this.state, action);
+  }
+  uploadKeyRecoveryCompleted(expected: AssetDisplayState): UploadKeyRecoveryAction | null {
+    return expected === this.state && this.current() ? this.uploadKey.recoveryCompleted(this.state) : null;
+  }
+  recoverUploadKey(expected: AssetDisplayState, action: UploadKeyRecoveryAction): boolean {
+    if (expected !== this.state || !this.contextReady() || expected !== this.state || !this.api?.recoverUploadKey) return false;
+    const request = this.uploadKey.recoverRequest(this.state, action);
+    if (!request) return false;
+    const api = this.api, localRevision = this.localRevision, failureRevision = this.failureRevision;
+    const project = this.selectedProject(), status = this.state.status;
+    const phase = this.phase({ type: 'upload-key-recovery', change: action }, RECOVER_UPLOAD_KEY_OPERATION, null);
+    const started = this.run(RECOVER_UPLOAD_KEY_OPERATION, async () => {
+      try {
+        // The original runner notifies subscribers before this handoff. A
+        // reentrant context/peer change must prevent the fixed call entirely.
+        const peer = this.otherOperationReason(), selected = this.selectedProject(), current = this.current();
+        if (peer || !current || this.disposed || this.api !== api || selected !== project ||
+            this.localRevision !== localRevision || this.failureRevision !== failureRevision ||
+            this.state.status !== status || !this.state.contextCurrent || this.state.updatingContext ||
+            this.state.blocked || this.state.observationFailed || this.state.busy !== RECOVER_UPLOAD_KEY_OPERATION ||
+            this.intentPhase !== phase || phase.uncertain) throw new Error('stale');
+        const result = parseUploadKeyStatus(await api.recoverUploadKey!(request));
+        if (!this.receive(result.assets, phase) || phase.uncertain || !this.uploadKey.accept(result, this.state, 'recover')) throw new Error('stale');
+        return result.assets;
+      } catch { this.uploadKey.failed('recover'); this.update({}); throw { code: 'assessment_context_stale' }; }
+    }, phase);
+    if (!started) { this.uploadKey.failed('recover'); this.update({ originPending: true }); }
     return started;
   }
   prepareRecord(record: AssetRecordRef): boolean {

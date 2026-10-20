@@ -7,6 +7,7 @@ use crate::{vault_crypto as crypto, vault_format as format, vault_store as store
 mod assignment_native;
 use assignment_native::upload_key;
 pub(crate) use upload_key::controls as upload_key_controls;
+use upload_key_controls::recovery as upload_key_recovery;
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use upload_key::observation as installed_upload_observation;
 pub(crate) use upload_key::{UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
@@ -136,6 +137,7 @@ pub(super) struct Work {
     // It is not a completed export, a second operation or a reusable slot.
     backup: backup_native::Work,
     upload_key: upload_key::Work,
+    upload_key_recovery: upload_key_recovery::Work,
     // The exact first coordinator receipt survives the one cleanup-only
     // continuation. That continuation reuses this OriginalWork/child slot; it
     // cannot turn failure/STOP into a second work attempt or a renewed lease.
@@ -153,25 +155,26 @@ pub(super) struct Retired {
     pub(super) bound: [Option<Box<BoundLoan>>; BOUND_LOAN_LIMIT], pub(super) previous_bound: Option<Box<BoundLoan>>,
     backup: backup_native::Work,
     upload_key: upload_key::Work,
+    upload_key_recovery: upload_key_recovery::Work,
 }
 impl Retired {
-    pub(super) fn upload_key_blocks_reuse(&self) -> bool { self.upload_key.blocks_reuse() }
-    pub(super) fn dispose_private_upload_key(&mut self) -> bool { self.upload_key.dispose_private() }
+    pub(super) fn upload_key_blocks_reuse(&self) -> bool { self.upload_key.blocks_reuse() || self.upload_key_recovery.blocks_reuse() }
+    pub(super) fn dispose_private_upload_key(&mut self) -> bool { self.upload_key.dispose_private() && self.upload_key_recovery.dispose() }
     pub(super) fn backup_blocks_reuse(&self) -> bool { self.backup.blocks_reuse() }
     pub(super) fn empty(&self) -> bool {
         self.session.is_none() && self.keys.iter().all(Option::is_none) && self.loaded.is_none() && self.label.is_none() && self.rows.capacity() == 0
-            && self.bound.iter().all(Option::is_none) && self.previous_bound.is_none() && self.backup.empty() && self.upload_key.empty()
+            && self.bound.iter().all(Option::is_none) && self.previous_bound.is_none() && self.backup.empty() && self.upload_key.empty() && self.upload_key_recovery.empty()
     }
     pub(super) fn data_bytes(&self) -> Option<usize> {
         std::mem::size_of::<Self>().checked_add(self.label.as_ref().map_or(0, String::capacity))?.checked_add(rows_bytes(&self.rows)?)?
             .checked_add(self.bound.iter().flatten().count().checked_mul(BOUND_LOAN_BYTES)?)?
             .checked_add(if self.previous_bound.is_some() { BOUND_LOAN_BYTES } else { 0 })?
-            .checked_add(self.backup.retained_bytes()?)?.checked_add(self.upload_key.retained_bytes()?)
+            .checked_add(self.backup.retained_bytes()?)?.checked_add(self.upload_key.retained_bytes()?)?.checked_add(self.upload_key_recovery.retained_bytes()?)
     }
 }
 impl Work {
-    pub(super) fn upload_key_retained_bytes(&self) -> Option<usize> { self.upload_key.retained_bytes() }
-    pub(super) fn upload_key_blocks_reuse(&self) -> bool { self.upload_key.blocks_reuse() }
+    pub(super) fn upload_key_retained_bytes(&self) -> Option<usize> { self.upload_key.retained_bytes()?.checked_add(self.upload_key_recovery.retained_bytes()?) }
+    pub(super) fn upload_key_blocks_reuse(&self) -> bool { self.upload_key.blocks_reuse() || self.upload_key_recovery.blocks_reuse() }
     pub(super) fn store_ref(&self) -> Option<&Arc<Mutex<store::StoreBook>>> { self.store.as_ref() }
     pub(super) fn key_ref(&self) -> Option<&Arc<crypto::VaultKey>> { self.key.as_ref() }
     pub(super) fn backup_retained_bytes(&self) -> Option<usize> { self.backup.retained_bytes() }
@@ -195,9 +198,16 @@ pub(super) struct SlotData {
     backup_discard: bool, backup_new_published: bool, backup_export_published: bool,
     upload_key_new_published: bool,
     upload_key_context: Option<(u32, StoredRef)>,
+    upload_key_recovery: Option<Arc<upload_key_recovery::Completion>>,
     // Nonsecret current-display stamp; the ordinary private working reference
     // is cleared by retirement. This grants no loan, retry or disposal right.
     backup_export_context: Option<(u32, StoredRef)>,
+}
+
+impl SlotData {
+    pub(super) fn recovery_retained_bytes(&self) -> usize {
+        self.upload_key_recovery.as_ref().map_or(0, |_| std::mem::size_of::<upload_key_recovery::Completion>() + 2 * std::mem::size_of::<usize>())
+    }
 }
 
 pub(super) fn mode(state: &DocumentState) -> bool { state.vault.is_some() }
@@ -279,6 +289,7 @@ impl Staged {
             Self::DeletedPreview { tokens, .. } => token_bytes(tokens)?,
             Self::Mutated { row, .. } => row.as_ref().map_or(Some(0), |row| row.authenticated.descriptor.retained_bytes().ok())?,
             Self::BackupPending { .. } | Self::BackupDelivered { .. } => 0,
+            Self::UploadKeyRecovered(_) => std::mem::size_of::<upload_key_recovery::Completion>() + 2 * std::mem::size_of::<usize>(),
             Self::Released => 0,
         };
         std::mem::size_of::<Self>().checked_add(dynamic)
@@ -388,6 +399,9 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
                     return Err(Reason::ContextStale);
                 }
             },
+            Staged::UploadKeyRecovered(completion) => {
+                if !upload_key_recovery::publish_allowed(document, state, slot, &work, completion) { return Err(Reason::SourceChanged); }
+            },
             Staged::Released => return Err(Reason::UserCancelled), // Cleanup cannot publish work authority.
         }
         Ok(())
@@ -477,6 +491,17 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
             slot.vault.backup_export_context = slot.context.as_ref().and_then(|context|
                 slot.vault.reference.map(|reference| (context.revision, reference)));
             slot.vault.backup_export_published = true;
+            slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+            slot.selection = None; slot.preview = None; slot.assessment = None;
+            slot.assessment_context_revision = None; slot.review_end = None; slot.discard = true;
+        },
+        Staged::UploadKeyRecovered(completion) => {
+            if !upload_key_recovery::published(&slot.owner) {
+                slot.staged = Some(super::Staged::Vault(Staged::UploadKeyRecovered(completion)));
+                slot.error = Some(AssetError::new(Reason::CleanupUnknown).into());
+                slot.stop(Reason::CleanupUnknown, Instant::now()); return;
+            }
+            slot.vault.upload_key_recovery = Some(completion);
             slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
             slot.selection = None; slot.preview = None; slot.assessment = None;
             slot.assessment_context_revision = None; slot.review_end = None; slot.discard = true;
@@ -681,7 +706,7 @@ pub(super) fn late_cleanup_install(state: &DocumentState, slot: &Slot) -> bool {
         && work.key.is_none() && work.store.as_ref().is_some_and(|store| Arc::ptr_eq(store, &session.store)))
 }
 pub(super) fn preserve_operation(slot: &Slot) -> bool {
-    slot.vault.lease.is_some() && matches!(slot.operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::PrepareBackupExport | Operation::GenerateUploadKey)
+    slot.vault.lease.is_some() && matches!(slot.operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::PrepareBackupExport | Operation::GenerateUploadKey | Operation::RecoverUploadKey)
 }
 pub(super) fn controls_released(owner: &OriginalWork) -> bool {
     owner.control_resources_settled() && owner.retired.load(Ordering::SeqCst)
@@ -698,6 +723,7 @@ pub(super) fn take_retirement(state: &mut DocumentState, slot: &mut Slot) -> Ret
         && backup_native::retirement_ready(&slot.owner);
     let retire_upload_key = slot.vault.upload_key_new_published && upload_key::retirement_ready(&slot.owner);
     let retire_cancelled_upload_key = upload_key::cancellation::retirement_ready(state, slot);
+    let retire_upload_key_recovery = upload_key_recovery::retirement_ready(state, slot);
     let mut retired = Retired { loaded: slot.vault.loaded.take(), label: slot.vault.label.take(),
         previous_bound: slot.vault.previous_bound.take(), ..Retired::default() };
     let stale: [bool; BOUND_LOAN_LIMIT] = std::array::from_fn(|index| state.vault.as_ref().is_some_and(|session|
@@ -711,6 +737,7 @@ pub(super) fn take_retirement(state: &mut DocumentState, slot: &mut Slot) -> Ret
         if retire_backup { retired.backup = std::mem::take(&mut work.backup); }
         if retire_upload_key { retired.upload_key = work.upload_key.take_for_retirement(); }
         else if retire_cancelled_upload_key { retired.upload_key = work.upload_key.take_cancelled_retirement(); }
+        if retire_upload_key_recovery { retired.upload_key_recovery = std::mem::take(&mut work.upload_key_recovery); }
     }
     if closing {
         if let Some(session) = &mut state.vault {
@@ -730,7 +757,7 @@ pub(super) fn restore_retirement(state: &mut DocumentState, slot: &mut Slot, mut
         if !retired.rows.is_empty() { session.rows = std::mem::take(&mut retired.rows); }
         if retired.keys[1].is_some() { session.key = retired.keys[1].take(); }
     }
-    if retired.keys[0].is_some() || !retired.backup.empty() || !retired.upload_key.empty() {
+    if retired.keys[0].is_some() || !retired.backup.empty() || !retired.upload_key.empty() || !retired.upload_key_recovery.empty() {
         // All original executions were joined before this retirement attempt.
         // Preserve opaque key custody even after a poisoned bookkeeping mutex;
         // the caller records Unknown, never treats this recovery as authority.
@@ -738,6 +765,7 @@ pub(super) fn restore_retirement(state: &mut DocumentState, slot: &mut Slot, mut
         if retired.keys[0].is_some() { work.key = retired.keys[0].take(); }
         if !retired.backup.empty() { work.backup = std::mem::take(&mut retired.backup); }
         if !retired.upload_key.empty() { work.upload_key = std::mem::take(&mut retired.upload_key); }
+        if !retired.upload_key_recovery.empty() { work.upload_key_recovery = std::mem::take(&mut retired.upload_key_recovery); }
     }
 }
 pub(super) fn initialize_preview_valid(state: &DocumentState, slot: &Slot, preview: &Preview) -> bool {
@@ -804,6 +832,7 @@ pub(super) enum Child {
     ReviewDelete { reference: StoredRef, roster: ProjectRoster, allowance: usize },
     Mutate { operation: format::Mutation, record: format::Id, expected: Option<StoredRef>, payload: Option<Arc<Payload>>, label: Option<String>, roster: ProjectRoster, allowance: usize },
     Check { reference: StoredRef, roster: ProjectRoster },
+    RecoveryRoot { identity: format::Identity, roster: ProjectRoster },
     Backup(backup_native::Request),
     GenerateUploadKey(upload_key::SaveRequest),
     Release,
@@ -822,7 +851,7 @@ pub(super) enum Staged {
     Prepared { root: store::RootWitness, identity: format::Identity, tokens: TokenBatch, generation: u32 },
     Unlocked { rows: Vec<Descriptor>, initialized_header: Option<[u8; format::HEADER_BYTES]> },
     DeletedPreview { reference: StoredRef, tokens: TokenBatch },
-    Mutated { record: format::Id, row: Option<Descriptor>, generation: u32 }, BackupPending { generation: u32 }, BackupDelivered { generation: u32 }, Released,
+    Mutated { record: format::Id, row: Option<Descriptor>, generation: u32 }, BackupPending { generation: u32 }, BackupDelivered { generation: u32 }, UploadKeyRecovered(Arc<upload_key_recovery::Completion>), Released,
 }
 #[cfg(feature = "desktop-shell")]
 pub(super) enum Job {
@@ -833,7 +862,7 @@ pub(super) enum Job {
     Load { reference: StoredRef, roster: ProjectRoster, context: Arc<NativeContext>, allowance: usize },
     Delete { reference: StoredRef, roster: ProjectRoster, allowance: usize },
     Mutate { operation: format::Mutation, record: format::Id, expected: Option<StoredRef>, payload: Option<Arc<Payload>>, label: Option<String>, roster: ProjectRoster, allowance: usize },
-    Bind { reference: StoredRef, roster: ProjectRoster, assignment: Assignment }, Backup(backup_native::Request), GenerateUploadKey(upload_key::Request), Release,
+    Bind { reference: StoredRef, roster: ProjectRoster, assignment: Assignment }, Backup(backup_native::Request), GenerateUploadKey(upload_key::Request), RecoverUploadKey(upload_key_recovery::Request), Release,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     BackupPick { app: tauri::AppHandle, purpose: backup_selection::Purpose },
 }
@@ -1002,6 +1031,12 @@ pub(super) fn execute(owner: &Arc<OriginalWork>, child: Child) -> Result<ChildRe
             book.recheck_record(&reference.original, &mut || owner.interrupted()).map_err(problem)?;
             Ok(ChildResult::Checked)
         },
+        Child::RecoveryRoot { identity, roster } => {
+            check_exclusions(owner, &mut book, &roster)?;
+            if active_key(owner)?.identity() != identity { return Err(Reason::VaultCorrupt); }
+            book.recheck_root(&mut || owner.interrupted()).map_err(problem)?;
+            Ok(ChildResult::Checked)
+        },
         Child::Backup(request) => backup_native::execute(owner, &mut book, request),
         // The fixed child remembers only its own actual NEW mutation, never a
         // previous StoreBook effect after a pre-seal/capture failure.
@@ -1074,7 +1109,7 @@ fn begin_backup_import(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> 
 }
 pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
     let Some((first, outcome, backup_recovery, upload_key_recovery)) = owner.vault.try_lock().ok()
-        .map(|work| (work.first, work.outcome, work.backup.recovery_required(), upload_key::cancellation::report_recovery(&work))) else { return; };
+        .map(|work| (work.first, work.outcome, work.backup.recovery_required(), upload_key::cancellation::report_recovery(&work) || work.upload_key_recovery.unknown())) else { return; };
     let mut state = document.lock();
     let mut changed = false;
     if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) {
@@ -1083,7 +1118,7 @@ pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
         slot.error = Some(AssetError::new(reason).into()); slot.stop(reason, at);
         let operation = slot.operation;
         let backup_recovery = backup_recovery && matches!(operation, Operation::PrepareBackupExport | Operation::ImportBackup);
-        let upload_key_recovery = upload_key_recovery && operation == Operation::GenerateUploadKey;
+        let upload_key_recovery = upload_key_recovery && matches!(operation, Operation::GenerateUploadKey | Operation::RecoverUploadKey);
         if backup_recovery || upload_key_recovery {
             // Unknown pair effects are not StoreBook mutation outcomes and do
             // not overwrite the first failure. They still prevent a misleading
@@ -2103,6 +2138,7 @@ async fn run_inner(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: J
         },
         Job::Backup(request) => backup_native::run(document, owner, request).await,
         Job::GenerateUploadKey(request) => upload_key::run(document, owner, request).await,
+        Job::RecoverUploadKey(request) => upload_key_recovery::run(document, owner, request).await,
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         Job::BackupPick { app, purpose } => backup_selection::run_selected(document, owner, &app, purpose).await,
         Job::Release => match native(document, owner, Child::Release).await? {

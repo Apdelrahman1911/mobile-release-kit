@@ -35,7 +35,7 @@ fn assessment_data() -> SafeAssessment {
         "serviceValidation":"not-run", "releaseReadiness":"unknown"}})).ok().unwrap();
     SafeAssessment(Arc::new(result))
 }
-fn bound_data() -> DocumentState {
+pub(super) fn bound_data() -> DocumentState {
     let mut state = loan_state();
     let context = state.context.as_ref().unwrap();
     state.context = Some(Arc::new(NativeContext {

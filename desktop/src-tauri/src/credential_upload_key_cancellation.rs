@@ -164,6 +164,7 @@ impl UploadKeyCancellationDisposal {
 pub(super) struct CancellationRetirement {
     proof: Option<UploadKeyCancellationDisposal>,
     failed: bool,
+    stopped_write: Option<controls::recovery::StoppedWrite>,
 }
 
 // Caller already has Work when used by report/retirement. Never re-lock it.
@@ -569,12 +570,14 @@ impl Work {
                 consumed: false,
             }
         };
+        let stopped_write = matches!(proof.disposition.kind, Kind::NoGo).then(controls::recovery::StoppedWrite::default);
         Self {
             inner: self.inner.take(),
             disposal: None,
             cancelled: Some(CancellationRetirement {
                 proof: Some(proof),
                 failed: false,
+                stopped_write,
             }),
         }
     }
@@ -645,8 +648,21 @@ fn dispose(held: &Holding, retirement: &mut CancellationRetirement) -> bool {
         if !run.cancelled_private_disposed(&owner, &held.preparation) {
             return false;
         }
+        if let Some(write) = &mut retirement.stopped_write {
+            if !controls::recovery::persist_stopped(held, write) { return false; }
+        }
         retire_use_cancelled(held, &owner)
     }
+}
+
+#[cfg(all(feature="desktop-shell", target_os="macos", target_pointer_width="64", any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn disposed_cleanup_window(held: &Holding) -> Option<Instant> {
+    let owner=held.owner.upgrade()?;
+    if held.native_use_retired.load(Ordering::SeqCst)
+        || !held.run.get()?.cancelled_private_disposed(&owner,&held.preparation)
+        || !owner.vault.try_lock().is_ok_and(|work| cancellation_origin(&owner,&held.clock,work.first,Instant::now())
+            && all_joins(&owner,&work) && store_closed(&work) && same_store(held,&work)) { return None; }
+    held.clock.cleanup_cutoff()
 }
 
 #[cfg(all(

@@ -448,6 +448,7 @@ mod known {
             if let Some(binding) = &value.images { self.image_binding(binding)?; }
             if let Some(batch) = &value.image_batch { self.heap::<asset_source::CapturedPublicImageBatch>(batch.retained_bytes())?; }
             if let Some(label) = &value.vault.label { self.add(label.capacity())?; }
+            self.add(value.vault.recovery_retained_bytes())?;
             if let Some(payload) = &value.vault.loaded { self.payload(payload)?; }
             if let Some(loan) = &value.vault.previous_bound {
                 self.add(vault::BOUND_LOAN_BYTES)?; self.vault_loan(loan)?;
