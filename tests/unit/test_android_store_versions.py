@@ -3,6 +3,7 @@ import base64
 import copy
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from mobile_release import android_store_versions as v
 from mobile_release import ios_store_versions as ios
@@ -32,7 +33,8 @@ def frame(*, tracks=(), bundles=(), apks=()):
 
 
 def observe(value):
-    return v.summary_from_frame(p.canonical(value), context_sha256=CONTEXT, package_name=PACKAGE)
+    raw = value if type(value) is bytes else p.canonical(value)
+    return v.summary_from_frame(raw, context_sha256=CONTEXT, package_name=PACKAGE)
 
 
 def selected(increment='build', candidate='00000000-0000-4000-8000-000000000006'):
@@ -45,6 +47,25 @@ def inventory(build=10, counts=(1, 1, 1, 0, 0)):
 
 
 class CurrentPlayInventoryTests(unittest.TestCase):
+    def test_ruby_frame_terminator_keeps_capture_limit_and_edit_uncertainty(self):
+        raw = p.canonical(frame(apks=[{'versionCode': 21}]))
+        expected = observe(raw)
+        self.assertEqual((expected['observation'], expected['maxBuild'], expected['temporaryEdit']),
+                         ('observed', 21, 'deleted'))
+        self.assertEqual(observe(raw + b'\n'), expected)
+        unknown = v.unavailable('temporary-edit-unconfirmed', temporary_edit='unconfirmed')
+        for changed in (raw + b'\n\n', raw + b'\r\n', raw + b' \n', raw + b'\n ',
+                        raw + b'\n' + raw + b'\n', b'\n' + raw + b'\n', b'\n'):
+            with self.subTest(raw=changed[-12:]):
+                self.assertEqual(observe(changed), unknown)
+        with patch.object(v, 'FRAME_LIMIT', len(raw)):
+            self.assertEqual(observe(raw), expected)
+            self.assertEqual(observe(raw + b'\n'), unknown)
+        with patch.object(v, 'FRAME_LIMIT', len(raw) + 1):
+            self.assertEqual(observe(raw + b'\n'), expected)
+        with self.assertRaises(ValueError):
+            v._json(b'{}\n')  # Only the fixed reader's framing changed.
+
     def test_all_tracks_all_statuses_apks_bundles_and_repeated_codes_count(self):
         tracks = [{'track': status, 'releases': [{'name': '9999.9.9 IS NOT A VERSION', 'status': status,
                     'versionCodes': ['10', str(index + 1)]}]} for index, status in enumerate(('draft', 'inProgress', 'halted', 'completed'))]

@@ -144,6 +144,10 @@ def _app(value: object, app_id: str, bundle_id: str) -> None:
 
 def _json(raw: bytes, *, frame: bool = False) -> dict:
     _need(type(raw) is bytes and 0 < len(raw) <= (FRAME_LIMIT if frame else RAW_LIMIT))
+    # The fixed Ruby reader writes JSON plus one LF. Charge that LF above;
+    # do not strip arbitrary whitespace or change raw provider-page parsing.
+    if frame and raw.endswith(b"\n"):
+        raw = raw[:-1]
     value = _decode_json(raw, limit=FRAME_LIMIT if frame else RAW_LIMIT,
                          nodes=1024 if frame else 20_000, depth=16, exact=True)
     _need(type(value) is dict)

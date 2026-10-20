@@ -178,6 +178,10 @@ def request(step: str, package: str, edit_id: str | None = None) -> dict:
 def _json(raw: bytes, *, frame=False) -> dict:
     limit = FRAME_LIMIT if frame else RAW_LIMIT
     _need(type(raw) is bytes and 0 < len(raw) <= limit)
+    # The fixed Ruby reader writes JSON plus one LF, included in the cap above.
+    # Strip only that frame terminator; raw provider-page parsing is unchanged.
+    if frame and raw.endswith(b"\n"):
+        raw = raw[:-1]
     value = _decode_json(raw, limit=limit, nodes=1024 if frame else 20_000, depth=16, exact=True)
     _need(type(value) is dict)
     return value

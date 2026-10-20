@@ -50,7 +50,8 @@ class OriginalPlayInventoryTests(unittest.TestCase):
         with patch.object(raw_fixture, "PACKAGE", environment["MOBILE_RELEASE_PLAY_PACKAGE"]):
             value = raw_fixture.frame(apks=[{"versionCode": 50}])
         value["contextSha256"] = environment["MOBILE_RELEASE_PLAY_CONTEXT"]
-        return policy.canonical(value)
+        # Match the actual AndroidStoreVersions::Operation.frame output.
+        return policy.canonical(value) + b"\n"
 
     def commands(self, operation, final):
         calls = []

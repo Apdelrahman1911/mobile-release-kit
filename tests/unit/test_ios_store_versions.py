@@ -78,6 +78,24 @@ def observe(value):
 
 
 class IOSCurrentInventoryTests(unittest.TestCase):
+    def test_ruby_frame_terminator_preserves_exact_framing_and_original_byte_limit(self):
+        raw = p.canonical(frame(uploads=[upload()]))
+        expected = observe(raw)
+        self.assertEqual((expected["observation"], expected["maxBuild"]), ("observed", 9))
+        self.assertEqual(observe(raw + b"\n"), expected)
+        for changed in (raw + b"\n\n", raw + b"\r\n", raw + b" \n",
+                        raw + b"\n ", raw + b"\n" + raw + b"\n", b"\n" + raw + b"\n", b"\n"):
+            with self.subTest(raw=changed[-12:]):
+                self.assertEqual(observe(changed), v.unavailable("inconclusive"))
+        # A terminator is part of the original capture, not free extra bytes.
+        with patch.object(v, "FRAME_LIMIT", len(raw)):
+            self.assertEqual(observe(raw), expected)
+            self.assertEqual(observe(raw + b"\n"), v.unavailable("inconclusive"))
+        with patch.object(v, "FRAME_LIMIT", len(raw) + 1):
+            self.assertEqual(observe(raw + b"\n"), expected)
+        with self.assertRaises(ValueError):
+            v._json(b"{}\n")  # Raw provider-page grammar was not widened.
+
     def test_three_current_collections_include_every_train_and_pending_null_build(self):
         value = frame(builds=[build(), build("12", "build2", "train2")],
             includes=[app(), train(), train("0.9.0", "train2")],
@@ -234,7 +252,8 @@ class IOSCurrentInventoryOriginalTests(unittest.TestCase):
         with patch(__name__ + ".BUNDLE", environment["MOBILE_RELEASE_ASC_BUNDLE_ID"]):
             value = frame(versions=[version()] if marketing else [], uploads=[upload()])
         value["contextSha256"] = environment["MOBILE_RELEASE_ASC_BUNDLE_READ_CONTEXT"]
-        return p.canonical(value)
+        # Real AppleStoreVersions::Input.frame writes this single terminal LF.
+        return p.canonical(value) + b"\n"
 
     def test_same_original_seven_commands_selected_p8_and_raw_bound_no_new_owner(self):
         with self.original_query() as (_, _, runtime, source, operation):

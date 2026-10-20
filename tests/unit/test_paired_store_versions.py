@@ -193,7 +193,8 @@ class PairedStoreOwnerTests(unittest.TestCase):
                     raw['temporaryEdit']['deleteConfirmed']=False; raw['pages'][-1]['response']['status']=500
                 if drift:
                     path=operation.root/'release/version.properties'; path.write_bytes(path.read_bytes()+b'\n')
-            return subprocess.CompletedProcess(argv,0,stdout=policy.canonical(raw),stderr=b'')
+            # Both fixed Ruby readers emit exactly one terminal LF.
+            return subprocess.CompletedProcess(argv,0,stdout=policy.canonical(raw)+b'\n',stderr=b'')
         return calls,call
 
     def test_same_original_four_private_roles_thirteen_commands_and_whole_pair(self):
