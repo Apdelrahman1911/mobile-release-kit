@@ -19,7 +19,7 @@ export function SetupWizard({ overview, onAction, onHelp }: {
   onHelp: (help: HelpContent) => void;
 }) {
   return <section className="card guided-steps" aria-label="Guided project setup">
-    <SectionHeading title="Setup steps" description="Start on this computer. You can open any step without approving a change.">
+    <SectionHeading title="Setup steps" description="Start locally, then add signing and Store setup when your chosen action needs them. Opening a step does not approve a change.">
       <HelpButton content={setupWizardHelp} onHelp={onHelp} />
     </SectionHeading>
     <ol>
@@ -33,7 +33,7 @@ export function SetupWizard({ overview, onAction, onHelp }: {
               aria-describedby={stage.next.disabledReason ? reasonId : undefined} onClick={() => onAction(stage.next.action)}>
               {stage.title}<Icon name="chevron" size={15} />
             </button>
-            {current && <p>{stage.summary}</p>}
+            {(current || stage.id === 'signing') && <p>{stage.summary}</p>}
             {stage.next.disabledReason && <p id={reasonId} className="guided-blocker">{stage.next.disabledReason}</p>}
           </div>
           <Badge tone={stage.state === 'observed' ? 'info' : stage.state === 'needs-action' || stage.state === 'unavailable' ? 'warning' : 'neutral'}>{stage.statusLabel}</Badge>

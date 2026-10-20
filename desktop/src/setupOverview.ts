@@ -202,8 +202,8 @@ function checkStage(input: SetupOverviewInput, id: 'tools' | 'signing'): SetupSt
     ? { id, title: 'Check this computer', state: 'not-checked', statusLabel: 'Not checked',
       summary: 'Check the tools this project needs. Use compatible tools already installed before preparing anything new.',
       next: next('Check this computer', navigate('environment')) }
-    : { id, title: 'Set up app signing', state: 'not-checked', statusLabel: 'Not checked',
-      summary: 'Use your app’s existing signing key. A different key can prevent app updates. Selecting a file is not a signing check.',
+    : { id, title: 'Set up signing when needed', state: 'not-checked', statusLabel: 'Not checked',
+      summary: 'Your chosen build or Store action explains which signing inputs it needs. Reuse your app’s existing key; a different key can prevent updates. Selecting a file is not a signing check.',
       next: next('Set up app signing', navigate('credentials')) };
   if (!session || input.preview || !session.snapshot || session.observedAt === null || session.snapshot.config.state !== 'format-valid' ||
     session.snapshotRequest !== null || session.snapshotError || session.snapshotPredatesSave || session.sourceChanged ||
@@ -245,10 +245,11 @@ export function setupOverview(input: SetupOverviewInput): SetupOverview {
       statusLabel: input.preview && session ? 'Example only' : session ? 'Folder selected' : 'Choose a folder',
       summary: session ? 'The selected folder is your workspace. Choosing it does not change its files.' : 'Choose the folder containing your Android, iOS or Kotlin app.',
       next: next(input.preview ? 'Load example project' : session ? 'Choose another project' : 'Choose project folder', { kind: 'choose-project' }, input.chooseReason) },
-    configurationStage(input), versionStage(input, version), checkStage(input, 'tools'), checkStage(input, 'signing'),
+    configurationStage(input), versionStage(input, version), checkStage(input, 'tools'),
     { id: 'build', title: 'Review a local build', state: 'not-checked', statusLabel: 'Separate checks',
-      summary: 'Open the build steps for Android or iOS. Each checks its own requirements and asks before running project code or using a signing key.',
+      summary: 'Review Android or iOS build options before setting up Store accounts. Each build checks its own requirements and asks before running project code or using a signing key.',
       next: next('Review a local build', navigate('releases')) },
+    checkStage(input, 'signing'),
   ];
   const current = stages.find((stage) => stage.state !== 'observed')!;
   const action = currentActivity ? next(currentActivity.state === 'prepared' ? 'Continue reviewing this task' :

@@ -161,6 +161,59 @@ test('full-checked-guidance-still-no-auto-build: the final suggestion is navigat
   assert.ok(!/release.ready|approved|published|reserved/i.test(model.known.join(' ')));
 });
 
+test('local build review comes before signing without treating signing as checked', () => {
+  for (const signing of [null, 'needs-attention', 'unavailable']) {
+    const state = input(project(), true);
+    state.checks = [check(state.session, 'tools'), ...(signing ? [check(state.session, 'signing', signing)] : [])];
+    const before = structuredClone(state), model = setupOverview(state);
+    assert.deepEqual(model.stages.map((row) => row.id), ['project', 'configuration', 'version', 'tools', 'build', 'signing']);
+    assert.equal(model.currentStage, 'build');
+    assert.deepEqual(model.next, { label: 'Review a local build', action: { kind: 'navigate', page: 'releases' }, disabledReason: null });
+    assert.equal(stage(model, 'build').state, 'not-checked');
+    assert.equal(stage(model, 'signing').state, signing === 'needs-attention' ? 'needs-action' : signing ?? 'not-checked');
+    assert.deepEqual(stage(model, 'signing').next.action, { kind: 'navigate', page: 'credentials' });
+    assert.equal(model.known.length, 4); assert.equal(model.remaining.length, 2);
+    assert.deepEqual(state, before, 'ordering changes no draft, check or operation input');
+  }
+});
+
+test('local-first ordering never replaces original review, running, cancellation or recovery controls', () => {
+  for (const phase of ['prepared', 'running', 'cancellation-requested', 'failed', 'recovery-required', 'unknown']) {
+    const state = input(project(), true);
+    state.checks = [check(state.session, 'tools')];
+    const original = { ...activity(phase), task: 'Signing key', action: { kind: 'navigate', page: 'credentials' } };
+    state.activities = [original];
+    const model = setupOverview(state);
+    assert.equal(model.currentStage, 'build');
+    assert.equal(model.currentActivity, original);
+    assert.deepEqual(model.next.action, original.action, 'the existing original owner, not the build, remains the next action');
+    assert.equal(stage(model, 'signing').state, 'not-checked');
+  }
+});
+
+test('local-first ordering preserves missing, stale, partial, dirty, preview and unchecked-tool gates', () => {
+  const base = input(project(), true);
+  base.checks = [check(base.session, 'tools')];
+  const cases = [
+    { patch: { preview: true, chooseReason: 'Original project picker pending.' }, stage: 'project', kind: 'choose-project', reason: 'Original project picker pending.' },
+    { patch: { session: project('missing') }, stage: 'configuration', kind: 'navigate', page: 'settings' },
+    { patch: { session: project('invalid') }, stage: 'configuration', kind: 'navigate', page: 'settings' },
+    { patch: { session: { ...base.session, draft: { ...base.session.draft, extra: 'unsaved' } } }, stage: 'configuration', kind: 'navigate', page: 'settings' },
+    { patch: { session: { ...base.session, sourceChanged: true }, refreshReason: 'Original read still pending.' }, stage: 'configuration', kind: 'refresh-project', reason: 'Original read still pending.' },
+    { patch: { session: { ...base.session, snapshot: { ...base.session.snapshot, discovery: { ...base.session.snapshot.discovery, partial: true } } } }, stage: 'configuration', kind: 'refresh-project' },
+    { patch: { releaseVersionState: versionState(base.session) }, stage: 'version', kind: 'read-version' },
+    { patch: { checks: [] }, stage: 'tools', kind: 'navigate', page: 'environment' },
+  ];
+  for (const value of cases) {
+    const state = { ...base, ...value.patch }, before = structuredClone(state), model = setupOverview(state);
+    assert.equal(model.currentStage, value.stage); assert.equal(model.next.action.kind, value.kind);
+    if (value.page) assert.equal(model.next.action.page, value.page);
+    assert.equal(model.next.disabledReason, value.reason ?? null);
+    assert.equal(stage(model, 'build').state, 'not-checked');
+    assert.deepEqual(state, before);
+  }
+});
+
 test('ordinary-unknown-does-not-mask-cancel: unperformed tools and signing do not replace live progress', () => {
   const state = input(project(), true);
   state.activities = [activity('running'), activity('cancellation-requested')];
