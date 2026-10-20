@@ -2,6 +2,8 @@
 //! proposal, provider, payload pass, install or executable loan is created.
 use super::*;
 use crate::tool_acquisition_protocol::components::Partition;
+#[path = "android_registration_source_acquisition_sdk_macos.rs"]
+mod sdk_copy;
 
 // Present only inside acquisition_read / its bounded walk and XML validation.
 // None of these buffers survive the returned read, unlike every source record,

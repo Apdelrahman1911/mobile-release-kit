@@ -13,6 +13,7 @@ pub(in crate::saved_command_owner) struct Original {
     runtime_closed: bool,
     sources: Option<AndroidRegistrationSourceSlots>,
     picked: Option<(Partition, [u8; 32])>,
+    sdk_copy: Option<wire::sdk::CopyInput>,
     unknown: bool,
 }
 impl Original {
@@ -25,6 +26,7 @@ impl Original {
             runtime_closed: false,
             sources: None,
             picked: None,
+            sdk_copy: None,
             unknown: false,
         }
     }
@@ -57,6 +59,7 @@ impl Original {
             bytes = bytes.checked_add(request.capacity())?;
         }
         if let Some(source) = &self.sources { bytes = bytes.checked_add(source.retained_bytes()?)?; }
+        if let Some(copy) = &self.sdk_copy { bytes = bytes.checked_add(copy.retained_bytes()?)?; }
         Some(bytes)
     }
     fn inspect_picked(&mut self, inner: &Arc<Inner>, owner: &Arc<Session>) -> Result<(), BridgeError> {
@@ -96,6 +99,17 @@ impl Original {
         if source.retained_bytes().is_none_or(|bytes| bytes > bound)
             || !intent.known.sources.originals_settled() || !context_current(inner, owner) { return Err(wire::invalid()); }
         self.picked = Some(source.acquisition_finding().ok_or_else(wire::invalid)?);
+        if context.action == wire::Action::Acquire {
+            if let Some(root) = intent.known.sources.roots()[1].as_ref() {
+                // Same actually closed original records; a child will open NEW
+                // read-only originals. No renderer path or revived native loan.
+                self.sdk_copy = source.acquisition_sdk_copy_input(root).map_err(|_| wire::invalid())?;
+            }
+            if self.sdk_copy.as_ref().map(|copy| copy.component)
+                != wire::sdk::Component::for_partition(self.picked.ok_or_else(wire::invalid)?.0) {
+                return Err(wire::invalid());
+            }
+        }
         Ok(())
     }
     fn picked_finding(&self) -> Option<(Partition, [u8; 32])> {
@@ -357,9 +371,11 @@ pub(super) fn inspect(
             "projectRoot":wire::native_path(&owner.project.path),"rootIdentity":owner.project.identity.posix().map_err(|_|wire::Reason::Input)?.preflight_identity(),
             "catalogGeneration":intent.known.catalog.generation(),"ownerRevision":intent.known.revision,
             "sourceGeneration":intent.known.source_generation,"registrationGeneration":intent.known.registration_generation,
-            "components":components.data(),"pickedObservationSha256":hash(&original.picked.ok_or(wire::Reason::Stale)?.1)}),wire::CONTROL_LIMIT).map_err(|_|wire::Reason::Limit)?;
+            "components":components.data(),"pickedObservationSha256":hash(&original.picked.ok_or(wire::Reason::Stale)?.1),
+            "sdkCopy":original.sdk_copy.as_ref().map(|copy|copy.data())}),wire::CONTROL_LIMIT).map_err(|_|wire::Reason::Limit)?;
         let expected = Expected {
             components,
+            copied_sdk: original.sdk_copy.as_ref().map(|copy| copy.component),
             context_sha256: hash(&context_raw),
             reference_sha256: projection
                 .reference_sha256
@@ -406,13 +422,16 @@ pub(super) fn inspect(
         if !context_current(inner, owner) {
             return Err(wire::Reason::Stale);
         }
-        let cache = original.cache.cache_data(
+        let mut cache = original.cache.cache_data(
             u64::from(intent.generation),
             &expected.context_sha256,
             &expected.reference_sha256,
             &expected.projection_sha256,
             components,
         )?;
+        if let Some(copy) = &original.sdk_copy {
+            cache.as_object_mut().ok_or(wire::Reason::Input)?.insert("sdkCopy".into(),copy.data());
+        }
         let bytes = wire::request(
             &owner.id,
             &owner.generation,

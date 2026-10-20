@@ -24,6 +24,7 @@ from ._tool_acquisition_spec import (AcquisitionError, Archive, CHUNK, COMPONENT
     METADATA_RESERVE, PROFILES, RESERVE_BYTES, canonical, decode_manifest, digest, operation_id, require)
 from ._tool_acquisition_files import (Files, OutputTree, directory_identity, extract_tar, extract_zip, named)
 from ._tool_vendor_transport import PublicVendorTransfer
+from ._tool_acquisition_sdk import CopyBinding, SdkCopy, SDK
 from .cancellation import CleanupScope, DefaultCancellation, cancellation_owner
 
 CACHE_JOBS_LIMIT = 32
@@ -53,6 +54,7 @@ class Admission:
     census_complete: bool
     lookup_scope: str
     deadline: float
+    sdk_copy: CopyBinding | None = None
 
 
 class NativeAcquisitionOwner(Protocol):
@@ -119,10 +121,12 @@ class PreparedSources:
     reused_archives: tuple[Component, ...]
     downloaded_archives: tuple[Component, ...]
     groups: tuple[StagedGroup, ...]
+    copied_source_components: tuple[Component, ...] = ()
 
     def to_data(self) -> dict:
         # No absolute path, URL, private runtime binding or authority receipt.
-        return {"schemaVersion": 1, "kind": "staged-tool-sources",
+        return {"schemaVersion": 2 if self.copied_source_components else 1, "kind": "staged-tool-sources",
+            **({"copiedSourceComponents": [part.value for part in self.copied_source_components]} if self.copied_source_components else {}),
             "operationId": self.operation_id, "contextSha256": self.context_sha256,
             "referenceSha256": self.reference_sha256, "projectionSha256": self.projection_sha256,
             "cacheJob": self.cache_job, "lookupScope": LOOKUP_SCOPE,
@@ -157,6 +161,10 @@ def _validate_admission(value: Admission) -> None:
         and value.compatible == tuple(part for part in COMPONENTS if part in value.compatible)
         and not set(value.missing).intersection(value.compatible)
         and set(value.missing + value.compatible) == set(COMPONENTS), "census-incomplete")
+    if value.sdk_copy is not None:
+        require(type(value.sdk_copy) is CopyBinding and value.sdk_copy.component in value.compatible
+            and tuple(part for part in SDK if part in value.compatible) == (value.sdk_copy.component,)
+            and len(tuple(part for part in SDK if part in value.missing)) == 1, "stale")
     now = time.monotonic()
     require(type(value.deadline) in (int, float) and now < value.deadline <= now + 1200, "cancelled")
 
@@ -214,6 +222,7 @@ class ToolAcquisition:
         self.unknown = False
         self.guard: DefaultCancellation | None = None
         self.files: Files | None = None
+        self.sdk_copy: SdkCopy | None = None
         self.transfer: PublicVendorTransfer | None = None
         self.scope: CleanupScope | None = None
         self.admission: Admission | None = None
@@ -242,7 +251,7 @@ class ToolAcquisition:
             self.guard = guard
             files = Files(admission.cache_root, guard, self._check)
             self.files = files
-            scope = CleanupScope(guard, files.close, owns_cancellation=owns, first_primary=True)
+            scope = CleanupScope(guard, self._close_files, owns_cancellation=owns, first_primary=True)
             self.scope = scope
             offer = None
             try:
@@ -254,9 +263,16 @@ class ToolAcquisition:
                         files.acquire()
                         require(directory_identity(os.fstat(files.root.fd)) == admission.cache_identity, "stale")
                         archives = tuple(manifest.archive(part) for part in admission.missing)
+                        output_archives = archives
+                        if admission.sdk_copy is not None:
+                            compatible = manifest.archive(admission.sdk_copy.component)
+                            self.sdk_copy = SdkCopy(admission.sdk_copy, admission.reference_sha256, compatible, files)
+                            self.sdk_copy.acquire()  # Original retained before IO; reject physical overlap.
+                            output_archives = tuple(manifest.archive(part) for part in COMPONENTS
+                                if part in admission.missing or part is admission.sdk_copy.component)
                         cached = self._cache(archives)
                         new_bytes = sum(archive.size for archive in archives if archive.component not in cached)
-                        space = _Space(files, new_bytes + sum(archive.expanded_bytes for archive in archives))
+                        space = _Space(files, new_bytes + sum(archive.expanded_bytes for archive in output_archives))
                         files.before_write = space.consume
                         self._check()
                         intent = canonical({"schemaVersion": 1, "operationId": admission.operation_id,
@@ -273,7 +289,9 @@ class ToolAcquisition:
                             files.control(job_fd, "origin.json", json.loads(intent))
                             files.mkdir(job_fd, "sources")
                             with files.directory(job_fd, "sources") as sources_fd:
-                                tree = OutputTree(files, sources_fd, archives)
+                                tree = OutputTree(files, sources_fd, output_archives)
+                                if self.sdk_copy is not None:
+                                    self.sdk_copy.copy_to(tree)  # Full POST + positive close BEFORE any HTTP.
                                 for archive in archives:
                                     files.check()
                                     previous = cached.get(archive.component)
@@ -298,7 +316,8 @@ class ToolAcquisition:
                     scope.__exit__(*sys.exc_info())
                 guard.check()
                 self._check()
-                require(files.settled and not (self.transfer is not None and self.transfer.unknown), "unknown")
+                require(files.settled and (self.sdk_copy is None or self.sdk_copy.closed)
+                    and not (self.transfer is not None and self.transfer.unknown), "unknown")
             except BaseException:
                 raise
             assert offer is not None
@@ -307,6 +326,7 @@ class ToolAcquisition:
             fatal = (self.guard is not None and self.guard.lifetime_ledger.fatal)
             self.unknown = (fatal or (self.intent_attempted and not self.intent_recorded)
                 or (self.files is not None and not self.files.settled)
+                or (self.sdk_copy is not None and not self.sdk_copy.closed)
                 or (self.transfer is not None and self.transfer.unknown))
             if self.unknown:
                 # Keep this exact object even if diagnostic publication fails.
@@ -322,6 +342,17 @@ class ToolAcquisition:
             if isinstance(error, AcquisitionError):
                 raise
             raise AcquisitionError("cache-conflict") from None
+
+    def _close_files(self):
+        first = None
+        for original in (self.sdk_copy, self.files):
+            if original is not None:
+                try:
+                    original.close()
+                except BaseException as error:
+                    if first is None: first = error
+        if first is not None:
+            raise first
 
     def _cache(self, archives: tuple[Archive, ...]) -> dict[Component, _CachedArchive]:
         files, admission = self.files, self.admission
@@ -392,10 +423,11 @@ class ToolAcquisition:
         admission = self.admission
         assert admission is not None
         groups = []
+        copied = () if admission.sdk_copy is None else (admission.sdk_copy.component,)
         for group in ("jdk", "sdk", "gradle"):
-            parts = tuple(part for part in admission.missing if part.group == group)
+            parts = tuple(part for part in COMPONENTS if part.group == group and (part in admission.missing or part in copied))
             if parts:
                 groups.append(StagedGroup(group, parts, parts == tuple(part for part in COMPONENTS if part.group == group)))
         return PreparedSources(admission.operation_id, admission.context_sha256, admission.reference_sha256,
             admission.projection_sha256, job, tuple(part for part in admission.missing if part in cached),
-            tuple(part for part in admission.missing if part not in cached), tuple(groups))
+            tuple(part for part in admission.missing if part not in cached), tuple(groups), copied)

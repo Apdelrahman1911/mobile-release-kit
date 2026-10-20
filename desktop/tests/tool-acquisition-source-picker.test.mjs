@@ -294,3 +294,28 @@ test('ordinary existing-folder selection is still plain and never automatically 
   assert.equal(h.android.getSnapshot().toolSources.inspection, 'not-run');
   assert.equal(h.android.getSnapshot().toolSources.protectedCopy, 'not-created');
 });
+
+
+test('assembled SDK goes through the original explicit picker and leaves chosen JDK/Gradle untouched', async (t) => {
+  for (const copied of ['sdk-platform', 'sdk-build-tools']) {
+    const missing = [copied === 'sdk-platform' ? 'sdk-build-tools' : 'sdk-platform'];
+    const selections = [{ role: 'jdk', displayName: 'Keep JDK' }, { role: 'sdk', displayName: 'Old partial SDK' },
+      { role: 'gradle', displayName: 'Keep Gradle' }];
+    const staged = report(); staged.schemaVersion = 2; staged.copiedSourceComponents = [copied];
+    staged.reusedArchives = []; staged.downloadedArchives = missing;
+    staged.groups = [{ group: 'sdk', components: ['sdk-platform', 'sdk-build-tools'], allRequiredComponentsStaged: true, next: 'choose-native-source' }];
+    const h = await controllers(t, { initialSources: { ...source(3, 'gradle'), selections }, missing, staged });
+    assert.deepEqual(h.tools.getSnapshot().preparedFolders.roles, ['sdk']);
+    assert.equal(h.tools.getSnapshot().preparedFolders.incompleteSdk, false);
+    assert.deepEqual(h.android.getSnapshot().toolSources.selections, selections);
+    await h.choose('jdk'); await h.choose('gradle'); assert.equal(h.calls.length, 0);
+    const picked = h.choose('sdk'); assert.equal(h.calls.length, 1);
+    assert.deepEqual(h.calls[0].input, { schemaVersion: 1, sourceGeneration: 3, projectId: 'p1', role: 'sdk', acquired: { operationId: OP, ownerGeneration: GEN } });
+    const after = [selections[0], { role: 'sdk', displayName: 'New prepared SDK' }, selections[2]];
+    h.reply(h.calls[0], { ...source(4, 'sdk'), selections: after }); await picked;
+    assert.deepEqual(h.android.getSnapshot().toolSources.selections, after);
+    assert.equal(h.android.getSnapshot().toolSources.inspection, 'not-run');
+    assert.equal(h.android.getSnapshot().toolSources.protectedCopy, 'not-created');
+    assert.equal(h.calls.length, 1); // No Inspect, approval, registration or build is automatic.
+  }
+});

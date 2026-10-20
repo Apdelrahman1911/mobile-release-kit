@@ -240,6 +240,7 @@ struct Expected {
     reference_sha256: String,
     projection_sha256: String,
     components: wire::components::Partition,
+    copied_sdk: Option<wire::sdk::Component>,
 }
 
 /// Native-only census from the SAME owner, original Android state and retained
@@ -1200,6 +1201,7 @@ pub(super) fn check_frame(owner: &Session, frame: wire::Frame) -> Result<wire::F
                 || result["referenceSha256"] != expected.reference_sha256
                 || result["projectionSha256"] != expected.projection_sha256
                 || !wire::staged_matches_partition(result, expected.components)
+                || wire::sdk::copied(result) != Ok(expected.copied_sdk)
             {
                 return Err(BridgeError::protocol());
             }

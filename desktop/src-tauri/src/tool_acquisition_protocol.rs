@@ -27,6 +27,8 @@ pub(crate) const CA_LIMIT: usize = 512 * 1024;
 pub(crate) const MANIFEST_LIMIT: usize = 8 * 1024 * 1024;
 #[path = "tool_acquisition_components.rs"]
 pub(crate) mod components;
+#[path = "tool_acquisition_sdk.rs"]
+pub(crate) mod sdk;
 use components::Partition;
 pub(crate) const COMPONENTS: [&str; 4] = components::ALL;
 pub(crate) const FIXED: [&str; 7] = [
@@ -789,9 +791,8 @@ fn result_valid(v: &Value, operation: &str, context: &Context) -> Result<(), Bri
         }
         return Ok(());
     }
-    if !keys(
-        v,
-        &[
+    let copied = sdk::copied(v).map_err(|_| invalid())?;
+    let mut fields = vec![
             "schemaVersion",
             "kind",
             "operationId",
@@ -804,8 +805,9 @@ fn result_valid(v: &Value, operation: &str, context: &Context) -> Result<(), Bri
             "downloadedArchives",
             "groups",
             "assurance",
-        ],
-    ) || v["schemaVersion"] != 1
+        ];
+    if copied.is_some() { fields.push("copiedSourceComponents"); }
+    if !keys(v, &fields)
         || v["kind"] != "staged-tool-sources"
         || v["operationId"] != operation
         || v["cacheJob"] != format!("tool-{operation}")
@@ -835,6 +837,13 @@ fn result_valid(v: &Value, operation: &str, context: &Context) -> Result<(), Bri
         }
     }
     if all.is_empty() || all.len() > COMPONENTS.len() { return Err(invalid()); }
+    if let Some(component) = copied {
+        // Copied is NOT a downloaded/reused archive. Only its opposite SDK
+        // half may be in that original missing-archive set.
+        let other = if component == sdk::Component::Platform { "sdk-build-tools" } else { "sdk-platform" };
+        if all.contains(component.name()) || !all.contains(other) { return Err(invalid()); }
+        all.insert(component.name());
+    }
     let expected: Vec<Value> = [("jdk", &COMPONENTS[..1]), ("sdk", &COMPONENTS[1..3]), ("gradle", &COMPONENTS[3..])]
         .into_iter().filter_map(|(group, parts)| {
             let missing: Vec<_> = parts.iter().copied().filter(|part| all.contains(part)).collect();
@@ -856,7 +865,11 @@ pub(crate) fn staged_matches_partition(value: &Value, partition: Partition) -> b
     COMPONENTS.into_iter().enumerate().all(|(index, name)| {
         let count = reused.iter().chain(downloaded).filter(|v| *v == name).count();
         count == usize::from(!partition.is_compatible(index))
-    })
+    }) && match sdk::copied(value) {
+        Ok(None) => true, // Preserve old schema1 DATA; native Expected may require a copy.
+        Ok(Some(component)) => sdk::Component::for_partition(partition) == Some(component),
+        Err(()) => false,
+    }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1096,6 +1109,30 @@ mod tests {
         changed["groups"][0]["allRequiredComponentsStaged"] = json!(true);
         changed["groups"][0]["next"] = json!("choose-native-source");
         assert!(result_valid(&changed, &operation, &context).is_err());
+    }
+    #[test]
+    fn assembled_sdk_result_keeps_missing_archives_separate_from_exact_copied_half() {
+        let partition = Partition::observed([Some(true),Some(true),Some(false),Some(true)]).unwrap();
+        let operation = "d".repeat(32);
+        let mut context = prepare(&context_value()).unwrap(); context.action=Action::Acquire;
+        context.review=Some(Review { operation_id:"0".repeat(32),owner_generation:"1".repeat(32),requirements_sha256:"b".repeat(64) });
+        let offered=json!({"schemaVersion":2,"kind":"staged-tool-sources","operationId":operation,
+            "contextSha256":"1".repeat(64),"referenceSha256":"2".repeat(64),"projectionSha256":"3".repeat(64),
+            "cacheJob":format!("tool-{operation}"),"lookupScope":"registered-selected-known",
+            "reusedArchives":[],"downloadedArchives":["sdk-build-tools"],"copiedSourceComponents":["sdk-platform"],
+            "groups":[{"group":"sdk","components":["sdk-platform","sdk-build-tools"],"allRequiredComponentsStaged":true,"next":"choose-native-source"}],
+            "assurance":{"nativeFinality":false,"registered":false,"readyToBuild":false}});
+        assert!(result_valid(&offered,&operation,&context).is_ok()); assert!(staged_matches_partition(&offered,partition));
+        assert_eq!(sdk::copied(&offered),Ok(Some(sdk::Component::Platform)));
+        assert!(!staged_matches_partition(&offered,Partition::missing_all()));
+        for (field,value) in [("schemaVersion",json!(1)),("copiedSourceComponents",json!(["jdk"])),
+            ("copiedSourceComponents",json!(["sdk-build-tools"])),("downloadedArchives",json!(["sdk-platform","sdk-build-tools"]))] {
+            let mut changed=offered.clone(); changed[field]=value; assert!(result_valid(&changed,&operation,&context).is_err());
+        }
+        let mut forged=offered.clone(); forged["copiedSourceComponents"]=json!(["sdk-build-tools"]);
+        forged["downloadedArchives"]=json!(["sdk-platform"]);
+        assert!(result_valid(&forged,&operation,&context).is_ok()); // Well-shaped DATA still cannot replace native Expected.
+        assert!(!staged_matches_partition(&forged,partition));
     }
     #[test]
     fn closed_ipc_requires_current_review_and_explicit_exact_consent() {

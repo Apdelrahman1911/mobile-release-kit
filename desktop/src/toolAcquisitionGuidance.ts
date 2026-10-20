@@ -5,14 +5,17 @@ import type { AndroidToolSourceRole } from './androidToolSources.ts';
 export type Component = 'jdk' | 'sdk-platform' | 'sdk-build-tools' | 'gradle';
 export const components: readonly Component[] = ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'];
 const roles: readonly AndroidToolSourceRole[] = ['jdk', 'sdk', 'gradle'];
-export interface StagedToolSourcesData {
-  schemaVersion: 1; kind: 'staged-tool-sources'; operationId: string; contextSha256: string;
+interface StagedToolSourcesBase {
+  kind: 'staged-tool-sources'; operationId: string; contextSha256: string;
   referenceSha256: string; projectionSha256: string; cacheJob: string; lookupScope: 'registered-selected-known';
   reusedArchives: Component[]; downloadedArchives: Component[];
   groups: { group: AndroidToolSourceRole; components: Component[]; allRequiredComponentsStaged: boolean;
     next: 'choose-native-source' | 'complete-sdk-manually' }[];
   assurance: { nativeFinality: false; registered: false; readyToBuild: false };
 }
+export type StagedToolSourcesData = StagedToolSourcesBase & (
+  { schemaVersion: 1; copiedSourceComponents?: never } |
+  { schemaVersion: 2; copiedSourceComponents: ['sdk-platform' | 'sdk-build-tools'] });
 function fields(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return null;
   const actual = Reflect.ownKeys(value);
@@ -44,17 +47,26 @@ const groupOf = (part: Component): AndroidToolSourceRole => part === 'sdk-platfo
 const sha = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 export function parseStagedToolSources(value: unknown): StagedToolSourcesData | null {
   try {
+    const schema = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'schemaVersion')?.value : null;
     const v = fields(value, ['schemaVersion', 'kind', 'operationId', 'contextSha256', 'referenceSha256', 'projectionSha256',
-      'cacheJob', 'lookupScope', 'reusedArchives', 'downloadedArchives', 'groups', 'assurance']);
-    if (!v || v.schemaVersion !== 1 || v.kind !== 'staged-tool-sources' || typeof v.operationId !== 'string' ||
+      'cacheJob', 'lookupScope', 'reusedArchives', 'downloadedArchives', 'groups', 'assurance', ...(schema === 2 ? ['copiedSourceComponents'] : [])]);
+    if (!v || ![1, 2].includes(v.schemaVersion as number) || v.kind !== 'staged-tool-sources' || typeof v.operationId !== 'string' ||
         !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(v.operationId) || !sha(v.contextSha256) || !sha(v.referenceSha256) || !sha(v.projectionSha256) ||
         v.lookupScope !== 'registered-selected-known') return null;
     const reused = componentList(v.reusedArchives), downloaded = componentList(v.downloadedArchives), groups = list(v.groups, 3);
     const assurance = fields(v.assurance, ['nativeFinality', 'registered', 'readyToBuild']);
     if (!reused || !downloaded || !groups || reused.some((part) => downloaded.includes(part)) ||
         !assurance || Object.values(assurance).some((fact) => fact !== false)) return null;
-    const selected = components.filter((part) => reused.includes(part) || downloaded.includes(part));
-    if (v.cacheJob !== (selected.length ? `tool-${v.operationId}` : '') || groups.length !== roles.filter((role) => selected.some((part) => groupOf(part) === role)).length) return null;
+    const archives = components.filter((part) => reused.includes(part) || downloaded.includes(part));
+    const copied = schema === 2 ? componentList(v.copiedSourceComponents) : [];
+    if (!copied) return null;
+    if (schema === 2) {
+      const part = copied[0];
+      if (copied.length !== 1 || (part !== 'sdk-platform' && part !== 'sdk-build-tools') ||
+          archives.includes(part) || !archives.includes(part === 'sdk-platform' ? 'sdk-build-tools' : 'sdk-platform')) return null;
+    }
+    const selected = components.filter((part) => archives.includes(part) || copied.includes(part));
+    if (v.cacheJob !== (archives.length ? `tool-${v.operationId}` : '') || groups.length !== roles.filter((role) => selected.some((part) => groupOf(part) === role)).length) return null;
     const parsedGroups: StagedToolSourcesData['groups'] = [];
     for (const role of roles) {
       const parts = selected.filter((part) => groupOf(part) === role);
@@ -94,6 +106,8 @@ export function stagedToolSourceGuidance(value: unknown, presentation: StagedToo
     'Keep existing installations and global settings. The search covered registered copies, selected folders and known supported locations, not every folder on this computer.'];
   if (report.groups.some((group) => !group.allRequiredComponentsStaged)) steps.unshift(
     'Only the missing Android SDK package was staged; the other required package was checked in your chosen SDK. This staged SDK is incomplete. Choose an existing complete supported SDK or finish manual SDK preparation without overwriting working tools.');
+  if (report.schemaVersion === 2) steps.unshift(
+    'The prepared SDK combines a verified copy of your matching package with the missing package. Your original SDK and its other packages were not changed. Inspect the complete candidate and review licenses before approving a protected copy.');
   const pickers = report.groups.map((group) => ({ role: group.group,
     label: group.group === 'jdk' ? 'Choose JDK' : group.group === 'gradle' ? 'Choose Gradle' :
       group.allRequiredComponentsStaged ? 'Choose Android SDK' : 'Choose complete Android SDK' }));

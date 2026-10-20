@@ -15,6 +15,8 @@ import stat
 
 from ._tool_acquisition_spec import COMPONENTS, MANIFEST_LIMIT, canonical
 from ._tool_requirements_capture import CONFIG, FIXED, module_files
+from ._tool_acquisition_sdk import CopyBinding
+from ._tool_acquisition_spec import AcquisitionError
 
 PROTOCOL = "mrk-tool-acquisition/1"
 CONSENT = "pinned-public-tool-sources-v1"
@@ -194,16 +196,22 @@ def component_partition(missing, compatible):
 
 
 def cache(value, *, operation, selected):
-    keys(value, ("root", "rootIdentity", "generation", "contextSha256", "referenceSha256", "projectionSha256",
-                 "missing", "compatible", "intentBase64", "origins", "footprint"))
+    fields = ("root", "rootIdentity", "generation", "contextSha256", "referenceSha256", "projectionSha256",
+              "missing", "compatible", "intentBase64", "origins", "footprint")
+    keys(value, fields + (("sdkCopy",) if type(value) is dict and "sdkCopy" in value else ()))
     path(value["root"])
     identity(value["rootIdentity"])
     require(value["rootIdentity"]["mode"] == (stat.S_IFDIR | 0o700) and integer(value["generation"], 2**53 - 1, 1)
             and all(text(value[key], SHA) for key in ("contextSha256", "referenceSha256", "projectionSha256")))
     # The SAME native SourceSlots inspection supplies this exact partition.
     # Present wrong/unreadable selections cannot be represented as missing.
-    missing, _ = component_partition(value["missing"], value["compatible"])
+    missing, compatible = component_partition(value["missing"], value["compatible"])
     require(bool(missing))
+    if "sdkCopy" in value:
+        try:
+            require(CopyBinding.parse(value["sdkCopy"], missing, compatible) is not None)
+        except AcquisitionError:
+            raise ProtocolError("Invalid fixed tool-acquisition protocol") from None
     footprint(value["footprint"])
     require(value["footprint"]["sourcesSha256"] == selected["review"]["requirementsSha256"])
     require_saved_config(value["footprint"], selected)
@@ -289,9 +297,12 @@ def requirements(value):
 
 
 def staged(value, request):
+    copied = request.native["cache"].get("sdkCopy")
     keys(value, ("schemaVersion", "kind", "operationId", "contextSha256", "referenceSha256", "projectionSha256", "cacheJob",
-                 "lookupScope", "reusedArchives", "downloadedArchives", "groups", "assurance"))
-    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["kind"] == "staged-tool-sources"
+                 "lookupScope", "reusedArchives", "downloadedArchives", "groups", "assurance")
+                 + (("copiedSourceComponents",) if copied is not None else ()))
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == (2 if copied is not None else 1)
+            and value["kind"] == "staged-tool-sources"
             and value["operationId"] == request.operation_id and value["cacheJob"] == "tool-" + request.operation_id
             and value["lookupScope"] == "registered-selected-known")
     require(all(value[key] == request.native["cache"][key] for key in ("contextSha256", "referenceSha256", "projectionSha256")))
@@ -305,10 +316,14 @@ def staged(value, request):
                 and parts == [part for part in expected if part in parts])
         all_parts.extend(parts)
     require(len(all_parts) == len(expected) and set(all_parts) == set(expected))
+    output = list(missing)
+    if copied is not None:
+        require(value["copiedSourceComponents"] == [copied["component"]])
+        output += [part for part in COMPONENTS if part.value == copied["component"]]
     groups = value["groups"]
     expected_groups = []
     for group in ("jdk", "sdk", "gradle"):
-        components = [part.value for part in missing if part.group == group]
+        components = [part.value for part in COMPONENTS if part in output and part.group == group]
         if components:
             complete = len(components) == sum(part.group == group for part in COMPONENTS)
             expected_groups.append({"group": group, "components": components, "allRequiredComponentsStaged": complete,
