@@ -71,6 +71,8 @@ mod local_checks;
 mod agent_android_build;
 #[path = "application_service_agent_ios_archive.rs"]
 mod agent_ios_archive;
+#[path = "application_service_request_catalogue.rs"]
+mod request_catalogue;
 
 pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
@@ -348,6 +350,7 @@ impl ApplicationService {
             // These two fixed routes touch only the bounded proposal inbox.
             // No native callback, executor or GUI approval runs in a socket.
             match &request.request {
+                p::RequestBody::Requests(query) => return self.discover_requests(client, &query.project_id),
                 p::RequestBody::AndroidBuildPrepare(input) => return self.prepare_agent_android_build(client, input.clone()),
                 p::RequestBody::AndroidBuildStart(input) => return self.start_agent_android_build(client, input),
                 p::RequestBody::AndroidBuildStatus(query) => return self.query_agent_android_build(client, query, false),
@@ -369,7 +372,7 @@ impl ApplicationService {
             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
-                p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
+                p::RequestBody::Requests(_) | p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
                     | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_)
                     | p::RequestBody::AndroidBuildPrepare(_) | p::RequestBody::AndroidBuildStart(_) | p::RequestBody::AndroidBuildStatus(_) | p::RequestBody::AndroidBuildCancel(_)
                     | p::RequestBody::IosArchivePrepare(_) | p::RequestBody::IosArchiveStart(_) | p::RequestBody::IosArchiveStatus(_) | p::RequestBody::IosArchiveCancel(_) => return Err(Error::InvalidRequest),

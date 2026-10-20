@@ -1,0 +1,364 @@
+diff --git a/desktop/src-tauri/src/agent_local_checks.rs b/desktop/src-tauri/src/agent_local_checks.rs
+--- a/desktop/src-tauri/src/agent_local_checks.rs
++++ b/desktop/src-tauri/src/agent_local_checks.rs
+@@ -471,9 +471,7 @@
+             _ => false,
+         }
+     }
+-    pub(crate) fn status(&self) -> Result<Status, Error> {
+-        self.occupies();
+-        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
++    fn observed_request_state(&self, has_operation: bool) -> RequestState {
+         let phase = self.phase.load(Ordering::Acquire);
+         let request_state = match phase {
+             QUEUED => RequestState::Queued,
+@@ -484,6 +482,37 @@
+             EXPIRED => RequestState::Expired,
+             _ => RequestState::AdmissionUnknown,
+         };
++        if has_operation && matches!(request_state, RequestState::Queued | RequestState::Admitting) {
++            RequestState::OriginalAvailable
++        } else { request_state }
++    }
++    /// Compact DATA only; never clone a report or acquire a native owner.
++    pub(crate) fn catalogue_metadata(&self) -> Result<crate::service_request_catalogue::Request, Error> {
++        use crate::service_request_catalogue as data;
++        self.occupies();
++        let operation = {
++            let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?;
++            latest.as_ref().map(|value| data::Operation {
++                operation_id: value.operation_id.clone(), owner_generation: value.owner_generation.clone(),
++                status_revision: value.status_revision, state: value.state, settlement: value.settlement,
++            })
++        }; // Same lock order as status: latest is released BEFORE publication.
++        let request_state = self.observed_request_state(operation.is_some());
++        let history = self.publication.lock().map_err(|_| Error::StateUnknown)?;
++        let history_available = !history.failed && operation.as_ref()
++            .is_some_and(|value| history.acknowledged == Some(value.status_revision));
++        let row = data::Request {
++            request_id: self.input.request_id.clone(),
++            expected_observation_revision: self.input.expected_observation_revision,
++            progress: data::Progress::LocalCheck { request_state }, operation, history_available,
++        };
++        row.validate().map_err(|_| Error::StateUnknown)?;
++        Ok(row)
++    }
++    pub(crate) fn status(&self) -> Result<Status, Error> {
++        self.occupies();
++        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
++        let request_state = self.observed_request_state(operation.is_some());
+         let history = self.publication.lock().map_err(|_| Error::StateUnknown)?;
+         let history_available = operation
+             .as_ref()
+@@ -492,15 +521,7 @@
+         let status = Status {
+             origin: self.input.query(),
+             expected_observation_revision: self.input.expected_observation_revision,
+-            request_state: if operation.is_some()
+-                && matches!(
+-                    request_state,
+-                    RequestState::Queued | RequestState::Admitting
+-                ) {
+-                RequestState::OriginalAvailable
+-            } else {
+-                request_state
+-            },
++            request_state,
+             operation,
+             history_available,
+             do_not_replay: true,
+diff --git a/desktop/src-tauri/src/agent_build_requests.rs b/desktop/src-tauri/src/agent_build_requests.rs
+--- a/desktop/src-tauri/src/agent_build_requests.rs
++++ b/desktop/src-tauri/src/agent_build_requests.rs
+@@ -454,9 +454,7 @@
+             _ => false,
+         }
+     }
+-    pub(crate) fn status(&self) -> Result<Snapshot, Error> {
+-        self.occupies();
+-        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
++    fn observed_request_state(&self) -> RequestState {
+         let request_state = match self.phase.load(Ordering::Acquire) {
+             QUEUED => RequestState::Queued,
+             PREPARING => RequestState::Preparing,
+@@ -466,12 +464,50 @@
+             EXPIRED => RequestState::Expired,
+             _ => RequestState::AdmissionUnknown,
+         };
++        request_state
++    }
++    fn observed_start_state(&self) -> StartState {
+         let start_state = match self.start.load(Ordering::Acquire) {
+             NO_START => StartState::NotRequested,
+             START_QUEUED => StartState::Queued,
+             START_ADMITTING => StartState::Admitting,
+             _ => StartState::Consumed,
+         };
++        start_state
++    }
++    /// Same original metadata, with no Report, Review or tool binding clone.
++    pub(crate) fn catalogue_metadata(&self) -> Result<crate::service_request_catalogue::Request, Error> {
++        use crate::service_request_catalogue as data;
++        self.occupies();
++        let operation = {
++            let latest = self.latest.lock().map_err(|_| Error::StateUnknown)?;
++            latest.as_ref().map(|value| data::Operation {
++                operation_id: value.operation_id().clone(), owner_generation: value.owner_generation().clone(),
++                status_revision: value.status_revision(), state: value.state(), settlement: value.settlement(),
++            })
++        }; // Never invert the existing latest -> publication order.
++        let request_state = self.observed_request_state();
++        let start_state = self.observed_start_state();
++        let progress = match self.family() {
++            Family::AndroidInspect => data::Progress::AndroidBuild { request_state, start_state },
++            Family::IosArchive => data::Progress::IosArchive { request_state, start_state },
++        };
++        let history = self.publication.lock().map_err(|_| Error::StateUnknown)?;
++        let history_available = !history.failed && operation.as_ref()
++            .is_some_and(|value| history.acknowledged == Some(value.status_revision));
++        let row = data::Request {
++            request_id: self.input.request_id.clone(),
++            expected_observation_revision: self.input.expected_observation_revision,
++            progress, operation, history_available,
++        };
++        row.validate().map_err(|_| Error::StateUnknown)?;
++        Ok(row)
++    }
++    pub(crate) fn status(&self) -> Result<Snapshot, Error> {
++        self.occupies();
++        let operation = self.latest.lock().map_err(|_| Error::StateUnknown)?.clone();
++        let request_state = self.observed_request_state();
++        let start_state = self.observed_start_state();
+         let p = self.publication.lock().map_err(|_| Error::StateUnknown)?;
+         let result = Snapshot {
+             origin: self.input.query(),
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -71,6 +71,8 @@
+ mod agent_android_build;
+ #[path = "application_service_agent_ios_archive.rs"]
+ mod agent_ios_archive;
++#[path = "application_service_request_catalogue.rs"]
++mod request_catalogue;
+
+ pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
+     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+@@ -348,6 +350,7 @@
+             // These two fixed routes touch only the bounded proposal inbox.
+             // No native callback, executor or GUI approval runs in a socket.
+             match &request.request {
++                p::RequestBody::Requests(query) => return self.discover_requests(client, &query.project_id),
+                 p::RequestBody::AndroidBuildPrepare(input) => return self.prepare_agent_android_build(client, input.clone()),
+                 p::RequestBody::AndroidBuildStart(input) => return self.start_agent_android_build(client, input),
+                 p::RequestBody::AndroidBuildStatus(query) => return self.query_agent_android_build(client, query, false),
+@@ -369,7 +372,7 @@
+             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
+             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
+             Ok(match request.request {
+-                p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
++                p::RequestBody::Requests(_) | p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
+                     | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_)
+                     | p::RequestBody::AndroidBuildPrepare(_) | p::RequestBody::AndroidBuildStart(_) | p::RequestBody::AndroidBuildStatus(_) | p::RequestBody::AndroidBuildCancel(_)
+                     | p::RequestBody::IosArchivePrepare(_) | p::RequestBody::IosArchiveStart(_) | p::RequestBody::IosArchiveStatus(_) | p::RequestBody::IosArchiveCancel(_) => return Err(Error::InvalidRequest),
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -210,6 +210,7 @@
+     #[serde(rename = "projects.list")] Projects(Empty),
+     #[serde(rename = "project.observation")] Observe(ProjectQuery),
+     #[serde(rename = "android-tools.observation")] AndroidTools(ProjectQuery),
++    #[serde(rename = "request.list")] Requests(ProjectQuery),
+     #[serde(rename = "operation.list")] Operations(ProjectQuery),
+     #[serde(rename = "operation.status")] Operation(OperationQuery),
+     #[serde(rename = "local-check.submit")] LocalCheckSubmit(crate::agent_local_checks::Submit),
+@@ -246,6 +247,7 @@
+     Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
+     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
+     AndroidTools(crate::service_android_tools::View),
++    Requests(crate::service_request_catalogue::Catalogue),
+     IdentityIntent(crate::agent_identity_requests::IntentStatus),
+     LocalCheck(crate::agent_local_checks::Status),
+     AndroidBuildRequest(crate::agent_android_build::Status),
+@@ -351,6 +353,7 @@
+         }
+         ResponseBody::Observation(row) => project(row)?,
+         ResponseBody::AndroidTools(row) => row.validate()?,
++        ResponseBody::Requests(row) => { row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+         ResponseBody::Operations(rows) => {
+             if rows.len() > OPERATION_LIMIT { return Err(Error::InvalidRequest); }
+             let mut seen = std::collections::BTreeSet::new();
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -22,6 +22,7 @@
+   mrk projects [--json]\n\
+   mrk observe PROJECT_ID [--json]\n\
+   mrk android-tools PROJECT_ID [--json]\n\
++  mrk requests PROJECT_ID [--json]\n\
+   mrk operations PROJECT_ID [--json]\n\
+   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
+   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
+@@ -41,6 +42,7 @@
+ Capabilities describe this CLI without opening Desktop or reading project data.\n\
+ For the other commands, open Desktop, select a project, then enable agent read access in Settings.\n\
+ Reads return observations; they do not rerun actions or validate a release.\n\
++requests lists retained local-check/build request IDs in this Desktop instance, not complete history or replay permission.\n\
+ android-tools returns historical Desktop catalogue labels, not current tools or project compatibility.\n\
+ observe --json may include optional setup state codes, not a passed check or release approval.\n\
+ Identity requests additionally need the separate 15-minute Desktop request permission.\n\
+@@ -71,6 +73,7 @@
+         ["projects"] => p::RequestBody::Projects(p::Empty {}),
+         ["observe", project] => p::RequestBody::Observe(p::ProjectQuery { project_id: Id::parse(project)? }),
+         ["android-tools", project] => p::RequestBody::AndroidTools(p::ProjectQuery { project_id: Id::parse(project)? }),
++        ["requests", project] => p::RequestBody::Requests(p::ProjectQuery { project_id: Id::parse(project)? }),
+         ["operations", project] => p::RequestBody::Operations(p::ProjectQuery { project_id: Id::parse(project)? }),
+         ["operation", project, operation] => p::RequestBody::Operation(p::OperationQuery { project_id: Id::parse(project)?, operation_id: Id::parse(operation)? }),
+         _ => return Err(Error::InvalidRequest),
+@@ -85,11 +88,12 @@
+     arguments: &'static [&'static str],
+     description: &'static str,
+ }
+-const READ_COMMANDS: [CommandCapability; 6] = [
++const READ_COMMANDS: [CommandCapability; 7] = [
+     CommandCapability { command: "status", arguments: &[], description: "Read the current Desktop service access status." },
+     CommandCapability { command: "projects", arguments: &[], description: "List projects allowed by the current read grant." },
+     CommandCapability { command: "observe", arguments: &["PROJECT_ID"], description: "Read a saved project observation and optional redacted setup guidance, which may be stale." },
+     CommandCapability { command: "android-tools", arguments: &["PROJECT_ID"], description: "Read historical Desktop catalogue labels; not live tools, inspection or project compatibility." },
++    CommandCapability { command: "requests", arguments: &["PROJECT_ID"], description: "Discover current-instance local-check/Android/iOS request IDs; not complete history or replay permission." },
+     CommandCapability { command: "operations", arguments: &["PROJECT_ID"], description: "List saved operation observations for a project." },
+     CommandCapability { command: "operation", arguments: &["PROJECT_ID", "OPERATION_ID"], description: "Read one saved operation observation; it is not native finality authority." },
+ ];
+@@ -157,6 +161,7 @@
+                 "commands": IOS_ARCHIVE_COMMANDS, "archiveDigestAvailable": false,
+                 "sharesBuildGrantAndRequestLimitWithAndroid": true,
+             },
++            "requestDiscovery": {"scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+                 "defaultEnabled": false,
+@@ -273,6 +278,7 @@
+         p::ResponseBody::Operations(operations) => if operations.is_empty() { "No operation observations have been published for this project.\n".to_owned() } else { operations.iter().map(operation).collect() },
+         p::ResponseBody::Operation(value) => operation(value),
+         p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
++        p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
+         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
+         p::ResponseBody::IdentityIntent(value) => identity::human(value),
+         p::ResponseBody::LocalCheck(value) => local_checks::human(value),
+@@ -324,6 +330,33 @@
+ mod tests {
+     use super::*;
+     fn args(values: &[&str]) -> Vec<OsString> { values.iter().map(OsString::from).collect() }
++    #[test]
++    fn requests_is_discovery_only_and_rejects_action_parameters_and_foreign_instance() {
++        let id = "11111111111111111111111111111111";
++        let Parsed::Request(options) = parse(args(&["requests", id, "--json"])).unwrap() else { panic!("wrong command") };
++        let wire = p::encode_request(&options.request).unwrap();
++        assert!(matches!(p::decode_request(&wire).unwrap().request, p::RequestBody::Requests(_)));
++        for extra in ["start", "cancel", "--report", "--root", "--all-projects"] {
++            assert!(parse(args(&["requests", id, extra])).is_err());
++        }
++        let view = crate::service_request_catalogue::Catalogue {
++            schema_version: 1, scope: crate::service_request_catalogue::Scope::CurrentHostRetainedRequests,
++            sampling: crate::service_request_catalogue::Sampling::PerRequestNotAtomic,
++            service_instance: Id::parse(id).unwrap(), project_id: Id::parse(id).unwrap(),
++            do_not_replay: true, requests: vec![],
++        };
++        let mut response = p::Response { version: p::VERSION, request_id: options.request.request_id,
++            service_instance: Id::parse(id).unwrap(), client_id: Id::parse(id).unwrap(), session_id: Id::parse(id).unwrap(),
++            response: p::ResponseBody::Requests(view) };
++        assert!(p::encode_response(&response).is_ok());
++        assert!(human(&response.response).contains("restart does not prove earlier work settled"));
++        response.service_instance = Id::parse("22222222222222222222222222222222").unwrap();
++        assert!(p::encode_response(&response).is_err());
++        let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
++        assert_eq!(caps["requestDiscovery"]["grantsExecution"], false);
++        assert_eq!(caps["requestDiscovery"]["includesReports"], false);
++        assert_eq!(caps["requestDiscovery"]["maxRequests"], 64);
++    }
+     #[test]
+     fn android_tools_is_a_closed_historical_read_with_no_action_parameters() {
+         let id = "11111111111111111111111111111111";
+@@ -392,7 +425,7 @@
+         assert_eq!(value["operationsRequire"], serde_json::json!({"runningDesktop":true,"projectReadGrant":true}));
+         assert!(value.get("serviceInstance").is_none() && value.get("requestId").is_none());
+         let commands = value["commands"].as_array().unwrap();
+-        assert_eq!(commands.len(), 6);
++        assert_eq!(commands.len(), 7);
+         // Each advertised command/argument order is accepted by the actual
+         // parser, not a separate documentation-only command implementation.
+         for command in commands {
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -255,6 +255,7 @@
+     let bytes = p::encode_response(&response)?;
+     match &response.response {
+         p::ResponseBody::AndroidTools(view) => service.android_tools_client_current(&client, &view.project_id)?,
++        p::ResponseBody::Requests(view) => service.requests_client_current(&client, &view.project_id)?,
+         _ => service.client_current(&client)?,
+     }
+     write_frame(stream, &bytes).await
+@@ -370,6 +371,17 @@
+                 }
+                 _ => panic!("wrong response"),
+             }
++            let discovery = p::Request { version: 1, request_id: Id::random().unwrap(), request:
++                p::RequestBody::Requests(p::ProjectQuery { project_id: id.clone() }) };
++            let response = request(&f.app, &discovery).await.unwrap();
++            match response.response {
++                p::ResponseBody::Requests(view) => {
++                    assert_eq!(view.service_instance, response.service_instance);
++                    assert_eq!(view.project_id, id);
++                    assert!(view.requests.is_empty() && view.do_not_replay);
++                }
++                _ => panic!("wrong response"),
++            }
+             observations.publish(crate::service_android_tools::tests::catalogue());
+             match request(&f.app, &tools).await.unwrap().response {
+                 p::ResponseBody::AndroidTools(view) => {
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -2002,6 +2002,8 @@
+             self.add(crate::agent_build_requests::DOCUMENT_BACKING)?; // ONE shared build inbox, not one per platform.
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             self.add(crate::service_android_tools::DOCUMENT_BACKING)?; // One volatile Host/Service DATA cell.
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            self.add(crate::service_request_catalogue::DOCUMENT_BACKING)?; // Same eight IPC request-summary replies, no new inbox.
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -112,6 +112,7 @@
+ mod service_protocol;
+ mod service_setup_guidance;
+ mod service_android_tools;
++mod service_request_catalogue;
+ mod agent_identity_requests;
+ mod agent_local_checks;
+ mod agent_android_build;
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -5,6 +5,7 @@
+ mod service_protocol;
+ mod service_setup_guidance;
+ mod service_android_tools;
++mod service_request_catalogue;
+ mod agent_identity_requests;
+ mod agent_local_checks;
+ mod agent_android_build;
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -21,6 +21,7 @@
+ #[path = "../src/service_protocol.rs"] mod service_protocol;
+ #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
+ #[path = "../src/service_android_tools.rs"] mod service_android_tools;
++#[path = "../src/service_request_catalogue.rs"] mod service_request_catalogue;
+ #[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;
+ #[path = "../src/agent_local_checks.rs"] mod agent_local_checks;
+ #[path = "../src/agent_android_build.rs"] mod agent_android_build;

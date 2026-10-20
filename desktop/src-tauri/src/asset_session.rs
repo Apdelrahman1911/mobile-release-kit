@@ -2005,6 +2005,8 @@ mod lookup_memory {
             self.add(crate::agent_build_requests::DOCUMENT_BACKING)?; // ONE shared build inbox, not one per platform.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             self.add(crate::service_android_tools::DOCUMENT_BACKING)?; // One volatile Host/Service DATA cell.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(crate::service_request_catalogue::DOCUMENT_BACKING)?; // Same eight IPC request-summary replies, no new inbox.
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;

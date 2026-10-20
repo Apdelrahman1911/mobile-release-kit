@@ -210,6 +210,7 @@ pub enum RequestBody {
     #[serde(rename = "projects.list")] Projects(Empty),
     #[serde(rename = "project.observation")] Observe(ProjectQuery),
     #[serde(rename = "android-tools.observation")] AndroidTools(ProjectQuery),
+    #[serde(rename = "request.list")] Requests(ProjectQuery),
     #[serde(rename = "operation.list")] Operations(ProjectQuery),
     #[serde(rename = "operation.status")] Operation(OperationQuery),
     #[serde(rename = "local-check.submit")] LocalCheckSubmit(crate::agent_local_checks::Submit),
@@ -246,6 +247,7 @@ pub enum ResponseBody {
     Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
     AndroidTools(crate::service_android_tools::View),
+    Requests(crate::service_request_catalogue::Catalogue),
     IdentityIntent(crate::agent_identity_requests::IntentStatus),
     LocalCheck(crate::agent_local_checks::Status),
     AndroidBuildRequest(crate::agent_android_build::Status),
@@ -351,6 +353,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         }
         ResponseBody::Observation(row) => project(row)?,
         ResponseBody::AndroidTools(row) => row.validate()?,
+        ResponseBody::Requests(row) => { row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         ResponseBody::Operations(rows) => {
             if rows.len() > OPERATION_LIMIT { return Err(Error::InvalidRequest); }
             let mut seen = std::collections::BTreeSet::new();

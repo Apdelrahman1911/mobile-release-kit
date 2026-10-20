@@ -255,6 +255,7 @@ async fn serve_exchange(stream: &mut UnixStream, service: &ApplicationService, e
     let bytes = p::encode_response(&response)?;
     match &response.response {
         p::ResponseBody::AndroidTools(view) => service.android_tools_client_current(&client, &view.project_id)?,
+        p::ResponseBody::Requests(view) => service.requests_client_current(&client, &view.project_id)?,
         _ => service.client_current(&client)?,
     }
     write_frame(stream, &bytes).await
@@ -367,6 +368,17 @@ mod tests {
                     assert_eq!(view.capture, crate::service_android_tools::Capture::Unobserved);
                     assert_eq!(view.freshness, crate::service_android_tools::Freshness::HistoricalNotRevalidated);
                     assert_eq!(view.project_compatibility, crate::service_android_tools::Compatibility::NotChecked);
+                }
+                _ => panic!("wrong response"),
+            }
+            let discovery = p::Request { version: 1, request_id: Id::random().unwrap(), request:
+                p::RequestBody::Requests(p::ProjectQuery { project_id: id.clone() }) };
+            let response = request(&f.app, &discovery).await.unwrap();
+            match response.response {
+                p::ResponseBody::Requests(view) => {
+                    assert_eq!(view.service_instance, response.service_instance);
+                    assert_eq!(view.project_id, id);
+                    assert!(view.requests.is_empty() && view.do_not_replay);
                 }
                 _ => panic!("wrong response"),
             }
