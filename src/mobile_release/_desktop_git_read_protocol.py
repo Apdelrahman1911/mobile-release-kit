@@ -129,7 +129,7 @@ class Action:
 
 def action(value: Any) -> Action:
     row = _keys(value, ("kind", "expectedRevision", "paths", "staged"))
-    require(type(row["kind"]) is str and row["kind"] in ("observe", "diff", "history")
+    require(type(row["kind"]) is str and row["kind"] in ("observe", "diff", "history", "branches")
             and type(row["staged"]) is bool and type(row["paths"]) is list)
     revision = row["expectedRevision"]
     require(revision is None if row["kind"] == "observe" else type(revision) is str)
@@ -244,7 +244,9 @@ def terminal(request: Request, status: str, *, reason: str | None, result=None,
         _integer(first_failure_ns, 1, cleanup_end_ns)
         require(cleanup_end_ns - first_failure_ns <= 10_000_000_000)
     if status == "ok":
-        expected_type = {"observe": read.ReadObservation, "diff": core.Diff, "history": read.History}[request.action.kind]
+        from .git_repository_branches import Branches
+        expected_type = {"observe": read.ReadObservation, "diff": core.Diff, "history": read.History,
+                         "branches": Branches}[request.action.kind]
         require(type(result) is expected_type and reason is None and first_failure_ns is None
                 and cleanup_end_ns == request.hard_end_ns)
         if request.action.kind != "observe":

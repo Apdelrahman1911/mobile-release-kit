@@ -15,6 +15,7 @@ import sys
 import time
 
 from . import _desktop_git_read_protocol as wire
+from . import _desktop_git_branches as branch
 from . import git_repository_read as read
 from . import git_service as core
 from ._desktop_git_read_control import GitReadInput
@@ -56,7 +57,7 @@ class GitReadOperation:
         self.calls = 0
         self.pending: _Command | None = None
         self.repository: read.GitReadRepository | None = None
-        self.result: read.ReadObservation | core.Diff | read.History | None = None
+        self.result: read.ReadObservation | core.Diff | read.History | branch.Branches | None = None
         source.bind_operation(self)  # Before any acquisition can lose its return.
 
     def checkpoint(self) -> None:
@@ -140,7 +141,9 @@ class GitReadOperation:
                      and type(output_limit) is int and 0 < output_limit <= core.MAX_GIT_BYTES
                      and type(timeout) is int and 0 < timeout <= wire.COMMAND_SECONDS)
         sessions = self.repository._active_sessions
-        wire.require(len(sessions) == 1 and type(sessions[0]) is read._ReadSession
+        wire.require(len(sessions) == 1
+                     and (branch.read_session(self, sessions[0]) if self.request.action.kind == "branches" else
+                          type(sessions[0]) is read._ReadSession)
                      and sessions[0].repository is self.repository and sessions[0].frozen is not None)
         session = sessions[0]
         wire.require(type(argv) is list and all(type(arg) is str for arg in argv))
@@ -178,15 +181,18 @@ class GitReadOperation:
         self.source_post(hash_files=True)
         wire.require(self.source.go_returned and not self.entered)
         self.entered = True
-        self.repository = read.GitReadRepository(self.request.root, git_executable=wire.TOOL_PATH,
+        action = self.request.action
+        repository_type = branch.GitBranchesRepository if action.kind == "branches" else read.GitReadRepository
+        self.repository = repository_type(self.request.root, git_executable=wire.TOOL_PATH,
             work_end=self.source.work_end, cancellation=self.guard, _run=self.command)
         wire.require(self.repository.root == self.request.root)
-        action = self.request.action
         try:
             if action.kind == "observe":
                 result = self.repository.observe()
             elif action.kind == "diff":
                 result = self.repository.diff(action.paths, staged=action.staged, expected_revision=action.expected_revision)
+            elif action.kind == "branches":
+                result = self.repository.branches(expected_revision=action.expected_revision)
             else:
                 wire.require(action.kind == "history")
                 result = self.repository.history(expected_revision=action.expected_revision)

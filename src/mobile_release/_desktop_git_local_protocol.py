@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 
 from . import _desktop_git_read_protocol as source_fields
+from . import _desktop_git_branches as branch
 from . import git_repository_local as local
 from . import git_repository_read as read
 from . import git_service as core
@@ -49,7 +50,9 @@ class Action:
                 {"name": self.identity.name, "email": self.identity.email}}
 
 
-def action(value) -> Action:
+def action(value) -> Action | branch.Action:
+    if type(value) is dict and value.get("kind") == "branch-create":
+        return branch.action(value)
     row = source_fields._keys(value, ("kind", "expectedRevision", "paths", "message", "identity"))
     require(type(row["kind"]) is str and row["kind"] in ("stage", "unstage", "commit"))
     revision = source_fields._hex(row["expectedRevision"])
@@ -73,7 +76,7 @@ def action(value) -> Action:
 class Request:
     id: str
     phase: str
-    action: Action
+    action: Action | branch.Action
     review_digest: str | None
     journal_revision: int | None
     project_id: str  # Runtime context alias; NOT the durable service project ID.
@@ -142,7 +145,9 @@ def go(request: Request) -> bytes:
     return b"MRK-GIT-LOCAL-GO/1 " + request.digest.encode("ascii") + b"\n"
 
 
-def matches_review(request: Request, review: local.LocalReview) -> None:
+def matches_review(request: Request, review: local.LocalReview | branch.BranchReview) -> None:
+    if type(request) is Request and type(request.action) is branch.Action:
+        return branch.matches_review(request, review)
     require(type(request) is Request and type(review) is local.LocalReview and type(review.plan) is core.GitPlan
             and review.digest == local._review_digest(review.plan))
     plan = review.plan
@@ -156,12 +161,15 @@ def matches_review(request: Request, review: local.LocalReview) -> None:
 @dataclass(frozen=True, slots=True, repr=False)
 class Candidate:
     request: Request
-    intent: core.PublicationIntent
+    intent: core.PublicationIntent | branch.BranchIntent
     raw: bytes
     digest: str
 
 
-def candidate(request: Request, review: local.LocalReview, intent: core.PublicationIntent) -> Candidate:
+def candidate(request: Request, review: local.LocalReview | branch.BranchReview,
+              intent: core.PublicationIntent | branch.BranchIntent) -> Candidate:
+    if type(request) is Request and type(request.action) is branch.Action:
+        return branch.candidate(request, review, intent)
     matches_review(request, review)
     require(request.phase == "apply" and type(intent) is core.PublicationIntent)
     before = review.plan._snapshot
@@ -192,11 +200,15 @@ def acknowledged(request: Request, sent: Candidate, raw: bytes) -> int:
     return revision
 
 
-def terminal(request: Request, status: str, *, reason: str | None, review: local.LocalReview | None = None,
+def terminal(request: Request, status: str, *, reason: str | None,
+             review: local.LocalReview | branch.BranchReview | None = None,
              diff: core.Diff | None = None, result: core.MutationResult | None = None,
              publication: str = "not-reported", first_failure_ns: int | None, cleanup_end_ns: int) -> bytes:
-    require(type(request) is Request and status in STATUSES and (reason is None or reason in core._REASONS)
-            and publication in ("not-reported", "index-returned", "ref-returned"))
+    is_branch = type(request) is Request and type(request.action) is branch.Action
+    require(type(request) is Request and status in STATUSES
+            and (reason is None or (branch.valid_reason(reason) if is_branch else reason in core._REASONS))
+            and publication in (("not-reported", branch.PUBLICATION) if is_branch else
+                                ("not-reported", "index-returned", "ref-returned")))
     try:
         source_fields._integer(cleanup_end_ns, 1, request.hard_end_ns)
         if first_failure_ns is not None:
@@ -205,7 +217,10 @@ def terminal(request: Request, status: str, *, reason: str | None, review: local
     except source_fields.ProtocolError:
         raise ProtocolError(_ERROR) from None
     data = None
-    if status == "ok":
+    if is_branch:
+        data = branch.terminal_data(request, status, reason=reason, review=review, diff=diff,
+            result=result, publication=publication, first_failure_ns=first_failure_ns, cleanup_end_ns=cleanup_end_ns)
+    elif status == "ok":
         require(reason is None)
         if request.phase == "prepare":
             require(result is None and publication == "not-reported" and first_failure_ns is None

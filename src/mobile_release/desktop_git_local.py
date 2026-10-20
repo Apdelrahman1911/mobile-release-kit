@@ -16,6 +16,7 @@ import sys
 import time
 
 from . import _desktop_git_local_protocol as wire
+from . import _desktop_git_branches as branch
 from . import _desktop_git_read_protocol as source_fields
 from . import git_repository_local as local
 from . import git_service as core
@@ -159,7 +160,9 @@ class GitLocalOperation:
                      and type(output_limit) is int and 0 < output_limit <= core.MAX_GIT_BYTES
                      and type(timeout) is int and 0 < timeout <= wire.COMMAND_SECONDS)
         sessions = self.repository._active_sessions
-        wire.require(len(sessions) == 1 and type(sessions[0]) is local._LocalSession
+        wire.require(len(sessions) == 1
+                     and (branch.local_session(self, sessions[0]) if type(self.request.action) is branch.Action else
+                          type(sessions[0]) is local._LocalSession)
                      and sessions[0].repository is self.repository and sessions[0].frozen is not None)
         session = sessions[0]
         wire.require(type(argv) is list and all(type(arg) is str for arg in argv) and type(environ) is dict)
@@ -215,20 +218,28 @@ class GitLocalOperation:
         self.source_post(hash_files=True)
         wire.require(self.source.go_returned and not self.entered)
         self.entered = True
-        self.repository = local.GitLocalRepository(self.request.root, git_executable=wire.TOOL_PATH,
-            work_end=self.source.work_end, cancellation=self.guard, _run=self.command)
         action = self.request.action
+        repository_type = branch.GitBranchesRepository if type(action) is branch.Action else local.GitLocalRepository
+        self.repository = repository_type(self.request.root, git_executable=wire.TOOL_PATH,
+            work_end=self.source.work_end, cancellation=self.guard, _run=self.command)
         try:
             # Apply performs a genuine fresh prepare from the retained exact
             # input, not reconstruction of a serialized/core plan capability.
-            self.review = self.repository.prepare_local(action.kind, expected_revision=action.expected_revision,
-                paths=action.paths, message=action.message, identity=action.identity)
+            if type(action) is branch.Action:
+                self.review = self.repository.prepare_branch(action.name, expected_revision=action.expected_revision,
+                    expected_reference_revision=action.expected_reference_revision)
+            else:
+                self.review = self.repository.prepare_local(action.kind, expected_revision=action.expected_revision,
+                    paths=action.paths, message=action.message, identity=action.identity)
             wire.matches_review(self.request, self.review)
-            if self.request.phase == "prepare":
+            if self.request.phase == "prepare" and type(action) is not branch.Action:
                 self.diff = self.repository.diff(self.review.plan.paths, staged=action.kind != "stage",
                                                 expected_revision=action.expected_revision)
-            else:
-                self.result = self.repository.apply_review(self.review, self, expected_digest=self.request.review_digest)
+            elif self.request.phase == "apply":
+                if type(action) is branch.Action:
+                    self.result = self.repository.apply_branch(self.review, self, expected_digest=self.request.review_digest)
+                else:
+                    self.result = self.repository.apply_review(self.review, self, expected_digest=self.request.review_digest)
                 if self.result.state != "succeeded":
                     self.source.failure_observed()
             wire.require(not self.repository._unknown and not self.repository._active_sessions
@@ -243,6 +254,8 @@ class GitLocalOperation:
             raise
 
     def publication(self) -> str:
+        if type(self.request.action) is branch.Action:
+            return branch.publication(self)
         if self._publication() is not None:
             return "index-returned"
         transaction = None if self.repository is None else self.repository._transaction
