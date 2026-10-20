@@ -1,0 +1,102 @@
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -319,6 +319,8 @@
+             "release_version_edit_close", "release_version_edit_status",
+             "project_identity_open", "project_identity_prepare", "project_identity_apply",
+             "project_identity_close", "project_identity_status",
++            "agent_identity_status", "allow_agent_identity", "revoke_agent_identity", "decline_agent_identity",
++            "review_agent_identity", "prepare_agent_identity", "apply_agent_identity",
+             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
+             "github_auth_status", "github_auth_connect", "github_auth_cancel", "github_auth_accounts",
+             "git_read_status", "git_read_start", "git_read_cancel",
+@@ -331,6 +333,7 @@
+             "github_history_status", "github_history_start", "github_history_cancel",
+             "vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "asset_context", "asset_choose", "credential_prepare",
+             "vault_prepare_delete", "vault_backup_export", "vault_backup_import", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
++            "upload_key_status", "upload_key_prepare", "upload_key_create",
+         ];
+         let attributes = tauri_build::Attributes::new()
+             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -1,7 +1,7 @@
+ {
+   "$schema": "../gen/schemas/desktop-schema.json",
+   "identifier": "main",
+-  "description": "Fixed passive queries, fixed macOS installation-location Finder requests and explicit original-owned read-only installation checks; explicitly confirmed installed-helper preparation and normal Quit, not Installer changes; finite local configuration, workflows, public metadata and saved-version edits; explicitly confirmed nonpublishing Store access checks using assigned local credentials, separately authorized local release-history and Store preparation/execution/reconciliation through original native owners, reviewed saved offline checks, Android builds, unsigned full-Xcode Mac archives and owned build-input recovery; qualified session or encrypted credential management. Store mutations still require project opt-in, reviewed original intent, assigned credentials and one-use confirmation; this capability grants no general Store or network authority. GitHub preflight permits only publisher-bound caller review, one-use nonpublishing dispatch and exact original-run observation. Build-tool preparation permits only separately admitted fixed public-source staging with one-use Start, not arbitrary download URLs or automatic installation. Build tools can execute trusted project code only under native runtime/tool custody. GitHub repository settings permit only separately reviewed, one-use Actions-enabled or workflow-token-policy changes on the same connected registered project. Setup publication permits only separately reviewed saved configuration plus four canonical callers on a new branch and draft PR, and read-only reconciliation of original durable intents. No general HTTP, arbitrary remote writes, event emission, filesystem, shell or opener authority; listen/unlisten is for owner status only.",
++  "description": "Fixed passive queries, fixed macOS installation-location Finder requests and explicit original-owned read-only installation checks; explicitly confirmed installed-helper preparation and normal Quit, not Installer changes; finite local configuration, workflows, public metadata and saved-version edits; explicitly confirmed nonpublishing Store access checks using assigned local credentials, separately authorized local release-history and Store preparation/execution/reconciliation through original native owners, reviewed saved offline checks, Android builds, unsigned full-Xcode Mac archives and owned build-input recovery; qualified session or encrypted credential management. Store mutations still require project opt-in, reviewed original intent, assigned credentials and one-use confirmation; this capability grants no general Store or network authority. GitHub preflight permits only publisher-bound caller review, one-use nonpublishing dispatch and exact original-run observation. Build-tool preparation permits only separately admitted fixed public-source staging with one-use Start, not arbitrary download URLs or automatic installation. Build tools can execute trusted project code only under native runtime/tool custody. GitHub repository settings permit only separately reviewed, one-use Actions-enabled or workflow-token-policy changes on the same connected registered project. Setup publication permits only separately reviewed saved configuration plus four canonical callers on a new branch and draft PR, and read-only reconciliation of original durable intents. Agent-requested project identity changes retain their separate explicit grant and review. Android upload-key setup permits only separately qualified, explicitly confirmed generation for a new application into encrypted storage; no implicit replacement of an existing key. No general HTTP, arbitrary remote writes, event emission, filesystem, shell or opener authority; listen/unlisten is for owner status only.",
+   "windows": ["main"],
+   "local": true,
+   "permissions": [
+@@ -46,6 +46,8 @@
+     "allow-release-version-edit-close", "allow-release-version-edit-status",
+     "allow-project-identity-open", "allow-project-identity-prepare", "allow-project-identity-apply",
+     "allow-project-identity-close", "allow-project-identity-status",
++    "allow-agent-identity-status", "allow-allow-agent-identity", "allow-revoke-agent-identity", "allow-decline-agent-identity",
++    "allow-review-agent-identity", "allow-prepare-agent-identity", "allow-apply-agent-identity",
+     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
+     "allow-github-auth-status", "allow-github-auth-connect", "allow-github-auth-cancel", "allow-github-auth-accounts",
+     "allow-git-read-status", "allow-git-read-start", "allow-git-read-cancel",
+@@ -58,6 +60,7 @@
+     "allow-github-history-status", "allow-github-history-start", "allow-github-history-cancel",
+     "allow-vault-status", "allow-vault-open", "allow-vault-prepare-initialize", "allow-vault-unlock", "allow-asset-context", "allow-asset-choose", "allow-credential-prepare",
+     "allow-vault-prepare-delete", "allow-vault-backup-export", "allow-vault-backup-import", "allow-vault-commit", "allow-vault-bind", "allow-vault-discard", "allow-vault-lock",
++    "allow-upload-key-status", "allow-upload-key-prepare", "allow-upload-key-create",
+     "core:event:allow-listen", "core:event:allow-unlisten"
+   ]
+ }
+diff --git a/desktop/tests/catalog.test.mjs b/desktop/tests/catalog.test.mjs
+--- a/desktop/tests/catalog.test.mjs
++++ b/desktop/tests/catalog.test.mjs
+@@ -14,6 +14,7 @@
+ import { previewApi } from '../src/preview.ts';
+ import { parseAssetStatus } from '../src/assetSessionProtocol.ts';
+ import { AssetSessionController, assetCancellationReason } from '../src/assetSessionController.ts';
++import { NEW_UPLOAD_KEY_DECLARATION } from '../src/credentialUploadKey.ts';
+
+ test('browser preview requires the exact explicit flag; native errors cannot select it', async () => {
+   for (const flag of [undefined, '', '0', 'true', true, 1]) assert.equal(bridgeMode(flag, false), 'unavailable');
+@@ -366,3 +367,41 @@
+     assert.match(permission, /^(?:allow-[a-z0-9-]+|core:event:allow-(?:un)?listen)$/);
+   }
+ });
++
++test('ten reviewed identity and upload-key controls have exact local-main ACL grants for their actual bridge commands', async () => {
++  const emitted = [];
++  const api = createNativeApi('native', async (command, args) => {
++    emitted.push({ command, args });
++    // Deliberate native-style refusal, never a fabricated successful status,
++    // credential, grant or qualification. Only bridge emission is exercised.
++    throw { code: 'asset_unqualified' };
++  });
++  const agent = api.agentIdentity;
++  assert.ok(agent); assert.equal(emitted.length, 0);
++  const [intentId, sessionId, revision, planToken] = ['a', 'b', 'c', 'd'].map((c) => c.repeat(32));
++  for (const action of [
++    () => agent.status(), () => agent.allow('project-1'), () => agent.revoke(),
++    () => agent.decline(intentId), () => agent.review(intentId),
++    () => agent.prepare({ intentId, sessionId, revision, acknowledgeNewApplication: true }),
++    () => agent.apply({ intentId, sessionId, revision, planToken, reviewed: true }),
++    () => api.uploadKeyStatus({ contextRevision: 1 }),
++    () => api.prepareUploadKey({ contextRevision: 1 }),
++    () => api.createUploadKey({ contextRevision: 1, expectedStatusRevision: 1, declaration: NEW_UPLOAD_KEY_DECLARATION }),
++  ]) await assert.rejects(action);
++  assert.deepEqual(emitted.map(({ command }) => command), [
++    'agent_identity_status', 'allow_agent_identity', 'revoke_agent_identity', 'decline_agent_identity',
++    'review_agent_identity', 'prepare_agent_identity', 'apply_agent_identity',
++    'upload_key_status', 'upload_key_prepare', 'upload_key_create',
++  ]);
++  assert.ok(emitted.slice(0, 7).every(({ args }) => args instanceof Uint8Array));
++  const permitted = capability.permissions.filter((p) => typeof p === 'string'
++    && (p.includes('agent-identity') || p.startsWith('allow-upload-key-')));
++  assert.equal(permitted.length, 10);
++  assert.deepEqual(new Set(permitted), new Set(emitted.map(({ command }) => 'allow-' + command.replaceAll('_', '-'))));
++  assert.deepEqual(capability.windows, ['main']); assert.equal(capability.local, true);
++  assert.equal(Object.hasOwn(capability, 'remote'), false);
++  assert.equal(Object.hasOwn(capability, 'webviews'), false);
++  // Locked Tauri denies missing application ACL entries before the handler.
++  // Its desktop-shell build separately validates the declarations generated
++  // from build.rs AppManifest; this test does not execute a native handler.
++});
