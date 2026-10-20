@@ -1,0 +1,88 @@
+--- a/desktop/src-tauri/src/protocol.rs
++++ b/desktop/src-tauri/src/protocol.rs
+@@ -158,6 +158,25 @@
+     strict_json_with_limits(bytes, 50_000, 20)
+ }
+
++// Fixed enrollment-only subset of the SAME VersionAllocations namespace.
++// The original full Snapshot is retained by its caller before this parse.
++// A smaller node cap bounds hostile tiny-container expansion before canonical
++// roundtrips; ordinary/recovery decoding above remains 1MiB / 50,000 nodes.
++pub(crate) fn strict_version_enrollment_state_json(bytes: &[u8]) -> Result<Value, BridgeError> {
++    let limit = || BridgeError::new("version_enrollment_state_limit", "The saved counter state exceeds this bounded connection path.");
++    if bytes.len() > 256 * 1024 { return Err(limit()); }
++    std::str::from_utf8(bytes).map_err(|_| BridgeError::protocol())?;
++    let mut decoder = serde_json::Deserializer::from_slice(bytes);
++    let mut nodes = 0usize;
++    let parsed = Seed { nodes: &mut nodes, depth: 0, node_limit: 4096, depth_limit: 20 }.deserialize(&mut decoder);
++    // The SAME Seed increments this original counter before allocating the
++    // rejected node. Do not classify malformed JSON as a size refusal.
++    if nodes > 4096 { return Err(limit()); }
++    let value = parsed.map_err(|_| BridgeError::protocol())?;
++    decoder.end().map_err(|_| BridgeError::protocol())?;
++    Ok(value)
++}
++
+ // Signed Mac inventory DATA only. Seven nodes/runtime row and nine/install
+ // row, including keys: 16,384 rows fit these fixed bounds. No renderer caller.
+ pub(crate) fn strict_macos_runtime_manifest_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+--- a/desktop/src-tauri/src/version_allocation_state_native.rs
++++ b/desktop/src-tauri/src/version_allocation_state_native.rs
+@@ -15,7 +15,7 @@
+     application_state_store::{Cleanup, Durability, Effect, Namespace, PrivateStateDirectory, Revision, Snapshot, StateError},
+     github_connection_protocol::{coordinate, numeric_id},
+     github_preflight_protocol::{branch, hex},
+-    protocol::strict_version_allocation_state_json,
++    protocol::{strict_version_allocation_state_json, strict_version_enrollment_state_json},
+     service_protocol::{Error, Id},
+ };
+ use serde::{Deserialize, Serialize};
+@@ -204,13 +204,18 @@
+     fn empty() -> Self {
+         Self { schema_version: 3, protocol: PROTOCOL.to_owned(), authorities: Vec::new(), enrollments: Vec::new(), candidates: Vec::new() }
+     }
+-    fn parse(snapshot: &Snapshot) -> Result<Self> {
++    fn parse(snapshot: &Snapshot) -> Result<Self> { Self::parse_original(snapshot, false) }
++    fn parse_original(snapshot: &Snapshot, enrollment: bool) -> Result<Self> {
+         if snapshot.revision == Revision(0) && snapshot.bytes.is_empty() { return Ok(Self::empty()); }
+         let bytes = &snapshot.bytes;
+         need(!bytes.is_empty() && bytes.len() <= STATE_LIMIT && bytes.last() == Some(&b'\n')
+             && bytes.iter().filter(|b| **b == b'\n').count() == 1)?;
+-        let mut value = strict_version_allocation_state_json(&bytes[..bytes.len() - 1])
+-            .map_err(|_| StateError::from(Error::RecoveryRequired))?;
++        let parsed = if enrollment {
++            strict_version_enrollment_state_json(&bytes[..bytes.len() - 1])
++        } else { strict_version_allocation_state_json(&bytes[..bytes.len() - 1]) };
++        let mut value = parsed.map_err(|error| StateError::from(
++            if enrollment && error.code == "version_enrollment_state_limit" { Error::Unavailable }
++            else { Error::RecoveryRequired }))?;
+         let version = value["schemaVersion"].as_u64().ok_or_else(|| StateError::from(Error::RecoveryRequired))?;
+         let keys: &[&str] = match version {
+             1 => &["schemaVersion", "protocol", "authorities"],
+@@ -324,8 +329,11 @@
+     pub(crate) fn snapshot(&self) -> Result<&Snapshot> {
+         self.usable()?; self.snapshot.as_ref().ok_or_else(|| Error::Unavailable.into())
+     }
+-    pub(crate) fn load(&mut self) -> Result<()> {
+-        self.usable()?; need(self.snapshot.is_none())?;
++    pub(crate) fn load(&mut self) -> Result<()> { self.load_bounded(STATE_LIMIT) }
++    // Private child-only enrollment subset; ordinary/recovery callers retain
++    // the exact 1MiB / 50k-node behavior. There is no caller-selected decoder.
++    fn load_bounded(&mut self, limit: usize) -> Result<()> {
++        self.usable()?; need(self.snapshot.is_none() && [256 * 1024, STATE_LIMIT].contains(&limit))?;
+         self.poisoned = true;
+         let loaded = self.store.read(Namespace::VersionAllocations);
+         match loaded {
+@@ -333,7 +341,11 @@
+             Ok(snapshot) => self.snapshot = Some(snapshot),
+         }
+         let result = (|| {
+-            let state = State::parse(self.snapshot.as_ref().ok_or_else(unknown)?)?;
++            let snapshot = self.snapshot.as_ref().ok_or_else(unknown)?;
++            // Keep the FULL original before either byte or complexity refusal.
++            if snapshot.bytes.len() > limit { return Err(Error::Unavailable.into()); }
++            let state = if limit == STATE_LIMIT { State::parse(snapshot)? }
++                else { State::parse_original(snapshot, true)? };
+             if state.enrollments.iter().any(|e| e.local_project_id == self.project.project_id.as_str()) {
+                 need(state.enrolled(self.project.project_id.as_str(), &self.authority.project_id)?.authority == self.authority)?;
+             }
