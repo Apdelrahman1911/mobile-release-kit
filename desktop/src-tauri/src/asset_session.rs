@@ -9815,4 +9815,4 @@ pub(crate) fn github_setup_consent_data_checks() {
 }
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub(crate) use vault::installed_upload_observation::{Sample as InstalledUploadSample, Trace as InstalledUploadTrace, ProducerSample as InstalledUploadProducerSample};
+pub(crate) use vault::installed_upload_observation::{Sample as InstalledUploadSample, Trace as InstalledUploadTrace, ProducerSample as InstalledUploadProducerSample, ColdState as InstalledUploadColdState};
