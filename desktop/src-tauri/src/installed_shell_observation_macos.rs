@@ -728,7 +728,12 @@ impl PanelSample {
                 mrk_macos_installed_native::PanelKind::ArtifactAab => "artifact-aab",
                 mrk_macos_installed_native::PanelKind::ArtifactIpa => "artifact-ipa",
                 mrk_macos_installed_native::PanelKind::ArtifactArchive => "artifact-archive",
-                mrk_macos_installed_native::PanelKind::ArtifactDsyms => "artifact-dsyms" },
+                mrk_macos_installed_native::PanelKind::ArtifactDsyms => "artifact-dsyms",
+                mrk_macos_installed_native::PanelKind::GitHubAuthExecutable => "github-auth-executable",
+                mrk_macos_installed_native::PanelKind::EncryptedBackup => "encrypted-backup",
+                mrk_macos_installed_native::PanelKind::RecoveryCode => "recovery-code",
+                mrk_macos_installed_native::PanelKind::EncryptedDestination => "encrypted-destination",
+                mrk_macos_installed_native::PanelKind::RecoveryDestination => "recovery-destination" },
             parent_present: native.parent_present, panel_present: native.panel_present,
             parent_references_panel: native.parent_references_panel,
             panel_references_parent: native.panel_references_parent, panel_visible: native.panel_visible,
@@ -1399,7 +1404,12 @@ impl Observation {
                 | mrk_macos_installed_native::PanelKind::ArtifactAab
                 | mrk_macos_installed_native::PanelKind::ArtifactIpa
                 | mrk_macos_installed_native::PanelKind::ArtifactArchive
-                | mrk_macos_installed_native::PanelKind::ArtifactDsyms => false,
+                | mrk_macos_installed_native::PanelKind::ArtifactDsyms
+                | mrk_macos_installed_native::PanelKind::GitHubAuthExecutable
+                | mrk_macos_installed_native::PanelKind::EncryptedBackup
+                | mrk_macos_installed_native::PanelKind::RecoveryCode
+                | mrk_macos_installed_native::PanelKind::EncryptedDestination
+                | mrk_macos_installed_native::PanelKind::RecoveryDestination => false,
         }
     }
     pub(super) fn open_identity_target(&self, id: u32, kind: mrk_macos_installed_native::PanelKind) -> Option<&Path> {
@@ -1416,7 +1426,12 @@ impl Observation {
                 | mrk_macos_installed_native::PanelKind::ArtifactAab
                 | mrk_macos_installed_native::PanelKind::ArtifactIpa
                 | mrk_macos_installed_native::PanelKind::ArtifactArchive
-                | mrk_macos_installed_native::PanelKind::ArtifactDsyms => None,
+                | mrk_macos_installed_native::PanelKind::ArtifactDsyms
+                | mrk_macos_installed_native::PanelKind::GitHubAuthExecutable
+                | mrk_macos_installed_native::PanelKind::EncryptedBackup
+                | mrk_macos_installed_native::PanelKind::RecoveryCode
+                | mrk_macos_installed_native::PanelKind::EncryptedDestination
+                | mrk_macos_installed_native::PanelKind::RecoveryDestination => None,
         }
     }
     pub(super) fn completion_returned(&self, id: u32, returned: mrk_macos_installed_native::CompletionReturn) {

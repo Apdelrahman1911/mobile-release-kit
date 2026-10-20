@@ -166,7 +166,7 @@ impl FixtureData {
         // and consuming FD closes), but with only this bounded copied DATA.
         let expected = super::Fixture { root: self.root.clone(), uid: self.uid, root_identity: self.root_identity,
             app_identity: Some(self.app_identity), untouched: Some(self.untouched.clone()), ignore: self.ignore.clone(),
-            config: None, release: None, ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, written: false, mutated: false };
+            config: None, release: None, ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, identity: None, written: false, mutated: false };
         expected.verify(false)
     }
 }
@@ -432,7 +432,7 @@ pub(super) fn data_checks() -> bool {
         super::Fixture { root: "/private/tmp/inert-installation-fixture".into(), uid: 501,
             root_identity: [8; 6], app_identity: Some([9; 6]),
             untouched: Some([fact.clone(), fact.clone(), fact.clone()]), ignore: fact,
-            config: None, release: None, ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, written: false, mutated: false }
+            config: None, release: None, ios: None, project_fields: None, recovery: None, local_edits: None, checks: None, identity: None, written: false, mutated: false }
     };
     let original = fixture();
     let Some(frozen) = FixtureData::capture(&original) else { return false; };

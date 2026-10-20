@@ -252,7 +252,7 @@ impl Observation {
         use tauri::Manager;
         if !self.timely(){return Err(());}
         let state=app.try_state::<crate::shell::ShellState>().ok_or(())?;
-        let webview=app.get_webview(crate::shell::MAIN_WINDOW).ok_or(())?;
+        let webview=app.get_webview_window(crate::shell::MAIN_WINDOW).ok_or(())?;
         let window=webview.label();if window!=crate::shell::MAIN_WINDOW{return Err(());}
         let (case,project,round)= {let r=self.record().ok_or(())?;let record=r.identity.as_ref().ok_or(())?;
             if record.pending||!r.project_settled{return Err(());} (record.case,r.project.as_ref().ok_or(())?.id.clone(),record.sessions.len())};

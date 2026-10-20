@@ -185,7 +185,7 @@ impl Selection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Step {
+pub(in super::super) enum Step {
     Context,
     Refresh,
     Refreshed,
@@ -217,12 +217,12 @@ pub(super) struct Record {
     not_executed: bool,
 }
 #[derive(Clone, Copy)]
-pub(super) struct FailureSample {
+pub(in super::super) struct FailureSample {
     sample: InstalledUploadSample,
     repeated_create_refused: bool,
 }
 impl FailureSample {
-    pub(super) fn value(self) -> Value {
+    pub(in super::super) fn value(self) -> Value {
         json!({"source":"original-upload-key-sample","observationOnly":true,
     "repeatedCreateRefused":self.repeated_create_refused,
     "exitOrDisposalPermission":false,"sample":self.sample})
