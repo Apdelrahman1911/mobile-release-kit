@@ -300,7 +300,8 @@ mod tests {
             input["platform"] = serde_json::json!(if android {"android"} else {"ios"});
             input["query"] = serde_json::json!(if android {play_versions::QUERY} else {wire::QUERY});
             if paired { input["platform"]=serde_json::json!("both");input["query"]=serde_json::json!(store_wire::paired_versions::QUERY);
-                input["iosRecord"]=serde_json::json!({"recordId":"c".repeat(32),"recordRevision":1}); }
+                input["iosRecord"]=serde_json::json!({"recordId":"d".repeat(32),"recordRevision":1});
+                assert_ne!(input["recordId"], input["iosRecord"]["recordId"]); }
             let context = store_wire::prepare(&input).unwrap().context();
             let application = SavedCommandOwner::new(
                 RuntimeConfig::packaged("/unopened-store-version-runtime".into()),

@@ -78,7 +78,8 @@ mod tests {
         v.as_object_mut().unwrap().remove("operation");
         v["platform"] = json!("both");
         v["query"] = json!(QUERY);
-        v["iosRecord"] = json!({"recordId":"c".repeat(32),"recordRevision":1});
+        v["iosRecord"] = json!({"recordId":"d".repeat(32),"recordRevision":1});
+        assert_ne!(v["recordId"], v["iosRecord"]["recordId"]);
         let c = super::super::prepare(&v).unwrap().context();
         assert!(selected(&c));
         for consent in [
