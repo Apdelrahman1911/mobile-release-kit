@@ -21,6 +21,7 @@ Usage:\n\
   mrk status [--json]\n\
   mrk projects [--json]\n\
   mrk observe PROJECT_ID [--json]\n\
+  mrk android-tools PROJECT_ID [--json]\n\
   mrk operations PROJECT_ID [--json]\n\
   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
@@ -39,7 +40,8 @@ Usage:\n\
   mrk --help\n\n\
 Capabilities describe this CLI without opening Desktop or reading project data.\n\
 For the other commands, open Desktop, select a project, then enable agent read access in Settings.\n\
-Reads return saved observations; they do not rerun actions or validate a release.\n\
+Reads return observations; they do not rerun actions or validate a release.\n\
+android-tools returns historical Desktop catalogue labels, not current tools or project compatibility.\n\
 observe --json may include optional setup state codes, not a passed check or release approval.\n\
 Identity requests additionally need the separate 15-minute Desktop request permission.\n\
 In Desktop Settings, check requests and explicitly review/preview/apply the unchanged proposal.\n\
@@ -68,6 +70,7 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, Error> {
         ["status"] => p::RequestBody::Info(p::Empty {}),
         ["projects"] => p::RequestBody::Projects(p::Empty {}),
         ["observe", project] => p::RequestBody::Observe(p::ProjectQuery { project_id: Id::parse(project)? }),
+        ["android-tools", project] => p::RequestBody::AndroidTools(p::ProjectQuery { project_id: Id::parse(project)? }),
         ["operations", project] => p::RequestBody::Operations(p::ProjectQuery { project_id: Id::parse(project)? }),
         ["operation", project, operation] => p::RequestBody::Operation(p::OperationQuery { project_id: Id::parse(project)?, operation_id: Id::parse(operation)? }),
         _ => return Err(Error::InvalidRequest),
@@ -82,10 +85,11 @@ struct CommandCapability {
     arguments: &'static [&'static str],
     description: &'static str,
 }
-const READ_COMMANDS: [CommandCapability; 5] = [
+const READ_COMMANDS: [CommandCapability; 6] = [
     CommandCapability { command: "status", arguments: &[], description: "Read the current Desktop service access status." },
     CommandCapability { command: "projects", arguments: &[], description: "List projects allowed by the current read grant." },
     CommandCapability { command: "observe", arguments: &["PROJECT_ID"], description: "Read a saved project observation and optional redacted setup guidance, which may be stale." },
+    CommandCapability { command: "android-tools", arguments: &["PROJECT_ID"], description: "Read historical Desktop catalogue labels; not live tools, inspection or project compatibility." },
     CommandCapability { command: "operations", arguments: &["PROJECT_ID"], description: "List saved operation observations for a project." },
     CommandCapability { command: "operation", arguments: &["PROJECT_ID", "OPERATION_ID"], description: "Read one saved operation observation; it is not native finality authority." },
 ];
@@ -127,6 +131,8 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             "idFormat": "32 lowercase hexadecimal characters; all-zero IDs are invalid",
             "jsonOption": "--json (last argument)",
             "commands": READ_COMMANDS,
+            "androidTools": {"scope":"desktop-catalogue-observation", "freshness":"historical-not-revalidated",
+                "projectCompatibility":"not-checked", "startsInspection":false, "persistsObservation":false},
             "localChecks": {
                 "scope": "saved-local-android-project-checks", "defaultEnabled": false, "oneUse": true,
                 "maxLeaseSeconds": crate::agent_local_checks::LIFETIME.as_secs(), "maxRetainedRequests": crate::agent_local_checks::LIMIT,
@@ -165,6 +171,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         let mut text = String::from("Compiled CLI capabilities (Desktop availability not checked).\n\
             Reads require a running Desktop and an explicit project read grant.\n\
             Saved observations are not live validation or native operation authority.\n\
+            Android tool-catalogue labels are historical; this query does not inspect tools or check project compatibility.\n\
             Direct edits, credentials, toolkit signing and publishing are not supported by this CLI.\n\
             iOS unsigned archives use the same one-use build grant and require the original qualified Mac/Xcode runtime.\n\
             A saved Android build needs a separate one-use exact-input Desktop START grant and selected qualified tools.\n\
@@ -265,6 +272,7 @@ fn human(response: &p::ResponseBody) -> String {
         },
         p::ResponseBody::Operations(operations) => if operations.is_empty() { "No operation observations have been published for this project.\n".to_owned() } else { operations.iter().map(operation).collect() },
         p::ResponseBody::Operation(value) => operation(value),
+        p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
         p::ResponseBody::IdentityIntent(value) => identity::human(value),
         p::ResponseBody::LocalCheck(value) => local_checks::human(value),
@@ -317,6 +325,34 @@ mod tests {
     use super::*;
     fn args(values: &[&str]) -> Vec<OsString> { values.iter().map(OsString::from).collect() }
     #[test]
+    fn android_tools_is_a_closed_historical_read_with_no_action_parameters() {
+        let id = "11111111111111111111111111111111";
+        let Parsed::Request(options) = parse(args(&["android-tools", id, "--json"])).unwrap() else { panic!("wrong command") };
+        assert!(matches!(&options.request.request, p::RequestBody::AndroidTools(_)));
+        let wire = p::encode_request(&options.request).unwrap();
+        assert!(matches!(p::decode_request(&wire).unwrap().request, p::RequestBody::AndroidTools(_)));
+        let mut action: serde_json::Value = serde_json::from_slice(&wire).unwrap();
+        action["request"]["params"]["inspect"] = serde_json::json!(true);
+        assert!(p::decode_request(&serde_json::to_vec(&action).unwrap()).is_err());
+        for words in [vec!["android-tools", id, "--inspect"], vec!["android-tools", id, "--select", id],
+            vec!["android-tools", "project-1"], vec!["android-tools", id, "--root", "/private/sentinel"]] {
+            assert!(parse(args(&words)).is_err());
+        }
+        let slot = crate::service_android_tools::ObservationSlot::default();
+        slot.publish(crate::service_android_tools::tests::catalogue());
+        let response = p::ResponseBody::AndroidTools(slot.view(Id::parse(id).unwrap()));
+        let text = human(&response);
+        assert!(text.contains("historical") && text.contains("not checked") && text.contains("not current-tool"));
+        let mut framed = p::Response { version: p::VERSION, request_id: Id::parse(id).unwrap(),
+            service_instance: Id::parse(id).unwrap(), client_id: Id::parse(id).unwrap(), session_id: Id::parse(id).unwrap(), response };
+        assert!(p::encode_response(&framed).is_ok());
+        if let p::ResponseBody::AndroidTools(view) = &mut framed.response { view.capture = crate::service_android_tools::Capture::Unavailable; }
+        assert!(p::encode_response(&framed).is_err());
+        let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
+        assert_eq!(caps["androidTools"]["startsInspection"], false);
+        assert_eq!(caps["androidTools"]["projectCompatibility"], "not-checked");
+    }
+    #[test]
     fn installed_cli_has_only_closed_read_verbs_and_stable_json_errors() {
         assert!(matches!(parse(args(&["--help"])).unwrap(), Parsed::Help));
         assert!(matches!(parse(args(&["projects", "--json"])).unwrap(), Parsed::Request(_)));
@@ -356,7 +392,7 @@ mod tests {
         assert_eq!(value["operationsRequire"], serde_json::json!({"runningDesktop":true,"projectReadGrant":true}));
         assert!(value.get("serviceInstance").is_none() && value.get("requestId").is_none());
         let commands = value["commands"].as_array().unwrap();
-        assert_eq!(commands.len(), 5);
+        assert_eq!(commands.len(), 6);
         // Each advertised command/argument order is accepted by the actual
         // parser, not a separate documentation-only command implementation.
         for command in commands {

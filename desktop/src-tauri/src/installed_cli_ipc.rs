@@ -253,7 +253,10 @@ async fn serve_exchange(stream: &mut UnixStream, service: &ApplicationService, e
     endpoint.check(service)?;
     let response = service.dispatch(&client, request);
     let bytes = p::encode_response(&response)?;
-    service.client_current(&client)?;
+    match &response.response {
+        p::ResponseBody::AndroidTools(view) => service.android_tools_client_current(&client, &view.project_id)?,
+        _ => service.client_current(&client)?,
+    }
     write_frame(stream, &bytes).await
 }
 async fn read_frame(stream: &mut UnixStream, limit: usize) -> Result<Vec<u8>, Error> {
@@ -345,7 +348,9 @@ mod tests {
     #[test]
     fn real_socket_two_clients_share_completed_observations_and_history() {
         runtime().block_on(async {
-            let f = Fixture::short(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap()); let service = Arc::new(ApplicationService::open(store.clone()).unwrap());
+            let f = Fixture::short(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+            let observations = Arc::new(crate::service_android_tools::ObservationSlot::default());
+            let service = Arc::new(ApplicationService::open_with_android_tools(store.clone(), observations.clone()).unwrap());
             let (id, root) = register_fixture(&service, &f.app, "project", "project-1");
             service.publish_passive_snapshot("project-1", &passive(&root, &"1".repeat(64))).unwrap();
             service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
@@ -353,6 +358,26 @@ mod tests {
             let first_request = list(); let second_request = list();
             let (one, two) = tokio::join!(request(&f.app, &first_request), request(&f.app, &second_request));
             assert_eq!(one.unwrap().response, two.unwrap().response);
+            // Actual authenticated socket/framing for the new closed read;
+            // fixture DATA is not a native tool-selection qualification.
+            let tools = p::Request { version: 1, request_id: Id::random().unwrap(), request:
+                p::RequestBody::AndroidTools(p::ProjectQuery { project_id: id.clone() }) };
+            match request(&f.app, &tools).await.unwrap().response {
+                p::ResponseBody::AndroidTools(view) => {
+                    assert_eq!(view.capture, crate::service_android_tools::Capture::Unobserved);
+                    assert_eq!(view.freshness, crate::service_android_tools::Freshness::HistoricalNotRevalidated);
+                    assert_eq!(view.project_compatibility, crate::service_android_tools::Compatibility::NotChecked);
+                }
+                _ => panic!("wrong response"),
+            }
+            observations.publish(crate::service_android_tools::tests::catalogue());
+            match request(&f.app, &tools).await.unwrap().response {
+                p::ResponseBody::AndroidTools(view) => {
+                    assert_eq!(view.capture, crate::service_android_tools::Capture::Observed);
+                    assert_eq!(view.observation.unwrap().observed_selection.unwrap().versions.jdk_version, "21");
+                }
+                _ => panic!("wrong response"),
+            }
             service.invalidate_native("project-1").unwrap();
             match request(&f.app, &list()).await.unwrap().response { p::ResponseBody::Projects(rows) => assert!(rows[0].observation.as_ref().unwrap().stale), _ => panic!("wrong response") }
             service.publish_passive_snapshot("project-1", &passive(&root, &"2".repeat(64))).unwrap();

@@ -3044,6 +3044,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if !android_build_relay_failed {
                 match document.android_toolchain_catalog_status() {
                     Ok(status) => {
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        application_history.publish_android_tools_catalogue(&status); // Original status has dropped native locks.
                         if android_catalog_revision != Some(status.status_revision) {
                             android_catalog_revision = Some(status.status_revision);
                             if app.emit_to(MAIN_WINDOW, crate::android_toolchain_catalog::EVENT, &status).is_err() {

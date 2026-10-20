@@ -111,6 +111,7 @@ mod git_branch_protocol;
 mod git_local_state;
 mod service_protocol;
 mod service_setup_guidance;
+mod service_android_tools;
 mod agent_identity_requests;
 mod agent_local_checks;
 mod agent_android_build;

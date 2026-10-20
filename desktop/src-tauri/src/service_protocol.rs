@@ -209,6 +209,7 @@ pub enum RequestBody {
     #[serde(rename = "service.info")] Info(Empty),
     #[serde(rename = "projects.list")] Projects(Empty),
     #[serde(rename = "project.observation")] Observe(ProjectQuery),
+    #[serde(rename = "android-tools.observation")] AndroidTools(ProjectQuery),
     #[serde(rename = "operation.list")] Operations(ProjectQuery),
     #[serde(rename = "operation.status")] Operation(OperationQuery),
     #[serde(rename = "local-check.submit")] LocalCheckSubmit(crate::agent_local_checks::Submit),
@@ -244,6 +245,7 @@ pub struct ServiceInfo {
 pub enum ResponseBody {
     Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
+    AndroidTools(crate::service_android_tools::View),
     IdentityIntent(crate::agent_identity_requests::IntentStatus),
     LocalCheck(crate::agent_local_checks::Status),
     AndroidBuildRequest(crate::agent_android_build::Status),
@@ -348,6 +350,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             for row in rows { project(row)?; if !seen.insert(&row.project_id) { return Err(Error::InvalidRequest); } }
         }
         ResponseBody::Observation(row) => project(row)?,
+        ResponseBody::AndroidTools(row) => row.validate()?,
         ResponseBody::Operations(rows) => {
             if rows.len() > OPERATION_LIMIT { return Err(Error::InvalidRequest); }
             let mut seen = std::collections::BTreeSet::new();

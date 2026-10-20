@@ -2000,6 +2000,8 @@ mod lookup_memory {
             self.add(crate::agent_local_checks::DOCUMENT_BACKING)?;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             self.add(crate::agent_build_requests::DOCUMENT_BACKING)?; // ONE shared build inbox, not one per platform.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            self.add(crate::service_android_tools::DOCUMENT_BACKING)?; // One volatile Host/Service DATA cell.
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
@@ -3409,6 +3411,8 @@ impl DocumentBinding {
     }
     pub(crate) fn android_build_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.android_build.subscribe() }
     pub(crate) fn android_build_relay_lost(&self) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.inner.bridge.application_service.android_tools_relay_lost(); // Memory-only before original STOP.
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.agent_android_builds_relay_lost();
         // Loss retires consent/STOP under the same gate. It is not settlement,
