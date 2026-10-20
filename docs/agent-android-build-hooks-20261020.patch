@@ -1,0 +1,1190 @@
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/git-local.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/tool-acquisition.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/git-local.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -283,6 +283,7 @@
+             "choose_project", "choose_project_path", "project_snapshot", "catalog",
+             "application_read_status", "allow_application_read", "revoke_application_read",
+             "agent_local_check_access", "allow_agent_local_check", "revoke_agent_local_check",
++    "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
+             "environment_requirements", "release_version_observe",
+             "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
+             "release_evidence_choose", "release_evidence_status", "release_evidence_observe", "release_evidence_cancel",
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -7,6 +7,9 @@
+   "permissions": [
+     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
+     "allow-agent-local-check-access", "allow-allow-agent-local-check", "allow-revoke-agent-local-check",
++    "allow-agent-android-build-access",
++    "allow-allow-agent-android-build",
++    "allow-revoke-agent-android-build",
+     "allow-app-info", "allow-reveal-installation", "allow-installation-status", "allow-inspect-installation", "allow-cancel-installation",
+     "allow-installation-preparation-status", "allow-prepare-installation-quit",
+     "allow-choose-project", "allow-choose-project-path", "allow-project-snapshot", "allow-catalog",
+--- a/desktop/src-tauri/src/android_build_owner.rs
++++ b/desktop/src-tauri/src/android_build_owner.rs
+@@ -208,6 +208,15 @@
+     pub(crate) fn can_exit(&self) -> bool { self.saved.can_exit() }
+     pub(crate) fn busy(&self) -> bool { self.saved.busy() }
+     pub(crate) fn ensure_idle(&self) -> Result<(), BridgeError> { self.saved.ensure_idle() }
++    pub(crate) fn approve_agent_android_build(&self, input: Prepare, selected: &crate::android_build_protocol::MacToolchainSelection, document: &std::sync::Arc<()>)
++        -> Result<std::sync::Arc<crate::saved_command_owner::AgentAndroidBuildApproval>, BridgeError> { self.saved.approve_agent_android_build(input, selected, document) }
++    pub(crate) fn agent_android_build_approval_current(&self, approval: &crate::saved_command_owner::AgentAndroidBuildApproval, document: &std::sync::Arc<()>) -> bool {
++        self.saved.agent_android_build_approval_current(approval, document)
++    }
++    pub(crate) fn prepare_agent_android_build(&self, entry: std::sync::Arc<crate::agent_android_build::Entry>, approval: std::sync::Arc<crate::saved_command_owner::AgentAndroidBuildApproval>,
++        registration: u32, root: RegisteredRoot, gate: Availability) -> Result<Status, BridgeError> { self.saved.prepare_agent_android_build(entry, approval, registration, root, gate) }
++    pub(crate) fn start_agent_android_build(&self, entry: &std::sync::Arc<crate::agent_android_build::Entry>, registered: Option<(u32, RegisteredRoot)>, gate: Availability)
++        -> Result<Admitted, BridgeError> { self.saved.start_agent_android_build(entry, registered, gate) }
+     pub(crate) fn installation_source_custody_empty(&self) -> bool {
+         self.saved.installation_source_custody_empty()
+     }
+--- a/desktop/src-tauri/src/android_build_protocol.rs
++++ b/desktop/src-tauri/src/android_build_protocol.rs
+@@ -1275,6 +1275,8 @@
+ #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+ pub(crate) struct Projection {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub(crate) agent_android_build: Option<crate::agent_android_build::Query>,
+     pub(crate) operation_id: String, pub(crate) owner_generation: String, pub(crate) context: Context,
+     pub(crate) phase: Phase, pub(crate) intent_usable: bool, pub(crate) outcome: Option<Outcome>, pub(crate) reason: Reason,
+     pub(crate) stage: Option<Stage>, pub(crate) activity: Option<Activity>, pub(crate) disposition: Option<Disposition>,
+@@ -1282,6 +1284,8 @@
+ }
+ impl Projection {
+     fn valid(&self) -> bool {
++        if self.agent_android_build.is_some() && (self.context.operation != Operation::AndroidBuildInspect || self.context.signed()
++            || self.context.artifact_validation.mode != ValidationMode::StructureAndVersion) { return false; }
+         if !token(&self.operation_id) || !token(&self.owner_generation) || !self.context.valid()
+             || self.context.candidate() && !candidate_id(&self.operation_id)
+             || !self.context.candidate() && self.reason.candidate_only()
+@@ -1334,7 +1338,8 @@
+     pub(crate) operation: Option<Projection>,
+ }
+ fn projection_shape(value: &Value) -> bool {
+-    keys(value, &["operationId", "ownerGeneration", "context", "phase", "intentUsable", "outcome", "reason", "stage", "activity", "disposition", "result"])
++    (keys(value, &["operationId", "ownerGeneration", "context", "phase", "intentUsable", "outcome", "reason", "stage", "activity", "disposition", "result"])
++        || keys(value, &["operationId", "ownerGeneration", "context", "phase", "intentUsable", "outcome", "reason", "stage", "activity", "disposition", "result", "agentAndroidBuild"]) && value.get("agentAndroidBuild").is_some_and(|v| !v.is_null()))
+         && value.get("activity").is_some_and(|v| v.is_null() || activity_shape(v))
+         && value.get("result").is_some_and(|v| v.is_null() || result_value_shape(v))
+ }
+--- a/desktop/src-tauri/src/android_build_wiring_tests.rs
++++ b/desktop/src-tauri/src/android_build_wiring_tests.rs
+@@ -6,7 +6,9 @@
+ fn empty_state() -> DocumentState {
+     DocumentState {
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        agent_local_check_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
++        agent_local_check_grant: None,
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
+         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+         quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false,
+         maintenance: macos_maintenance::Closure::default(),
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -67,10 +67,12 @@
+
+ #[path = "application_service_agent_local_checks.rs"]
+ mod local_checks;
++#[path = "application_service_agent_android_build.rs"]
++mod agent_android_build;
+
+ pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
+     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
+-    local_checks: Arc<crate::agent_local_checks::Inbox> }
++    local_checks: Arc<crate::agent_local_checks::Inbox>, android_builds: Arc<crate::agent_android_build::Inbox> }
+ impl ApplicationService {
+     pub(crate) fn open(store: Arc<PrivateStateDirectory>) -> Result<Self, Error> {
+         let snapshot = store.read(Namespace::Projects).map_err(|e| e.code)?;
+@@ -87,7 +89,8 @@
+         let instance = Id::random()?;
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, identity_requests, local_checks, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
++        let android_builds = Arc::new(crate::agent_android_build::Inbox::new(instance.clone()));
++        Ok(Self { store, instance, identity_requests, local_checks, android_builds, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -326,6 +329,10 @@
+             // These two fixed routes touch only the bounded proposal inbox.
+             // No native callback, executor or GUI approval runs in a socket.
+             match &request.request {
++                p::RequestBody::AndroidBuildPrepare(input) => return self.prepare_agent_android_build(client, input.clone()),
++                p::RequestBody::AndroidBuildStart(input) => return self.start_agent_android_build(client, input),
++                p::RequestBody::AndroidBuildStatus(query) => return self.query_agent_android_build(client, query, false),
++                p::RequestBody::AndroidBuildCancel(query) => return self.query_agent_android_build(client, query, true),
+                 p::RequestBody::LocalCheckSubmit(input) => return self.submit_local_check(client, input.clone()),
+                 p::RequestBody::LocalCheckStatus(query) => return self.query_local_check(client, query, false),
+                 p::RequestBody::LocalCheckCancel(query) => return self.query_local_check(client, query, true),
+@@ -340,7 +347,8 @@
+             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
+             Ok(match request.request {
+                 p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
+-                    | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_) => return Err(Error::InvalidRequest),
++                    | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_)
++                    | p::RequestBody::AndroidBuildPrepare(_) | p::RequestBody::AndroidBuildStart(_) | p::RequestBody::AndroidBuildStatus(_) | p::RequestBody::AndroidBuildCancel(_) => return Err(Error::InvalidRequest),
+                 p::RequestBody::Info(_) => p::ResponseBody::Info(p::ServiceInfo { read_only: false, read_grant_authorizes_execution: false, local_checks_require_separate_grant: true, requires_running_desktop: true,
+                     cached_observations_are_authority: false, remaining_access_ms: remaining(grant) }),
+                 p::RequestBody::Projects(_) => p::ResponseBody::Projects(state.saved.projects.iter().filter(|p| grant.projects.contains(&p.binding.project_id)).map(|p| view(&state, p)).collect()),
+@@ -360,7 +368,7 @@
+     }
+     /// The IPC owner must first stop accepting, notify and join all original
+     /// workers. This revokes admission but does not pretend to join them.
+-    pub(crate) fn stop(&self) -> Result<(), Error> { self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
++    pub(crate) fn stop(&self) -> Result<(), Error> { self.android_builds.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+ }
+
+ fn valid_root(path: &Path) -> Result<&str, Error> {
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -38,6 +38,9 @@
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path = "asset_session_agent_local_checks.rs"]
+ pub(crate) mod agent_local_checks;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "asset_session_agent_android_build.rs"]
++pub(crate) mod agent_android_build;
+ #[path = "asset_session_android_registration.rs"]
+ mod android_registration;
+ #[path = "asset_session_macos_maintenance.rs"]
+@@ -794,6 +797,8 @@
+ struct DocumentState {
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     agent_local_check_grant: Option<Arc<agent_local_checks::Grant>>,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    agent_android_build_grant: Option<Arc<agent_android_build::Grant>>,
+     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
+     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
+     compatibility_picker_pending: bool,
+@@ -1075,7 +1080,11 @@
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     agent_local_check_service: std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
++    agent_android_build_service: std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
+     agent_local_check_revoke_epoch: std::sync::atomic::AtomicU64,
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    agent_android_build_revoke_epoch: std::sync::atomic::AtomicU64,
+     android_registration_control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
+     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+     installed_session: Mutex<Option<installed_session_observation::Book>>,
+@@ -1975,6 +1984,8 @@
+             self.add(crate::agent_identity_requests::document_backing_bytes())?;
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             self.add(crate::agent_local_checks::DOCUMENT_BACKING)?;
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            self.add(crate::agent_android_build::DOCUMENT_BACKING)?;
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+@@ -2662,7 +2673,11 @@
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_local_check_service: std::sync::OnceLock::new(),
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
++            agent_android_build_service: std::sync::OnceLock::new(),
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_local_check_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            agent_android_build_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+             installed_session: Mutex::new(None),
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -2673,7 +2688,9 @@
+             github_fixture: None,
+             state: Mutex::new(DocumentState {
+                 #[cfg(any(target_os = "linux", target_os = "macos"))]
+-                agent_local_check_grant: None, lifetime: DocumentLifetime::default(), revision: 0,
++                agent_local_check_grant: None,
++                #[cfg(any(target_os = "linux", target_os = "macos"))]
++                agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0,
+             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+@@ -3340,6 +3357,8 @@
+     }
+     pub(crate) fn android_build_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.android_build.subscribe() }
+     pub(crate) fn android_build_relay_lost(&self) {
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        self.agent_android_builds_relay_lost();
+         // Loss retires consent/STOP under the same gate. It is not settlement,
+         // owner deletion, a replacement run or permission to reopen the slot.
+         let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,true).ok();
+@@ -8099,7 +8118,9 @@
+         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
+         DocumentState {
+                 #[cfg(any(target_os = "linux", target_os = "macos"))]
+-                agent_local_check_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
++                agent_local_check_grant: None,
++                #[cfg(any(target_os = "linux", target_os = "macos"))]
++                agent_android_build_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+@@ -8234,7 +8255,9 @@
+         if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
+         DocumentState {
+                 #[cfg(any(target_os = "linux", target_os = "macos"))]
+-                agent_local_check_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
++                agent_local_check_grant: None,
++                #[cfg(any(target_os = "linux", target_os = "macos"))]
++                agent_android_build_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+@@ -8332,7 +8355,9 @@
+     pub(super) fn empty_state() -> DocumentState {
+         DocumentState {
+                 #[cfg(any(target_os = "linux", target_os = "macos"))]
+-                agent_local_check_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
++                agent_local_check_grant: None,
++                #[cfg(any(target_os = "linux", target_os = "macos"))]
++                agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+--- a/desktop/src-tauri/src/asset_session_installation_memory.rs
++++ b/desktop/src-tauri/src/asset_session_installation_memory.rs
+@@ -556,7 +556,9 @@
+             root:project.clone(),role:crate::android_tool_sources::Role::Jdk,acquired:None}));
+         let state=DocumentState {
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        agent_local_check_grant: None,lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
++        agent_local_check_grant: None,
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        agent_android_build_grant: None,lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
+             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
+             retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,apple_provisioning_ready:None,version_allocation_source:None,version_enrollment:version_enrollment::State::new(),git_local:None,git_local_review:None,
+             session_owner_reason:None,maintenance:macos_maintenance::Closure::default(),context:Some(context),slot:Some(slot),records,assignments,
+@@ -664,7 +666,9 @@
+         fn state() -> DocumentState {
+             DocumentState {
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        agent_local_check_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
++        agent_local_check_grant: None,
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
+                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+                 quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, git_local: None, git_local_review: None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(),
+                 session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -8,6 +8,8 @@
+ mod identity;
+ #[path = "installed_cli_local_checks.rs"]
+ mod local_checks;
++#[path = "installed_cli_android_build.rs"]
++mod android_build;
+
+ const HELP: &str = "Mobile Release Kit agent CLI\n\n\
+ Usage:\n\
+@@ -22,6 +24,10 @@
+   mrk local-check PROJECT_ID OBSERVATION_REVISION [--json]\n\
+   mrk local-check-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk local-check-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk android-build-prepare PROJECT_ID OBSERVATION_REVISION [--json]\n\
++  mrk android-build-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID OPERATION_ID OWNER_GENERATION [--json]\n\
++  mrk android-build-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk android-build-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk --help\n\n\
+ Capabilities describe this CLI without opening Desktop or reading project data.\n\
+ For the other commands, open Desktop, select a project, then enable agent read access in Settings.\n\
+@@ -33,7 +39,9 @@
+ Local checks require a separate one-use 15-minute project permission in Desktop.\n\
+ Configured project checks may run programs, modify files or contact the network; this is not a sandbox.\n\
+ Keep the printed instance/request IDs: inspect or cancel the same original, never replay it.\n\
+-There is no direct CLI Apply, build, credential or publishing route.\n";
++Android build preparation and Start are separate, one-use requests for the exact saved inputs approved in Desktop.\n\
++The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
++There is no direct CLI Apply, toolkit signing, credential or publishing route.\n";
+
+ struct Options { request: p::Request, json: bool }
+ enum Parsed { Help, Version, Capabilities { json: bool }, Request(Options) }
+@@ -77,6 +85,12 @@
+     CommandCapability { command: "local-check", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Use one separately allowed saved local-project check; configured code may have effects." },
+     CommandCapability { command: "local-check-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same request and original operation without reexecution." },
+     CommandCapability { command: "local-check-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request STOP of the same original; cancellation is not settlement." },
++];
++const ANDROID_BUILD_COMMANDS: [CommandCapability; 4] = [
++    CommandCapability { command: "android-build-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Prepare the exact Desktop-approved saved Android build; no Start or GO." },
++    CommandCapability { command: "android-build-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID", "OPERATION_ID", "OWNER_GENERATION"], description: "Start that one original build once; project code may have file/network effects." },
++    CommandCapability { command: "android-build-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same preparation/build without replay." },
++    CommandCapability { command: "android-build-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request original STOP; no settlement is inferred." },
+ ];
+ const IDENTITY_REQUEST_COMMANDS: [CommandCapability; 2] = [
+     CommandCapability { command: "identity-request", arguments: &["PROJECT_ID", "OBSERVATION_REVISION", "--stdin"], description: "Propose an identity change for explicit Desktop review; this does not apply an edit." },
+@@ -106,6 +120,14 @@
+                 "requires": {"runningDesktop": true, "projectReadGrant": true, "separateProjectExecutionPermission": true},
+                 "commands": LOCAL_CHECK_COMMANDS,
+             },
++            "androidBuilds": {
++                "scope": "saved-android-build-structure-and-version", "defaultEnabled": false, "oneUse": true,
++                "maxStartWindowSeconds": crate::agent_android_build::START_WINDOW.as_secs(), "maxRetainedRequests": crate::agent_android_build::LIMIT,
++                "prepareStartsBuild": false, "projectCodeEffectsPossible": true, "toolkitSigning": false, "storePublishing": false,
++                "readGrantAuthorizesExecution": false, "nativeAvailabilityChecked": false,
++                "requires": {"runningDesktop": true, "projectReadGrant": true, "separateSavedInputBuildPermission": true, "qualifiedSelectedTools": true},
++                "commands": ANDROID_BUILD_COMMANDS,
++            },
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+                 "defaultEnabled": false,
+@@ -120,13 +142,15 @@
+         let mut text = String::from("Compiled CLI capabilities (Desktop availability not checked).\n\
+             Reads require a running Desktop and an explicit project read grant.\n\
+             Saved observations are not live validation or native operation authority.\n\
+-            Direct edits, credentials, builds and publishing are not supported by this CLI.\n\
++            Direct edits, credentials, toolkit signing and publishing are not supported by this CLI.\n\
++            A saved Android build needs a separate one-use exact-input Desktop START grant and selected qualified tools.\n\
++            Prepare never starts a build; project code may have file/network/signing effects.\n\
+             A named local check needs a separate one-use Desktop grant. Configured project code may have effects.\n\
+             Identity proposals require a separate Desktop permission and explicit Desktop review/apply.\n\n");
+         if !cfg!(any(target_os = "linux", target_os = "macos")) {
+             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
+         }
+-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()) {
++        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()) {
+             text.push_str("  mrk "); text.push_str(command.command);
+             for argument in command.arguments { text.push(' '); text.push_str(argument); }
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+@@ -135,7 +159,7 @@
+         text.into_bytes()
+     };
+     if json { bytes.push(b'\n'); }
+-    if bytes.len() > p::REQUEST_BYTES { return Err(Error::StateUnknown); }
++    if bytes.len() > 8192 { return Err(Error::StateUnknown); }
+     Ok(bytes)
+ }
+
+@@ -220,6 +244,7 @@
+         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
+         p::ResponseBody::IdentityIntent(value) => identity::human(value),
+         p::ResponseBody::LocalCheck(value) => local_checks::human(value),
++        p::ResponseBody::AndroidBuildRequest(value) => android_build::human(value),
+     }
+ }
+
+@@ -232,6 +257,7 @@
+     let json = args.iter().any(|a| a == "--json");
+     if identity::recognizes(&args) { return identity::run(args); }
+     if local_checks::recognizes(&args) { return local_checks::run(args); }
++    if android_build::recognizes(&args) { return android_build::run(args); }
+     let output = match parse(args) {
+         Ok(Parsed::Help) => { let _ = std::io::stdout().write_all(HELP.as_bytes()); return 0; }
+         Ok(Parsed::Version) => { let _ = std::io::stdout().write_all(b"mrk application-observation protocol 1\n"); return 0; }
+@@ -283,7 +309,7 @@
+     #[test]
+     fn capabilities_keep_read_grants_separate_from_desktop_reviewed_proposals() {
+         let bytes = capabilities(true).unwrap();
+-        assert!(bytes.len() <= p::REQUEST_BYTES && bytes.ends_with(b"\n"));
++        assert!(bytes.len() <= 8192 && bytes.ends_with(b"\n"));
+         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+         assert_eq!(value["protocolVersion"], p::VERSION);
+         assert_eq!(value["scope"], "compiled-interface");
+@@ -297,6 +323,10 @@
+         assert_eq!(value["localChecks"]["maxLeaseSeconds"], crate::agent_local_checks::LIFETIME.as_secs());
+         assert_eq!(value["localChecks"]["maxRetainedRequests"], crate::agent_local_checks::LIMIT);
+         assert_eq!(value["localChecks"]["commands"].as_array().unwrap().len(), 3);
++        assert_eq!(value["androidBuilds"]["commands"].as_array().unwrap().len(), 4);
++        assert_eq!(value["androidBuilds"]["prepareStartsBuild"], false);
++        assert_eq!(value["androidBuilds"]["toolkitSigning"], false);
++        assert_eq!(value["androidBuilds"]["maxStartWindowSeconds"], crate::agent_android_build::START_WINDOW.as_secs());
+         assert_eq!(value["operationsRequire"], serde_json::json!({"runningDesktop":true,"projectReadGrant":true}));
+         assert!(value.get("serviceInstance").is_none() && value.get("requestId").is_none());
+         let commands = value["commands"].as_array().unwrap();
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -6,6 +6,7 @@
+ mod service_setup_guidance;
+ mod agent_identity_requests;
+ mod agent_local_checks;
++mod agent_android_build;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod application_state_store;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -112,6 +112,7 @@
+ mod service_setup_guidance;
+ mod agent_identity_requests;
+ mod agent_local_checks;
++mod agent_android_build;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod version_allocation_state_native;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+--- a/desktop/src-tauri/src/offline_preflight_owner_tests.rs
++++ b/desktop/src-tauri/src/offline_preflight_owner_tests.rs
+@@ -9,11 +9,11 @@
+ fn owner() -> OfflinePreflightOwner { OfflinePreflightOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-runtime"))) }
+ fn project() -> RegisteredRoot { RegisteredRoot { path: PathBuf::from("/unopened-preflight-project"),
+     identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) } }
+-fn projection() -> RunProjection { RunProjection { agent_local_check: None, operation_id: "a".repeat(32), owner_generation: "b".repeat(32),
++fn projection() -> RunProjection { RunProjection { agent_android_build: None, agent_local_check: None, operation_id: "a".repeat(32), owner_generation: "b".repeat(32),
+     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
+     outcome: None, reason: Reason::None, result: None, stage: None } }
+ fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
+-    owner.original_for_test().inner.lock().prepared = Some(Prepared { agent_local_check: None, apple:None, upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
++    owner.original_for_test().inner.lock().prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, apple:None, upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+ }
+ fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
+ fn active() -> (OfflinePreflightOwner, Arc<Session>) { active_with_agent(None) }
+@@ -32,7 +32,7 @@
+     let clocks = Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now());
+     let (native_audit_cutoff, _) = watch::channel(clocks.work);
+     let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
+-    let session = Arc::new(Session { agent_local_check, apple:apple_provisioning::State::new(None), upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
++    let session = Arc::new(Session { agent_android_build: None, agent_local_check, apple:apple_provisioning::State::new(None), upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+         profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
+         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None,
+         artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
+@@ -54,7 +54,7 @@
+     // Offline fixture data must not acquire another domain's input or tool loan.
+     assert!(session.artifact_selection.is_none() && session.artifact_tools.is_none()
+         && session.artifact_binding.lock().unwrap().is_none());
+-    let p = RunProjection { agent_local_check: p.agent_local_check, operation_id: p.operation_id, owner_generation: p.owner_generation, context: p.context,
++    let p = RunProjection { agent_android_build: None, agent_local_check: p.agent_local_check, operation_id: p.operation_id, owner_generation: p.owner_generation, context: p.context,
+         phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
+     owner.original_for_test().inner.lock().active = Some(Active { owner: session.clone(), projection: p, first_stop: None, work_expired: false,
+         accepted: false, terminal: false, unknown: false, final_join_seen: false, context_invalidated: false });
+--- a/desktop/src-tauri/src/saved_command_agent_local_checks.rs
++++ b/desktop/src-tauri/src/saved_command_agent_local_checks.rs
+@@ -312,7 +312,7 @@
+     #[test]
+     fn helper_complete_is_pending_until_original_retirement() {
+         let mut p = RunProjection {
+-            agent_local_check: None,
++            agent_android_build: None, agent_local_check: None,
+             operation_id: "a".repeat(32),
+             owner_generation: "b".repeat(32),
+             context: Context::OfflinePreflight(wire::Context {
+@@ -348,7 +348,7 @@
+     #[test]
+     fn release_scope_and_terminal_shaped_pending_do_not_cross_admission() {
+         let mut p = RunProjection {
+-            agent_local_check: None,
++            agent_android_build: None, agent_local_check: None,
+             operation_id: "a".repeat(32),
+             owner_generation: "b".repeat(32),
+             context: Context::OfflinePreflight(wire::Context {
+@@ -404,14 +404,14 @@
+             platform: wire::Platform::Android,
+         });
+         let prepared = Prepared {
+-            agent_local_check: Some(link.clone()),
++            agent_android_build: None, agent_local_check: Some(link.clone()),
+             upload_key_preparation: None,
+             upload_key: None,
+             apple: None,
+             tools: None,
+             local_history: None,
+             projection: RunProjection {
+-                agent_local_check: Some(link.origin()),
++                agent_android_build: None, agent_local_check: Some(link.origin()),
+                 operation_id: "a".repeat(32),
+                 owner_generation: "b".repeat(32),
+                 context,
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning_tests.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning_tests.rs
+@@ -23,7 +23,7 @@
+         "lifetime":{"complete":true,"fatal":false,"contained":true,"commandDispatched":true,"commands":7,
+             "profileCalls":0,"inputClosed":true,"handlersRestored":true,"invocationClosed":true,"stopObserved":"none"}
+     })).unwrap();
+-    RunProjection { agent_local_check: None,
++    RunProjection { agent_android_build: None, agent_local_check: None,
+         operation_id: "d".repeat(32),
+         owner_generation: "e".repeat(32),
+         context: Context::AppleProvisioning(context),
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -1248,8 +1248,11 @@
+ }
+ #[path = "saved_command_agent_local_checks.rs"]
+ mod agent_local_checks;
++#[path = "saved_command_agent_android_build.rs"]
++mod agent_android_build;
++pub(crate) use agent_android_build::Approval as AgentAndroidBuildApproval;
+
+-struct Prepared { agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
++struct Prepared { agent_android_build: Option<Arc<crate::agent_android_build::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
+     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
+     android_selection: Option<Arc<android_catalog::Selection>>, artifact_selection: Option<Arc<artifact_inputs::Loan>>, artifact_tools: Option<Arc<ArtifactToolLoan>> }
+ struct RecoveryReview { context: recovery_wire::Context, observation: recovery_wire::Observation, stamp: String, expires: Instant, registration: u32, project: RegisteredRoot }
+@@ -1289,7 +1292,7 @@
+     fn at_or_after(self, previous: Self) -> bool { self == previous || self.after(previous) }
+ }
+ #[derive(Clone)]
+-struct RunProjection { agent_local_check: Option<crate::agent_local_checks::Query>,
++struct RunProjection { agent_android_build: Option<crate::agent_android_build::Query>, agent_local_check: Option<crate::agent_local_checks::Query>,
+     operation_id: String, owner_generation: String, context: Context, phase: Phase, intent_usable: bool,
+     outcome: Option<Outcome>, reason: Reason, result: Option<Terminal>, stage: Option<Stage>,
+ }
+@@ -1413,7 +1416,7 @@
+             Some(Terminal::AndroidBuild(t)) => (t.result, Some(t.activity), Some(t.disposition)),
+             None => (None, None, None), Some(Terminal::OfflinePreflight(_) | Terminal::IOSArchive(_) | Terminal::ProjectRecovery(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_) | Terminal::ToolAcquisition(_) | Terminal::GenerateUploadKey(_) | Terminal::AppleProvisioning(_)) => return Err(BridgeError::protocol()),
+         };
+-        Ok(android_wire::Projection { operation_id: self.operation_id, owner_generation: self.owner_generation, context,
++        Ok(android_wire::Projection { agent_android_build: self.agent_android_build, operation_id: self.operation_id, owner_generation: self.owner_generation, context,
+             phase: self.phase.android(), intent_usable: self.intent_usable, outcome: self.outcome.map(Outcome::android),
+             reason: self.reason.android()?, stage: match self.stage { None => None, Some(Stage::AndroidBuild(stage)) => Some(stage), _ => return Err(BridgeError::protocol()) }, result, activity, disposition })
+     }
+@@ -1428,7 +1431,7 @@
+             reason: self.reason.ios()?, stage: match self.stage { None => None, Some(Stage::IOSArchive(stage)) => Some(stage), _ => return Err(BridgeError::protocol()) }, result, activity, disposition, report })
+     }
+ }
+-struct Session { agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>,
++struct Session { agent_android_build: Option<Arc<crate::agent_android_build::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>,
+     upload_key: upload_key::State,
+     apple: apple_provisioning::State,
+     tools: tool_acquisition::State,
+@@ -2275,9 +2278,14 @@
+         material: Option<PrivateSigningMaterial>, artifact_tools:Option<Arc<ArtifactToolLoan>>) -> Result<Status, BridgeError> {
+         self.prepare_bound_agent(context, registration, project, gate, material, artifact_tools, None)
+     }
+-    fn prepare_bound_agent(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
++    fn prepare_bound_agent(&self, context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
+         material: Option<PrivateSigningMaterial>, artifact_tools:Option<Arc<ArtifactToolLoan>>,
+         agent_entry: Option<Arc<crate::agent_local_checks::Entry>>) -> Result<Status, BridgeError> {
++        self.prepare_bound_requests(context, registration, project, gate, material, artifact_tools, agent_entry, None)
++    }
++    fn prepare_bound_requests(&self, mut context: Context, registration: u32, project: RegisteredRoot, gate: Availability,
++        material: Option<PrivateSigningMaterial>, artifact_tools:Option<Arc<ArtifactToolLoan>>,
++        agent_entry: Option<Arc<crate::agent_local_checks::Entry>>, agent_build: Option<agent_android_build::Preparation>) -> Result<Status, BridgeError> {
+         if artifact_tools.is_some()&&!matches!(&context,Context::ArtifactInspection(c) if c.format==artifact_wire::Format::Aab){return Err(self.inner.domain.invalid_owner());}
+         if artifact_tools.as_ref().is_some_and(|v|!v.current()){return Err(self.inner.domain.unavailable());}
+         let prepared_at = Instant::now(); // Before this intent's entropy; never renewed by polling.
+@@ -2351,11 +2359,13 @@
+         if r.last.as_ref().is_some_and(|last| last.operation_id == id || last.owner_generation == generation) { return Err(self.inner.domain.unavailable()); }
+         let agent_local_check = agent_local_checks::prepare(agent_entry, &context, registration, &project, &id, &generation,
+             r.revision.checked_add(1).filter(|n| *n < u32::MAX).ok_or_else(|| self.inner.domain.unavailable())?)?;
+-        let projection = RunProjection { agent_local_check: agent_local_check.as_ref().map(|link| link.origin()), operation_id: id, owner_generation: generation, context,
++        let agent_android_build = agent_android_build::prepare(agent_build, &self.inner, &r, &context, registration, &project, &id, &generation,
++            r.revision.checked_add(1).filter(|n| *n < u32::MAX).ok_or_else(|| self.inner.domain.unavailable())?, expires)?;
++        let projection = RunProjection { agent_android_build: agent_android_build.as_ref().map(|link| link.origin()), agent_local_check: agent_local_check.as_ref().map(|link| link.origin()), operation_id: id, owner_generation: generation, context,
+             phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
+         if self.inner.domain == SavedCommandDomain::ProjectRecovery { r.recovery_review = None; }
+         let android_selection = r.android_catalog.selection().cloned();
+-        r.prepared = Some(Prepared { agent_local_check, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
++        r.prepared = Some(Prepared { agent_android_build, agent_local_check, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
+         self.inner.bump(&mut r);
+         // After commit, only typed status or unknown/lost reply, never the three
+         // fixed preallocation refusal codes used by the renderer controller.
+@@ -2383,6 +2393,12 @@
+         material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
+         tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
+         agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>)->Result<Admitted,BridgeError>{
++        self.start_bound_requests(input,admitted_at,registered,gate,material,execute_budget,tools_admission,agent_entry,None)
++    }
++    fn start_bound_requests(&self,input:Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:Availability,
++        material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
++        tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
++        agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>, agent_build:Option<&Arc<crate::agent_android_build::Entry>>)->Result<Admitted,BridgeError>{
+         if (self.inner.domain==SavedCommandDomain::ToolAcquisition)!=tools_admission.is_some(){return Err(self.inner.domain.unavailable());}
+         if (self.inner.domain==SavedCommandDomain::LocalStoreExecute)!=execute_budget.is_some(){return Err(self.inner.domain.unavailable());}
+         let mut r = self.inner.lock();
+@@ -2391,12 +2407,14 @@
+         }
+         // All Start routes share this guard BEFORE take. Ordinary GUI Start
+         // cannot adopt a CLI-authorized Prepared or replace its exact scope.
+-        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry)) {
++        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry) && agent_android_build::start_matches(p,agent_build)) {
+             return Err(self.inner.domain.invalid_owner());
+         }
++        agent_android_build::consume(r.prepared.as_ref().ok_or_else(|| self.inner.domain.invalid_owner())?)?;
+         let prepared = r.prepared.take().ok_or_else(|| self.inner.domain.invalid_owner())?; // One use, before executor/runtime/effects.
+         if !tool_acquisition::start_admitted(&self.inner,&r,&prepared,tools_admission) {
+             agent_local_checks::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
++            agent_android_build::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
+             r.last=Some(retire(prepared.projection,Reason::StaleIntent));self.inner.bump(&mut r);
+             return Ok(Admitted{status:self.inner.snapshot_locked(&mut r,gate)?,release:None});
+         }
+@@ -2443,6 +2461,7 @@
+         if let Some(reason) = refused {
+             if reason == Reason::CleanupUnknown { r.disabled = true; }
+             agent_local_checks::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
++            agent_android_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             r.last = Some(retire(prepared.projection, reason)); self.inner.bump(&mut r);
+             return Ok(Admitted { status: self.inner.snapshot_locked(&mut r, gate)?, release: None });
+         }
+@@ -2462,11 +2481,12 @@
+         // the original worker and re-counted under the vault READY gate.
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+         let upload_key_native=upload_key::native_new(&prepared,audit_cutoff.clone(),cleanup_cutoff.clone(),clocks)?;
++        if let Some(link) = &prepared.agent_android_build { link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?; }
+         if let Some(link) = &prepared.agent_local_check {
+             link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?;
+         }
+         let context = prepared.projection.context;
+-        let projection = RunProjection { agent_local_check: prepared.agent_local_check.as_ref().map(|link|link.origin()), operation_id: input.operation_id.clone(), owner_generation: input.owner_generation.clone(),
++        let projection = RunProjection { agent_android_build: prepared.agent_android_build.as_ref().map(|link|link.origin()), agent_local_check: prepared.agent_local_check.as_ref().map(|link|link.origin()), operation_id: input.operation_id.clone(), owner_generation: input.owner_generation.clone(),
+             context: context.clone(), phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+         let android_native=if self.inner.domain==SavedCommandDomain::AndroidBuild{
+@@ -2498,7 +2518,7 @@
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+         let android_close=android_control.as_ref().map(|control|AndroidCloseSlot::reserved(executor.clone(),control.clone()));
+         let requires_private_material = context.requires_private_material();
+-        let owner = Arc::new(Session { agent_local_check: prepared.agent_local_check, upload_key:upload_key::State::new(prepared.upload_key), apple:apple_provisioning::State::new(prepared.apple), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
++        let owner = Arc::new(Session { agent_android_build: prepared.agent_android_build, agent_local_check: prepared.agent_local_check, upload_key:upload_key::State::new(prepared.upload_key), apple:apple_provisioning::State::new(prepared.apple), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
+             registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff,
+             material: Mutex::new(prepared.material), material_retired: AtomicBool::new(!requires_private_material),
+             recovery: prepared.recovery, android_selection: prepared.android_selection.clone(), artifact_selection: prepared.artifact_selection, artifact_tools:prepared.artifact_tools, artifact_binding:Mutex::new(None), native_failure: Mutex::new(None),
+@@ -2817,6 +2837,7 @@
+                 tool_acquisition::after_final(&mut r,&mut active,&owner);
+                 upload_key::after_final(&active,&owner);
+                 agent_local_checks::retired(&active,r.revision.saturating_add(1));
++                agent_android_build::retired(&active,r.revision.saturating_add(1));
+                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
+             }
+         } else {
+@@ -3090,22 +3111,28 @@
+                 r.android_registration.exhaust(at);
+                 if let Some(prepared) = r.prepared.take() {
+                     agent_local_checks::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
++                    agent_android_build::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
+                     r.last = Some(retire(prepared.projection, Reason::CleanupUnknown));
+                 }
+                 if let Some(a) = &r.active { a.owner.stop.send_replace(true); a.owner.wake.notify_waiters(); }
+             },
+         }
+         agent_local_checks::changed(r);
++        agent_android_build::changed(r);
+         self.changes.send_replace(r.revision); self.changed.notify_waiters();
+     }
+     fn retire_prepared(&self, r: &mut Registry, reason: Reason) {
+         if let Some(prepared) = r.prepared.take() {
+             if reason == Reason::CleanupUnknown { r.disabled = true; }
+             agent_local_checks::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
++            agent_android_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             r.last = Some(retire(prepared.projection, reason)); self.bump(r);
+         }
+     }
+     fn expire_prepared(&self, r: &mut Registry, now: Instant) {
++        if r.prepared.as_ref().and_then(|p|p.agent_android_build.as_ref()).is_some_and(|link|link.entry().stop_at(now).is_some()) {
++            self.retire_prepared(r,Reason::Cancelled);
++        }
+         if r.prepared.as_ref().and_then(|p|p.agent_local_check.as_ref()).is_some_and(|link|link.entry().stop_at(now).is_some()) {
+             self.retire_prepared(r,Reason::Cancelled);
+         }
+@@ -3247,6 +3274,7 @@
+     }
+     fn advance_locked(&self, r: &mut Registry, owner: &Session, now: Instant) {
+         if !original_session(r,owner){return;}
++        if let Some(at)=owner.agent_android_build.as_ref().and_then(|link|link.entry().stop_at(now)) { self.stop_locked(r,owner,Reason::Cancelled,at); }
+         if let Some(at)=owner.agent_local_check.as_ref().and_then(|link|link.entry().stop_at(now)) {
+             self.stop_locked(r,owner,Reason::Cancelled,at);
+         }
+@@ -3798,7 +3826,7 @@
+     // wake this existing watchdog independently of relay/store locks. There is
+     // no new observer and a true latch never spins a newly-created receiver.
+     let mut local_stop = owner.stop.subscribe();
+-    let mut listen_local_stop = owner.agent_local_check.is_some() && !*local_stop.borrow_and_update();
++    let mut listen_local_stop = (owner.agent_local_check.is_some() || owner.agent_android_build.is_some()) && !*local_stop.borrow_and_update();
+     loop {
+         let wake = owner.wake.notified(); let end = inner.endpoint(owner);
+         tokio::select! { result = join_slot(slot) => return result, _ = wake => {}, _ = clock_wait(end) => {},
+@@ -5448,7 +5476,7 @@
+         let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
+         let project = RegisteredRoot { path: std::path::PathBuf::from("/inert-mrk-recovery-project-not-opened"),
+             identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+-        let owner = Arc::new(Session { agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
++        let owner = Arc::new(Session { agent_android_build: None, agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
+             context: context.clone(), profile: Profile::current(domain).unwrap(), clocks, registration: 1, project,
+             recovery_stamp: None, request: AsyncMutex::new(None), material: Mutex::new(None), material_retired: AtomicBool::new(true),
+             recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None, artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
+@@ -5469,7 +5497,7 @@
+                 any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+             fixture: None,
+         });
+-        let projection = RunProjection { agent_local_check: None, operation_id: owner.id.clone(), owner_generation: owner.generation.clone(), context,
++        let projection = RunProjection { agent_android_build: None, agent_local_check: None, operation_id: owner.id.clone(), owner_generation: owner.generation.clone(), context,
+             phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
+         application.inner.lock().active = Some(Active { owner: owner.clone(), projection, first_stop: None, work_expired: false,
+             accepted: false, terminal: false, unknown: false, final_join_seen: false, context_invalidated: false });
+@@ -5643,7 +5671,7 @@
+     let expiry = SavedCommandOwner::project_recovery(runtime);
+     {
+         let mut r = expiry.inner.lock(); let expires = t + INTENT;
+-        r.prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: RunProjection { agent_local_check: None, operation_id: original.id.clone(), owner_generation: original.generation.clone(),
++        r.prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: RunProjection { agent_android_build: None, agent_local_check: None, operation_id: original.id.clone(), owner_generation: original.generation.clone(),
+             context: original.context.clone(), phase: Phase::AwaitingConsent, intent_usable: true, outcome: None,
+             reason: Reason::None, result: None, stage: None }, expires, registration: original.registration, project: original.project.clone(),
+             recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+--- a/desktop/src-tauri/src/saved_command_owner_tests.rs
++++ b/desktop/src-tauri/src/saved_command_owner_tests.rs
+@@ -80,7 +80,7 @@
+         assert_eq!(r.revision, 1); assert_eq!(r.ios_mode_capabilities, None);
+     }
+ }
+-fn projection(domain: SavedCommandDomain) -> RunProjection { RunProjection { agent_local_check: None,
++fn projection(domain: SavedCommandDomain) -> RunProjection { RunProjection { agent_android_build: None, agent_local_check: None,
+     operation_id: "a".repeat(32), owner_generation: "b".repeat(32), context: context(domain),
+     phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None,
+ } }
+@@ -92,7 +92,7 @@
+         expected.operation = operation;
+         let mut prepared = projection(SavedCommandDomain::OfflinePreflight);
+         prepared.context = Context::OfflinePreflight(expected.clone());
+-        owner.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools: None, local_history: None, projection: prepared,
++        owner.inner.lock().prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools: None, local_history: None, projection: prepared,
+             expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None,
+             material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+         let request = |consent, operation_id| wire::start(&json!({"operationId": operation_id,
+@@ -131,7 +131,7 @@
+ }
+ pub(super) fn active_with_context(application: SavedCommandOwner, context: Context) -> (SavedCommandOwner, Arc<Session>) {
+     let domain = application.inner.domain;
+-    let mut p = RunProjection { agent_local_check: None, operation_id: "a".repeat(32), owner_generation: "b".repeat(32), context,
++    let mut p = RunProjection { agent_android_build: None, agent_local_check: None, operation_id: "a".repeat(32), owner_generation: "b".repeat(32), context,
+         phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
+     let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
+     let (frames, receiver) = mpsc::channel(2);
+@@ -144,7 +144,7 @@
+         SavedCommandDomain::IOSArchive => Profile::IOSArchive(ios_wire::Profile::MacArm64),
+         SavedCommandDomain::ArtifactInspection => Profile::ArtifactInspection(artifact_wire::Profile::MacosArm64),
+         SavedCommandDomain::LocalStorePreflight => Profile::LocalStorePreflight(store_wire::Profile::MacosArm64) };
+-    let owner = Arc::new(Session { agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
++    let owner = Arc::new(Session { agent_android_build: None, agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+         profile, clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
+         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None, artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+@@ -194,7 +194,7 @@
+             SavedCommandDomain::ArtifactInspection => &bridge.artifact_inspection,
+             SavedCommandDomain::LocalStorePreflight => bridge.local_store.original_for_test(),
+         };
+-        original.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(domain),
++        original.inner.lock().prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(domain),
+             expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+         assert_eq!(original.inner.qualified(None), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
+             && original.inner.runtime.offline_preflight_installed_profile_available());
+@@ -409,7 +409,7 @@
+         let owner = application(SavedCommandDomain::AndroidBuild);
+         let mut prepared = projection(SavedCommandDomain::AndroidBuild);
+         prepared.context = Context::AndroidBuild(context.clone());
+-        owner.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: prepared,
++        owner.inner.lock().prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: prepared,
+             expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+         assert!(owner.start_offline(wire::start(&wrong_consent).unwrap(), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
+         assert!(owner.inner.lock().prepared.is_some());
+@@ -440,7 +440,7 @@
+         "baselineGeneration":3,"action":"recover"})).unwrap();
+     assert!(owner.prepare_recovery(request, 1, project(), recovery_wire::Availability::Available).is_err());
+     { let r = owner.inner.lock(); assert!(r.recovery_review.is_none() && r.prepared.is_none()); }
+-    owner.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::ProjectRecovery),
++    owner.inner.lock().prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::ProjectRecovery),
+         expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+     let input = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":recovery_wire::CONSENT});
+     // An unqualified runtime or this plain test's absent executor refuses the
+@@ -588,7 +588,7 @@
+         let app = application(SavedCommandDomain::IOSArchive);
+         let mut p = projection(SavedCommandDomain::IOSArchive); p.context = recovery_action();
+         { let mut r = app.inner.lock(); r.recovery = Some(observed);
+-            r.prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection:p, expires:Instant::now()+INTENT, registration:1,
++            r.prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection:p, expires:Instant::now()+INTENT, registration:1,
+                 project:project(), recovery_stamp:None, material:None, recovery:Some(prepared), android_selection: None, artifact_selection: None, artifact_tools: None }); }
+         let admitted = app.start(Start { operation_id:"a".repeat(32), owner_generation:"b".repeat(32) },
+             Instant::now(), Some((1, project())), Availability::Available).unwrap();
+@@ -726,7 +726,7 @@
+         // No positive runtime/toolchain/observer permission is manufactured.
+         { let mut r = owner.inner.lock();
+             assert!(r.active.is_none() && r.prepared.is_none());
+-            r.prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
++            r.prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
+                 registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None }); }
+         let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
+         let registration = if scenario == "stale-registration" { 2 } else { 1 };
+@@ -1168,7 +1168,7 @@
+     assert!(owner.prepare_android(android_wire::prepare(&android).unwrap(), 1, project(), android_wire::Availability::Available).is_err());
+     assert_eq!(owner.inner.lock().revision, 0);
+     assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
+-    owner.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::IOSArchive),
++    owner.inner.lock().prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::IOSArchive),
+         expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+     let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":ios_wire::CONSENT});
+     let status = owner.start_ios(ios_wire::start(&request).unwrap(), Instant::now(), Some((1,project())), ios_wire::Availability::Available).unwrap().release();
+@@ -1250,7 +1250,7 @@
+     let intent = projection(SavedCommandDomain::ArtifactInspection);
+     let intent_id = intent.operation_id.clone();
+     let intent_generation = intent.owner_generation.clone();
+-    prepared.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: intent,
++    prepared.inner.lock().prepared = Some(Prepared { agent_android_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: intent,
+         expires: Instant::now() + INTENT, registration: 1, project: project(),
+         recovery_stamp: None, material: None, recovery: None, android_selection: None,
+         artifact_selection: None, artifact_tools: None });
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -214,6 +214,10 @@
+     #[serde(rename = "local-check.submit")] LocalCheckSubmit(crate::agent_local_checks::Submit),
+     #[serde(rename = "local-check.status")] LocalCheckStatus(crate::agent_local_checks::Query),
+     #[serde(rename = "local-check.cancel")] LocalCheckCancel(crate::agent_local_checks::Query),
++    #[serde(rename = "android-build.prepare")] AndroidBuildPrepare(crate::agent_android_build::Prepare),
++    #[serde(rename = "android-build.start")] AndroidBuildStart(crate::agent_android_build::Start),
++    #[serde(rename = "android-build.status")] AndroidBuildStatus(crate::agent_android_build::Query),
++    #[serde(rename = "android-build.cancel")] AndroidBuildCancel(crate::agent_android_build::Query),
+     #[serde(rename = "identity.request")] IdentitySubmit(crate::agent_identity_requests::Submit),
+     #[serde(rename = "identity.request-status")] IdentityIntent(crate::agent_identity_requests::Query),
+ }
+@@ -238,6 +242,7 @@
+     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
+     IdentityIntent(crate::agent_identity_requests::IntentStatus),
+     LocalCheck(crate::agent_local_checks::Status),
++    AndroidBuildRequest(crate::agent_android_build::Status),
+ }
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -274,6 +279,7 @@
+     if request.version != VERSION { return Err(Error::InvalidRequest); }
+     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
+     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
++    if let RequestBody::AndroidBuildPrepare(input) = &request.request { input.validate()?; }
+     Ok(request)
+ }
+ pub fn encode_request(request: &Request) -> Result<Vec<u8>, Error> {
+@@ -344,6 +350,7 @@
+         ResponseBody::Operation(row) => operation(row)?,
+         ResponseBody::IdentityIntent(row) => { row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+         ResponseBody::LocalCheck(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
++        ResponseBody::AndroidBuildRequest(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+         _ => {}
+     }
+     Ok(())
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1584,6 +1584,42 @@
+     }
+     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent local checks are not supported on this platform.")) }
++}
++#[tauri::command]
++async fn agent_android_build_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_android_build_access(window)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Android builds are not supported on this platform.")) }
++}
++#[tauri::command]
++async fn allow_agent_android_build(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let args: crate::asset_session::agent_android_build::Allow = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.allow_agent_android_build(window, args)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Android builds are not supported on this platform.")) }
++}
++#[tauri::command]
++async fn revoke_agent_android_build(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.revoke_agent_android_build(window)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Android builds are not supported on this platform.")) }
+ }
+ #[tauri::command]
+ async fn agent_identity_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+@@ -2704,6 +2740,8 @@
+             let _ = application_history.publish_identity_history();
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             if !preflight_relay_failed { document.service_local_checks_tick(); }
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            if !android_build_relay_failed { document.service_android_builds_tick(); }
+             // status() releases its native locks before any renderer callback.
+             // Events are best effort: the UI subscribes then fetches status and
+             // orders both by native revision, never by arrival time.
+@@ -3095,6 +3133,7 @@
+                     // before closing the original service, including on quit.
+                     // A history error remains in Host custody; cleanup MUST run.
+                     document.drain_local_checks_for_exit();
++                    document.drain_android_builds_for_exit();
+                     app.state::<ShellState>().bridge.application_service.drain_identity_history_for_exit();
+                     let report = app.state::<ShellState>().bridge.application_service.shutdown().await;
+                     if !report.settled() || !document.can_exit() {
+@@ -4557,6 +4596,7 @@
+             app_info, application_read_status, allow_application_read, revoke_application_read,
+             agent_identity_status, allow_agent_identity, revoke_agent_identity, decline_agent_identity, review_agent_identity, prepare_agent_identity, apply_agent_identity,
+             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
++            agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
+             reveal_installation, installation_status, inspect_installation, cancel_installation,
+             installation_preparation_status, prepare_installation_quit,
+             choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -21,6 +21,7 @@
+ #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
+ #[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;
+ #[path = "../src/agent_local_checks.rs"] mod agent_local_checks;
++#[path = "../src/agent_android_build.rs"] mod agent_android_build;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path = "../src/version_allocation_state_native.rs"] mod version_allocation_state_native;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -36,6 +36,8 @@
+ import { CliReadAccessController } from './cliReadAccessController.ts';
+ import { CliReadAccessPanel } from './components/CliReadAccessPanel.tsx';
+ import { AgentLocalCheckPermission } from './agentLocalChecks.ts';
++import { AgentAndroidBuildPermission } from './agentAndroidBuild.ts';
++import { AgentAndroidBuildAccess } from './components/AgentAndroidBuildAccess.tsx';
+ import { AgentLocalCheckAccess } from './components/AgentLocalCheckAccess.tsx';
+ import { VersionEnrollmentController } from './versionEnrollmentController.ts';
+ import { VersionEnrollmentPanel } from './components/VersionEnrollmentPanel.tsx';
+@@ -992,6 +994,15 @@
+   // App-owned pending calls survive the Advanced panel being hidden. Current
+   // context is also sampled again synchronously inside the Allow event.
+   useEffect(() => { agentLocalChecks.syncContext(); });
++  const [agentAndroidBuild] = useState(() => new AgentAndroidBuildPermission(() => {
++    const service = cliService.current;
++    return { api: service.api?.mode === 'native' ? service.api.agentAndroidBuild ?? null : null,
++      project: androidBuildControllerRef.current?.agentBuildApproval() ?? null,
++      blocked: service !== pathService.current || connectionPicking.current || !!(versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ??
++        externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason()),
++    };
++  }));
++  useEffect(() => { agentAndroidBuild.syncContext(); });
+   const [externalObserver] = useState(() => new ExternalProjectObservationController({
+     current: () => {
+       const current = workspaceRef.current;
+@@ -1861,7 +1872,8 @@
+             projectName={session?.project.name ?? null} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null}
+             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
+             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
+-            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /></div>}
++            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />
++            <AgentAndroidBuildAccess controller={agentAndroidBuild} /></div>}
+           iosArchive={<IOSArchive state={iosArchiveState} controller={iosArchive}
+             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
+             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
+--- a/desktop/src/androidBuild.ts
++++ b/desktop/src/androidBuild.ts
+@@ -1,3 +1,6 @@
++import { canObserveAgentAndroidBuild } from './agentAndroidBuildOrigin.ts';
++import { copyAndroidBuildApproval } from './agentAndroidBuild.ts';
++import type { AndroidBuildApproval } from './agentAndroidBuild.ts';
+ // App-owned coordination only, following OfflinePreflightController's original
+ // observer/one-Start lifetime. A view, Promise or saved comparison is not native
+ // custody, qualification, cancellation settlement or a release approval.
+@@ -240,6 +243,8 @@
+     observationIssue: null, nativeBlocked: false, integrityFailed: false, generationLost: false });
+   private readonly context: Context;
+   private observer: Observer | null = null;
++  private pendingGuiSubmissions = 0;
++  private deferredAgentObservation: { observer: Observer; status: AndroidBuildStatus } | null = null;
+   private attempt: Attempt | null = null;
+   private cancelClaim: AndroidBuildIdentity | null = null;
+   private catalogAttempt: CatalogAttempt | null = null;
+@@ -467,7 +472,7 @@
+   }
+   private originCandidate(attempt: Attempt, status: AndroidBuildStatus): boolean {
+     const op = status.operation;
+-    return !!op && status.statusRevision > attempt.after && !sameAndroidBuildIdentity(op, attempt.previous) &&
++    return !!op && !op.agentAndroidBuild && status.statusRevision > attempt.after && !sameAndroidBuildIdentity(op, attempt.previous) &&
+       sameAndroidBuildData(op.context, attempt.binding.context) && (!attempt.identity || sameAndroidBuildIdentity(op, attempt.identity));
+   }
+   private reconcile(observer: Observer): void {
+@@ -501,6 +506,21 @@
+       this.fail({ code: 'android_build_protocol' }, true); return null;
+     }
+     if (a && b && sameAndroidBuildIdentity(a, b) && !androidBuildOperationProgress(a, b)) { this.fail({ code: 'android_build_protocol' }, true); return null; }
++    if (canObserveAgentAndroidBuild(previous, status, false) && this.pendingGuiSubmissions !== 0) {
++      // Keep one bounded native observation until the original GUI invoke
++      // actually returned; terminal DATA never discards an in-flight caller.
++      const held = this.deferredAgentObservation?.status;
++      if (!held || held.operation && b && sameAndroidBuildIdentity(held.operation, b) &&
++          status.statusRevision > held.statusRevision && androidBuildOperationProgress(held.operation, b)) this.deferredAgentObservation = { observer, status };
++      return status;
++    }
++    const agentObservation = canObserveAgentAndroidBuild(previous, status,
++      this.pendingGuiSubmissions !== 0 || this.state.pending !== null || this.state.originalUnconfirmed || !!this.attempt && !this.attempt.settled);
++    if (agentObservation) {
++      this.attempt = null; this.clearTimer(); this.cancelClaim = null;
++      // Observe/STOP only; no GUI Start consent is reconstructed.
++      this.update({ consent: null, pending: null, originalUnconfirmed: false, historical: true, cancelClaimed: null });
++    }
+     const attempt = this.attempt;
+     if (attempt?.observer === observer && attempt.prepareSent) {
+       if (attempt.identity ? !sameAndroidBuildIdentity(attempt.identity, b) :
+@@ -518,7 +538,7 @@
+       if (selected && !sameAndroidBuildData({ module: selected.module, variant: selected.variant, applicationId: selected.applicationId }, attempt.binding.selection)) {
+         this.fail({ code: 'android_build_protocol' }, true); return null;
+       }
+-    } else if (previous && !sameAndroidBuildIdentity(a ?? null, b) && (a !== null || b !== null)) {
++    } else if (!agentObservation && previous && !sameAndroidBuildIdentity(a ?? null, b) && (a !== null || b !== null)) {
+       this.fail({ code: 'android_build_protocol' }, true); return null; // Unsolicited foreign IDs cannot authorize a run.
+     }
+     if (status.statusRevision === ANDROID_BUILD_COUNTER_MAX) this.retire({ generationLost: true });
+@@ -529,6 +549,13 @@
+       this.reconcile(observer); this.expireConsent();
+     }
+     return status;
++  }
++  private returnedGuiSubmission(): void {
++    if (Number.isSafeInteger(this.pendingGuiSubmissions) && this.pendingGuiSubmissions > 0) this.pendingGuiSubmissions--;
++    const held = this.deferredAgentObservation;
++    if (!held || this.pendingGuiSubmissions !== 0) return;
++    this.deferredAgentObservation = null;
++    if (held.observer.active && held.observer === this.observer) this.receive(held.observer, held.status);
+   }
+   canCheckStatus(): boolean { return !this.disposed && !!this.observer?.active && !this.state.readPending; }
+   async checkStatus(): Promise<void> {
+@@ -1565,6 +1592,17 @@
+       'Local upload-key signing requires the separately admitted Apple-silicon or Intel Mac tool owner; Linux and Windows signing are not qualified by this action.') : null) ?? (this.artifactValidation() === null ?
+       'Save android.uploadCertificateSha256, then refresh the saved configuration and version before reviewing upload-signature inspection.' : null) ?? this.context.otherOperationReason();
+   }
++  /** Same saved-input/catalog builder and existing busy gates. This is UI
++   * comparison DATA; the native grant independently checks original readers. */
++  agentBuildApproval(): AndroidBuildApproval | null {
++    this.syncProject();
++    const project = this.state.project, toolchainSelection = this.state.catalogStatus?.selected;
++    if (this.prepareReason() || this.pendingGuiSubmissions !== 0 || !project || project.dirtyDraft || !project.savedConfig || !project.savedVersion ||
++        !toolchainSelection || this.state.buildMode !== 'unsigned' || this.state.retainCandidateInputs || this.state.verifyUploadSignature) return null;
++    return copyAndroidBuildApproval({ input: { projectId: project.projectId, draftRevision: project.draftRevision,
++      baselineGeneration: project.baselineGeneration, savedConfig: project.savedConfig, savedVersion: project.savedVersion,
++      artifactValidation: { mode: 'structure-and-version', uploadCertificateSha256: null } }, toolchainSelection });
++  }
+   prepareReason = (): string | null => this.commonReason() ?? androidBuildOwnerReason(this.state) ??
+     (this.state.status?.availability === 'busy' ? androidBuildAvailabilityText.busy : null);
+   startReason = (): string | null => {
+@@ -1613,6 +1651,7 @@
+     if (!this.matches(attempt) || this.commonReason()) {
+       attempt.prepareSent = false; attempt.retired = true; attempt.settled = true; this.update({ pending: null, originalUnconfirmed: false }); return;
+     }
++    this.pendingGuiSubmissions = this.pendingGuiSubmissions < Number.MAX_SAFE_INTEGER ? this.pendingGuiSubmissions + 1 : Infinity;
+     try {
+       const value = await observer.api.prepareAndroidBuild(request);
+       if (!observer.active || this.attempt !== attempt) return;
+@@ -1637,7 +1676,7 @@
+           attempt.retired = true; attempt.settled = true; this.update({ pending: null, originalUnconfirmed: false, consent: null, error: safe });
+         } else this.fail(error, safe.code !== 'android_build_protocol');
+       }
+-    }
++    } finally { this.returnedGuiSubmission(); }
+   }
+   setAcknowledged(operationId: string, ownerGeneration: string, acknowledged: boolean): void {
+     this.syncProject(); this.expireConsent();
+@@ -1652,6 +1691,7 @@
+     attempt.startSent = true; attempt.startAfter = attempt.observer.status?.statusRevision ?? 0; this.clearTimer();
+     this.update({ consent: null, pending: 'start', originalUnconfirmed: true, historical: false, error: null }); this.syncProject();
+     if (!this.matches(attempt) || this.commonReason()) { this.retire(); return; }
++    this.pendingGuiSubmissions = this.pendingGuiSubmissions < Number.MAX_SAFE_INTEGER ? this.pendingGuiSubmissions + 1 : Infinity;
+     try {
+       const value = await attempt.observer.api.startAndroidBuild({ operationId, ownerGeneration, consentVersion: attempt.binding.context.operation === 'android-candidate-inputs' ? ANDROID_CANDIDATE_CONSENT : attempt.binding.context.operation === 'android-build-sign' ? ANDROID_BUILD_SIGNED_CONSENT : ANDROID_BUILD_CONSENT });
+       if (!attempt.observer.active || this.attempt !== attempt) return;
+@@ -1661,6 +1701,7 @@
+       }
+       this.receive(attempt.observer, status);
+     } catch (error) { if (attempt.observer.active && this.attempt === attempt && !attempt.settled) this.fail(error); }
++    finally { this.returnedGuiSubmission(); }
+   }
+   canCancel(): boolean {
+     const observer = this.observer, op = observer?.status?.operation;
+--- a/desktop/src/androidBuildProtocol.ts
++++ b/desktop/src/androidBuildProtocol.ts
+@@ -1,3 +1,4 @@
++import { sameAgentAndroidBuildOrigin, validAgentAndroidBuildOrigin } from './agentAndroidBuildOrigin.ts';
+ import { candidateInputs, LOCAL_CANDIDATE_CONSENT as ANDROID_CANDIDATE_CONSENT } from './localReleaseHistoryProtocol.ts';
+ import type { AndroidCandidateInputsResult, AndroidBuildPublishedResult } from './androidBuildTypes.ts';
+ // Renderer-consumed closed DATA only. The four requests are original UTF-8 Raw
+@@ -351,13 +352,16 @@
+     oneOf(value.artifacts, ['not-created', 'removed', 'retained-local-result', 'retained-incomplete', 'unknown']);
+ }
+ function operation(value: unknown): value is AndroidBuildOperation {
+-  if (!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result']) ||
++  if ((!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result']) &&
++       !keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result', 'agentAndroidBuild'])) ||
+       !identity(value) || !context(value.context) || !oneOf(value.phase, phases) || typeof value.intentUsable !== 'boolean' ||
+       !(value.outcome === null || oneOf(value.outcome, outcomes)) || !oneOf(value.reason, Object.keys(androidBuildReasonText)) ||
+       !(value.stage === null || oneOf(value.stage, ANDROID_BUILD_STAGES)) || !(value.activity === null || activity(value.activity)) ||
+       !(value.disposition === null || disposition(value.disposition)) || !(value.result === null ||
+         (value.context.operation === 'android-candidate-inputs' ? candidateResult(value.result, value.operationId) : result(value.result)))) return false;
+   const op = value as unknown as AndroidBuildOperation;
++  if (Object.hasOwn(value, 'agentAndroidBuild') && (!validAgentAndroidBuildOrigin(value.agentAndroidBuild) ||
++      op.context.operation !== 'android-build-inspect' || op.context.artifactValidation.mode !== 'structure-and-version')) return false;
+   const candidate = op.context.operation === 'android-candidate-inputs';
+   if (candidate ? !/^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$/.test(op.operationId) :
+       ['journal-unavailable', 'recovery-required', 'candidate-inputs-unavailable'].includes(op.reason)) return false;
+@@ -426,7 +430,7 @@
+   return !!a && !!b && a.operationId === b.operationId && a.ownerGeneration === b.ownerGeneration;
+ }
+ export function androidBuildOperationProgress(a: AndroidBuildOperation, b: AndroidBuildOperation): boolean {
+-  if (!sameAndroidBuildIdentity(a, b) || !sameAndroidBuildData(a.context, b.context)) return false;
++  if (!sameAndroidBuildIdentity(a, b) || !sameAndroidBuildData(a.context, b.context) || !sameAgentAndroidBuildOrigin(a.agentAndroidBuild, b.agentAndroidBuild)) return false;
+   if (a.phase === 'terminal') return sameAndroidBuildData(a, b);
+   if (a.phase === 'unknown' && b.phase !== 'unknown' || !a.intentUsable && b.intentUsable) return false;
+   const stageIndex = (stage: AndroidBuildStage | null) => stage === null ? -1 : ANDROID_BUILD_STAGES.indexOf(stage);
+--- a/desktop/src/androidBuildTypes.ts
++++ b/desktop/src/androidBuildTypes.ts
+@@ -89,6 +89,7 @@
+ // native terminal finality can publish the paired observations; completion may
+ // still contain FAIL findings and never means release approval.
+ export interface AndroidBuildOperation extends AndroidBuildIdentity {
++  readonly agentAndroidBuild?: import('./agentAndroidBuildOrigin.ts').AgentAndroidBuildOrigin;
+   context: AndroidBuildContext; phase: AndroidBuildPhase; intentUsable: boolean; outcome: AndroidBuildOutcome | null;
+   reason: AndroidBuildReason; stage: AndroidBuildStage | null; activity: AndroidBuildActivity | null;
+   disposition: AndroidBuildDisposition | null; result: AndroidBuildPublishedResult | null;
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -84,6 +84,7 @@
+ import { cliReadAccessProjectIdFits } from './cliReadAccess.ts';
+ import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdentityNative.ts';
+ import { createAgentLocalCheckApi } from './agentLocalChecks.ts';
++import { createAgentAndroidBuildApi } from './agentAndroidBuild.ts';
+ import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
+ import { createGitReadApi } from './gitReadProtocol.ts';
+ import { createVersionEnrollmentPort } from './versionEnrollment.ts';
+@@ -398,6 +399,7 @@
+     projectIdentity: createProjectIdentityApi(mode, invoke, listen),
+     agentIdentity: createAgentIdentityApi(mode, invoke),
+     agentLocalChecks: createAgentLocalCheckApi(mode, invoke),
++    agentAndroidBuild: createAgentAndroidBuildApi(mode, invoke),
+     githubGhEntry: createGitHubGhApi(mode, invoke),
+     gitRead: createGitReadApi(mode, invoke),
+     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+--- a/desktop/src/components/AndroidBuild.tsx
++++ b/desktop/src/components/AndroidBuild.tsx
+@@ -49,6 +49,7 @@
+     <div className="inline-heading"><h3>Local AAB observation · {operationProjectName ?? op.context.projectId}</h3><Badge tone={historical ? 'warning' : 'info'}>{historical ? 'Historical / retained context' : 'This build only'}</Badge></div>
+     <p><strong>Complete is not PASS, a fresh build or release approval.</strong> Native completion permits this bounded observation to be shown. It does not establish that these are current source outputs or current-file authority.</p>
+     <AndroidBuildDetails state={state} />
++    {op.agentAndroidBuild && <p>CLI request <code>{op.agentAndroidBuild.requestId}</code> · original operation <code>{op.operationId}</code>. This is the same completed build, not an invitation to run it again.</p>}
+     {candidate && (historical ? <p className="review-caution">This candidate belongs to an earlier context. Verify it in the correct project's Local release history before using its files.</p> : <div className="session-review" aria-label="Created local candidate inputs">
+       <h4>Local candidate inputs kept · not submitted</h4>
+       <p>Candidate <code>{candidate.operationId}</code> · source commit <code>{candidate.sourceCommit}</code>.</p>
+@@ -130,6 +131,7 @@
+   </section>;
+   const selected = project?.selection;
+   return <section className="card offline-preflight" aria-labelledby={label}>
++    {op?.agentAndroidBuild && <p className="review-caution">CLI-authorized original <code>{op.operationId}</code> · request <code>{op.agentAndroidBuild.requestId}</code>. This panel observes and can stop it; Start belongs to that one CLI request. Do not prepare or run a replacement.</p>}
+     <SectionHeading title="Build Android app" description="Build the selected saved configuration, then inspect its AAB. This does not publish a release.">
+       <Badge tone="warning">Project code executes</Badge>{onHelp && <HelpButton content={androidBuildHelp} onHelp={onHelp} />}
+     </SectionHeading>
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -424,6 +424,7 @@
+   readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
+   readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
+   readonly agentLocalChecks?: import('./agentLocalChecks.ts').AgentLocalCheckApi | null;
++  readonly agentAndroidBuild?: import('./agentAndroidBuild.ts').AgentAndroidBuildApi | null;
+   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
+   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
+   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
