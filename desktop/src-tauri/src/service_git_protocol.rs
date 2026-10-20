@@ -17,6 +17,7 @@ pub const STATUS_BYTES: usize = 8 * 1024;
 pub enum Action {
     Stage,
     Unstage,
+    Commit,
 }
 
 pub(crate) fn digest(value: &str) -> bool {
@@ -80,10 +81,12 @@ fn selection_hash(action: Action, revision: &str, paths: &[String]) -> Result<St
         return Err(Error::InvalidRequest);
     }
     let mut hash = Sha256::new();
-    hash.update(b"mrk-agent-git-index-selection/1\0");
+    hash.update(if action == Action::Commit { b"mrk-agent-git-commit-selection/1\0".as_slice() }
+        else { b"mrk-agent-git-index-selection/1\0".as_slice() });
     hash.update(match action {
         Action::Stage => b"stage".as_slice(),
         Action::Unstage => b"unstage".as_slice(),
+        Action::Commit => b"commit".as_slice(),
     });
     hash.update(revision.as_bytes());
     for path in paths {
@@ -94,6 +97,10 @@ fn selection_hash(action: Action, revision: &str, paths: &[String]) -> Result<St
 }
 impl Selection {
     pub(crate) fn new(action: Action, revision: String, paths: Vec<String>) -> Result<Self, Error> {
+        if action == Action::Commit { return Err(Error::InvalidRequest); }
+        Self::new_shared(action, revision, paths)
+    }
+    pub(crate) fn new_shared(action: Action, revision: String, paths: Vec<String>) -> Result<Self, Error> {
         let selection_sha256 = selection_hash(action, &revision, &paths)?;
         let summary = Summary {
             action,
@@ -116,6 +123,10 @@ impl Selection {
         Ok(value)
     }
     pub fn validate(&self) -> Result<(), Error> {
+        if self.summary.action == Action::Commit { return Err(Error::InvalidRequest); }
+        self.validate_shared()
+    }
+    pub(crate) fn validate_shared(&self) -> Result<(), Error> {
         self.summary.validate()?;
         if self.summary.path_count as usize != self.paths.len()
             || selection_hash(
@@ -181,6 +192,10 @@ impl Access {
         }
     }
     pub fn validate(&self) -> Result<(), Error> {
+        if self.selection.as_ref().is_some_and(|s| s.summary.action == Action::Commit) { return Err(Error::InvalidRequest); }
+        self.validate_shared()
+    }
+    pub(crate) fn validate_shared(&self) -> Result<(), Error> {
         if self.remaining_ms > 900_000
             || self.enabled && (self.consumed || self.remaining_ms == 0)
             || !self.enabled && self.remaining_ms != 0
@@ -191,7 +206,7 @@ impl Access {
             return Err(Error::InvalidRequest);
         }
         if let Some(v) = &self.selection {
-            v.validate()?;
+            v.validate_shared()?;
         }
         encoded_bound(self, SCOPE_BYTES - 1024)
     }
@@ -205,7 +220,11 @@ pub struct Scope {
 }
 impl Scope {
     pub fn validate(&self) -> Result<(), Error> {
-        self.access.validate()?;
+        if self.access.selection.as_ref().is_some_and(|s| s.summary.action == Action::Commit) { return Err(Error::InvalidRequest); }
+        self.validate_shared()
+    }
+    pub(crate) fn validate_shared(&self) -> Result<(), Error> {
+        self.access.validate_shared()?;
         if self
             .access
             .project_id
@@ -290,6 +309,10 @@ pub struct Status {
 }
 impl Status {
     pub fn validate(&self) -> Result<(), Error> {
+        if self.selection.action == Action::Commit { return Err(Error::InvalidRequest); }
+        self.validate_shared()
+    }
+    pub(crate) fn validate_shared(&self) -> Result<(), Error> {
         use State as S;
         self.selection.validate()?;
         if self.revision == 0

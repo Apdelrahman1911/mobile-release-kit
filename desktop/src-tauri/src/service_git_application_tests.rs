@@ -27,6 +27,7 @@ fn original_service_requires_both_grants_and_preserves_request_across_client_rec
         document: Arc::downgrade(&doc),
         selection: git::Selection::new(git::Action::Stage, "a".repeat(64), vec!["app/a".into()])
             .unwrap(),
+        commit: None,
         changes,
     });
     let mut input = git::Prepare {

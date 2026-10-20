@@ -6,7 +6,13 @@ use crate::{
     edit_owner::SavedEditStamp, git_local_protocol as local, git_read_protocol as read,
     service_git_protocol as wire, service_git_requests as requests, service_protocol::Error,
 };
+use crate::service_git_commit_protocol::{Draft, Family};
 use serde::Deserialize;
+
+#[path = "service_git_commit_document.rs"]
+mod commit;
+pub(crate) use commit::{decode_commit_allow, CommitAllow};
+pub(super) use commit::review_matches as agent_git_files_review_matches;
 use std::{path::Path, sync::OnceLock};
 
 #[derive(Deserialize)]
@@ -29,6 +35,7 @@ pub(crate) fn decode_allow(bytes: &[u8]) -> Result<Allow, BridgeError> {
         || args.project_id.len() > 64
         || !wire::native_id(&args.read_operation_id)
         || !(1..u32::MAX).contains(&args.expected_document_revision)
+        || args.action == wire::Action::Commit
         || args.paths.is_empty()
         || args.paths.len() > wire::PATH_LIMIT
         || args.paths.iter().any(|p| !wire::relative(p))
@@ -186,6 +193,7 @@ fn selection(
             .get(match action {
                 wire::Action::Stage => "worktree",
                 wire::Action::Unstage => "index",
+                wire::Action::Commit => return Err(BridgeError::invalid()),
             })
             .and_then(Value::as_str);
         if !mark.is_some_and(|v| v.len() == 1 && v != " " && v != ".") {
@@ -255,7 +263,12 @@ impl DocumentBinding {
         window: &str,
         args: Allow,
     ) -> Result<wire::Access, BridgeError> {
-        if window != MAIN || args.consent_version != wire::CONSENT {
+        self.allow_agent_git_files(window, args, None)
+    }
+    fn allow_agent_git_files(&self, window: &str, args: Allow, commit: Option<Draft>) -> Result<wire::Access, BridgeError> {
+        let family = if commit.is_some() { Family::Commit } else { Family::Index };
+        let consent = if family == Family::Commit { crate::service_git_commit_protocol::CONSENT } else { wire::CONSENT };
+        if window != MAIN || args.consent_version != consent || !family.matches(args.action) {
             return Err(BridgeError::invalid());
         }
         let (original, selected, revoke_epoch) = {
@@ -303,7 +316,8 @@ impl DocumentBinding {
             )?;
             (
                 observed.original.clone(),
-                selection(value, args.action, args.paths)?,
+                if family == Family::Commit { commit::whole_selection(value)? }
+                else { selection(value, args.action, args.paths)? },
                 book.revoke_epoch,
             )
         };
@@ -334,6 +348,7 @@ impl DocumentBinding {
             read_operation_id: args.read_operation_id,
             document: Arc::downgrade(&self.inner.session_identity),
             selection: selected,
+            commit,
             changes: self.inner.changes.clone(),
         });
         let mut state = self.lock();
@@ -381,10 +396,9 @@ impl DocumentBinding {
                 .set(Arc::downgrade(&service))
                 .map_err(|_| public(Error::StateUnknown))?;
         }
-        let access = service
-            .git_index_requests()
-            .allow(scope.clone())
-            .map_err(public)?;
+        let access = if family == Family::Commit {
+            service.git_index_requests().allow_commit(scope.clone()).map(|a| a.0)
+        } else { service.git_index_requests().allow(scope.clone()) }.map_err(public)?;
         book.grant = Some(Arc::new(Grant {
             scope,
             observation: original,
@@ -392,6 +406,9 @@ impl DocumentBinding {
         Ok(access)
     }
     pub(crate) fn revoke_agent_git_index(&self, window: &str) -> Result<wire::Access, BridgeError> {
+        self.revoke_agent_git_files(window, Family::Index)
+    }
+    fn revoke_agent_git_files(&self, window: &str, family: Family) -> Result<wire::Access, BridgeError> {
         if window != MAIN {
             return Err(BridgeError::invalid());
         }
@@ -410,7 +427,7 @@ impl DocumentBinding {
             Ok(())
         })();
         let stop = match self.git_index_service() {
-            Ok(Some(s)) => s.git_index_requests().revoke().map_err(public),
+            Ok(Some(s)) => if family == Family::Commit { s.git_index_requests().revoke_commit().map(|a| a.0).map_err(public) } else { s.git_index_requests().revoke().map_err(public) },
             Ok(None) => Ok(wire::Access::empty()),
             Err(e) => Err(e),
         };
@@ -439,7 +456,7 @@ impl DocumentBinding {
         if link.phase() != phase
             || !Arc::ptr_eq(link.scope(), &grant.scope)
             || link.stopped()
-            || !same_action(action, &grant.scope.selection)
+            || !commit::action(&grant.scope).is_ok_and(|expected| expected == *action)
         {
             return Err(public(Error::Conflict));
         }
@@ -503,7 +520,7 @@ impl DocumentBinding {
                 local::Prepare {
                     project_id: scope.runtime_id.clone(),
                     expected_document_revision: scope.document_revision,
-                    action: native_action(&scope.selection)?,
+                    action: commit::action(&scope)?,
                 },
                 Some(link),
             ),
@@ -616,7 +633,7 @@ fn same_action(action: &local::Action, selection: &wire::Selection) -> bool {
     // The original action validator enforces absent private commit fields for
     // Stage/Unstage; this child needs no access to those fields.
     action.valid()
-        && matches!(action,local::Action::Files(v) if v.kind==match selection.summary.action {wire::Action::Stage=>local::Kind::Stage,wire::Action::Unstage=>local::Kind::Unstage}
+        && matches!(action,local::Action::Files(v) if v.kind==match selection.summary.action {wire::Action::Stage=>local::Kind::Stage,wire::Action::Unstage=>local::Kind::Unstage,wire::Action::Commit=>return false}
             && v.expected_revision==selection.summary.repository_revision && v.paths==selection.paths)
 }
 fn native_action(selection: &wire::Selection) -> Result<local::Action, BridgeError> {
@@ -624,6 +641,7 @@ fn native_action(selection: &wire::Selection) -> Result<local::Action, BridgeErr
         match selection.summary.action {
             wire::Action::Stage => local::Kind::Stage,
             wire::Action::Unstage => local::Kind::Unstage,
+            wire::Action::Commit => return Err(BridgeError::invalid()),
         },
         selection.summary.repository_revision.clone(),
         selection.paths.clone(),
@@ -654,6 +672,7 @@ fn flush(service: &ApplicationService) -> Result<(), Error> {
         let action = match entry.status()?.selection.action {
             wire::Action::Stage => crate::service_protocol::Action::GitStage,
             wire::Action::Unstage => crate::service_protocol::Action::GitUnstage,
+            wire::Action::Commit => crate::service_protocol::Action::GitCommit,
         };
         let id = entry.input().origin.request_id.clone();
         let result = if new {

@@ -1,5 +1,5 @@
 use super::*;
-fn observed() -> read::Projection {
+pub(super) fn observed() -> read::Projection {
     read::Projection {
         operation_id: "git-read-1".into(),
         context: read::Context {
@@ -84,6 +84,7 @@ fn native_index_action_preserves_private_field_and_exact_selection_checks() {
         let opposite = match kind {
             wire::Action::Stage => local::Kind::Unstage,
             wire::Action::Unstage => local::Kind::Stage,
+            wire::Action::Commit => unreachable!("index-only loop"),
         };
         let other = local::Action::index(opposite, "a".repeat(64), vec!["app/a".into()]).unwrap();
         assert!(!same_action(&other, &selected));

@@ -34,29 +34,29 @@ export function createGitIndexApi(mode:string,invoke:Invoke):GitIndexApi|null {
   try{const raw=new TextEncoder().encode(JSON.stringify(input));if(raw.length+96>96*1024)throw failure();const result=parseGitIndexAccess(await invoke<unknown>(command,raw));if(!result)throw failure();return result;}catch{throw failure();}};
  return Object.freeze({status:()=>call('agent_git_index_access',{}),revoke:()=>call('revoke_agent_git_index',{}),allow:(input:GitIndexApproval)=>{const safe=copyGitIndexApproval(input);return safe?call('allow_agent_git_index',{...safe,consentVersion:GIT_INDEX_CONSENT}):Promise.reject(failure());}});
 }
-export interface PermissionApi<A> {status():Promise<GitIndexAccess>;allow(input:A):Promise<GitIndexAccess>;revoke():Promise<GitIndexAccess>}
-export interface PermissionState { access: GitIndexAccess | null; acknowledged: boolean; pending: 'allow' | 'status' | null; revokePending: boolean; uncertain: boolean; message: string | null }
-export interface PermissionContext<A> { api: PermissionApi<A> | null; project: A | null; blocked: boolean }
-interface Work<A> { api: PermissionApi<A>; epoch: number; context: A | null; superseded: boolean }
+export interface PermissionApi<A, R = GitIndexAccess> {status():Promise<R>;allow(input:A):Promise<R>;revoke():Promise<R>}
+export interface PermissionState<R = GitIndexAccess> { access: R | null; acknowledged: boolean; pending: 'allow' | 'status' | null; revokePending: boolean; uncertain: boolean; message: string | null }
+export interface PermissionContext<A, R = GitIndexAccess> { api: PermissionApi<A, R> | null; project: A | null; blocked: boolean }
+interface Work<A, R> { api: PermissionApi<A, R>; epoch: number; context: A | null; superseded: boolean }
 /** App-owned finite UI requests: one read/allow and one independent revoke.
  * Native consent/epoch and original native owner remain authoritative. */
-class Permission<A> {
+export class Permission<A, R extends { readonly enabled: boolean } = GitIndexAccess> {
   private readonly copy:(value:unknown)=>A|null;
-  private api: PermissionApi<A> | null = null;
-  private original: PermissionApi<A> | null = null;
+  private api: PermissionApi<A, R> | null = null;
+  private original: PermissionApi<A, R> | null = null;
   private context: A | null = null;
   private epoch = 0;
   private blocked = false;
-  private readonly current: (() => PermissionContext<A>) | null;
-  private work: Work<A> | null = null;
-  private revokeWork: Work<A> | null = null;
-  private listeners = new Set<(state: PermissionState) => void>();
-  private state: PermissionState = { access: null, acknowledged: false, pending: null, revokePending: false, uncertain: false, message: null };
-  constructor(copy: (value:unknown)=>A|null,current?:()=>PermissionContext<A>) {this.copy=copy;this.current=current??null;}
-  getState(): PermissionState { return this.state; }
-  subscribe(listener: (state: PermissionState) => void): () => void { this.listeners.add(listener); listener(this.state); return () => { this.listeners.delete(listener); }; }
-  private update(value: Partial<PermissionState>): void { this.state = Object.freeze({ ...this.state, ...value }); for (const fn of this.listeners) fn(this.state); }
-  bind(api: PermissionApi<A> | null, input: A | null): void {
+  private readonly current: (() => PermissionContext<A, R>) | null;
+  private work: Work<A, R> | null = null;
+  private revokeWork: Work<A, R> | null = null;
+  private listeners = new Set<(state: PermissionState<R>) => void>();
+  private state: PermissionState<R> = { access: null, acknowledged: false, pending: null, revokePending: false, uncertain: false, message: null };
+  constructor(copy: (value:unknown)=>A|null,current?:()=>PermissionContext<A, R>) {this.copy=copy;this.current=current??null;}
+  getState(): PermissionState<R> { return this.state; }
+  subscribe(listener: (state: PermissionState<R>) => void): () => void { this.listeners.add(listener); listener(this.state); return () => { this.listeners.delete(listener); }; }
+  private update(value: Partial<PermissionState<R>>): void { this.state = Object.freeze({ ...this.state, ...value }); for (const fn of this.listeners) fn(this.state); }
+  bind(api: PermissionApi<A, R> | null, input: A | null): void {
     const context = input ? this.copy(input) : null;
     if (this.api === api && JSON.stringify(this.context) === JSON.stringify(context)) return;
     this.api = api; this.context = context;
@@ -76,7 +76,7 @@ class Permission<A> {
   async allow(): Promise<void> {
     this.syncContext(); // Native invocation uses current event-time selection, not an earlier render/effect.
     if (!this.canAllow()) return;
-    const api = this.api!, context = this.context!, work: Work<A> = { api, context, epoch: this.epoch, superseded: false };
+    const api = this.api!, context = this.context!, work: Work<A, R> = { api, context, epoch: this.epoch, superseded: false };
     this.original = api; this.work = work; this.update({ pending: 'allow', acknowledged: false, message: null });
     try {
       // Notification is synchronous: a subscriber can revoke or change the
@@ -97,7 +97,7 @@ class Permission<A> {
     // A status-only reconnect can observe a previously enabled permission.
     // Keep that exact connection until original Revoke, even after rebinding.
     this.original = api;
-    const work: Work<A> = { api, context: this.context, epoch: this.epoch, superseded: false }; this.work = work; this.update({ pending: 'status' });
+    const work: Work<A, R> = { api, context: this.context, epoch: this.epoch, superseded: false }; this.work = work; this.update({ pending: 'status' });
     try { const result = await api.status(); if (!work.superseded && work.epoch === this.epoch) this.update({ access: result, message: null }); }
     catch { if (!work.superseded && work.epoch === this.epoch) this.update({ message: 'Permission was not confirmed. Refresh or stop it in the original Desktop; do not repeat the Git change.' }); }
     finally { if (this.work === work) { this.work = null; this.update({ pending: null }); } }
@@ -109,7 +109,7 @@ class Permission<A> {
     // late Allow display after it and never a new action on an old ACK.
     this.epoch = Math.min(this.epoch + 1, Number.MAX_SAFE_INTEGER);
     if (this.work) this.work.superseded = true;
-    const work: Work<A> = { api, context: null, epoch: this.epoch, superseded: false }; this.revokeWork = work;
+    const work: Work<A, R> = { api, context: null, epoch: this.epoch, superseded: false }; this.revokeWork = work;
     this.update({ revokePending: true, access: null, acknowledged: false });
     try {
       const result = await api.revoke();

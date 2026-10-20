@@ -87,6 +87,7 @@ import { createAgentIdentityActionApi } from './agentIdentityActions.ts';
 import { createAgentLocalCheckApi } from './agentLocalChecks.ts';
 import { createAgentAndroidBuildApi } from './agentAndroidBuild.ts';
 import { createGitIndexApi } from './service_git_permission.ts';
+import { createGitCommitApi } from './service_git_commit_permission.ts';
 import { createAgentIOSArchiveApi } from './agentIOSArchive.ts';
 import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
 import { createGitReadApi } from './gitReadProtocol.ts';
@@ -411,6 +412,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     agentLocalChecks: createAgentLocalCheckApi(mode, invoke),
     agentAndroidBuild: createAgentAndroidBuildApi(mode, invoke),
     agentGitIndex: createGitIndexApi(mode, invoke),
+    agentGitCommit: createGitCommitApi(mode, invoke),
     agentIOSArchive: createAgentIOSArchiveApi(mode, invoke),
     githubGhEntry: createGitHubGhApi(mode, invoke),
     gitRead: createGitReadApi(mode, invoke),

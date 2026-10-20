@@ -25,6 +25,7 @@ fn links(document: &Arc<()>) -> (Arc<requests::NativeLink>, Arc<requests::Native
         read_operation_id: "git-read-1".into(),
         document: Arc::downgrade(document),
         selection,
+        commit: None,
         changes: tokio::sync::watch::channel(0).0,
     });
     let grant_id = inbox.allow(scope).unwrap().grant_id.unwrap();

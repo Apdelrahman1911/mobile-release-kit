@@ -18,6 +18,7 @@ fn scope(document: &Arc<()>) -> Arc<NativeScope> {
         document: Arc::downgrade(document),
         selection: p::Selection::new(p::Action::Stage, "d".repeat(64), vec!["app/a.txt".into()])
             .unwrap(),
+        commit: None,
         changes,
     })
 }

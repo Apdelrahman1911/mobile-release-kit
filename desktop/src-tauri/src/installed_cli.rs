@@ -18,6 +18,8 @@ mod build_requests;
 mod ios_archive;
 #[path="installed_cli_git_index.rs"]
 mod git_index;
+#[path="installed_cli_git_commit.rs"]
+mod git_commit;
 
 const HELP: &str = "Mobile Release Kit agent CLI\n\n\
 Usage:\n\
@@ -33,6 +35,11 @@ Usage:\n\
   mrk git-index-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID PREPARE_OPERATION_ID REVIEW_ID [--json]\n\
   mrk git-index-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk git-index-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk git-commit-scope PROJECT_ID [--json]\n\
+  mrk git-commit-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID [--json]\n\
+  mrk git-commit-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID PREPARE_OPERATION_ID REVIEW_ID [--json]\n\
+  mrk git-commit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk git-commit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk operations PROJECT_ID [--json]\n\
   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
@@ -206,6 +213,10 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
                 "commit":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":GIT_INDEX_COMMANDS},
+            "gitCommits": {"scope":"desktop-approved-whole-staged-index", "defaultEnabled":false,"oneUse":true,
+                "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
+                "sharesGrantAndRequestLimitWithGitIndex":true,"readOrIndexGrantAuthorizesCommit":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
+                "includesPrivateDraft":false,"hooks":false,"signing":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":git_commit::COMMANDS},
             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
             "requestDiscovery": {"scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "savedHistory":false, "includesReports":false, "grantsExecution":false},
             "identityRequests": {
@@ -233,7 +244,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
         }
-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()) {
+        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()) {
             text.push_str("  mrk "); text.push_str(command.command);
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
@@ -327,6 +338,8 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
+        p::ResponseBody::GitCommitScope(_) | p::ResponseBody::GitCommitRequest(_) =>
+            "Use the named git-commit command and its exact original request IDs to inspect this response.\n".into(),
         p::ResponseBody::GitIndexScope(_) | p::ResponseBody::GitIndexRequest(_) =>
             "Use the named git-index command and its exact original request IDs to inspect this response.\n".into(),
         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
@@ -353,6 +366,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     let json = args.iter().any(|a| a == "--json");
     if identity::recognizes(&args) { return identity::run(args); }
     if git_index::recognizes(&args) { return git_index::run(args); }
+    if git_commit::recognizes(&args) { return git_commit::run(args); }
     if identity_actions::recognizes(&args) { return identity_actions::run(args); }
     if local_checks::recognizes(&args) { return local_checks::run(args); }
     if android_build::recognizes(&args) { return android_build::run(args); }

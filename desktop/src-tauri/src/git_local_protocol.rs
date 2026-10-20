@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+#[path = "service_git_commit_native.rs"]
+mod service_commit;
+
 pub(crate) use read::{Clock, Context, Directories, DirectoryIdentity, FileIdentity, Files, Native, Snapshot};
 pub(crate) use read::{INDEX_LIMIT, TOOL_LIMIT, TOOL_PATH};
 pub(crate) const PROTOCOL: &str = "mrk-git-local/1";

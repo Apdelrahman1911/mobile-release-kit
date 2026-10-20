@@ -364,10 +364,15 @@ impl ApplicationService {
             // No native callback, executor or GUI approval runs in a socket.
             match &request.request {
                 p::RequestBody::GitIndexScope(q) => return self.git_index_scope(client, &q.project_id),
+                p::RequestBody::GitCommitScope(q) => return self.git_commit_scope(client, &q.project_id),
                 p::RequestBody::GitIndexPrepare(v) => return self.git_index_prepare(client, v.clone()),
+                p::RequestBody::GitCommitPrepare(v) => return self.git_commit_prepare(client, v.clone()),
                 p::RequestBody::GitIndexStart(v) => return self.git_index_start(client, v),
+                p::RequestBody::GitCommitStart(v) => return self.git_commit_start(client, v),
                 p::RequestBody::GitIndexStatus(q) => return self.git_index_query(client, q, false),
+                p::RequestBody::GitCommitStatus(q) => return self.git_commit_query(client, q, false),
                 p::RequestBody::GitIndexCancel(q) => return self.git_index_query(client, q, true),
+                p::RequestBody::GitCommitCancel(q) => return self.git_commit_query(client, q, true),
                 p::RequestBody::Requests(query) => return self.discover_requests(client, &query.project_id),
                 p::RequestBody::AndroidBuildPrepare(input) => return self.prepare_agent_android_build(client, input.clone()),
                 p::RequestBody::AndroidBuildStart(input) => return self.start_agent_android_build(client, input),
@@ -395,7 +400,9 @@ impl ApplicationService {
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
-                | p::RequestBody::GitIndexStatus(_) | p::RequestBody::GitIndexCancel(_) | p::RequestBody::Requests(_) | p::RequestBody::IdentityPrepare(_) | p::RequestBody::IdentityStart(_) | p::RequestBody::IdentityActionStatus(_) | p::RequestBody::IdentityCancel(_)
+                | p::RequestBody::GitIndexStatus(_) | p::RequestBody::GitIndexCancel(_)
+                | p::RequestBody::GitCommitScope(_) | p::RequestBody::GitCommitPrepare(_)
+                | p::RequestBody::GitCommitStart(_) | p::RequestBody::GitCommitStatus(_) | p::RequestBody::GitCommitCancel(_) | p::RequestBody::Requests(_) | p::RequestBody::IdentityPrepare(_) | p::RequestBody::IdentityStart(_) | p::RequestBody::IdentityActionStatus(_) | p::RequestBody::IdentityCancel(_)
                 | p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
                     | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_)
                     | p::RequestBody::AndroidBuildPrepare(_) | p::RequestBody::AndroidBuildStart(_) | p::RequestBody::AndroidBuildStatus(_) | p::RequestBody::AndroidBuildCancel(_)

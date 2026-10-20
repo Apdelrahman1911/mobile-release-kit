@@ -23,6 +23,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/git_local_state.rs"] mod git_local_state;
 #[path = "../src/service_protocol.rs"] mod service_protocol;
 #[path = "../src/service_git_protocol.rs"] mod service_git_protocol;
+#[path = "../src/service_git_commit_protocol.rs"] mod service_git_commit_protocol;
 #[path = "../src/service_git_requests.rs"] mod service_git_requests;
 #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
 #[path = "../src/service_android_tools.rs"] mod service_android_tools;

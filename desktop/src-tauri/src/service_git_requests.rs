@@ -2,6 +2,7 @@
 //! Document lock, accesses Store, or reconstructs a native ReadyReview.
 use crate::{
     service_git_protocol as p,
+    service_git_commit_protocol::{Draft, Family},
     service_protocol::{Error, Id, OperationState, Settlement},
 };
 use std::{
@@ -16,11 +17,13 @@ use std::{
 // Thirty-two metadata rows, ONE selected pathset (plus one old handoff stack),
 // and the SAME eight IPC workers' typed/encoded responses. The existing native
 // Git owner separately charges its action/review/runtime/source/job originals.
-// No diff, file bytes, branch/commit draft or raw native result is retained here.
+// No diff, file bytes, branch draft or raw native result is retained here.
+// One private Commit draft is retained only with the active scope/handoff,
+// never in the 32 metadata tombstones or public IPC responses.
 const SCOPE_BACKING: usize = p::PATH_LIMIT * (1024 + std::mem::size_of::<String>()) + 8192;
 pub(crate) const DOCUMENT_BACKING: usize = p::REQUEST_LIMIT
     * (4096 + std::mem::size_of::<Entry>() + std::mem::size_of::<Row>())
-    + 2 * SCOPE_BACKING
+    + 2 * (SCOPE_BACKING + crate::service_git_commit_protocol::DRAFT_BACKING)
     + 8 * (p::SCOPE_BYTES + SCOPE_BACKING + p::STATUS_BYTES + 4096);
 
 pub(crate) struct NativeScope {
@@ -35,11 +38,17 @@ pub(crate) struct NativeScope {
     pub(crate) read_operation_id: String,
     pub(crate) document: Weak<()>,
     pub(crate) selection: p::Selection,
+    pub(crate) commit: Option<Draft>,
     pub(crate) changes: tokio::sync::watch::Sender<u32>,
 }
 impl NativeScope {
     fn valid(&self) -> bool {
-        self.selection.validate().is_ok()
+        self.selection.validate_shared().is_ok()
+            && match (&self.commit, self.selection.summary.action) {
+                (Some(draft), p::Action::Commit) => draft.valid(),
+                (None, p::Action::Stage | p::Action::Unstage) => true,
+                _ => false,
+            }
             && (1..=64).contains(&self.runtime_id.len())
             && self.root.is_absolute()
             && self.root.as_os_str().len() <= 4096
@@ -98,6 +107,7 @@ struct Row {
 }
 pub(crate) struct Entry {
     input: p::Prepare,
+    family: Family,
     runtime_id: String,
     row: Mutex<Row>,
     failed: AtomicBool,
@@ -231,7 +241,7 @@ impl Entry {
         let row = self.lock()?;
         let mut status = row.status.clone();
         status.history_available = !row.history_failed && row.history_ack == Some(status.revision);
-        status.validate()?;
+        status.validate_shared()?;
         Ok(status)
     }
     pub(crate) fn unknown(&self) {
@@ -663,7 +673,10 @@ impl Inbox {
         })
     }
     pub(crate) fn allow(&self, scope: Arc<NativeScope>) -> Result<p::Access, Error> {
-        if !scope.valid() {
+        self.allow_for(scope, Family::Index)
+    }
+    fn allow_for(&self, scope: Arc<NativeScope>, family: Family) -> Result<p::Access, Error> {
+        if !scope.valid() || !family.matches(scope.selection.summary.action) {
             return Err(Error::InvalidRequest);
         }
         let mut book = self.lock()?;
@@ -687,21 +700,24 @@ impl Inbox {
             old.revoked.store(true, Ordering::Release);
         }
         book.lease = Some(lease);
-        access(&book, None)
+        access(&book, None, family)
     }
     pub(crate) fn access(&self) -> Result<p::Access, Error> {
         let book = self.lock()?;
-        access(&book, None)
+        access(&book, None, Family::Index)
     }
     pub(crate) fn scope(&self, project: &Id) -> Result<p::Scope, Error> {
         let book = self.lock()?;
         Ok(p::Scope {
             service_instance: self.instance.clone(),
             project_id: project.clone(),
-            access: access(&book, Some(project))?,
+            access: access(&book, Some(project), Family::Index)?,
         })
     }
     pub(crate) fn revoke(&self) -> Result<p::Access, Error> {
+        self.revoke_for(Family::Index)
+    }
+    fn revoke_for(&self, family: Family) -> Result<p::Access, Error> {
         let book = self.lock()?;
         if let Some(lease) = &book.lease {
             lease.revoked.store(true, Ordering::Release);
@@ -709,7 +725,7 @@ impl Inbox {
         for e in &book.entries {
             e.cancel(p::Reason::PermissionRevoked, Instant::now());
         }
-        access(&book, None)
+        access(&book, None, family)
     }
     pub(crate) fn close(&self) {
         match self.book.lock() {
@@ -725,16 +741,19 @@ impl Inbox {
             Err(_) => self.failed.store(true, Ordering::Release),
         }
     }
-    fn find<'a>(&self, book: &'a Book, query: &p::Query) -> Result<&'a Arc<Entry>, Error> {
+    fn find<'a>(&self, book: &'a Book, query: &p::Query, family: Family) -> Result<&'a Arc<Entry>, Error> {
         if query.service_instance != self.instance {
             return Err(Error::Conflict);
         }
         book.entries
             .iter()
-            .find(|e| e.input.origin == *query)
+            .find(|e| e.input.origin == *query && e.family == family)
             .ok_or(Error::Conflict)
     }
     pub(crate) fn prepare(&self, input: p::Prepare) -> Result<p::Status, Error> {
+        self.prepare_for(input, Family::Index)
+    }
+    fn prepare_for(&self, input: p::Prepare, family: Family) -> Result<p::Status, Error> {
         let mut book = self.lock()?;
         if input.origin.service_instance != self.instance || book.closed {
             return Err(Error::Conflict);
@@ -744,7 +763,7 @@ impl Inbox {
             .iter()
             .find(|e| e.input.origin.request_id == input.origin.request_id)
         {
-            return if prior.input == input {
+            return if prior.input == input && prior.family == family {
                 prior.status()
             } else {
                 Err(Error::Conflict)
@@ -754,7 +773,8 @@ impl Inbox {
             return Err(Error::Busy);
         }
         let lease = book.lease.as_ref().ok_or(Error::AccessDenied)?.clone();
-        if lease.id != input.grant_id
+        if !family.matches(lease.scope.selection.summary.action)
+            || lease.id != input.grant_id
             || lease.scope.project_id != input.origin.project_id
             || !lease.live(Instant::now())
             || lease.used.load(Ordering::Acquire)
@@ -779,6 +799,7 @@ impl Inbox {
         let entry = Arc::new(Entry {
             runtime_id: lease.scope.runtime_id.clone(),
             input,
+            family,
             failed: AtomicBool::new(false),
             row: Mutex::new(Row {
                 lease: Some(lease.clone()),
@@ -801,11 +822,11 @@ impl Inbox {
     }
     pub(crate) fn start(&self, input: &p::Start) -> Result<p::Status, Error> {
         let book = self.lock()?;
-        self.find(&book, &input.origin)?.request_start(input)
+        self.find(&book, &input.origin, Family::Index)?.request_start(input)
     }
     pub(crate) fn query(&self, input: &p::Query, cancel: bool) -> Result<p::Status, Error> {
         let book = self.lock()?;
-        let entry = self.find(&book, input)?;
+        let entry = self.find(&book, input, Family::Index)?;
         if cancel {
             entry.cancel(p::Reason::UserCancelled, Instant::now());
         }
@@ -850,11 +871,12 @@ impl Inbox {
         Ok(self.lock()?.entries.clone())
     }
 }
-fn access(book: &Book, project: Option<&Id>) -> Result<p::Access, Error> {
+fn access(book: &Book, project: Option<&Id>, family: Family) -> Result<p::Access, Error> {
     let Some(lease) = book
         .lease
         .as_ref()
-        .filter(|l| project.is_none_or(|id| id == &l.scope.project_id))
+        .filter(|l| family.matches(l.scope.selection.summary.action)
+            && project.is_none_or(|id| id == &l.scope.project_id))
     else {
         return Ok(p::Access::empty());
     };
@@ -874,9 +896,12 @@ fn access(book: &Book, project: Option<&Id>) -> Result<p::Access, Error> {
         grant_id: Some(lease.id.clone()),
         selection: Some(lease.scope.selection.clone()),
     };
-    value.validate()?;
+    value.validate_shared()?;
     Ok(value)
 }
+
+#[path = "service_git_commit_requests.rs"]
+mod commit;
 
 #[cfg(test)]
 #[path = "service_git_requests_tests.rs"]

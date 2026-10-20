@@ -330,6 +330,7 @@ pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
                     let review=terminal.review().ok()?;
                     if let Some(agent)=&gate.0.agent {
                         let wire::Review::Files(details)=&review else {return None};
+                        if !agent_git_index::agent_git_files_review_matches(agent.scope(), details) {return None}
                         if !agent.ready(crate::service_git_protocol::Review {review_id:format!("{}-review",ticket.operation_id()),
                             expected_index:details.expected_index.clone(),review_digest:details.review_digest.clone(),
                             document_revision:gate.0.document_revision,registration_generation:gate.0.context.generation},expires).ok()? {return None}

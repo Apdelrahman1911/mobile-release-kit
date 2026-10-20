@@ -7,6 +7,9 @@
   "permissions": [
     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
     "allow-agent-local-check-access", "allow-allow-agent-local-check", "allow-revoke-agent-local-check",
+    "allow-agent-git-commit-access",
+    "allow-allow-agent-git-commit",
+    "allow-revoke-agent-git-commit",
     "allow-agent-git-index-access",
     "allow-allow-agent-git-index",
     "allow-revoke-agent-git-index",
