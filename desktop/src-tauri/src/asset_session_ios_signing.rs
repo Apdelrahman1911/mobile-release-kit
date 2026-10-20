@@ -57,6 +57,7 @@ impl IOSSigningMaterial {
         let mut result = Vec::new();
         result.try_reserve_exact(5).map_err(|_| invalid())?;
         for payload in &self.payloads {
+            if self.context.signing_check() && payload.kind == Kind::ProjectReadToken { return Err(invalid()); }
             match payload.kind {
                 Kind::AppleP12 | Kind::AppleProfile | Kind::IosFirebase => {
                     let value = payload.material.as_ref().filter(|m| m.observation.is_observed()).ok_or_else(invalid)?;
@@ -148,6 +149,7 @@ pub(super) fn borrow_material(state: &DocumentState, context: &wire::Context,
     if !context.signed() { return Err(invalid()); }
     let native = state.context.as_ref().ok_or_else(invalid)?.clone();
     let policy = context.signing.as_ref().ok_or_else(invalid)?;
+    if context.signing_check() && policy.assignments.iter().any(|row| row.kind == "project-read-token") { return Err(invalid()); }
     if native.project_id != context.project_id || native.registry_generation != registration || native.project != *project
         || native.platform != Platform::Ios || native.stage != Stage::Candidate || native.purpose != Purpose::Signing
         || native.draft.is_empty() || native.draft.len() > 512 * 1024 || !(2..=4).contains(&policy.assignments.len()) { return Err(invalid()); }

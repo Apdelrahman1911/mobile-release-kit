@@ -28,8 +28,8 @@ class SavedIOSConfiguration:
     source: str
     name_key: str
     build_key: str
-    container: tuple[str, str]
-    scheme: str
+    container: tuple[str, str] | None
+    scheme: str | None
     configuration: str
     bundle_id: str
     symbols_policy: str
@@ -43,7 +43,7 @@ class SavedIOSSelection:
     release: ReleaseVersion
 
 
-def select_saved_ios_configuration(raw: bytes | None, expected: object) -> tuple[dict[str, Any], SavedIOSConfiguration]:
+def select_saved_ios_configuration(raw: bytes | None, expected: object, *, signing_check: bool = False) -> tuple[dict[str, Any], SavedIOSConfiguration]:
     from ._desktop_android_build_selection import AndroidSelectionRefused
     try:
         text = _captured(raw, _comparison(expected, MAX_CONFIG_BYTES), kind="config", maximum=MAX_CONFIG_BYTES)
@@ -61,9 +61,9 @@ def select_saved_ios_configuration(raw: bytes | None, expected: object) -> tuple
     from pathlib import Path
     config = ReleaseConfig(path=Path("release/mobile-release.json"), root=Path("."), data=data)
     container, scheme = selected_ios_container(config, {}), selected_ios_scheme(config, {})
-    if container is None:
+    if container is None and not signing_check:
         _refuse("container-required")
-    if scheme is None:
+    if scheme is None and not signing_check:
         _refuse("scheme-required")
     if not _source_path(spec["source"]):
         _refuse("saved-version-unsafe")

@@ -14,6 +14,7 @@ class IOSArchiveInput(_SavedCommandInput):
         self.material_receiving = False
         self.material_pending = False
         self.signed = False
+        self.signing_check = False
         self.recovery = False
         self.cleanup_end = self.work_end + 10
         self.hard_end = self.work_end + 10
@@ -23,10 +24,16 @@ class IOSArchiveInput(_SavedCommandInput):
             SIGNED_CLEANUP_SECONDS, SIGNED_FINALITY_SECONDS, WORK_SECONDS, is_signed, is_recovery,
         )
         self._owner()
+        from ._desktop_ios_signing_reuse_protocol import is_check, WORK_SECONDS as CHECK_WORK, FINALITY_SECONDS as CHECK_HARD
         self.signed = is_signed(request.context)
+        self.signing_check = is_check(request.context)
         self.recovery = is_recovery(request.context)
         started = self.work_end - WORK_SECONDS
-        if self.signed:
+        if self.signing_check:
+            self.work_end = started + CHECK_WORK
+            self.cleanup_end = self.hard_end = started + CHECK_HARD
+            self.material_pending = True
+        elif self.signed:
             # Derived from original source Start, never renewed after parsing.
             self.cleanup_end = started + SIGNED_CLEANUP_SECONDS
             self.hard_end = started + SIGNED_FINALITY_SECONDS
@@ -74,11 +81,11 @@ class IOSArchiveInput(_SavedCommandInput):
 
     def cleanup_endpoint(self) -> float:
         self._owner()
-        return min(self.cleanup_end, self.first_failure + (120 if self.account_lifecycle else 10)) if self.first_failure is not None else self.cleanup_end
+        return min(self.cleanup_end, self.first_failure + (120 if self.account_lifecycle and not self.signing_check else 10)) if self.first_failure is not None else self.cleanup_end
 
     def hard_endpoint(self) -> float:
         self._owner()
-        return min(self.hard_end, self.first_failure + (130 if self.account_lifecycle else 10)) if self.first_failure is not None else self.hard_end
+        return min(self.hard_end, self.first_failure + (130 if self.account_lifecycle and not self.signing_check else 10)) if self.first_failure is not None else self.hard_end
 
     def close(self) -> None:
         if self.candidate_input is None:

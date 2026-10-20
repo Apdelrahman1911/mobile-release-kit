@@ -1873,13 +1873,13 @@ struct IOSXcodeAlias { parent: usize, identity: Identity, target: PathBuf }
 pub(crate) struct IOSXcodeSlots {
     original: Book, managed: Option<IOSManagedSelection>, alias: Option<IOSXcodeAlias>, sdk_alias: Option<IOSXcodeAlias>, developer: Option<usize>, executable: Option<usize>,
     sdk: Option<usize>, developer_path: Option<PathBuf>, sdk_path: Option<PathBuf>,
-    signing: Option<[usize; 3]>, recovery_security: Option<usize>, validation_only: bool, upload: Option<(usize,usize)>,
+    signing: Option<[usize; 3]>, recovery_security: Option<usize>, signing_check_openssl: Option<usize>, validation_only: bool, upload: Option<(usize,usize)>,
     audit: watch::Receiver<Instant>, prepared: bool,
 }
 impl IOSXcodeSlots {
     pub(crate) fn new(audit: watch::Receiver<Instant>) -> Self {
         Self { original: Book::new(), managed: None, alias: None, sdk_alias: None, developer: None, executable: None, sdk: None,
-            developer_path: None, sdk_path: None, signing: None, recovery_security: None,
+            developer_path: None, sdk_path: None, signing: None, recovery_security: None, signing_check_openssl: None,
             validation_only: false, upload: None, audit, prepared: false }
     }
     pub(crate) fn arm_acl_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
@@ -1900,6 +1900,21 @@ impl IOSXcodeSlots {
     }
     pub(crate) fn inspect_signed_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         self.inspect_selected(end, stop, true)
+    }
+    /// Check-only assigned P12/profile validation has one fixed executable.
+    /// Keep this receipt separate from full Xcode, IPA validation and recovery;
+    /// only the original armed Book can inspect or settle these four records.
+    pub(crate) fn inspect_signing_check_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        if !self.original.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
+        self.original.records.try_reserve_exact(4).map_err(native_error)?;
+        self.original.started = true;
+        checkpoint(end, stop)?;
+        native::real_user().map_err(native_error)?;
+        let bin = self.original.chain(Path::new("/usr/bin"), end, stop)?;
+        self.signing_check_openssl = Some(self.original.open(Some(bin), "openssl", false, end, stop)?);
+        self.original.inspected = true;
+        let _ = self.signing_check_binding_data()?;
+        self.check_current(end, stop)
     }
     /// Current IPA validation needs only the three fixed system tools, not an
     /// Xcode selection, signing account, build permission or upload executable.
@@ -2108,7 +2123,7 @@ impl IOSXcodeSlots {
     }
     pub(crate) fn binding_data(&self) -> Result<crate::ios_archive_protocol::ToolchainBinding> {
         use crate::ios_archive_protocol::{RootIdentity, ToolchainBinding};
-        if self.validation_only || self.upload.is_some() { return Err(AdmissionFailure::Inventory); }
+        if self.validation_only || self.upload.is_some() || self.signing_check_openssl.is_some() { return Err(AdmissionFailure::Inventory); }
         if !self.original.inspected || !self.original.admission_custody_ready() { return Err(AdmissionFailure::Unknown); }
         let identity = |index: Option<usize>| -> Result<Identity> {
             self.original.records.get(index.ok_or(AdmissionFailure::Unknown)?).and_then(|r| r.identity).ok_or(AdmissionFailure::Identity)
@@ -2134,11 +2149,24 @@ impl IOSXcodeSlots {
             mtime_ns: nanos(tool.mtime, tool.mtime_ns)?, ctime_ns: nanos(tool.ctime, tool.ctime_ns)? })
     }
     pub(crate) fn signing_binding_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
-        if self.validation_only || self.upload.is_some() { return Err(AdmissionFailure::Inventory); }
+        if self.validation_only || self.upload.is_some() || self.signing_check_openssl.is_some() { return Err(AdmissionFailure::Inventory); }
         self.system_signing_data()
     }
+    pub(crate) fn signing_check_binding_data(&self) -> Result<crate::ios_archive_protocol::ToolIdentity> {
+        if self.validation_only || self.upload.is_some() || self.managed.is_some() || self.alias.is_some() || self.sdk_alias.is_some()
+            || self.developer.is_some() || self.executable.is_some() || self.sdk.is_some()
+            || self.developer_path.is_some() || self.sdk_path.is_some() || self.recovery_security.is_some() || self.signing.is_some()
+            || self.signing_check_openssl != Some(3) || self.original.records.len() != 4
+            || self.original.retained_original_count() != Some(4)
+            || !self.original.inspected || !self.original.admission_custody_ready() {
+            return Err(AdmissionFailure::Inventory);
+        }
+        let tool = self.tool_data(self.signing_check_openssl)?;
+        if !tool.valid() || tool.uid != 0 || tool.mode & 0o022 != 0 { return Err(AdmissionFailure::Inventory); }
+        Ok(tool)
+    }
     pub(crate) fn validation_binding_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
-        if !self.validation_only || self.upload.is_some() || self.managed.is_some() || self.alias.is_some() || self.sdk_alias.is_some()
+        if !self.validation_only || self.signing_check_openssl.is_some() || self.upload.is_some() || self.managed.is_some() || self.alias.is_some() || self.sdk_alias.is_some()
             || self.developer.is_some() || self.executable.is_some() || self.sdk.is_some()
             || self.developer_path.is_some() || self.sdk_path.is_some() || self.recovery_security.is_some()
             || self.signing != Some([3, 4, 5]) || self.original.records.len() != 6
@@ -2148,7 +2176,7 @@ impl IOSXcodeSlots {
         self.system_signing_data()
     }
     pub(crate) fn upload_binding_data(&self)->Result<crate::local_store_execute_protocol::NativeTools> {
-        if self.validation_only||self.sdk_alias.is_some()||self.executable.is_some()||self.sdk.is_some()
+        if self.validation_only||self.signing_check_openssl.is_some()||self.sdk_alias.is_some()||self.executable.is_some()||self.sdk.is_some()
             ||self.sdk_path.is_some()||self.recovery_security.is_some(){return Err(AdmissionFailure::Inventory);}
         let(app,xcrun)=self.upload.ok_or(AdmissionFailure::Inventory)?;
         let root=|index:usize|->Result<crate::ios_archive_protocol::RootIdentity>{
@@ -2168,7 +2196,7 @@ impl IOSXcodeSlots {
             self.tool_data(Some(codesign))?, self.tool_data(Some(openssl))?).map_err(|_| AdmissionFailure::Inventory)
     }
     pub(crate) fn recovery_binding_data(&self) -> Result<crate::ios_archive_protocol::ToolIdentity> {
-        if self.validation_only || self.upload.is_some() || self.managed.is_some() || !self.original.inspected || !self.original.admission_custody_ready()
+        if self.validation_only || self.signing_check_openssl.is_some() || self.upload.is_some() || self.managed.is_some() || !self.original.inspected || !self.original.admission_custody_ready()
             || self.signing.is_some() || self.developer.is_some() || self.sdk.is_some() || self.executable.is_some() {
             return Err(AdmissionFailure::Inventory);
         }

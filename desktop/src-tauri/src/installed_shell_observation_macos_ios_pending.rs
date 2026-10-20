@@ -295,7 +295,7 @@ pub(super) fn data_checks(unsigned: &Snapshot) -> bool {
             phase:wire::Phase::AwaitingConsent, intent_usable:true, outcome:None, reason:wire::Reason::None,
             stage:None, activity:None, disposition:None, result:None, report:None };
         let mut status = wire::Status { schema_version:wire::STATUS_SCHEMA_VERSION,status_revision:1+i as u32*3,availability:wire::Availability::Busy,
-            mode_capabilities:wire::ModeCapabilities { unsigned:false,signed:false,recovery:true },operation:Some(projection) };
+            mode_capabilities:wire::ModeCapabilities { unsigned:false,signed:false,recovery:true, signing_check: false },operation:Some(projection) };
         if i == 1 {
             let mut reused = status.clone(); reused.operation.as_mut().unwrap().operation_id = "a".repeat(32);
             if pair.clone().result(Command::Prepare, &Ok(reused)) { return false; }

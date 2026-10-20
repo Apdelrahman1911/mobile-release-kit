@@ -21,13 +21,13 @@ fn context(domain: SavedCommandDomain) -> Context { match domain { SavedCommandD
 #[test]
 fn ios_mode_gate_keeps_matched_non_ios_pass_through_and_exact_mode_selection() {
     use ios_wire::{ModeCapabilities as Modes, Operation};
-    let supported = Modes { unsigned: true, signed: true, recovery: true };
+    let supported = Modes { unsigned: true, signed: true, recovery: true, signing_check: false };
     assert_eq!(ios_mode_selection(true, None), supported);
     assert_eq!(ios_mode_selection(false, None), Modes::NONE);
     // Exhaust the three-mode observer mask. DATA can narrow an installed
     // provider, never substitute for one; a closed observation has no fallback.
     for mask in 0..8 {
-        let observed = Modes { unsigned: mask & 1 != 0, signed: mask & 2 != 0, recovery: mask & 4 != 0 };
+        let observed = Modes { unsigned: mask & 1 != 0, signed: mask & 2 != 0, recovery: mask & 4 != 0, signing_check: false };
         assert_eq!(ios_mode_selection(true, Some(observed)), observed);
         assert_eq!(ios_mode_selection(false, Some(observed)), Modes::NONE);
     }
@@ -58,7 +58,7 @@ fn ios_mode_gate_keeps_matched_non_ios_pass_through_and_exact_mode_selection() {
 fn mode_only_status_changes_use_the_original_counter_without_changing_other_domains() {
     let ios = application(SavedCommandDomain::IOSArchive);
     let mut r = ios.inner.lock();
-    let unsigned = ios_wire::ModeCapabilities { unsigned: true, signed: false, recovery: false };
+    let unsigned = ios_wire::ModeCapabilities { unsigned: true, signed: false, recovery: false, signing_check: false };
     ios.inner.record_capabilities(&mut r, Availability::RuntimeUnqualified, Some(ios_wire::ModeCapabilities::NONE));
     let first = r.revision;
     ios.inner.record_capabilities(&mut r, Availability::RuntimeUnqualified, Some(ios_wire::ModeCapabilities::NONE));
@@ -1369,4 +1369,48 @@ fn local_store_cancel_cutoff_and_dropped_go_never_create_completion() {
     assert!(matches!(entered.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
     assert!(!owner.startup.lock().unwrap().attempted);
     let r=application.inner.lock();assert!(r.active.is_some() && r.last.is_none());
+}
+
+#[test]
+fn signing_input_check_uses_original_short_clocks_and_earliest_stop() {
+    let mut selected=ios_wire::tests::signed_context();
+    selected.operation=ios_wire::Operation::IOSSigningInputsCheck;
+    selected.action=Some(ios_wire::CreateAction::CheckSigning);
+    let(application,owner)=active_with_context(application(SavedCommandDomain::IOSArchive),Context::IOSArchive(selected));
+    let admitted=owner.clocks.admitted;
+    assert!(owner.clocks.signed && owner.clocks.signing_check && !owner.clocks.recovery);
+    assert_eq!(owner.clocks.work,admitted+Duration::from_secs(300));
+    assert_eq!(owner.clocks.cleanup_end(None),admitted+Duration::from_secs(310));
+    assert_eq!(owner.clocks.audit_end(None),admitted+Duration::from_secs(310));
+    assert_eq!(owner.clocks.settlement(None),admitted+Duration::from_secs(310));
+    let first=admitted+Duration::from_secs(2);
+    let audit=owner.native_audit_cutoff.subscribe();
+    let cleanup=owner.native_cleanup_cutoff.subscribe();
+    let mut r=application.inner.lock();
+    application.inner.stop_locked(&mut r,&owner,Reason::Cancelled,first);
+    application.inner.stop_locked(&mut r,&owner,Reason::Shutdown,first+Duration::from_secs(5));
+    assert_eq!(r.active.as_ref().unwrap().first_stop,Some(first));
+    assert_eq!(*audit.borrow(),first+SETTLEMENT);
+    assert_eq!(*cleanup.borrow(),first+SETTLEMENT);
+    assert_eq!(owner.clocks.settlement(Some(first)),first+SETTLEMENT);
+    assert!(!final_clock_clear(&r,&owner,first+SETTLEMENT));
+    application.inner.advance_locked(&mut r,&owner,first+SETTLEMENT);
+    assert!(r.active.as_ref().unwrap().unknown);
+    assert!(r.active.as_ref().unwrap().projection.public().result.is_none());
+    // Actual original Session stop/unknown gates, no worker or positive native
+    // receipt. The existing missing joins cannot be replaced by these clocks.
+}
+
+#[test]
+fn signing_input_check_cannot_borrow_signed_export_qualification() {
+    let owner=application(SavedCommandDomain::IOSArchive);
+    let mut selected=ios_wire::tests::signed_context();
+    selected.operation=ios_wire::Operation::IOSSigningInputsCheck;
+    selected.action=Some(ios_wire::CreateAction::CheckSigning);
+    let defaults=ios_mode_selection(true,None);
+    assert!(defaults.signed && defaults.unsigned && defaults.recovery);
+    assert!(!defaults.signing_check);
+    assert!(!defaults.supports(selected.operation));
+    assert!(!owner.inner.ios_mode_qualified(&Context::IOSArchive(selected),None));
+    assert!(!owner.inner.ios_mode_capabilities().signing_check);
 }

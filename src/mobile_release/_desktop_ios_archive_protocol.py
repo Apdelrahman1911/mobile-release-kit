@@ -73,6 +73,9 @@ def require(condition: bool) -> None:
 
 
 def prepare(value: object) -> dict:
+    if type(value) is dict and value.get("action") == "check-signing":
+        from ._desktop_ios_signing_reuse_protocol import prepare as check_prepare
+        return check_prepare(value)
     if type(value) is dict and "recovery" in value:
         from ._desktop_ios_recovery_protocol import prepare as recovery_prepare
         return recovery_prepare(value)
@@ -94,6 +97,9 @@ def parse_prepare(raw: bytes) -> dict:
 
 
 def context(value: object) -> dict:
+    if type(value) is dict and (value.get("action") == "check-signing" or value.get("operation") == "ios-signing-inputs-check"):
+        from ._desktop_ios_signing_reuse_protocol import context as check_context
+        return check_context(value)
     if type(value) is dict and "recovery" in value:
         from ._desktop_ios_recovery_protocol import context as recovery_context
         return recovery_context(value)
@@ -130,7 +136,7 @@ def candidate_create(value: dict) -> bool:
 
 
 def is_signed(value: dict) -> bool:
-    return value.get("operation") in {"ios-signed-export", "ios-candidate-inputs"}
+    return value.get("operation") in {"ios-signed-export", "ios-candidate-inputs", "ios-signing-inputs-check"}
 
 
 def is_recovery(value: dict) -> bool:
@@ -138,6 +144,9 @@ def is_recovery(value: dict) -> bool:
 
 
 def stages(value: dict) -> tuple[str, ...]:
+    from ._desktop_ios_signing_reuse_protocol import is_check, STAGES as check_stages
+    if is_check(value):
+        return check_stages
     if is_recovery(value):
         from ._desktop_ios_recovery_protocol import STAGES as recovery_stages
         return recovery_stages
@@ -145,6 +154,9 @@ def stages(value: dict) -> tuple[str, ...]:
 
 
 def protocol(value: dict) -> str:
+    from ._desktop_ios_signing_reuse_protocol import is_check, PROTOCOL as check_protocol
+    if is_check(value):
+        return check_protocol
     if candidate_create(value):
         return CANDIDATE_PROTOCOL
     if is_recovery(value):
@@ -163,7 +175,11 @@ def _tool_identity(value: object) -> dict:
     return dict(value)
 
 
-def _native(value: object, *, signed: bool = False, recovery: bool = False, candidate: bool = False) -> dict:
+def _native(value: object, *, signed: bool = False, recovery: bool = False, candidate: bool = False, signing_check: bool = False) -> dict:
+    if signing_check:
+        require(signed and not recovery and not candidate)
+        from ._desktop_ios_signing_reuse_protocol import native as check_native
+        return check_native(value)
     if recovery:
         require(not signed)
         from ._desktop_ios_recovery_protocol import native as recovery_native
@@ -213,14 +229,14 @@ def parse_request(raw: bytes) -> IOSArchiveRequest:
         from uuid import UUID
         require(_uuid(str(UUID(hex=value["operationId"]))))
     return IOSArchiveRequest(value["operationId"], value["ownerGeneration"], selected,
-        _native(value["native"], signed=is_signed(selected), recovery=is_recovery(selected), candidate=candidate_create(selected)),
+        _native(value["native"], signed=is_signed(selected), recovery=is_recovery(selected), candidate=candidate_create(selected), signing_check=selected["operation"] == "ios-signing-inputs-check"),
         hashlib.sha256(raw).hexdigest() if candidate_create(selected) else "")
 
 
 def _request_binding(request: IOSArchiveRequest) -> dict:
     require(type(request) is IOSArchiveRequest and _text(request.operation_id, _TOKEN) and _text(request.owner_generation, _TOKEN))
     return {"operationId": request.operation_id, "ownerGeneration": request.owner_generation,
-            "context": context(request.context), "native": _native(request.native, signed=is_signed(request.context), recovery=is_recovery(request.context), candidate=candidate_create(request.context))}
+            "context": context(request.context), "native": _native(request.native, signed=is_signed(request.context), recovery=is_recovery(request.context), candidate=candidate_create(request.context), signing_check=request.context["operation"] == "ios-signing-inputs-check")}
 
 
 def _selection(value: object) -> dict:
@@ -261,6 +277,9 @@ def activity(value: object, *, signed: bool = False) -> dict:
 
 
 def validate_terminal(value: object, request: IOSArchiveRequest) -> None:
+    from ._desktop_ios_signing_reuse_protocol import is_check, validate_terminal as check_terminal
+    if is_check(request.context):
+        return check_terminal(value, request)
     if candidate_create(request.context):
         from .local_ios_candidate_protocol import terminal
         return terminal(value, request)

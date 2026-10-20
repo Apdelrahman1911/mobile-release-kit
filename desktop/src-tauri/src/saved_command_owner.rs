@@ -143,7 +143,9 @@ const RECOVERY_HARD: Duration = Duration::from_secs(130);
 // never falls back. Exact context/original checks remain in ios_mode_qualified.
 fn ios_mode_selection(installed: bool, observed: Option<ios_wire::ModeCapabilities>) -> ios_wire::ModeCapabilities {
     if !installed { return ios_wire::ModeCapabilities::NONE; }
-    observed.unwrap_or(ios_wire::ModeCapabilities { unsigned: true, signed: true, recovery: true })
+    // Check-only has a distinct system-tool/private-input qualification. The
+    // existing signed-export observation cannot enable it by default.
+    observed.unwrap_or(ios_wire::ModeCapabilities { unsigned: true, signed: true, recovery: true, signing_check: false })
 }
 const IOS_WORK: Duration = Duration::from_secs(5400);
 const IOS_HARD: Duration = Duration::from_secs(5410);
@@ -244,6 +246,7 @@ impl SavedCommandDomain {
 enum Context { GenerateUploadKey(upload_wire::UploadKeyContext), AppleProvisioning(apple_wire::Context), ToolAcquisition(tools_wire::Context), LocalReleaseHistory(history_wire::Context), LocalStoreExecute(execute_wire::Context), LocalStoreReconcile(reconcile_wire::Context), LocalStorePrepare(prepare_wire::Context), LocalStorePreflight(store_wire::Context), OfflinePreflight(wire::Context), AndroidBuild(android_wire::Context), ProjectRecovery(recovery_wire::Context), IOSArchive(ios_wire::Context), ArtifactInspection(artifact_wire::Context) }
 impl Context {
     fn signed_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signed()) }
+    fn signing_check_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signing_check()) }
     fn requires_private_material(&self) -> bool { self.signed_ios() || matches!(self, Self::AndroidBuild(c) if c.signed()) || matches!(self, Self::AppleProvisioning(_) | Self::LocalStorePreflight(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_)) }
     fn recovery_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.recovery()) }
     fn frame_limit(&self) -> usize { match self { Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), Self::LocalStoreReconcile(context)=>context.frame_limit(), _ => self.domain().frame_limit() } }
@@ -1138,16 +1141,22 @@ impl Status {
 }
 
 #[derive(Clone, Copy)]
-struct Clocks { admitted: Instant, work: Instant, finality: Instant, cleanup: Instant, signed: bool, recovery: bool, local_history: bool }
+struct Clocks { admitted: Instant, work: Instant, finality: Instant, cleanup: Instant, signed: bool, recovery: bool, signing_check: bool, local_history: bool }
 impl Clocks {
     fn new(domain: SavedCommandDomain, admitted: Instant) -> Self {
         let (work, hard) = match domain { SavedCommandDomain::GenerateUploadKey => (Duration::from_secs(upload_wire::WORK_SECONDS),Duration::from_secs(upload_wire::FINALITY_SECONDS)), SavedCommandDomain::ToolAcquisition => (Duration::from_secs(1200),Duration::from_secs(1210)), SavedCommandDomain::LocalReleaseHistory => (Duration::from_secs(60),Duration::from_secs(62)), SavedCommandDomain::AppleProvisioning | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStoreExecute => (Duration::from_secs(1200),Duration::from_secs(1210)), SavedCommandDomain::OfflinePreflight => (OFFLINE_WORK, OFFLINE_HARD),
             SavedCommandDomain::AndroidBuild => (ANDROID_WORK, ANDROID_HARD), SavedCommandDomain::IOSArchive => (IOS_WORK, IOS_HARD), SavedCommandDomain::ProjectRecovery => (RECOVERY_WORK, RECOVERY_HARD), SavedCommandDomain::ArtifactInspection => (Duration::from_secs(900),Duration::from_secs(910)) };
-        Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false, local_history: domain == SavedCommandDomain::LocalReleaseHistory }
+        Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false, signing_check: false, local_history: domain == SavedCommandDomain::LocalReleaseHistory }
     }
     fn for_context(context: &Context, admitted: Instant) -> Self {
         let mut clocks = Self::new(context.domain(), admitted);
-        if context.signed_ios() {
+        if context.signing_check_ios() {
+            clocks.work = admitted + Duration::from_secs(ios_wire::signing_reuse::WORK_SECONDS);
+            clocks.cleanup = admitted + Duration::from_secs(ios_wire::signing_reuse::FINALITY_SECONDS);
+            clocks.finality = clocks.cleanup;
+            clocks.signed = true;
+            clocks.signing_check = true;
+        } else if context.signed_ios() {
             clocks.cleanup = admitted + IOS_SIGNED_CLEANUP;
             clocks.finality = admitted + IOS_SIGNED_HARD;
             clocks.signed = true;
@@ -1160,10 +1169,10 @@ impl Clocks {
         clocks
     }
     fn settlement(self, first_stop: Option<Instant>) -> Instant {
-        first_stop.map_or(self.finality, |first| self.finality.min(first + if self.signed || self.recovery { IOS_SIGNED_SETTLEMENT } else if self.local_history { Duration::from_secs(2) } else { SETTLEMENT }))
+        first_stop.map_or(self.finality, |first| self.finality.min(first + if self.signing_check { SETTLEMENT } else if self.signed || self.recovery { IOS_SIGNED_SETTLEMENT } else if self.local_history { Duration::from_secs(2) } else { SETTLEMENT }))
     }
     fn cleanup_end(self, first_stop: Option<Instant>) -> Instant {
-        first_stop.map_or(self.cleanup, |first| self.cleanup.min(first + if self.signed || self.recovery { Duration::from_secs(120) } else if self.local_history { Duration::from_secs(2) } else { SETTLEMENT }))
+        first_stop.map_or(self.cleanup, |first| self.cleanup.min(first + if self.signing_check { SETTLEMENT } else if self.signed || self.recovery { Duration::from_secs(120) } else if self.local_history { Duration::from_secs(2) } else { SETTLEMENT }))
     }
     fn audit_end(self, first_stop: Option<Instant>) -> Instant {
         if self.signed || self.recovery { self.settlement(first_stop) } else { self.work.min(self.settlement(first_stop)) }
@@ -1175,7 +1184,7 @@ impl Clocks {
         // the renderer, the environment, a subphase, or a later observation.
         let work = IOS_WORK.min(Duration::from_secs(300));
         let hard = IOS_HARD.min(work + SETTLEMENT);
-        Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false, local_history: false }
+        Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false, signing_check: false, local_history: false }
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn installed_ios_signed(admitted: Instant) -> Self {
@@ -1183,7 +1192,7 @@ impl Clocks {
         // at Start. Existing F+120/F+130 tightening still cannot renew them.
         Self { admitted, work: admitted + IOS_WORK.min(Duration::from_secs(120)),
             finality: admitted + IOS_SIGNED_HARD.min(Duration::from_secs(250)),
-            cleanup: admitted + IOS_SIGNED_CLEANUP.min(Duration::from_secs(240)), signed: true, recovery: false, local_history: false }
+            cleanup: admitted + IOS_SIGNED_CLEANUP.min(Duration::from_secs(240)), signed: true, recovery: false, signing_check: false, local_history: false }
     }
 }
 #[derive(Clone)]
@@ -1714,23 +1723,23 @@ impl AndroidNativeBooks {
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 struct IOSNativeBooks {
     runtime: IOSArchiveRuntimeSlots, tools: IOSXcodeSlots, selection: Option<VerifiedRuntime>,
-    phase: NativePhase, failure: Option<AdmissionFailure>, settlement_started: bool, audit: watch::Receiver<Instant>, signed: bool, recovery: bool,
+    phase: NativePhase, failure: Option<AdmissionFailure>, settlement_started: bool, audit: watch::Receiver<Instant>, signed: bool, recovery: bool, signing_check: bool,
 }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl IOSNativeBooks {
     fn new(audit: watch::Receiver<Instant>) -> Self {
-        Self::new_selected(audit, false, false)
+        Self::new_selected(audit, false, false, false)
     }
-    fn new_selected(audit: watch::Receiver<Instant>, signed: bool, recovery: bool) -> Self {
+    fn new_selected(audit: watch::Receiver<Instant>, signed: bool, recovery: bool, signing_check: bool) -> Self {
         Self { runtime: IOSArchiveRuntimeSlots::new(), tools: IOSXcodeSlots::new(audit.clone()), selection: None,
-            phase: NativePhase::New, failure: None, settlement_started: false, audit, signed, recovery }
+            phase: NativePhase::New, failure: None, settlement_started: false, audit, signed, recovery, signing_check }
     }
     fn candidate_source_quote(&self)->Option<usize>{
-        if self.phase!=NativePhase::Ready||!self.signed||self.recovery||self.settlement_started||self.first_failure().is_some(){return None;}
+        if self.phase!=NativePhase::Ready||!self.signed||self.recovery||self.signing_check||self.settlement_started||self.first_failure().is_some(){return None;}
         self.runtime.retained_original_count()?.checked_add(self.tools.retained_original_count()?)
     }
     fn candidate_backing(&self)->Option<usize>{
-        if !matches!(self.phase,NativePhase::Ready|NativePhase::Claimed)||!self.signed||self.recovery||self.settlement_started||self.first_failure().is_some(){return None;}
+        if !matches!(self.phase,NativePhase::Ready|NativePhase::Claimed)||!self.signed||self.recovery||self.signing_check||self.settlement_started||self.first_failure().is_some(){return None;}
         let mut bytes=std::mem::size_of::<Self>().checked_add(self.runtime.retained_bytes()?)?.checked_add(self.tools.retained_bytes()?)?;
         if let Some(v)=&self.selection{for n in [v.python.capacity(),v.bootstrap.capacity(),v.core.capacity(),v.cwd.capacity()]{bytes=bytes.checked_add(n)?;}}
         Some(bytes)
@@ -1768,7 +1777,8 @@ impl IOSNativeBooks {
         };
         self.selection = Some(VerifiedRuntime { python: selected.python.clone(), bootstrap: selected.bootstrap.clone(),
             core: selected.core.clone(), cwd: selected.cwd.clone() });
-        let tools = if self.signed && self.recovery { Err(AdmissionFailure::Inventory) }
+        let tools = if self.signed && self.recovery || self.signing_check && (!self.signed || self.recovery) { Err(AdmissionFailure::Inventory) }
+            else if self.signing_check { self.tools.inspect_signing_check_once(end, stop) }
             else if self.recovery { self.tools.inspect_recovery_once(end, stop) }
             else if self.signed { self.tools.inspect_signed_once(end, stop) } else { self.tools.inspect_once(end, stop) };
         publish_macos_returned_failure(tools.as_ref().err().copied(),
@@ -1789,7 +1799,7 @@ impl IOSNativeBooks {
     }
     fn request_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::ToolchainBinding, AdmissionFailure> {
         self.selected_binding(expected)?;
-        if self.recovery { return Err(AdmissionFailure::Inventory); }
+        if self.recovery || self.signing_check { return Err(AdmissionFailure::Inventory); }
         self.tools.binding_data()
     }
     fn signing_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::SigningToolBindings, AdmissionFailure> {
@@ -1797,9 +1807,14 @@ impl IOSNativeBooks {
         let _ = self.request_binding(expected)?;
         self.tools.signing_binding_data()
     }
+    fn signing_check_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::ToolIdentity, AdmissionFailure> {
+        self.selected_binding(expected)?;
+        if !self.signing_check || !self.signed || self.recovery { return Err(AdmissionFailure::Inventory); }
+        self.tools.signing_check_binding_data()
+    }
     fn recovery_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::ToolIdentity, AdmissionFailure> {
         self.selected_binding(expected)?;
-        if !self.recovery || self.signed { return Err(AdmissionFailure::Inventory); }
+        if !self.recovery || self.signed || self.signing_check { return Err(AdmissionFailure::Inventory); }
         self.tools.recovery_binding_data()
     }
     fn check_before_spawn(&mut self, selected: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>,
@@ -2284,7 +2299,7 @@ impl SavedCommandOwner {
             })?;
         }
         let mut recovery_stamp = None;
-        let mut expires = prepared_at + INTENT;
+        let mut expires = prepared_at + if context.signing_check_ios() { Duration::from_secs(ios_wire::signing_reuse::INTENT_SECONDS) } else { INTENT };
         if let Context::ProjectRecovery(selected) = &mut context {
             if selected.action == recovery_wire::Action::Recover {
                 let reviewed = r.recovery_review.as_ref().filter(|reviewed|
@@ -2365,7 +2380,7 @@ impl SavedCommandOwner {
             Clocks::for_context(&prepared.projection.context, admitted_at)
         } else { self.inner.start_clocks(admitted_at) };
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-        let clocks = if prepared.projection.context.signed_ios()
+        let clocks = if prepared.projection.context.signed_ios() && !prepared.projection.context.signing_check_ios()
             && self.inner.ios_observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o|
                 o.originals[0].is_none() && o.control.permits_mode(ios_wire::Operation::IOSSignedExport))) {
             Clocks::installed_ios_signed(admitted_at)
@@ -2498,7 +2513,7 @@ impl SavedCommandOwner {
                 native: None,
                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 ios_native: (self.inner.domain == SavedCommandDomain::IOSArchive)
-                    .then(|| Arc::new(Mutex::new(IOSNativeBooks::new_selected(audit_cutoff, clocks.signed, clocks.recovery)))),
+                    .then(|| Arc::new(Mutex::new(IOSNativeBooks::new_selected(audit_cutoff, clocks.signed, clocks.recovery, clocks.signing_check)))),
                 ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())), error: Arc::new(AsyncMutex::new(Pipe::default())),
             driver: AsyncMutex::new(None), watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
@@ -2909,6 +2924,7 @@ impl Inner {
             unsigned: observation.control.permits_mode(ios_wire::Operation::IOSUnsignedArchive),
             signed: observation.control.permits_mode(ios_wire::Operation::IOSSignedExport),
             recovery: observation.control.permits_mode(ios_wire::Operation::IOSLocalRecovery),
+            signing_check: false, // No existing observer supplies the new mode receipt.
         }))
     }
     fn ios_mode_capabilities(&self) -> ios_wire::ModeCapabilities {
@@ -4801,11 +4817,22 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
                 let construct = || {
                     let native = book.ios_native.as_ref().ok_or_else(|| owner.domain.unavailable())?
                         .lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    if native.signed != context.signed() || native.recovery != context.recovery() { return Err(owner.domain.invalid_owner()); }
+                    if native.signed != context.signed() || native.recovery != context.recovery()
+                        || native.signing_check != context.signing_check() { return Err(owner.domain.invalid_owner()); }
                     if context.recovery() {
                         if !owner.recovery_matches() { return Err(owner.domain.invalid_owner()); }
                         let security = native.recovery_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
                         return ios_wire::request_recovery(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, &security);
+                    }
+                    if context.signing_check() {
+                        let openssl = native.signing_check_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
+                        let original = { let material = owner.material.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                            let Some(PrivateSigningMaterial::IOS(original)) = material.as_ref() else { return Err(owner.domain.invalid_owner()); };
+                            original.clone() };
+                        drop(native);
+                        if !original.matches(context, owner.registration, &owner.project) { return Err(owner.domain.invalid_owner()); }
+                        return ios_wire::request_signing_check(&owner.id, &owner.generation, context, profile,
+                            &owner.project, &runtime.cwd, &openssl, &original.context_data());
                     }
                     let binding = native.request_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
                     if context.signed() {

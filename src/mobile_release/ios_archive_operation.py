@@ -468,6 +468,13 @@ class _OriginalIOSFiles:
     def acquire_tools(self) -> None:
         self.point()
         require(self.developer is None and self.sdk is None and self.xcodebuild is None)
+        if self.operation.source.signing_check:
+            require(self.system_directory is None and not self.system_tools)
+            self.system_directory = _Directory(Path("/usr/bin"), self.guard, edit_checkpoints=True)
+            self.system_directory.acquire()
+            self.system_tools["openssl"] = self._hold(self.system_directory.fd, "openssl", directory=False)
+            self.check_tools()
+            return
         if self.operation.source.recovery:
             require(self.system_directory is None and not self.system_tools)
             self.system_directory = _Directory(Path("/usr/bin"), self.guard, edit_checkpoints=True)
@@ -500,6 +507,16 @@ class _OriginalIOSFiles:
 
     def check_tools(self) -> None:
         self.point()
+        if self.operation.source.signing_check:
+            require(self.developer is None and self.sdk is None and self.xcodebuild is None
+                    and self.system_directory is not None and set(self.system_tools) == {"openssl"})
+            self.system_directory.check()
+            original = self.system_tools["openssl"]
+            self.check_held(original)
+            value = os.fstat(original.slot.number)
+            require(_tool_data(value) == self.operation.request.native["openssl"]
+                    and value.st_uid == 0 and value.st_mode & 0o022 == 0)
+            return
         if self.operation.source.recovery:
             require(self.developer is None and self.sdk is None and self.xcodebuild is None
                     and self.system_directory is not None and set(self.system_tools) == {"security"})
@@ -884,7 +901,7 @@ class IOSArchiveOperation:
         self.signing = None
         self.failure = None
         self.counters: dict[str, int] = {}
-        self.roles = () if source.recovery else SIGNED_ROLES if source.signed else ROLES
+        self.roles = () if source.recovery or source.signing_check else SIGNED_ROLES if source.signed else ROLES
         self._roles = {role: "new" for role in self.roles}
         self._command_slots = {role: None for role in self.roles}
         self._returned: dict[str, int] = {}
@@ -986,11 +1003,11 @@ class IOSArchiveOperation:
         self.checkpoint()
         require(self.inputs is None and self.files is not None)
         raw = self.files.read_input("release/mobile-release.json", limit=MAX_CONFIG_BYTES)
-        data, selected = select_saved_ios_configuration(raw, self.request.context["savedConfig"])
+        data, selected = select_saved_ios_configuration(raw, self.request.context["savedConfig"], signing_check=self.source.signing_check)
         version = self.files.read_input(selected.source, limit=MAX_VERSION_BYTES)
         saved = bind_saved_ios_version(selected, version, self.request.context["savedVersion"])
         self.inputs = BoundIOSInputs(ReleaseConfig(path=self.root / "release/mobile-release.json", root=self.root, data=data), saved)
-        if not selected.prepare:
+        if not self.source.signing_check and not selected.prepare:
             self._roles["prepare"] = "not-configured"
         self.check_inputs()
         return self.inputs
@@ -1008,6 +1025,14 @@ class IOSArchiveOperation:
         self.checkpoint()
         require(self.inputs is not None and not self.prepared)
         self.files.acquire_namespace()
+        self.files.acquire_tools()
+        self.check_inputs()
+        self.prepared = True
+
+    def prepare_signing_check(self) -> None:
+        self.checkpoint()
+        require(self.source.signing_check and self.inputs is not None and not self.prepared
+                and self.files.namespace is None and self.files.work is None and not self.roles)
         self.files.acquire_tools()
         self.check_inputs()
         self.prepared = True

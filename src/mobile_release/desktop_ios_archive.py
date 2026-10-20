@@ -92,6 +92,9 @@ class IOSArchiveRun:
                 raise
 
     def _build_bound(self, bound):
+        if self.source.signing_check:
+            from .ios_signing_reuse import run_check
+            return run_check(self, bound)
         operation, guard = self.operation, self.guard
         operation.prepare()
         if operation.signing is None:
@@ -335,8 +338,11 @@ class IOSArchiveRun:
         signed = self.source.signed
         from ._desktop_ios_recovery_protocol import COMMAND_LIMIT as RECOVERY_COMMAND_LIMIT
         command_limit = RECOVERY_COMMAND_LIMIT if self.source.recovery else SIGNED_COMMAND_LIMIT + 8 if getattr(self, "_candidate_inputs", None) is not None else SIGNED_COMMAND_LIMIT if signed else 4
-        if (verdict.profile_calls > (SIGNED_PROFILE_LIMIT if signed else 0)
-                or verdict.commands > command_limit):
+        profile_limit = SIGNED_PROFILE_LIMIT if signed else 0
+        if self.source.signing_check:
+            from ._desktop_ios_signing_reuse_protocol import COMMAND_LIMIT, PROFILE_LIMIT
+            command_limit, profile_limit = COMMAND_LIMIT, PROFILE_LIMIT
+        if (verdict.profile_calls > profile_limit or verdict.commands > command_limit):
             self.guard._abort(ProtocolError("Unexpected iOS archive command domain"))
             verdict = self.guard.lifetime_ledger.verdict()
         files = operation.files
@@ -355,6 +361,9 @@ class IOSArchiveRun:
             lifetime.update(signingClosed=operation.signing.account_closed(),
                 buildInputsClosed=operation.signing.inputs_closed(),
                 materialRetired=self.source.material_closed())
+        if self.source.signing_check:
+            from .ios_signing_reuse import terminal as check_terminal
+            return check_terminal(self, lifetime, dispatched)
         if self.source.recovery:
             settled = (lifetime["complete"] and not lifetime["fatal"] and lifetime["contained"]
                        and dispatched is not None and all(lifetime[key] for key in CLOSE_FIELDS)

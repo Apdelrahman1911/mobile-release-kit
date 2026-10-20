@@ -82,7 +82,7 @@ class SignedIOSOperation:
     def __init__(self, operation) -> None:
         from .ios_archive_operation import IOSArchiveOperation
         require(type(operation) is IOSArchiveOperation and operation.source.account_lifecycle
-                and operation.request.context["operation"] in {"ios-signed-export", "ios-local-recovery", "ios-candidate-inputs"})
+                and operation.request.context["operation"] in {"ios-signed-export", "ios-local-recovery", "ios-candidate-inputs", "ios-signing-inputs-check"})
         self.operation, self.guard = operation, operation.guard
         self.lease = self.session = self.materialization = None
         self.lease_close_claimed = self.lease_close_returned = False
@@ -103,6 +103,10 @@ class SignedIOSOperation:
     def owner(self) -> None:
         self.operation.owner()
         require(self.operation.signing is self and self.operation.source.account_lifecycle)
+
+    @property
+    def signing_check(self) -> bool:
+        return self.operation.source.signing_check
 
     @property
     def recovery(self) -> bool:
@@ -135,7 +139,7 @@ class SignedIOSOperation:
     def bind_session(self, session) -> None:
         from .local_signing import SigningSession
         self.owner()
-        require(type(session) is SigningSession and self.session is None and session.lease is self.lease
+        require(not self.signing_check and type(session) is SigningSession and self.session is None and session.lease is self.lease
                 and session.cancellation is self.guard
                 and self.phase == ("recovering-account" if self.recovery else "materializing-signing")
                 and (not self.recovery or self.lease._recovery_mode is True))
@@ -191,7 +195,7 @@ class SignedIOSOperation:
     def bind_materialization(self, child) -> None:
         from .build_inputs import BuildInputs
         self.owner()
-        require(type(child) is BuildInputs and child.invocation is self.operation.invocation
+        require(not self.signing_check and type(child) is BuildInputs and child.invocation is self.operation.invocation
                 and child.cancellation is self.guard and self.materialization is None
                 and self.phase == "materializing-signing")
         self.materialization = child
@@ -202,7 +206,10 @@ class SignedIOSOperation:
         require(type(scratch) is FiniteScratch and scratch.cancellation is self.guard
                 and scratch.layout in {"signing-validation", "build"} and not scratch.active and not scratch.claimed
                 and len(self.scratches) < 2 and not any(item.layout == scratch.layout for item in self.scratches))
-        if self.recovery:
+        if self.signing_check:
+            require(scratch.layout == "signing-validation" and self.phase == "validating-signing"
+                    and scratch.journal is None and not self.scratches)
+        elif self.recovery:
             from .build_inputs import BuildInputs
             require(scratch.layout == "build" and self.phase == "recovering-project"
                     and type(scratch.journal) is BuildInputs and scratch.journal.invocation is None
@@ -305,7 +312,7 @@ class SignedIOSOperation:
         expected = ["apple-p12", "apple-profile"]
         if config.section("services").get("iosFirebase") == "required":
             expected.append("ios-firebase")
-        if "MOBILE_RELEASE_PROJECT_READ_TOKEN" in names:
+        if not self.signing_check and "MOBILE_RELEASE_PROJECT_READ_TOKEN" in names:
             expected.append("project-read-token")
         require([row["kind"] for row in policy["assignments"]] == expected)
         self.values = material.bind(self.operation)
@@ -336,6 +343,13 @@ class SignedIOSOperation:
         """Closed, original capabilities; never scrub-and-copy ambient values."""
         files = self.operation.files
         require(files is not None and self.operation.prepared)
+        if self.signing_check:
+            self.operation.checkpoint()
+            require(role == "credential-validation" and scope is not None and self.lease is not None
+                    and self.values is not None and files.namespace is None and files.work is None)
+            return {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C",
+                    "HOME": str(self.lease.home),
+                    "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": self.values["MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD"]}
         if self.recovery:
             self.recovery_checkpoint()
             require(role == "account-recovery" and scope is not None and self.lease is not None)
@@ -426,6 +440,14 @@ class SignedIOSOperation:
                 and all(type(item) is str and "\0" not in item for item in argv))
         role = self.operation._pending
         program = argv[0]
+        if self.signing_check:
+            self.operation.checkpoint()
+            require(not cleanup and role is None and self.phase == "validating-signing"
+                    and self.session is None and self.materialization is None and binding is None
+                    and program in {"openssl", "/usr/bin/openssl"}
+                    and len(argv) > 1 and argv[1] in {"pkcs12", "x509", "pkey"})
+            self._scope(scope, binding, False)
+            return "credential-validation", 30
         if self.recovery:
             self.recovery_checkpoint()
             require(role is None and self.phase == "recovering-account"
@@ -499,7 +521,8 @@ class SignedIOSOperation:
         reservation = (COMMAND_METADATA_RESERVE + self.request_reservation(arguments, environment, cwd)
                        + (12 * output_limit if capture else 0))
         from ._desktop_ios_recovery_protocol import COMMAND_LIMIT as RECOVERY_COMMAND_LIMIT
-        limit = RECOVERY_COMMAND_LIMIT if self.recovery else SIGNED_COMMAND_LIMIT
+        from ._desktop_ios_signing_reuse_protocol import COMMAND_LIMIT as CHECK_COMMAND_LIMIT
+        limit = CHECK_COMMAND_LIMIT if self.signing_check else RECOVERY_COMMAND_LIMIT if self.recovery else SIGNED_COMMAND_LIMIT
         if len(self.commands) >= limit or self.capture_reserved + reservation > CAPTURE_BUDGET:
             self.operation.fail("input-limit")
         self.check_tool_bindings()
@@ -566,7 +589,12 @@ class SignedIOSOperation:
                 and evidence._ledger is self.guard.lifetime_ledger and not evidence._finished
                 and self.pending is None and self.settling_command is None
                 and self.phase in {"validating-signing", "materializing-signing", "inspecting"})
-        if len(self.profiles) >= SIGNED_PROFILE_LIMIT or self.capture_reserved + PROFILE_RESERVE > CAPTURE_BUDGET:
+        from ._desktop_ios_signing_reuse_protocol import PROFILE_LIMIT as CHECK_PROFILE_LIMIT
+        if self.signing_check:
+            require(self.phase == "validating-signing" and evidence.operation == "load"
+                    and self.session is None and self.materialization is None)
+        limit = CHECK_PROFILE_LIMIT if self.signing_check else SIGNED_PROFILE_LIMIT
+        if len(self.profiles) >= limit or self.capture_reserved + PROFILE_RESERVE > CAPTURE_BUDGET:
             self.operation.fail("input-limit")
         self.profiles.append(evidence)
         self.capture_reserved += PROFILE_RESERVE

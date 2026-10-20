@@ -8,6 +8,9 @@ use crate::{asset_source::RegisteredRoot, edit_protocol::{bounded, token}, error
 // runtime, tool binding, frame, result or ownership type crosses this boundary.
 pub(crate) use crate::android_build_protocol::{Content, SavedVersion, RootIdentity};
 use crate::android_build_protocol::{native_path, structure};
+#[path = "ios_signing_reuse.rs"]
+pub(crate) mod signing_reuse;
+pub(crate) use signing_reuse::request as request_signing_check;
 
 pub(crate) const PROTOCOL: &str = "mrk-ios-archive/1";
 pub(crate) const CONSENT: &str = "saved-ios-unsigned-archive-v1";
@@ -70,10 +73,11 @@ pub(crate) enum Operation {
     #[serde(rename = "ios-signed-export")] IOSSignedExport,
     #[serde(rename = "ios-local-recovery")] IOSLocalRecovery,
     #[serde(rename = "ios-candidate-inputs")] IOSCandidateInputs,
+    #[serde(rename = "ios-signing-inputs-check")] IOSSigningInputsCheck,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum CreateAction { Create }
+pub(crate) enum CreateAction { Create, #[serde(rename = "check-signing")] CheckSigning }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum RecoveryAction { Inspect, Account, Project }
@@ -141,7 +145,10 @@ impl Context { fn valid(&self) -> bool {
         if self.recovery() { return self.draft_revision.is_none() && self.baseline_generation.is_none()
             && self.saved_config.is_none() && self.saved_version.is_none() && self.signing.is_none() && self.action.is_none()
             && self.recovery.as_ref().is_some_and(RecoveryIntent::valid); }
-        self.candidate() == (self.action == Some(CreateAction::Create)) && self.recovery.is_none() && self.draft_revision.is_some_and(|v| v < u32::MAX)
+        self.candidate() == (self.action == Some(CreateAction::Create))
+            && self.signing_check() == (self.action == Some(CreateAction::CheckSigning))
+            && (!self.signing_check() || self.signing.as_ref().is_some_and(|p|
+                p.assignments.iter().all(|row| row.kind != "project-read-token"))) && self.recovery.is_none() && self.draft_revision.is_some_and(|v| v < u32::MAX)
             && self.baseline_generation.is_some_and(|v| v < u32::MAX)
             && self.saved_config.as_ref().is_some_and(|v| v.valid(512 * 1024))
             && self.saved_version.as_ref().is_some_and(SavedVersion::valid)
@@ -158,11 +165,12 @@ impl Context { fn valid(&self) -> bool {
         Some(bytes)
     }
     pub(crate) fn candidate(&self) -> bool { self.operation == Operation::IOSCandidateInputs }
-    pub(crate) fn signed(&self) -> bool { matches!(self.operation, Operation::IOSSignedExport | Operation::IOSCandidateInputs) }
+    pub(crate) fn signing_check(&self) -> bool { self.operation == Operation::IOSSigningInputsCheck }
+    pub(crate) fn signed(&self) -> bool { matches!(self.operation, Operation::IOSSignedExport | Operation::IOSCandidateInputs | Operation::IOSSigningInputsCheck) }
     pub(crate) fn recovery(&self) -> bool { self.operation == Operation::IOSLocalRecovery }
     pub(crate) fn account_lifecycle(&self) -> bool { self.signed() || self.recovery() }
-    pub(crate) fn frame_limit(&self) -> usize { if self.candidate() { CANDIDATE_MAX_FRAMES } else if self.recovery() { RECOVERY_MAX_FRAMES } else if self.signed() { SIGNED_MAX_FRAMES } else { MAX_FRAMES } }
-    fn protocol(&self) -> &'static str { if self.candidate() { CANDIDATE_PROTOCOL } else if self.recovery() { RECOVERY_PROTOCOL } else if self.signed() { SIGNED_PROTOCOL } else { PROTOCOL } }
+    pub(crate) fn frame_limit(&self) -> usize { if self.signing_check() { signing_reuse::MAX_FRAMES } else if self.candidate() { CANDIDATE_MAX_FRAMES } else if self.recovery() { RECOVERY_MAX_FRAMES } else if self.signed() { SIGNED_MAX_FRAMES } else { MAX_FRAMES } }
+    fn protocol(&self) -> &'static str { if self.signing_check() { signing_reuse::PROTOCOL } else if self.candidate() { CANDIDATE_PROTOCOL } else if self.recovery() { RECOVERY_PROTOCOL } else if self.signed() { SIGNED_PROTOCOL } else { PROTOCOL } }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -186,7 +194,7 @@ pub(crate) struct Prepare {
 impl Prepare { pub(crate) fn context(&self) -> Context { Context { project_id: self.project_id.clone(),
     draft_revision: self.draft_revision, baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
     saved_version: self.saved_version.clone(), platform: Platform::Ios,
-    operation: if self.action.is_some() { Operation::IOSCandidateInputs } else if self.recovery.is_some() { Operation::IOSLocalRecovery } else if self.signing.is_some() { Operation::IOSSignedExport } else { Operation::IOSUnsignedArchive },
+    operation: if self.action == Some(CreateAction::CheckSigning) { Operation::IOSSigningInputsCheck } else if self.action.is_some() { Operation::IOSCandidateInputs } else if self.recovery.is_some() { Operation::IOSLocalRecovery } else if self.signing.is_some() { Operation::IOSSignedExport } else { Operation::IOSUnsignedArchive },
     signing: self.signing.clone(), recovery: self.recovery.clone(), action:self.action } } }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -199,7 +207,7 @@ impl Start { pub(crate) fn consent_matches(&self, context: &Context) -> bool {
     if let Some(recovery) = &context.recovery { return self.consent_version == RECOVERY_CONSENT && self.confirmation.as_deref() == match recovery.action {
         RecoveryAction::Inspect => None, RecoveryAction::Account => Some(ACCOUNT_CONFIRMATION), RecoveryAction::Project => Some(PROJECT_CONFIRMATION),
     }; }
-    self.confirmation.is_none() && self.consent_version == (if context.candidate() { CANDIDATE_CONSENT } else if context.signed() { SIGNED_CONSENT } else { CONSENT })
+    self.confirmation.is_none() && self.consent_version == (if context.signing_check() { signing_reuse::CONSENT } else if context.candidate() { CANDIDATE_CONSENT } else if context.signed() { SIGNED_CONSENT } else { CONSENT })
 } }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -213,7 +221,7 @@ pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     let input = Start::deserialize(value).map_err(|_| invalid())?;
     if !token(&input.operation_id) || !token(&input.owner_generation)
-        || ![CONSENT, SIGNED_CONSENT, CANDIDATE_CONSENT, RECOVERY_CONSENT].contains(&input.consent_version.as_str())
+        || ![CONSENT, SIGNED_CONSENT, CANDIDATE_CONSENT, RECOVERY_CONSENT, signing_reuse::CONSENT].contains(&input.consent_version.as_str())
         || input.confirmation.as_deref().is_some_and(|confirmation| input.consent_version != RECOVERY_CONSENT
             || ![ACCOUNT_CONFIRMATION, PROJECT_CONFIRMATION].contains(&confirmation)) { return Err(invalid()); }
     Ok(input)
@@ -325,7 +333,7 @@ pub(crate) fn request_candidate(operation:&str,generation:&str,context:&Context,
 fn request_data(operation: &str, generation: &str, context: &Context, profile: Profile,
     project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding,
     signing: Option<(&SigningToolBindings, &Content)>,candidate:Option<&CandidateNative>) -> Result<Vec<u8>, BridgeError> {
-    if !token(operation) || !token(generation) || !context.valid() || context.recovery() || !toolchain.matches_profile(profile)
+    if !token(operation) || !token(generation) || !context.valid() || context.recovery() || context.signing_check() || !toolchain.matches_profile(profile)
         || context.candidate()!=candidate.is_some()||candidate.is_some_and(|c|!c.valid())||context.candidate()&&!crate::android_build_protocol::candidate_id(operation)
         || context.signed() != signing.is_some()
         || signing.is_some_and(|(tools, comparison)| !tools.valid() || !comparison.valid(512 * 1024)) { return Err(invalid()); }
@@ -375,9 +383,11 @@ pub(crate) enum Reason {
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Stage { Accepted, InputsBound, CheckingXcode, ValidatingSigning, MaterializingSigning,
-    Preparing, Archiving, Exporting, RestoringSigning, Inspecting, RecoveringAccount, RecoveringProject, DisposingSnapshot, DisposingWork }
+pub(crate) enum Stage { Accepted, InputsBound, CheckingSigningTools, CheckingXcode, ValidatingSigning, MaterializingSigning,
+    Preparing, Archiving, Exporting, RestoringSigning, Inspecting, RecoveringAccount, RecoveringProject, DisposingSnapshot, DisposingWork, CheckingInputs }
 impl Stage { fn valid(self, context: &Context) -> bool {
+    if context.signing_check() { return matches!(self, Self::Accepted | Self::InputsBound | Self::CheckingSigningTools | Self::ValidatingSigning | Self::CheckingInputs); }
+    if matches!(self, Self::CheckingSigningTools | Self::CheckingInputs) { return false; }
     if context.recovery() { return matches!(self, Self::Accepted | Self::RecoveringAccount | Self::RecoveringProject | Self::DisposingWork); }
     !matches!(self, Self::RecoveringAccount | Self::RecoveringProject) && (context.signed() || !matches!(self,
         Self::ValidatingSigning | Self::MaterializingSigning | Self::Exporting | Self::RestoringSigning))
@@ -434,10 +444,10 @@ pub(crate) struct ArchiveActivity { pub(crate) selection: Option<Selection>, pub
     pub(crate) findings: Vec<Finding> }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(from = "ActivityWire", into = "ActivityWire")]
-pub(crate) struct Activity { pub(crate) stage: Stage, build: Option<ArchiveActivity> }
+pub(crate) struct Activity { pub(crate) stage: Stage, build: Option<ArchiveActivity>, check: Option<Vec<Finding>> }
 #[derive(Deserialize, Serialize)]
 #[serde(untagged)]
-enum ActivityWire { Archive(ArchiveActivityWire), Recovery(RecoveryActivityWire) }
+enum ActivityWire { Archive(ArchiveActivityWire), Recovery(RecoveryActivityWire), SigningCheck(SigningCheckActivityWire) }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ArchiveActivityWire { stage: Stage, #[serde(deserialize_with = "nullable")] selection: Option<Selection>,
@@ -445,15 +455,20 @@ struct ArchiveActivityWire { stage: Stage, #[serde(deserialize_with = "nullable"
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RecoveryActivityWire { stage: Stage }
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SigningCheckActivityWire { stage: Stage, findings: Vec<Finding> }
 impl From<ActivityWire> for Activity { fn from(value: ActivityWire) -> Self { match value {
     ActivityWire::Archive(value) => Self { stage: value.stage, build: Some(ArchiveActivity {
-        selection: value.selection, commands: value.commands, findings: value.findings }) },
-    ActivityWire::Recovery(value) => Self { stage: value.stage, build: None },
+        selection: value.selection, commands: value.commands, findings: value.findings }), check: None },
+    ActivityWire::Recovery(value) => Self { stage: value.stage, build: None, check: None },
+    ActivityWire::SigningCheck(value) => Self { stage: value.stage, build: None, check: Some(value.findings) },
 } } }
 impl From<Activity> for ActivityWire { fn from(value: Activity) -> Self { match value.build {
     Some(build) => Self::Archive(ArchiveActivityWire { stage: value.stage, selection: build.selection,
         commands: build.commands, findings: build.findings }),
-    None => Self::Recovery(RecoveryActivityWire { stage: value.stage }),
+    None => match value.check { Some(findings) => Self::SigningCheck(SigningCheckActivityWire { stage: value.stage, findings }),
+        None => Self::Recovery(RecoveryActivityWire { stage: value.stage }) },
 } } }
 impl Activity {
     /// Borrow typed archive DATA; the caller must still require its exact mode.
@@ -461,6 +476,8 @@ impl Activity {
     pub(crate) fn archive_activity(&self) -> Option<&ArchiveActivity> { self.build.as_ref() }
     fn valid(&self, context: &Context) -> bool {
         if !self.stage.valid(context) { return false; }
+        if context.signing_check() { return self.build.is_none() && self.check.as_ref().is_some_and(|rows| signing_reuse::findings(rows)); }
+        if self.check.is_some() { return false; }
         if context.recovery() { return self.build.is_none(); }
         let Some(build) = &self.build else { return false; };
         let signed = context.signed();
@@ -471,7 +488,10 @@ impl Activity {
                 || build.commands.archive.zero() && (!signed || build.commands.export.as_ref().is_some_and(CommandData::zero)))
     }
     fn complete(&self, context: &Context) -> bool {
-        if !self.valid(context) || self.stage != Stage::DisposingWork { return false; }
+        if !self.valid(context) { return false; }
+        if context.signing_check() { return self.stage == Stage::CheckingInputs
+            && self.check.as_ref().is_some_and(|rows| signing_reuse::complete_findings(context, rows)); }
+        if self.stage != Stage::DisposingWork { return false; }
         if context.recovery() { return true; }
         let Some(build) = &self.build else { return false; };
         let Some(selection) = &build.selection else { return false; };
@@ -528,7 +548,7 @@ pub(crate) struct ResultData { schema_version: u32, scope: String, pub(crate) us
     pub(crate) pairing: Option<Pairing>,
 }
 impl ResultData { fn valid(&self, context: &Context, operation: &str) -> bool {
-    !context.recovery() && self.schema_version == 1 && self.scope == (if context.signed() { SIGNED_SCOPE } else { SCOPE })
+    !context.recovery() && !context.signing_check() && self.schema_version == 1 && self.scope == (if context.signed() { SIGNED_SCOPE } else { SCOPE })
         && context.saved_config.as_ref() == Some(&self.used_config) && context.saved_version.as_ref() == Some(&self.used_version)
         && self.archive == format!(".mobile-release/desktop-ios-archive/{operation}/archive.xcarchive")
         && (1..=100_000).contains(&self.entries) && (1..=8 * 1024u64.pow(3)).contains(&self.bytes)
@@ -585,11 +605,12 @@ pub(crate) struct CandidateResult {schema_version:u32,scope:String,pub(crate) he
     pub(crate) candidate_inputs:CandidateInputs,build:ResultData}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub(crate) enum ResultValue { Candidate(CandidateResult),Build(ResultData) }
+pub(crate) enum ResultValue { Candidate(CandidateResult),Build(ResultData),SigningCheck(signing_reuse::ResultData) }
 impl ResultValue {
-    pub(crate) fn ordinary_build(&self)->Option<&ResultData>{match self{Self::Build(v)=>Some(v),Self::Candidate(_)=>None}}
+    pub(crate) fn ordinary_build(&self)->Option<&ResultData>{match self{Self::Build(v)=>Some(v),Self::Candidate(_)|Self::SigningCheck(_)=>None}}
     fn valid(&self,context:&Context,operation:&str)->bool {
         match self {
+            Self::SigningCheck(value) => value.valid(context),
             Self::Build(build)=>!context.candidate()&&build.valid(context,operation),
             Self::Candidate(v)=>context.candidate()&&v.schema_version==1&&v.scope=="local-ios-candidate-inputs"
                 &&(3..=513).contains(&v.head_sequence)&&v.candidate_inputs.valid(operation)&&v.build.valid(context,operation)
@@ -600,6 +621,7 @@ impl ResultValue {
         }
     }
     fn matches_activity(&self,activity:&Activity)->bool{match self{
+        Self::SigningCheck(value)=>activity.check.as_ref()==Some(&value.checks),
         Self::Build(_)=>true,Self::Candidate(v)=>activity.build.as_ref().and_then(|b|b.selection.as_ref())
             .is_some_and(|s|s.bundle_id==v.candidate_inputs.bundle_id),
     }}
@@ -682,8 +704,8 @@ impl Lifetime { fn valid(&self, context: &Context) -> bool {
         self.source_commands.is_some()==context.candidate()
             &&[self.candidate_inputs_closed,self.journal_closed,self.lease_closed].iter().all(|f|f.is_some()==context.candidate())
             &&self.source_commands.is_none_or(|n|n<=8&&n<=self.commands&&self.commands-n<=SIGNED_COMMAND_LIMIT)
-            &&self.commands <= (if context.candidate(){SIGNED_COMMAND_LIMIT+8}else if context.recovery() { RECOVERY_COMMAND_LIMIT } else if context.signed() { SIGNED_COMMAND_LIMIT } else { 4 })
-            && self.profile_calls <= (if context.signed() { SIGNED_PROFILE_LIMIT } else { 0 })
+            &&self.commands <= (if context.signing_check(){signing_reuse::COMMAND_LIMIT}else if context.candidate(){SIGNED_COMMAND_LIMIT+8}else if context.recovery() { RECOVERY_COMMAND_LIMIT } else if context.signed() { SIGNED_COMMAND_LIMIT } else { 4 })
+            && self.profile_calls <= (if context.signing_check() { signing_reuse::PROFILE_LIMIT } else if context.signed() { SIGNED_PROFILE_LIMIT } else { 0 })
             && [self.signing_closed, self.build_inputs_closed, self.material_retired].iter().all(|flag| flag.is_some() == context.account_lifecycle())
     }
     pub(crate) fn settled(&self) -> bool {
@@ -743,7 +765,8 @@ impl Terminal {
         if context.recovery() {
             if self.disposition.is_some() || self.result.is_some()
                 || self.report.as_ref().is_some_and(|report| !self.settled() || !report.valid(context)) { return false; }
-        } else if self.report.is_some() || !self.disposition.as_ref().is_some_and(|d| d.valid(operation)) { return false; }
+        } else if self.report.is_some() || !self.disposition.as_ref().is_some_and(|d| d.valid(operation)
+            && (!context.signing_check() || signing_reuse::no_artifacts(d))) { return false; }
         let life = &self.lifetime;
         let commands = self.activity.build.as_ref().map_or_else(Vec::new, |build| build.commands.all());
         if commands.iter().filter(|c| c.outcome == CommandOutcome::Exited).count() > (life.commands-life.source_commands.unwrap_or(0)) as usize { return false; }
@@ -754,6 +777,9 @@ impl Terminal {
         if self.outcome == Outcome::Complete {
             if !self.settled() || self.reason != Reason::None || life.stop_observed != CoreStop::None || !self.activity.complete(context) { return false; }
             if context.recovery() { return self.report.is_some(); }
+            if context.signing_check() { return (5..=signing_reuse::COMMAND_LIMIT).contains(&life.commands)
+                && life.profile_calls == signing_reuse::PROFILE_LIMIT && life.command_dispatched == Some(true)
+                && self.result.as_ref().is_some_and(|r| r.valid(context, operation) && r.matches_activity(&self.activity)); }
             let roles = if self.activity.build.as_ref().and_then(|b| b.selection.as_ref()).is_some_and(|s| s.preparation_configured) { 4 } else { 3 };
             return self.disposition.as_ref().is_some_and(Disposition::complete)
                 && (if context.candidate(){life.source_commands==Some(8)&&life.commands>=8+roles+1&&life.profile_calls>=3}
@@ -872,12 +898,13 @@ pub(crate) enum Availability { Available, Busy, Shutdown, CleanupUnknown, Docume
 // signing material, exact-session recovery or finality.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ModeCapabilities { pub(crate) unsigned: bool, pub(crate) signed: bool, pub(crate) recovery: bool }
+pub(crate) struct ModeCapabilities { pub(crate) unsigned: bool, pub(crate) signed: bool, pub(crate) recovery: bool,
+    #[serde(default)] pub(crate) signing_check: bool }
 impl ModeCapabilities {
-    pub(crate) const NONE: Self = Self { unsigned: false, signed: false, recovery: false };
+    pub(crate) const NONE: Self = Self { unsigned: false, signed: false, recovery: false, signing_check: false };
     pub(crate) fn supports(self, operation: Operation) -> bool { match operation {
         Operation::IOSUnsignedArchive => self.unsigned, Operation::IOSSignedExport | Operation::IOSCandidateInputs => self.signed,
-        Operation::IOSLocalRecovery => self.recovery,
+        Operation::IOSLocalRecovery => self.recovery, Operation::IOSSigningInputsCheck => self.signing_check,
     } }
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -948,9 +975,10 @@ impl Projection { fn valid(&self) -> bool {
             if self.intent_usable || outcome == Outcome::Unknown || self.reason == Reason::CleanupUnknown
                 || (self.reason == Reason::None) != (outcome == Outcome::Complete) { return false; }
             if outcome == Outcome::Complete {
-                if self.stage != Some(Stage::DisposingWork) || !self.activity.as_ref().is_some_and(|a| a.complete(&self.context)) { return false; }
+                if self.stage != Some(if self.context.signing_check() { Stage::CheckingInputs } else { Stage::DisposingWork })
+                    || !self.activity.as_ref().is_some_and(|a| a.complete(&self.context)) { return false; }
                 return if self.context.recovery() { self.report.as_ref().is_some_and(|r| r.valid(&self.context)) }
-                    else { self.disposition.as_ref().is_some_and(|d| d.complete() && d.valid(&self.operation_id))
+                    else { self.disposition.as_ref().is_some_and(|d| (if self.context.signing_check() { signing_reuse::no_artifacts(d) } else { d.complete() }) && d.valid(&self.operation_id))
                         && self.result.as_ref().is_some_and(|r| r.valid(&self.context, &self.operation_id)&&r.matches_activity(self.activity.as_ref().expect("checked activity"))) };
             }
             if self.result.is_some() || outcome == Outcome::Cancelled && !matches!(self.reason,
@@ -962,7 +990,7 @@ impl Projection { fn valid(&self) -> bool {
             }; }
             match (&self.activity, &self.disposition) {
                 (Some(a), Some(d)) => a.valid(&self.context) && self.stage == Some(a.stage) && d.known() && d.valid(&self.operation_id)
-                    && d.output != OutputDisposition::RetainedLocalResult,
+                    && d.output != OutputDisposition::RetainedLocalResult && (!self.context.signing_check() || signing_reuse::no_artifacts(d)),
                 (None, None) => true, _ => false,
             }
         },
@@ -1447,7 +1475,7 @@ pub(crate) mod tests {
             phase:Phase::Terminal,intent_usable:false,outcome:Some(Outcome::Complete),reason:Reason::None,stage:Some(Stage::DisposingWork),
             activity:Some(accepted.activity),disposition:None,result:None,report:accepted.report };
         let status = Status { schema_version:STATUS_SCHEMA_VERSION,status_revision:1,availability:Availability::Available,
-            mode_capabilities:ModeCapabilities { unsigned:false,signed:false,recovery:true },operation:Some(projection) };
+            mode_capabilities:ModeCapabilities { unsigned:false,signed:false,recovery:true,signing_check:false },operation:Some(projection) };
         let encoded = status_bytes(&status).unwrap(); let data: Value = serde_json::from_slice(&encoded).unwrap();
         assert!(!data["operation"].as_object().unwrap().contains_key("result"));
         assert!(!data["operation"].as_object().unwrap().contains_key("disposition"));

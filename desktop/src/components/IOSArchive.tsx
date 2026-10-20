@@ -1,7 +1,8 @@
 import { useId } from 'react';
+import { IOSSigningInputsCheck, IOSSigningInputsResult } from './IOSSigningInputsCheck.tsx';
 import type { IOSArchiveController, IOSArchiveState } from '../iosArchive.ts';
 import { iosArchiveHelp, iosArchiveInputHelp, iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp, iosArchiveOwnerReason } from '../iosArchive.ts';
-import { isIOSRecoveryOperation, sameIOSArchiveData, sameIOSArchiveIdentity, sameIOSArchiveSavedPair, iosArchiveRoles, iosArchiveAvailabilityText, iosArchiveModeAvailability, iosArchiveFindingText, iosArchiveLimitationText, iosArchiveReasonText } from '../iosArchiveProtocol.ts';
+import { isIOSSigningCheckOperation, isIOSRecoveryOperation, sameIOSArchiveData, sameIOSArchiveIdentity, sameIOSArchiveSavedPair, iosArchiveRoles, iosArchiveAvailabilityText, iosArchiveModeAvailability, iosArchiveFindingText, iosArchiveLimitationText, iosArchiveReasonText } from '../iosArchiveProtocol.ts';
 import type { IOSArchiveCoreStatus, IOSArchivePhase, IOSArchiveRole, IOSArchiveStage, IOSRecoveryRowState } from '../iosArchiveTypes.ts';
 import type { HelpContent } from '../types.ts';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
@@ -10,6 +11,7 @@ import { Icon } from './Icon.tsx';
 const phases: Record<IOSArchivePhase, string> = { 'awaiting-consent': 'Awaiting your approval', starting: 'Starting iOS operation',
   running: 'iOS operation running', stopping: 'Stopping · waiting for cleanup', terminal: 'iOS request finished', unknown: 'Cleanup needs attention' };
 const stages: Record<IOSArchiveStage, string> = { accepted: 'Request accepted', 'inputs-bound': 'Saved inputs bound',
+  'checking-signing-tools': 'Checking the original system validation tool', 'checking-inputs': 'Rechecking original saved/private input scope',
   'checking-xcode': 'Checking full Xcode and iOS SDK', preparing: 'Running saved project preparation', archiving: 'Creating the reviewed archive',
   'validating-signing': 'Validating original signing material and saved policy', 'materializing-signing': 'Preparing owned signing and build inputs',
   exporting: 'Exporting the local signed IPA', 'restoring-signing': 'Restoring original signing and build-input state',
@@ -48,6 +50,7 @@ function UnsignedArchiveDetails({ state, review = false }: { state: IOSArchiveSt
 // folder, a path label or a provisional core terminal cannot populate it.
 export function IOSArchiveResultView({ state, operationProjectName = null }: { state: IOSArchiveState; operationProjectName?: string | null }) {
   const op = state.status?.operation;
+  if (op && isIOSSigningCheckOperation(op)) return <IOSSigningInputsResult state={state} />;
   if (state.mode !== 'native' || !op || isIOSRecoveryOperation(op) || op.phase !== 'terminal' || op.outcome !== 'complete' || !op.result || !op.activity) return null;
   const candidate = op.result.scope === 'local-ios-candidate-inputs' ? op.result : null;
   const result = op.result.scope === 'local-ios-candidate-inputs' ? op.result.build : op.result, historical = state.historical || state.integrityFailed || state.nativeBlocked;
@@ -83,14 +86,14 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
   refreshReason?: string | null; versionReason?: string | null; onHelp?: (help: HelpContent) => void;
 }) {
   const label = useId(), op = state.status?.operation, consent = state.consent, project = state.project;
-  const signed = state.archiveMode === 'signed';
+  const signed = state.archiveMode === 'signed', checking = state.archiveMode === 'signing-check';
   const owned = iosArchiveOwnerReason(state);
   if (compact && !owned) return null;
   const prepareReason = controller.prepareReason(), startReason = controller.startReason();
   const cancelRequested = !!op && state.cancelClaimed?.operationId === op.operationId && state.cancelClaimed.ownerGeneration === op.ownerGeneration;
   const controls = <div className="button-row">
-    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} />{state.readPending ? 'Reading archive status…' : 'Check archive status'}</button>
-    {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" data-mrk-ios-archive-action="cancel" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · waiting for cleanup' : 'Cancel this iOS archive'}</button>}
+    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} />{state.readPending ? checking ? 'Reading status…' : 'Reading archive status…' : checking ? 'Check signing-input status' : 'Check archive status'}</button>
+    {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" data-mrk-ios-archive-action="cancel" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · waiting for cleanup' : checking ? 'Cancel this signing-input check' : 'Cancel this iOS archive'}</button>}
     {onHelp && <HelpButton content={iosArchiveCancelHelp} onHelp={onHelp} />}
     {compact && onShow && <button type="button" className="button secondary small" onClick={onShow}>{op && isIOSRecoveryOperation(op) ? 'Show in Recovery' : 'Show in Releases'}</button>}
   </div>;
@@ -100,16 +103,21 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
       <p>Cancel is not rollback. Prior project or network effects are not undone.</p>
     </div>
   </section>;
+  const modes = <fieldset className="session-context" disabled={state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}><legend>Choose this local operation</legend>
+      <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={state.archiveMode === 'unsigned'} onChange={() => controller.setArchiveMode('unsigned')} /><span>Unsigned archive · no signing or IPA export</span></label>
+      <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={signed} onChange={() => controller.setArchiveMode('signed')} /><span>Sign and export IPA · separately admitted local signing</span></label>
+      <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={checking} onChange={() => controller.setArchiveMode('signing-check')} /><span>Check existing signing inputs · no archive, Xcode or signing installation</span></label>
+      <p>{checking ? 'Changing modes cancels an unstarted review. This check does not build or publish.' : 'Changing modes or candidate retention retires any unstarted review. Ordinary archive/export does not authenticate source; candidate retention adds its separately verified source and local journal binding. None publishes.'}</p>
+    </fieldset>;
+  if (checking) return <IOSSigningInputsCheck state={state} controller={controller} controls={controls} modes={modes} projectName={projectName}
+    onRefresh={onRefresh} onReadVersion={onReadVersion} onCredentials={onCredentials} onSettings={onSettings} onRecovery={onRecovery}
+    refreshReason={refreshReason} versionReason={versionReason} />;
   const selected = project?.selection;
   return <section className="card offline-preflight" aria-labelledby={label} data-mrk-ios-archive="status" data-phase={op?.phase ?? 'idle'} data-stage={op?.stage ?? ''} data-outcome={op?.outcome ?? ''}>
     <SectionHeading title={signed ? 'Sign and export a local iOS IPA' : 'Create unsigned iOS archive'} description={signed ? 'Use assigned session inputs to archive, export and validate one local IPA. No Store upload or symbol uploader.' : 'Archive the saved app with full Xcode, then check identity, version and symbols. No signing, IPA export or Store upload.'}>
       <Badge tone="warning">Project code executes</Badge>{onHelp && <HelpButton content={iosArchiveHelp} onHelp={onHelp} />}
     </SectionHeading>
-    <fieldset className="session-context" disabled={state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}><legend>Choose this local operation</legend>
-      <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={!signed} onChange={() => controller.setArchiveMode('unsigned')} /><span>Unsigned archive · no signing or IPA export</span></label>
-      <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={signed} onChange={() => controller.setArchiveMode('signed')} /><span>Sign and export IPA · separately admitted local signing</span></label>
-      <p>Changing modes or candidate retention retires any unstarted review. Ordinary archive/export does not authenticate source; candidate retention adds its separately verified source and local journal binding. None publishes.</p>
-    </fieldset>
+    {modes}
     {signed && <label className="offline-ack"><input type="checkbox" checked={state.keepCandidate}
       disabled={state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}
       onChange={(event) => controller.setKeepCandidate(event.target.checked)} /><span>Keep local candidate inputs · bind the original archive/IPA to clean configured source, metadata and enrolled local history. No Store operation.</span></label>}
@@ -162,7 +170,7 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
       <div className="inline-heading"><h3>Archive status · {operationProjectName ?? op.context.projectId}</h3><Badge tone={op.phase === 'unknown' ? 'warning' : 'neutral'}>{phases[op.phase]}</Badge></div>
       {op.stage && <p>Reached stage: {stages[op.stage]}. A stage is not a completion percentage or proof that cleanup finished.</p>}
       {op.outcome && <p><strong>Outcome:</strong> {op.outcome}</p>}<p>{iosArchiveReasonText[op.reason]}</p>
-      {!isIOSRecoveryOperation(op) && op.activity && <ul>{iosArchiveRoles(op.context).map((role) => { const command = op.activity!.commands[role]!; return <li key={role}>{roles[role]}: {command.outcome === 'exited' ? `known exit ${command.exitCode}` : command.outcome === 'unknown' ? 'no usable original outcome' : command.outcome === 'not-configured' ? 'not configured' : 'not dispatched'}.</li>; })}</ul>}
+      {!isIOSRecoveryOperation(op) && !isIOSSigningCheckOperation(op) && op.activity && <ul>{iosArchiveRoles(op.context).map((role) => { const command = op.activity!.commands[role]!; return <li key={role}>{roles[role]}: {command.outcome === 'exited' ? `known exit ${command.exitCode}` : command.outcome === 'unknown' ? 'no usable original outcome' : command.outcome === 'not-configured' ? 'not configured' : 'not dispatched'}.</li>; })}</ul>}
       {op.disposition && <><p>Inspection snapshot: {op.disposition.snapshot}. Task work: {op.disposition.work}. Archive output: {op.disposition.output}.</p>
         {op.disposition.relativeDirectory && <p>Retained operation location: <code>{op.disposition.relativeDirectory}</code>. This is not permission for a blanket cleanup or rerun.</p>}</>}
       {!isIOSRecoveryOperation(op) && op.activity && op.outcome !== 'complete' && <ol className="offline-findings">{op.activity.findings.map((finding, index) => <li key={index}><Badge tone={negative(finding.status) ? 'warning' : 'neutral'}>{finding.status}</Badge><span>{iosArchiveFindingText[finding.check]}</span></li>)}</ol>}

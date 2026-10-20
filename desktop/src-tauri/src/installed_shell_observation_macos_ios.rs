@@ -1027,7 +1027,7 @@ pub(super) fn data_checks() -> bool {
         phase: wire::Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: wire::Reason::None,
         stage: None, activity: None, disposition: None, result: None, report: None };
     let mut status = wire::Status { schema_version: wire::STATUS_SCHEMA_VERSION, status_revision: 1, availability: wire::Availability::Busy,
-        mode_capabilities: wire::ModeCapabilities { unsigned: true, signed: false, recovery: false }, operation: Some(prepared) };
+        mode_capabilities: wire::ModeCapabilities { unsigned: true, signed: false, recovery: false, signing_check: false }, operation: Some(prepared) };
     let mut record = Record::default();
     if record.request(case, Step::Prepare, Command::Prepare, &input, Some("inert-ios-parser")) { return false; }
     record.version = Some(observed);
