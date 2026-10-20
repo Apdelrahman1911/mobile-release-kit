@@ -43,12 +43,13 @@ class StoreConsumerData(unittest.TestCase):
             TOOL.need(False, secret)
         except TOOL.Refused as error:
             original = error
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            TOOL.runtime_refusal_annotation('compose-store-runtime', original)
-        self.assertRegex(stderr.getvalue(), r'^MRK_RUNTIME_PREPARATION_REFUSED=refused;sites=stager:[0-9]+\n$')
-        self.assertNotIn(secret, stderr.getvalue())
-        self.assertNotIn(str(TOOL.DESKTOP), stderr.getvalue())
+        for command in ('compose-store-runtime', 'app'):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                TOOL.runtime_refusal_annotation(command, original)
+            self.assertRegex(stderr.getvalue(), r'^MRK_RUNTIME_PREPARATION_REFUSED=refused;sites=stager:[0-9]+\n$')
+            self.assertNotIn(secret, stderr.getvalue())
+            self.assertNotIn(str(TOOL.DESKTOP), stderr.getvalue())
         # Foreign stack filenames, exception chains and arbitrary class names
         # are not diagnostics. Only literal known kinds and own code sites are.
         class PrivateNamedError(Exception):
