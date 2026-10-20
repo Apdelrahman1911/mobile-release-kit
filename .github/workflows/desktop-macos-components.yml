@@ -565,9 +565,9 @@ jobs:
               android_service_prepare::tests::fixed_layout_role_and_reserved_bytes_cannot_alias \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-native-contracts.log"
             grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-native-contracts.log"
-            # Seven Mac-only cache and Git-source comparisons in the ordinary
-            # library, never in the shipping image. No files, services or tools
-            # are opened by these exact methods; native acquisition is separate.
+            # Twelve Mac-only cache, acquisition and Git-source comparisons in
+            # the ordinary library, never in the shipping image. These methods
+            # open no files, services or tools; native acquisition is separate.
             rustup run 1.98.1 cargo test --locked --no-default-features \
               --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
               saved_command_owner::tool_acquisition::cache::tests::unentered_cache_close_never_mints_a_producer_origin \
@@ -577,8 +577,13 @@ jobs:
               saved_command_owner::tool_acquisition::cache::tests::interrupted_application_creation_retains_first_failure_and_finishes_unentered_slots \
               asset_source::macos::git_local_sources::tests::exact_own_unlink_allows_ctime_only_without_replacing_old_identity \
               asset_source::macos::git_local_sources::tests::foreign_index_metadata_never_uses_unlink_exception \
+              installed_runtime::android_registration_source::acquisition::tests::missing_requires_exact_enoent_not_denial_link_or_interruption \
+              installed_runtime::android_registration_source::acquisition::tests::both_compiled_rosters_reserve_one_read_phase_not_registration_authority \
+              installed_runtime::android_registration_source::acquisition::tests::sdk_scope_never_includes_sibling_packages \
+              asset_source::macos::git_local_sources::branch_tests::new_branch_source_head_stays_original_and_only_destination_must_be_absent \
+              asset_source::macos::git_local_sources::branch_tests::old_commit_ref_edge_retains_its_own_branch_and_stage_cannot_select_a_ref \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
-            grep -Eq '^test result: ok\. 7 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            grep -Eq '^test result: ok\. 12 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
             exit 0
           fi
           if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == local-keychain-contracts ]]; then
