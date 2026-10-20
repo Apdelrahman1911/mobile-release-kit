@@ -985,7 +985,7 @@ export function App() {
       !project.snapshotPredatesSave && !project.saveRecoveryRequired && project.savedConfigContent !== null;
     return { api: service.api?.mode === 'native' ? service.api.agentLocalChecks ?? null : null,
       project: usable ? { projectId: project.project.id, draftRevision: project.revision, baselineGeneration: project.baselineGeneration } : null,
-      blocked: service !== pathService.current || !!(gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+      blocked: service !== pathService.current || !!(versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
         savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason()),
     };
   }));

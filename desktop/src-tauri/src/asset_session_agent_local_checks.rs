@@ -230,7 +230,7 @@ impl DocumentBinding {
             .consume_local_check_observation(entry.scope())
             .map_err(public)?;
         let at = Instant::now();
-        let state = self.lock();
+        let mut state = self.lock();
         let gate = self.preflight_gate(&state); // Contains reciprocal peers; before holding Edit below.
         if gate != wire::Availability::Available {
             return Err(crate::offline_preflight_owner::unavailable());
@@ -246,9 +246,16 @@ impl DocumentBinding {
             return Err(public(Error::Conflict));
         }
         let (registration, root) = self
-            .inner
-            .bridge
-            .native_project(&entry.scope().runtime_id)?;
+            .registry_result(
+                &mut state,
+                self.inner.bridge.native_project(&entry.scope().runtime_id),
+                None,
+            )
+            .map_err(|error| public(if error.reason == Reason::CleanupUnknown {
+                Error::StateUnknown
+            } else {
+                Error::Conflict
+            }))?;
         let edit = self
             .inner
             .bridge

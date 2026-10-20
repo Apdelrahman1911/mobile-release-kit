@@ -666,7 +666,7 @@ mod known {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         agent_local_check_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
-                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, version_allocation_source: None,
+                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, version_allocation_source: None, version_enrollment: None,
                 session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
                 quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None,
                 evidence: EvidenceRegistry::new(), images: images::Registry::new(),
