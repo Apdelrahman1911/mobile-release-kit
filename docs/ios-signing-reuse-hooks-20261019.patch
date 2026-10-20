@@ -1,0 +1,1575 @@
+diff --git a/src/mobile_release/_desktop_ios_archive_protocol.py b/src/mobile_release/_desktop_ios_archive_protocol.py
+--- a/src/mobile_release/_desktop_ios_archive_protocol.py
++++ b/src/mobile_release/_desktop_ios_archive_protocol.py
+@@ -73,6 +73,9 @@
+
+
+ def prepare(value: object) -> dict:
++    if type(value) is dict and value.get("action") == "check-signing":
++        from ._desktop_ios_signing_reuse_protocol import prepare as check_prepare
++        return check_prepare(value)
+     if type(value) is dict and "recovery" in value:
+         from ._desktop_ios_recovery_protocol import prepare as recovery_prepare
+         return recovery_prepare(value)
+@@ -94,6 +97,9 @@
+
+
+ def context(value: object) -> dict:
++    if type(value) is dict and (value.get("action") == "check-signing" or value.get("operation") == "ios-signing-inputs-check"):
++        from ._desktop_ios_signing_reuse_protocol import context as check_context
++        return check_context(value)
+     if type(value) is dict and "recovery" in value:
+         from ._desktop_ios_recovery_protocol import context as recovery_context
+         return recovery_context(value)
+@@ -130,7 +136,7 @@
+
+
+ def is_signed(value: dict) -> bool:
+-    return value.get("operation") in {"ios-signed-export", "ios-candidate-inputs"}
++    return value.get("operation") in {"ios-signed-export", "ios-candidate-inputs", "ios-signing-inputs-check"}
+
+
+ def is_recovery(value: dict) -> bool:
+@@ -138,6 +144,9 @@
+
+
+ def stages(value: dict) -> tuple[str, ...]:
++    from ._desktop_ios_signing_reuse_protocol import is_check, STAGES as check_stages
++    if is_check(value):
++        return check_stages
+     if is_recovery(value):
+         from ._desktop_ios_recovery_protocol import STAGES as recovery_stages
+         return recovery_stages
+@@ -145,6 +154,9 @@
+
+
+ def protocol(value: dict) -> str:
++    from ._desktop_ios_signing_reuse_protocol import is_check, PROTOCOL as check_protocol
++    if is_check(value):
++        return check_protocol
+     if candidate_create(value):
+         return CANDIDATE_PROTOCOL
+     if is_recovery(value):
+@@ -163,7 +175,11 @@
+     return dict(value)
+
+
+-def _native(value: object, *, signed: bool = False, recovery: bool = False, candidate: bool = False) -> dict:
++def _native(value: object, *, signed: bool = False, recovery: bool = False, candidate: bool = False, signing_check: bool = False) -> dict:
++    if signing_check:
++        require(signed and not recovery and not candidate)
++        from ._desktop_ios_signing_reuse_protocol import native as check_native
++        return check_native(value)
+     if recovery:
+         require(not signed)
+         from ._desktop_ios_recovery_protocol import native as recovery_native
+@@ -213,14 +229,14 @@
+         from uuid import UUID
+         require(_uuid(str(UUID(hex=value["operationId"]))))
+     return IOSArchiveRequest(value["operationId"], value["ownerGeneration"], selected,
+-        _native(value["native"], signed=is_signed(selected), recovery=is_recovery(selected), candidate=candidate_create(selected)),
++        _native(value["native"], signed=is_signed(selected), recovery=is_recovery(selected), candidate=candidate_create(selected), signing_check=selected["operation"] == "ios-signing-inputs-check"),
+         hashlib.sha256(raw).hexdigest() if candidate_create(selected) else "")
+
+
+ def _request_binding(request: IOSArchiveRequest) -> dict:
+     require(type(request) is IOSArchiveRequest and _text(request.operation_id, _TOKEN) and _text(request.owner_generation, _TOKEN))
+     return {"operationId": request.operation_id, "ownerGeneration": request.owner_generation,
+-            "context": context(request.context), "native": _native(request.native, signed=is_signed(request.context), recovery=is_recovery(request.context), candidate=candidate_create(request.context))}
++            "context": context(request.context), "native": _native(request.native, signed=is_signed(request.context), recovery=is_recovery(request.context), candidate=candidate_create(request.context), signing_check=request.context["operation"] == "ios-signing-inputs-check")}
+
+
+ def _selection(value: object) -> dict:
+@@ -261,6 +277,9 @@
+
+
+ def validate_terminal(value: object, request: IOSArchiveRequest) -> None:
++    from ._desktop_ios_signing_reuse_protocol import is_check, validate_terminal as check_terminal
++    if is_check(request.context):
++        return check_terminal(value, request)
+     if candidate_create(request.context):
+         from .local_ios_candidate_protocol import terminal
+         return terminal(value, request)
+diff --git a/src/mobile_release/_desktop_ios_archive_control.py b/src/mobile_release/_desktop_ios_archive_control.py
+--- a/src/mobile_release/_desktop_ios_archive_control.py
++++ b/src/mobile_release/_desktop_ios_archive_control.py
+@@ -14,6 +14,7 @@
+         self.material_receiving = False
+         self.material_pending = False
+         self.signed = False
++        self.signing_check = False
+         self.recovery = False
+         self.cleanup_end = self.work_end + 10
+         self.hard_end = self.work_end + 10
+@@ -23,10 +24,16 @@
+             SIGNED_CLEANUP_SECONDS, SIGNED_FINALITY_SECONDS, WORK_SECONDS, is_signed, is_recovery,
+         )
+         self._owner()
++        from ._desktop_ios_signing_reuse_protocol import is_check, WORK_SECONDS as CHECK_WORK, FINALITY_SECONDS as CHECK_HARD
+         self.signed = is_signed(request.context)
++        self.signing_check = is_check(request.context)
+         self.recovery = is_recovery(request.context)
+         started = self.work_end - WORK_SECONDS
+-        if self.signed:
++        if self.signing_check:
++            self.work_end = started + CHECK_WORK
++            self.cleanup_end = self.hard_end = started + CHECK_HARD
++            self.material_pending = True
++        elif self.signed:
+             # Derived from original source Start, never renewed after parsing.
+             self.cleanup_end = started + SIGNED_CLEANUP_SECONDS
+             self.hard_end = started + SIGNED_FINALITY_SECONDS
+@@ -74,11 +81,11 @@
+
+     def cleanup_endpoint(self) -> float:
+         self._owner()
+-        return min(self.cleanup_end, self.first_failure + (120 if self.account_lifecycle else 10)) if self.first_failure is not None else self.cleanup_end
++        return min(self.cleanup_end, self.first_failure + (120 if self.account_lifecycle and not self.signing_check else 10)) if self.first_failure is not None else self.cleanup_end
+
+     def hard_endpoint(self) -> float:
+         self._owner()
+-        return min(self.hard_end, self.first_failure + (130 if self.account_lifecycle else 10)) if self.first_failure is not None else self.hard_end
++        return min(self.hard_end, self.first_failure + (130 if self.account_lifecycle and not self.signing_check else 10)) if self.first_failure is not None else self.hard_end
+
+     def close(self) -> None:
+         if self.candidate_input is None:
+diff --git a/src/mobile_release/_desktop_ios_archive_selection.py b/src/mobile_release/_desktop_ios_archive_selection.py
+--- a/src/mobile_release/_desktop_ios_archive_selection.py
++++ b/src/mobile_release/_desktop_ios_archive_selection.py
+@@ -28,8 +28,8 @@
+     source: str
+     name_key: str
+     build_key: str
+-    container: tuple[str, str]
+-    scheme: str
++    container: tuple[str, str] | None
++    scheme: str | None
+     configuration: str
+     bundle_id: str
+     symbols_policy: str
+@@ -43,7 +43,7 @@
+     release: ReleaseVersion
+
+
+-def select_saved_ios_configuration(raw: bytes | None, expected: object) -> tuple[dict[str, Any], SavedIOSConfiguration]:
++def select_saved_ios_configuration(raw: bytes | None, expected: object, *, signing_check: bool = False) -> tuple[dict[str, Any], SavedIOSConfiguration]:
+     from ._desktop_android_build_selection import AndroidSelectionRefused
+     try:
+         text = _captured(raw, _comparison(expected, MAX_CONFIG_BYTES), kind="config", maximum=MAX_CONFIG_BYTES)
+@@ -61,9 +61,9 @@
+     from pathlib import Path
+     config = ReleaseConfig(path=Path("release/mobile-release.json"), root=Path("."), data=data)
+     container, scheme = selected_ios_container(config, {}), selected_ios_scheme(config, {})
+-    if container is None:
++    if container is None and not signing_check:
+         _refuse("container-required")
+-    if scheme is None:
++    if scheme is None and not signing_check:
+         _refuse("scheme-required")
+     if not _source_path(spec["source"]):
+         _refuse("saved-version-unsafe")
+diff --git a/src/mobile_release/ios_archive_operation.py b/src/mobile_release/ios_archive_operation.py
+--- a/src/mobile_release/ios_archive_operation.py
++++ b/src/mobile_release/ios_archive_operation.py
+@@ -468,6 +468,13 @@
+     def acquire_tools(self) -> None:
+         self.point()
+         require(self.developer is None and self.sdk is None and self.xcodebuild is None)
++        if self.operation.source.signing_check:
++            require(self.system_directory is None and not self.system_tools)
++            self.system_directory = _Directory(Path("/usr/bin"), self.guard, edit_checkpoints=True)
++            self.system_directory.acquire()
++            self.system_tools["openssl"] = self._hold(self.system_directory.fd, "openssl", directory=False)
++            self.check_tools()
++            return
+         if self.operation.source.recovery:
+             require(self.system_directory is None and not self.system_tools)
+             self.system_directory = _Directory(Path("/usr/bin"), self.guard, edit_checkpoints=True)
+@@ -500,6 +507,16 @@
+
+     def check_tools(self) -> None:
+         self.point()
++        if self.operation.source.signing_check:
++            require(self.developer is None and self.sdk is None and self.xcodebuild is None
++                    and self.system_directory is not None and set(self.system_tools) == {"openssl"})
++            self.system_directory.check()
++            original = self.system_tools["openssl"]
++            self.check_held(original)
++            value = os.fstat(original.slot.number)
++            require(_tool_data(value) == self.operation.request.native["openssl"]
++                    and value.st_uid == 0 and value.st_mode & 0o022 == 0)
++            return
+         if self.operation.source.recovery:
+             require(self.developer is None and self.sdk is None and self.xcodebuild is None
+                     and self.system_directory is not None and set(self.system_tools) == {"security"})
+@@ -884,7 +901,7 @@
+         self.signing = None
+         self.failure = None
+         self.counters: dict[str, int] = {}
+-        self.roles = () if source.recovery else SIGNED_ROLES if source.signed else ROLES
++        self.roles = () if source.recovery or source.signing_check else SIGNED_ROLES if source.signed else ROLES
+         self._roles = {role: "new" for role in self.roles}
+         self._command_slots = {role: None for role in self.roles}
+         self._returned: dict[str, int] = {}
+@@ -986,11 +1003,11 @@
+         self.checkpoint()
+         require(self.inputs is None and self.files is not None)
+         raw = self.files.read_input("release/mobile-release.json", limit=MAX_CONFIG_BYTES)
+-        data, selected = select_saved_ios_configuration(raw, self.request.context["savedConfig"])
++        data, selected = select_saved_ios_configuration(raw, self.request.context["savedConfig"], signing_check=self.source.signing_check)
+         version = self.files.read_input(selected.source, limit=MAX_VERSION_BYTES)
+         saved = bind_saved_ios_version(selected, version, self.request.context["savedVersion"])
+         self.inputs = BoundIOSInputs(ReleaseConfig(path=self.root / "release/mobile-release.json", root=self.root, data=data), saved)
+-        if not selected.prepare:
++        if not self.source.signing_check and not selected.prepare:
+             self._roles["prepare"] = "not-configured"
+         self.check_inputs()
+         return self.inputs
+@@ -1008,6 +1025,14 @@
+         self.checkpoint()
+         require(self.inputs is not None and not self.prepared)
+         self.files.acquire_namespace()
++        self.files.acquire_tools()
++        self.check_inputs()
++        self.prepared = True
++
++    def prepare_signing_check(self) -> None:
++        self.checkpoint()
++        require(self.source.signing_check and self.inputs is not None and not self.prepared
++                and self.files.namespace is None and self.files.work is None and not self.roles)
+         self.files.acquire_tools()
+         self.check_inputs()
+         self.prepared = True
+diff --git a/src/mobile_release/_desktop_ios_signed_operation.py b/src/mobile_release/_desktop_ios_signed_operation.py
+--- a/src/mobile_release/_desktop_ios_signed_operation.py
++++ b/src/mobile_release/_desktop_ios_signed_operation.py
+@@ -82,7 +82,7 @@
+     def __init__(self, operation) -> None:
+         from .ios_archive_operation import IOSArchiveOperation
+         require(type(operation) is IOSArchiveOperation and operation.source.account_lifecycle
+-                and operation.request.context["operation"] in {"ios-signed-export", "ios-local-recovery", "ios-candidate-inputs"})
++                and operation.request.context["operation"] in {"ios-signed-export", "ios-local-recovery", "ios-candidate-inputs", "ios-signing-inputs-check"})
+         self.operation, self.guard = operation, operation.guard
+         self.lease = self.session = self.materialization = None
+         self.lease_close_claimed = self.lease_close_returned = False
+@@ -105,6 +105,10 @@
+         require(self.operation.signing is self and self.operation.source.account_lifecycle)
+
+     @property
++    def signing_check(self) -> bool:
++        return self.operation.source.signing_check
++
++    @property
+     def recovery(self) -> bool:
+         return self.operation.source.recovery
+
+@@ -135,7 +139,7 @@
+     def bind_session(self, session) -> None:
+         from .local_signing import SigningSession
+         self.owner()
+-        require(type(session) is SigningSession and self.session is None and session.lease is self.lease
++        require(not self.signing_check and type(session) is SigningSession and self.session is None and session.lease is self.lease
+                 and session.cancellation is self.guard
+                 and self.phase == ("recovering-account" if self.recovery else "materializing-signing")
+                 and (not self.recovery or self.lease._recovery_mode is True))
+@@ -191,7 +195,7 @@
+     def bind_materialization(self, child) -> None:
+         from .build_inputs import BuildInputs
+         self.owner()
+-        require(type(child) is BuildInputs and child.invocation is self.operation.invocation
++        require(not self.signing_check and type(child) is BuildInputs and child.invocation is self.operation.invocation
+                 and child.cancellation is self.guard and self.materialization is None
+                 and self.phase == "materializing-signing")
+         self.materialization = child
+@@ -202,7 +206,10 @@
+         require(type(scratch) is FiniteScratch and scratch.cancellation is self.guard
+                 and scratch.layout in {"signing-validation", "build"} and not scratch.active and not scratch.claimed
+                 and len(self.scratches) < 2 and not any(item.layout == scratch.layout for item in self.scratches))
+-        if self.recovery:
++        if self.signing_check:
++            require(scratch.layout == "signing-validation" and self.phase == "validating-signing"
++                    and scratch.journal is None and not self.scratches)
++        elif self.recovery:
+             from .build_inputs import BuildInputs
+             require(scratch.layout == "build" and self.phase == "recovering-project"
+                     and type(scratch.journal) is BuildInputs and scratch.journal.invocation is None
+@@ -305,7 +312,7 @@
+         expected = ["apple-p12", "apple-profile"]
+         if config.section("services").get("iosFirebase") == "required":
+             expected.append("ios-firebase")
+-        if "MOBILE_RELEASE_PROJECT_READ_TOKEN" in names:
++        if not self.signing_check and "MOBILE_RELEASE_PROJECT_READ_TOKEN" in names:
+             expected.append("project-read-token")
+         require([row["kind"] for row in policy["assignments"]] == expected)
+         self.values = material.bind(self.operation)
+@@ -336,6 +343,13 @@
+         """Closed, original capabilities; never scrub-and-copy ambient values."""
+         files = self.operation.files
+         require(files is not None and self.operation.prepared)
++        if self.signing_check:
++            self.operation.checkpoint()
++            require(role == "credential-validation" and scope is not None and self.lease is not None
++                    and self.values is not None and files.namespace is None and files.work is None)
++            return {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C",
++                    "HOME": str(self.lease.home),
++                    "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": self.values["MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD"]}
+         if self.recovery:
+             self.recovery_checkpoint()
+             require(role == "account-recovery" and scope is not None and self.lease is not None)
+@@ -426,6 +440,14 @@
+                 and all(type(item) is str and "\0" not in item for item in argv))
+         role = self.operation._pending
+         program = argv[0]
++        if self.signing_check:
++            self.operation.checkpoint()
++            require(not cleanup and role is None and self.phase == "validating-signing"
++                    and self.session is None and self.materialization is None and binding is None
++                    and program in {"openssl", "/usr/bin/openssl"}
++                    and len(argv) > 1 and argv[1] in {"pkcs12", "x509", "pkey"})
++            self._scope(scope, binding, False)
++            return "credential-validation", 30
+         if self.recovery:
+             self.recovery_checkpoint()
+             require(role is None and self.phase == "recovering-account"
+@@ -499,7 +521,8 @@
+         reservation = (COMMAND_METADATA_RESERVE + self.request_reservation(arguments, environment, cwd)
+                        + (12 * output_limit if capture else 0))
+         from ._desktop_ios_recovery_protocol import COMMAND_LIMIT as RECOVERY_COMMAND_LIMIT
+-        limit = RECOVERY_COMMAND_LIMIT if self.recovery else SIGNED_COMMAND_LIMIT
++        from ._desktop_ios_signing_reuse_protocol import COMMAND_LIMIT as CHECK_COMMAND_LIMIT
++        limit = CHECK_COMMAND_LIMIT if self.signing_check else RECOVERY_COMMAND_LIMIT if self.recovery else SIGNED_COMMAND_LIMIT
+         if len(self.commands) >= limit or self.capture_reserved + reservation > CAPTURE_BUDGET:
+             self.operation.fail("input-limit")
+         self.check_tool_bindings()
+@@ -566,7 +589,12 @@
+                 and evidence._ledger is self.guard.lifetime_ledger and not evidence._finished
+                 and self.pending is None and self.settling_command is None
+                 and self.phase in {"validating-signing", "materializing-signing", "inspecting"})
+-        if len(self.profiles) >= SIGNED_PROFILE_LIMIT or self.capture_reserved + PROFILE_RESERVE > CAPTURE_BUDGET:
++        from ._desktop_ios_signing_reuse_protocol import PROFILE_LIMIT as CHECK_PROFILE_LIMIT
++        if self.signing_check:
++            require(self.phase == "validating-signing" and evidence.operation == "load"
++                    and self.session is None and self.materialization is None)
++        limit = CHECK_PROFILE_LIMIT if self.signing_check else SIGNED_PROFILE_LIMIT
++        if len(self.profiles) >= limit or self.capture_reserved + PROFILE_RESERVE > CAPTURE_BUDGET:
+             self.operation.fail("input-limit")
+         self.profiles.append(evidence)
+         self.capture_reserved += PROFILE_RESERVE
+diff --git a/src/mobile_release/desktop_ios_archive.py b/src/mobile_release/desktop_ios_archive.py
+--- a/src/mobile_release/desktop_ios_archive.py
++++ b/src/mobile_release/desktop_ios_archive.py
+@@ -92,6 +92,9 @@
+                 raise
+
+     def _build_bound(self, bound):
++        if self.source.signing_check:
++            from .ios_signing_reuse import run_check
++            return run_check(self, bound)
+         operation, guard = self.operation, self.guard
+         operation.prepare()
+         if operation.signing is None:
+@@ -335,8 +338,11 @@
+         signed = self.source.signed
+         from ._desktop_ios_recovery_protocol import COMMAND_LIMIT as RECOVERY_COMMAND_LIMIT
+         command_limit = RECOVERY_COMMAND_LIMIT if self.source.recovery else SIGNED_COMMAND_LIMIT + 8 if getattr(self, "_candidate_inputs", None) is not None else SIGNED_COMMAND_LIMIT if signed else 4
+-        if (verdict.profile_calls > (SIGNED_PROFILE_LIMIT if signed else 0)
+-                or verdict.commands > command_limit):
++        profile_limit = SIGNED_PROFILE_LIMIT if signed else 0
++        if self.source.signing_check:
++            from ._desktop_ios_signing_reuse_protocol import COMMAND_LIMIT, PROFILE_LIMIT
++            command_limit, profile_limit = COMMAND_LIMIT, PROFILE_LIMIT
++        if (verdict.profile_calls > profile_limit or verdict.commands > command_limit):
+             self.guard._abort(ProtocolError("Unexpected iOS archive command domain"))
+             verdict = self.guard.lifetime_ledger.verdict()
+         files = operation.files
+@@ -355,6 +361,9 @@
+             lifetime.update(signingClosed=operation.signing.account_closed(),
+                 buildInputsClosed=operation.signing.inputs_closed(),
+                 materialRetired=self.source.material_closed())
++        if self.source.signing_check:
++            from .ios_signing_reuse import terminal as check_terminal
++            return check_terminal(self, lifetime, dispatched)
+         if self.source.recovery:
+             settled = (lifetime["complete"] and not lifetime["fatal"] and lifetime["contained"]
+                        and dispatched is not None and all(lifetime[key] for key in CLOSE_FIELDS)
+diff --git a/desktop/src-tauri/src/ios_archive_protocol.rs b/desktop/src-tauri/src/ios_archive_protocol.rs
+--- a/desktop/src-tauri/src/ios_archive_protocol.rs
++++ b/desktop/src-tauri/src/ios_archive_protocol.rs
+@@ -8,6 +8,9 @@
+ // runtime, tool binding, frame, result or ownership type crosses this boundary.
+ pub(crate) use crate::android_build_protocol::{Content, SavedVersion, RootIdentity};
+ use crate::android_build_protocol::{native_path, structure};
++#[path = "ios_signing_reuse.rs"]
++pub(crate) mod signing_reuse;
++pub(crate) use signing_reuse::request as request_signing_check;
+
+ pub(crate) const PROTOCOL: &str = "mrk-ios-archive/1";
+ pub(crate) const CONSENT: &str = "saved-ios-unsigned-archive-v1";
+@@ -70,10 +73,11 @@
+     #[serde(rename = "ios-signed-export")] IOSSignedExport,
+     #[serde(rename = "ios-local-recovery")] IOSLocalRecovery,
+     #[serde(rename = "ios-candidate-inputs")] IOSCandidateInputs,
++    #[serde(rename = "ios-signing-inputs-check")] IOSSigningInputsCheck,
+ }
+ #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all = "lowercase")]
+-pub(crate) enum CreateAction { Create }
++pub(crate) enum CreateAction { Create, #[serde(rename = "check-signing")] CheckSigning }
+ #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all = "lowercase")]
+ pub(crate) enum RecoveryAction { Inspect, Account, Project }
+@@ -141,7 +145,10 @@
+         if self.recovery() { return self.draft_revision.is_none() && self.baseline_generation.is_none()
+             && self.saved_config.is_none() && self.saved_version.is_none() && self.signing.is_none() && self.action.is_none()
+             && self.recovery.as_ref().is_some_and(RecoveryIntent::valid); }
+-        self.candidate() == (self.action == Some(CreateAction::Create)) && self.recovery.is_none() && self.draft_revision.is_some_and(|v| v < u32::MAX)
++        self.candidate() == (self.action == Some(CreateAction::Create))
++            && self.signing_check() == (self.action == Some(CreateAction::CheckSigning))
++            && (!self.signing_check() || self.signing.as_ref().is_some_and(|p|
++                p.assignments.iter().all(|row| row.kind != "project-read-token"))) && self.recovery.is_none() && self.draft_revision.is_some_and(|v| v < u32::MAX)
+             && self.baseline_generation.is_some_and(|v| v < u32::MAX)
+             && self.saved_config.as_ref().is_some_and(|v| v.valid(512 * 1024))
+             && self.saved_version.as_ref().is_some_and(SavedVersion::valid)
+@@ -158,11 +165,12 @@
+         Some(bytes)
+     }
+     pub(crate) fn candidate(&self) -> bool { self.operation == Operation::IOSCandidateInputs }
+-    pub(crate) fn signed(&self) -> bool { matches!(self.operation, Operation::IOSSignedExport | Operation::IOSCandidateInputs) }
++    pub(crate) fn signing_check(&self) -> bool { self.operation == Operation::IOSSigningInputsCheck }
++    pub(crate) fn signed(&self) -> bool { matches!(self.operation, Operation::IOSSignedExport | Operation::IOSCandidateInputs | Operation::IOSSigningInputsCheck) }
+     pub(crate) fn recovery(&self) -> bool { self.operation == Operation::IOSLocalRecovery }
+     pub(crate) fn account_lifecycle(&self) -> bool { self.signed() || self.recovery() }
+-    pub(crate) fn frame_limit(&self) -> usize { if self.candidate() { CANDIDATE_MAX_FRAMES } else if self.recovery() { RECOVERY_MAX_FRAMES } else if self.signed() { SIGNED_MAX_FRAMES } else { MAX_FRAMES } }
+-    fn protocol(&self) -> &'static str { if self.candidate() { CANDIDATE_PROTOCOL } else if self.recovery() { RECOVERY_PROTOCOL } else if self.signed() { SIGNED_PROTOCOL } else { PROTOCOL } }
++    pub(crate) fn frame_limit(&self) -> usize { if self.signing_check() { signing_reuse::MAX_FRAMES } else if self.candidate() { CANDIDATE_MAX_FRAMES } else if self.recovery() { RECOVERY_MAX_FRAMES } else if self.signed() { SIGNED_MAX_FRAMES } else { MAX_FRAMES } }
++    fn protocol(&self) -> &'static str { if self.signing_check() { signing_reuse::PROTOCOL } else if self.candidate() { CANDIDATE_PROTOCOL } else if self.recovery() { RECOVERY_PROTOCOL } else if self.signed() { SIGNED_PROTOCOL } else { PROTOCOL } }
+ }
+ #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -186,7 +194,7 @@
+ impl Prepare { pub(crate) fn context(&self) -> Context { Context { project_id: self.project_id.clone(),
+     draft_revision: self.draft_revision, baseline_generation: self.baseline_generation, saved_config: self.saved_config.clone(),
+     saved_version: self.saved_version.clone(), platform: Platform::Ios,
+-    operation: if self.action.is_some() { Operation::IOSCandidateInputs } else if self.recovery.is_some() { Operation::IOSLocalRecovery } else if self.signing.is_some() { Operation::IOSSignedExport } else { Operation::IOSUnsignedArchive },
++    operation: if self.action == Some(CreateAction::CheckSigning) { Operation::IOSSigningInputsCheck } else if self.action.is_some() { Operation::IOSCandidateInputs } else if self.recovery.is_some() { Operation::IOSLocalRecovery } else if self.signing.is_some() { Operation::IOSSignedExport } else { Operation::IOSUnsignedArchive },
+     signing: self.signing.clone(), recovery: self.recovery.clone(), action:self.action } } }
+ #[derive(Debug, Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -199,7 +207,7 @@
+     if let Some(recovery) = &context.recovery { return self.consent_version == RECOVERY_CONSENT && self.confirmation.as_deref() == match recovery.action {
+         RecoveryAction::Inspect => None, RecoveryAction::Account => Some(ACCOUNT_CONFIRMATION), RecoveryAction::Project => Some(PROJECT_CONFIRMATION),
+     }; }
+-    self.confirmation.is_none() && self.consent_version == (if context.candidate() { CANDIDATE_CONSENT } else if context.signed() { SIGNED_CONSENT } else { CONSENT })
++    self.confirmation.is_none() && self.consent_version == (if context.signing_check() { signing_reuse::CONSENT } else if context.candidate() { CANDIDATE_CONSENT } else if context.signed() { SIGNED_CONSENT } else { CONSENT })
+ } }
+ #[derive(Debug, Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -213,7 +221,7 @@
+ pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
+     let input = Start::deserialize(value).map_err(|_| invalid())?;
+     if !token(&input.operation_id) || !token(&input.owner_generation)
+-        || ![CONSENT, SIGNED_CONSENT, CANDIDATE_CONSENT, RECOVERY_CONSENT].contains(&input.consent_version.as_str())
++        || ![CONSENT, SIGNED_CONSENT, CANDIDATE_CONSENT, RECOVERY_CONSENT, signing_reuse::CONSENT].contains(&input.consent_version.as_str())
+         || input.confirmation.as_deref().is_some_and(|confirmation| input.consent_version != RECOVERY_CONSENT
+             || ![ACCOUNT_CONFIRMATION, PROJECT_CONFIRMATION].contains(&confirmation)) { return Err(invalid()); }
+     Ok(input)
+@@ -325,7 +333,7 @@
+ fn request_data(operation: &str, generation: &str, context: &Context, profile: Profile,
+     project: &RegisteredRoot, cwd: &Path, toolchain: &ToolchainBinding,
+     signing: Option<(&SigningToolBindings, &Content)>,candidate:Option<&CandidateNative>) -> Result<Vec<u8>, BridgeError> {
+-    if !token(operation) || !token(generation) || !context.valid() || context.recovery() || !toolchain.matches_profile(profile)
++    if !token(operation) || !token(generation) || !context.valid() || context.recovery() || context.signing_check() || !toolchain.matches_profile(profile)
+         || context.candidate()!=candidate.is_some()||candidate.is_some_and(|c|!c.valid())||context.candidate()&&!crate::android_build_protocol::candidate_id(operation)
+         || context.signed() != signing.is_some()
+         || signing.is_some_and(|(tools, comparison)| !tools.valid() || !comparison.valid(512 * 1024)) { return Err(invalid()); }
+@@ -375,9 +383,11 @@
+ }
+ #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+ #[serde(rename_all = "kebab-case")]
+-pub(crate) enum Stage { Accepted, InputsBound, CheckingXcode, ValidatingSigning, MaterializingSigning,
+-    Preparing, Archiving, Exporting, RestoringSigning, Inspecting, RecoveringAccount, RecoveringProject, DisposingSnapshot, DisposingWork }
++pub(crate) enum Stage { Accepted, InputsBound, CheckingSigningTools, CheckingXcode, ValidatingSigning, MaterializingSigning,
++    Preparing, Archiving, Exporting, RestoringSigning, Inspecting, RecoveringAccount, RecoveringProject, DisposingSnapshot, DisposingWork, CheckingInputs }
+ impl Stage { fn valid(self, context: &Context) -> bool {
++    if context.signing_check() { return matches!(self, Self::Accepted | Self::InputsBound | Self::CheckingSigningTools | Self::ValidatingSigning | Self::CheckingInputs); }
++    if matches!(self, Self::CheckingSigningTools | Self::CheckingInputs) { return false; }
+     if context.recovery() { return matches!(self, Self::Accepted | Self::RecoveringAccount | Self::RecoveringProject | Self::DisposingWork); }
+     !matches!(self, Self::RecoveringAccount | Self::RecoveringProject) && (context.signed() || !matches!(self,
+         Self::ValidatingSigning | Self::MaterializingSigning | Self::Exporting | Self::RestoringSigning))
+@@ -434,10 +444,10 @@
+     pub(crate) findings: Vec<Finding> }
+ #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(from = "ActivityWire", into = "ActivityWire")]
+-pub(crate) struct Activity { pub(crate) stage: Stage, build: Option<ArchiveActivity> }
++pub(crate) struct Activity { pub(crate) stage: Stage, build: Option<ArchiveActivity>, check: Option<Vec<Finding>> }
+ #[derive(Deserialize, Serialize)]
+ #[serde(untagged)]
+-enum ActivityWire { Archive(ArchiveActivityWire), Recovery(RecoveryActivityWire) }
++enum ActivityWire { Archive(ArchiveActivityWire), Recovery(RecoveryActivityWire), SigningCheck(SigningCheckActivityWire) }
+ #[derive(Deserialize, Serialize)]
+ #[serde(deny_unknown_fields)]
+ struct ArchiveActivityWire { stage: Stage, #[serde(deserialize_with = "nullable")] selection: Option<Selection>,
+@@ -445,15 +455,20 @@
+ #[derive(Deserialize, Serialize)]
+ #[serde(deny_unknown_fields)]
+ struct RecoveryActivityWire { stage: Stage }
++#[derive(Deserialize, Serialize)]
++#[serde(deny_unknown_fields)]
++struct SigningCheckActivityWire { stage: Stage, findings: Vec<Finding> }
+ impl From<ActivityWire> for Activity { fn from(value: ActivityWire) -> Self { match value {
+     ActivityWire::Archive(value) => Self { stage: value.stage, build: Some(ArchiveActivity {
+-        selection: value.selection, commands: value.commands, findings: value.findings }) },
+-    ActivityWire::Recovery(value) => Self { stage: value.stage, build: None },
++        selection: value.selection, commands: value.commands, findings: value.findings }), check: None },
++    ActivityWire::Recovery(value) => Self { stage: value.stage, build: None, check: None },
++    ActivityWire::SigningCheck(value) => Self { stage: value.stage, build: None, check: Some(value.findings) },
+ } } }
+ impl From<Activity> for ActivityWire { fn from(value: Activity) -> Self { match value.build {
+     Some(build) => Self::Archive(ArchiveActivityWire { stage: value.stage, selection: build.selection,
+         commands: build.commands, findings: build.findings }),
+-    None => Self::Recovery(RecoveryActivityWire { stage: value.stage }),
++    None => match value.check { Some(findings) => Self::SigningCheck(SigningCheckActivityWire { stage: value.stage, findings }),
++        None => Self::Recovery(RecoveryActivityWire { stage: value.stage }) },
+ } } }
+ impl Activity {
+     /// Borrow typed archive DATA; the caller must still require its exact mode.
+@@ -461,6 +476,8 @@
+     pub(crate) fn archive_activity(&self) -> Option<&ArchiveActivity> { self.build.as_ref() }
+     fn valid(&self, context: &Context) -> bool {
+         if !self.stage.valid(context) { return false; }
++        if context.signing_check() { return self.build.is_none() && self.check.as_ref().is_some_and(|rows| signing_reuse::findings(rows)); }
++        if self.check.is_some() { return false; }
+         if context.recovery() { return self.build.is_none(); }
+         let Some(build) = &self.build else { return false; };
+         let signed = context.signed();
+@@ -471,7 +488,10 @@
+                 || build.commands.archive.zero() && (!signed || build.commands.export.as_ref().is_some_and(CommandData::zero)))
+     }
+     fn complete(&self, context: &Context) -> bool {
+-        if !self.valid(context) || self.stage != Stage::DisposingWork { return false; }
++        if !self.valid(context) { return false; }
++        if context.signing_check() { return self.stage == Stage::CheckingInputs
++            && self.check.as_ref().is_some_and(|rows| signing_reuse::complete_findings(context, rows)); }
++        if self.stage != Stage::DisposingWork { return false; }
+         if context.recovery() { return true; }
+         let Some(build) = &self.build else { return false; };
+         let Some(selection) = &build.selection else { return false; };
+@@ -528,7 +548,7 @@
+     pub(crate) pairing: Option<Pairing>,
+ }
+ impl ResultData { fn valid(&self, context: &Context, operation: &str) -> bool {
+-    !context.recovery() && self.schema_version == 1 && self.scope == (if context.signed() { SIGNED_SCOPE } else { SCOPE })
++    !context.recovery() && !context.signing_check() && self.schema_version == 1 && self.scope == (if context.signed() { SIGNED_SCOPE } else { SCOPE })
+         && context.saved_config.as_ref() == Some(&self.used_config) && context.saved_version.as_ref() == Some(&self.used_version)
+         && self.archive == format!(".mobile-release/desktop-ios-archive/{operation}/archive.xcarchive")
+         && (1..=100_000).contains(&self.entries) && (1..=8 * 1024u64.pow(3)).contains(&self.bytes)
+@@ -585,11 +605,12 @@
+     pub(crate) candidate_inputs:CandidateInputs,build:ResultData}
+ #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(untagged)]
+-pub(crate) enum ResultValue { Candidate(CandidateResult),Build(ResultData) }
++pub(crate) enum ResultValue { Candidate(CandidateResult),Build(ResultData),SigningCheck(signing_reuse::ResultData) }
+ impl ResultValue {
+-    pub(crate) fn ordinary_build(&self)->Option<&ResultData>{match self{Self::Build(v)=>Some(v),Self::Candidate(_)=>None}}
++    pub(crate) fn ordinary_build(&self)->Option<&ResultData>{match self{Self::Build(v)=>Some(v),Self::Candidate(_)|Self::SigningCheck(_)=>None}}
+     fn valid(&self,context:&Context,operation:&str)->bool {
+         match self {
++            Self::SigningCheck(value) => value.valid(context),
+             Self::Build(build)=>!context.candidate()&&build.valid(context,operation),
+             Self::Candidate(v)=>context.candidate()&&v.schema_version==1&&v.scope=="local-ios-candidate-inputs"
+                 &&(3..=513).contains(&v.head_sequence)&&v.candidate_inputs.valid(operation)&&v.build.valid(context,operation)
+@@ -600,6 +621,7 @@
+         }
+     }
+     fn matches_activity(&self,activity:&Activity)->bool{match self{
++        Self::SigningCheck(value)=>activity.check.as_ref()==Some(&value.checks),
+         Self::Build(_)=>true,Self::Candidate(v)=>activity.build.as_ref().and_then(|b|b.selection.as_ref())
+             .is_some_and(|s|s.bundle_id==v.candidate_inputs.bundle_id),
+     }}
+@@ -682,8 +704,8 @@
+         self.source_commands.is_some()==context.candidate()
+             &&[self.candidate_inputs_closed,self.journal_closed,self.lease_closed].iter().all(|f|f.is_some()==context.candidate())
+             &&self.source_commands.is_none_or(|n|n<=8&&n<=self.commands&&self.commands-n<=SIGNED_COMMAND_LIMIT)
+-            &&self.commands <= (if context.candidate(){SIGNED_COMMAND_LIMIT+8}else if context.recovery() { RECOVERY_COMMAND_LIMIT } else if context.signed() { SIGNED_COMMAND_LIMIT } else { 4 })
+-            && self.profile_calls <= (if context.signed() { SIGNED_PROFILE_LIMIT } else { 0 })
++            &&self.commands <= (if context.signing_check(){signing_reuse::COMMAND_LIMIT}else if context.candidate(){SIGNED_COMMAND_LIMIT+8}else if context.recovery() { RECOVERY_COMMAND_LIMIT } else if context.signed() { SIGNED_COMMAND_LIMIT } else { 4 })
++            && self.profile_calls <= (if context.signing_check() { signing_reuse::PROFILE_LIMIT } else if context.signed() { SIGNED_PROFILE_LIMIT } else { 0 })
+             && [self.signing_closed, self.build_inputs_closed, self.material_retired].iter().all(|flag| flag.is_some() == context.account_lifecycle())
+     }
+     pub(crate) fn settled(&self) -> bool {
+@@ -743,7 +765,8 @@
+         if context.recovery() {
+             if self.disposition.is_some() || self.result.is_some()
+                 || self.report.as_ref().is_some_and(|report| !self.settled() || !report.valid(context)) { return false; }
+-        } else if self.report.is_some() || !self.disposition.as_ref().is_some_and(|d| d.valid(operation)) { return false; }
++        } else if self.report.is_some() || !self.disposition.as_ref().is_some_and(|d| d.valid(operation)
++            && (!context.signing_check() || signing_reuse::no_artifacts(d))) { return false; }
+         let life = &self.lifetime;
+         let commands = self.activity.build.as_ref().map_or_else(Vec::new, |build| build.commands.all());
+         if commands.iter().filter(|c| c.outcome == CommandOutcome::Exited).count() > (life.commands-life.source_commands.unwrap_or(0)) as usize { return false; }
+@@ -754,6 +777,9 @@
+         if self.outcome == Outcome::Complete {
+             if !self.settled() || self.reason != Reason::None || life.stop_observed != CoreStop::None || !self.activity.complete(context) { return false; }
+             if context.recovery() { return self.report.is_some(); }
++            if context.signing_check() { return (5..=signing_reuse::COMMAND_LIMIT).contains(&life.commands)
++                && life.profile_calls == signing_reuse::PROFILE_LIMIT && life.command_dispatched == Some(true)
++                && self.result.as_ref().is_some_and(|r| r.valid(context, operation) && r.matches_activity(&self.activity)); }
+             let roles = if self.activity.build.as_ref().and_then(|b| b.selection.as_ref()).is_some_and(|s| s.preparation_configured) { 4 } else { 3 };
+             return self.disposition.as_ref().is_some_and(Disposition::complete)
+                 && (if context.candidate(){life.source_commands==Some(8)&&life.commands>=8+roles+1&&life.profile_calls>=3}
+@@ -872,12 +898,13 @@
+ // signing material, exact-session recovery or finality.
+ #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+-pub(crate) struct ModeCapabilities { pub(crate) unsigned: bool, pub(crate) signed: bool, pub(crate) recovery: bool }
++pub(crate) struct ModeCapabilities { pub(crate) unsigned: bool, pub(crate) signed: bool, pub(crate) recovery: bool,
++    #[serde(default)] pub(crate) signing_check: bool }
+ impl ModeCapabilities {
+-    pub(crate) const NONE: Self = Self { unsigned: false, signed: false, recovery: false };
++    pub(crate) const NONE: Self = Self { unsigned: false, signed: false, recovery: false, signing_check: false };
+     pub(crate) fn supports(self, operation: Operation) -> bool { match operation {
+         Operation::IOSUnsignedArchive => self.unsigned, Operation::IOSSignedExport | Operation::IOSCandidateInputs => self.signed,
+-        Operation::IOSLocalRecovery => self.recovery,
++        Operation::IOSLocalRecovery => self.recovery, Operation::IOSSigningInputsCheck => self.signing_check,
+     } }
+ }
+ #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+@@ -948,9 +975,10 @@
+             if self.intent_usable || outcome == Outcome::Unknown || self.reason == Reason::CleanupUnknown
+                 || (self.reason == Reason::None) != (outcome == Outcome::Complete) { return false; }
+             if outcome == Outcome::Complete {
+-                if self.stage != Some(Stage::DisposingWork) || !self.activity.as_ref().is_some_and(|a| a.complete(&self.context)) { return false; }
++                if self.stage != Some(if self.context.signing_check() { Stage::CheckingInputs } else { Stage::DisposingWork })
++                    || !self.activity.as_ref().is_some_and(|a| a.complete(&self.context)) { return false; }
+                 return if self.context.recovery() { self.report.as_ref().is_some_and(|r| r.valid(&self.context)) }
+-                    else { self.disposition.as_ref().is_some_and(|d| d.complete() && d.valid(&self.operation_id))
++                    else { self.disposition.as_ref().is_some_and(|d| (if self.context.signing_check() { signing_reuse::no_artifacts(d) } else { d.complete() }) && d.valid(&self.operation_id))
+                         && self.result.as_ref().is_some_and(|r| r.valid(&self.context, &self.operation_id)&&r.matches_activity(self.activity.as_ref().expect("checked activity"))) };
+             }
+             if self.result.is_some() || outcome == Outcome::Cancelled && !matches!(self.reason,
+@@ -962,7 +990,7 @@
+             }; }
+             match (&self.activity, &self.disposition) {
+                 (Some(a), Some(d)) => a.valid(&self.context) && self.stage == Some(a.stage) && d.known() && d.valid(&self.operation_id)
+-                    && d.output != OutputDisposition::RetainedLocalResult,
++                    && d.output != OutputDisposition::RetainedLocalResult && (!self.context.signing_check() || signing_reuse::no_artifacts(d)),
+                 (None, None) => true, _ => false,
+             }
+         },
+@@ -1447,7 +1475,7 @@
+             phase:Phase::Terminal,intent_usable:false,outcome:Some(Outcome::Complete),reason:Reason::None,stage:Some(Stage::DisposingWork),
+             activity:Some(accepted.activity),disposition:None,result:None,report:accepted.report };
+         let status = Status { schema_version:STATUS_SCHEMA_VERSION,status_revision:1,availability:Availability::Available,
+-            mode_capabilities:ModeCapabilities { unsigned:false,signed:false,recovery:true },operation:Some(projection) };
++            mode_capabilities:ModeCapabilities { unsigned:false,signed:false,recovery:true,signing_check:false },operation:Some(projection) };
+         let encoded = status_bytes(&status).unwrap(); let data: Value = serde_json::from_slice(&encoded).unwrap();
+         assert!(!data["operation"].as_object().unwrap().contains_key("result"));
+         assert!(!data["operation"].as_object().unwrap().contains_key("disposition"));
+diff --git a/desktop/src-tauri/src/saved_command_owner.rs b/desktop/src-tauri/src/saved_command_owner.rs
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -143,7 +143,9 @@
+ // never falls back. Exact context/original checks remain in ios_mode_qualified.
+ fn ios_mode_selection(installed: bool, observed: Option<ios_wire::ModeCapabilities>) -> ios_wire::ModeCapabilities {
+     if !installed { return ios_wire::ModeCapabilities::NONE; }
+-    observed.unwrap_or(ios_wire::ModeCapabilities { unsigned: true, signed: true, recovery: true })
++    // Check-only has a distinct system-tool/private-input qualification. The
++    // existing signed-export observation cannot enable it by default.
++    observed.unwrap_or(ios_wire::ModeCapabilities { unsigned: true, signed: true, recovery: true, signing_check: false })
+ }
+ const IOS_WORK: Duration = Duration::from_secs(5400);
+ const IOS_HARD: Duration = Duration::from_secs(5410);
+@@ -244,6 +246,7 @@
+ enum Context { GenerateUploadKey(upload_wire::UploadKeyContext), AppleProvisioning(apple_wire::Context), ToolAcquisition(tools_wire::Context), LocalReleaseHistory(history_wire::Context), LocalStoreExecute(execute_wire::Context), LocalStoreReconcile(reconcile_wire::Context), LocalStorePrepare(prepare_wire::Context), LocalStorePreflight(store_wire::Context), OfflinePreflight(wire::Context), AndroidBuild(android_wire::Context), ProjectRecovery(recovery_wire::Context), IOSArchive(ios_wire::Context), ArtifactInspection(artifact_wire::Context) }
+ impl Context {
+     fn signed_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signed()) }
++    fn signing_check_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signing_check()) }
+     fn requires_private_material(&self) -> bool { self.signed_ios() || matches!(self, Self::AndroidBuild(c) if c.signed()) || matches!(self, Self::AppleProvisioning(_) | Self::LocalStorePreflight(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_)) }
+     fn recovery_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.recovery()) }
+     fn frame_limit(&self) -> usize { match self { Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), Self::LocalStoreReconcile(context)=>context.frame_limit(), _ => self.domain().frame_limit() } }
+@@ -1138,16 +1141,22 @@
+ }
+
+ #[derive(Clone, Copy)]
+-struct Clocks { admitted: Instant, work: Instant, finality: Instant, cleanup: Instant, signed: bool, recovery: bool, local_history: bool }
++struct Clocks { admitted: Instant, work: Instant, finality: Instant, cleanup: Instant, signed: bool, recovery: bool, signing_check: bool, local_history: bool }
+ impl Clocks {
+     fn new(domain: SavedCommandDomain, admitted: Instant) -> Self {
+         let (work, hard) = match domain { SavedCommandDomain::GenerateUploadKey => (Duration::from_secs(upload_wire::WORK_SECONDS),Duration::from_secs(upload_wire::FINALITY_SECONDS)), SavedCommandDomain::ToolAcquisition => (Duration::from_secs(1200),Duration::from_secs(1210)), SavedCommandDomain::LocalReleaseHistory => (Duration::from_secs(60),Duration::from_secs(62)), SavedCommandDomain::AppleProvisioning | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStoreExecute => (Duration::from_secs(1200),Duration::from_secs(1210)), SavedCommandDomain::OfflinePreflight => (OFFLINE_WORK, OFFLINE_HARD),
+             SavedCommandDomain::AndroidBuild => (ANDROID_WORK, ANDROID_HARD), SavedCommandDomain::IOSArchive => (IOS_WORK, IOS_HARD), SavedCommandDomain::ProjectRecovery => (RECOVERY_WORK, RECOVERY_HARD), SavedCommandDomain::ArtifactInspection => (Duration::from_secs(900),Duration::from_secs(910)) };
+-        Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false, local_history: domain == SavedCommandDomain::LocalReleaseHistory }
++        Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false, signing_check: false, local_history: domain == SavedCommandDomain::LocalReleaseHistory }
+     }
+     fn for_context(context: &Context, admitted: Instant) -> Self {
+         let mut clocks = Self::new(context.domain(), admitted);
+-        if context.signed_ios() {
++        if context.signing_check_ios() {
++            clocks.work = admitted + Duration::from_secs(ios_wire::signing_reuse::WORK_SECONDS);
++            clocks.cleanup = admitted + Duration::from_secs(ios_wire::signing_reuse::FINALITY_SECONDS);
++            clocks.finality = clocks.cleanup;
++            clocks.signed = true;
++            clocks.signing_check = true;
++        } else if context.signed_ios() {
+             clocks.cleanup = admitted + IOS_SIGNED_CLEANUP;
+             clocks.finality = admitted + IOS_SIGNED_HARD;
+             clocks.signed = true;
+@@ -1160,10 +1169,10 @@
+         clocks
+     }
+     fn settlement(self, first_stop: Option<Instant>) -> Instant {
+-        first_stop.map_or(self.finality, |first| self.finality.min(first + if self.signed || self.recovery { IOS_SIGNED_SETTLEMENT } else if self.local_history { Duration::from_secs(2) } else { SETTLEMENT }))
++        first_stop.map_or(self.finality, |first| self.finality.min(first + if self.signing_check { SETTLEMENT } else if self.signed || self.recovery { IOS_SIGNED_SETTLEMENT } else if self.local_history { Duration::from_secs(2) } else { SETTLEMENT }))
+     }
+     fn cleanup_end(self, first_stop: Option<Instant>) -> Instant {
+-        first_stop.map_or(self.cleanup, |first| self.cleanup.min(first + if self.signed || self.recovery { Duration::from_secs(120) } else if self.local_history { Duration::from_secs(2) } else { SETTLEMENT }))
++        first_stop.map_or(self.cleanup, |first| self.cleanup.min(first + if self.signing_check { SETTLEMENT } else if self.signed || self.recovery { Duration::from_secs(120) } else if self.local_history { Duration::from_secs(2) } else { SETTLEMENT }))
+     }
+     fn audit_end(self, first_stop: Option<Instant>) -> Instant {
+         if self.signed || self.recovery { self.settlement(first_stop) } else { self.work.min(self.settlement(first_stop)) }
+@@ -1175,7 +1184,7 @@
+         // the renderer, the environment, a subphase, or a later observation.
+         let work = IOS_WORK.min(Duration::from_secs(300));
+         let hard = IOS_HARD.min(work + SETTLEMENT);
+-        Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false, local_history: false }
++        Self { admitted, work: admitted + work, finality: admitted + hard, cleanup: admitted + hard, signed: false, recovery: false, signing_check: false, local_history: false }
+     }
+     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     fn installed_ios_signed(admitted: Instant) -> Self {
+@@ -1183,7 +1192,7 @@
+         // at Start. Existing F+120/F+130 tightening still cannot renew them.
+         Self { admitted, work: admitted + IOS_WORK.min(Duration::from_secs(120)),
+             finality: admitted + IOS_SIGNED_HARD.min(Duration::from_secs(250)),
+-            cleanup: admitted + IOS_SIGNED_CLEANUP.min(Duration::from_secs(240)), signed: true, recovery: false, local_history: false }
++            cleanup: admitted + IOS_SIGNED_CLEANUP.min(Duration::from_secs(240)), signed: true, recovery: false, signing_check: false, local_history: false }
+     }
+ }
+ #[derive(Clone)]
+@@ -1714,23 +1723,23 @@
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+ struct IOSNativeBooks {
+     runtime: IOSArchiveRuntimeSlots, tools: IOSXcodeSlots, selection: Option<VerifiedRuntime>,
+-    phase: NativePhase, failure: Option<AdmissionFailure>, settlement_started: bool, audit: watch::Receiver<Instant>, signed: bool, recovery: bool,
++    phase: NativePhase, failure: Option<AdmissionFailure>, settlement_started: bool, audit: watch::Receiver<Instant>, signed: bool, recovery: bool, signing_check: bool,
+ }
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+ impl IOSNativeBooks {
+     fn new(audit: watch::Receiver<Instant>) -> Self {
+-        Self::new_selected(audit, false, false)
+-    }
+-    fn new_selected(audit: watch::Receiver<Instant>, signed: bool, recovery: bool) -> Self {
++        Self::new_selected(audit, false, false, false)
++    }
++    fn new_selected(audit: watch::Receiver<Instant>, signed: bool, recovery: bool, signing_check: bool) -> Self {
+         Self { runtime: IOSArchiveRuntimeSlots::new(), tools: IOSXcodeSlots::new(audit.clone()), selection: None,
+-            phase: NativePhase::New, failure: None, settlement_started: false, audit, signed, recovery }
++            phase: NativePhase::New, failure: None, settlement_started: false, audit, signed, recovery, signing_check }
+     }
+     fn candidate_source_quote(&self)->Option<usize>{
+-        if self.phase!=NativePhase::Ready||!self.signed||self.recovery||self.settlement_started||self.first_failure().is_some(){return None;}
++        if self.phase!=NativePhase::Ready||!self.signed||self.recovery||self.signing_check||self.settlement_started||self.first_failure().is_some(){return None;}
+         self.runtime.retained_original_count()?.checked_add(self.tools.retained_original_count()?)
+     }
+     fn candidate_backing(&self)->Option<usize>{
+-        if !matches!(self.phase,NativePhase::Ready|NativePhase::Claimed)||!self.signed||self.recovery||self.settlement_started||self.first_failure().is_some(){return None;}
++        if !matches!(self.phase,NativePhase::Ready|NativePhase::Claimed)||!self.signed||self.recovery||self.signing_check||self.settlement_started||self.first_failure().is_some(){return None;}
+         let mut bytes=std::mem::size_of::<Self>().checked_add(self.runtime.retained_bytes()?)?.checked_add(self.tools.retained_bytes()?)?;
+         if let Some(v)=&self.selection{for n in [v.python.capacity(),v.bootstrap.capacity(),v.core.capacity(),v.cwd.capacity()]{bytes=bytes.checked_add(n)?;}}
+         Some(bytes)
+@@ -1768,7 +1777,8 @@
+         };
+         self.selection = Some(VerifiedRuntime { python: selected.python.clone(), bootstrap: selected.bootstrap.clone(),
+             core: selected.core.clone(), cwd: selected.cwd.clone() });
+-        let tools = if self.signed && self.recovery { Err(AdmissionFailure::Inventory) }
++        let tools = if self.signed && self.recovery || self.signing_check && (!self.signed || self.recovery) { Err(AdmissionFailure::Inventory) }
++            else if self.signing_check { self.tools.inspect_signing_check_once(end, stop) }
+             else if self.recovery { self.tools.inspect_recovery_once(end, stop) }
+             else if self.signed { self.tools.inspect_signed_once(end, stop) } else { self.tools.inspect_once(end, stop) };
+         publish_macos_returned_failure(tools.as_ref().err().copied(),
+@@ -1789,7 +1799,7 @@
+     }
+     fn request_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::ToolchainBinding, AdmissionFailure> {
+         self.selected_binding(expected)?;
+-        if self.recovery { return Err(AdmissionFailure::Inventory); }
++        if self.recovery || self.signing_check { return Err(AdmissionFailure::Inventory); }
+         self.tools.binding_data()
+     }
+     fn signing_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::SigningToolBindings, AdmissionFailure> {
+@@ -1797,9 +1807,14 @@
+         let _ = self.request_binding(expected)?;
+         self.tools.signing_binding_data()
+     }
++    fn signing_check_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::ToolIdentity, AdmissionFailure> {
++        self.selected_binding(expected)?;
++        if !self.signing_check || !self.signed || self.recovery { return Err(AdmissionFailure::Inventory); }
++        self.tools.signing_check_binding_data()
++    }
+     fn recovery_binding(&self, expected: &VerifiedRuntime) -> Result<ios_wire::ToolIdentity, AdmissionFailure> {
+         self.selected_binding(expected)?;
+-        if !self.recovery || self.signed { return Err(AdmissionFailure::Inventory); }
++        if !self.recovery || self.signed || self.signing_check { return Err(AdmissionFailure::Inventory); }
+         self.tools.recovery_binding_data()
+     }
+     fn check_before_spawn(&mut self, selected: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>,
+@@ -2284,7 +2299,7 @@
+             })?;
+         }
+         let mut recovery_stamp = None;
+-        let mut expires = prepared_at + INTENT;
++        let mut expires = prepared_at + if context.signing_check_ios() { Duration::from_secs(ios_wire::signing_reuse::INTENT_SECONDS) } else { INTENT };
+         if let Context::ProjectRecovery(selected) = &mut context {
+             if selected.action == recovery_wire::Action::Recover {
+                 let reviewed = r.recovery_review.as_ref().filter(|reviewed|
+@@ -2365,7 +2380,7 @@
+             Clocks::for_context(&prepared.projection.context, admitted_at)
+         } else { self.inner.start_clocks(admitted_at) };
+         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-        let clocks = if prepared.projection.context.signed_ios()
++        let clocks = if prepared.projection.context.signed_ios() && !prepared.projection.context.signing_check_ios()
+             && self.inner.ios_observation.lock().is_ok_and(|book| book.as_ref().is_some_and(|o|
+                 o.originals[0].is_none() && o.control.permits_mode(ios_wire::Operation::IOSSignedExport))) {
+             Clocks::installed_ios_signed(admitted_at)
+@@ -2498,7 +2513,7 @@
+                 native: None,
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 ios_native: (self.inner.domain == SavedCommandDomain::IOSArchive)
+-                    .then(|| Arc::new(Mutex::new(IOSNativeBooks::new_selected(audit_cutoff, clocks.signed, clocks.recovery)))),
++                    .then(|| Arc::new(Mutex::new(IOSNativeBooks::new_selected(audit_cutoff, clocks.signed, clocks.recovery, clocks.signing_check)))),
+                 ..Resources::default() }),
+             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())), error: Arc::new(AsyncMutex::new(Pipe::default())),
+             driver: AsyncMutex::new(None), watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
+@@ -2909,6 +2924,7 @@
+             unsigned: observation.control.permits_mode(ios_wire::Operation::IOSUnsignedArchive),
+             signed: observation.control.permits_mode(ios_wire::Operation::IOSSignedExport),
+             recovery: observation.control.permits_mode(ios_wire::Operation::IOSLocalRecovery),
++            signing_check: false, // No existing observer supplies the new mode receipt.
+         }))
+     }
+     fn ios_mode_capabilities(&self) -> ios_wire::ModeCapabilities {
+@@ -4801,11 +4817,22 @@
+                 let construct = || {
+                     let native = book.ios_native.as_ref().ok_or_else(|| owner.domain.unavailable())?
+                         .lock().map_err(|_| BridgeError::cleanup_unknown())?;
+-                    if native.signed != context.signed() || native.recovery != context.recovery() { return Err(owner.domain.invalid_owner()); }
++                    if native.signed != context.signed() || native.recovery != context.recovery()
++                        || native.signing_check != context.signing_check() { return Err(owner.domain.invalid_owner()); }
+                     if context.recovery() {
+                         if !owner.recovery_matches() { return Err(owner.domain.invalid_owner()); }
+                         let security = native.recovery_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
+                         return ios_wire::request_recovery(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, &security);
++                    }
++                    if context.signing_check() {
++                        let openssl = native.signing_check_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
++                        let original = { let material = owner.material.lock().map_err(|_| BridgeError::cleanup_unknown())?;
++                            let Some(PrivateSigningMaterial::IOS(original)) = material.as_ref() else { return Err(owner.domain.invalid_owner()); };
++                            original.clone() };
++                        drop(native);
++                        if !original.matches(context, owner.registration, &owner.project) { return Err(owner.domain.invalid_owner()); }
++                        return ios_wire::request_signing_check(&owner.id, &owner.generation, context, profile,
++                            &owner.project, &runtime.cwd, &openssl, &original.context_data());
+                     }
+                     let binding = native.request_binding(&runtime).map_err(|_| owner.domain.unavailable())?;
+                     if context.signed() {
+diff --git a/desktop/src-tauri/src/installed_runtime_macos.rs b/desktop/src-tauri/src/installed_runtime_macos.rs
+--- a/desktop/src-tauri/src/installed_runtime_macos.rs
++++ b/desktop/src-tauri/src/installed_runtime_macos.rs
+@@ -1873,13 +1873,13 @@
+ pub(crate) struct IOSXcodeSlots {
+     original: Book, managed: Option<IOSManagedSelection>, alias: Option<IOSXcodeAlias>, sdk_alias: Option<IOSXcodeAlias>, developer: Option<usize>, executable: Option<usize>,
+     sdk: Option<usize>, developer_path: Option<PathBuf>, sdk_path: Option<PathBuf>,
+-    signing: Option<[usize; 3]>, recovery_security: Option<usize>, validation_only: bool, upload: Option<(usize,usize)>,
++    signing: Option<[usize; 3]>, recovery_security: Option<usize>, signing_check_openssl: Option<usize>, validation_only: bool, upload: Option<(usize,usize)>,
+     audit: watch::Receiver<Instant>, prepared: bool,
+ }
+ impl IOSXcodeSlots {
+     pub(crate) fn new(audit: watch::Receiver<Instant>) -> Self {
+         Self { original: Book::new(), managed: None, alias: None, sdk_alias: None, developer: None, executable: None, sdk: None,
+-            developer_path: None, sdk_path: None, signing: None, recovery_security: None,
++            developer_path: None, sdk_path: None, signing: None, recovery_security: None, signing_check_openssl: None,
+             validation_only: false, upload: None, audit, prepared: false }
+     }
+     pub(crate) fn arm_acl_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+@@ -1900,6 +1900,21 @@
+     }
+     pub(crate) fn inspect_signed_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+         self.inspect_selected(end, stop, true)
++    }
++    /// Check-only assigned P12/profile validation has one fixed executable.
++    /// Keep this receipt separate from full Xcode, IPA validation and recovery;
++    /// only the original armed Book can inspect or settle these four records.
++    pub(crate) fn inspect_signing_check_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
++        if !self.original.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
++        self.original.records.try_reserve_exact(4).map_err(native_error)?;
++        self.original.started = true;
++        checkpoint(end, stop)?;
++        native::real_user().map_err(native_error)?;
++        let bin = self.original.chain(Path::new("/usr/bin"), end, stop)?;
++        self.signing_check_openssl = Some(self.original.open(Some(bin), "openssl", false, end, stop)?);
++        self.original.inspected = true;
++        let _ = self.signing_check_binding_data()?;
++        self.check_current(end, stop)
+     }
+     /// Current IPA validation needs only the three fixed system tools, not an
+     /// Xcode selection, signing account, build permission or upload executable.
+@@ -2108,7 +2123,7 @@
+     }
+     pub(crate) fn binding_data(&self) -> Result<crate::ios_archive_protocol::ToolchainBinding> {
+         use crate::ios_archive_protocol::{RootIdentity, ToolchainBinding};
+-        if self.validation_only || self.upload.is_some() { return Err(AdmissionFailure::Inventory); }
++        if self.validation_only || self.upload.is_some() || self.signing_check_openssl.is_some() { return Err(AdmissionFailure::Inventory); }
+         if !self.original.inspected || !self.original.admission_custody_ready() { return Err(AdmissionFailure::Unknown); }
+         let identity = |index: Option<usize>| -> Result<Identity> {
+             self.original.records.get(index.ok_or(AdmissionFailure::Unknown)?).and_then(|r| r.identity).ok_or(AdmissionFailure::Identity)
+@@ -2134,11 +2149,24 @@
+             mtime_ns: nanos(tool.mtime, tool.mtime_ns)?, ctime_ns: nanos(tool.ctime, tool.ctime_ns)? })
+     }
+     pub(crate) fn signing_binding_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
+-        if self.validation_only || self.upload.is_some() { return Err(AdmissionFailure::Inventory); }
++        if self.validation_only || self.upload.is_some() || self.signing_check_openssl.is_some() { return Err(AdmissionFailure::Inventory); }
+         self.system_signing_data()
+     }
++    pub(crate) fn signing_check_binding_data(&self) -> Result<crate::ios_archive_protocol::ToolIdentity> {
++        if self.validation_only || self.upload.is_some() || self.managed.is_some() || self.alias.is_some() || self.sdk_alias.is_some()
++            || self.developer.is_some() || self.executable.is_some() || self.sdk.is_some()
++            || self.developer_path.is_some() || self.sdk_path.is_some() || self.recovery_security.is_some() || self.signing.is_some()
++            || self.signing_check_openssl != Some(3) || self.original.records.len() != 4
++            || self.original.retained_original_count() != Some(4)
++            || !self.original.inspected || !self.original.admission_custody_ready() {
++            return Err(AdmissionFailure::Inventory);
++        }
++        let tool = self.tool_data(self.signing_check_openssl)?;
++        if !tool.valid() || tool.uid != 0 || tool.mode & 0o022 != 0 { return Err(AdmissionFailure::Inventory); }
++        Ok(tool)
++    }
+     pub(crate) fn validation_binding_data(&self) -> Result<crate::ios_archive_protocol::SigningToolBindings> {
+-        if !self.validation_only || self.upload.is_some() || self.managed.is_some() || self.alias.is_some() || self.sdk_alias.is_some()
++        if !self.validation_only || self.signing_check_openssl.is_some() || self.upload.is_some() || self.managed.is_some() || self.alias.is_some() || self.sdk_alias.is_some()
+             || self.developer.is_some() || self.executable.is_some() || self.sdk.is_some()
+             || self.developer_path.is_some() || self.sdk_path.is_some() || self.recovery_security.is_some()
+             || self.signing != Some([3, 4, 5]) || self.original.records.len() != 6
+@@ -2148,7 +2176,7 @@
+         self.system_signing_data()
+     }
+     pub(crate) fn upload_binding_data(&self)->Result<crate::local_store_execute_protocol::NativeTools> {
+-        if self.validation_only||self.sdk_alias.is_some()||self.executable.is_some()||self.sdk.is_some()
++        if self.validation_only||self.signing_check_openssl.is_some()||self.sdk_alias.is_some()||self.executable.is_some()||self.sdk.is_some()
+             ||self.sdk_path.is_some()||self.recovery_security.is_some(){return Err(AdmissionFailure::Inventory);}
+         let(app,xcrun)=self.upload.ok_or(AdmissionFailure::Inventory)?;
+         let root=|index:usize|->Result<crate::ios_archive_protocol::RootIdentity>{
+@@ -2168,7 +2196,7 @@
+             self.tool_data(Some(codesign))?, self.tool_data(Some(openssl))?).map_err(|_| AdmissionFailure::Inventory)
+     }
+     pub(crate) fn recovery_binding_data(&self) -> Result<crate::ios_archive_protocol::ToolIdentity> {
+-        if self.validation_only || self.upload.is_some() || self.managed.is_some() || !self.original.inspected || !self.original.admission_custody_ready()
++        if self.validation_only || self.signing_check_openssl.is_some() || self.upload.is_some() || self.managed.is_some() || !self.original.inspected || !self.original.admission_custody_ready()
+             || self.signing.is_some() || self.developer.is_some() || self.sdk.is_some() || self.executable.is_some() {
+             return Err(AdmissionFailure::Inventory);
+         }
+diff --git a/desktop/src-tauri/src/asset_session_ios_signing.rs b/desktop/src-tauri/src/asset_session_ios_signing.rs
+--- a/desktop/src-tauri/src/asset_session_ios_signing.rs
++++ b/desktop/src-tauri/src/asset_session_ios_signing.rs
+@@ -57,6 +57,7 @@
+         let mut result = Vec::new();
+         result.try_reserve_exact(5).map_err(|_| invalid())?;
+         for payload in &self.payloads {
++            if self.context.signing_check() && payload.kind == Kind::ProjectReadToken { return Err(invalid()); }
+             match payload.kind {
+                 Kind::AppleP12 | Kind::AppleProfile | Kind::IosFirebase => {
+                     let value = payload.material.as_ref().filter(|m| m.observation.is_observed()).ok_or_else(invalid)?;
+@@ -148,6 +149,7 @@
+     if !context.signed() { return Err(invalid()); }
+     let native = state.context.as_ref().ok_or_else(invalid)?.clone();
+     let policy = context.signing.as_ref().ok_or_else(invalid)?;
++    if context.signing_check() && policy.assignments.iter().any(|row| row.kind == "project-read-token") { return Err(invalid()); }
+     if native.project_id != context.project_id || native.registry_generation != registration || native.project != *project
+         || native.platform != Platform::Ios || native.stage != Stage::Candidate || native.purpose != Purpose::Signing
+         || native.draft.is_empty() || native.draft.len() > 512 * 1024 || !(2..=4).contains(&policy.assignments.len()) { return Err(invalid()); }
+diff --git a/desktop/src-tauri/src/saved_command_owner_tests.rs b/desktop/src-tauri/src/saved_command_owner_tests.rs
+--- a/desktop/src-tauri/src/saved_command_owner_tests.rs
++++ b/desktop/src-tauri/src/saved_command_owner_tests.rs
+@@ -21,13 +21,13 @@
+ #[test]
+ fn ios_mode_gate_keeps_matched_non_ios_pass_through_and_exact_mode_selection() {
+     use ios_wire::{ModeCapabilities as Modes, Operation};
+-    let supported = Modes { unsigned: true, signed: true, recovery: true };
++    let supported = Modes { unsigned: true, signed: true, recovery: true, signing_check: false };
+     assert_eq!(ios_mode_selection(true, None), supported);
+     assert_eq!(ios_mode_selection(false, None), Modes::NONE);
+     // Exhaust the three-mode observer mask. DATA can narrow an installed
+     // provider, never substitute for one; a closed observation has no fallback.
+     for mask in 0..8 {
+-        let observed = Modes { unsigned: mask & 1 != 0, signed: mask & 2 != 0, recovery: mask & 4 != 0 };
++        let observed = Modes { unsigned: mask & 1 != 0, signed: mask & 2 != 0, recovery: mask & 4 != 0, signing_check: false };
+         assert_eq!(ios_mode_selection(true, Some(observed)), observed);
+         assert_eq!(ios_mode_selection(false, Some(observed)), Modes::NONE);
+     }
+@@ -58,7 +58,7 @@
+ fn mode_only_status_changes_use_the_original_counter_without_changing_other_domains() {
+     let ios = application(SavedCommandDomain::IOSArchive);
+     let mut r = ios.inner.lock();
+-    let unsigned = ios_wire::ModeCapabilities { unsigned: true, signed: false, recovery: false };
++    let unsigned = ios_wire::ModeCapabilities { unsigned: true, signed: false, recovery: false, signing_check: false };
+     ios.inner.record_capabilities(&mut r, Availability::RuntimeUnqualified, Some(ios_wire::ModeCapabilities::NONE));
+     let first = r.revision;
+     ios.inner.record_capabilities(&mut r, Availability::RuntimeUnqualified, Some(ios_wire::ModeCapabilities::NONE));
+@@ -1370,3 +1370,47 @@
+     assert!(!owner.startup.lock().unwrap().attempted);
+     let r=application.inner.lock();assert!(r.active.is_some() && r.last.is_none());
+ }
++
++#[test]
++fn signing_input_check_uses_original_short_clocks_and_earliest_stop() {
++    let mut selected=ios_wire::tests::signed_context();
++    selected.operation=ios_wire::Operation::IOSSigningInputsCheck;
++    selected.action=Some(ios_wire::CreateAction::CheckSigning);
++    let(application,owner)=active_with_context(application(SavedCommandDomain::IOSArchive),Context::IOSArchive(selected));
++    let admitted=owner.clocks.admitted;
++    assert!(owner.clocks.signed && owner.clocks.signing_check && !owner.clocks.recovery);
++    assert_eq!(owner.clocks.work,admitted+Duration::from_secs(300));
++    assert_eq!(owner.clocks.cleanup_end(None),admitted+Duration::from_secs(310));
++    assert_eq!(owner.clocks.audit_end(None),admitted+Duration::from_secs(310));
++    assert_eq!(owner.clocks.settlement(None),admitted+Duration::from_secs(310));
++    let first=admitted+Duration::from_secs(2);
++    let audit=owner.native_audit_cutoff.subscribe();
++    let cleanup=owner.native_cleanup_cutoff.subscribe();
++    let mut r=application.inner.lock();
++    application.inner.stop_locked(&mut r,&owner,Reason::Cancelled,first);
++    application.inner.stop_locked(&mut r,&owner,Reason::Shutdown,first+Duration::from_secs(5));
++    assert_eq!(r.active.as_ref().unwrap().first_stop,Some(first));
++    assert_eq!(*audit.borrow(),first+SETTLEMENT);
++    assert_eq!(*cleanup.borrow(),first+SETTLEMENT);
++    assert_eq!(owner.clocks.settlement(Some(first)),first+SETTLEMENT);
++    assert!(!final_clock_clear(&r,&owner,first+SETTLEMENT));
++    application.inner.advance_locked(&mut r,&owner,first+SETTLEMENT);
++    assert!(r.active.as_ref().unwrap().unknown);
++    assert!(r.active.as_ref().unwrap().projection.public().result.is_none());
++    // Actual original Session stop/unknown gates, no worker or positive native
++    // receipt. The existing missing joins cannot be replaced by these clocks.
++}
++
++#[test]
++fn signing_input_check_cannot_borrow_signed_export_qualification() {
++    let owner=application(SavedCommandDomain::IOSArchive);
++    let mut selected=ios_wire::tests::signed_context();
++    selected.operation=ios_wire::Operation::IOSSigningInputsCheck;
++    selected.action=Some(ios_wire::CreateAction::CheckSigning);
++    let defaults=ios_mode_selection(true,None);
++    assert!(defaults.signed && defaults.unsigned && defaults.recovery);
++    assert!(!defaults.signing_check);
++    assert!(!defaults.supports(selected.operation));
++    assert!(!owner.inner.ios_mode_qualified(&Context::IOSArchive(selected),None));
++    assert!(!owner.inner.ios_mode_capabilities().signing_check);
++}
+diff --git a/desktop/src-tauri/src/installed_shell_observation_macos_ios.rs b/desktop/src-tauri/src/installed_shell_observation_macos_ios.rs
+--- a/desktop/src-tauri/src/installed_shell_observation_macos_ios.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos_ios.rs
+@@ -1027,7 +1027,7 @@
+         phase: wire::Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: wire::Reason::None,
+         stage: None, activity: None, disposition: None, result: None, report: None };
+     let mut status = wire::Status { schema_version: wire::STATUS_SCHEMA_VERSION, status_revision: 1, availability: wire::Availability::Busy,
+-        mode_capabilities: wire::ModeCapabilities { unsigned: true, signed: false, recovery: false }, operation: Some(prepared) };
++        mode_capabilities: wire::ModeCapabilities { unsigned: true, signed: false, recovery: false, signing_check: false }, operation: Some(prepared) };
+     let mut record = Record::default();
+     if record.request(case, Step::Prepare, Command::Prepare, &input, Some("inert-ios-parser")) { return false; }
+     record.version = Some(observed);
+diff --git a/desktop/src-tauri/src/installed_shell_observation_macos_ios_pending.rs b/desktop/src-tauri/src/installed_shell_observation_macos_ios_pending.rs
+--- a/desktop/src-tauri/src/installed_shell_observation_macos_ios_pending.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos_ios_pending.rs
+@@ -295,7 +295,7 @@
+             phase:wire::Phase::AwaitingConsent, intent_usable:true, outcome:None, reason:wire::Reason::None,
+             stage:None, activity:None, disposition:None, result:None, report:None };
+         let mut status = wire::Status { schema_version:wire::STATUS_SCHEMA_VERSION,status_revision:1+i as u32*3,availability:wire::Availability::Busy,
+-            mode_capabilities:wire::ModeCapabilities { unsigned:false,signed:false,recovery:true },operation:Some(projection) };
++            mode_capabilities:wire::ModeCapabilities { unsigned:false,signed:false,recovery:true, signing_check: false },operation:Some(projection) };
+         if i == 1 {
+             let mut reused = status.clone(); reused.operation.as_mut().unwrap().operation_id = "a".repeat(32);
+             if pair.clone().result(Command::Prepare, &Ok(reused)) { return false; }
+diff --git a/desktop/src/iosArchiveTypes.ts b/desktop/src/iosArchiveTypes.ts
+--- a/desktop/src/iosArchiveTypes.ts
++++ b/desktop/src/iosArchiveTypes.ts
+@@ -4,7 +4,7 @@
+ export interface IOSArchiveSavedConfig { bytes: number; sha256: string }
+ export interface IOSArchiveSavedVersion extends IOSArchiveSavedConfig { source: string; name: string; build: number }
+ export interface IOSArchiveSavedPair { savedConfig: IOSArchiveSavedConfig; savedVersion: IOSArchiveSavedVersion }
+-export type IOSArchiveMode = 'unsigned' | 'signed' | 'recovery';
++export type IOSArchiveMode = 'unsigned' | 'signed' | 'recovery' | 'signingCheck';
+ export type IOSSigningKind = 'apple-p12' | 'apple-profile' | 'ios-firebase' | 'project-read-token';
+ export interface IOSSigningAssignment { kind: IOSSigningKind; recordId: string; recordRevision: number; contextRevision: number }
+ export interface IOSSigningPolicy { teamId: string; distributionCertificateSha256: string; assignments: IOSSigningAssignment[] }
+@@ -13,14 +13,16 @@
+ }
+ export type IOSRecoveryIntent = { action: 'inspect'; session?: never } | { action: 'account' | 'project'; session: string };
+ export interface PrepareIOSRecovery { projectId: string; recovery: IOSRecoveryIntent }
+-export type PrepareIOSArchive = PrepareIOSBuild | PrepareIOSRecovery;
++export interface PrepareIOSSigningCheck extends Omit<PrepareIOSBuild, 'signing' | 'action'> { signing: IOSSigningPolicy; action: 'check-signing' }
++export type PrepareIOSArchive = PrepareIOSBuild | PrepareIOSRecovery | PrepareIOSSigningCheck;
+ export interface IOSArchiveIdentity { operationId: string; ownerGeneration: string }
+ export type StartIOSArchive = IOSArchiveIdentity & (
+-  { consentVersion: 'saved-ios-unsigned-archive-v1' | 'saved-ios-signed-export-v2' | 'local-ios-candidate-inputs-v1'; confirmation?: never } |
++  { consentVersion: 'saved-ios-unsigned-archive-v1' | 'saved-ios-signed-export-v2' | 'local-ios-candidate-inputs-v1' | 'saved-ios-signing-inputs-check-v1'; confirmation?: never } |
+   { consentVersion: 'local-ios-recovery-v1'; confirmation?: 'account-signing-is-idle-and-restore-owned-state' | 'project-build-inputs-are-idle-and-restore-owned-state' });
+ export interface IOSArchiveBuildContext extends PrepareIOSBuild { platform: 'ios'; operation: 'ios-unsigned-archive' | 'ios-signed-export' | 'ios-candidate-inputs' }
+ export interface IOSRecoveryContext extends PrepareIOSRecovery { platform: 'ios'; operation: 'ios-local-recovery' }
+-export type IOSArchiveContext = IOSArchiveBuildContext | IOSRecoveryContext;
++export interface IOSSigningCheckContext extends PrepareIOSSigningCheck { platform: 'ios'; operation: 'ios-signing-inputs-check' }
++export type IOSArchiveContext = IOSArchiveBuildContext | IOSRecoveryContext | IOSSigningCheckContext;
+ export type IOSArchiveAvailability = 'available' | 'busy' | 'shutdown' | 'cleanup-unknown' | 'document-lost' |
+   'unsupported-platform' | 'runtime-unqualified' | 'toolchain-unqualified';
+ export type IOSArchivePhase = 'awaiting-consent' | 'starting' | 'running' | 'stopping' | 'terminal' | 'unknown';
+@@ -36,7 +38,7 @@
+   'candidate-inputs-unavailable' | 'journal-unavailable' | 'recovery-required';
+ export type IOSRecoveryStage = 'accepted' | 'recovering-account' | 'recovering-project' | 'disposing-work';
+ export type IOSArchiveStage = 'accepted' | 'inputs-bound' | 'checking-xcode' | 'preparing' | 'archiving' | 'inspecting' |
+-  'disposing-snapshot' | 'disposing-work' | 'validating-signing' | 'materializing-signing' | 'exporting' | 'restoring-signing' | IOSRecoveryStage;
++  'disposing-snapshot' | 'disposing-work' | 'validating-signing' | 'materializing-signing' | 'exporting' | 'restoring-signing' | 'checking-signing-tools' | 'checking-inputs' | IOSRecoveryStage;
+ export type IOSArchiveCoreStatus = 'PASS' | 'FAIL' | 'MISSING' | 'BLOCKED' | 'INVALID' | 'SKIP' | 'MANUAL' | 'CONFIGURED' | 'NOT_APPLICABLE';
+ export type IOSArchiveCheckId = 'archive-identity' | 'archive-dsym' | 'archive-structure' | 'other-core-finding' |
+   'signing-material' | 'profile-material' | 'firebase-material' | 'artifact-correspondence' | 'ipa-structure' |
+@@ -98,9 +100,19 @@
+ export interface IOSRecoveryOperation extends IOSArchiveOperationBase {
+   context: IOSRecoveryContext; activity: IOSRecoveryActivity | null; report: IOSRecoveryReport | null; disposition?: never; result?: never;
+ }
+-export type IOSArchiveOperation = IOSArchiveBuildOperation | IOSRecoveryOperation;
++export interface IOSSigningCheckActivity { stage: IOSArchiveStage; findings: IOSArchiveFinding[] }
++export interface IOSSigningCheckResult {
++  schemaVersion: 1; scope: 'local-ios-signing-inputs-validation'; checkedAt: string;
++  usedConfig: IOSArchiveSavedConfig; usedVersion: IOSArchiveSavedVersion; usedSigning: IOSSigningPolicy;
++  checks: IOSArchiveFinding[]; limitations: string[];
++}
++export interface IOSSigningCheckOperation extends IOSArchiveOperationBase {
++  context: IOSSigningCheckContext; activity: IOSSigningCheckActivity | null;
++  disposition: IOSArchiveDisposition | null; result: IOSSigningCheckResult | null; report?: never;
++}
++export type IOSArchiveOperation = IOSArchiveBuildOperation | IOSRecoveryOperation | IOSSigningCheckOperation;
+ // Native mode-gate observation only, never consent or original ownership.
+-export interface IOSArchiveModeCapabilities { unsigned: boolean; signed: boolean; recovery: boolean }
++export interface IOSArchiveModeCapabilities { unsigned: boolean; signed: boolean; recovery: boolean; signingCheck?: boolean }
+ export interface IOSArchiveStatus {
+   schemaVersion: 2; statusRevision: number; availability: IOSArchiveAvailability;
+   modeCapabilities: IOSArchiveModeCapabilities; operation: IOSArchiveOperation | null;
+diff --git a/desktop/src/iosArchiveProtocol.ts b/desktop/src/iosArchiveProtocol.ts
+--- a/desktop/src/iosArchiveProtocol.ts
++++ b/desktop/src/iosArchiveProtocol.ts
+@@ -7,11 +7,19 @@
+   IOSArchiveMode, IOSArchiveOperation, IOSArchiveOutcome, IOSArchivePhase, IOSArchiveReason, IOSArchiveResult, IOSArchivePublishedResult, IOSCandidateInputsResult, IOSCandidateInputs,
+   IOSArchiveSavedConfig, IOSArchiveSavedPair, IOSArchiveSavedVersion, IOSArchiveSelection, IOSArchiveStage,
+   IOSArchiveStatus, IOSRecoveryContext, IOSRecoveryIntent, IOSRecoveryOperation, IOSRecoveryReport, IOSRecoveryRow, IOSRecoveryStage,
++  IOSSigningCheckContext, IOSSigningCheckOperation, IOSSigningCheckResult, IOSArchiveFinding,
+   IOSSigningPolicy, PrepareIOSArchive, StartIOSArchive } from './iosArchiveTypes.ts';
+
+ export const IOS_ARCHIVE_EVENT = 'ios-archive-state-changed';
+ export const IOS_ARCHIVE_CONSENT = 'saved-ios-unsigned-archive-v1';
+ export const IOS_SIGNED_ARCHIVE_CONSENT = 'saved-ios-signed-export-v2';
++export const IOS_SIGNING_CHECK_CONSENT = 'saved-ios-signing-inputs-check-v1';
++export const IOS_SIGNING_CHECK_CONSENT_MS = 60_000;
++export const IOS_SIGNING_CHECK_SCOPE = 'local-ios-signing-inputs-validation';
++export const IOS_SIGNING_CHECK_STAGES: readonly IOSArchiveStage[] = Object.freeze(['accepted', 'inputs-bound', 'checking-signing-tools', 'validating-signing', 'checking-inputs']);
++export const IOS_SIGNING_CHECK_LIMITATIONS = Object.freeze(['saved-inputs-not-atomic', 'single-primary-profile', 'offline-not-live-revocation',
++  'no-build-or-installed-signing-session', 'no-provider-operation', 'historical-input-check-not-credential-assignment',
++  'release-readiness-not-assessed', 'core-terminal-requires-original-native-finality']);
+ export const IOS_CANDIDATE_CONSENT = 'local-ios-candidate-inputs-v1';
+ export const IOS_RECOVERY_CONSENT = 'local-ios-recovery-v1';
+ export const IOS_ACCOUNT_RECOVERY_CONFIRMATION = 'account-signing-is-idle-and-restore-owned-state';
+@@ -47,10 +55,11 @@
+   'local-recovery-only', 'manual-recovery-not-supported', 'user-confirmation-is-not-worker-finality', 'no-store-operation',
+ ]);
+ export const isIOSRecoveryOperation = (op: IOSArchiveOperation): op is IOSRecoveryOperation => op.context.operation === 'ios-local-recovery';
+-export const iosArchiveSigned = (ctx: IOSArchiveContext): boolean => ctx.operation === 'ios-signed-export' || ctx.operation === 'ios-candidate-inputs';
++export const isIOSSigningCheckOperation = (op: IOSArchiveOperation): op is IOSSigningCheckOperation => op.context.operation === 'ios-signing-inputs-check';
++export const iosArchiveSigned = (ctx: IOSArchiveContext): boolean => ctx.operation === 'ios-signed-export' || ctx.operation === 'ios-candidate-inputs' || ctx.operation === 'ios-signing-inputs-check';
+ export const iosArchiveRoles = (ctx: IOSArchiveBuildContext) => iosArchiveSigned(ctx) ? IOS_SIGNED_ARCHIVE_ROLES : IOS_ARCHIVE_ROLES;
+ export const iosArchiveStages = (ctx: IOSArchiveContext): readonly IOSArchiveStage[] =>
+-  ctx.operation === 'ios-local-recovery' ? IOS_RECOVERY_STAGES : iosArchiveSigned(ctx) ? IOS_SIGNED_ARCHIVE_STAGES : IOS_ARCHIVE_STAGES;
++  ctx.operation === 'ios-local-recovery' ? IOS_RECOVERY_STAGES : ctx.operation === 'ios-signing-inputs-check' ? IOS_SIGNING_CHECK_STAGES : iosArchiveSigned(ctx) ? IOS_SIGNED_ARCHIVE_STAGES : IOS_ARCHIVE_STAGES;
+ export const IOS_ARCHIVE_LIMITATIONS: readonly IOSArchiveLimitation[] = Object.freeze([
+   'saved-inputs-not-atomic', 'project-build-code-is-trusted', 'not-network-isolated', 'unsigned-archive-not-an-ipa',
+   'signing-and-profile-not-validated', 'ipa-correspondence-not-validated', 'source-provenance-not-authenticated',
+@@ -194,9 +203,10 @@
+     projectId(value.projectId) && recoveryIntent(value.recovery);
+   const signed = record(value) && Object.hasOwn(value, 'signing');
+   const candidate = record(value) && Object.hasOwn(value, 'action');
+-  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', ...(signed ? ['signing'] : []), ...(candidate ? ['action'] : [])]) && (!candidate || signed && value.action === 'create') && projectId(value.projectId) &&
++  return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', ...(signed ? ['signing'] : []), ...(candidate ? ['action'] : [])]) && (!candidate || signed && (value.action === 'create' || value.action === 'check-signing')) && projectId(value.projectId) &&
+     iosArchiveCounter(value.draftRevision) && iosArchiveCounter(value.baselineGeneration) && content(value.savedConfig) && savedVersion(value.savedVersion) &&
+-    (!signed || signingPolicy(value.signing));
++    (!signed || signingPolicy(value.signing)) && (value.action !== 'check-signing' ||
++      signingPolicy(value.signing) && value.signing.assignments.every((row) => row.kind !== 'project-read-token'));
+ }
+ function identity(value: unknown): value is IOSArchiveIdentity {
+   return record(value) && token(value.operationId) && token(value.ownerGeneration);
+@@ -207,7 +217,7 @@
+   const signed = record(value) && Object.hasOwn(value, 'signing');
+   const candidate = record(value) && Object.hasOwn(value, 'action');
+   return keys(value, ['projectId', 'draftRevision', 'baselineGeneration', 'savedConfig', 'savedVersion', 'platform', 'operation', ...(signed ? ['signing'] : []), ...(candidate ? ['action'] : [])]) &&
+-    value.platform === 'ios' && value.operation === (candidate ? 'ios-candidate-inputs' : signed ? 'ios-signed-export' : 'ios-unsigned-archive') && prepare({ projectId: value.projectId,
++    value.platform === 'ios' && value.operation === (value.action === 'check-signing' ? 'ios-signing-inputs-check' : candidate ? 'ios-candidate-inputs' : signed ? 'ios-signed-export' : 'ios-unsigned-archive') && prepare({ projectId: value.projectId,
+       draftRevision: value.draftRevision, baselineGeneration: value.baselineGeneration, savedConfig: value.savedConfig, savedVersion: value.savedVersion,
+       ...(signed ? { signing: value.signing } : {}), ...(candidate ? { action: value.action } : {}) });
+ }
+@@ -220,7 +230,7 @@
+     if (command === 'start_ios_archive' && record(safe)) {
+       const confirmation = Object.hasOwn(safe, 'confirmation');
+       if (keys(safe, ['operationId', 'ownerGeneration', 'consentVersion', ...(confirmation ? ['confirmation'] : [])]) && identity(safe) &&
+-          oneOf(safe.consentVersion, [IOS_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_CONSENT, IOS_CANDIDATE_CONSENT, IOS_RECOVERY_CONSENT]) &&
++          oneOf(safe.consentVersion, [IOS_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_CONSENT, IOS_CANDIDATE_CONSENT, IOS_RECOVERY_CONSENT, IOS_SIGNING_CHECK_CONSENT]) &&
+           (!confirmation || safe.consentVersion === IOS_RECOVERY_CONSENT && oneOf(safe.confirmation, [IOS_ACCOUNT_RECOVERY_CONFIRMATION, IOS_PROJECT_RECOVERY_CONFIRMATION])))
+         return safe as unknown as StartIOSArchive;
+     }
+@@ -377,11 +387,51 @@
+   return !(op.outcome === 'cancelled' && !['cancelled', 'context-changed', 'document-lost', 'shutdown'].includes(op.reason) ||
+     op.outcome === 'timed-out' && op.reason !== 'timed-out');
+ }
++function signingCheckFindings(value: unknown): value is IOSArchiveFinding[] {
++  return Array.isArray(value) && value.length <= 4 && value.every((row, index) => keys(row, ['check', 'status']) &&
++    oneOf(row.check, ['signing-material', 'profile-material', 'firebase-material', 'other-core-finding']) &&
++    oneOf(row.status, IOS_ARCHIVE_CORE_STATUSES) && value.slice(0, index).every((prior) => prior.check !== row.check));
++}
++function signingCheckComplete(rows: IOSArchiveFinding[], ctx: IOSSigningCheckContext): boolean {
++  const expected = ['signing-material', 'profile-material'];
++  if (ctx.signing.assignments.some((row) => row.kind === 'ios-firebase')) expected.push('firebase-material');
++  return rows.length === expected.length && expected.every((check) => rows.some((row) => row.check === check && row.status === 'PASS'));
++}
++function signingCheckResult(value: unknown, ctx: IOSSigningCheckContext): value is IOSSigningCheckResult {
++  if (!keys(value, ['schemaVersion', 'scope', 'checkedAt', 'usedConfig', 'usedVersion', 'usedSigning', 'checks', 'limitations']) ||
++      value.schemaVersion !== 1 || value.scope !== IOS_SIGNING_CHECK_SCOPE || typeof value.checkedAt !== 'string' ||
++      !/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/.test(value.checkedAt) || value.checkedAt.startsWith('0000') ||
++      !content(value.usedConfig) || !savedVersion(value.usedVersion) || !signingPolicy(value.usedSigning) ||
++      !sameIOSArchiveSavedPair(ctx, { savedConfig: value.usedConfig, savedVersion: value.usedVersion }) ||
++      !sameIOSArchiveData(value.usedSigning, ctx.signing) || !signingCheckFindings(value.checks) || !signingCheckComplete(value.checks, ctx) ||
++      !sameIOSArchiveData(value.limitations, IOS_SIGNING_CHECK_LIMITATIONS)) return false;
++  const stamp = new Date(value.checkedAt);
++  return Number.isFinite(stamp.getTime()) && stamp.toISOString() === value.checkedAt.slice(0, -1) + '.000Z';
++}
++function signingCheckOperation(value: Record<string, unknown>, ctx: IOSSigningCheckContext): value is Record<string, unknown> & IOSSigningCheckOperation {
++  if (!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result']) ||
++      !(value.activity === null || keys(value.activity, ['stage', 'findings']) && oneOf(value.activity.stage, IOS_SIGNING_CHECK_STAGES) && signingCheckFindings(value.activity.findings)) ||
++      !(value.disposition === null || sameIOSArchiveData(value.disposition, { snapshot: 'not-created', work: 'not-created', output: 'not-created', relativeDirectory: null })) ||
++      !(value.result === null || signingCheckResult(value.result, ctx))) return false;
++  const op = value as unknown as IOSSigningCheckOperation;
++  if ((op.activity === null) !== (op.disposition === null) || op.activity !== null && op.stage !== op.activity.stage) return false;
++  const empty = op.activity === null && op.disposition === null && op.result === null;
++  if (op.phase === 'awaiting-consent') return op.outcome === null && op.reason === 'none' && op.stage === null && empty;
++  if (op.intentUsable) return false;
++  if (op.phase === 'unknown') return op.outcome === 'unknown' && op.reason === 'cleanup-unknown' && empty;
++  if (op.phase !== 'terminal') return op.outcome === null && empty && (op.phase !== 'starting' || op.stage === null);
++  if (op.outcome === null || op.outcome === 'unknown' || op.reason === 'cleanup-unknown' || (op.reason === 'none') !== (op.outcome === 'complete')) return false;
++  if (op.outcome === 'complete') return op.stage === 'checking-inputs' && op.activity !== null && op.result !== null &&
++    signingCheckComplete(op.activity.findings, ctx) && sameIOSArchiveData(op.result.checks, op.activity.findings);
++  return op.result === null && !(op.outcome === 'cancelled' && !['cancelled', 'context-changed', 'document-lost', 'shutdown'].includes(op.reason) ||
++    op.outcome === 'timed-out' && op.reason !== 'timed-out');
++}
+ function operation(value: unknown): value is IOSArchiveOperation {
+   if (!record(value) || !identity(value) || !context(value.context) || !oneOf(value.phase, phases) || typeof value.intentUsable !== 'boolean' ||
+       !(value.outcome === null || oneOf(value.outcome, outcomes)) || !oneOf(value.reason, Object.keys(iosArchiveReasonText)) ||
+       !(value.stage === null || oneOf(value.stage, iosArchiveStages(value.context)))) return false;
+   if (value.context.operation === 'ios-local-recovery') return recoveryOperation(value, value.context);
++  if (value.context.operation === 'ios-signing-inputs-check') return signingCheckOperation(value, value.context);
+   if (!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result']) ||
+       !(value.activity === null || activity(value.activity, value.context)) ||
+       !(value.disposition === null || disposition(value.disposition, value.operationId)) ||
+@@ -409,9 +459,10 @@
+     const safe = copyData(value, IOS_ARCHIVE_STATUS_LIMIT);
+     if (!keys(safe, ['schemaVersion', 'statusRevision', 'availability', 'modeCapabilities', 'operation']) || safe.schemaVersion !== IOS_ARCHIVE_STATUS_VERSION ||
+         !iosArchiveCounter(safe.statusRevision) || !oneOf(safe.availability, Object.keys(iosArchiveAvailabilityText)) ||
+-        !keys(safe.modeCapabilities, ['unsigned', 'signed', 'recovery']) ||
++        !keys(safe.modeCapabilities, ['unsigned', 'signed', 'recovery', ...(record(safe.modeCapabilities) && Object.hasOwn(safe.modeCapabilities, 'signingCheck') ? ['signingCheck'] : [])]) ||
+         typeof safe.modeCapabilities.unsigned !== 'boolean' || typeof safe.modeCapabilities.signed !== 'boolean' ||
+         typeof safe.modeCapabilities.recovery !== 'boolean' ||
++        Object.hasOwn(safe.modeCapabilities, 'signingCheck') && typeof safe.modeCapabilities.signingCheck !== 'boolean' ||
+         !(safe.operation === null || operation(safe.operation))) return null;
+     return safe as unknown as IOSArchiveStatus;
+   } catch { return null; }
+@@ -438,7 +489,7 @@
+ }
+
+ const iosArchiveModeByOperation: Record<IOSArchiveContext['operation'], IOSArchiveMode> = {
+-  'ios-unsigned-archive': 'unsigned', 'ios-signed-export': 'signed', 'ios-candidate-inputs': 'signed', 'ios-local-recovery': 'recovery',
++  'ios-unsigned-archive': 'unsigned', 'ios-signed-export': 'signed', 'ios-candidate-inputs': 'signed', 'ios-local-recovery': 'recovery', 'ios-signing-inputs-check': 'signingCheck',
+ };
+ // Only validated Status DATA reaches this projection. Status/Cancel never use
+ // it as permission to observe or settle an already-owned operation.
+diff --git a/desktop/src/iosArchive.ts b/desktop/src/iosArchive.ts
+--- a/desktop/src/iosArchive.ts
++++ b/desktop/src/iosArchive.ts
+@@ -12,7 +12,7 @@
+ import type { IOSArchiveApi, IOSArchiveContext, IOSArchiveIdentity, IOSArchiveOperation, IOSArchiveSavedConfig,
+   IOSArchiveSavedVersion, IOSArchiveSelection, IOSArchiveStatus, IOSRecoveryIntent, IOSRecoveryOperation,
+   IOSSigningAssignment, IOSSigningPolicy, PrepareIOSArchive, StartIOSArchive } from './iosArchiveTypes.ts';
+-import { IOS_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_CONSENT, IOS_CANDIDATE_CONSENT, IOS_RECOVERY_CONSENT, IOS_ACCOUNT_RECOVERY_CONFIRMATION,
++import { IOS_SIGNING_CHECK_CONSENT, IOS_SIGNING_CHECK_CONSENT_MS, IOS_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_CONSENT, IOS_CANDIDATE_CONSENT, IOS_RECOVERY_CONSENT, IOS_ACCOUNT_RECOVERY_CONFIRMATION,
+   IOS_PROJECT_RECOVERY_CONFIRMATION, IOS_ARCHIVE_CONSENT_MS, IOS_ARCHIVE_COUNTER_MAX, iosArchiveAvailabilityText, iosArchiveModeAvailability, isIOSRecoveryOperation,
+   iosArchiveSigned, iosArchiveCounter, iosArchiveError, iosArchiveOperationProgress, copyIOSArchiveRequest, parseIOSArchiveSavedConfig,
+   parseIOSArchiveSavedVersion, parseIOSArchiveSelection, parseIOSArchiveStatus, parseIOSSigningPolicy,
+@@ -27,6 +27,7 @@
+   savedConfig: IOSArchiveSavedConfig | null; savedVersion: IOSArchiveSavedVersion | null;
+   selection: IOSArchiveSavedSelection | null; versionObservation: VersionObservationBinding | null; inputIssue: string | null;
+   signingPolicy: Pick<IOSSigningPolicy, 'teamId' | 'distributionCertificateSha256'> | null;
++  signingInput: { bundleId: string; firebaseRequired: boolean } | null;
+   dirtyDraft: boolean; snapshotPending: boolean; versionPending: boolean; saveRecoveryRequired: boolean;
+ }
+ export interface IOSArchiveBinding {
+@@ -36,7 +37,7 @@
+ export interface IOSArchiveConsent extends IOSArchiveIdentity { binding: IOSArchiveBinding; acknowledged: boolean; deadline: number }
+ export interface IOSSigningObservation { policy: IOSSigningPolicy | null; issue: string | null }
+ export interface IOSArchiveState {
+-  mode: BridgeMode; archiveMode: 'unsigned' | 'signed'; keepCandidate: boolean; project: IOSArchiveProject | null; signing: IOSSigningObservation;
++  mode: BridgeMode; archiveMode: 'unsigned' | 'signed' | 'signing-check'; keepCandidate: boolean; project: IOSArchiveProject | null; signing: IOSSigningObservation;
+   visible: boolean; recoveryVisible: boolean; selectionPending: boolean;
+   connectionGeneration: number; selectionGeneration: number; contextGeneration: number; requestGeneration: number;
+   listening: boolean; initialized: boolean; readPending: boolean; status: IOSArchiveStatus | null;
+@@ -103,7 +104,7 @@
+   const distributionCertificateSha256 = fingerprint.replaceAll(':', '').toLowerCase();
+   return distributionCertificateSha256.length === 64 && !/[^0-9a-f]/.test(distributionCertificateSha256) ? { teamId, distributionCertificateSha256 } : null;
+ }
+-function signingObservation(project: IOSArchiveProject | null, assets: AssetDisplayState | null): IOSSigningObservation {
++function signingObservation(project: IOSArchiveProject | null, assets: AssetDisplayState | null, signingCheck = false): IOSSigningObservation {
+   const unavailable = (issue: string): IOSSigningObservation => ({ policy: null, issue });
+   if (!project?.signingPolicy) return unavailable('Save the Apple Team ID and reviewed Apple Distribution certificate SHA-256 fingerprint in Project settings, then refresh saved configuration.');
+   if (project.dirtyDraft) return unavailable('Signed export requires the credential context to match the saved configuration. Save or explicitly revert the unsaved draft, then refresh, read the saved version and assign the current inputs again.');
+@@ -116,10 +117,12 @@
+       assets.scope.platform !== 'ios' || assets.scope.stage !== 'candidate' || assets.scope.purpose !== 'signing')
+     return unavailable('In Credentials, submit this saved project with iOS · Candidate / internal testing · Build / signing only, then assign its inputs. Other projects or release contexts cannot donate material.');
+   const assignments: IOSSigningAssignment[] = [];
+-  for (const kind of ['apple-p12', 'apple-profile', 'ios-firebase', 'project-read-token'] as const) {
++  const kinds: IOSSigningAssignment['kind'][] = signingCheck ? ['apple-p12', 'apple-profile', ...(project.signingInput?.firebaseRequired ? ['ios-firebase' as const] : [])] :
++    ['apple-p12', 'apple-profile', 'ios-firebase', 'project-read-token'];
++  for (const kind of kinds) {
+     const row = status.assignments.find((assignment) => assignment.kind === kind);
+     if (!row) {
+-      if (kind === 'apple-p12' || kind === 'apple-profile') return unavailable(`Keep and assign ${kind === 'apple-p12' ? 'the Apple Distribution P12 and its password' : 'the Apple-issued App Store provisioning profile'} to this exact iOS signing context in Credentials.`);
++      if (kind === 'apple-p12' || kind === 'apple-profile' || signingCheck && kind === 'ios-firebase') return unavailable(`Keep and assign ${kind === 'apple-p12' ? 'the Apple Distribution P12 and its password' : kind === 'apple-profile' ? 'the Apple-issued App Store provisioning profile' : 'the saved-required iOS Firebase file'} to this exact iOS signing context in Credentials.`);
+       continue;
+     }
+     if (row.availability !== 'available' || row.contextRevision !== context.revision || !status.records.some((record) =>
+@@ -130,9 +133,9 @@
+   const policy = parseIOSSigningPolicy({ ...project.signingPolicy, assignments });
+   return policy ? { policy, issue: null } : unavailable('The current assignment revisions cannot be bound to one exact signing context. Recheck the original credential-session status.');
+ }
+-function projectObservation(session: ProjectSession, version: ReleaseVersionState | null): IOSArchiveProject {
++function projectObservation(session: ProjectSession, version: ReleaseVersionState | null, signingCheck = false): IOSArchiveProject {
+   const project: IOSArchiveProject = { projectId: session.project.id, draftRevision: session.revision, baselineGeneration: session.baselineGeneration,
+-    observationGeneration: session.observationGeneration, savedConfig: null, savedVersion: null, selection: null, versionObservation: null, signingPolicy: null,
++    observationGeneration: session.observationGeneration, savedConfig: null, savedVersion: null, selection: null, versionObservation: null, signingPolicy: null, signingInput: null,
+     dirtyDraft: isDirty(session), snapshotPending: session.snapshotRequest !== null, versionPending: version?.pending !== null && version?.pending !== undefined,
+     saveRecoveryRequired: session.saveRecoveryRequired, inputIssue: 'Refresh a current, format-valid saved configuration, then read its saved version. Prior snapshots and editor baselines are not build inputs.' };
+   try {
+@@ -144,7 +147,12 @@
+     const data = own(own(session.snapshot, 'config'), 'data');
+     project.signingPolicy = savedSigningPolicy(data);
+     project.selection = savedSelection(data);
+-    if (!project.selection) { project.inputIssue = 'Enable and save the intended iOS bundle ID, explicit Xcode workspace or project and shared scheme, then refresh the saved configuration.'; return project; }
++    const ios = own(data, 'ios'), bundleId = own(ios, 'bundleId');
++    if (own(ios, 'enabled') === true && typeof bundleId === 'string' && bundleId.length <= 255 &&
++        /^[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z][A-Za-z0-9-]*)+$/.test(bundleId))
++      project.signingInput = { bundleId, firebaseRequired: own(own(data, 'services'), 'iosFirebase') === 'required' };
++    if (signingCheck && !project.signingInput) { project.inputIssue = 'Enable and save the intended iOS Bundle ID, then refresh the saved configuration.'; return project; }
++    if (!signingCheck && !project.selection) { project.inputIssue = 'Enable and save the intended iOS bundle ID, explicit Xcode workspace or project and shared scheme, then refresh the saved configuration.'; return project; }
+     project.inputIssue = 'Read a complete saved-version observation for this current configuration. An older, pending, failed or partial version response cannot authorize a build.';
+     if (!version || version.mode !== 'native' || version.reason !== null || version.generationLost || version.selectionPending || version.pending !== null ||
+         version.stale || version.error !== null || !version.resultBinding || !version.project) return project;
+@@ -248,13 +256,14 @@
+   syncProject(): void {
+     if (this.disposed) return;
+     const session = this.context.selectedProject(), version = this.context.releaseVersion();
+-    const next = session ? projectObservation(session, version) : null, draft = session?.draft ?? null, snapshot = session?.snapshot ?? null;
+-    const signing = signingObservation(next, this.context.assetSession?.() ?? null);
++    const signingCheck = this.state.archiveMode === 'signing-check';
++    const next = session ? projectObservation(session, version, signingCheck) : null, draft = session?.draft ?? null, snapshot = session?.snapshot ?? null;
++    const signing = signingObservation(next, this.context.assetSession?.() ?? null, signingCheck);
+     const result = version?.result ?? null, binding = version?.resultBinding ?? null;
+     const projectChanged = !sameIOSArchiveData(next, this.state.project) || this.draftReference !== draft || this.snapshotReference !== snapshot ||
+       this.versionReference !== result || this.versionBindingReference !== binding;
+     if (!projectChanged && sameIOSArchiveData(signing, this.state.signing)) return;
+-    const signingRelevant = this.attempt && !this.attempt.settled ? iosArchiveSigned(this.attempt.binding.context) : this.state.archiveMode === 'signed';
++    const signingRelevant = this.attempt && !this.attempt.settled ? iosArchiveSigned(this.attempt.binding.context) : this.state.archiveMode !== 'unsigned';
+     if (!projectChanged && !signingRelevant) {
+       this.update({ signing }); return;
+     }
+@@ -274,9 +283,12 @@
+       this.retire({ ...this.advance('contextGeneration'), recoveryVisible });
+     else this.update({ recoveryVisible });
+   }
+-  setArchiveMode(archiveMode: 'unsigned' | 'signed'): boolean {
+-    if (this.disposed || !['unsigned', 'signed'].includes(archiveMode) || this.attempt?.startSent && !this.attempt.settled) return false;
+-    if (archiveMode !== this.state.archiveMode) this.retire({ ...this.advance('contextGeneration'), archiveMode, keepCandidate: false });
++  setArchiveMode(archiveMode: 'unsigned' | 'signed' | 'signing-check'): boolean {
++    if (this.disposed || !['unsigned', 'signed', 'signing-check'].includes(archiveMode) || this.attempt?.startSent && !this.attempt.settled) return false;
++    if (archiveMode !== this.state.archiveMode) {
++      this.retire({ ...this.advance('contextGeneration'), archiveMode, keepCandidate: false });
++      this.syncProject();
++    }
+     return true;
+   }
+   setKeepCandidate(keepCandidate: boolean): boolean {
+@@ -325,11 +337,11 @@
+       b.contextGeneration === this.state.contextGeneration && b.requestGeneration === this.state.requestGeneration && p !== null && b.context.projectId === p.projectId;
+     if (!common || !p) return false;
+     if (b.context.operation === 'ios-local-recovery') return true;
+-    return p.inputIssue === null && this.state.archiveMode === (iosArchiveSigned(b.context) ? 'signed' : 'unsigned') &&
++    return p.inputIssue === null && this.state.archiveMode === (b.context.operation === 'ios-signing-inputs-check' ? 'signing-check' : iosArchiveSigned(b.context) ? 'signed' : 'unsigned') &&
+       this.state.keepCandidate === (b.context.operation === 'ios-candidate-inputs') &&
+       (!iosArchiveSigned(b.context) || this.state.signing.issue === null && sameIOSArchiveData(b.context.signing, this.state.signing.policy)) &&
+       b.observationGeneration === p.observationGeneration && sameIOSArchiveData(b.versionObservation, p.versionObservation) &&
+-      sameIOSArchiveData(b.selection, p.selection) && b.context.projectId === p.projectId && b.context.draftRevision === p.draftRevision &&
++      sameIOSArchiveData(b.selection, b.context.operation === 'ios-signing-inputs-check' ? null : p.selection) && b.context.projectId === p.projectId && b.context.draftRevision === p.draftRevision &&
+       b.context.baselineGeneration === p.baselineGeneration && p.savedConfig !== null && p.savedVersion !== null &&
+       sameIOSArchiveSavedPair(b.context, { savedConfig: p.savedConfig, savedVersion: p.savedVersion });
+   }
+@@ -418,7 +430,7 @@
+       if (observer.reading === work) { observer.reading = null; if (this.observer === observer) this.update({ readPending: false }); }
+     }
+   }
+-  private commonReason(operation: IOSArchiveContext['operation'] = this.state.keepCandidate ? 'ios-candidate-inputs' : this.state.archiveMode === 'signed' ? 'ios-signed-export' : 'ios-unsigned-archive'): string | null {
++  private commonReason(operation: IOSArchiveContext['operation'] = this.state.archiveMode === 'signing-check' ? 'ios-signing-inputs-check' : this.state.keepCandidate ? 'ios-candidate-inputs' : this.state.archiveMode === 'signed' ? 'ios-signed-export' : 'ios-unsigned-archive'): string | null {
+     if (this.disposed || this.state.mode !== 'native') return 'Open the native application. Browser preview cannot prepare or run an iOS archive, signed export or recovery.';
+     if (this.state.nativeBlocked || this.state.integrityFailed || this.state.generationLost) return iosArchiveOwnerReason(this.state);
+     if (!this.observer?.active || this.observer.generation !== this.state.connectionGeneration || !this.state.listening || !this.state.initialized || !this.state.status || this.state.observationIssue)
+@@ -435,7 +447,7 @@
+     if (project.saveRecoveryRequired) return 'Finish original configuration-save recovery before reviewing a build.';
+     if (project.snapshotPending) return 'Wait for the current saved-configuration refresh to settle.';
+     if (project.versionPending) return 'Wait for the original saved-version read to settle; an earlier result cannot stand in.';
+-    return project.inputIssue ?? (operation === 'ios-signed-export' || operation === 'ios-candidate-inputs' ? this.state.signing.issue : null) ?? this.context.otherOperationReason();
++    return project.inputIssue ?? (operation === 'ios-signed-export' || operation === 'ios-candidate-inputs' || operation === 'ios-signing-inputs-check' ? this.state.signing.issue : null) ?? this.context.otherOperationReason();
+   }
+   prepareReason = (): string | null => this.commonReason() ?? iosArchiveOwnerReason(this.state) ??
+     (this.state.status?.availability === 'busy' ? iosArchiveAvailabilityText.busy : null);
+@@ -445,9 +457,10 @@
+     if (!consent || !attempt || !attempt.prepareReply || attempt.startSent || !this.matches(attempt) || !sameIOSArchiveIdentity(consent, op ?? null) ||
+         op?.phase !== 'awaiting-consent' || !op.intentUsable) return 'Review a new saved-input archive intent. Status or an earlier acknowledgement cannot authorize Start.';
+     const now = this.now();
+-    if (!Number.isFinite(now) || now < 0 || now >= consent.deadline) return 'This original five-minute review expired. Checking Status does not extend it.';
++    if (!Number.isFinite(now) || now < 0 || now >= consent.deadline) return attempt.binding.context.operation === 'ios-signing-inputs-check' ? 'This original one-minute check review expired. Status does not extend it.' : 'This original five-minute review expired. Checking Status does not extend it.';
+     return consent.acknowledged ? null : consent.binding.context.operation === 'ios-local-recovery' ?
+       'Acknowledge this exact local inspection or idle-state recovery action before Start.' :
++      consent.binding.context.operation === 'ios-signing-inputs-check' ? 'Acknowledge the exact assigned private inputs and check-only limits before Start.' :
+       'Acknowledge the exact saved inputs, project-code effects and inspection limits before Start.';
+   };
+   recoveryReason = (action: IOSRecoveryIntent['action'] = 'inspect', inspected: IOSRecoveryOperation | null = null): string | null => {
+@@ -483,11 +496,11 @@
+   async prepare(): Promise<void> {
+     this.syncProject();
+     const project = this.state.project;
+-    if (this.prepareReason() || !this.observer || !project?.savedConfig || !project.savedVersion || !project.selection || !project.versionObservation) return;
++    if (this.prepareReason() || !this.observer || !project?.savedConfig || !project.savedVersion || this.state.archiveMode !== 'signing-check' && !project.selection || !project.versionObservation) return;
+     const request = copyIOSArchiveRequest('prepare_ios_archive', { projectId: project.projectId, draftRevision: project.draftRevision,
+       baselineGeneration: project.baselineGeneration, savedConfig: project.savedConfig, savedVersion: project.savedVersion,
+-      ...(this.state.archiveMode === 'signed' ? { signing: this.state.signing.policy } : {}),
+-      ...(this.state.keepCandidate ? { action: 'create' } : {}) }) as PrepareIOSArchive | null;
++      ...(this.state.archiveMode !== 'unsigned' ? { signing: this.state.signing.policy } : {}),
++      ...(this.state.archiveMode === 'signing-check' ? { action: 'check-signing' } : this.state.keepCandidate ? { action: 'create' } : {}) }) as PrepareIOSArchive | null;
+     if (!request) { this.fail({ code: 'ios_archive_invalid' }, true); return; }
+     await this.prepareRequest(request);
+   }
+@@ -503,16 +516,17 @@
+     const project = this.state.project;
+     if (!this.observer || !project) return;
+     const context: IOSArchiveContext = 'recovery' in request ? { ...request, platform: 'ios', operation: 'ios-local-recovery' } :
++      request.action === 'check-signing' ? { ...request, platform: 'ios', operation: 'ios-signing-inputs-check' } :
+       { ...request, platform: 'ios', operation: request.action === 'create' ? 'ios-candidate-inputs' : request.signing ? 'ios-signed-export' : 'ios-unsigned-archive' };
+-    const now = this.now();
+-    if (!Number.isFinite(now) || now < 0 || !Number.isFinite(now + IOS_ARCHIVE_CONSENT_MS)) { this.fail({ code: 'ios_archive_invalid' }, true); return; }
++    const now = this.now(), consentMs = context.operation === 'ios-signing-inputs-check' ? IOS_SIGNING_CHECK_CONSENT_MS : IOS_ARCHIVE_CONSENT_MS;
++    if (!Number.isFinite(now) || now < 0 || !Number.isFinite(now + consentMs)) { this.fail({ code: 'ios_archive_invalid' }, true); return; }
+     const counters = this.advance('requestGeneration'); if (counters.generationLost) { this.retire(counters); return; }
+     const observer = this.observer;
+-    const binding: IOSArchiveBinding = freeze({ context, selection: context.operation === 'ios-local-recovery' ? null : project.selection,
++    const binding: IOSArchiveBinding = freeze({ context, selection: context.operation === 'ios-local-recovery' || context.operation === 'ios-signing-inputs-check' ? null : project.selection,
+       observationGeneration: project.observationGeneration, versionObservation: context.operation === 'ios-local-recovery' ? null : project.versionObservation, connectionGeneration: this.state.connectionGeneration,
+       selectionGeneration: this.state.selectionGeneration, contextGeneration: this.state.contextGeneration, requestGeneration: counters.requestGeneration! });
+     const attempt: Attempt = { observer, binding, previous: observer.status?.operation ? id(observer.status.operation) : null,
+-      after: observer.status?.statusRevision ?? 0, identity: null, prepareSent: false, prepareReply: false, deadline: now + IOS_ARCHIVE_CONSENT_MS,
++      after: observer.status?.statusRevision ?? 0, identity: null, prepareSent: false, prepareReply: false, deadline: now + consentMs,
+       startSent: false, startAfter: 0, retired: false, settled: false };
+     this.attempt = attempt; this.cancelClaim = null;
+     this.update({ ...counters, consent: null, pending: 'prepare', originalUnconfirmed: false, historical: true, cancelClaimed: null, error: null });
+@@ -565,7 +579,7 @@
+       const context = attempt.binding.context;
+       const request: StartIOSArchive = context.operation === 'ios-local-recovery' ? { operationId, ownerGeneration, consentVersion: IOS_RECOVERY_CONSENT,
+         ...(context.recovery.action === 'inspect' ? {} : { confirmation: context.recovery.action === 'account' ? IOS_ACCOUNT_RECOVERY_CONFIRMATION : IOS_PROJECT_RECOVERY_CONFIRMATION }) } :
+-        { operationId, ownerGeneration, consentVersion: context.operation === 'ios-candidate-inputs' ? IOS_CANDIDATE_CONSENT : context.operation === 'ios-signed-export' ? IOS_SIGNED_ARCHIVE_CONSENT : IOS_ARCHIVE_CONSENT };
++        { operationId, ownerGeneration, consentVersion: context.operation === 'ios-signing-inputs-check' ? IOS_SIGNING_CHECK_CONSENT : context.operation === 'ios-candidate-inputs' ? IOS_CANDIDATE_CONSENT : context.operation === 'ios-signed-export' ? IOS_SIGNED_ARCHIVE_CONSENT : IOS_ARCHIVE_CONSENT };
+       const value = await attempt.observer.api.startIOSArchive(request);
+       if (!attempt.observer.active || this.attempt !== attempt) return;
+       const status = parseIOSArchiveStatus(value);
+diff --git a/desktop/src/components/IOSArchive.tsx b/desktop/src/components/IOSArchive.tsx
+--- a/desktop/src/components/IOSArchive.tsx
++++ b/desktop/src/components/IOSArchive.tsx
+@@ -1,7 +1,8 @@
+ import { useId } from 'react';
++import { IOSSigningInputsCheck, IOSSigningInputsResult } from './IOSSigningInputsCheck.tsx';
+ import type { IOSArchiveController, IOSArchiveState } from '../iosArchive.ts';
+ import { iosArchiveHelp, iosArchiveInputHelp, iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp, iosArchiveOwnerReason } from '../iosArchive.ts';
+-import { isIOSRecoveryOperation, sameIOSArchiveData, sameIOSArchiveIdentity, sameIOSArchiveSavedPair, iosArchiveRoles, iosArchiveAvailabilityText, iosArchiveModeAvailability, iosArchiveFindingText, iosArchiveLimitationText, iosArchiveReasonText } from '../iosArchiveProtocol.ts';
++import { isIOSSigningCheckOperation, isIOSRecoveryOperation, sameIOSArchiveData, sameIOSArchiveIdentity, sameIOSArchiveSavedPair, iosArchiveRoles, iosArchiveAvailabilityText, iosArchiveModeAvailability, iosArchiveFindingText, iosArchiveLimitationText, iosArchiveReasonText } from '../iosArchiveProtocol.ts';
+ import type { IOSArchiveCoreStatus, IOSArchivePhase, IOSArchiveRole, IOSArchiveStage, IOSRecoveryRowState } from '../iosArchiveTypes.ts';
+ import type { HelpContent } from '../types.ts';
+ import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
+@@ -10,6 +11,7 @@
+ const phases: Record<IOSArchivePhase, string> = { 'awaiting-consent': 'Awaiting your approval', starting: 'Starting iOS operation',
+   running: 'iOS operation running', stopping: 'Stopping · waiting for cleanup', terminal: 'iOS request finished', unknown: 'Cleanup needs attention' };
+ const stages: Record<IOSArchiveStage, string> = { accepted: 'Request accepted', 'inputs-bound': 'Saved inputs bound',
++  'checking-signing-tools': 'Checking the original system validation tool', 'checking-inputs': 'Rechecking original saved/private input scope',
+   'checking-xcode': 'Checking full Xcode and iOS SDK', preparing: 'Running saved project preparation', archiving: 'Creating the reviewed archive',
+   'validating-signing': 'Validating original signing material and saved policy', 'materializing-signing': 'Preparing owned signing and build inputs',
+   exporting: 'Exporting the local signed IPA', 'restoring-signing': 'Restoring original signing and build-input state',
+@@ -48,6 +50,7 @@
+ // folder, a path label or a provisional core terminal cannot populate it.
+ export function IOSArchiveResultView({ state, operationProjectName = null }: { state: IOSArchiveState; operationProjectName?: string | null }) {
+   const op = state.status?.operation;
++  if (op && isIOSSigningCheckOperation(op)) return <IOSSigningInputsResult state={state} />;
+   if (state.mode !== 'native' || !op || isIOSRecoveryOperation(op) || op.phase !== 'terminal' || op.outcome !== 'complete' || !op.result || !op.activity) return null;
+   const candidate = op.result.scope === 'local-ios-candidate-inputs' ? op.result : null;
+   const result = op.result.scope === 'local-ios-candidate-inputs' ? op.result.build : op.result, historical = state.historical || state.integrityFailed || state.nativeBlocked;
+@@ -83,14 +86,14 @@
+   refreshReason?: string | null; versionReason?: string | null; onHelp?: (help: HelpContent) => void;
+ }) {
+   const label = useId(), op = state.status?.operation, consent = state.consent, project = state.project;
+-  const signed = state.archiveMode === 'signed';
++  const signed = state.archiveMode === 'signed', checking = state.archiveMode === 'signing-check';
+   const owned = iosArchiveOwnerReason(state);
+   if (compact && !owned) return null;
+   const prepareReason = controller.prepareReason(), startReason = controller.startReason();
+   const cancelRequested = !!op && state.cancelClaimed?.operationId === op.operationId && state.cancelClaimed.ownerGeneration === op.ownerGeneration;
+   const controls = <div className="button-row">
+-    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} />{state.readPending ? 'Reading archive status…' : 'Check archive status'}</button>
+-    {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" data-mrk-ios-archive-action="cancel" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · waiting for cleanup' : 'Cancel this iOS archive'}</button>}
++    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} />{state.readPending ? checking ? 'Reading status…' : 'Reading archive status…' : checking ? 'Check signing-input status' : 'Check archive status'}</button>
++    {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" data-mrk-ios-archive-action="cancel" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · waiting for cleanup' : checking ? 'Cancel this signing-input check' : 'Cancel this iOS archive'}</button>}
+     {onHelp && <HelpButton content={iosArchiveCancelHelp} onHelp={onHelp} />}
+     {compact && onShow && <button type="button" className="button secondary small" onClick={onShow}>{op && isIOSRecoveryOperation(op) ? 'Show in Recovery' : 'Show in Releases'}</button>}
+   </div>;
+@@ -100,16 +103,21 @@
+       <p>Cancel is not rollback. Prior project or network effects are not undone.</p>
+     </div>
+   </section>;
++  const modes = <fieldset className="session-context" disabled={state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}><legend>Choose this local operation</legend>
++      <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={state.archiveMode === 'unsigned'} onChange={() => controller.setArchiveMode('unsigned')} /><span>Unsigned archive · no signing or IPA export</span></label>
++      <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={signed} onChange={() => controller.setArchiveMode('signed')} /><span>Sign and export IPA · separately admitted local signing</span></label>
++      <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={checking} onChange={() => controller.setArchiveMode('signing-check')} /><span>Check existing signing inputs · no archive, Xcode or signing installation</span></label>
++      <p>{checking ? 'Changing modes cancels an unstarted review. This check does not build or publish.' : 'Changing modes or candidate retention retires any unstarted review. Ordinary archive/export does not authenticate source; candidate retention adds its separately verified source and local journal binding. None publishes.'}</p>
++    </fieldset>;
++  if (checking) return <IOSSigningInputsCheck state={state} controller={controller} controls={controls} modes={modes} projectName={projectName}
++    onRefresh={onRefresh} onReadVersion={onReadVersion} onCredentials={onCredentials} onSettings={onSettings} onRecovery={onRecovery}
++    refreshReason={refreshReason} versionReason={versionReason} />;
+   const selected = project?.selection;
+   return <section className="card offline-preflight" aria-labelledby={label} data-mrk-ios-archive="status" data-phase={op?.phase ?? 'idle'} data-stage={op?.stage ?? ''} data-outcome={op?.outcome ?? ''}>
+     <SectionHeading title={signed ? 'Sign and export a local iOS IPA' : 'Create unsigned iOS archive'} description={signed ? 'Use assigned session inputs to archive, export and validate one local IPA. No Store upload or symbol uploader.' : 'Archive the saved app with full Xcode, then check identity, version and symbols. No signing, IPA export or Store upload.'}>
+       <Badge tone="warning">Project code executes</Badge>{onHelp && <HelpButton content={iosArchiveHelp} onHelp={onHelp} />}
+     </SectionHeading>
+-    <fieldset className="session-context" disabled={state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}><legend>Choose this local operation</legend>
+-      <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={!signed} onChange={() => controller.setArchiveMode('unsigned')} /><span>Unsigned archive · no signing or IPA export</span></label>
+-      <label className="offline-ack"><input type="radio" name={`${label}-mode`} checked={signed} onChange={() => controller.setArchiveMode('signed')} /><span>Sign and export IPA · separately admitted local signing</span></label>
+-      <p>Changing modes or candidate retention retires any unstarted review. Ordinary archive/export does not authenticate source; candidate retention adds its separately verified source and local journal binding. None publishes.</p>
+-    </fieldset>
++    {modes}
+     {signed && <label className="offline-ack"><input type="checkbox" checked={state.keepCandidate}
+       disabled={state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}
+       onChange={(event) => controller.setKeepCandidate(event.target.checked)} /><span>Keep local candidate inputs · bind the original archive/IPA to clean configured source, metadata and enrolled local history. No Store operation.</span></label>}
+@@ -162,7 +170,7 @@
+       <div className="inline-heading"><h3>Archive status · {operationProjectName ?? op.context.projectId}</h3><Badge tone={op.phase === 'unknown' ? 'warning' : 'neutral'}>{phases[op.phase]}</Badge></div>
+       {op.stage && <p>Reached stage: {stages[op.stage]}. A stage is not a completion percentage or proof that cleanup finished.</p>}
+       {op.outcome && <p><strong>Outcome:</strong> {op.outcome}</p>}<p>{iosArchiveReasonText[op.reason]}</p>
+-      {!isIOSRecoveryOperation(op) && op.activity && <ul>{iosArchiveRoles(op.context).map((role) => { const command = op.activity!.commands[role]!; return <li key={role}>{roles[role]}: {command.outcome === 'exited' ? `known exit ${command.exitCode}` : command.outcome === 'unknown' ? 'no usable original outcome' : command.outcome === 'not-configured' ? 'not configured' : 'not dispatched'}.</li>; })}</ul>}
++      {!isIOSRecoveryOperation(op) && !isIOSSigningCheckOperation(op) && op.activity && <ul>{iosArchiveRoles(op.context).map((role) => { const command = op.activity!.commands[role]!; return <li key={role}>{roles[role]}: {command.outcome === 'exited' ? `known exit ${command.exitCode}` : command.outcome === 'unknown' ? 'no usable original outcome' : command.outcome === 'not-configured' ? 'not configured' : 'not dispatched'}.</li>; })}</ul>}
+       {op.disposition && <><p>Inspection snapshot: {op.disposition.snapshot}. Task work: {op.disposition.work}. Archive output: {op.disposition.output}.</p>
+         {op.disposition.relativeDirectory && <p>Retained operation location: <code>{op.disposition.relativeDirectory}</code>. This is not permission for a blanket cleanup or rerun.</p>}</>}
+       {!isIOSRecoveryOperation(op) && op.activity && op.outcome !== 'complete' && <ol className="offline-findings">{op.activity.findings.map((finding, index) => <li key={index}><Badge tone={negative(finding.status) ? 'warning' : 'neutral'}>{finding.status}</Badge><span>{iosArchiveFindingText[finding.check]}</span></li>)}</ol>}
