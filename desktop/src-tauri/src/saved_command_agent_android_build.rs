@@ -61,6 +61,7 @@ fn same_context(
         return false;
     };
     let s = entry.scope();
+    let Some(review) = s.review.android() else { return false };
     c.operation == android_wire::Operation::AndroidBuildInspect
         && c.signing.is_none()
         && c.action.is_none()
@@ -69,9 +70,9 @@ fn same_context(
         && c.project_id == s.runtime_id
         && c.draft_revision == s.draft_revision
         && c.baseline_generation == s.baseline_generation
-        && c.saved_config.bytes == s.review.saved_config.bytes
-        && c.saved_config.sha256 == s.review.saved_config.sha256
-        && version(&c.saved_version) == s.review.saved_version
+        && c.saved_config.bytes == review.saved_config.bytes
+        && c.saved_config.sha256 == review.saved_config.sha256
+        && version(&c.saved_version) == review.saved_version
         && root.path == s.root
         && registration == s.registration
         && root
@@ -94,7 +95,7 @@ pub(super) fn prepare(
     let Some(input) = input else { return Ok(None) };
     if !input.approval.current(inner, r)
         || &Context::AndroidBuild(input.approval.input.context()) != context
-        || input.approval.review != input.entry.scope().review
+        || Some(&input.approval.review) != input.entry.scope().review.android()
         || !same_context(&input.entry, context, registration, root)
         || !input.entry.prepare_live()
     {
@@ -102,7 +103,7 @@ pub(super) fn prepare(
     }
     input
         .entry
-        .bind(
+        .bind(agent::FAMILY,
             service::Id::parse(id).map_err(|_| failure())?,
             service::Id::parse(generation).map_err(|_| failure())?,
             revision,
@@ -112,10 +113,10 @@ pub(super) fn prepare(
         .map_err(|_| failure())
 }
 pub(super) fn start_matches(p: &Prepared, entry: Option<&Arc<agent::Entry>>) -> bool {
-    match (&p.agent_android_build, entry) {
+    match (&p.agent_build, entry) {
         (None, None) => true,
         (Some(link), Some(entry)) => {
-            link.start_matches(Some(entry))
+            link.start_matches(agent::FAMILY, Some(entry))
                 && link.matches(&p.projection.operation_id, &p.projection.owner_generation)
                 && same_context(entry, &p.projection.context, p.registration, &p.project)
         }
@@ -123,8 +124,8 @@ pub(super) fn start_matches(p: &Prepared, entry: Option<&Arc<agent::Entry>>) -> 
     }
 }
 pub(super) fn consume(p: &Prepared) -> Result<(), BridgeError> {
-    match &p.agent_android_build {
-        Some(link) => link.consume_start().map_err(|_| failure()),
+    match &p.agent_build {
+        Some(link) => link.consume_start(agent::FAMILY).map_err(|_| failure()),
         None => Ok(()),
     }
 }
@@ -269,24 +270,24 @@ fn publish(link: &agent::NativeLink, p: &RunProjection, revision: u32, retired: 
 // Only SAME original Registry callbacks. No Doc/Host/Service lock or IO here.
 pub(super) fn changed(r: &Registry) {
     if let Some(a) = &r.active {
-        if let Some(link) = &a.owner.agent_android_build {
+        if let Some(link) = &a.owner.agent_build {
             publish(link, &a.projection, r.revision, false);
         }
     } else if let Some(p) = &r.prepared {
-        if let Some(link) = &p.agent_android_build {
+        if let Some(link) = &p.agent_build {
             publish(link, &p.projection, r.revision, false);
         }
     }
 }
 pub(super) fn retired_prepared(p: &Prepared, reason: Reason, revision: u32) {
-    if let Some(link) = &p.agent_android_build {
+    if let Some(link) = &p.agent_build {
         publish(link, &retire(p.projection.clone(), reason), revision, true);
     }
 }
 // Not a helper FINAL or Status read: called after the original watchdog join,
 // material/native retirement and SAME active->last transition.
 pub(super) fn retired(a: &Active, revision: u32) {
-    if let Some(link) = &a.owner.agent_android_build {
+    if let Some(link) = &a.owner.agent_build {
         publish(link, &a.projection, revision, true);
     }
 }
@@ -364,7 +365,7 @@ impl SavedCommandOwner {
             None,
             None,
             None,
-            Some(Preparation { entry, approval }),
+            Some(agent_build::Preparation::Android(Preparation { entry, approval })),
         )?
         .android()
     }
@@ -437,7 +438,7 @@ mod tests {
     fn terminal_shaped_data_cannot_replace_the_original_retirement_callback() {
         let mut p = RunProjection {
             agent_local_check: None,
-            agent_android_build: None,
+            agent_build: None,
             operation_id: "a".repeat(32),
             owner_generation: "b".repeat(32),
             context: Context::AndroidBuild(input().context()),
@@ -499,7 +500,7 @@ mod tests {
                     catalog_generation: 1,
                     record_sha256: "c".repeat(64),
                 },
-            },
+            }.into(),
         });
         let inbox = agent::Inbox::new(id('e'));
         inbox.allow(scope.clone()).unwrap();
@@ -510,7 +511,7 @@ mod tests {
             expected_observation_revision: 2,
         };
         inbox
-            .prepare(
+            .prepare(agent::FAMILY,
                 request.clone(),
                 &crate::agent_local_checks::SavedPoint {
                     project_id: id('c'),
@@ -520,15 +521,15 @@ mod tests {
                     inode: 2,
                     revision: 2,
                     fresh: true,
-                    config: Some(scope.review.saved_config.clone()),
+                    config: Some(scope.review.config().clone()),
                 },
             )
             .unwrap();
-        let preparing = inbox.claim().unwrap().unwrap();
+        let preparing = inbox.claim(agent::FAMILY).unwrap().unwrap();
         let expires = Instant::now() + INTENT;
         let link = preparing
             .entry()
-            .bind(id('a'), id('b'), 1, expires)
+            .bind(agent::FAMILY,id('a'), id('b'), 1, expires)
             .unwrap();
         preparing.returned(true);
         let owner = SavedCommandOwner::android_build(
@@ -542,7 +543,7 @@ mod tests {
             ),
         };
         let prepared = Prepared {
-            agent_android_build: Some(link.clone()),
+            agent_build: Some(link.clone()),
             agent_local_check: None,
             upload_key_preparation: None,
             upload_key: None,
@@ -550,7 +551,7 @@ mod tests {
             tools: None,
             local_history: None,
             projection: RunProjection {
-                agent_android_build: Some(link.origin()),
+                agent_build: Some(link.projection_origin()),
                 agent_local_check: None,
                 operation_id: "a".repeat(32),
                 owner_generation: "b".repeat(32),
@@ -591,13 +592,13 @@ mod tests {
         assert!(owner.inner.lock().prepared.is_some());
         assert!(owner.inner.lock().active.is_none());
         inbox
-            .start(&agent::Start {
+            .start(agent::FAMILY,&agent::Start {
                 origin: request.query(),
                 operation_id: id('a'),
                 owner_generation: id('b'),
             })
             .unwrap();
-        let starting = inbox.claim().unwrap().unwrap();
+        let starting = inbox.claim(agent::FAMILY).unwrap().unwrap();
         {
             let mut r = owner.inner.lock();
             let Context::AndroidBuild(c) = &mut r.prepared.as_mut().unwrap().projection.context
@@ -640,13 +641,14 @@ mod tests {
         }
         let result = starting.entry().status().unwrap();
         assert_eq!(result.start_state, agent::StartState::Consumed);
-        let result = result.operation.unwrap();
+        let operation = result.operation.unwrap();
+        let result = operation.android();
         assert_eq!(
             (result.outcome, result.settlement),
             (Some(agent::Outcome::Refused), service::Settlement::Settled)
         );
         starting.returned(true);
-        assert!(inbox.claim().unwrap().is_none());
+        assert!(inbox.claim(agent::FAMILY).unwrap().is_none());
     }
     #[test]
     fn original_validated_result_projection_drops_labels_paths_and_preserves_failed_checks() {

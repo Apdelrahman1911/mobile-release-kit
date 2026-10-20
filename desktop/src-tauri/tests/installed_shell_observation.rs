@@ -23,6 +23,8 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;
 #[path = "../src/agent_local_checks.rs"] mod agent_local_checks;
 #[path = "../src/agent_android_build.rs"] mod agent_android_build;
+#[path = "../src/agent_build_requests.rs"] mod agent_build_requests;
+#[path = "../src/agent_ios_archive.rs"] mod agent_ios_archive;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../src/version_allocation_state_native.rs"] mod version_allocation_state_native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

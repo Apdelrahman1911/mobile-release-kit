@@ -1023,7 +1023,7 @@ pub(super) fn data_checks() -> bool {
     if context_matches(case, "inert-ios-parser", &missing_version, None)
         || context_matches(case, "inert-ios-parser", &missing_config, None) { return false; }
     let operation = "a".repeat(32); let generation = "b".repeat(32);
-    let prepared = wire::Projection { operation_id: operation.clone(), owner_generation: generation.clone(), context: context.clone(),
+    let prepared = wire::Projection { agent_ios_archive:None, operation_id: operation.clone(), owner_generation: generation.clone(), context: context.clone(),
         phase: wire::Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: wire::Reason::None,
         stage: None, activity: None, disposition: None, result: None, report: None };
     let mut status = wire::Status { schema_version: wire::STATUS_SCHEMA_VERSION, status_revision: 1, availability: wire::Availability::Busy,
@@ -1159,7 +1159,7 @@ fn current_data_checks(unsigned: &Snapshot) -> bool {
     let Ok(terminal) = wire::terminal(&value, &context, &facts.operation_id) else { return false; };
     if !terminal_for(Case::SignedCancel, &Snapshot { facts: facts.clone(), terminal }) { return false; }
     let mut cancel = Record::default(); cancel.start_requested = true;
-    cancel.prepared = Some(wire::Projection { operation_id: facts.operation_id.clone(), owner_generation: facts.owner_generation.clone(),
+    cancel.prepared = Some(wire::Projection { agent_ios_archive:None, operation_id: facts.operation_id.clone(), owner_generation: facts.owner_generation.clone(),
         context: context.clone(), phase: wire::Phase::Running, intent_usable: false, outcome: None, reason: wire::Reason::None,
         stage: Some(wire::Stage::InputsBound), activity: None, disposition: None, result: None, report: None });
     let request = json!({"operationId":facts.operation_id,"ownerGeneration":facts.owner_generation});

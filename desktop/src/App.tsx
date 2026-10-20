@@ -40,6 +40,8 @@ import { CliReadAccessPanel } from './components/CliReadAccessPanel.tsx';
 import { AgentLocalCheckPermission } from './agentLocalChecks.ts';
 import { AgentAndroidBuildPermission } from './agentAndroidBuild.ts';
 import { AgentAndroidBuildAccess } from './components/AgentAndroidBuildAccess.tsx';
+import { AgentIOSArchivePermission } from './agentIOSArchive.ts';
+import { AgentIOSArchiveAccess } from './components/AgentIOSArchiveAccess.tsx';
 import { AgentLocalCheckAccess } from './components/AgentLocalCheckAccess.tsx';
 import { VersionEnrollmentController } from './versionEnrollmentController.ts';
 import { VersionEnrollmentPanel } from './components/VersionEnrollmentPanel.tsx';
@@ -1034,6 +1036,15 @@ export function App() {
     };
   }));
   useEffect(() => { agentAndroidBuild.syncContext(); });
+  const [agentIOSArchive] = useState(() => new AgentIOSArchivePermission(() => {
+    const service = cliService.current;
+    return { api: service.api?.mode === 'native' ? service.api.agentIOSArchive ?? null : null,
+      project: iosArchiveControllerRef.current?.agentArchiveApproval() ?? null,
+      blocked: service !== pathService.current || connectionPicking.current || !!(versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ??
+        externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason()),
+    };
+  }));
+  useEffect(() => { agentIOSArchive.syncContext(); });
   const [externalObserver] = useState(() => new ExternalProjectObservationController({
     current: () => {
       const current = workspaceRef.current;
@@ -1954,11 +1965,11 @@ export function App() {
             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
             onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />
             <AgentAndroidBuildAccess controller={agentAndroidBuild} /></div>}
-          iosArchive={<IOSArchive state={iosArchiveState} controller={iosArchive}
+          iosArchive={<><IOSArchive state={iosArchiveState} controller={iosArchive}
             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
-            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />} />}
+            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /><AgentIOSArchiveAccess controller={agentIOSArchive} /></>} />}
         {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} inspectionState={artifactInspectionState} inspectionController={artifactInspection} projectName={session?.project.name ?? null} onHelp={setHelp} />
           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} />
           <IOSArchiveResultView state={iosArchiveState} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} /></>}

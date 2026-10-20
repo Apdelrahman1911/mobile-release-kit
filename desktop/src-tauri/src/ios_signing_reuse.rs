@@ -374,6 +374,7 @@ mod tests {
     fn incomplete_native_status_never_projects_success() {
         let value = check(&complete()).unwrap();
         let projection = Projection {
+            agent_ios_archive:None,
             operation_id: "a".repeat(32),
             owner_generation: "b".repeat(32),
             context: context(),

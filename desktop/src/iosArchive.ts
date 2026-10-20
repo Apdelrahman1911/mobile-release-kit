@@ -1,3 +1,6 @@
+import {canObserveAgentIOSArchive} from './agentIOSArchiveOrigin.ts';
+import {copyIOSArchiveApproval} from './agentIOSArchive.ts';
+import type {IOSArchiveApproval} from './agentIOSArchive.ts';
 // App-owned coordination only, following OfflinePreflightController's original
 // observer/one-Start lifetime. A view, Promise or saved comparison is not native
 // custody, qualification, cancellation settlement or a release approval.
@@ -197,6 +200,8 @@ export class IOSArchiveController {
   private readonly context: Context;
   private observer: Observer | null = null;
   private attempt: Attempt | null = null;
+  private pendingGuiSubmissions = 0;
+  private deferredAgentObservation: {observer:Observer;status:IOSArchiveStatus}|null = null;
   private cancelClaim: IOSArchiveIdentity | null = null;
   private draftReference: ProjectSession['draft'] = null;
   private snapshotReference: ProjectSession['snapshot'] = null;
@@ -347,7 +352,7 @@ export class IOSArchiveController {
   }
   private originCandidate(attempt: Attempt, status: IOSArchiveStatus): boolean {
     const op = status.operation;
-    return !!op && status.statusRevision > attempt.after && !sameIOSArchiveIdentity(op, attempt.previous) &&
+    return !!op && !op.agentIosArchive && status.statusRevision > attempt.after && !sameIOSArchiveIdentity(op, attempt.previous) &&
       sameIOSArchiveData(op.context, attempt.binding.context) && (!attempt.identity || sameIOSArchiveIdentity(op, attempt.identity));
   }
   private reconcile(observer: Observer): void {
@@ -381,6 +386,21 @@ export class IOSArchiveController {
       this.fail({ code: 'ios_archive_protocol' }, true); return null;
     }
     if (a && b && sameIOSArchiveIdentity(a, b) && !iosArchiveOperationProgress(a, b)) { this.fail({ code: 'ios_archive_protocol' }, true); return null; }
+    if (canObserveAgentIOSArchive(previous, status, false) && this.pendingGuiSubmissions !== 0) {
+      // Keep one bounded native observation until the original GUI invoke
+      // actually returned; terminal DATA never discards an in-flight caller.
+      const held = this.deferredAgentObservation?.status;
+      if (!held || held.operation && b && sameIOSArchiveIdentity(held.operation, b) &&
+          status.statusRevision > held.statusRevision && iosArchiveOperationProgress(held.operation, b)) this.deferredAgentObservation = { observer, status };
+      return status;
+    }
+    const agentObservation = canObserveAgentIOSArchive(previous, status,
+      this.pendingGuiSubmissions !== 0 || this.state.pending !== null || this.state.originalUnconfirmed || !!this.attempt && !this.attempt.settled);
+    if (agentObservation) {
+      this.attempt = null; this.clearTimer(); this.cancelClaim = null;
+      // Observe/STOP only; no GUI Start consent is reconstructed.
+      this.update({ consent: null, pending: null, originalUnconfirmed: false, historical: true, cancelClaimed: null });
+    }
     const attempt = this.attempt;
     if (attempt?.observer === observer && attempt.prepareSent) {
       if (attempt.identity ? !sameIOSArchiveIdentity(attempt.identity, b) :
@@ -399,7 +419,7 @@ export class IOSArchiveController {
       // or creates consent. In particular an expired terminal can settle the
       // original slot instead of leaving peers blocked forever with no Cancel.
       if (!attempt.identity && b && this.originCandidate(attempt, status)) attempt.identity = id(b);
-    } else if (previous && !sameIOSArchiveIdentity(a ?? null, b) && (a !== null || b !== null)) {
+    } else if (!agentObservation && previous && !sameIOSArchiveIdentity(a ?? null, b) && (a !== null || b !== null)) {
       this.fail({ code: 'ios_archive_protocol' }, true); return null; // Unsolicited foreign IDs cannot authorize a run.
     }
     if (status.statusRevision === IOS_ARCHIVE_COUNTER_MAX) this.retire({ generationLost: true });
@@ -410,6 +430,13 @@ export class IOSArchiveController {
       this.reconcile(observer); this.expireConsent();
     }
     return status;
+  }
+  private returnedGuiSubmission(): void {
+    if (Number.isSafeInteger(this.pendingGuiSubmissions) && this.pendingGuiSubmissions > 0) this.pendingGuiSubmissions--;
+    const held = this.deferredAgentObservation;
+    if (!held || this.pendingGuiSubmissions !== 0) return;
+    this.deferredAgentObservation = null;
+    if (held.observer.active && held.observer === this.observer) this.receive(held.observer, held.status);
   }
   canCheckStatus(): boolean { return !this.disposed && !!this.observer?.active && !this.state.readPending; }
   async checkStatus(): Promise<void> {
@@ -448,6 +475,12 @@ export class IOSArchiveController {
     if (project.snapshotPending) return 'Wait for the current saved-configuration refresh to settle.';
     if (project.versionPending) return 'Wait for the original saved-version read to settle; an earlier result cannot stand in.';
     return project.inputIssue ?? (operation === 'ios-signed-export' || operation === 'ios-candidate-inputs' || operation === 'ios-signing-inputs-check' ? this.state.signing.issue : null) ?? this.context.otherOperationReason();
+  }
+  /** Same saved observation/selection, not a new reader or tool receipt. */
+  agentArchiveApproval():IOSArchiveApproval|null {
+    this.syncProject();const p=this.state.project;
+    if(this.prepareReason()||this.pendingGuiSubmissions!==0||!p||p.dirtyDraft||!p.savedConfig||!p.savedVersion||this.state.archiveMode!=='unsigned'||this.state.keepCandidate)return null;
+    return copyIOSArchiveApproval({input:{projectId:p.projectId,draftRevision:p.draftRevision,baselineGeneration:p.baselineGeneration,savedConfig:p.savedConfig,savedVersion:p.savedVersion}});
   }
   prepareReason = (): string | null => this.commonReason() ?? iosArchiveOwnerReason(this.state) ??
     (this.state.status?.availability === 'busy' ? iosArchiveAvailabilityText.busy : null);
@@ -536,6 +569,7 @@ export class IOSArchiveController {
     if (!this.matches(attempt) || this.commonReason(context.operation)) {
       attempt.prepareSent = false; attempt.retired = true; attempt.settled = true; this.update({ pending: null, originalUnconfirmed: false }); return;
     }
+    this.pendingGuiSubmissions = this.pendingGuiSubmissions < Number.MAX_SAFE_INTEGER ? this.pendingGuiSubmissions + 1 : Infinity;
     try {
       const value = await observer.api.prepareIOSArchive(request);
       if (!observer.active || this.attempt !== attempt) return;
@@ -560,7 +594,7 @@ export class IOSArchiveController {
           attempt.retired = true; attempt.settled = true; this.update({ pending: null, originalUnconfirmed: false, consent: null, error: safe });
         } else this.fail(error, safe.code !== 'ios_archive_protocol');
       }
-    }
+    } finally {this.returnedGuiSubmission();}
   }
   setAcknowledged(operationId: string, ownerGeneration: string, acknowledged: boolean): void {
     this.syncProject(); this.expireConsent();
@@ -575,6 +609,7 @@ export class IOSArchiveController {
     attempt.startSent = true; attempt.startAfter = attempt.observer.status?.statusRevision ?? 0; this.clearTimer();
     this.update({ consent: null, pending: 'start', originalUnconfirmed: true, historical: false, error: null }); this.syncProject();
     if (!this.matches(attempt) || this.commonReason(attempt.binding.context.operation)) { this.retire(); return; }
+    this.pendingGuiSubmissions = this.pendingGuiSubmissions < Number.MAX_SAFE_INTEGER ? this.pendingGuiSubmissions + 1 : Infinity;
     try {
       const context = attempt.binding.context;
       const request: StartIOSArchive = context.operation === 'ios-local-recovery' ? { operationId, ownerGeneration, consentVersion: IOS_RECOVERY_CONSENT,
@@ -588,6 +623,7 @@ export class IOSArchiveController {
       }
       this.receive(attempt.observer, status);
     } catch (error) { if (attempt.observer.active && this.attempt === attempt && !attempt.settled) this.fail(error); }
+    finally {this.returnedGuiSubmission();}
   }
   canCancel(): boolean {
     const observer = this.observer, op = observer?.status?.operation;

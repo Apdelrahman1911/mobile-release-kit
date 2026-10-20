@@ -41,6 +41,9 @@ pub(crate) mod agent_local_checks;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "asset_session_agent_android_build.rs"]
 pub(crate) mod agent_android_build;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path = "asset_session_agent_ios_archive.rs"]
+pub(crate) mod agent_ios_archive;
 #[path = "asset_session_android_registration.rs"]
 mod android_registration;
 #[path = "asset_session_macos_maintenance.rs"]
@@ -802,6 +805,8 @@ struct DocumentState {
     agent_local_check_grant: Option<Arc<agent_local_checks::Grant>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     agent_android_build_grant: Option<Arc<agent_android_build::Grant>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_ios_archive_grant: Option<Arc<agent_ios_archive::Grant>>,
     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
     compatibility_picker_pending: bool,
@@ -1084,10 +1089,14 @@ struct Inner {
     agent_local_check_service: std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     agent_android_build_service: std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_ios_archive_service: std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     agent_local_check_revoke_epoch: std::sync::atomic::AtomicU64,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     agent_android_build_revoke_epoch: std::sync::atomic::AtomicU64,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_ios_archive_revoke_epoch: std::sync::atomic::AtomicU64,
     android_registration_control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_session: Mutex<Option<installed_session_observation::Book>>,
@@ -1990,7 +1999,7 @@ mod lookup_memory {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             self.add(crate::agent_local_checks::DOCUMENT_BACKING)?;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            self.add(crate::agent_android_build::DOCUMENT_BACKING)?;
+            self.add(crate::agent_build_requests::DOCUMENT_BACKING)?; // ONE shared build inbox, not one per platform.
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
@@ -2712,10 +2721,14 @@ impl DocumentBinding {
             agent_local_check_service: std::sync::OnceLock::new(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_android_build_service: std::sync::OnceLock::new(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_ios_archive_service: std::sync::OnceLock::new(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_local_check_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_android_build_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_ios_archive_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_session: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -2728,7 +2741,8 @@ impl DocumentBinding {
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 agent_local_check_grant: None,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
-                agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0,
+                agent_android_build_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
@@ -3536,6 +3550,8 @@ impl DocumentBinding {
     }
     pub(crate) fn ios_archive_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.ios_archive.subscribe() }
     pub(crate) fn ios_archive_relay_lost(&self) {
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.agent_ios_archives_relay_lost();
         // Loss retires consent/STOP under the same gate. It is not settlement,
         // owner deletion, a replacement run or permission to reopen the slot.
         let _state = self.lock(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost();
@@ -8159,7 +8175,8 @@ pub(crate) fn assert_project_path_document_contracts() {
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 agent_local_check_grant: None,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
-                agent_android_build_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+                agent_android_build_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
@@ -8296,7 +8313,8 @@ pub(crate) fn assert_project_selection_gate_contract() {
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 agent_local_check_grant: None,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
-                agent_android_build_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+                agent_android_build_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
@@ -8396,7 +8414,8 @@ mod tests {
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 agent_local_check_grant: None,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
-                agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+                agent_android_build_grant: None,
+                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,

@@ -24,6 +24,10 @@ impl IOSArchiveOwner {
     pub(crate) fn candidate_helper_matches(&self,claim:&crate::saved_command_owner::LocalHistoryHelperClaim)->bool{claim.matches_owner(&self.saved)}
 
     pub(crate) fn new(runtime: RuntimeConfig) -> Self { Self { saved: SavedCommandOwner::ios_archive(runtime) } }
+    pub(crate) fn approve_agent_ios_archive(&self,input:Prepare,document:&Arc<()>)->Result<Arc<crate::saved_command_owner::AgentIOSArchiveApproval>,BridgeError>{self.saved.approve_agent_ios_archive(input,document)}
+    pub(crate) fn agent_ios_archive_approval_current(&self,approval:&crate::saved_command_owner::AgentIOSArchiveApproval,document:&Arc<()>)->bool{self.saved.agent_ios_archive_approval_current(approval,document)}
+    pub(crate) fn prepare_agent_ios_archive(&self,entry:Arc<crate::agent_build_requests::Entry>,approval:Arc<crate::saved_command_owner::AgentIOSArchiveApproval>,registration:u32,root:RegisteredRoot,gate:Availability)->Result<Status,BridgeError>{self.saved.prepare_agent_ios_archive(entry,approval,registration,root,gate)}
+    pub(crate) fn start_agent_ios_archive(&self,entry:&Arc<crate::agent_build_requests::Entry>,registered:Option<(u32,RegisteredRoot)>,gate:Availability)->Result<Admitted,BridgeError>{self.saved.start_agent_ios_archive(entry,registered,gate)}
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }

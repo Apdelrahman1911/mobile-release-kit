@@ -87,6 +87,13 @@ impl SavedComparisonData {
             && input.saved_version.source.as_bytes() == &self.source[..usize::from(self.source_len)]
             && input.saved_version.name.as_bytes() == &self.name[..usize::from(self.name_len)] && input.saved_version.build == self.build
     }
+    fn matches_ios(&self, input: &crate::ios_archive_protocol::Prepare) -> bool {
+        let (Some(config),Some(version))=(&input.saved_config,&input.saved_version) else {return false;};
+        config.bytes == self.config_bytes && Self::digest(&config.sha256) == Some(self.config_sha256)
+            && version.bytes == self.version_bytes && Self::digest(&version.sha256) == Some(self.version_sha256)
+            && version.source.as_bytes() == &self.source[..usize::from(self.source_len)]
+            && version.name.as_bytes() == &self.name[..usize::from(self.name_len)] && version.build == self.build
+    }
 }
 pub(super) struct SavedInputBinding { pub(super) lane: Arc<SavedObservationLane>, comparison: SavedComparisonData }
 impl SavedInputBinding {
@@ -141,6 +148,13 @@ impl ValidatedSavedInput {
             && original.android_registration_control.matches_epoch(self.epoch))
             && self.lane.returned() && self.lane.registration == registration && &self.lane.root == root
             && self.lane.project_id == input.project_id && self.comparison.matches(input)
+    }
+    pub(crate) fn matches_ios(&self, document: &Arc<()>, registration: u32, root: &asset_source::RegisteredRoot,
+        input: &crate::ios_archive_protocol::Prepare) -> bool {
+        self.document.upgrade().is_some_and(|original| Arc::ptr_eq(&original.session_identity, document)
+            && original.android_registration_control.matches_epoch(self.epoch))
+            && self.lane.returned() && self.lane.registration == registration && &self.lane.root == root
+            && self.lane.project_id == input.project_id && self.comparison.matches_ios(input)
     }
     pub(crate) fn same_binding(&self, other: &Self) -> bool {
         Weak::ptr_eq(&self.document, &other.document) && Arc::ptr_eq(&self.lane, &other.lane) && self.epoch == other.epoch
@@ -363,6 +377,15 @@ impl DocumentBinding {
         let (registration, root) = self.inner.bridge.native_project(&input.project_id).map_err(|_| stale())?;
         if !edit.matches(&binding.lane.stamp) || registration != binding.lane.registration || root != binding.lane.root
             || binding.lane.project_id != input.project_id || !binding.comparison.matches(input)
+            || !self.inner.android_registration_control.matches_epoch(binding.lane.epoch) { return Err(stale()); }
+        Ok(ValidatedSavedInput { document: Arc::downgrade(&self.inner), lane: binding.lane.clone(),
+            comparison: binding.comparison, epoch: binding.lane.epoch })
+    }
+    pub(super) fn validated_ios_saved_input_with_edit(&self, state: &DocumentState, input: &crate::ios_archive_protocol::Prepare,
+        edit:&crate::edit_owner::SavedEditGuard<'_>, registration:u32, root:&asset_source::RegisteredRoot) -> Result<ValidatedSavedInput, BridgeError> {
+        let binding = state.saved_input.as_ref().filter(|binding| binding.lane.returned()).ok_or_else(stale)?;
+        if !edit.matches(&binding.lane.stamp) || registration != binding.lane.registration || root != &binding.lane.root
+            || binding.lane.project_id != input.project_id || !binding.comparison.matches_ios(input)
             || !self.inner.android_registration_control.matches_epoch(binding.lane.epoch) { return Err(stale()); }
         Ok(ValidatedSavedInput { document: Arc::downgrade(&self.inner), lane: binding.lane.clone(),
             comparison: binding.comparison, epoch: binding.lane.epoch })

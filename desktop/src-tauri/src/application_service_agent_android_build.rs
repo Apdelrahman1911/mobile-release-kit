@@ -4,10 +4,10 @@ use super::*;
 use crate::{agent_android_build as build, agent_local_checks::SavedPoint};
 
 impl ApplicationService {
-    pub(crate) fn android_builds(&self) -> &Arc<build::Inbox> {
-        &self.android_builds
+    pub(crate) fn build_requests(&self) -> &Arc<build::Inbox> {
+        &self.build_requests
     }
-    fn build_point(state: &State, id: &Id) -> Result<SavedPoint, Error> {
+    pub(super) fn build_point(state: &State, id: &Id) -> Result<SavedPoint, Error> {
         let base = Self::identity_point(state, id)?;
         let config = state
             .saved
@@ -35,7 +35,7 @@ impl ApplicationService {
             config,
         })
     }
-    pub(crate) fn android_build_point(&self, runtime: &str) -> Result<SavedPoint, Error> {
+    pub(crate) fn build_point_for_runtime(&self, runtime: &str) -> Result<SavedPoint, Error> {
         let state = self.lock()?;
         self.check(&state)?;
         let id = state.runtime_aliases.get(runtime).ok_or(Error::Conflict)?;
@@ -50,7 +50,7 @@ impl ApplicationService {
     }
     /// Start's possible project effects make the old shared observation stale.
     /// The original Doc/Edit inputs are rematched AFTER this existing writer.
-    pub(crate) fn consume_android_build_observation(
+    pub(crate) fn consume_build_observation(
         &self,
         scope: &build::NativeScope,
     ) -> Result<(), Error> {
@@ -72,7 +72,7 @@ impl ApplicationService {
         observation.revision = state.revision.0.checked_add(1).ok_or(Error::StateUnknown)?;
         self.save(&mut state, next)
     }
-    fn authorize_build_client(
+    pub(super) fn authorize_build_client(
         &self,
         state: &State,
         client: &ClientSession,
@@ -97,9 +97,9 @@ impl ApplicationService {
         self.authorize_build_client(&state, client, &input.project_id)?;
         let point = Self::build_point(&state, &input.project_id)?;
         let result = self
-            .android_builds
-            .prepare(input, &point)
-            .map(p::ResponseBody::AndroidBuildRequest);
+            .build_requests
+            .prepare(build::FAMILY,input, &point)
+            .and_then(build::Status::try_from).map(p::ResponseBody::AndroidBuildRequest);
         drop(state);
         result
     }
@@ -113,9 +113,9 @@ impl ApplicationService {
         // Same grant lock through the bounded memory-only enqueue. A different
         // connection can inspect this exact one-use request, not create Start.
         let result = self
-            .android_builds
-            .start(input)
-            .map(p::ResponseBody::AndroidBuildRequest);
+            .build_requests
+            .start(build::FAMILY,input)
+            .and_then(build::Status::try_from).map(p::ResponseBody::AndroidBuildRequest);
         drop(state);
         result
     }
@@ -128,9 +128,9 @@ impl ApplicationService {
         let state = self.lock()?;
         self.authorize_build_client(&state, client, &query.project_id)?;
         let result = self
-            .android_builds
-            .query(query, cancel)
-            .map(p::ResponseBody::AndroidBuildRequest);
+            .build_requests
+            .query(build::FAMILY,query, cancel)
+            .and_then(build::Status::try_from).map(p::ResponseBody::AndroidBuildRequest);
         drop(state);
         result
     }
@@ -154,7 +154,7 @@ mod tests {
             .allow_agent_read(vec![project.clone()], Duration::from_secs(60))
             .unwrap();
         let first = service.admit_client().unwrap();
-        let point = service.android_build_point("project-1").unwrap();
+        let point = service.build_point_for_runtime("project-1").unwrap();
         let input = build::Prepare {
             service_instance: service.instance().clone(),
             project_id: project.clone(),
@@ -193,22 +193,22 @@ mod tests {
                     catalog_generation: 1,
                     record_sha256: "c".repeat(64),
                 },
-            },
+            }.into(),
             draft_revision: 1,
             baseline_generation: 1,
             changes,
         });
         // Inert native-scope DATA. No native Document/Android approval is minted.
-        service.android_builds.allow(scope.clone()).unwrap();
+        service.build_requests.allow(scope.clone()).unwrap();
         service
             .prepare_agent_android_build(&first, input.clone())
             .unwrap();
-        let claim = service.android_builds.claim().unwrap().unwrap();
+        let claim = service.build_requests.claim(build::FAMILY).unwrap().unwrap();
         let operation = Id::random().unwrap();
         let generation = Id::random().unwrap();
         let link = claim
             .entry()
-            .bind(
+            .bind(build::FAMILY,
                 operation.clone(),
                 generation.clone(),
                 1,
@@ -221,23 +221,23 @@ mod tests {
         service
             .prepare_agent_android_build(&second, input.clone())
             .unwrap();
-        assert_eq!(service.android_builds.entries().unwrap().len(), 1);
+        assert_eq!(service.build_requests.entries(build::FAMILY).unwrap().len(), 1);
         let start = build::Start {
             origin: input.query(),
             operation_id: operation,
             owner_generation: generation,
         };
         service.start_agent_android_build(&second, &start).unwrap();
-        let start_claim = service.android_builds.claim().unwrap().unwrap();
-        link.consume_start().unwrap();
+        let start_claim = service.build_requests.claim(build::FAMILY).unwrap().unwrap();
+        link.consume_start(build::FAMILY).unwrap();
         start_claim.returned(true);
-        service.consume_android_build_observation(&scope).unwrap();
-        assert!(service.android_build_point("project-1").is_err());
+        service.consume_build_observation(&scope).unwrap();
+        assert!(service.build_point_for_runtime("project-1").is_err());
         service
             .prepare_agent_android_build(&second, input.clone())
             .unwrap(); // Same original even when stale.
         service.start_agent_android_build(&second, &start).unwrap();
-        assert!(service.android_builds.claim().unwrap().is_none());
+        assert!(service.build_requests.claim(build::FAMILY).unwrap().is_none());
         service.revoke_agent_read().unwrap();
         assert_eq!(
             service

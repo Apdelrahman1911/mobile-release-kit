@@ -10,6 +10,10 @@ mod identity;
 mod local_checks;
 #[path = "installed_cli_android_build.rs"]
 mod android_build;
+#[path="installed_cli_build_requests.rs"]
+mod build_requests;
+#[path="installed_cli_ios_archive.rs"]
+mod ios_archive;
 
 const HELP: &str = "Mobile Release Kit agent CLI\n\n\
 Usage:\n\
@@ -28,6 +32,10 @@ Usage:\n\
   mrk android-build-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID OPERATION_ID OWNER_GENERATION [--json]\n\
   mrk android-build-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk android-build-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk ios-archive-prepare PROJECT_ID OBSERVATION_REVISION [--json]\n\
+  mrk ios-archive-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID OPERATION_ID OWNER_GENERATION [--json]\n\
+  mrk ios-archive-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk ios-archive-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk --help\n\n\
 Capabilities describe this CLI without opening Desktop or reading project data.\n\
 For the other commands, open Desktop, select a project, then enable agent read access in Settings.\n\
@@ -92,6 +100,12 @@ const ANDROID_BUILD_COMMANDS: [CommandCapability; 4] = [
     CommandCapability { command: "android-build-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same preparation/build without replay." },
     CommandCapability { command: "android-build-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request original STOP; no settlement is inferred." },
 ];
+const IOS_ARCHIVE_COMMANDS: [CommandCapability; 4] = [
+    CommandCapability { command: "ios-archive-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Prepare the exact Desktop-approved saved iOS unsigned archive; no Start or GO." },
+    CommandCapability { command: "ios-archive-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID", "OPERATION_ID", "OWNER_GENERATION"], description: "Start that one original build once; project code may have file/network effects." },
+    CommandCapability { command: "ios-archive-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same preparation/build without replay." },
+    CommandCapability { command: "ios-archive-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request original STOP; no settlement is inferred." },
+];
 const IDENTITY_REQUEST_COMMANDS: [CommandCapability; 2] = [
     CommandCapability { command: "identity-request", arguments: &["PROJECT_ID", "OBSERVATION_REVISION", "--stdin"], description: "Propose an identity change for explicit Desktop review; this does not apply an edit." },
     CommandCapability { command: "identity-request-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Query the original proposal without replaying it; a linked operation has separate status." },
@@ -128,6 +142,15 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "requires": {"runningDesktop": true, "projectReadGrant": true, "separateSavedInputBuildPermission": true, "qualifiedSelectedTools": true},
                 "commands": ANDROID_BUILD_COMMANDS,
             },
+            "iosArchives": {
+                "scope": "saved-ios-unsigned-archive", "defaultEnabled": false, "oneUse": true,
+                "maxStartWindowSeconds": crate::agent_build_requests::START_WINDOW.as_secs(), "maxRetainedRequests": crate::agent_build_requests::LIMIT,
+                "prepareStartsBuild": false, "projectCodeEffectsPossible": true, "toolkitSigning": false, "storePublishing": false,
+                "readGrantAuthorizesExecution": false, "nativeAvailabilityChecked": false,
+                "requires": {"runningDesktop": true, "projectReadGrant": true, "separateSavedInputBuildPermission": true, "qualifiedMacXcodeRuntime": true},
+                "commands": IOS_ARCHIVE_COMMANDS, "archiveDigestAvailable": false,
+                "sharesBuildGrantAndRequestLimitWithAndroid": true,
+            },
             "identityRequests": {
                 "scope": "desktop-reviewed-proposal",
                 "defaultEnabled": false,
@@ -143,6 +166,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             Reads require a running Desktop and an explicit project read grant.\n\
             Saved observations are not live validation or native operation authority.\n\
             Direct edits, credentials, toolkit signing and publishing are not supported by this CLI.\n\
+            iOS unsigned archives use the same one-use build grant and require the original qualified Mac/Xcode runtime.\n\
             A saved Android build needs a separate one-use exact-input Desktop START grant and selected qualified tools.\n\
             Prepare never starts a build; project code may have file/network/signing effects.\n\
             A named local check needs a separate one-use Desktop grant. Configured project code may have effects.\n\
@@ -150,7 +174,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
         }
-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()) {
+        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()) {
             text.push_str("  mrk "); text.push_str(command.command);
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
@@ -245,6 +269,7 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::IdentityIntent(value) => identity::human(value),
         p::ResponseBody::LocalCheck(value) => local_checks::human(value),
         p::ResponseBody::AndroidBuildRequest(value) => android_build::human(value),
+        p::ResponseBody::IosArchiveRequest(value) => ios_archive::human(value),
     }
 }
 
@@ -258,6 +283,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     if identity::recognizes(&args) { return identity::run(args); }
     if local_checks::recognizes(&args) { return local_checks::run(args); }
     if android_build::recognizes(&args) { return android_build::run(args); }
+    if ios_archive::recognizes(&args) { return ios_archive::run(args); }
     let output = match parse(args) {
         Ok(Parsed::Help) => { let _ = std::io::stdout().write_all(HELP.as_bytes()); return 0; }
         Ok(Parsed::Version) => { let _ = std::io::stdout().write_all(b"mrk application-observation protocol 1\n"); return 0; }
@@ -355,7 +381,20 @@ mod tests {
         assert_eq!(identity["commands"][0]["arguments"], serde_json::json!(["PROJECT_ID", "OBSERVATION_REVISION", "--stdin"]));
         assert_eq!(identity["commands"][1]["command"], "identity-request-status");
         assert_eq!(identity["commands"][1]["arguments"], serde_json::json!(["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"]));
-        assert!(human.contains("availability not checked") && human.contains("Direct edits, credentials, builds and publishing are not supported"));
+        assert!(human.contains("mrk ios-archive-prepare") && human.contains("mrk android-build-prepare"));
+        let ios=&value["iosArchives"];
+        assert_eq!(ios["defaultEnabled"],false);assert_eq!(ios["oneUse"],true);
+        assert_eq!(ios["nativeAvailabilityChecked"],false);assert_eq!(ios["toolkitSigning"],false);
+        assert_eq!(ios["storePublishing"],false);assert_eq!(ios["archiveDigestAvailable"],false);
+        assert_eq!(ios["maxRetainedRequests"],value["androidBuilds"]["maxRetainedRequests"]);
+        assert_eq!(ios["sharesBuildGrantAndRequestLimitWithAndroid"],true);
+        for command in ios["commands"].as_array().unwrap() {
+            let mut words=vec![command["command"].as_str().unwrap()];
+            for argument in command["arguments"].as_array().unwrap() {
+                words.push(if argument=="OBSERVATION_REVISION" {"1"} else {"11111111111111111111111111111111"});
+            }
+            words.push("--json");assert!(build_requests::parse(crate::agent_ios_archive::FAMILY,&args(&words)).is_ok());
+        }
         assert!(human.contains("mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin") && human.contains("explicit Desktop review/apply"));
     }
 

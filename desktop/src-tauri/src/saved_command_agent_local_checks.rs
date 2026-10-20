@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn helper_complete_is_pending_until_original_retirement() {
         let mut p = RunProjection {
-            agent_android_build: None, agent_local_check: None,
+            agent_build: None, agent_local_check: None,
             operation_id: "a".repeat(32),
             owner_generation: "b".repeat(32),
             context: Context::OfflinePreflight(wire::Context {
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn release_scope_and_terminal_shaped_pending_do_not_cross_admission() {
         let mut p = RunProjection {
-            agent_android_build: None, agent_local_check: None,
+            agent_build: None, agent_local_check: None,
             operation_id: "a".repeat(32),
             owner_generation: "b".repeat(32),
             context: Context::OfflinePreflight(wire::Context {
@@ -404,14 +404,14 @@ mod tests {
             platform: wire::Platform::Android,
         });
         let prepared = Prepared {
-            agent_android_build: None, agent_local_check: Some(link.clone()),
+            agent_build: None, agent_local_check: Some(link.clone()),
             upload_key_preparation: None,
             upload_key: None,
             apple: None,
             tools: None,
             local_history: None,
             projection: RunProjection {
-                agent_android_build: None, agent_local_check: Some(link.origin()),
+                agent_build: None, agent_local_check: Some(link.origin()),
                 operation_id: "a".repeat(32),
                 owner_generation: "b".repeat(32),
                 context,

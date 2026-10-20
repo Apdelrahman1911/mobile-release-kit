@@ -910,6 +910,7 @@ impl ModeCapabilities {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "ProjectionWire")]
 pub(crate) struct Projection {
+    pub(crate) agent_ios_archive: Option<crate::agent_ios_archive::Query>,
     pub(crate) operation_id: String, pub(crate) owner_generation: String, pub(crate) context: Context,
     pub(crate) phase: Phase, pub(crate) intent_usable: bool, pub(crate) outcome: Option<Outcome>, pub(crate) reason: Reason,
     pub(crate) stage: Option<Stage>, pub(crate) activity: Option<Activity>,
@@ -921,6 +922,8 @@ enum ProjectionWire { Archive(ArchiveProjectionWire), Recovery(RecoveryProjectio
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ArchiveProjectionWire {
+    #[serde(default, deserialize_with="present", skip_serializing_if="Option::is_none")]
+    agent_ios_archive: Option<crate::agent_ios_archive::Query>,
     operation_id: String, owner_generation: String, context: Context, phase: Phase, intent_usable: bool,
     #[serde(deserialize_with = "nullable")] outcome: Option<Outcome>, reason: Reason,
     #[serde(deserialize_with = "nullable")] stage: Option<Stage>, #[serde(deserialize_with = "nullable")] activity: Option<Activity>,
@@ -936,10 +939,10 @@ struct RecoveryProjectionWire {
 }
 impl TryFrom<ProjectionWire> for Projection { type Error = &'static str;
     fn try_from(value: ProjectionWire) -> Result<Self, Self::Error> { match value {
-        ProjectionWire::Archive(v) if !v.context.recovery() => Ok(Self { operation_id: v.operation_id, owner_generation: v.owner_generation,
+        ProjectionWire::Archive(v) if !v.context.recovery() && (v.agent_ios_archive.is_none() || v.context.operation==Operation::IOSUnsignedArchive) => Ok(Self { agent_ios_archive: v.agent_ios_archive, operation_id: v.operation_id, owner_generation: v.owner_generation,
             context: v.context, phase: v.phase, intent_usable: v.intent_usable, outcome: v.outcome, reason: v.reason, stage: v.stage,
             activity: v.activity, disposition: v.disposition, result: v.result, report: None }),
-        ProjectionWire::Recovery(v) if v.context.recovery() => Ok(Self { operation_id: v.operation_id, owner_generation: v.owner_generation,
+        ProjectionWire::Recovery(v) if v.context.recovery() => Ok(Self { agent_ios_archive:None, operation_id: v.operation_id, owner_generation: v.owner_generation,
             context: v.context, phase: v.phase, intent_usable: v.intent_usable, outcome: v.outcome, reason: v.reason, stage: v.stage,
             activity: v.activity, disposition: None, result: None, report: v.report }),
         _ => Err("wrong iOS status mode"),
@@ -947,6 +950,7 @@ impl TryFrom<ProjectionWire> for Projection { type Error = &'static str;
 }
 impl Serialize for Projection { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
     use serde::ser::Error;
+    if self.agent_ios_archive.is_some() && self.context.operation!=Operation::IOSUnsignedArchive {return Err(S::Error::custom("wrong agent archive mode"));}
     if self.context.recovery() {
         if self.disposition.is_some() || self.result.is_some() { return Err(S::Error::custom("wrong recovery status fields")); }
         RecoveryProjectionWire { operation_id: self.operation_id.clone(), owner_generation: self.owner_generation.clone(), context: self.context.clone(),
@@ -954,12 +958,13 @@ impl Serialize for Projection { fn serialize<S: serde::Serializer>(&self, serial
             activity: self.activity.clone(), report: self.report.clone() }.serialize(serializer)
     } else {
         if self.report.is_some() { return Err(S::Error::custom("wrong archive status fields")); }
-        ArchiveProjectionWire { operation_id: self.operation_id.clone(), owner_generation: self.owner_generation.clone(), context: self.context.clone(),
+        ArchiveProjectionWire { agent_ios_archive:self.agent_ios_archive.clone(), operation_id: self.operation_id.clone(), owner_generation: self.owner_generation.clone(), context: self.context.clone(),
             phase: self.phase, intent_usable: self.intent_usable, outcome: self.outcome, reason: self.reason, stage: self.stage,
             activity: self.activity.clone(), disposition: self.disposition.clone(), result: self.result.clone() }.serialize(serializer)
     }
 } }
 impl Projection { fn valid(&self) -> bool {
+    if self.agent_ios_archive.is_some() && self.context.operation!=Operation::IOSUnsignedArchive {return false;}
     if !token(&self.operation_id) || !token(&self.owner_generation) || !self.context.valid()
         ||self.context.candidate()&&!crate::android_build_protocol::candidate_id(&self.operation_id)
         || self.stage.is_some_and(|stage| !stage.valid(&self.context))
@@ -1119,7 +1124,7 @@ pub(crate) mod tests {
     #[test]
     fn native_status_cannot_publish_a_provisional_result_or_foreign_retained_path() {
         let complete = check(&complete()).unwrap();
-        let mut projection = Projection { operation_id:"a".repeat(32),owner_generation:"b".repeat(32),context:context(),
+        let mut projection = Projection { agent_ios_archive:None, operation_id:"a".repeat(32),owner_generation:"b".repeat(32),context:context(),
             phase:Phase::Terminal,intent_usable:false,outcome:Some(Outcome::Complete),reason:Reason::None,stage:Some(Stage::DisposingWork),
             activity:Some(complete.activity),disposition:complete.disposition,result:complete.result,report:None };
         assert!(projection.valid());
@@ -1471,7 +1476,7 @@ pub(crate) mod tests {
         value["report"]["account"] = json!({"status":"recovered","session":"c".repeat(32),"next":"none"});
         assert!(terminal(&value,&action,&"a".repeat(32)).is_ok());
         value["report"]["account"]["session"] = json!("d".repeat(32)); assert!(terminal(&value,&action,&"a".repeat(32)).is_err());
-        let projection = Projection { operation_id:"a".repeat(32),owner_generation:"b".repeat(32),context:context.clone(),
+        let projection = Projection { agent_ios_archive:None, operation_id:"a".repeat(32),owner_generation:"b".repeat(32),context:context.clone(),
             phase:Phase::Terminal,intent_usable:false,outcome:Some(Outcome::Complete),reason:Reason::None,stage:Some(Stage::DisposingWork),
             activity:Some(accepted.activity),disposition:None,result:None,report:accepted.report };
         let status = Status { schema_version:STATUS_SCHEMA_VERSION,status_revision:1,availability:Availability::Available,

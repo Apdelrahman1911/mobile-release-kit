@@ -1622,6 +1622,42 @@ async fn revoke_agent_android_build(webview: Webview, request: tauri::ipc::Reque
     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Android builds are not supported on this platform.")) }
 }
 #[tauri::command]
+async fn agent_ios_archive_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_ios_archive_access(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent iOS archives are not supported on this platform.")) }
+}
+#[tauri::command]
+async fn allow_agent_ios_archive(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let args: crate::asset_session::agent_ios_archive::Allow = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.allow_agent_ios_archive(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent iOS archives are not supported on this platform.")) }
+}
+#[tauri::command]
+async fn revoke_agent_ios_archive(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_ios_archive(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent iOS archives are not supported on this platform.")) }
+}
+#[tauri::command]
 async fn agent_identity_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
@@ -2800,6 +2836,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if !preflight_relay_failed { document.service_local_checks_tick(); }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             if !android_build_relay_failed { document.service_android_builds_tick(); }
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if !ios_archive_relay_failed { document.service_ios_archives_tick(); }
             // status() releases its native locks before any renderer callback.
             // Events are best effort: the UI subscribes then fetches status and
             // orders both by native revision, never by arrival time.
@@ -3197,6 +3235,8 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
                     // A history error remains in Host custody; cleanup MUST run.
                     document.drain_local_checks_for_exit();
                     document.drain_android_builds_for_exit();
+                    #[cfg(any(target_os="linux",target_os="macos"))]
+                    document.drain_ios_archives_for_exit();
                     app.state::<ShellState>().bridge.application_service.drain_identity_history_for_exit();
                     let report = app.state::<ShellState>().bridge.application_service.shutdown().await;
                     if !report.settled() || !document.can_exit() {
@@ -4660,6 +4700,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             agent_identity_status, allow_agent_identity, revoke_agent_identity, decline_agent_identity, review_agent_identity, prepare_agent_identity, apply_agent_identity,
             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
+            agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
             reveal_installation, installation_status, inspect_installation, cancel_installation,
             installation_preparation_status, prepare_installation_quit,
             choose_project, choose_project_path, project_snapshot, catalog, environment_requirements, release_version_observe,

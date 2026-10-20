@@ -291,7 +291,7 @@ pub(super) fn data_checks(unsigned: &Snapshot) -> bool {
         let context = pair.legs[i].context.as_ref().unwrap().clone();
         let operation = (if i == 0 { "a" } else { "c" }).repeat(32);
         let generation = (if i == 0 { "b" } else { "d" }).repeat(32);
-        let projection = wire::Projection { operation_id:operation.clone(), owner_generation:generation.clone(), context:context.clone(),
+        let projection = wire::Projection { agent_ios_archive:None, operation_id:operation.clone(), owner_generation:generation.clone(), context:context.clone(),
             phase:wire::Phase::AwaitingConsent, intent_usable:true, outcome:None, reason:wire::Reason::None,
             stage:None, activity:None, disposition:None, result:None, report:None };
         let mut status = wire::Status { schema_version:wire::STATUS_SCHEMA_VERSION,status_revision:1+i as u32*3,availability:wire::Availability::Busy,

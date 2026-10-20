@@ -1,3 +1,4 @@
+import {sameAgentIOSArchiveOrigin,validAgentIOSArchiveOrigin} from './agentIOSArchiveOrigin.ts';
 // Strict renderer DATA for the original unsigned/signed iOS archive owner. Raw native
 // decoding and original final joins remain native responsibilities. No status,
 // path label or signature-like field can authorize execution or publication.
@@ -432,7 +433,8 @@ function operation(value: unknown): value is IOSArchiveOperation {
       !(value.stage === null || oneOf(value.stage, iosArchiveStages(value.context)))) return false;
   if (value.context.operation === 'ios-local-recovery') return recoveryOperation(value, value.context);
   if (value.context.operation === 'ios-signing-inputs-check') return signingCheckOperation(value, value.context);
-  if (!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result']) ||
+  if (!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result', ...(Object.hasOwn(value,'agentIosArchive') ? ['agentIosArchive'] : [])]) ||
+      Object.hasOwn(value,'agentIosArchive') && (value.context.operation !== 'ios-unsigned-archive' || !validAgentIOSArchiveOrigin(value.agentIosArchive)) ||
       !(value.activity === null || activity(value.activity, value.context)) ||
       !(value.disposition === null || disposition(value.disposition, value.operationId)) ||
       !(value.result === null || (value.context.operation === 'ios-candidate-inputs' ? candidateResult(value.result, value.context, value.operationId) : result(value.result, value.context, value.operationId)))) return false;
@@ -481,7 +483,7 @@ export function sameIOSArchiveIdentity(a: IOSArchiveIdentity | null, b: IOSArchi
   return !!a && !!b && a.operationId === b.operationId && a.ownerGeneration === b.ownerGeneration;
 }
 export function iosArchiveOperationProgress(a: IOSArchiveOperation, b: IOSArchiveOperation): boolean {
-  if (!sameIOSArchiveIdentity(a, b) || !sameIOSArchiveData(a.context, b.context)) return false;
+  if (!sameIOSArchiveIdentity(a, b) || !sameIOSArchiveData(a.context, b.context) || !sameAgentIOSArchiveOrigin(a.agentIosArchive,b.agentIosArchive)) return false;
   if (a.phase === 'terminal') return sameIOSArchiveData(a, b);
   if (a.phase === 'unknown' && b.phase !== 'unknown' || !a.intentUsable && b.intentUsable) return false;
   const stageIndex = (stage: IOSArchiveStage | null) => stage === null ? -1 : iosArchiveStages(a.context).indexOf(stage);

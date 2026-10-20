@@ -91,6 +91,7 @@ export interface IOSRecoveryReport { schemaVersion: 1; scope: 'local-ios-recover
 export interface IOSRecoveryActivity { stage: IOSRecoveryStage }
 // This is original native Status, not the provisional Python core terminal.
 interface IOSArchiveOperationBase extends IOSArchiveIdentity {
+  readonly agentIosArchive?: import('./agentIOSArchiveOrigin.ts').AgentIOSArchiveOrigin;
   phase: IOSArchivePhase; intentUsable: boolean; outcome: IOSArchiveOutcome | null; reason: IOSArchiveReason; stage: IOSArchiveStage | null;
 }
 export interface IOSArchiveBuildOperation extends IOSArchiveOperationBase {

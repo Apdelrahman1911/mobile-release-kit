@@ -111,7 +111,7 @@ impl DocumentBinding {
             return Err(BridgeError::invalid());
         }
         match self.agent_android_service()? {
-            Some(s) => s.android_builds().access().map_err(public),
+            Some(s) => s.build_requests().access(agent::FAMILY).map_err(public),
             None => Ok(empty()),
         }
     }
@@ -174,7 +174,7 @@ impl DocumentBinding {
             .identity_request_service(&native)
             .map_err(public)?;
         let point = service
-            .android_build_point(&native.runtime_id)
+            .build_point_for_runtime(&native.runtime_id)
             .map_err(public)?;
         let scope = Arc::new(agent::NativeScope {
             project_id: point.project_id.clone(),
@@ -186,7 +186,7 @@ impl DocumentBinding {
             input_revision: native.input_revision,
             document: Arc::downgrade(&self.inner.session_identity),
             observation_revision: point.revision,
-            review: approval.review().clone(),
+            review: approval.review().clone().into(),
             draft_revision: approval.input().draft_revision,
             baseline_generation: approval.input().baseline_generation,
             changes: self.inner.changes.clone(),
@@ -234,7 +234,7 @@ impl DocumentBinding {
         }
         // Same Doc guard linearizes first-Allow against Revoke. Inbox is only
         // bounded memory, and has no reverse callback into this document.
-        let access = service.android_builds().allow(scope).map_err(public)?;
+        let access = service.build_requests().allow(scope).map_err(public)?;
         state.agent_android_build_grant = Some(grant);
         Ok(access)
     }
@@ -252,7 +252,7 @@ impl DocumentBinding {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |e| e.checked_add(1))
             .map_err(|_| public(Error::StateUnknown));
         let revoked = match self.agent_android_service() {
-            Ok(Some(s)) => s.android_builds().revoke().map_err(public),
+            Ok(Some(s)) => s.build_requests().revoke(agent::FAMILY).map_err(public),
             Ok(None) => Ok(empty()),
             Err(e) => Err(e),
         };
@@ -264,6 +264,7 @@ impl DocumentBinding {
         entry: &Arc<agent::Entry>,
         kind: agent::ClaimKind,
     ) -> Result<(), BridgeError> {
+        if entry.family() != agent::FAMILY { return Err(public(Error::Conflict)); }
         let grant = {
             let state = self.lock();
             state
@@ -287,7 +288,7 @@ impl DocumentBinding {
                 if !entry.prepare_live()
                     || !entry.scope().matches(
                         &service
-                            .android_build_point(&grant.native.runtime_id)
+                            .build_point_for_runtime(&grant.native.runtime_id)
                             .map_err(public)?,
                     )
                 {
@@ -302,7 +303,7 @@ impl DocumentBinding {
                 // stale BEFORE possible build effects. A later known refusal
                 // may leave it stale; it never claims the build was executed.
                 service
-                    .consume_android_build_observation(entry.scope())
+                    .consume_build_observation(entry.scope())
                     .map_err(public)?;
             }
         }
@@ -370,7 +371,7 @@ impl DocumentBinding {
             self.agent_android_current(&state, &grant, &edit, registration, &root)
         })();
         if current.is_err() {
-            let _ = service.android_builds().revoke();
+            let _ = service.build_requests().revoke(agent::FAMILY);
         }
     }
     /// Called by the already-retained relay, never by an IPC worker or a new task.
@@ -379,33 +380,33 @@ impl DocumentBinding {
             return;
         };
         self.revoke_stale_agent_android(&service);
-        match service.android_builds().claim() {
+        match service.build_requests().claim(agent::FAMILY) {
             Ok(Some(claim)) => {
                 let result = self.admit_agent_android_build(&service, claim.entry(), claim.kind());
                 claim.returned(result.is_ok());
             }
             Ok(None) => {}
             Err(_) => {
-                let _ = service.android_builds().revoke();
+                let _ = service.build_requests().revoke(agent::FAMILY);
             }
         }
-        let _ = flush(&service);
+        let _ = flush(&service, agent::FAMILY);
     }
     pub(crate) fn agent_android_builds_relay_lost(&self) {
         if let Ok(Some(s)) = self.agent_android_service() {
-            let _ = s.android_builds().revoke();
+            let _ = s.build_requests().revoke(agent::FAMILY);
         }
     }
     /// After all original domain owners AND this same relay joined. Never
     /// dispatch remaining queued Prepare/Start to clear a shutdown inbox.
     pub(crate) fn drain_android_builds_for_exit(&self) {
         if let Ok(Some(s)) = self.agent_android_service() {
-            s.android_builds().close();
-            let _ = flush(&s);
+            s.build_requests().close();
+            let _ = flush(&s, agent::FAMILY);
         }
     }
 }
-fn flush(service: &ApplicationService) -> Result<(), Error> {
+pub(super) fn flush(service: &ApplicationService, family: crate::agent_build_requests::Family) -> Result<(), Error> {
     struct Returned<'a> {
         service: &'a ApplicationService,
         known: bool,
@@ -422,7 +423,7 @@ fn flush(service: &ApplicationService) -> Result<(), Error> {
         known: false,
     };
     let mut failed = None;
-    for entry in service.android_builds().entries()? {
+    for entry in service.build_requests().entries(family)? {
         let claimed = match entry.claim_history() {
             Ok(v) => v,
             Err(e) => {
@@ -436,21 +437,21 @@ fn flush(service: &ApplicationService) -> Result<(), Error> {
         let result = if first {
             service.begin_operation(
                 &entry.scope().runtime_id,
-                data.operation_id.clone(),
+                data.operation_id().clone(),
                 Action::Build,
-                data.state,
-                data.settlement,
+                data.state(),
+                data.settlement(),
             )
         } else {
             service.publish_operation(
                 &entry.scope().runtime_id,
-                data.operation_id.clone(),
+                data.operation_id().clone(),
                 Action::Build,
-                data.state,
-                data.settlement,
+                data.state(),
+                data.settlement(),
             )
         };
-        if let Err(e) = entry.history_returned(data.status_revision, result) {
+        if let Err(e) = entry.history_returned(data.status_revision(), result) {
             failed.get_or_insert(e);
         }
     }
