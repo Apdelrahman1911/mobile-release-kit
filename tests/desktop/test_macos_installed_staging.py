@@ -7638,7 +7638,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                                  ["--message-format=json-render-diagnostics"])
                 self.assertEqual((build_options["timeout"], build_options["capture"],
                                   build_options["text"], build_options["output_limit"]),
-                                 (720 if build_target == module.INTEL_TARGET else 480, True, False, 4 * 1024 * 1024))
+                                 (720 if build_target == module.INTEL_TARGET else 1200, True, False, 4 * 1024 * 1024))
                 diagnostic = b"warning: synthetic helper build diagnostic\n"
                 self.assertEqual((work / "android-helper-build.stderr").read_bytes(), diagnostic)
                 self.assertEqual(receipt["originalCalls"][build_index]["stderrSha256"], module.digest(diagnostic))
