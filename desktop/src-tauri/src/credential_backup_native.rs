@@ -11,6 +11,9 @@
 //! No public route/qualification is enabled by these internal adapters.
 use super::*;
 use crypto::backup;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[path = "credential_upload_key_backup_observation.rs"]
+pub(in crate::asset_session) mod installed;
 
 const ARC_BYTES: usize = 2 * std::mem::size_of::<usize>();
 // Future SourceBook/roster/control allocations are not present in the initial

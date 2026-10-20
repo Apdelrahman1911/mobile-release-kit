@@ -8,6 +8,8 @@ use std::sync::Mutex;
 use tauri::Manager;
 #[path = "installed_shell_observation_macos_upload_key_restart.rs"]
 pub(crate) mod restart;
+#[path = "installed_shell_observation_macos_upload_key_backup.rs"]
+pub(crate) mod backup;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Case {
@@ -16,9 +18,10 @@ pub(crate) enum Case {
     StopAfterNew,
     ColdProduce,
     ColdReopen,
+    BackupRoundTrip,
 }
 impl Case {
-    pub(super) const ALL: [Self; 5] = [Self::RoundTrip, Self::StopBeforeGo, Self::StopAfterNew, Self::ColdProduce, Self::ColdReopen];
+    pub(super) const ALL: [Self; 6] = [Self::RoundTrip, Self::StopBeforeGo, Self::StopAfterNew, Self::ColdProduce, Self::ColdReopen, Self::BackupRoundTrip];
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::RoundTrip => "upload-key-roundtrip",
@@ -26,12 +29,13 @@ impl Case {
             Self::StopAfterNew => "upload-key-stop-after-new",
             Self::ColdProduce => "upload-key-cold-produce",
             Self::ColdReopen => "upload-key-cold-reopen",
+            Self::BackupRoundTrip => backup::SCOPE,
         }
     }
     pub(crate) fn fixture_name(self) -> &'static str {
         if matches!(self, Self::ColdProduce | Self::ColdReopen) { restart::SCOPE } else { self.name() }
     }
-    fn positive(self) -> bool { matches!(self, Self::RoundTrip | Self::ColdProduce) }
+    fn positive(self) -> bool { matches!(self, Self::RoundTrip | Self::ColdProduce | Self::BackupRoundTrip) }
     pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -108,6 +112,7 @@ impl Action {
     }
     fn allowed(self, case: Case) -> bool {
         if case == Case::ColdReopen { return false; }
+        if case == Case::BackupRoundTrip { return matches!(self, Self::Context|Self::Refresh|Self::Recover|Self::Select|Self::Saved|Self::Prepare|Self::Create|Self::RefuseRepeat|Self::Missing); }
         match self {
             Self::RecoverySaved | Self::RecoveryPrepare | Self::AcknowledgeUnstarted | Self::RecoveredRelock => case == Case::StopBeforeGo,
             Self::Read => case != Case::StopBeforeGo,
@@ -126,6 +131,7 @@ pub(crate) struct Flow {
     next: AtomicU8,
     pub(crate) trace: Mutex<InstalledUploadTrace>,
     pub(crate) cold: restart::Flow,
+    pub(crate) backup: backup::Flow,
 }
 impl Flow {
     pub(crate) fn case(&self, case: super::Case) -> Option<Case> {
@@ -176,12 +182,14 @@ impl Flow {
     }
     pub(super) fn finished(&self, case: Case, originals: usize) -> bool {
         if case == Case::ColdReopen { return self.cold.finished(originals); }
+        if case == Case::BackupRoundTrip { let next=self.next.load(Ordering::SeqCst);
+            return originals==4 && next==255 || next==8 && self.backup.finished(originals); }
         let next = self.next.load(Ordering::SeqCst);
         (originals == 4 && next == 255) || match case {
             Case::RoundTrip | Case::ColdProduce => originals == 8 && next == 14,
             Case::StopBeforeGo => originals == 8 && next == 16,
             Case::StopAfterNew => originals == 10 && next == 18,
-            Case::ColdReopen => false,
+            Case::ColdReopen | Case::BackupRoundTrip => false,
         }
     }
 }
@@ -236,6 +244,7 @@ impl Selection {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in super::super) enum Step {
     Cold(restart::Step),
+    Backup(backup::Step),
     Context,
     Refresh,
     Refreshed,
@@ -273,6 +282,7 @@ pub(in super::super) enum Step {
 pub(super) struct Record {
     pub(super) sample: Option<InstalledUploadSample>,
     cold: restart::Record,
+    backup: backup::Record,
     repeated_refused: bool,
     readback: bool,
     acknowledged: bool,
@@ -359,6 +369,7 @@ impl Observation {
     }
     async fn upload_tick(self: &Arc<Self>, document: &DocumentBinding, step: Step) {
         if let Step::Cold(cold) = step { self.cold_tick(document, cold); return; }
+        if let Step::Backup(backup) = step { self.backup_tick(document, backup); return; }
         let Some(control) = &self.vault else {
             self.fail_with("upload-key-original-contract");
             return;
@@ -380,7 +391,7 @@ impl Observation {
                     .map_err(asset)
             };
             Ok(match step {
-                Step::Cold(_) => return Err(BridgeError::invalid()),
+                Step::Cold(_) | Step::Backup(_) => return Err(BridgeError::invalid()),
                 Step::Context => {
                     let project = self
                         .record()
@@ -480,7 +491,7 @@ impl Observation {
                         .ok_or_else(BridgeError::invalid)?
                         .upload
                         .repeated_refused = true;
-                    Some(Step::Lock)
+                    Some(if case == Case::BackupRoundTrip { Step::Backup(backup::Step::Export) } else { Step::Lock })
                 }
                 Step::Lock => {
                     document
@@ -705,6 +716,7 @@ pub(super) fn report(record: &super::Record, control: &Control) -> Option<Value>
     if case == Case::ColdReopen { return restart::report(record, control); }
     let data = &record.upload;
     let not_executed = record.not_executed || data.not_executed;
+    if case == Case::BackupRoundTrip && !not_executed { return backup::report(record, control); }
     if !record.final_originals
         || !control.completed()
         || !record.opened
@@ -805,7 +817,7 @@ pub(super) fn data_checks() -> bool {
     if lost.claim(&document, 4, Some(&root)) || control.upload.finished(Case::RoundTrip, 5) {
         return false;
     }
-    for case in Case::ALL {
+    for case in Case::ALL.into_iter().filter(|case|*case!=Case::BackupRoundTrip) {
         for next in [14, 16, 18, 255] {
             control.upload.next.store(next, Ordering::SeqCst);
             for originals in [4, 5, 7, 8, 9, 10, 11] {
@@ -813,7 +825,7 @@ pub(super) fn data_checks() -> bool {
                     Case::RoundTrip | Case::ColdProduce => originals == 8 && next == 14,
                     Case::StopBeforeGo => originals == 8 && next == 16,
                     Case::StopAfterNew => originals == 10 && next == 18,
-            Case::ColdReopen => false,
+            Case::ColdReopen | Case::BackupRoundTrip => false,
                 });
                 if control.upload.finished(case, originals) != expected { return false; }
             }

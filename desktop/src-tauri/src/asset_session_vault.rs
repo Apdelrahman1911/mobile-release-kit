@@ -25,6 +25,8 @@ pub(crate) use upload_key::{UploadKeyClock, UploadKeyGoGate, PreparedGenerationG
 pub(super) use upload_key::parent_stop as upload_key_parent_stop;
 #[path = "credential_backup_native.rs"]
 mod backup_native;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(in crate::asset_session) use backup_native::installed as installed_backup_observation;
 #[path = "credential_backup_selection.rs"]
 mod backup_selection;
 #[path = "credential_backup_desktop.rs"]
@@ -452,6 +454,8 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
                 if !document.context_matches(state, context).map_err(|error| error.reason)? {
                     return Err(Reason::ContextStale);
                 }
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                backup_native::installed::capture_export(document, state, slot, &work, session)?;
             },
             Staged::UploadKeyRecovered(completion) => {
                 if !upload_key_recovery::publish_allowed(document, state, slot, &work, completion) { return Err(Reason::SourceChanged); }

@@ -81,6 +81,16 @@ pub(crate) struct Trace {
     bound_preference_revision: Option<u64>,
 }
 
+impl Trace {
+    // Nonshipping comparison-only access to the SAME joined generated record;
+    // no private material, new original, assignment or disposal capability.
+    pub(in crate::asset_session) fn generated_reference_data(&self) -> Option<(StoredRef, Arc<OriginalWork>)> {
+        (self.reserved && self.authenticated && self.recorded && self.disposed && self.native_use_retired
+            && self.checkpoint.is_none() && !self.cancelled_disposal)
+            .then(|| Some((self.reference?, self.original.upgrade()?)))?
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Cut {
     BeforeGo,
@@ -147,7 +157,7 @@ impl Sample {
     /// Even an exact checkpoint cannot turn a lost join into a successful test.
     pub(crate) fn stopped_observed(self, case: Case) -> bool {
         let cut = match case {
-            Case::RoundTrip | Case::ColdProduce | Case::ColdReopen => return false,
+            Case::RoundTrip | Case::ColdProduce | Case::ColdReopen | Case::BackupRoundTrip => return false,
             Case::StopBeforeGo => "before-go",
             Case::StopAfterNew => "after-new-before-journal",
         };
@@ -174,7 +184,7 @@ impl Sample {
                 Case::StopAfterNew => {
                     self.authenticated_new && self.producer.is_some_and(ProducerSample::generated)
                 }
-                Case::RoundTrip | Case::ColdProduce | Case::ColdReopen => false,
+                Case::RoundTrip | Case::ColdProduce | Case::ColdReopen | Case::BackupRoundTrip => false,
             }
     }
 }
@@ -356,7 +366,7 @@ pub(super) fn checkpoint(held: &Holding, cut: Cut) -> Result<(), Reason> {
 impl DocumentBinding {
     /// Action selection and root come only from the registered original
     /// observation. Reading this adapter never creates state or authority.
-    fn installed_upload_control(&self) -> Result<Arc<Control>, AssetError> {
+    pub(in crate::asset_session) fn installed_upload_control(&self) -> Result<Arc<Control>, AssetError> {
         let book = self
             .inner
             .installed_macos_session

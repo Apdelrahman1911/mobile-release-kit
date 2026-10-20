@@ -48,6 +48,8 @@ pub(crate) struct BackupSources {
     authentication_started: bool,
     transition_bytes: usize,
     first: Option<Reason>,
+    #[cfg(all(test, debug_assertions))]
+    component_expected: Option<ComponentExpectedPair>,
 }
 
 impl BackupSources {
@@ -65,7 +67,19 @@ impl BackupSources {
             raw: PrivatePair { encrypted: Zeroizing::new(Vec::new()), code: Zeroizing::new(Vec::new()) },
             restored: None, capture_started: false, captured: false,
             authentication_started: false, transition_bytes: 0, first: None,
+            #[cfg(all(test, debug_assertions))]
+            component_expected: None,
         })
+    }
+
+    /// Test-only same-output comparison; no selected-path or native receipt
+    /// can be supplied. All ordinary capture/currentness/cleanup stays below.
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn new_component_restore(pair: ComponentPair) -> Result<Self, Reason> {
+        let (paths, expected) = pair.into_parts();
+        let mut value = Self::new(paths)?;
+        value.component_expected = Some(expected);
+        Ok(value)
     }
 
     fn fail(&mut self, reason: Reason) {
@@ -180,10 +194,17 @@ impl BackupSources {
                 let actual = self.book.directory(*ancestor)?;
                 if root_ids.iter().any(|root| actual.same_object(*root)) { return Err(Reason::ProjectOverlap); }
             }
-            let leaf = self.book.child(*chain.last().ok_or(Reason::SourceRefused)?, name, true, stop)?;
+            let parent = *chain.last().ok_or(Reason::SourceRefused)?;
+            let leaf = self.book.child(parent, name, true, stop)?;
             let file = match self.book.slots[leaf].identity {
                 Some(Identity::File(file)) => file, _ => return Err(Reason::SourceRefused),
             };
+            #[cfg(all(test, debug_assertions))]
+            if self.component_expected.as_ref().is_some_and(|expected|
+                !self.book.directory(parent).is_ok_and(|parent|
+                    expected.matches(index, parent, file))) {
+                return Err(Reason::SourceChanged);
+            }
             let size = usize::try_from(file.size).map_err(|_| Reason::MaterialLimit)?;
             if !input_size(index, size) { return Err(Reason::MaterialLimit); }
             self.book.private_acl(leaf, 0, stop)?;

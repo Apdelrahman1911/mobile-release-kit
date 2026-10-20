@@ -22,7 +22,7 @@ pub(in crate::asset_session) fn cancelled_disposed(held: &Holding, stopped_revis
         || trace.cancelled_disposal || trace.disposed || trace.recorded
     { return; }
     let exact = match case {
-        Case::RoundTrip | Case::ColdProduce | Case::ColdReopen => false,
+        Case::RoundTrip | Case::ColdProduce | Case::ColdReopen | Case::BackupRoundTrip => false,
         Case::StopBeforeGo => trace.checkpoint == Some(Cut::BeforeGo)
             && stopped_revision.is_some_and(|revision| revision > 0)
             && !trace.authenticated && trace.reference.is_none()
@@ -56,7 +56,7 @@ impl Sample {
             && self.parent_ended && !self.document_unknown && self.unassigned
             && !self.recorded && !self.published && self.retained_producer.is_none()
             && match case {
-                Case::RoundTrip | Case::ColdProduce | Case::ColdReopen => false,
+                Case::RoundTrip | Case::ColdProduce | Case::ColdReopen | Case::BackupRoundTrip => false,
                 Case::StopBeforeGo => self.checkpoint == "before-go"
                     && !self.authenticated_new && self.producer.is_none()
                     && self.stopped_preference_revision.is_some_and(|revision| revision > 0),

@@ -12,6 +12,8 @@ pub(crate) use backup_sources::BackupSources;
 #[path = "credential_backup_destinations_macos.rs"]
 mod backup_destinations;
 pub(crate) use backup_destinations::BackupDestinations;
+#[cfg(all(test, debug_assertions))]
+pub(crate) use backup_destinations::{ComponentExpectedPair, ComponentPair};
 #[path = "github_history_sources_macos.rs"]
 mod history_sources;
 pub(crate) use history_sources::HistorySources;

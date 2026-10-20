@@ -12,6 +12,11 @@ use nix::{errno::Errno, unistd::Whence};
 use mrk_macos_installed_native::{self as native, vault_filesystem::{SnapshotBook, Expected,
     Policy, Failure, ObservePhase, SNAPSHOT_FRAME_BYTES}};
 use zeroize::{Zeroize, Zeroizing};
+#[cfg(all(test, debug_assertions))]
+#[path = "credential_backup_component_pair_macos.rs"]
+mod component_pair;
+#[cfg(all(test, debug_assertions))]
+pub(crate) use component_pair::{ComponentExpectedPair, ComponentPair};
 
 const ROOTS: usize = 33;
 const CODE_BYTES: usize = b"mrk-recovery-v1-".len() + 64;

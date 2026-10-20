@@ -17,7 +17,7 @@ impl Case {
         Self::StopAfterAdd => "vault-helper-stop-after-add", Self::UploadKey(case) => case.name(),
     } }
     pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> { Self::ALL.into_iter().find(|c| value == std::ffi::OsStr::new(c.name())).or_else(|| upload_key::Case::parse(value).map(Self::UploadKey)) }
-    pub(crate) fn maximum_original(self) -> u32 { if self == Self::UploadKey(upload_key::Case::ColdReopen) { 6 } else if self == Self::UploadKey(upload_key::Case::StopAfterNew) { 11 } else if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
+    pub(crate) fn maximum_original(self) -> u32 { if self == Self::UploadKey(upload_key::Case::BackupRoundTrip) { 13 } else if self == Self::UploadKey(upload_key::Case::ColdReopen) { 6 } else if self == Self::UploadKey(upload_key::Case::StopAfterNew) { 11 } else if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

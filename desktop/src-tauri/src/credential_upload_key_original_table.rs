@@ -44,6 +44,20 @@ pub(in crate::asset_session) fn original_allowed(
             RecoverUploadKey,
         ],
         Case::ColdReopen => &[ChooseProject, OpenVault, Unlock, Prepare, Bind],
+        Case::BackupRoundTrip => &[
+            ChooseProject,
+            OpenVault,
+            PrepareInitialize,
+            Initialize,
+            GenerateUploadKey,
+            PrepareBackupExport,
+            OpenVault,
+            PrepareInitialize,
+            Initialize,
+            ImportBackup,
+            Prepare,
+            Bind,
+        ],
     };
     // None is the existing ordinary Quit original, including known-safe early
     // Quit after a refused journey. It is never a new execution/cleanup right;
@@ -62,6 +76,53 @@ pub(in crate::asset_session) fn original_allowed(
 mod tests {
     use super::*;
     use Operation::*;
+
+    #[test]
+    fn backup_roundtrip_registers_only_its_actual_export_new_import_and_bind() {
+        let route = [
+            ChooseProject,
+            OpenVault,
+            PrepareInitialize,
+            Initialize,
+            GenerateUploadKey,
+            PrepareBackupExport,
+            OpenVault,
+            PrepareInitialize,
+            Initialize,
+            ImportBackup,
+            Prepare,
+            Bind,
+        ];
+        for (index, operation) in route.into_iter().enumerate() {
+            let id = index as u32 + 1;
+            assert!(original_allowed(Case::BackupRoundTrip, id, Some(operation)));
+            assert!(!original_allowed(Case::BackupRoundTrip, id + 1, Some(operation)));
+        }
+        for case in [
+            Case::RoundTrip,
+            Case::ColdProduce,
+            Case::ColdReopen,
+            Case::StopBeforeGo,
+            Case::StopAfterNew,
+        ] {
+            assert!(!original_allowed(case, 6, Some(PrepareBackupExport)));
+            assert!(!original_allowed(case, 10, Some(ImportBackup)));
+            assert!(!original_allowed(case, 12, Some(Bind)));
+        }
+        for id in 1..=13 {
+            for operation in [ChooseFile, Unlock, Commit, RecoverUploadKey] {
+                assert!(!original_allowed(Case::BackupRoundTrip, id, Some(operation)));
+            }
+        }
+        for id in 2..=13 {
+            assert!(original_allowed(Case::BackupRoundTrip, id, None));
+        }
+        for id in [0, 1, 14, u32::MAX] {
+            assert!(!original_allowed(Case::BackupRoundTrip, id, None));
+        }
+        // Comparison DATA cannot register an original or supply any close,
+        // picker, write, Load or Bind receipt. Actual SessionBook gates remain.
+    }
 
     #[test]
     fn each_existing_upload_journey_registers_its_actual_service_operations() {

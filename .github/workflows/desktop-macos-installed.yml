@@ -2330,10 +2330,10 @@ jobs:
           # Separate source/cache originals per case; existing2400s bounds do
           # not renew. Unknown stops the driver and preserves exact originals.
           exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-setup
-      - name: Verify generated upload-key reuse and both cancellation recovery paths
+      - name: Verify upload-key reuse, cancellation, cold restart and backend backup
         id: upload_key_native
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.tool_native.outcome == 'success'
-        timeout-minutes: 30
+        timeout-minutes: 60
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -2341,13 +2341,19 @@ jobs:
           set -euo pipefail
           umask 077
           ulimit -c 0
-          # Reuse the same installed observer and freshly registered tools.
-          # Each existing case has its own private namespace and unchanged
-          # 495s original caller. A failure or unexecuted78 stops this step;
-          # never retry, combine reports or turn an unknown into completion.
+          # Same installed observer, protected catalogue and original owners;
+          # no second package/build/sign/install or shipping availability change.
+          # Old3 + ColdA's two genuine processes + backend-backup1 = six495s
+          # original callers (49.5min maxima); this60min step only contains them.
+          # All per-case clocks and the350min job cap stay fixed; no fit claim.
+          # Nonzero/unexecuted78 stops later scopes; never retry or clear unknown.
+          # ColdA owns its returned first-process/private-readback/POST gate.
+          # Backup has real native sinks/NEW/Bind, NOT picker or crash coverage.
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-roundtrip
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-stop-before-go
-          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-stop-after-new
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-stop-after-new
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-cold-restart
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-backup-roundtrip
       - name: Verify credential continuity and owned-record deletion on P1
         id: update_p1_credentials
         if: github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success'
