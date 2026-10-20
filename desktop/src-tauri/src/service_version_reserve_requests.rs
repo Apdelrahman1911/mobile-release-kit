@@ -490,6 +490,37 @@ impl Inbox {
             Error::StateUnknown
         })
     }
+    /// Discovery does not sample status, expire grants or stop a reservation.
+    pub(crate) fn catalogue_requests(
+        &self,
+        instance: &Id,
+        project: &Id,
+    ) -> Result<Vec<crate::service_request_catalogue::AdditionalRequest>, Error> {
+        use crate::service_request_catalogue::{AdditionalFamily, AdditionalRequest};
+        let book = self.lock()?;
+        if book.closed {
+            return Err(Error::Unavailable);
+        }
+        if &self.instance != instance || book.entries.len() > p::REQUEST_LIMIT {
+            return Err(Error::StateUnknown);
+        }
+        let mut rows = Vec::with_capacity(book.entries.len());
+        for entry in &book.entries {
+            if &entry.input.origin.service_instance != instance {
+                return Err(Error::StateUnknown);
+            }
+            if &entry.input.origin.project_id == project {
+                rows.push(AdditionalRequest {
+                    family: AdditionalFamily::VersionReservation,
+                    request_id: entry.input.origin.request_id.clone(),
+                });
+            }
+        }
+        if self.failed.load(Ordering::Acquire) {
+            return Err(Error::StateUnknown);
+        }
+        Ok(rows)
+    }
     /// READ-Allow captures this BEFORE its IO-capable Service lock. It is
     /// comparison DATA, not read consent or a native Reserve grant.
     pub(crate) fn read_permission_epoch(&self) -> Result<u64, Error> {
