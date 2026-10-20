@@ -5,6 +5,8 @@
 //! The reviewed caller supplies one fresh empty private APFS directory and
 //! cleans only that directory after the exact test process has joined.
 use super::*;
+#[path = "credential_apple_key_component_macos.rs"]
+mod apple_key;
 use std::{
     fs::{self, DirBuilder, OpenOptions},
     io::{Read, Write},
@@ -25,6 +27,7 @@ const FIXTURE_CONTROL: usize = 2 * 1024 * 1024;
 struct Vault {
     store: Arc<Mutex<store::StoreBook>>,
     key: Arc<crypto::VaultKey>,
+    header: [u8; format::HEADER_BYTES],
 }
 
 fn empty_directory(parent: &Path, name: &str) -> Result<PathBuf, Reason> {
@@ -107,6 +110,7 @@ fn initialize(parent: &Path, id: u32) -> Result<Vault, Reason> {
     Ok(Vault {
         store: Arc::new(Mutex::new(book)),
         key: Arc::new(key),
+        header,
     })
 }
 
