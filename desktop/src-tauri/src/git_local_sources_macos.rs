@@ -1,0 +1,541 @@
+//! Fixed GitLocal child of the EXISTING SourceBook/Account/SnapshotBook.
+//! No separate native IO executor. Original old index/ref descriptors survive
+//! their exact acknowledged replacement and receive their original sole close.
+//! A parsed child result or candidate alone never enables a source exception.
+use super::*;
+use crate::git_local_protocol as wire;
+use crate::supervisor::GitLocalPublication;
+use mrk_macos_installed_native::{
+    local_account::Account,
+    vault_filesystem::{Expected, Failure, Policy, SnapshotBook},
+};
+use sha2::{Digest, Sha256};
+use std::time::Instant;
+use zeroize::Zeroizing;
+
+const SOURCE_LIMIT: usize = 128;
+struct RefEdge {
+    parent: usize,
+    name: Vec<u8>,
+    original: Option<(usize, wire::Snapshot)>,
+}
+struct Replacement {
+    old: Option<usize>,
+    old_snapshot: Option<wire::Snapshot>,
+    successor: usize,
+    successor_snapshot: wire::Snapshot,
+    intent: wire::Intent,
+}
+// Only the metadata part of the receipt-bound exception. This does not mint
+// a replacement: the actual retained old FD and both byte hashes are still
+// checked by snapshot_original/post_inner and closed by the original Book.
+fn unlinked_original(current:FileIdentity,original:FileIdentity,successor:FileIdentity,flags:u64)->bool {
+    current.common==original.common && current.nlink==0 && current.size==original.size
+        && current.mtime==original.mtime && flags==0
+        && (successor.common.dev!=current.common.dev || successor.common.ino!=current.common.ino)
+}
+pub(crate) struct GitLocalSources {
+    book: SourceBook,
+    account: Account,
+    acl: Option<SnapshotBook>,
+    acl_entered: bool,
+    started: bool,
+    finished: bool,
+    close_failed: bool,
+    first: Option<Reason>,
+    native: Option<wire::Native>,
+    git: Option<usize>,
+    indices: [Option<usize>; 4],
+    operation_id: Option<String>,
+    review: Option<wire::Review>,
+    reference: Option<RefEdge>,
+    replacement: Option<Replacement>,
+    post_claimed: bool,
+}
+impl Drop for GitLocalSources {
+    fn drop(&mut self) {
+        // Defensive retention only, never a successful closure or retry route.
+        if !self.book.settled() {
+            let book = std::mem::replace(&mut self.book, SourceBook::new());
+            std::mem::forget(book);
+        }
+    }
+}
+impl GitLocalSources {
+    pub(crate) fn new() -> Self {
+        Self {
+            book: SourceBook::new(),
+            account: Account::new(),
+            acl: None,
+            acl_entered: false,
+            started: false,
+            finished: false,
+            close_failed: false,
+            first: None,
+            native: None,
+            git: None,
+            indices: [None; 4],
+            operation_id: None, review: None, reference: None, replacement: None,
+            post_claimed: false,
+        }
+    }
+    pub(crate) fn not_started(&self) -> bool {
+        !self.started && !self.finished && !self.acl_entered && self.acl.is_none() && self.book.not_started()
+    }
+    pub(crate) fn working_bytes() -> Option<usize> {
+        SOURCE_LIMIT
+            .checked_mul(std::mem::size_of::<Descriptor>() + 255)?
+            .checked_add(std::mem::size_of::<Self>() + 65536 + 5 * PATH_LIMIT + 4096)?
+            .checked_add(mrk_macos_installed_native::vault_filesystem::SNAPSHOT_FRAME_BYTES)
+    }
+    pub(crate) fn first_failure(&self) -> Option<(Failure, Instant)> {
+        self.acl.as_ref().and_then(SnapshotBook::first_failure)
+    }
+    pub(crate) fn mark_interrupted(&mut self) {
+        self.first.get_or_insert(Reason::CleanupUnknown);
+        self.close_failed = true;
+    }
+    fn remember<T>(&mut self, result: Result<T, Reason>) -> Result<T, Reason> {
+        if let Err(reason) = &result {
+            self.first.get_or_insert(*reason);
+        }
+        result
+    }
+    fn file(
+        &mut self,
+        parent: usize,
+        name: &[u8],
+        uid: u32,
+        maximum: u64,
+        executable: bool,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> Result<usize, Reason> {
+        checkpoint(stop)?;
+        let index = self.book.reserve(Some(parent), name)?;
+        let before = stat::fstatat(self.book.fd(parent)?, OsStr::from_bytes(name), AtFlags::AT_SYMLINK_NOFOLLOW)
+            .map_err(|_| Reason::SourceRefused)?;
+        checkpoint(stop)?;
+        let expected = file_identity(&before)?;
+        if expected.common.uid != uid
+            || expected.nlink != 1
+            || expected.common.mode & 0o7022 != 0
+            || expected.size > maximum
+            || executable && (expected.size == 0 || expected.common.mode & 0o111 == 0)
+            || before.st_flags != 0
+        {
+            return Err(Reason::SourceRefused);
+        }
+        self.book.slots[index].state = OriginalState::Acquiring;
+        let opened = fcntl::openat(
+            self.book.fd(parent)?,
+            OsStr::from_bytes(name),
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+            Mode::empty(),
+        );
+        self.book.adopt(index, opened)?;
+        checkpoint(stop)?;
+        filesystem(self.book.fd(index)?, stop)?;
+        let held = stat::fstat(self.book.fd(index)?).map_err(|_| Reason::SourceChanged)?;
+        checkpoint(stop)?;
+        let named = stat::fstatat(self.book.fd(parent)?, OsStr::from_bytes(name), AtFlags::AT_SYMLINK_NOFOLLOW)
+            .map_err(|_| Reason::SourceChanged)?;
+        checkpoint(stop)?;
+        if file_identity(&held)? != expected || file_identity(&named)? != expected {
+            return Err(Reason::SourceChanged);
+        }
+        self.book.slots[index].identity = Some(Identity::File(expected));
+        Ok(index)
+    }
+    fn snapshot(&self, index: usize, maximum: u64, stop: &mut dyn FnMut() -> bool) -> Result<wire::Snapshot, Reason> {
+        checkpoint(stop)?;
+        let expected = match self.book.slots[index].identity {
+            Some(Identity::File(value)) => value,
+            _ => return Err(Reason::SourceChanged),
+        };
+        self.snapshot_identity(index, expected, maximum, stop)
+    }
+    fn snapshot_identity(&self, index: usize, expected: FileIdentity, maximum: u64,
+        stop: &mut dyn FnMut() -> bool) -> Result<wire::Snapshot, Reason> {
+        checkpoint(stop)?;
+        if expected.size > maximum {
+            return Err(Reason::Capacity);
+        }
+        let held = stat::fstat(self.book.fd(index)?).map_err(|_| Reason::SourceChanged)?;
+        checkpoint(stop)?;
+        if file_identity(&held)? != expected {
+            return Err(Reason::SourceChanged);
+        }
+        let nanos = |v: (i64, i64)| -> Result<i64, Reason> {
+            if !(0..1_000_000_000).contains(&v.1) {
+                return Err(Reason::SourceRefused);
+            }
+            v.0.checked_mul(1_000_000_000)
+                .and_then(|s| s.checked_add(v.1))
+                .ok_or(Reason::SourceRefused)
+        };
+        unistd::lseek(self.book.fd(index)?, 0, unistd::Whence::SeekSet).map_err(|_| Reason::SourceRefused)?;
+        let mut buffer = Zeroizing::new([0u8; 32768]);
+        let mut hash = Sha256::new();
+        let mut count = 0u64;
+        loop {
+            checkpoint(stop)?;
+            let count_now = unistd::read(self.book.fd(index)?, &mut buffer[..]).map_err(|_| Reason::SourceRefused)?;
+            checkpoint(stop)?;
+            if count_now == 0 {
+                break;
+            }
+            count = count.checked_add(count_now as u64).ok_or(Reason::Capacity)?;
+            if count > expected.size {
+                return Err(Reason::SourceChanged);
+            }
+            hash.update(&buffer[..count_now]);
+        }
+        let after = stat::fstat(self.book.fd(index)?).map_err(|_| Reason::SourceChanged)?;
+        checkpoint(stop)?;
+        if count != expected.size || file_identity(&after)? != expected {
+            return Err(Reason::SourceChanged);
+        }
+        Ok(wire::Snapshot {
+            identity: (
+                expected.common.dev,
+                expected.common.ino,
+                expected.common.mode,
+                expected.common.uid,
+                expected.common.gid,
+                expected.nlink,
+                expected.size,
+                nanos(expected.mtime)?,
+                nanos(expected.ctime)?,
+            ),
+            sha256: hash.finalize().iter().map(|b| format!("{b:02x}")).collect(),
+        })
+    }
+    fn capture_reference(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+        let review = self.review.as_ref().ok_or(Reason::SourceRefused)?;
+        let name = review.branch.as_deref().ok_or(Reason::SourceRefused)?;
+        if !crate::git_read_protocol::branch(name) || name.split('/').count() > 32 {
+            return Err(Reason::SourceRefused);
+        }
+        let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
+        let sha = |bytes: &[u8]| -> String { Sha256::digest(bytes).iter().map(|b|format!("{b:02x}")).collect() };
+        if native.files.head.sha256 != sha(format!("ref: {name}\n").as_bytes()) {
+            return Err(Reason::SourceChanged);
+        }
+        let uid = native.uid;
+        let expected = review.head.as_ref().map(|head| sha(format!("{head}\n").as_bytes()));
+        let parts: Vec<Vec<u8>> = name.split('/').map(|v|v.as_bytes().to_vec()).collect();
+        let mut parent = self.git.ok_or(Reason::SourceChanged)?;
+        // Initial slice needs existing physical ref parents. Ordinary unborn
+        // repositories have refs/heads; no invented ref resolver or creation.
+        for part in &parts[..parts.len()-1] { parent = self.book.child(parent, part, false, stop)?; }
+        let leaf = parts.last().ok_or(Reason::SourceRefused)?.clone();
+        checkpoint(stop)?;
+        let original = match stat::fstatat(self.book.fd(parent)?, OsStr::from_bytes(&leaf), AtFlags::AT_SYMLINK_NOFOLLOW) {
+            Err(nix::errno::Errno::ENOENT) => None,
+            Ok(_) => {
+                let index = self.file(parent, &leaf, uid, 65, false, stop)?;
+                let snapshot = self.snapshot(index, 65, stop)?;
+                if expected.as_ref() != Some(&snapshot.sha256) { return Err(Reason::SourceChanged); }
+                Some((index, snapshot))
+            }
+            Err(_) => return Err(Reason::SourceRefused),
+        };
+        // Absent loose ref can be unborn or packed. Git's fixed expected-old
+        // CAS and original frozen/core inventory still decide its semantics.
+        self.reference = Some(RefEdge { parent, name:leaf, original });
+        checkpoint(stop)
+    }
+
+    fn old_identity(&self, index: usize, held: &FileStat) -> Result<FileIdentity, Reason> {
+        let replacement = self.replacement.as_ref().filter(|v|v.old == Some(index)).ok_or(Reason::SourceChanged)?;
+        let original = match self.book.slots[index].identity { Some(Identity::File(v)) => v, _ => return Err(Reason::SourceChanged) };
+        let current = file_identity(held)?;
+        let Some(Identity::File(successor))=self.book.slots[replacement.successor].identity else {return Err(Reason::SourceChanged)};
+        if replacement.old_snapshot.is_none() || !unlinked_original(current,original,successor,held.st_flags as u64) {
+            return Err(Reason::SourceChanged);
+        }
+        Ok(current)
+    }
+    fn snapshot_original(&self, index: usize, maximum: u64, stop: &mut dyn FnMut() -> bool) -> Result<wire::Snapshot, Reason> {
+        let Some(replacement) = self.replacement.as_ref().filter(|v|v.old==Some(index)) else {return self.snapshot(index,maximum,stop)};
+        checkpoint(stop)?;
+        let held = stat::fstat(self.book.fd(index)?).map_err(|_|Reason::SourceChanged)?;
+        let actual = self.old_identity(index,&held)?;
+        let hashed = self.snapshot_identity(index,actual,maximum,stop)?;
+        let original = replacement.old_snapshot.as_ref().ok_or(Reason::SourceChanged)?;
+        if hashed.sha256 != original.sha256 {return Err(Reason::SourceChanged)}
+        // Comparison projection only. The actual descriptor/identity slot is
+        // never replaced or reset; its original sole close remains in Book.
+        Ok(original.clone())
+    }
+
+    /// Called only by the original native-settlement arm after its actual
+    /// child/pipe/ACK jobs returned. Publication is a private original-native
+    /// witness; candidate-shaped DATA alone cannot call this exception.
+    pub(crate) fn post_returned(&mut self, publication: Option<&GitLocalPublication>,
+        stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+        if self.finished || self.first.is_some() || self.post_claimed {return Err(Reason::SourceChanged)}
+        self.post_claimed = true;
+        let result = (|| {
+            if let Some(publication) = publication {
+                let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
+                let review = self.review.as_ref().ok_or(Reason::SourceChanged)?;
+                let intent = publication.intent_for(self.operation_id.as_deref().ok_or(Reason::SourceChanged)?,native,review)?.clone();
+                if self.replacement.is_some() {return Err(Reason::SourceChanged)}
+                let uid = native.uid;
+                let (parent,name,old,old_snapshot,expected,maximum) = if intent.action==wire::Kind::Commit {
+                    let edge = self.reference.as_ref().ok_or(Reason::SourceChanged)?;
+                    let head = intent.candidate_commit.as_ref().ok_or(Reason::SourceChanged)?;
+                    let digest = Sha256::digest(format!("{head}\n").as_bytes()).iter().map(|b|format!("{b:02x}")).collect::<String>();
+                    (edge.parent,edge.name.clone(),edge.original.as_ref().map(|v|v.0),edge.original.as_ref().map(|v|v.1.clone()),digest,65)
+                } else {
+                    (self.git.ok_or(Reason::SourceChanged)?,b"index".to_vec(),self.indices[3],native.files.index.clone(),
+                        intent.candidate_index.clone().ok_or(Reason::SourceChanged)?,wire::INDEX_LIMIT)
+                };
+                let successor = self.file(parent,&name,uid,maximum,false,stop)?;
+                let successor_snapshot = self.snapshot(successor,maximum,stop)?;
+                if successor_snapshot.sha256 != expected {return Err(Reason::SourceChanged)}
+                self.replacement = Some(Replacement {old,old_snapshot,successor,successor_snapshot,intent});
+            }
+            self.post_inner(stop)
+        })();
+        self.remember(result)
+    }
+    pub(crate) fn inspect(&mut self, root: &RegisteredRoot, runtime_live: usize, id: &str,
+        review: Option<&wire::Review>, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+        if !self.not_started() {
+            return Err(Reason::CleanupUnknown);
+        }
+        self.started = true;
+        let result = (|| {
+            checkpoint(stop)?;
+            if !crate::protocol::valid_id(id) || review.is_some_and(|v| !v.valid()) { return Err(Reason::SourceRefused); }
+            self.operation_id = Some(id.into()); self.review = review.cloned();
+            self.account.acquire().map_err(|_| Reason::SourceRefused)?;
+            checkpoint(stop)?;
+            let (_, uid, gid) = self.account.selected().map_err(|_| Reason::SourceRefused)?;
+            let project_parts = parts(&root.path)?;
+            let tool_parts = parts(Path::new(wire::TOOL_PATH))?;
+            let parent_parts = &tool_parts[..tool_parts.len() - 1];
+            let capacity = roster_limit([project_parts.len(), parent_parts.len()], 42 + source_extra(&project_parts))?;
+            if capacity > SOURCE_LIMIT
+                || capacity
+                    .checked_add(runtime_live)
+                    .and_then(|n| n.checked_add(32))
+                    .is_none_or(|n| n > 256)
+            {
+                return Err(Reason::Capacity);
+            }
+            self.book.begin(capacity, 0, 1)?;
+            self.acl_entered = true;
+            self.acl = Some(SnapshotBook::new());
+            self.book.root(stop)?;
+            self.book.anchor_private(stop)?;
+            let (project_chain, _) = self.book.chain(&project_parts, true, stop)?;
+            let project = *project_chain.last().ok_or(Reason::SourceRefused)?;
+            if self.book.directory(project)? != root.identity.posix()? {
+                return Err(Reason::SourceChanged);
+            }
+            let git = self.book.child(project, b".git", false, stop)?;
+            self.git = Some(git);
+            let objects = self.book.child(git, b"objects", false, stop)?;
+            let (tool_chain, _) = self.book.chain(parent_parts, false, stop)?;
+            // This fixed provider is not nominated through a user-writable
+            // executable prefix. Held and named identities are rechecked by
+            // post_inner; the Python worker freezes and verifies the same tool.
+            for index in &tool_chain {
+                let directory = self.book.directory(*index)?;
+                if directory.uid != 0 || directory.mode & 0o7022 != 0 {
+                    return Err(Reason::SourceRefused);
+                }
+            }
+            let tool_parent = *tool_chain.last().ok_or(Reason::SourceRefused)?;
+            let tool = self.file(tool_parent, b"git", 0, wire::TOOL_LIMIT, true, stop)?;
+            self.indices[0] = Some(tool);
+            let head = self.file(git, b"HEAD", uid, 2048, false, stop)?;
+            self.indices[1] = Some(head);
+            let config = self.file(git, b"config", uid, 65536, false, stop)?;
+            self.indices[2] = Some(config);
+            checkpoint(stop)?;
+            match stat::fstatat(self.book.fd(git)?, "index", AtFlags::AT_SYMLINK_NOFOLLOW) {
+                Err(nix::errno::Errno::ENOENT) => {}
+                Ok(_) => {
+                    self.indices[3] = Some(self.file(git, b"index", uid, wire::INDEX_LIMIT, false, stop)?);
+                }
+                Err(_) => return Err(Reason::SourceRefused),
+            }
+            let directory = |index| -> Result<wire::DirectoryIdentity, Reason> {
+                let d = self.book.directory(index)?;
+                Ok((d.dev, d.ino, d.mode, d.uid, d.gid))
+            };
+            let native = wire::Native {
+                uid,
+                gid,
+                root: root.path.to_str().ok_or(Reason::SourceRefused)?.into(),
+                directories: wire::Directories {
+                    root: directory(project)?,
+                    git: directory(git)?,
+                    objects: directory(objects)?,
+                },
+                tool: self.snapshot(tool, wire::TOOL_LIMIT, stop)?,
+                files: wire::Files {
+                    head: self.snapshot(head, 2048, stop)?,
+                    config: self.snapshot(config, 65536, stop)?,
+                    index: self.indices[3].map(|i| self.snapshot(i, wire::INDEX_LIMIT, stop)).transpose()?,
+                },
+            };
+            if !native.valid() {
+                return Err(Reason::SourceRefused);
+            }
+            self.native = Some(native);
+            if review.is_some_and(|v| v.action == wire::Kind::Commit) { self.capture_reference(stop)?; }
+            self.post_inner(stop)
+        })();
+        self.remember(result)
+    }
+    fn post_inner(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+        let (_, uid, _) = self.account.selected().map_err(|_| Reason::SourceChanged)?;
+        for index in 0..self.book.slots.len() {
+            checkpoint(stop)?;
+            let slot = &self.book.slots[index];
+            let expected = slot.identity.ok_or(Reason::SourceChanged)?;
+            let file = matches!(expected, Identity::File(_));
+            let fd = self.book.fd(index)?;
+            filesystem(fd, stop)?;
+            let held = stat::fstat(fd).map_err(|_| Reason::SourceChanged)?;
+            checkpoint(stop)?;
+            if self.replacement.as_ref().is_some_and(|v|v.old==Some(index)) {
+                self.old_identity(index,&held)?;
+            } else {
+                let named = if let Some(parent) = slot.parent {
+                    stat::fstatat(self.book.fd(parent)?, OsStr::from_bytes(&slot.name), AtFlags::AT_SYMLINK_NOFOLLOW)
+                } else { stat::lstat(Path::new("/")) }.map_err(|_|Reason::SourceChanged)?;
+                checkpoint(stop)?;
+                if identity(&held,file)? != expected || identity(&named,file)? != expected
+                    || held.st_flags != 0 || named.st_flags != 0 { return Err(Reason::SourceChanged); }
+            }
+            if held.st_uid != 0 && held.st_uid != uid {
+                return Err(Reason::SourceChanged);
+            }
+            // Existing protected temporary ancestors may be sticky; no other
+            // group/other writable directory can nominate a Git executable.
+            if held.st_mode & 0o7022 != 0 && !(slot.role == PhysicalRole::Tmp && held.st_mode & 0o1000 != 0) {
+                return Err(Reason::SourceRefused);
+            }
+            let actual = common(&held)?;
+            self.acl
+                .as_mut()
+                .ok_or(Reason::CleanupUnknown)?
+                .observe(
+                    fd.as_fd(),
+                    Expected {
+                        device: actual.dev,
+                        inode: actual.ino,
+                        mode: actual.mode,
+                        owner: actual.uid,
+                        group: actual.gid,
+                        flags: held.st_flags,
+                    },
+                    if file { Policy::Empty } else { Policy::Ancestors },
+                    stop,
+                )
+                .map_err(|failure| {
+                    if failure == Failure::Unknown {
+                        Reason::CleanupUnknown
+                    } else {
+                        Reason::SourceRefused
+                    }
+                })?;
+            checkpoint(stop)?;
+        }
+        for alias in &self.book.aliases {
+            self.book.check_alias(alias, stop)?;
+        }
+        let original = self.native.as_ref().ok_or(Reason::SourceChanged)?;
+        for (index, expected, maximum) in [
+            (self.indices[0], Some(&original.tool), wire::TOOL_LIMIT),
+            (self.indices[1], Some(&original.files.head), 2048),
+            (self.indices[2], Some(&original.files.config), 65536),
+            (self.indices[3], original.files.index.as_ref(), wire::INDEX_LIMIT),
+        ] {
+            match (index, expected) {
+                (Some(index), Some(expected)) if self.snapshot_original(index, maximum, stop)? == *expected => {}
+                (None, None) if self.replacement.as_ref().is_some_and(|v|v.intent.action!=wire::Kind::Commit) => {}
+                (None, None) => {
+                    checkpoint(stop)?;
+                    if !matches!(
+                        stat::fstatat(
+                            self.book.fd(self.git.ok_or(Reason::SourceChanged)?)?,
+                            "index",
+                            AtFlags::AT_SYMLINK_NOFOLLOW
+                        ),
+                        Err(nix::errno::Errno::ENOENT)
+                    ) {
+                        return Err(Reason::SourceChanged);
+                    }
+                    checkpoint(stop)?;
+                }
+                _ => return Err(Reason::SourceChanged),
+            }
+        }
+        if let Some(edge) = &self.reference {
+            if let Some((index,expected)) = &edge.original {
+                if self.snapshot_original(*index,65,stop)? != *expected {return Err(Reason::SourceChanged)}
+            } else if !self.replacement.as_ref().is_some_and(|v|v.intent.action==wire::Kind::Commit) {
+                checkpoint(stop)?;
+                if !matches!(stat::fstatat(self.book.fd(edge.parent)?,OsStr::from_bytes(&edge.name),AtFlags::AT_SYMLINK_NOFOLLOW),
+                    Err(nix::errno::Errno::ENOENT)) {return Err(Reason::SourceChanged)}
+                checkpoint(stop)?;
+            }
+        }
+        if let Some(replacement) = &self.replacement {
+            let maximum = if replacement.intent.action==wire::Kind::Commit {65} else {wire::INDEX_LIMIT};
+            if self.snapshot(replacement.successor,maximum,stop)? != replacement.successor_snapshot {return Err(Reason::SourceChanged)}
+        }
+        Ok(())
+    }
+    pub(crate) fn post(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+        if self.finished || self.first.is_some() || self.post_claimed {
+            return Err(Reason::SourceChanged);
+        }
+        let result = self.post_inner(stop);
+        self.remember(result)
+    }
+    pub(crate) fn native_snapshot(&self) -> Result<&wire::Native, Reason> {
+        if self.finished || self.first.is_some() {
+            return Err(Reason::SourceChanged);
+        }
+        self.native.as_ref().ok_or(Reason::SourceRefused)
+    }
+    pub(crate) fn close(&mut self, expired: &mut dyn FnMut(Option<(Failure, Instant)>) -> bool) -> Result<(), Reason> {
+        if self.finished {
+            return if self.settled() { Ok(()) } else { Err(Reason::CleanupUnknown) };
+        }
+        self.finished = true;
+        self.close_failed = true;
+        if !self.account.call_settled() || self.first == Some(Reason::CleanupUnknown) || self.acl_entered && self.acl.is_none() {
+            return Err(Reason::CleanupUnknown);
+        }
+        if let Some(acl) = self.acl.as_mut() {
+            if !acl.release(expired) || !acl.settled() {
+                return Err(Reason::CleanupUnknown);
+            }
+        }
+        if expired(self.first_failure()) || !self.book.close_all() || expired(self.first_failure()) {
+            return Err(Reason::CleanupUnknown);
+        }
+        self.close_failed = false;
+        Ok(())
+    }
+    pub(crate) fn settled(&self) -> bool {
+        self.finished
+            && !self.close_failed
+            && self.account.call_settled()
+            && self.book.settled()
+            && (!self.acl_entered || self.acl.as_ref().is_some_and(SnapshotBook::settled))
+    }
+}
+
+#[cfg(test)]
+#[path="git_local_sources_macos_tests.rs"]
+mod tests;
