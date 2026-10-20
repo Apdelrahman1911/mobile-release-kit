@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Closed existing identity/tool observations on one current installed observer.
+"""Closed identity/tool/upload-key observations on one current installed observer.
 
 Import is DATA-only. The explicit main entry uses the existing Fixtures and
 run_cases/owned_process owners; it never prepares, signs or installs a runtime.
@@ -14,6 +14,7 @@ import sys
 SCOPE = "project-identity-native"
 TOOLS_SCOPE = "tool-setup"
 SERVICE_SCOPE = "tool-service-prerequisite"
+UPLOAD_SCOPES = ("upload-key-roundtrip", "upload-key-stop-before-go", "upload-key-stop-after-new")
 ROLE = "installed-shell-observation"
 TARGET = "aarch64-apple-darwin"
 CHECKOUT = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
@@ -87,15 +88,16 @@ def current_context(environment, target):
 
 
 def observation_scope(environment, scope):
-    """One source-selected package, three explicit driver invocations.
+    """One source-selected package, separate explicit driver invocations.
 
     Tool scope keeps the same installed observer for identity first, then its
-    separate service prerequisite and the unchanged three tool journeys. This
-    is not a relay, prerequisite proof, generic case selector, or auto-retry.
+    separate service prerequisite and unchanged three tool journeys. After
+    actual catalogue preparation, each upload-key case is a separate explicit
+    invocation. This is not prerequisite proof, a generic selector or a retry.
     """
     native = environment.get("MRK_MACOS_NATIVE_SCOPE")
     need(type(scope) is str and ((native == SCOPE and scope == SCOPE)
-         or (native == TOOLS_SCOPE and scope in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE))),
+         or (native == TOOLS_SCOPE and scope in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES))),
          "current-native-observation-scope")
     return scope
 
@@ -104,7 +106,7 @@ def arguments(argv):
     if argv == ["--target", TARGET]:
         return SCOPE  # Preserve the original identity-only invocation.
     need(type(argv) is list and len(argv) == 4 and argv[:3] == ["--target", TARGET, "--scope"]
-         and type(argv[3]) is str and argv[3] in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE),
+         and type(argv[3]) is str and argv[3] in (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES),
          "identity-native-arguments")
     return argv[3]
 
@@ -213,9 +215,9 @@ def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE):
         not_executed = aqua.run_cases(binding, fixtures, owner.run_owned, uid, username, emit_checked, scope=scope)
         aqua.need(type(not_executed) is tuple and all(case in cases for case in not_executed)
                   and len(set(not_executed)) == len(not_executed) and count == len(cases)
-                  and len(cases) == {SCOPE: 4, SERVICE_SCOPE: 1, TOOLS_SCOPE: 3}[scope],
+                  and len(cases) == (1 if scope in UPLOAD_SCOPES else {SCOPE: 4, SERVICE_SCOPE: 1, TOOLS_SCOPE: 3}[scope]),
                   "identity-native-incomplete")
-        aqua.need(not not_executed or scope in (SERVICE_SCOPE, TOOLS_SCOPE), "identity-native-incomplete")
+        aqua.need(not not_executed or scope in (SERVICE_SCOPE, TOOLS_SCOPE, *UPLOAD_SCOPES), "identity-native-incomplete")
         _current(aqua, fixtures)
     except BaseException as caught:
         error = caught
@@ -232,16 +234,20 @@ def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE):
             pass  # No retry or masking of the original unknown/failed call.
         return 130 if isinstance(error, KeyboardInterrupt) else 1
     try:
-        kind = "macos-identity-current-complete" if scope == SCOPE else (
-            "macos-tool-service-current-complete" if scope == SERVICE_SCOPE else "macos-tool-setup-current-complete")
+        kind = "macos-upload-key-current-complete" if scope in UPLOAD_SCOPES else (
+            "macos-identity-current-complete" if scope == SCOPE else (
+                "macos-tool-service-current-complete" if scope == SERVICE_SCOPE else "macos-tool-setup-current-complete"))
         if not_executed:
-            # A known joined refusal is not a passing tool case. Do not start
-            # the next workflow step or manufacture Ready; leave manual approval
-            # to the owner. Unknown invocations returned above as failures.
-            aqua.emit_record({"schemaVersion": 1, "type": "macos-tool-current-unexecuted",
+            # Only a parsed report after actual original return/readback/close
+            # can be unexecuted. No runtime error or unknown becomes exit78.
+            # Do not manufacture Ready or automatically run another case.
+            upload = scope in UPLOAD_SCOPES
+            aqua.emit_record({"schemaVersion": 1, "type": "macos-upload-key-current-unexecuted" if upload else "macos-tool-current-unexecuted",
                 **binding.public(), "target": binding.target, "scope": scope,
                 "notExecuted": list(not_executed), "allOriginalCallsReturned": True,
-                "fixtureHandlesClosed": True, "manualStep": "Resolve the reported service prerequisite before starting the tool cases; no automatic retry was performed.",
+                "fixtureHandlesClosed": True, "manualStep": (
+                    "Resolve the reported vault or protected JDK catalogue prerequisite before a new explicit invocation; no automatic retry was performed."
+                    if upload else "Resolve the reported service prerequisite before starting the tool cases; no automatic retry was performed."),
                 "shippingBinaryQualified": False, "distributionQualified": False}, sys.stdout)
             return 78
         aqua.emit_record({"schemaVersion": 1, "type": kind,

@@ -5324,7 +5324,9 @@ class Fixtures:
 
     def admit_normal_account_runtime(self, source, work, *, application_source):
         """Same-job installed originals, not a fabricated producer/supplier result."""
-        need(self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES) and not self.inflight and self.recovery_runtime is None,
+        need((self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES)
+              or len(self.cases) == 1 and self.cases[0] in UPLOAD.CASES)
+             and not self.inflight and self.recovery_runtime is None,
              "normal-account-runtime-order")
         need(isinstance(source, Path) and source == Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
              and isinstance(work, Path) and work.parent == Path("/Users/runner/work/_temp")
