@@ -14,6 +14,7 @@ import { PROJECT_PATH_FIELDS, isProjectPathField, parseProjectPathRequest, parse
 import { previewApi } from '../src/preview.ts';
 import { parseAssetStatus } from '../src/assetSessionProtocol.ts';
 import { AssetSessionController, assetCancellationReason } from '../src/assetSessionController.ts';
+import { NEW_UPLOAD_KEY_DECLARATION } from '../src/credentialUploadKey.ts';
 
 test('browser preview requires the exact explicit flag; native errors cannot select it', async () => {
   for (const flag of [undefined, '', '0', 'true', true, 1]) assert.equal(bridgeMode(flag, false), 'unavailable');
@@ -365,4 +366,42 @@ test('desktop permissions apply only to the local main window without generic sy
     assert.equal(typeof permission, 'string');
     assert.match(permission, /^(?:allow-[a-z0-9-]+|core:event:allow-(?:un)?listen)$/);
   }
+});
+
+test('ten reviewed identity and upload-key controls have exact local-main ACL grants for their actual bridge commands', async () => {
+  const emitted = [];
+  const api = createNativeApi('native', async (command, args) => {
+    emitted.push({ command, args });
+    // Deliberate native-style refusal, never a fabricated successful status,
+    // credential, grant or qualification. Only bridge emission is exercised.
+    throw { code: 'asset_unqualified' };
+  });
+  const agent = api.agentIdentity;
+  assert.ok(agent); assert.equal(emitted.length, 0);
+  const [intentId, sessionId, revision, planToken] = ['a', 'b', 'c', 'd'].map((c) => c.repeat(32));
+  for (const action of [
+    () => agent.status(), () => agent.allow('project-1'), () => agent.revoke(),
+    () => agent.decline(intentId), () => agent.review(intentId),
+    () => agent.prepare({ intentId, sessionId, revision, acknowledgeNewApplication: true }),
+    () => agent.apply({ intentId, sessionId, revision, planToken, reviewed: true }),
+    () => api.uploadKeyStatus({ contextRevision: 1 }),
+    () => api.prepareUploadKey({ contextRevision: 1 }),
+    () => api.createUploadKey({ contextRevision: 1, expectedStatusRevision: 1, declaration: NEW_UPLOAD_KEY_DECLARATION }),
+  ]) await assert.rejects(action);
+  assert.deepEqual(emitted.map(({ command }) => command), [
+    'agent_identity_status', 'allow_agent_identity', 'revoke_agent_identity', 'decline_agent_identity',
+    'review_agent_identity', 'prepare_agent_identity', 'apply_agent_identity',
+    'upload_key_status', 'upload_key_prepare', 'upload_key_create',
+  ]);
+  assert.ok(emitted.slice(0, 7).every(({ args }) => args instanceof Uint8Array));
+  const permitted = capability.permissions.filter((p) => typeof p === 'string'
+    && (p.includes('agent-identity') || p.startsWith('allow-upload-key-')));
+  assert.equal(permitted.length, 10);
+  assert.deepEqual(new Set(permitted), new Set(emitted.map(({ command }) => 'allow-' + command.replaceAll('_', '-'))));
+  assert.deepEqual(capability.windows, ['main']); assert.equal(capability.local, true);
+  assert.equal(Object.hasOwn(capability, 'remote'), false);
+  assert.equal(Object.hasOwn(capability, 'webviews'), false);
+  // Locked Tauri denies missing application ACL entries before the handler.
+  // Its desktop-shell build separately validates the declarations generated
+  // from build.rs AppManifest; this test does not execute a native handler.
 });

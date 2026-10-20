@@ -2,6 +2,7 @@
 // Replies/events are already deserialized DATA: this renderer cannot recover
 // duplicate keys from their original bytes. Native owns that boundary.
 import type { ApiError } from './types.ts';
+import { sameAgentLocalCheckOrigin, validAgentLocalCheckOrigin } from './agentLocalCheckOrigin.ts';
 import type { OfflineCheckConsentVersion, OfflineCheckOperation, OfflineCheckId, OfflineCoreStatus, OfflineLimitation, OfflinePreflightAvailability, OfflinePreflightContext,
   OfflinePreflightIdentity, OfflinePreflightOperation, OfflinePreflightReason, OfflinePreflightResult, OfflinePreflightStatus,
   PrepareOfflinePreflight, SavedConfigContent, StartOfflinePreflight } from './offlinePreflightTypes.ts';
@@ -237,9 +238,13 @@ export function parseOfflinePreflightStatus(value: unknown): OfflinePreflightSta
         !offlineCounter(safe.statusRevision) || !oneOf(safe.availability, Object.keys(offlineAvailabilityText))) return null;
     const op = safe.operation;
     if (op === null) return safe as unknown as OfflinePreflightStatus;
-    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result']) ||
+    if ((!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result']) &&
+         !keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'agentLocalCheck'])) ||
         !identity(op) || !context(op.context) || !oneOf(op.phase, ['awaiting-consent', 'starting', 'running', 'stopping', 'terminal', 'unknown']) ||
         typeof op.intentUsable !== 'boolean' || !oneOf(op.reason, Object.keys(offlineReasonText))) return null;
+    // Only this native Projection can carry the marker; request/worker
+    // Context/Terminal remain unchanged. It grants display and STOP, not Run.
+    if (Object.hasOwn(op, 'agentLocalCheck') && (!validAgentLocalCheckOrigin(op.agentLocalCheck) || op.context.operation !== 'local-project-checks')) return null;
     if (op.phase === 'awaiting-consent') {
       if (op.outcome !== null || op.result !== null || op.reason !== 'none') return null;
     } else if (op.phase === 'unknown') {
@@ -264,7 +269,7 @@ export function sameOfflineIdentity(a: OfflinePreflightIdentity | null, b: Offli
   return !!a && !!b && a.operationId === b.operationId && a.ownerGeneration === b.ownerGeneration;
 }
 export function offlineOperationProgress(a: OfflinePreflightOperation, b: OfflinePreflightOperation): boolean {
-  if (!sameOfflineIdentity(a, b) || !sameOfflineData(a.context, b.context)) return false;
+  if (!sameOfflineIdentity(a, b) || !sameOfflineData(a.context, b.context) || !sameAgentLocalCheckOrigin(a.agentLocalCheck, b.agentLocalCheck)) return false;
   if (a.phase === 'unknown') return b.phase === 'unknown';
   if (a.phase === 'terminal') return sameOfflineData(a, b);
   if (!a.intentUsable && b.intentUsable) return false;

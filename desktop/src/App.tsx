@@ -35,6 +35,8 @@ import { ReleaseVersionController } from './releaseVersion.ts';
 import { ExternalProjectObservationController } from './externalProjectObservationController.ts';
 import { CliReadAccessController } from './cliReadAccessController.ts';
 import { CliReadAccessPanel } from './components/CliReadAccessPanel.tsx';
+import { AgentLocalCheckPermission } from './agentLocalChecks.ts';
+import { AgentLocalCheckAccess } from './components/AgentLocalCheckAccess.tsx';
 import { ProjectIdentityNativeController, bindAgentIdentityApi, parseAgentIdentityGuiStatus } from './projectIdentityNative.ts';
 import type { ProjectIdentityNativeState, AgentIdentityProposal, AgentIdentityGuiStatus } from './projectIdentityNative.ts';
 import { ProjectIdentityController } from './projectIdentityController.ts';
@@ -943,6 +945,20 @@ export function App() {
   // Keep the retained controller when its Advanced panel is hidden. This
   // refreshes display/admission only; it never starts an IPC request or grant.
   useEffect(() => { cliReadAccess.syncContext(); });
+  const [agentLocalChecks] = useState(() => new AgentLocalCheckPermission(() => {
+    const service = cliService.current, current = workspaceRef.current;
+    const project = current.selectedId ? current.projects[current.selectedId] : null;
+    const usable = project && !connectionPicking.current && !isDirty(project) && project.snapshotRequest === null &&
+      !project.snapshotPredatesSave && !project.saveRecoveryRequired && project.savedConfigContent !== null;
+    return { api: service.api?.mode === 'native' ? service.api.agentLocalChecks ?? null : null,
+      project: usable ? { projectId: project.project.id, draftRevision: project.revision, baselineGeneration: project.baselineGeneration } : null,
+      blocked: service !== pathService.current || !!(gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+        savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason()),
+    };
+  }));
+  // App-owned pending calls survive the Advanced panel being hidden. Current
+  // context is also sampled again synchronously inside the Allow event.
+  useEffect(() => { agentLocalChecks.syncContext(); });
   const [externalObserver] = useState(() => new ExternalProjectObservationController({
     current: () => {
       const current = workspaceRef.current;
@@ -1734,6 +1750,7 @@ export function App() {
           </ProgressiveDisclosure>
           <ProgressiveDisclosure title="Advanced · CLI / AI access" needsAttention={cliReadNeedsAttention || !!agentRequestMessage || !!agentRequests?.pending} reveal={cliAccessReveal}>
             <CliReadAccessPanel controller={cliReadAccess} />
+            <AgentLocalCheckAccess controller={agentLocalChecks} blocked={loading || choosing || !session || savedCommandBusy() !== null} />
             {cliService.current.api?.mode === 'native' && cliService.current.api.agentIdentity && <section className="card"><h3>Let an agent propose an app ID</h3>
               <p>Separate from read access. Enable this only for the selected project, for up to 15 minutes. The CLI cannot Apply: you must read the saved source, acknowledge a new app when applicable, preview, and approve the exact native change here.</p>
               <p>Current observation: {agentRequests ? agentRequests.lease.enabled ? 'request permission was observed enabled' : 'request permission was observed disabled' : 'not checked'}. Status is not an approval or completed edit.</p>

@@ -35,6 +35,14 @@ impl OfflinePreflightOwner {
     pub(crate) fn cancel(&self, operation: &str, generation: &str, gate: Availability) -> Result<Status, BridgeError> {
         self.saved.cancel_offline(operation, generation, gate)
     }
+    pub(crate) fn prepare_agent_local_check(&self, entry: std::sync::Arc<crate::agent_local_checks::Entry>, registration: u32,
+        root: RegisteredRoot, gate: Availability) -> Result<Status, BridgeError> {
+        self.saved.prepare_agent_local_check(entry,registration,root,gate)
+    }
+    pub(crate) fn start_agent_local_check(&self, entry: &std::sync::Arc<crate::agent_local_checks::Entry>, at: Instant,
+        registered: Option<(u32,RegisteredRoot)>, gate: Availability) -> Result<Admitted,BridgeError> {
+        self.saved.start_agent_local_check(entry,at,registered,gate)
+    }
     pub(crate) fn document_lost(&self) { self.saved.document_lost(); }
     pub(crate) fn context_changed(&self) { self.saved.context_changed(); }
     pub(crate) fn registration_matches(&self, registration: u32) -> bool { self.saved.registration_matches(registration) }

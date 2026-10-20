@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Fixed passive queries, fixed macOS installation-location Finder requests and explicit original-owned read-only installation checks; explicitly confirmed installed-helper preparation and normal Quit, not Installer changes; finite local configuration, workflows, public metadata and saved-version edits; explicitly confirmed nonpublishing Store access checks using assigned local credentials, separately authorized local release-history and Store preparation/execution/reconciliation through original native owners, reviewed saved offline checks, Android builds, unsigned full-Xcode Mac archives and owned build-input recovery; qualified session or encrypted credential management. Store mutations still require project opt-in, reviewed original intent, assigned credentials and one-use confirmation; this capability grants no general Store or network authority. GitHub preflight permits only publisher-bound caller review, one-use nonpublishing dispatch and exact original-run observation. Build-tool preparation permits only separately admitted fixed public-source staging with one-use Start, not arbitrary download URLs or automatic installation. Build tools can execute trusted project code only under native runtime/tool custody. GitHub repository settings permit only separately reviewed, one-use Actions-enabled or workflow-token-policy changes on the same connected registered project. Setup publication permits only separately reviewed saved configuration plus four canonical callers on a new branch and draft PR, and read-only reconciliation of original durable intents. No general HTTP, arbitrary remote writes, event emission, filesystem, shell or opener authority; listen/unlisten is for owner status only.",
+  "description": "Fixed passive queries, fixed macOS installation-location Finder requests and explicit original-owned read-only installation checks; explicitly confirmed installed-helper preparation and normal Quit, not Installer changes; finite local configuration, workflows, public metadata and saved-version edits; explicitly confirmed nonpublishing Store access checks using assigned local credentials, separately authorized local release-history and Store preparation/execution/reconciliation through original native owners, reviewed saved offline checks, Android builds, unsigned full-Xcode Mac archives and owned build-input recovery; qualified session or encrypted credential management. Store mutations still require project opt-in, reviewed original intent, assigned credentials and one-use confirmation; this capability grants no general Store or network authority. GitHub preflight permits only publisher-bound caller review, one-use nonpublishing dispatch and exact original-run observation. Build-tool preparation permits only separately admitted fixed public-source staging with one-use Start, not arbitrary download URLs or automatic installation. Build tools can execute trusted project code only under native runtime/tool custody. GitHub repository settings permit only separately reviewed, one-use Actions-enabled or workflow-token-policy changes on the same connected registered project. Setup publication permits only separately reviewed saved configuration plus four canonical callers on a new branch and draft PR, and read-only reconciliation of original durable intents. Agent-requested project identity changes retain their separate explicit grant and review. Android upload-key setup permits only separately qualified, explicitly confirmed generation for a new application into encrypted storage; no implicit replacement of an existing key. No general HTTP, arbitrary remote writes, event emission, filesystem, shell or opener authority; listen/unlisten is for owner status only.",
   "windows": ["main"],
   "local": true,
   "permissions": [
     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
+    "allow-agent-local-check-access", "allow-allow-agent-local-check", "allow-revoke-agent-local-check",
     "allow-app-info", "allow-reveal-installation", "allow-installation-status", "allow-inspect-installation", "allow-cancel-installation",
     "allow-installation-preparation-status", "allow-prepare-installation-quit",
     "allow-choose-project", "allow-choose-project-path", "allow-project-snapshot", "allow-catalog",
@@ -46,6 +47,8 @@
     "allow-release-version-edit-close", "allow-release-version-edit-status",
     "allow-project-identity-open", "allow-project-identity-prepare", "allow-project-identity-apply",
     "allow-project-identity-close", "allow-project-identity-status",
+    "allow-agent-identity-status", "allow-allow-agent-identity", "allow-revoke-agent-identity", "allow-decline-agent-identity",
+    "allow-review-agent-identity", "allow-prepare-agent-identity", "allow-apply-agent-identity",
     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
     "allow-github-auth-status", "allow-github-auth-connect", "allow-github-auth-cancel", "allow-github-auth-accounts",
     "allow-git-read-status", "allow-git-read-start", "allow-git-read-cancel",
@@ -58,6 +61,7 @@
     "allow-github-history-status", "allow-github-history-start", "allow-github-history-cancel",
     "allow-vault-status", "allow-vault-open", "allow-vault-prepare-initialize", "allow-vault-unlock", "allow-asset-context", "allow-asset-choose", "allow-credential-prepare",
     "allow-vault-prepare-delete", "allow-vault-backup-export", "allow-vault-backup-import", "allow-vault-commit", "allow-vault-bind", "allow-vault-discard", "allow-vault-lock",
+    "allow-upload-key-status", "allow-upload-key-prepare", "allow-upload-key-create",
     "core:event:allow-listen", "core:event:allow-unlisten"
   ]
 }

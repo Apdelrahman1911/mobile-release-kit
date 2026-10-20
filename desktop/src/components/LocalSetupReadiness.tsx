@@ -25,7 +25,7 @@ export function LocalSetupReadiness({ session, preview, refreshReason, onNavigat
       <div className="button-row">
         <button type="button" className="button secondary" onClick={() => onNavigate('settings')}>Review local settings</button>
         <button type="button" className="button secondary" onClick={() => onNavigate('environment')}>Check build environment</button>
-        <button type="button" className="button secondary" onClick={() => onNavigate('releases')}>Review unsigned build</button>
+        <button type="button" className="button secondary" onClick={() => onNavigate('releases')}>Review build options</button>
       </div>
       <details><summary>What this guidance does not verify</summary><ul>{view.analysis.limitations.map((line) => <li key={line}>{line}</li>)}</ul></details>
     </>}

@@ -65,8 +65,12 @@ pub(crate) struct ClientSession { client_id: Id, session_id: Id, grant_id: Id, i
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReadAccessStatus { pub(crate) enabled: bool, pub(crate) remaining_ms: u64, pub(crate) project_ids: Vec<Id> }
 
+#[path = "application_service_agent_local_checks.rs"]
+mod local_checks;
+
 pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
-    identity_requests: Arc<crate::agent_identity_requests::Inbox> }
+    identity_requests: Arc<crate::agent_identity_requests::Inbox>,
+    local_checks: Arc<crate::agent_local_checks::Inbox> }
 impl ApplicationService {
     pub(crate) fn open(store: Arc<PrivateStateDirectory>) -> Result<Self, Error> {
         let snapshot = store.read(Namespace::Projects).map_err(|e| e.code)?;
@@ -82,7 +86,8 @@ impl ApplicationService {
         for operation in &mut saved.operations { operation.stale = true; }
         let instance = Id::random()?;
         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
-        Ok(Self { store, instance, identity_requests, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
+        let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+        Ok(Self { store, instance, identity_requests, local_checks, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
     }
     pub(crate) fn instance(&self) -> &Id { &self.instance }
@@ -321,6 +326,9 @@ impl ApplicationService {
             // These two fixed routes touch only the bounded proposal inbox.
             // No native callback, executor or GUI approval runs in a socket.
             match &request.request {
+                p::RequestBody::LocalCheckSubmit(input) => return self.submit_local_check(client, input.clone()),
+                p::RequestBody::LocalCheckStatus(query) => return self.query_local_check(client, query, false),
+                p::RequestBody::LocalCheckCancel(query) => return self.query_local_check(client, query, true),
                 p::RequestBody::IdentitySubmit(input) => return self.submit_identity(client, input.clone()),
                 p::RequestBody::IdentityIntent(query) => return self.query_identity(client, query),
                 _ => {},
@@ -331,8 +339,9 @@ impl ApplicationService {
             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
-                p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) => return Err(Error::InvalidRequest),
-                p::RequestBody::Info(_) => p::ResponseBody::Info(p::ServiceInfo { read_only: true, requires_running_desktop: true,
+                p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
+                    | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_) => return Err(Error::InvalidRequest),
+                p::RequestBody::Info(_) => p::ResponseBody::Info(p::ServiceInfo { read_only: false, read_grant_authorizes_execution: false, local_checks_require_separate_grant: true, requires_running_desktop: true,
                     cached_observations_are_authority: false, remaining_access_ms: remaining(grant) }),
                 p::RequestBody::Projects(_) => p::ResponseBody::Projects(state.saved.projects.iter().filter(|p| grant.projects.contains(&p.binding.project_id)).map(|p| view(&state, p)).collect()),
                 p::RequestBody::Observe(query) => { allowed(&query.project_id)?; p::ResponseBody::Observation(project(&query.project_id)?) }
@@ -351,7 +360,7 @@ impl ApplicationService {
     }
     /// The IPC owner must first stop accepting, notify and join all original
     /// workers. This revokes admission but does not pretend to join them.
-    pub(crate) fn stop(&self) -> Result<(), Error> { self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+    pub(crate) fn stop(&self) -> Result<(), Error> { self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
 }
 
 fn valid_root(path: &Path) -> Result<&str, Error> {

@@ -1,6 +1,7 @@
 // App-owned coordination, not a native owner or a cleanup receipt. A page,
 // Promise, generation or listener cannot settle/reconstruct the original run.
 import { isDirty } from './drafts.ts';
+import { canObserveAgentLocalCheck } from './agentLocalCheckOrigin.ts';
 import type { ProjectSession, WorkspaceAction } from './drafts.ts';
 import type { ApiError, BridgeMode } from './types.ts';
 import type { OfflineCheckOperation, OfflinePreflightApi, OfflinePreflightContext, OfflinePreflightIdentity, OfflinePreflightOperation,
@@ -62,6 +63,8 @@ export class OfflinePreflightController {
   private readonly context: Context;
   private observer: Observer | null = null;
   private attempt: Attempt | null = null;
+  private pendingGuiSubmissions = 0;
+  private deferredAgentObservation: { observer: Observer; status: OfflinePreflightStatus } | null = null;
   private cancelClaim: OfflinePreflightIdentity | null = null;
   private draftReference: ProjectSession['draft'] = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -188,7 +191,7 @@ export class OfflinePreflightController {
   }
   private originCandidate(attempt: Attempt, status: OfflinePreflightStatus): boolean {
     const op = status.operation;
-    return !!op && status.statusRevision > attempt.after && !sameOfflineIdentity(op, attempt.previous) &&
+    return !!op && !op.agentLocalCheck && status.statusRevision > attempt.after && !sameOfflineIdentity(op, attempt.previous) &&
       sameOfflineData(op.context, attempt.binding.context) && (!attempt.identity || sameOfflineIdentity(op, attempt.identity));
   }
   private reconcile(observer: Observer): void {
@@ -224,6 +227,26 @@ export class OfflinePreflightController {
     if (a && b && sameOfflineIdentity(a, b) && !offlineOperationProgress(a, b)) {
       this.fail({ code: 'offline_preflight_protocol' }, true); return null;
     }
+    if (canObserveAgentLocalCheck(previous, status, false) && this.pendingGuiSubmissions !== 0) {
+      // One bounded, copied native observation can wait for the actual GUI
+      // invoke return. Its terminal predecessor is already observed, but a
+      // still-pending GUI submission must not be abandoned or reinterpreted.
+      const held = this.deferredAgentObservation?.status;
+      if (!held || held.operation && b && sameOfflineIdentity(held.operation, b) &&
+          status.statusRevision > held.statusRevision && offlineOperationProgress(held.operation, b)) {
+        this.deferredAgentObservation = { observer, status };
+      }
+      return status;
+    }
+    const agentObservation = canObserveAgentLocalCheck(previous, status,
+      this.pendingGuiSubmissions !== 0 || this.state.pending !== null || this.state.originalUnconfirmed || !!this.attempt && !this.attempt.settled);
+    if (agentObservation) {
+      // SAME native original is already authorized/admitted elsewhere. Only
+      // adopt its display/STOP after prior original settlement; do not send a
+      // GUI Prepare/Start, infer consent, or replace unknown/pending custody.
+      this.attempt = null; this.clearTimer(); this.cancelClaim = null;
+      this.update({ consent: null, pending: null, originalUnconfirmed: false, historical: true, cancelClaimed: null });
+    }
     const attempt = this.attempt;
     if (attempt?.observer === observer && attempt.prepareSent) {
       if (attempt.identity ? !sameOfflineIdentity(attempt.identity, b) :
@@ -234,7 +257,7 @@ export class OfflinePreflightController {
           (b.phase === 'starting' || b.phase === 'running' || b.outcome === 'complete')) {
         this.fail({ code: 'offline_preflight_protocol' }, true); return null;
       }
-    } else if (previous && !sameOfflineIdentity(a ?? null, b) && (a !== null || b !== null)) {
+    } else if (!agentObservation && previous && !sameOfflineIdentity(a ?? null, b) && (a !== null || b !== null)) {
       // Unsolicited foreign IDs cannot replace a result or authorize a run.
       this.fail({ code: 'offline_preflight_protocol' }, true); return null;
     }
@@ -247,6 +270,16 @@ export class OfflinePreflightController {
       this.expireConsent();
     }
     return status;
+  }
+  private returnedGuiSubmission(): void {
+    // This counter gates only unsolicited CLI display adoption. It does not
+    // alter existing GUI retry-after-native-retirement behavior or manufacture
+    // native settlement from a Promise. Overflow conservatively stays closed.
+    if (Number.isSafeInteger(this.pendingGuiSubmissions) && this.pendingGuiSubmissions > 0) this.pendingGuiSubmissions--;
+    const held = this.deferredAgentObservation;
+    if (!held || this.pendingGuiSubmissions !== 0) return;
+    this.deferredAgentObservation = null;
+    if (held.observer.active && held.observer === this.observer) this.receive(held.observer, held.status);
   }
   canCheckStatus(): boolean { return !this.disposed && !!this.observer?.active && !this.state.readPending; }
   async checkStatus(): Promise<void> {
@@ -338,6 +371,7 @@ export class OfflinePreflightController {
       attempt.prepareSent = false; attempt.retired = true; attempt.settled = true;
       this.update({ pending: null, originalUnconfirmed: false }); return;
     }
+    this.pendingGuiSubmissions = this.pendingGuiSubmissions < Number.MAX_SAFE_INTEGER ? this.pendingGuiSubmissions + 1 : Infinity;
     try {
       const value = await observer.api.prepareOfflinePreflight(request);
       if (!observer.active || this.attempt !== attempt) return;
@@ -369,7 +403,7 @@ export class OfflinePreflightController {
           this.update({ pending: null, originalUnconfirmed: false, consent: null, error: safe });
         } else this.fail(error, safe.code !== 'offline_preflight_protocol');
       }
-    }
+    } finally { this.returnedGuiSubmission(); }
   }
   setAcknowledged(operationId: string, ownerGeneration: string, acknowledged: boolean): void {
     this.syncProject(); this.expireConsent();
@@ -389,6 +423,7 @@ export class OfflinePreflightController {
     this.clearTimer();
     this.update({ consent: null, pending: 'start', originalUnconfirmed: true, historical: false, error: null });
     if (!this.matches(attempt) || this.commonReason()) { this.retire(); return; }
+    this.pendingGuiSubmissions = this.pendingGuiSubmissions < Number.MAX_SAFE_INTEGER ? this.pendingGuiSubmissions + 1 : Infinity;
     try {
       const value = await attempt.observer.api.startOfflinePreflight({ operationId, ownerGeneration, consentVersion: offlineCheckConsent(attempt.binding.context.operation) });
       if (!attempt.observer.active || this.attempt !== attempt) return;
@@ -398,6 +433,7 @@ export class OfflinePreflightController {
       }
       this.receive(attempt.observer, status);
     } catch (error) { if (attempt.observer.active && this.attempt === attempt && !attempt.settled) this.fail(error); }
+    finally { this.returnedGuiSubmission(); }
   }
   canCancel(): boolean {
     const observer = this.observer, op = observer?.status?.operation;

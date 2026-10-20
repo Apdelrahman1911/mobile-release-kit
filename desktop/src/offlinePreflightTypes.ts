@@ -32,6 +32,7 @@ export interface OfflinePreflightResult {
   limitations: OfflineLimitation[];
 }
 export interface OfflinePreflightOperation extends OfflinePreflightIdentity {
+  readonly agentLocalCheck?: import('./agentLocalCheckOrigin.ts').AgentLocalCheckOrigin;
   context: OfflinePreflightContext; phase: OfflinePreflightPhase; intentUsable: boolean;
   outcome: OfflinePreflightOutcome | null; reason: OfflinePreflightReason; result: OfflinePreflightResult | null;
 }

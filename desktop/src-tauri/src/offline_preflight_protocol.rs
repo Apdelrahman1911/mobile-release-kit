@@ -276,6 +276,9 @@ pub(crate) enum Availability { Available, Busy, Shutdown, CleanupUnknown, Docume
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Projection {
+    // Native-origin DATA only, never part of worker Context/Terminal or consent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) agent_local_check: Option<crate::agent_local_checks::Query>,
     pub(crate) operation_id: String, pub(crate) owner_generation: String, pub(crate) context: Context, pub(crate) phase: Phase,
     pub(crate) intent_usable: bool, pub(crate) outcome: Option<Outcome>, pub(crate) reason: Reason, pub(crate) result: Option<ResultData>,
 }

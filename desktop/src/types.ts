@@ -423,6 +423,7 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   readonly applicationRead?: import('./cliReadAccessController.ts').CliReadAccessPort;
   readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
   readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
+  readonly agentLocalChecks?: import('./agentLocalChecks.ts').AgentLocalCheckApi | null;
   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
   readonly gitLocal?: import('./gitLocalProtocol.ts').GitLocalApi | null;

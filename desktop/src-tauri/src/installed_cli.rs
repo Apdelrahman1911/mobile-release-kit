@@ -1,11 +1,13 @@
 //! Installed agent CLI frontend. No Python/Rust installation is needed by the
-//! installed binary. Only the running Desktop's explicitly allowed saved DATA
-//! is accessible; native mutations are not smuggled through another entrypoint.
+//! installed binary. Read access is separate from the single named local-check
+//! execution permission. Both use the running Desktop's original owners.
 use crate::service_protocol as p;
 use p::{Error, Id};
 use std::{ffi::OsString, io::Write, path::PathBuf};
 #[path = "installed_cli_identity.rs"]
 mod identity;
+#[path = "installed_cli_local_checks.rs"]
+mod local_checks;
 
 const HELP: &str = "Mobile Release Kit agent CLI\n\n\
 Usage:\n\
@@ -17,6 +19,9 @@ Usage:\n\
   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
   mrk identity-request-status PROJECT_ID SERVICE_INSTANCE INTENT_ID [--json]\n\
+  mrk local-check PROJECT_ID OBSERVATION_REVISION [--json]\n\
+  mrk local-check-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk local-check-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk --help\n\n\
 Capabilities describe this CLI without opening Desktop or reading project data.\n\
 For the other commands, open Desktop, select a project, then enable agent read access in Settings.\n\
@@ -25,7 +30,10 @@ observe --json may include optional setup state codes, not a passed check or rel
 Identity requests additionally need the separate 15-minute Desktop request permission.\n\
 In Desktop Settings, check requests and explicitly review/preview/apply the unchanged proposal.\n\
 Stdin is one closed JSON object: selection {platform,target,project}, desiredIdentity, identityIntent.\n\
-There is no CLI Apply, build, credential or publishing route.\n";
+Local checks require a separate one-use 15-minute project permission in Desktop.\n\
+Configured project checks may run programs, modify files or contact the network; this is not a sandbox.\n\
+Keep the printed instance/request IDs: inspect or cancel the same original, never replay it.\n\
+There is no direct CLI Apply, build, credential or publishing route.\n";
 
 struct Options { request: p::Request, json: bool }
 enum Parsed { Help, Version, Capabilities { json: bool }, Request(Options) }
@@ -65,6 +73,11 @@ const READ_COMMANDS: [CommandCapability; 5] = [
     CommandCapability { command: "operations", arguments: &["PROJECT_ID"], description: "List saved operation observations for a project." },
     CommandCapability { command: "operation", arguments: &["PROJECT_ID", "OPERATION_ID"], description: "Read one saved operation observation; it is not native finality authority." },
 ];
+const LOCAL_CHECK_COMMANDS: [CommandCapability; 3] = [
+    CommandCapability { command: "local-check", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Use one separately allowed saved local-project check; configured code may have effects." },
+    CommandCapability { command: "local-check-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same request and original operation without reexecution." },
+    CommandCapability { command: "local-check-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request STOP of the same original; cancellation is not settlement." },
+];
 const IDENTITY_REQUEST_COMMANDS: [CommandCapability; 2] = [
     CommandCapability { command: "identity-request", arguments: &["PROJECT_ID", "OBSERVATION_REVISION", "--stdin"], description: "Propose an identity change for explicit Desktop review; this does not apply an edit." },
     CommandCapability { command: "identity-request-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "INTENT_ID"], description: "Query the original proposal without replaying it; a linked operation has separate status." },
@@ -79,12 +92,20 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             "scope": "compiled-interface",
             "runtimeChecked": false,
             "serviceTransportImplemented": cfg!(any(target_os = "linux", target_os = "macos")),
-            "supportsMutations": false,
+            "supportsDirectMutationCommands": false,
+            "supportsNamedProjectExecution": true,
             "operationsRequire": {"runningDesktop": true, "projectReadGrant": true},
             "observationScope": "saved-data-not-live-validation-or-native-authority",
             "idFormat": "32 lowercase hexadecimal characters; all-zero IDs are invalid",
             "jsonOption": "--json (last argument)",
             "commands": READ_COMMANDS,
+            "localChecks": {
+                "scope": "saved-local-android-project-checks", "defaultEnabled": false, "oneUse": true,
+                "maxLeaseSeconds": crate::agent_local_checks::LIFETIME.as_secs(), "maxRetainedRequests": crate::agent_local_checks::LIMIT,
+                "projectCodeEffectsPossible": true, "readGrantAuthorizesExecution": false,
+                "requires": {"runningDesktop": true, "projectReadGrant": true, "separateProjectExecutionPermission": true},
+                "commands": LOCAL_CHECK_COMMANDS,
+            },
             "identityRequests": {
                 "scope": "desktop-reviewed-proposal",
                 "defaultEnabled": false,
@@ -100,11 +121,12 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             Reads require a running Desktop and an explicit project read grant.\n\
             Saved observations are not live validation or native operation authority.\n\
             Direct edits, credentials, builds and publishing are not supported by this CLI.\n\
+            A named local check needs a separate one-use Desktop grant. Configured project code may have effects.\n\
             Identity proposals require a separate Desktop permission and explicit Desktop review/apply.\n\n");
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
         }
-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()) {
+        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()) {
             text.push_str("  mrk "); text.push_str(command.command);
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
@@ -182,7 +204,7 @@ fn human(response: &p::ResponseBody) -> String {
         format!("{}  {state}{} (reported observation, not authority)\n", operation.operation_id.as_str(), if operation.stale { "; stale" } else { "" })
     }
     match response {
-        p::ResponseBody::Info(_) => "Connected to Desktop with read-only access. Results are saved observations, not release validation.\n".to_owned(),
+        p::ResponseBody::Info(_) => "Connected to Desktop. The read grant cannot execute checks; execution needs a separate one-use grant. Saved observations are not release validation.\n".to_owned(),
         p::ResponseBody::Projects(projects) => if projects.is_empty() { "No projects are allowed for this read session.\n".to_owned() } else { projects.iter().map(project).collect() },
         p::ResponseBody::Observation(value) => {
             let mut text = project(value);
@@ -197,6 +219,7 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::Operation(value) => operation(value),
         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
         p::ResponseBody::IdentityIntent(value) => identity::human(value),
+        p::ResponseBody::LocalCheck(value) => local_checks::human(value),
     }
 }
 
@@ -208,6 +231,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     let args: Vec<OsString> = args.into_iter().take(8).collect();
     let json = args.iter().any(|a| a == "--json");
     if identity::recognizes(&args) { return identity::run(args); }
+    if local_checks::recognizes(&args) { return local_checks::run(args); }
     let output = match parse(args) {
         Ok(Parsed::Help) => { let _ = std::io::stdout().write_all(HELP.as_bytes()); return 0; }
         Ok(Parsed::Version) => { let _ = std::io::stdout().write_all(b"mrk application-observation protocol 1\n"); return 0; }
@@ -264,7 +288,15 @@ mod tests {
         assert_eq!(value["protocolVersion"], p::VERSION);
         assert_eq!(value["scope"], "compiled-interface");
         assert_eq!(value["runtimeChecked"], false);
-        assert_eq!(value["supportsMutations"], false);
+        assert_eq!(value["supportsDirectMutationCommands"], false);
+        assert_eq!(value["supportsNamedProjectExecution"], true);
+        assert_eq!(value["localChecks"]["oneUse"], true);
+        assert_eq!(value["localChecks"]["defaultEnabled"], false);
+        assert_eq!(value["localChecks"]["readGrantAuthorizesExecution"], false);
+        assert_eq!(value["localChecks"]["projectCodeEffectsPossible"], true);
+        assert_eq!(value["localChecks"]["maxLeaseSeconds"], crate::agent_local_checks::LIFETIME.as_secs());
+        assert_eq!(value["localChecks"]["maxRetainedRequests"], crate::agent_local_checks::LIMIT);
+        assert_eq!(value["localChecks"]["commands"].as_array().unwrap().len(), 3);
         assert_eq!(value["operationsRequire"], serde_json::json!({"runningDesktop":true,"projectReadGrant":true}));
         assert!(value.get("serviceInstance").is_none() && value.get("requestId").is_none());
         let commands = value["commands"].as_array().unwrap();

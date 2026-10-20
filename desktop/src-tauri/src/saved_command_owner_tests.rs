@@ -80,7 +80,7 @@ fn mode_only_status_changes_use_the_original_counter_without_changing_other_doma
         assert_eq!(r.revision, 1); assert_eq!(r.ios_mode_capabilities, None);
     }
 }
-fn projection(domain: SavedCommandDomain) -> RunProjection { RunProjection {
+fn projection(domain: SavedCommandDomain) -> RunProjection { RunProjection { agent_local_check: None,
     operation_id: "a".repeat(32), owner_generation: "b".repeat(32), context: context(domain),
     phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None,
 } }
@@ -92,7 +92,7 @@ fn offline_start_checks_original_scope_before_consuming_the_prepared_intent() {
         expected.operation = operation;
         let mut prepared = projection(SavedCommandDomain::OfflinePreflight);
         prepared.context = Context::OfflinePreflight(expected.clone());
-        owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools: None, local_history: None, projection: prepared,
+        owner.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools: None, local_history: None, projection: prepared,
             expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None,
             material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
         let request = |consent, operation_id| wire::start(&json!({"operationId": operation_id,
@@ -131,7 +131,7 @@ fn active_in(application: SavedCommandOwner) -> (SavedCommandOwner, Arc<Session>
 }
 pub(super) fn active_with_context(application: SavedCommandOwner, context: Context) -> (SavedCommandOwner, Arc<Session>) {
     let domain = application.inner.domain;
-    let mut p = RunProjection { operation_id: "a".repeat(32), owner_generation: "b".repeat(32), context,
+    let mut p = RunProjection { agent_local_check: None, operation_id: "a".repeat(32), owner_generation: "b".repeat(32), context,
         phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
     let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
     let (frames, receiver) = mpsc::channel(2);
@@ -144,7 +144,7 @@ pub(super) fn active_with_context(application: SavedCommandOwner, context: Conte
         SavedCommandDomain::IOSArchive => Profile::IOSArchive(ios_wire::Profile::MacArm64),
         SavedCommandDomain::ArtifactInspection => Profile::ArtifactInspection(artifact_wire::Profile::MacosArm64),
         SavedCommandDomain::LocalStorePreflight => Profile::LocalStorePreflight(store_wire::Profile::MacosArm64) };
-    let owner = Arc::new(Session { upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+    let owner = Arc::new(Session { agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile, clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None, artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
@@ -194,7 +194,7 @@ fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration
             SavedCommandDomain::ArtifactInspection => &bridge.artifact_inspection,
             SavedCommandDomain::LocalStorePreflight => bridge.local_store.original_for_test(),
         };
-        original.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(domain),
+        original.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(domain),
             expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
         assert_eq!(original.inner.qualified(None), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
             && original.inner.runtime.offline_preflight_installed_profile_available());
@@ -409,7 +409,7 @@ fn typed_consent_cannot_cross_domains_and_android_burns_before_any_custody() {
         let owner = application(SavedCommandDomain::AndroidBuild);
         let mut prepared = projection(SavedCommandDomain::AndroidBuild);
         prepared.context = Context::AndroidBuild(context.clone());
-        owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: prepared,
+        owner.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: prepared,
             expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
         assert!(owner.start_offline(wire::start(&wrong_consent).unwrap(), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
         assert!(owner.inner.lock().prepared.is_some());
@@ -440,7 +440,7 @@ fn recovery_uses_its_own_closed_domain_and_one_use_intent_without_opening_a_runt
         "baselineGeneration":3,"action":"recover"})).unwrap();
     assert!(owner.prepare_recovery(request, 1, project(), recovery_wire::Availability::Available).is_err());
     { let r = owner.inner.lock(); assert!(r.recovery_review.is_none() && r.prepared.is_none()); }
-    owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::ProjectRecovery),
+    owner.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::ProjectRecovery),
         expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
     let input = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":recovery_wire::CONSENT});
     // An unqualified runtime or this plain test's absent executor refuses the
@@ -588,7 +588,7 @@ fn recovery_start_consumes_observation_and_refuses_a_different_arc_or_lost_conte
         let app = application(SavedCommandDomain::IOSArchive);
         let mut p = projection(SavedCommandDomain::IOSArchive); p.context = recovery_action();
         { let mut r = app.inner.lock(); r.recovery = Some(observed);
-            r.prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection:p, expires:Instant::now()+INTENT, registration:1,
+            r.prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection:p, expires:Instant::now()+INTENT, registration:1,
                 project:project(), recovery_stamp:None, material:None, recovery:Some(prepared), android_selection: None, artifact_selection: None, artifact_tools: None }); }
         let admitted = app.start(Start { operation_id:"a".repeat(32), owner_generation:"b".repeat(32) },
             Instant::now(), Some((1, project())), Availability::Available).unwrap();
@@ -726,7 +726,7 @@ fn android_unselected_stale_and_stopped_intents_refuse_before_any_native_book() 
         // No positive runtime/toolchain/observer permission is manufactured.
         { let mut r = owner.inner.lock();
             assert!(r.active.is_none() && r.prepared.is_none());
-            r.prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
+            r.prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
                 registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None }); }
         let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
         let registration = if scenario == "stale-registration" { 2 } else { 1 };
@@ -1168,7 +1168,7 @@ fn ios_consent_is_domain_local_one_use_and_cannot_qualify_runtime_custody() {
     assert!(owner.prepare_android(android_wire::prepare(&android).unwrap(), 1, project(), android_wire::Availability::Available).is_err());
     assert_eq!(owner.inner.lock().revision, 0);
     assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
-    owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::IOSArchive),
+    owner.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::IOSArchive),
         expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
     let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":ios_wire::CONSENT});
     let status = owner.start_ios(ios_wire::start(&request).unwrap(), Instant::now(), Some((1,project())), ios_wire::Availability::Available).unwrap().release();
@@ -1250,7 +1250,7 @@ fn artifact_two_frames_without_selected_originals_never_publish_and_first_stop_n
     let intent = projection(SavedCommandDomain::ArtifactInspection);
     let intent_id = intent.operation_id.clone();
     let intent_generation = intent.owner_generation.clone();
-    prepared.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: intent,
+    prepared.inner.lock().prepared = Some(Prepared { agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: intent,
         expires: Instant::now() + INTENT, registration: 1, project: project(),
         recovery_stamp: None, material: None, recovery: None, android_selection: None,
         artifact_selection: None, artifact_tools: None });

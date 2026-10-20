@@ -97,7 +97,7 @@ impl CredentialReference {
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
     ObserveProject, EditConfiguration, EditProjectIdentity, GitStage, GitUnstage,
-    GitCommit, AssignCredential, GenerateCredential, Build, Release,
+    GitCommit, AssignCredential, GenerateCredential, Build, Release, LocalProjectChecks,
 }
 
 /// Future operation-specific adapters may compare this DATA with a genuine
@@ -211,6 +211,9 @@ pub enum RequestBody {
     #[serde(rename = "project.observation")] Observe(ProjectQuery),
     #[serde(rename = "operation.list")] Operations(ProjectQuery),
     #[serde(rename = "operation.status")] Operation(OperationQuery),
+    #[serde(rename = "local-check.submit")] LocalCheckSubmit(crate::agent_local_checks::Submit),
+    #[serde(rename = "local-check.status")] LocalCheckStatus(crate::agent_local_checks::Query),
+    #[serde(rename = "local-check.cancel")] LocalCheckCancel(crate::agent_local_checks::Query),
     #[serde(rename = "identity.request")] IdentitySubmit(crate::agent_identity_requests::Submit),
     #[serde(rename = "identity.request-status")] IdentityIntent(crate::agent_identity_requests::Query),
 }
@@ -222,6 +225,8 @@ pub struct Request { pub version: u32, pub request_id: Id, pub request: RequestB
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ServiceInfo {
     pub read_only: bool,
+    pub read_grant_authorizes_execution: bool,
+    pub local_checks_require_separate_grant: bool,
     pub requires_running_desktop: bool,
     pub cached_observations_are_authority: bool,
     pub remaining_access_ms: u64,
@@ -232,6 +237,7 @@ pub enum ResponseBody {
     Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
     IdentityIntent(crate::agent_identity_requests::IntentStatus),
+    LocalCheck(crate::agent_local_checks::Status),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -267,6 +273,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
     if request.version != VERSION { return Err(Error::InvalidRequest); }
     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
+    if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
     Ok(request)
 }
 pub fn encode_request(request: &Request) -> Result<Vec<u8>, Error> {
@@ -321,7 +328,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
     }
     if response.version != VERSION { return Err(Error::InvalidRequest); }
     match &response.response {
-        ResponseBody::Info(info) if !info.read_only || !info.requires_running_desktop || info.cached_observations_are_authority
+        ResponseBody::Info(info) if info.read_only || info.read_grant_authorizes_execution || !info.local_checks_require_separate_grant || !info.requires_running_desktop || info.cached_observations_are_authority
             || info.remaining_access_ms > 3_600_000 => return Err(Error::InvalidRequest),
         ResponseBody::Projects(rows) => {
             if rows.len() > PROJECT_LIMIT { return Err(Error::InvalidRequest); }
@@ -336,6 +343,7 @@ fn validate_response(response: &Response) -> Result<(), Error> {
         }
         ResponseBody::Operation(row) => operation(row)?,
         ResponseBody::IdentityIntent(row) => { row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
+        ResponseBody::LocalCheck(row) => { row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); } },
         _ => {}
     }
     Ok(())

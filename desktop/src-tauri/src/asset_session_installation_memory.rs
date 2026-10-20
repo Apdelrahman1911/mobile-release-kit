@@ -553,7 +553,9 @@ mod known {
             path:project.path.to_str().unwrap().to_owned()});
         slot.android_source=Some(Arc::new(AndroidSourceBinding{project_id:project_id.to_owned(),generation:1,
             root:project.clone(),role:crate::android_tool_sources::Role::Jdk,acquired:None}));
-        let state=DocumentState{lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
+        let state=DocumentState {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        agent_local_check_grant: None,lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
             retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,apple_provisioning_ready:None,version_allocation_source:None,
             session_owner_reason:None,maintenance:macos_maintenance::Closure::default(),context:Some(context),slot:Some(slot),records,assignments,
@@ -659,7 +661,9 @@ mod known {
         // Only inert DATA. No source, child, GUI, native settlement or runtime
         // admission is produced by these synthetic bookkeeping arrangements.
         fn state() -> DocumentState {
-            DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
+            DocumentState {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        agent_local_check_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
                 quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, version_allocation_source: None,
                 session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),

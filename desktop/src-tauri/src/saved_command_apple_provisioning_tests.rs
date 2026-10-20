@@ -23,7 +23,7 @@ fn projection() -> RunProjection {
         "lifetime":{"complete":true,"fatal":false,"contained":true,"commandDispatched":true,"commands":7,
             "profileCalls":0,"inputClosed":true,"handlersRestored":true,"invocationClosed":true,"stopObserved":"none"}
     })).unwrap();
-    RunProjection {
+    RunProjection { agent_local_check: None,
         operation_id: "d".repeat(32),
         owner_generation: "e".repeat(32),
         context: Context::AppleProvisioning(context),

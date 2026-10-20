@@ -282,6 +282,7 @@ fn main() {
             "installation_preparation_status", "prepare_installation_quit",
             "choose_project", "choose_project_path", "project_snapshot", "catalog",
             "application_read_status", "allow_application_read", "revoke_application_read",
+            "agent_local_check_access", "allow_agent_local_check", "revoke_agent_local_check",
             "environment_requirements", "release_version_observe",
             "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
             "release_evidence_choose", "release_evidence_status", "release_evidence_observe", "release_evidence_cancel",
@@ -319,6 +320,8 @@ fn main() {
             "release_version_edit_close", "release_version_edit_status",
             "project_identity_open", "project_identity_prepare", "project_identity_apply",
             "project_identity_close", "project_identity_status",
+            "agent_identity_status", "allow_agent_identity", "revoke_agent_identity", "decline_agent_identity",
+            "review_agent_identity", "prepare_agent_identity", "apply_agent_identity",
             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
             "github_auth_status", "github_auth_connect", "github_auth_cancel", "github_auth_accounts",
             "git_read_status", "git_read_start", "git_read_cancel",
@@ -331,6 +334,7 @@ fn main() {
             "github_history_status", "github_history_start", "github_history_cancel",
             "vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_backup_export", "vault_backup_import", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
+            "upload_key_status", "upload_key_prepare", "upload_key_create",
         ];
         let attributes = tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));
