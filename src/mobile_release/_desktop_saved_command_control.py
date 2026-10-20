@@ -34,6 +34,7 @@ class SavedCommandDomain(Enum):
     GitHubHistory = "github-history"
     GitHubAuth = "github-auth"
     GitRead = "git-read"
+    GitLocal = "git-local"
     VersionAllocationSource = "version-allocation-source"
     AppleProvisioning = "apple-bundle-provisioning"
     LocalStorePreflight = "local-store-preflight"
@@ -69,6 +70,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.GitHubHistory:
         from . import _desktop_github_history_protocol
         return _desktop_github_history_protocol
+    if domain is SavedCommandDomain.GitLocal:
+        from . import _desktop_git_local_protocol
+        return _desktop_git_local_protocol
     if domain is SavedCommandDomain.GitRead:
         from . import _desktop_git_read_protocol
         return _desktop_git_read_protocol
@@ -125,6 +129,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_github_history_control import HistoryInput
     if type(source) is HistoryInput and source.domain is SavedCommandDomain.GitHubHistory:
         return SavedCommandDomain.GitHubHistory
+    from ._desktop_git_local_control import GitLocalInput
+    if type(source) is GitLocalInput and source.domain is SavedCommandDomain.GitLocal:
+        return SavedCommandDomain.GitLocal
     from ._desktop_git_read_control import GitReadInput
     if type(source) is GitReadInput and source.domain is SavedCommandDomain.GitRead:
         return SavedCommandDomain.GitRead
@@ -212,7 +219,7 @@ class _SavedCommandInput:
 
     def remaining_timeout(self, timeout: int) -> int:
         self._owner()
-        self._require(self.domain not in (SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ToolAcquisition, SavedCommandDomain.GitRead))
+        self._require(self.domain not in (SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ToolAcquisition, SavedCommandDomain.GitRead, SavedCommandDomain.GitLocal))
         self._require(self.guard is not None and type(timeout) is int and timeout > 0)
         self.guard.check()
         if self.domain is SavedCommandDomain.OfflinePreflight:
@@ -230,7 +237,7 @@ class _SavedCommandInput:
 
     def command_limits(self, timeout: int, capture: bool, output_limit: int) -> tuple[int, int]:
         """Clamp only an original domain; no change to C/A/W command ownership."""
-        self._require(self.domain not in (SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ToolAcquisition, SavedCommandDomain.GitRead))
+        self._require(self.domain not in (SavedCommandDomain.ProjectRecovery, SavedCommandDomain.ToolAcquisition, SavedCommandDomain.GitRead, SavedCommandDomain.GitLocal))
         timeout = self.remaining_timeout(timeout)
         if self.domain is SavedCommandDomain.OfflinePreflight:
             from ._desktop_preflight_budget import budget_for
@@ -305,6 +312,7 @@ class _SavedCommandInput:
                            SavedCommandDomain.GitHubHistory: "Original History input changed",
                            SavedCommandDomain.GitHubAuth: "Original gh-auth input changed",
                            SavedCommandDomain.GitRead: "Original Git read input changed",
+                           SavedCommandDomain.GitLocal: "Original local Git input changed",
                            SavedCommandDomain.AppleProvisioning: "Original Bundle-ID provisioning input changed",
                            SavedCommandDomain.LocalStorePreflight: "Original Store access-check input changed",
                            SavedCommandDomain.LocalStorePrepare: "Original Store preparation input changed",
