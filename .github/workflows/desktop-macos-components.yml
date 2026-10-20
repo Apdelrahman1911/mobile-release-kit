@@ -438,6 +438,10 @@ jobs:
     name: ${{ inputs.component == 'app-typecheck' && 'Typecheck shipping app and focused Mac contracts' || inputs.component == 'app-native-tests' && 'Test focused Mac library, backup and IPC behavior' || inputs.component == 'local-keychain-contracts' && 'Test local Keychain contracts' || inputs.component == 'local-keychain' && 'Check local Keychain integration' || inputs.component == 'app-contracts' && 'Test Mac Store contracts' || 'Compile packaged app' }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
+    permissions:
+      contents: read
+      # The token is passed only to the conditional artifact-restore step.
+      actions: read
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -948,6 +952,259 @@ jobs:
             saved_command_owner::local_history::native::reconcile_tests::local_external_readiness_final_original_join_alone_selects_cleanup_not_success \
             --exact --test-threads=1 | tee "$WORK_ROOT/store-contract-tests.log"
           grep -Eq '^test result: ok\. 74 passed; 0 failed; 0 ignored;' "$WORK_ROOT/store-contract-tests.log"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: inputs.component == 'app-native-tests'
+        id: apple-key-python
+        with:
+          python-version: '3.14.7'
+      - name: Restore the SOURCE-selected signed Ruby for the local Apple key component
+        if: inputs.component == 'app-native-tests'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_PYTHON: ${{ steps.apple-key-python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          umask 077
+          # Same acquisition as store-runtime. No account calls, signing,
+          # runtime build, alternate artifact or retry.
+          "$OWNER_PYTHON" -I -S -B desktop/tools/macos_store_component.py restore-selected \
+            "$WORK_ROOT/component" --target aarch64-apple-darwin
+      - name: Verify real local Apple key generation, encrypted NEW and fresh reuse
+        if: inputs.component == 'app-native-tests'
+        id: apple-key-component
+        timeout-minutes: 10
+        shell: bash
+        env:
+          OWNER_PYTHON: ${{ steps.apple-key-python.outputs.python-path }}
+          WORK_ROOT: ${{ steps.work.outputs.root }}
+          MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+          MRK_IMAGE_RELEASE_ID: ${{ matrix.release }}
+          MACOSX_DEPLOYMENT_TARGET: '26.0'
+        run: |
+          set -euo pipefail
+          umask 077
+          # Reuse the actual library graph just tested above. Cargo selects the
+          # executable; no filename guessing or copied/cached-binary authority.
+          export CARGO_HOME="$GITHUB_WORKSPACE/desktop/.ci-component-cargo" RUSTUP_HOME="$WORK_ROOT/rustup"
+          export CARGO_TARGET_DIR="$CARGO_HOME/target" CARGO_INCREMENTAL=0
+          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+          rustup run 1.98.1 cargo test --locked --no-default-features \
+            --manifest-path desktop/src-tauri/Cargo.toml --lib --no-run --message-format=json \
+            > "$WORK_ROOT/apple-key-cargo.jsonl"
+          "$OWNER_PYTHON" -I -S -B - <<'PY'
+          import importlib.util, json, os, re, resource, stat, subprocess, sys, time
+          from pathlib import Path
+          checkout, work = Path.cwd(), Path(os.environ["WORK_ROOT"])
+          phase = "prepare"
+          try:
+              assert sys.version_info[:3] == (3, 14, 7) and sys.flags.isolated and sys.flags.no_site
+              def load(name):
+                  spec = importlib.util.spec_from_file_location("_apple_key_component_" + name,
+                      checkout / "desktop/tools" / (name + ".py"))
+                  module = importlib.util.module_from_spec(spec)
+                  sys.modules[spec.name] = module
+                  spec.loader.exec_module(module)
+                  return module
+              stager, prep, helper, signing = [load(name) for name in
+                  ("stage_macos_installed", "prepare_runtime", "macos_android_helper_package", "macos_store_signing")]
+              stager.need(os.uname().sysname == "Darwin" and os.uname().machine == "arm64"
+                  and os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+                  and os.environ.get("RUNNER_OS") == "macOS" and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                  and os.environ.get("GITHUB_REPOSITORY") == "Apdelrahman1911/mobile-release-kit"
+                  and os.environ.get("GITHUB_SHA") == os.environ.get("GITHUB_WORKFLOW_SHA"), "apple-key-hosted-source")
+              def directory(value):
+                  stager.need(stat.S_ISDIR(value.st_mode) and value.st_uid == os.geteuid() != 0
+                      and stat.S_IMODE(value.st_mode) == 0o700, "apple-key-private-directory")
+                  return (value.st_dev, value.st_ino, value.st_uid, value.st_gid, value.st_mode)
+              def private(path, limit):
+                  with stager.parent(path) as (parent, leaf):
+                      body, info = stager.read_at(parent, leaf, limit)
+                  stager.need(info.st_uid == os.geteuid() and info.st_nlink == 1
+                      and stat.S_IMODE(info.st_mode) == 0o600, "apple-key-private-file")
+                  return body, stager.signature(info)
+              flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+              held = os.open(work, flags)
+              try:
+                  root_identity = directory(os.fstat(held))
+                  stager.need(directory(work.lstat()) == root_identity
+                      and work.parent == Path(os.environ["RUNNER_TEMP"]) and work.name.startswith("mrk-app-check."),
+                      "apple-key-task-root")
+                  messages = stager.read(work / "apple-key-cargo.jsonl", 4 * 1024 * 1024)
+                  artifacts = [json.loads(line) for line in messages.splitlines()]
+                  candidates = [item for item in artifacts if item.get("reason") == "compiler-artifact"
+                      and item.get("target", {}).get("name") == "mobile_release_desktop"
+                      and item.get("target", {}).get("kind") == ["lib"] and item.get("profile", {}).get("test") is True
+                      and item.get("manifest_path") == str(checkout / "desktop/src-tauri/Cargo.toml")
+                      and item.get("target", {}).get("src_path") == str(checkout / "desktop/src-tauri/src/lib.rs")
+                      and item.get("features") == [] and isinstance(item.get("executable"), str)]
+                  stager.need(len(candidates) == 1, "apple-key-original-test-executable")
+                  binary = Path(candidates[0]["executable"])
+                  stager.need(binary.parent == Path(os.environ["CARGO_TARGET_DIR"]) / "debug/deps"
+                      and re.fullmatch(r"mobile_release_desktop-[0-9a-f]+", binary.name) is not None,
+                      "apple-key-original-test-path")
+                  binary_info = binary.lstat()
+                  stager.need(stat.S_ISREG(binary_info.st_mode) and binary_info.st_uid == os.geteuid()
+                      and binary_info.st_nlink == 1 and binary_info.st_mode & 0o111 != 0
+                      and binary_info.st_mode & 0o022 == 0 and 0 < binary_info.st_size <= 256 * 1024 * 1024,
+                      "apple-key-original-test-shape")
+                  binary_identity = stager.signature(binary_info)
+                  # Identical SOURCE-selected archive/inventory/signature checks
+                  # to store-runtime, without running its six unrelated suites.
+                  target, arch = "aarch64-apple-darwin", "arm64"
+                  capsule = work / "component"
+                  runtime = prep._root(capsule / "extracted/runtime")
+                  original = stager.store_component_inputs(capsule, target)
+                  def snapshot():
+                      rows, directories = [], {}
+                      for path in prep.store_component_files(runtime, directories=directories):
+                          with stager.parent(path) as (parent, leaf):
+                              body, info = stager.read_at(parent, leaf, signing.FILE_LIMIT)
+                          rows.append((path.relative_to(runtime).as_posix(), stager.digest(body), len(body)))
+                      stager.need(tuple(rows) == original[1], "apple-key-runtime-bytes")
+                      return directories
+                  original_directories = snapshot()
+                  producer_path, service_path = checkout / helper.PRODUCER_PROFILE, checkout / helper.PROFILE
+                  producer, service = stager.read(producer_path, 1024), stager.read(service_path, 1024)
+                  stager.packaging_signing_data(producer, service)
+                  identity = stager.service_signing_data(service)
+                  receipt = stager.decode(stager.read(capsule / "store-signed-receipt.json", 256 * 1024))
+                  native = receipt["nativeMembers"]
+                  stager.need(len(native) == signing.NATIVE_COUNT, "apple-key-runtime-native-count")
+                  source_paths = ("fastlane/apple_distribution_key.rb", "fastlane/apple_distribution_key_verify.rb",
+                      "desktop/tools/verify_macos_store_runtime.rb")
+                  sources = tuple(stager.read(checkout / name, 128 * 1024) for name in source_paths)
+                  home, fixture = work / "apple-key-home", work / "apple-key-fixture"
+                  home.mkdir(mode=0o700); fixture.mkdir(mode=0o700)
+                  fixture_identity = directory(fixture.lstat())
+                  for name in ("generated", "native", "reopened"):
+                      (fixture / name).mkdir(mode=0o700)
+                  clean = {"PATH": str(runtime / "bin") + ":/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(home),
+                      "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TZ": "UTC", "CI": "true",
+                      "FASTLANE_SKIP_UPDATE_CHECK": "1", "FASTLANE_OPT_OUT_USAGE": "1", "FASTLANE_HIDE_CHANGELOG": "1"}
+                  profile = ('(version 1) (allow default) (deny network*) '
+                      '(deny file-write* (subpath (param "RUNTIME"))) (deny file-write* (subpath (param "CHECKOUT")))')
+                  sandbox = ["/usr/bin/sandbox-exec", "-D", "RUNTIME=" + str(runtime),
+                      "-D", "CHECKOUT=" + str(checkout), "-p", profile]
+                  ruby = [str(runtime / "bin/bundle"), "exec", "ruby"]
+                  resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+                  resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024, 256 * 1024))
+                  phase = "runtime-signatures"
+                  with (work / "apple-key-runtime.private").open("xb") as capture:
+                      end = time.monotonic() + 180
+                      for row in native:
+                          name = row["path"]
+                          stager.need(name.startswith("runtime/") and row["identifier"] == signing.identifier(name),
+                              "apple-key-runtime-native-path")
+                          remaining = end - time.monotonic()
+                          stager.need(remaining > 0, "apple-key-runtime-signature-deadline")
+                          requirement = helper.signing_requirement(identity, signing.identifier(name))
+                          subprocess.run(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures",
+                              "--test-requirement", "=" + requirement, str(capsule / "extracted" / name)],
+                              stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
+                              env=clean, cwd=home, check=True, timeout=min(30, remaining))
+                      phase = "runtime-loader"
+                      subprocess.run(sandbox + ruby + [str(checkout / source_paths[2]), str(runtime), arch, "projected-smoke"],
+                          stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
+                          env=clean, cwd=home, check=True, timeout=90)
+                  test_name = ("asset_session::vault::backup_native::component_tests::apple_key::"
+                      "native_apfs_apple_key_new_reopen_and_private_reuse")
+                  phase = "test-selection"
+                  with (work / "apple-key-selection.private").open("xb") as capture:
+                      subprocess.run(sandbox + [str(binary), test_name, "--exact", "--ignored", "--list"],
+                          stdin=subprocess.DEVNULL, stdout=capture, stderr=subprocess.STDOUT,
+                          env=clean, cwd=home, check=True, timeout=15)
+                  listing = private(work / "apple-key-selection.private", 64 * 1024)[0].splitlines()
+                  stager.need(listing.count((test_name + ": test").encode("ascii")) == 1
+                      and b"1 test, 0 benchmarks" in listing, "apple-key-one-original-test")
+                  generated = fixture / "generated/pending-apple-key.mrk"
+                  reopened = fixture / "reopened/pending-apple-key.mrk"
+                  magic = b"MRK-APPLE-DISTRIBUTION-KEY/1\n"
+                  public_magic = b"MRK-APPLE-DISTRIBUTION-KEY-PUBLIC/1\n"
+                  private_limit = len(magic) + 12 + 3072 + 4096 + 1024
+                  public_limit = len(public_magic) + 8 + 4096 + 1024
+                  # One original90s end for ALL three calls and their checks.
+                  # No phase retry/renewal and no private diagnosticTail.
+                  end = time.monotonic() + 90
+                  calls = (
+                      ("generate", ruby + [str(checkout / source_paths[0])], generated, private_limit, 30),
+                      ("native", [str(binary), test_name, "--exact", "--ignored", "--test-threads=1"],
+                          work / "apple-key-native.private", 64 * 1024, 35),
+                      ("verify", ruby + [str(checkout / source_paths[1]), str(reopened)],
+                          work / "apple-key-verifier.private", public_limit, 25),
+                  )
+                  for phase, argv, destination, limit, seconds in calls:
+                      remaining = end - time.monotonic()
+                      stager.need(remaining > 0 and directory(fixture.lstat()) == fixture_identity
+                          and stager.signature(binary.lstat()) == binary_identity, "apple-key-original-cut")
+                      error_path = work / ("apple-key-" + phase + "-stderr.private")
+                      resource.setrlimit(resource.RLIMIT_FSIZE, (limit, 256 * 1024))
+                      with destination.open("xb") as output, error_path.open("xb") as errors:
+                          environment = dict(clean)
+                          if phase == "native": environment["MRK_MACOS_VAULT_FIXTURE_ROOT"] = str(fixture)
+                          remaining = end - time.monotonic()
+                          stager.need(remaining > 0, "apple-key-call-deadline")
+                          # run() kills AND waits for this original on timeout;
+                          # any exception stops the loop, never the next phase.
+                          subprocess.run(sandbox + argv, stdin=subprocess.DEVNULL, stdout=output, stderr=errors,
+                              env=environment, cwd=home, check=True, timeout=min(seconds, remaining))
+                          output.flush(); os.fsync(output.fileno())
+                          errors.flush(); os.fsync(errors.fileno())
+                      resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024, 256 * 1024))
+                      body, output_identity = private(destination, limit)
+                      stager.need(len(private(error_path, 4096)[0]) == 0 and time.monotonic() < end,
+                          "apple-key-private-call-return")
+                      if phase == "generate":
+                          stager.need(body.startswith(magic) and len(body) > len(magic) + 12, "apple-key-generated-frame")
+                          offset = len(magic)
+                          sizes = [int.from_bytes(body[offset+i:offset+i+4]) for i in (0, 4, 8)]
+                          stager.need(all(0 < size <= cap for size, cap in zip(sizes, (3072, 4096, 1024)))
+                              and len(body) == offset + 12 + sum(sizes), "apple-key-generated-frame-bound")
+                          generated_identity, private_digest = output_identity, stager.digest(body)
+                          expected_public = public_magic + body[offset+4:offset+12] + body[offset+12+sizes[0]:]
+                      elif phase == "native":
+                          stager.need(re.search(rb"^test result: ok\. 1 passed; 0 failed; 0 ignored;", body, re.MULTILINE)
+                              is not None, "apple-key-native-count")
+                          fresh, reopened_identity = private(reopened, private_limit)
+                          original_body, current_identity = private(generated, private_limit)
+                          stager.need(stager.digest(fresh) == stager.digest(original_body) == private_digest
+                              and current_identity == generated_identity, "apple-key-native-private-readback")
+                      else:
+                          stager.need(body.startswith(public_magic) and len(body) >= len(public_magic) + 8,
+                              "apple-key-verified-frame")
+                          offset = len(public_magic)
+                          csr, spki = int.from_bytes(body[offset:offset+4]), int.from_bytes(body[offset+4:offset+8])
+                          stager.need(0 < csr <= 4096 and 0 < spki <= 1024
+                              and len(body) == offset + 8 + csr + spki and body == expected_public,
+                              "apple-key-verified-frame-bound")
+                  phase = "post"
+                  for path, expected_identity in ((generated, generated_identity), (reopened, reopened_identity)):
+                      current_body, current_identity = private(path, private_limit)
+                      stager.need(current_identity == expected_identity and stager.digest(current_body) == private_digest,
+                          "apple-key-private-original-post")
+                  stager.need(snapshot() == original_directories and stager.store_component_inputs(capsule, target) == original
+                      and stager.read(producer_path, 1024) == producer and stager.read(service_path, 1024) == service
+                      and tuple(stager.read(checkout / name, 128 * 1024) for name in source_paths) == sources
+                      and stager.signature(binary.lstat()) == binary_identity and directory(fixture.lstat()) == fixture_identity
+                      and directory(os.fstat(held)) == root_identity and directory(work.lstat()) == root_identity
+                      and time.monotonic() < end, "apple-key-originals-post")
+              finally:
+                  os.close(held)  # One actual close; never retry or publish through failure.
+              # Only after all actual child returns, file closes and held root
+              # close may the existing caller clean its OWN private task root.
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="ascii") as output:
+                  output.write("root_identity=" + ":".join(map(str, root_identity)) + "\n")
+              print(json.dumps({"localAppleKeyComponent": "passed", "nativeTests": 1, "networkDenied": True,
+                  "signedStoreRuby": "3.3.12", "productionProvisioningQualified": False}))
+          except BaseException as error:
+              # Never display argv, exception text, CSR/key bytes or captured
+              # output. Unknown/failed ownership retains this private task root.
+              print(json.dumps({"localAppleKeyComponent": "failed", "phase": phase,
+                  "errorType": type(error).__name__, "privateFixtureRetained": True}))
+              raise SystemExit(1) from None
+          PY
       - name: Bound successful compiler cache publication
         id: cache-size
         if: success() && steps.cargo-cache.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true'
@@ -991,13 +1248,24 @@ jobs:
         env:
           WORK_ROOT: ${{ steps.work.outputs.root }}
           CARGO_CACHE_OWNED: ${{ steps.work.outputs.cache_owned }}
+          APP_CHECKS: ${{ inputs.component }}
+          APPLE_KEY_OUTCOME: ${{ steps.apple-key-component.outcome }}
+          APPLE_KEY_ROOT_IDENTITY: ${{ steps.apple-key-component.outputs.root_identity }}
         run: |
           python3 - <<'PY'
-          import os, shutil
+          import os, shutil, stat
           from pathlib import Path
           work = Path(os.environ["WORK_ROOT"])
           assert work.parent == Path(os.environ["RUNNER_TEMP"])
           assert work.name.startswith("mrk-app-check.") and not work.is_symlink()
+          if os.environ["APP_CHECKS"] == "app-native-tests":
+              info = work.lstat()
+              identity = ":".join(map(str, (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode)))
+              if (os.environ["APPLE_KEY_OUTCOME"] != "success" or identity != os.environ["APPLE_KEY_ROOT_IDENTITY"]
+                      or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                      or stat.S_IMODE(info.st_mode) != 0o700):
+                  print("Apple key component did not return with original custody; leave task files for disposable-host teardown.")
+                  raise SystemExit(1)
           cache = (Path("desktop/.ci-component-cargo"),) if os.environ["CARGO_CACHE_OWNED"] == "true" else ()
           for path in (work, *cache, Path("desktop/node_modules"), Path("desktop/dist")):
               if path.exists():
