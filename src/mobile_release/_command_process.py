@@ -2375,6 +2375,7 @@ class _Worker:
         _require(bootstrap.account_binding is None and self.mapping[5].account_binding is None)
         self.upstream = _Wire(context, self.mapping[3], self.mapping[4])
         self.exec_retired = self.reject_attempted = False
+        self.git_remote_limits_entered = False
         self.effects: list[_FileEffect] = []
 
     def _setup(self, operation: str, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -2440,6 +2441,8 @@ class _Worker:
                 endpoint = self.mapping[8]
                 _require(binding_of(endpoint, ctx.nonce) is ctx.git_remote_binding)
                 endpoint._validate()
+                from ._git_remote_command_limits import apply_worker_limits
+                apply_worker_limits(self, endpoint)
                 _require(self._setup("git_remote_inheritance", os.set_inheritable,
                                     endpoint.fileno(), True) is None)
             stage = "cwd"
