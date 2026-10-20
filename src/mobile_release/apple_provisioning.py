@@ -401,7 +401,8 @@ def validate_download(plan: ProvisioningPlan, response: api.AppleResponse, *, no
     return profile
 
 
-def validate_profile_claims(plan: ProvisioningPlan, profile: api.Profile, payload: dict, *, now: datetime) -> None:
+def validate_profile_claims(plan: ProvisioningPlan, profile: api.Profile, payload: dict, *, now: datetime,
+                            deadline=None) -> None:
     """Pure policy comparison AFTER authentication, never authentication itself.
 
     Public for focused synthetic tests. No result/certificate assignment token is
@@ -428,7 +429,7 @@ def validate_profile_claims(plan: ProvisioningPlan, profile: api.Profile, payloa
                 and api.digest(certificates[0]) == plan.binding.certificate_sha256, "profile_certificate_mismatch")
     try:
         _ipa_profile_policy(payload, plan.target.bundle_id, plan.target.team_id)
-        validate_profile_entitlements(plan.target.entitlements(), payload.get("Entitlements", {}))
+        validate_profile_entitlements(plan.target.entitlements(), payload.get("Entitlements", {}), deadline=deadline)
     except api.ValidationError:
         raise ProvisioningError("profile_entitlements_mismatch") from None
 
@@ -443,7 +444,7 @@ class AuthenticatedProfile:
 
 
 def authenticate_downloaded_profile(plan: ProvisioningPlan, response: api.AppleResponse, *,
-                                    cancellation, now: datetime) -> AuthenticatedProfile:
+                                    cancellation, now: datetime, deadline=None) -> AuthenticatedProfile:
     """Actual existing macOS CMS/finality boundary; no decode-only fallback.
 
     The actual credentials owner must retain the same current key loan and
@@ -454,8 +455,10 @@ def authenticate_downloaded_profile(plan: ProvisioningPlan, response: api.AppleR
     from ._profile_callers import consume_profile_evidence
     from .inspection import InspectionDeadline
     from .ios_profiles import decode_authenticated_profile
+    deadline = deadline if deadline is not None else InspectionDeadline()
+    deadline.check()
+    cancellation.check()
     profile = validate_download(plan, response, now=now)
-    deadline = InspectionDeadline()
     evidence = ProfileCallEvidence(operation="decode")
     primary, payload = None, None
     try:
@@ -471,5 +474,5 @@ def authenticate_downloaded_profile(plan: ProvisioningPlan, response: api.AppleR
     cancellation.check()
     # Native authentication can outlive a profile/certificate's last seconds.
     # Recheck actual current time, not only the pre-call observation timestamp.
-    validate_profile_claims(plan, profile, payload, now=datetime.now(timezone.utc))
+    validate_profile_claims(plan, profile, payload, now=datetime.now(timezone.utc), deadline=deadline)
     return AuthenticatedProfile(profile, plan.binding.key_ref, plan.binding.certificate_sha256)

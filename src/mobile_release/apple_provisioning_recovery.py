@@ -338,13 +338,18 @@ class ProvisioningAttempt:
             # not silently attribute/adopt it or enable the next write.
             return self._save(owner, replace(self.record, status="recovery_required", reason="resource_found_review_required",
                                              observed_resource_id=matched_id))
-        if (matched_id != self.record.response_resource_id
-                or api.resource_sha256(matched) != self.record.response_resource_sha256):
+        if not self._response_matches(matched):
             return self._save(owner, replace(self.record, status="unknown", reason="response_readback_disagrees"))
         status = "cancelled" if self.record.cancel_requested else "succeeded"
         return self._save(owner, replace(self.record, status=status,
                                          reason="cancelled_after_settlement" if self.record.cancel_requested else "provider_resource_confirmed",
                                          observed_resource_id=matched_id))
+
+    def _response_matches(self, resource) -> bool:
+        # Default full-resource comparison stays unchanged. The profile-only
+        # subclass compares its retained sparse 201 receipt to the exact GET.
+        return (resource.resource_id == self.record.response_resource_id
+                and api.resource_sha256(resource) == self.record.response_resource_sha256)
 
     def _matching_resources(self, observation: Observation, bindings: tuple[CertificateBinding, ...],
                             now: datetime) -> list[api.BundleId | api.Certificate | api.Profile]:
