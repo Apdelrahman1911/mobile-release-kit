@@ -24,6 +24,9 @@ use tokio::sync::Mutex as AsyncMutex;
 mod identity_history;
 pub(crate) use identity_history::{IdentityCapture, IdentityObservation, IdentitySource, identity_history_document_backing_bytes};
 
+#[path = "application_service_upload_key.rs"]
+mod upload_key;
+
 const ACCESS_LIFETIME: Duration = Duration::from_secs(3600);
 // Work admission is not the user lease. Bounded synchronous native calls have
 // checkpoints; this does not claim that a stalled kernel call is preemptible.
@@ -243,7 +246,19 @@ impl ApplicationHost {
     /// original document lock before publishing a new registry member.
     pub(crate) fn reserve_native_location(&self, app_data: &Path,
         registered_roots: &[RegisteredRoot]) -> Result<(), Error> {
-        let mut state = self.lock()?; state.available()?;
+        let mut state = self.lock()?;
+        Self::reserve_location_locked(&mut state, app_data, registered_roots)
+    }
+    /// Native preparation holds the Document lock. Never queue that lock
+    /// behind an older Host caller performing storage IO under Control.
+    pub(crate) fn reserve_native_state_location(&self, app_data: &Path,
+        registered_roots: &[RegisteredRoot]) -> Result<(), Error> {
+        let mut state = self.try_native_lock()?;
+        Self::reserve_location_locked(&mut state, app_data, registered_roots)
+    }
+    fn reserve_location_locked(state: &mut Control, app_data: &Path,
+        registered_roots: &[RegisteredRoot]) -> Result<(), Error> {
+        state.available()?;
         if state.phase == Phase::Starting { return Err(Error::Busy); }
         if !ordinary_absolute(app_data)
             || app_data.file_name().and_then(|v| v.to_str()) != Some("dev.mobile-release-kit.desktop")
@@ -309,15 +324,33 @@ impl ApplicationHost {
         }
     }
     pub(crate) fn begin_allow(&self, original: NativeProject) -> Result<AllowTicket, Error> {
-        self.begin_start(original, true)
+        self.begin_start(original, true, None)
     }
     pub(crate) fn begin_native_state(&self, original: NativeProject) -> Result<NativeStateTicket, Error> {
-        self.begin_start(original, false).map(NativeStateTicket)
+        self.begin_start(original, false, None).map(NativeStateTicket)
     }
-    fn begin_start(&self, original: NativeProject, revoke_read: bool) -> Result<AllowTicket, Error> {
+    /// A native action that already owns a deadline cannot buy another full
+    /// startup interval. The original smaller bound remains authoritative.
+    pub(crate) fn begin_native_state_until(&self, original: NativeProject,
+        work_end: Instant) -> Result<NativeStateTicket, Error> {
+        self.begin_start(original, false, Some(work_end)).map(NativeStateTicket)
+    }
+    /// Retire only this unfinished ticket. A late caller cannot cancel a newer
+    /// startup or close its originals. Actual Host shutdown still joins them.
+    pub(crate) fn cancel_native_state_ticket(&self, ticket: &NativeStateTicket) -> Result<(), Error> {
+        let mut state = self.try_native_lock()?;
+        if !Arc::ptr_eq(&ticket.0.owner, &self.identity)
+            || state.pending != Some(ticket.0.epoch) || state.epoch != ticket.0.epoch {
+            return Err(Error::Conflict);
+        }
+        state.retire_pending()
+    }
+    fn begin_start(&self, original: NativeProject, revoke_read: bool,
+        work_end: Option<Instant>) -> Result<AllowTicket, Error> {
         let mut state = if revoke_read { self.lock()? } else { self.try_native_lock()? };
         state.available()?;
         if state.phase == Phase::Starting { return Err(Error::Busy); }
+        if work_end.is_some_and(|end| Instant::now() >= end) { return Err(Error::Expired); }
         state.retire_pending()?;
         if let Some(service) = state.service.clone().filter(|_| revoke_read) {
             if let Err(error) = service.revoke_agent_read() {
@@ -333,7 +366,9 @@ impl ApplicationHost {
         }
         let now = Instant::now();
         let expires = now.checked_add(ACCESS_LIFETIME).ok_or(Error::StateUnknown)?;
-        let startup_expires = now.checked_add(STARTUP_WORK).ok_or(Error::StateUnknown)?;
+        let startup_limit = now.checked_add(STARTUP_WORK).ok_or(Error::StateUnknown)?;
+        let startup_expires = work_end.map_or(startup_limit, |end| end.min(startup_limit));
+        if now >= startup_expires { return Err(Error::Expired); }
         state.pending = Some(state.epoch);
         Ok(AllowTicket { owner: self.identity.clone(), epoch: state.epoch,
             source_epoch: state.source_epoch, original, expires, startup_expires })
@@ -712,6 +747,49 @@ mod tests {
     use super::*;
     use crate::{application_service::tests::passive, application_state_store::{Fixture, Namespace, Revision, DIRECTORY}};
     use std::{fs::File, future::Future, os::unix::fs::{MetadataExt, PermissionsExt}, task::Poll};
+
+    #[test]
+    fn native_state_location_never_waits_for_control_and_keeps_fixed_path_checks() {
+        // Only the real memory lock and unopened path DATA. No Store, source
+        // probe, service, endpoint or replacement thread is created.
+        let host = ApplicationHost::new();
+        let path = Path::new("/unopened-native-state/dev.mobile-release-kit.desktop");
+        {
+            let _original = host.control.lock().unwrap();
+            assert_eq!(host.reserve_native_state_location(path, &[]), Err(Error::Busy));
+        }
+        assert_eq!(host.reserve_native_state_location(path, &[]), Ok(()));
+        assert_eq!(host.reserve_native_state_location(Path::new("/unopened-native-state/wrong-name"), &[]), Err(Error::InvalidRequest));
+        assert_eq!(host.reserve_native_state_location(Path::new("/other-native-state/dev.mobile-release-kit.desktop"), &[]), Err(Error::Conflict));
+        let state = host.control.lock().unwrap();
+        assert_eq!(state.native_location.as_deref(), Some(path));
+        assert!(state.native_roots.is_empty());
+        assert!(state.phase == Phase::Dormant);
+        assert!(state.store.is_none() && state.service.is_none() && state.pending.is_none());
+    }
+
+    #[test]
+    fn native_startup_keeps_original_deadline_and_cancels_only_its_ticket() {
+        let f = Fixture::new();
+        let original = project(&f);
+        let host = ApplicationHost::new();
+        reserve(&host, &f, &original);
+        let end = Instant::now() + Duration::from_secs(5);
+        let first = host.begin_native_state_until(original.clone(), end).unwrap();
+        assert_eq!(first.0.startup_expires, end);
+        let second = host.begin_native_state(original.clone()).unwrap();
+        assert_eq!(host.cancel_native_state_ticket(&first), Err(Error::Conflict));
+        {
+            let state = host.control.lock().unwrap();
+            assert_eq!(state.pending, Some(second.0.epoch));
+            assert_eq!(host.cancel_native_state_ticket(&second), Err(Error::Busy));
+        }
+        assert_eq!(host.cancel_native_state_ticket(&second), Ok(()));
+        assert_eq!(host.cancel_native_state_ticket(&second), Err(Error::Conflict));
+        assert!(matches!(host.begin_native_state_until(original, Instant::now()), Err(Error::Expired)));
+        let state = host.control.lock().unwrap();
+        assert!(state.pending.is_none() && state.store.is_none() && state.service.is_none());
+    }
 
     fn runtime() -> tokio::runtime::Runtime { tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap() }
     fn project(f: &Fixture) -> NativeProject {

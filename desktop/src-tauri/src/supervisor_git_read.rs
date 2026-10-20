@@ -274,8 +274,8 @@ impl Invocation {
             native_clock,
         )?);
         {
-            let mut slot = self.request.lock().map_err(|_| BridgeError::cleanup_unknown)?;
-            let mut bridge = self.clock.lock().map_err(|_| BridgeError::cleanup_unknown)?;
+            let mut slot = self.request.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            let mut bridge = self.clock.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if slot.is_some() || bridge.is_some() {
                 return Err(BridgeError::cleanup_unknown());
             }

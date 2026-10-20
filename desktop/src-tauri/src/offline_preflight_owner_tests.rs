@@ -13,7 +13,7 @@ fn projection() -> RunProjection { RunProjection { operation_id: "a".repeat(32),
     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
     outcome: None, reason: Reason::None, result: None, stage: None } }
 fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
-    owner.original_for_test().inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+    owner.original_for_test().inner.lock().prepared = Some(Prepared { apple:None, upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
 }
 fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
 fn active() -> (OfflinePreflightOwner, Arc<Session>) {
@@ -22,7 +22,7 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
     let clocks = Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now());
     let (native_audit_cutoff, _) = watch::channel(clocks.work);
     let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
-    let session = Arc::new(Session { upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+    let session = Arc::new(Session { apple:apple_provisioning::State::new(None), upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None,
         artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
@@ -52,7 +52,7 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
 }
 
 fn offline_context(owner: &Session) -> &wire::Context {
-    match &owner.context { Context::OfflinePreflight(context) => context, Context::AndroidBuild(_) | Context::ProjectRecovery(_) | Context::IOSArchive(_) | Context::ArtifactInspection(_) | Context::LocalStorePreflight(_) | Context::LocalStoreExecute(_) | Context::LocalStorePrepare(_) | Context::LocalStoreReconcile(_) | Context::LocalReleaseHistory(_) | Context::ToolAcquisition(_) | Context::GenerateUploadKey(_) => panic!("offline test context") }
+    match &owner.context { Context::OfflinePreflight(context) => context, Context::AndroidBuild(_) | Context::ProjectRecovery(_) | Context::IOSArchive(_) | Context::ArtifactInspection(_) | Context::LocalStorePreflight(_) | Context::LocalStoreExecute(_) | Context::LocalStorePrepare(_) | Context::LocalStoreReconcile(_) | Context::LocalReleaseHistory(_) | Context::ToolAcquisition(_) | Context::GenerateUploadKey(_) | Context::AppleProvisioning(_) => panic!("offline test context") }
 }
 
 pub(crate) fn qualification_is_closed_without_a_runtime_or_another_owners_permit() {

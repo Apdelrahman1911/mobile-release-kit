@@ -3,6 +3,8 @@
 use super::*;
 use crate::local_store_preflight_protocol as wire;
 use sha2::{Digest, Sha256};
+#[path="asset_session_apple_provisioning_material.rs"]
+mod apple_provisioning;
 
 pub(crate) const MATERIAL_PREFIX: &[u8] = b"MRK-STORE-MATERIAL/1\n";
 pub(crate) const MATERIAL_SUFFIX: &[u8] = b"\nMRK-STORE-MATERIAL-END\n";
@@ -14,7 +16,7 @@ pub(crate) struct SelectedStoreMaterial {
     supplemental:[Option<(RecordKey,Arc<Payload>)>;3],
 }
 #[derive(Clone,PartialEq,Eq)]
-enum StoreCommand {Access(wire::Context),Prepare(crate::local_store_prepare_protocol::Context),Reconcile(crate::local_store_reconcile_protocol::Context),Execute(crate::local_store_execute_protocol::Context)}
+enum StoreCommand {Provisioning(crate::apple_provisioning_protocol::Context),Access(wire::Context),Prepare(crate::local_store_prepare_protocol::Context),Reconcile(crate::local_store_reconcile_protocol::Context),Execute(crate::local_store_execute_protocol::Context)}
 impl StoreCommand {
     fn later(&self)->Option<&crate::local_store_prepare_protocol::LaterStage>{match self {Self::Prepare(c)=>c.later.as_ref(),Self::Execute(c)=>c.later.as_ref(),_=>None}}
     fn assignments(&self)->Option<&crate::local_store_prepare_protocol::StageAssignments>{match self {
@@ -22,6 +24,7 @@ impl StoreCommand {
         _=>self.later().and_then(|s|s.supplemental_assignments.as_ref()),
     }}
     fn apple_material(&self)->bool {match self {
+        Self::Provisioning(_)=>true,
         Self::Access(c)=>c.platform==wire::AccessPlatform::Ios,
         Self::Prepare(c)=>c.platform==crate::local_store_prepare_protocol::Platform::Ios,
         Self::Execute(c)=>c.platform==crate::local_store_execute_protocol::Platform::Ios,
@@ -61,6 +64,7 @@ impl SelectedStoreMaterial {
         let mut bytes = self.key.id.0.capacity();
         if let Some(command)=&self.command {
             let (common,extra)=match command {
+                StoreCommand::Provisioning(c)=>([c.project_id.capacity(),c.saved_config.sha256.capacity(),c.saved_version.source.capacity(),c.saved_version.sha256.capacity(),c.saved_version.name.capacity(),c.record_id.capacity()],[c.display_name.capacity(),c.reference.as_ref().map_or(0,|r|r.operation_id.capacity()),c.reference.as_ref().map_or(0,|r|r.owner_generation.capacity())]),
                 StoreCommand::Access(c)=>([c.project_id.capacity(),c.saved_config.sha256.capacity(),c.saved_version.source.capacity(),c.saved_version.sha256.capacity(),c.saved_version.name.capacity(),c.record_id.capacity()],[0;3]),
                 StoreCommand::Prepare(c)=>([c.project_id.capacity(),c.saved_config.sha256.capacity(),c.saved_version.source.capacity(),c.saved_version.sha256.capacity(),c.saved_version.name.capacity(),c.record_id.capacity()],[c.candidate_operation_id.capacity(),c.candidate_sha256.capacity(),c.confirmation.capacity()]),
                 StoreCommand::Reconcile(c)=>([c.project_id.capacity(),c.saved_config.sha256.capacity(),c.saved_version.source.capacity(),c.saved_version.sha256.capacity(),c.saved_version.name.capacity(),c.record_id.capacity()],[c.candidate_operation_id.capacity(),c.candidate_sha256.capacity(),c.confirmation.capacity()]),

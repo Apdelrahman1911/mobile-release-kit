@@ -368,3 +368,7 @@ impl DocumentBinding {
             comparison: binding.comparison, epoch: binding.lane.epoch })
     }
 }
+
+#[path="asset_session_apple_provisioning_saved.rs"]
+mod apple_provisioning;
+pub(crate) use apple_provisioning::AppleProvisioningSavedInput;

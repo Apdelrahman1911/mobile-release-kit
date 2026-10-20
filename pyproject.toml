@@ -42,6 +42,7 @@ mobile_release = ["data/apple-profile-roots.pem", "api/data/*.json"]
   "fastlane/play_store.rb",
   "fastlane/apple_store.rb",
   "fastlane/apple_provisioning.rb",
+  "fastlane/apple_provisioning_bundle_registration.rb",
   "fastlane/apple_provisioning_bundle_read.rb",
   "fastlane/apple_provisioning_profile_read.rb",
   "fastlane/apple_production.rb",

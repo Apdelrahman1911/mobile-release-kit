@@ -16,6 +16,8 @@ use std::sync::{OnceLock, Weak};
 // Source/portable checks do not qualify private native generation. Entry and
 // status must use this SAME fixed predicate, never installed-vault alone.
 const NATIVE_UPLOAD_KEY_QUALIFIED: bool = false;
+#[path = "credential_upload_key_controls.rs"]
+pub(crate) mod controls;
 // The generated container is fixed and small. Reserving the entire remaining
 // vault allowance before the real inspector returns would spuriously deny a
 // normal measured native graph. This smaller, source-derived workspace grants
@@ -251,6 +253,9 @@ struct Holding {
     native: SavedCommandOwner,
     preparation: Arc<UploadKeyPreparation>,
     service: Arc<ApplicationService>,
+    setup: Arc<controls::PreparedSetup>,
+    native_use: OnceLock<crate::application_service_host::NativeStateLease>,
+    native_use_retired: AtomicBool,
     observed: NativeObservation,
     preference_revision: u64,
     roster: ProjectRoster,
@@ -273,7 +278,8 @@ impl Holding {
     fn retained_bytes(&self) -> Option<usize> {
         const ARC_CELLS: usize = 2 * std::mem::size_of::<usize>();
         let mut bytes = std::mem::size_of::<Self>().checked_add(ARC_CELLS)?;
-        bytes = bytes.checked_add(self.preparation.retained_bytes()?)?;
+        bytes = bytes.checked_add(self.preparation.retained_bytes()?)?
+            .checked_add(controls::retained_use_bytes(self)?)?;
         for text in [
             &self.observed.project.project_id,
             &self.observed.project.canonical_root,
@@ -694,6 +700,9 @@ impl Work {
             if !run.private_disposed() {
                 return false;
             }
+            // This is after actual private disposal AND every original job,
+            // including final journal readback/publication. No token-first cycle.
+            if !controls::retire_use(held) { return false; }
             let clock = held.clock.clone();
             self.inner = None; // Actual zeroizing private Fields/candidate holding dropped first.
                                // Only the same-original publication + all-join disposal proof can
@@ -818,6 +827,8 @@ impl UploadKeyGoGate {
             }
             // ORIGINAL shared-state IO in the original native writer, outside
             // every document/native-registry lock. No detached gate task.
+            let retained = self.held.upgrade().ok_or(Reason::VaultInterrupted)?;
+            controls::check_use(&retained)?;
             self.reservation
                 .current(&self.state)
                 .map_err(|error| preference_error(error).reason)?;
@@ -893,6 +904,7 @@ impl DocumentBinding {
         tools: Arc<crate::saved_command_owner::UploadKeyToolLoan>,
         context_revision: u32,
         native_availability: wire::Availability,
+        consent: controls::Consent,
     ) -> Result<AssetStatus, AssetError> {
         if !available(self) || native_availability != wire::Availability::Available {
             return Err(AssetError::new(Reason::Unqualified));
@@ -903,6 +915,8 @@ impl DocumentBinding {
             self.expire(&mut state, Instant::now());
             self.durable_gate(&state, true)?;
             idle(&state)?;
+            consent.current(self, &state)?;
+            if !consent.service_matches(&service) { return Err(AssetError::new(Reason::ContextStale)); }
             let context = state
                 .context
                 .as_ref()
@@ -916,10 +930,9 @@ impl DocumentBinding {
             }
             context
         };
-        // Shared-state locks/IO never run under the original Document lock.
-        let known = service
-            .native_binding(&context.project_id)
-            .map_err(service_error)?;
+        // Private SAME-ready native binding, not a renderer/project-ID lookup.
+        // First journal IO belongs to the retained coordinator NativeStateLease.
+        let known = consent.project_binding();
         let (observed, saved, key, storage, roster) = {
             let mut state = self.lock();
             self.expire(&mut state, Instant::now());
@@ -954,12 +967,9 @@ impl DocumentBinding {
             let roster = self.vault_roster(&mut state)?;
             (observed, saved, key, storage, roster)
         };
-        let preference = persistence::observe(
-            service.state_directory(),
-            &observed.project,
-            Role::AndroidUpload,
-        )
-        .map_err(preference_error)?;
+        // Explicit setup's reference-only observation is not authority. The
+        // actual reservation re-reads/CAS-checks it under NativeUse before RNG.
+        let preference = consent.preference();
         let plan = observed
             .with_continuity(Continuity::NewApplicationConfirmed, |value| {
                 setup::classify(value, preference.preference.as_ref())
@@ -1152,6 +1162,9 @@ impl DocumentBinding {
             native: native.clone(),
             preparation,
             service,
+            setup: consent.preparation().clone(),
+            native_use: OnceLock::new(),
+            native_use_retired: AtomicBool::new(false),
             observed,
             preference_revision: preference.store_revision,
             roster,
@@ -1249,6 +1262,7 @@ fn rematch(
     mutating: bool,
 ) -> Result<(), Reason> {
     current_gate(document, state, owner)?;
+    controls::current_prepared(document, state, &held.setup).map_err(|error| error.reason)?;
     let slot = state.slot.as_ref().ok_or(Reason::ContextStale)?;
     let session = state.vault.as_ref().ok_or(Reason::Closed)?;
     let key = held.key.upgrade().ok_or(Reason::VaultKeyMissing)?;
@@ -1558,6 +1572,8 @@ async fn run_inner(
         let state = document.lock();
         rematch(document, &state, owner, held, false)?;
     }
+    controls::begin_use(held)?; // SAME original coordinator, before any journal/private work.
+    controls::check_use(held)?;
     held.progress()?
         .enter(ProgressPhase::Admitted, ProgressPhase::Reserving)?;
     let context = held.preparation.context();
@@ -1731,6 +1747,7 @@ async fn run_inner(
         certificate_sha256: Some(crate::service_protocol::hex(&certificate)),
         operation_id: reservation.operation_id().to_owned(),
     };
+    controls::check_use(held)?;
     let revision = persistence::record_saved(
         held.service.state_directory(),
         reservation.store_revision(),

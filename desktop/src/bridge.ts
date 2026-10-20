@@ -1,3 +1,4 @@
+import { uploadKeyRequestFits, parseUploadKeyStatus, type UploadKeyCommand, type UploadKeyStatus } from './credentialUploadKey.ts';
 import { STORE_RECONCILE_EVENT, encodeLocalStoreReconcileRequest, parseLocalStoreReconcileStatus, localStoreReconcileError, type StoreReconcileCommand } from './localStoreReconcileProtocol.ts';
 import { STORE_EXECUTE_EVENT, encodeLocalStoreExecuteRequest, parseLocalStoreExecuteStatus, localStoreExecuteError, type StoreExecuteCommand } from './localStoreExecuteProtocol.ts';
 import type { LocalStoreReconcileStatus } from './localStoreReconcileTypes.ts';
@@ -85,9 +86,10 @@ import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdent
 import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
 import { createGitReadApi } from './gitReadProtocol.ts';
 import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
+import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -321,6 +323,12 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     try { return await invoke<T>(command, args); }
     catch (error) { throw apiError(error); }
   };
+  const uploadKeyCall = async (command: UploadKeyCommand, args: unknown): Promise<UploadKeyStatus> => {
+    try {
+      if (!uploadKeyRequestFits(command, args)) throw { code: 'asset_invalid_request' };
+      return parseUploadKeyStatus(await call<unknown>(command, structuredClone(args) as Record<string, unknown>));
+    } catch (error) { throw assetError(error); }
+  };
   const assetCall = async (command: AssetCommand, args: Record<string, unknown>): Promise<AssetStatus> => {
     try {
       if (!assetRequestFits(command, args)) throw { code: 'asset_invalid_request' };
@@ -389,6 +397,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     githubGhEntry: createGitHubGhApi(mode, invoke),
     gitRead: createGitReadApi(mode, invoke),
     toolAcquisition: createToolAcquisitionApi(mode, invoke, listen),
+    appleProvisioning: createAppleProvisioningApi(mode, invoke, listen),
     applicationRead: mode === 'native' ? Object.freeze({
       status: () => call<unknown>('application_read_status', {}),
       allow: (projectId: string) => cliReadAccessProjectIdFits(projectId)
@@ -793,6 +802,9 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         return await listen(GITHUB_RELEASE_EVENT, (value) => onStatus(parseGitHubReleaseStatus(value)));
       } catch (error) { throw githubReleaseError(error); }
     },
+    uploadKeyStatus: (request) => uploadKeyCall('upload_key_status', request),
+    prepareUploadKey: (request) => uploadKeyCall('upload_key_prepare', request),
+    createUploadKey: (request) => uploadKeyCall('upload_key_create', request),
     assetStatus: () => assetCall('vault_status', {}),
     openAssetSession: (storageMode = 'session') => assetCall('vault_open', { mode: storageMode }),
     prepareVaultInitialize: () => assetCall('vault_prepare_initialize', {}),

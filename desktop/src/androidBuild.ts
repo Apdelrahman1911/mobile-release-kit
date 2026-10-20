@@ -257,6 +257,7 @@ export class AndroidBuildController {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private listeners = new Set<() => void>();
   private disposed = false;
+  private toolSetupVisible = false;
   constructor(context: Context) { this.context = context; }
   getSnapshot = (): AndroidBuildState => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -351,6 +352,15 @@ export class AndroidBuildController {
         || !!this.state.toolRegistration?.review))
       this.retire({ ...this.advance('contextGeneration'), visible });
     else this.update({ visible, serviceConsent: visible ? this.state.serviceConsent : null }); // Started originals stay app-owned across pages.
+  }
+  // Tools is another view of this owner, not permission to prepare or start a build.
+  setToolSetupVisible(visible: boolean): void {
+    if (this.disposed || visible === this.toolSetupVisible) return;
+    this.toolSetupVisible = visible;
+    if (!visible && (this.registrationAttempt?.kind === 'inspection' && (this.registrationHeld() || !this.registrationAttempt.settled)
+        || !!this.state.toolRegistration?.review))
+      this.retire(this.advance('contextGeneration'));
+    else this.update({ serviceConsent: visible ? this.state.serviceConsent : null });
   }
   private needsOriginal(observer: Observer): boolean {
     return this.attempt?.observer === observer && this.attempt.prepareSent && !this.attempt.settled || active(observer.status?.operation)
@@ -751,7 +761,7 @@ export class AndroidBuildController {
     const status = observer.registration, attempt = this.registrationAttempt;
     if (!status?.review || !status.operation || status.phase !== 'review' || !attempt || attempt.observer !== observer
         || attempt.kind !== 'inspection' || !attempt.replySettled || !this.registrationCandidate(attempt, status)
-        || !this.registrationMatches(attempt) || !this.state.visible || this.state.registrationIssue) {
+        || !this.registrationMatches(attempt) || !(this.state.visible || this.toolSetupVisible) || this.state.registrationIssue) {
       if (observer === this.observer && this.state.registrationConsent) this.update({ registrationConsent: null });
       return;
     }
@@ -858,7 +868,7 @@ export class AndroidBuildController {
       return 'Finish or cancel the current catalog or prepared/active build before source inspection or registration.';
     if (status.prerequisite !== 'ready') return androidToolRegistrationPrerequisiteText[status.prerequisite];
     if (status.availability !== 'available') return androidBuildAvailabilityText[status.availability];
-    if (!this.state.visible) return 'Open Releases to review the selected source contents and protected-copy consent.';
+    if (!(this.state.visible || this.toolSetupVisible)) return 'Open Set up build tools or Build & release to review the source folders and protected-copy consent.';
     if (!project || this.state.selectionPending) return 'Choose a registered source project first.';
     if (project.snapshotPending || project.versionPending || project.saveRecoveryRequired)
       return 'Finish the current saved-input read or save recovery before source inspection.';
@@ -1151,7 +1161,7 @@ export class AndroidBuildController {
     if (status.prerequisite === 'signing-unavailable')
       return 'This app does not contain the required shipping-signed helper identity. Obtain a correctly signed release from the publisher; local administrator access cannot replace it.';
     if (status.availability !== 'available') return androidBuildAvailabilityText[status.availability];
-    if (!this.state.visible) return 'Open Releases to review and choose a service setup action.';
+    if (!(this.state.visible || this.toolSetupVisible)) return 'Open Set up build tools or Build & release to review a helper setup action.';
     if (!project || this.state.selectionPending) return 'Select a registered mobile project first.';
     if (project.snapshotPending || project.versionPending || project.saveRecoveryRequired) return 'Finish the saved-input observation or save recovery first.';
     return project.inputIssue ?? (this.currentRegistrationContext() ? this.context.otherOperationReason() : 'Refresh saved configuration and read its saved version first.');

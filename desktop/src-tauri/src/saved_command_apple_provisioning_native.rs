@@ -239,6 +239,11 @@ async fn call(
                 // Preserve the SAME lease before entering ANY journal read,
                 // including refusal, panic or a lost initialization result.
                 held.lease = Some(lease.clone());
+                // Start's explicit consent covers this local journal setup.
+                // Reuse the fixed same-owner upgrade INSIDE this retained IO
+                // job; status/Prepare never upgrades or contacts Apple.
+                lease.store().enable_apple_provisioning(lease.native_use())
+                    .map_err(|error| state_error(&original, error))?;
                 held.journal = Some(AppleProvisioningJournal::new(
                     lease.store().clone(),
                     lease.native_use().clone(),

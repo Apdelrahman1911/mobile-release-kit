@@ -14,6 +14,7 @@
     "allow-release-evidence-choose", "allow-release-evidence-status", "allow-release-evidence-observe", "allow-release-evidence-cancel",
     "allow-start-environment-diagnostics", "allow-environment-diagnostics-status", "allow-cancel-environment-diagnostics",
     "allow-prepare-local-release-history", "allow-start-local-release-history", "allow-local-release-history-status", "allow-cancel-local-release-history",
+    "allow-prepare-apple-provisioning", "allow-start-apple-provisioning", "allow-apple-provisioning-status", "allow-cancel-apple-provisioning",
     "allow-prepare-local-store-preflight", "allow-start-local-store-preflight", "allow-local-store-preflight-status", "allow-cancel-local-store-preflight",
     "allow-prepare-local-store-prepare", "allow-start-local-store-prepare", "allow-local-store-prepare-status", "allow-cancel-local-store-prepare",
     "allow-prepare-local-store-execute", "allow-start-local-store-execute", "allow-local-store-execute-status", "allow-cancel-local-store-execute",

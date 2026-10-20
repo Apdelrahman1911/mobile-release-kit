@@ -636,7 +636,7 @@ mod tests {
             reference: row.reference(identity),
             identity: digest(
                 &app_policy(&state.context.as_ref().unwrap().draft, Role::AndroidUpload)
-                    .unwrap()
+                    .unwrap_or_else(|_| panic!("synthetic Android app policy was refused"))
                     .0,
             )
             .unwrap(),
@@ -682,13 +682,13 @@ mod tests {
     fn closed_requests_require_exact_current_revision_and_explicit_new_app_declaration() {
         assert_eq!(
             context_request(&json!({"contextRevision":1}))
-                .unwrap()
+                .unwrap_or_else(|_| panic!("valid context request was refused"))
                 .context_revision,
             1
         );
         let request =
             json!({"contextRevision":1,"expectedStatusRevision":2,"declaration":DECLARATION});
-        assert_eq!(create_request(&request).unwrap().expected_revision, 2);
+        assert_eq!(create_request(&request).unwrap_or_else(|_| panic!("valid create request was refused")).expected_revision, 2);
         for bad in [
             json!(0),
             json!(-1),

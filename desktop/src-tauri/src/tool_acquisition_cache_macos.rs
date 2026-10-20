@@ -78,16 +78,42 @@ fn expected_directory(fields: asset_source::ApplicationDirectoryFields) -> wire:
         gid: fields.4,
     }
 }
-fn existing_expectation(
+fn application_expectation(
     value: (
         asset_source::ApplicationDirectoryFields,
         Option<asset_source::ApplicationDirectoryFields>,
     ),
-) -> Result<(wire::DirectoryIdentity, wire::DirectoryIdentity)> {
-    // Fresh installation without app-data is deliberately unavailable in this
-    // first native slice. ENOENT is not authority to initialize another service.
-    let existing = value.1.ok_or(wire::Reason::Unsupported)?;
-    Ok((expected_directory(value.0), expected_directory(existing)))
+) -> (wire::DirectoryIdentity, Option<wire::DirectoryIdentity>) {
+    (expected_directory(value.0), value.1.map(expected_directory))
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplicationEdge {
+    Existing,
+    Missing,
+}
+// Comparison DATA inside the original cache book, not authority to create a
+// caller-nominated directory. Only the native full-roster proof supplies these
+// expectations, and the same book must still own/recheck the physical chain.
+fn application_edge(
+    expected_parent: &wire::DirectoryIdentity,
+    expected_leaf: Option<&wire::DirectoryIdentity>,
+    held_parent: &wire::DirectoryIdentity,
+    named_leaf: Option<&wire::DirectoryIdentity>,
+    prior_witness: bool,
+    known_origins: bool,
+) -> Result<ApplicationEdge> {
+    need(
+        expected_parent == held_parent && expected_leaf == named_leaf,
+        wire::Reason::Stale,
+    )?;
+    match expected_leaf {
+        Some(_) => Ok(ApplicationEdge::Existing),
+        None => {
+            // A disappeared prior cache is recovery, never fresh setup.
+            need(!prior_witness && !known_origins, wire::Reason::RecoveryRequired)?;
+            Ok(ApplicationEdge::Missing)
+        }
+    }
 }
 fn hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -242,6 +268,9 @@ pub(super) struct Book {
     application_source: Option<asset_source::SourceBook>,
     application_exclusion: Option<asset_source::ApplicationDirectoryExclusion>,
     application: Option<Application>,
+    // Prearmed before the first possible app-data namespace effect. Clear only
+    // after its actual held root, fsyncs and final forward checks are retained.
+    application_creation_pending: bool,
     cache: Option<Cache>,
     entered: bool,
     retired: bool,
@@ -260,6 +289,7 @@ impl Book {
             application_source: None,
             application_exclusion: None,
             application: None,
+            application_creation_pending: false,
             cache: None,
             entered: false,
             retired: false,
@@ -617,7 +647,7 @@ impl Book {
             wire::Reason::Input,
         )?;
         let root_index = self.path(&root.path, stop)?;
-        let id = root.identity.posix().map_err(io)?.preflight_identity();
+        let id = root.identity.posix().map_err(source_failure)?.preflight_identity();
         let captured = self.originals[root_index]
             .directory
             .as_ref()
@@ -859,6 +889,7 @@ impl Book {
                 && self.application_source.is_none()
                 && self.application_exclusion.is_none()
                 && self.application.is_none()
+                && !self.application_creation_pending
                 && projects.len() <= 64
                 && crate::edit_protocol::token(operation)
                 && intent.len() <= wire::CONTROL_LIMIT
@@ -883,41 +914,55 @@ impl Book {
                 .is_some_and(|b| b.settled()),
             wire::Reason::CleanupUnknown,
         )?;
-        let (expected_parent, expected_app) = existing_expectation(
+        let (expected_parent, expected_app) = application_expectation(
             self.application_exclusion
                 .as_ref()
                 .ok_or(wire::Reason::CleanupUnknown)?
                 .store_expectation(&location.application, projects)
                 .map_err(source_failure)?,
-        )?;
+        );
         let parent = self.path(
             location.application.parent().ok_or(wire::Reason::Input)?,
             stop,
-        )?;
-        need(
-            self.originals[parent].directory.as_ref() == Some(&expected_parent),
-            wire::Reason::Stale,
         )?;
         let name = location
             .application
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or(wire::Reason::Input)?;
-        // Match the actual no-follow edge against original Expected Existing,
-        // not a second pathname snapshot or a successful resolver lookup.
-        need(
-            self.named(parent, name, stop)?
-                .as_ref()
-                .map(directory)
-                .transpose()?
-                == Some(expected_app.clone()),
-            wire::Reason::Stale,
+        // A changed Missing/Existing edge never becomes an implicit repair or
+        // adoption. Match the original full-roster expectation before effects.
+        let named = self.named(parent, name, stop)?.as_ref().map(directory).transpose()?;
+        let edge = application_edge(
+            &expected_parent,
+            expected_app.as_ref(),
+            self.originals[parent].directory.as_ref().ok_or(wire::Reason::Stale)?,
+            named.as_ref(),
+            previous.is_some(),
+            !known.is_empty(),
         )?;
-        let app = self.directory(Some(parent), name, false, stop)?;
-        need(
-            self.originals[app].directory.as_ref() == Some(&expected_app),
-            wire::Reason::Stale,
-        )?;
+        let app = match edge {
+            ApplicationEdge::Existing => self.directory(Some(parent), name, false, stop)?,
+            ApplicationEdge::Missing => {
+                // check_application cannot stand in for this check: no held
+                // Application exists yet. Recheck every actual forward edge.
+                for (index, original) in self.originals.iter().enumerate() {
+                    if original.directory.is_some() && original.state == State::Owned {
+                        self.check_named(index, stop)?;
+                    }
+                }
+                need(current(), wire::Reason::Stale)?;
+                point(stop)?;
+                self.application_creation_pending = true;
+                self.make_directory(parent, name, stop)?
+            }
+        };
+        if let Some(expected) = &expected_app {
+            need(
+                self.originals[app].directory.as_ref() == Some(expected),
+                wire::Reason::Stale,
+            )?;
+        }
         let actual = self.stat(app, stop)?;
         self.application = Some(Application {
             root: RegisteredRoot {
@@ -937,6 +982,17 @@ impl Book {
             post_checked: false,
         });
         self.check_application(stop)?;
+        if edge == ApplicationEdge::Missing {
+            // The real new Application is retained before these final leaf
+            // and parent fsyncs. A failed/STOP/panic cut leaves the prearmed
+            // fence set; closure can never report an absent app-data.
+            self.sync(app, stop)?;
+            self.sync(parent, stop)?;
+            self.check_application(stop)?;
+            need(current(), wire::Reason::Stale)?;
+            point(stop)?;
+            self.application_creation_pending = false;
+        }
         let existing = self.named(app, "tool-cache-v1", stop)?;
         // An existing path without this process's actual positive predecessor
         // is a restart/recovery fence, even if no target/job currently exists.
@@ -945,7 +1001,7 @@ impl Book {
             wire::Reason::RecoveryRequired,
         )?;
         // Full original parent chain is rematched immediately BEFORE the
-        // first possible namespace effect, not merely after the download.
+        // first possible cache-namespace effect, not merely after the download.
         self.check_application(stop)?;
         need(current(), wire::Reason::Stale)?;
         let base = if existing.is_some() {
@@ -1219,6 +1275,7 @@ impl Book {
     /// Called in the actual cache tail, after namespace writes and original
     /// consumer/runtime joins, before the SAME descriptors are closed.
     pub(super) fn post_application(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<()> {
+        need(!self.application_creation_pending, wire::Reason::CleanupUnknown)?;
         self.check_application(stop)?;
         if let Some(application) = &mut self.application {
             application.post_checked = true;
@@ -1310,6 +1367,7 @@ impl Book {
         self.retired
             && !self.unknown
             && !self.in_flight
+            && !self.application_creation_pending
             && self
                 .application_source
                 .as_ref()
@@ -1357,7 +1415,7 @@ impl Book {
         if self.retired {
             return self.settled();
         }
-        if self.in_flight {
+        if self.in_flight || self.application_creation_pending {
             self.interrupted();
         }
         if self
@@ -1387,7 +1445,7 @@ impl Book {
         self.settled()
     }
     pub(super) fn retained_bytes(&self) -> Option<usize> {
-        if self.unknown || self.in_flight {
+        if self.unknown || self.in_flight || self.application_creation_pending {
             return None;
         }
         let mut bytes = std::mem::size_of::<Self>().checked_add(
@@ -1534,16 +1592,20 @@ mod tests {
         assert_eq!(original.first().unwrap().0, wire::Reason::CleanupUnknown);
     }
     #[test]
-    fn missing_application_is_unavailable_and_existing_fields_are_lossless() {
+    fn application_expectation_preserves_missing_and_all_original_fields() {
         let parent = (17, 29, 0o40755, 501, 20);
         let leaf = (17, u64::MAX, 0o40700, 501, 21);
-        assert_eq!(
-            existing_expectation((parent, None)).err(),
-            Some(wire::Reason::Unsupported)
-        );
-        let (actual_parent, actual_leaf) = existing_expectation((parent, Some(leaf))).unwrap();
+        let (missing_parent, missing_leaf) = application_expectation((parent, None));
+        assert_eq!(missing_parent, expected_directory(parent));
+        assert!(missing_leaf.is_none());
+        let (actual_parent, actual_leaf) = application_expectation((parent, Some(leaf)));
         assert_eq!(actual_parent, expected_directory(parent));
+        let actual_leaf = actual_leaf.unwrap();
         assert_eq!(actual_leaf, expected_directory(leaf));
+        assert_eq!(
+            application_edge(&actual_parent, Some(&actual_leaf), &actual_parent, Some(&actual_leaf), false, false),
+            Ok(ApplicationEdge::Existing)
+        );
         for changed in [
             (18, leaf.1, leaf.2, leaf.3, leaf.4),
             (leaf.0, 30, leaf.2, leaf.3, leaf.4),
@@ -1551,7 +1613,83 @@ mod tests {
             (leaf.0, leaf.1, leaf.2, 502, leaf.4),
             (leaf.0, leaf.1, leaf.2, leaf.3, 22),
         ] {
-            assert_ne!(actual_leaf, expected_directory(changed));
+            assert_eq!(
+                application_edge(&actual_parent, Some(&actual_leaf), &actual_parent, Some(&expected_directory(changed)), false, false),
+                Err(wire::Reason::Stale)
+            );
+        }
+        for changed in [
+            (18, parent.1, parent.2, parent.3, parent.4),
+            (parent.0, 30, parent.2, parent.3, parent.4),
+            (parent.0, parent.1, 0o40700, parent.3, parent.4),
+            (parent.0, parent.1, parent.2, 502, parent.4),
+            (parent.0, parent.1, parent.2, parent.3, 22),
+        ] {
+            assert_eq!(
+                application_edge(&actual_parent, None, &expected_directory(changed), None, false, false),
+                Err(wire::Reason::Stale)
+            );
+        }
+    }
+    #[test]
+    fn missing_application_never_adopts_appearance_or_recreates_previous_cache() {
+        let parent = expected_directory((17, 29, 0o40755, 501, 20));
+        let leaf = expected_directory((17, 30, 0o40700, 501, 20));
+        assert_eq!(
+            application_edge(&parent, None, &parent, None, false, false),
+            Ok(ApplicationEdge::Missing)
+        );
+        for (expected, named) in [(None, Some(&leaf)), (Some(&leaf), None)] {
+            assert_eq!(
+                application_edge(&parent, expected, &parent, named, false, false),
+                Err(wire::Reason::Stale)
+            );
+        }
+        for (witness, origins) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                application_edge(&parent, None, &parent, None, witness, origins),
+                Err(wire::Reason::RecoveryRequired)
+            );
+            assert_eq!(
+                application_edge(&parent, Some(&leaf), &parent, Some(&leaf), witness, origins),
+                Ok(ApplicationEdge::Existing)
+            );
+        }
+    }
+    #[test]
+    fn interrupted_application_creation_retains_first_failure_and_finishes_unentered_slots() {
+        for captured in [false, true] {
+            let mut original = Book::new();
+            // Exercise the real original-book close boundary without arming
+            // SnapshotBook, opening a file or constructing a native success.
+            original.note(wire::Reason::Stale);
+            let first = original.first().unwrap();
+            original.application_creation_pending = true;
+            original.originals.push(Original {
+                state: State::Reserved, fd: None, parent: None, name: "never-opened".into(),
+                directory: None, file: None, private: true,
+            });
+            if captured {
+                original.application = Some(Application {
+                    root: RegisteredRoot {
+                        path: PathBuf::from("/inert-never-opened/dev.mobile-release-kit.desktop"),
+                        identity: asset_source::ProjectIdentity::Posix(
+                            asset_source::DirectoryIdentity::vault_original(17, 30, 0o40700, 501, 20),
+                        ),
+                    },
+                    parent: 0, leaf: 1, post_checked: false,
+                });
+            }
+            assert_eq!(original.post_application(&mut || false), Err(wire::Reason::CleanupUnknown));
+            assert!(original.retained_bytes().is_none());
+            assert!(!original.release(&mut || false));
+            assert!(matches!(original.originals[0].state, State::NoHandle));
+            assert_eq!(original.first().unwrap(), first);
+            assert!(!original.settled());
+            assert!(original.application_root().is_err());
+            assert!(original.origin().is_none());
+            assert!(!original.release(&mut || false));
+            assert!(original.application_creation_pending);
         }
     }
 }

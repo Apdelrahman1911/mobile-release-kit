@@ -969,6 +969,11 @@ class GitRepository:
         self._expected(session.snapshot(), expected_revision)
         return GitPlan("commit", paths, self._key, snapshot, {}, message, identity)
 
+    def _index_transaction(self, session: _Session, current: _Snapshot) -> _IndexTransaction:
+        # Internal closed facets may strengthen publication checks; ordinary
+        # GitRepository behavior and its original transaction stay unchanged.
+        return _IndexTransaction(session, current)
+
     @_session_boundary
     def apply(self, plan: GitPlan, owner: MutationOwner) -> MutationResult:
         _need(not self._retained, "recovery-required")
@@ -984,7 +989,7 @@ class GitRepository:
             _need(session.validate_paths(plan.paths, current, staging=plan.action == "stage") == plan._selected,
                   "stale-observation")
         plan._used = True
-        transaction = _IndexTransaction(session, current)
+        transaction = self._index_transaction(session, current)
         intent = None
         observation = None
         state, settlement, reason = "failed", "settled", None

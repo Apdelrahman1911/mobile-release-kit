@@ -287,6 +287,7 @@ fn main() {
             "release_evidence_choose", "release_evidence_status", "release_evidence_observe", "release_evidence_cancel",
             "start_environment_diagnostics", "environment_diagnostics_status", "cancel_environment_diagnostics",
             "prepare_local_release_history", "start_local_release_history", "local_release_history_status", "cancel_local_release_history",
+            "prepare_apple_provisioning", "start_apple_provisioning", "apple_provisioning_status", "cancel_apple_provisioning",
             "prepare_local_store_preflight", "start_local_store_preflight", "local_store_preflight_status", "cancel_local_store_preflight",
             "prepare_local_store_prepare", "start_local_store_prepare", "local_store_prepare_status", "cancel_local_store_prepare",
             "prepare_local_store_execute", "start_local_store_execute", "local_store_execute_status", "cancel_local_store_execute",

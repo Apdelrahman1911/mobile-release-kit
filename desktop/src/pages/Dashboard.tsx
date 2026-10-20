@@ -39,13 +39,14 @@ const laterTasks: readonly { page: Page; icon: IconName; title: string; descript
 ];
 
 export function Dashboard({ session, preview, chooseDisabled, chooseReason, refreshReason, setupReadinessReason, releaseVersionState, releaseVersionReason,
-  versionEditor, versionEditState, initializationPanel, initializationState, configSaveState, checks, activities,
+  versionEditor, versionEditState, initializationPanel, initializationState, appleProvisioningPanel, appleProvisioningNeedsAttention, configSaveState, checks, activities,
   onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
   session: ProjectSession | null; info: AppInfo | null; preview: boolean;
   chooseDisabled: boolean; chooseReason: string | null; refreshReason: string | null;
   setupReadinessReason: string | null;
   versionEditor: ReactNode; versionEditState: VersionEditState;
   initializationPanel: ReactNode; initializationState: ProjectInitializationState;
+  appleProvisioningPanel?: ReactNode; appleProvisioningNeedsAttention?: boolean;
   configSaveState: ConfigEditState;
   releaseVersionState: ReleaseVersionState; releaseVersionReason: string | null;
   checks?: readonly SetupCheckObservation[]; activities?: readonly SetupActivity[];
@@ -112,6 +113,12 @@ export function Dashboard({ session, preview, chooseDisabled, chooseReason, refr
       description="Manual by default. Open the saved values, choose a change and review it before saving. This does not build or release the app.">
       {versionEditor}
     </ProgressiveDisclosure>
+
+    {appleProvisioningPanel && <ProgressiveDisclosure title="Apple Bundle ID · reuse or register"
+      needsAttention={appleProvisioningNeedsAttention}
+      description="A separate optional Store task. Review an existing ID first; a new registration needs its own approval. This does not make signing or release ready.">
+      {appleProvisioningPanel}
+    </ProgressiveDisclosure>}
 
     <section className="card" aria-label="Later release tasks">
       <SectionHeading title="When you’re ready for the next stage" description="GitHub and Store delivery are separate tasks, not prerequisites for exploring local setup." />

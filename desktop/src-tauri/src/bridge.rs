@@ -211,6 +211,7 @@ pub struct DesktopBridge {
     pub(crate) diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner,
     pub(crate) preflight: crate::offline_preflight_owner::OfflinePreflightOwner,
     pub(crate) local_history: crate::local_release_history_owner::LocalReleaseHistoryOwner,
+    pub(crate) apple_provisioning: crate::saved_command_owner::SavedCommandOwner,
     pub(crate) local_store: crate::local_store_preflight_owner::LocalStorePreflightOwner,
     pub(crate) local_store_prepare: crate::local_store_prepare_owner::LocalStorePrepareOwner,
     pub(crate) local_store_execute: crate::local_store_execute_owner::LocalStoreExecuteOwner,
@@ -281,6 +282,7 @@ impl DesktopBridge {
             diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime.clone()),
             preflight: crate::offline_preflight_owner::OfflinePreflightOwner::new(runtime.clone()),
             local_history: crate::local_release_history_owner::LocalReleaseHistoryOwner::new(runtime.clone()),
+            apple_provisioning: crate::saved_command_owner::SavedCommandOwner::apple_provisioning(runtime.clone()),
             local_store: crate::local_store_preflight_owner::LocalStorePreflightOwner::new(runtime.clone()),
             local_store_prepare: crate::local_store_prepare_owner::LocalStorePrepareOwner::new(runtime.clone()),
             local_store_execute: crate::local_store_execute_owner::LocalStoreExecuteOwner::new(runtime.clone()),
@@ -459,7 +461,7 @@ impl DesktopBridge {
         Ok(())
     }
     pub fn open_config_edit(&self, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
-        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
+        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.apple_provisioning.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
         self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?; self.upload_key.ensure_idle()?;
@@ -473,7 +475,7 @@ impl DesktopBridge {
         self.edits.open(window, project_id, root)
     }
     pub(crate) fn open_config_edit_published(&self, publisher: &crate::saved_command_owner::AndroidRegistrationPublisher, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
-        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
+        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.apple_provisioning.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
         self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?; self.upload_key.ensure_idle()?;
@@ -754,7 +756,7 @@ impl DesktopBridge {
     }
     #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
-        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
+        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.apple_provisioning.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
         self.android_build.ensure_idle()?;
         self.project_recovery.ensure_idle()?;
         self.ios_archive.ensure_idle()?; self.artifact_inspection.ensure_idle()?; self.tool_acquisition.ensure_idle()?; self.upload_key.ensure_idle()?;

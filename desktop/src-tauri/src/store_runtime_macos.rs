@@ -69,6 +69,7 @@ impl StoreRuntimeSlots {
         let (end, stop) = (originals.end, originals.stop.clone());
         self.inner.inspect_once(profile, end, &stop)
     }
+    pub(crate) fn inspect_apple_provisioning_once(&mut self,profile:runtime::AppleProvisioningInstalledProfile)->std::result::Result<VerifiedRuntime,BridgeError>{self.inspect_selected(profile.selection()?)}
     pub(crate) fn inspect_preflight_once(&mut self,profile:runtime::LocalStorePreflightInstalledProfile)->std::result::Result<VerifiedRuntime,BridgeError>{self.inspect_selected(profile.selection()?)}
     pub(crate) fn inspect_prepare_once(&mut self,profile:runtime::LocalStorePrepareInstalledProfile)->std::result::Result<VerifiedRuntime,BridgeError>{self.inspect_selected(profile.selection()?)}
     pub(crate) fn inspect_reconcile_once(&mut self,profile:runtime::LocalStoreReconcileInstalledProfile)->std::result::Result<VerifiedRuntime,BridgeError>{self.inspect_selected(profile.selection()?)}

@@ -175,20 +175,21 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
     const operation = value.operation;
     if (operation !== null) {
       if (!keys(operation, ['operationId', 'operation', 'phase', 'reason', 'source', 'settlement', 'storageOutcome', 'selectionToken', 'assessment', 'preview', ...(object(operation) && Object.hasOwn(operation, 'backupDelivered') ? ['backupDelivered'] : [])]) ||
-          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-images', 'inspect-installation', 'choose-project', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup']) ||
+          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-images', 'inspect-installation', 'choose-project', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock', 'open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup', 'generate-upload-key']) ||
           !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'assessing', 'preview', 'mutating', 'stopping', 'unknown']) ||
           !one(operation.reason, ASSET_REASONS) || !one(operation.source, ['not-run', 'pending', 'captured', 'refused', 'unknown']) ||
           !one(operation.settlement, ['pending', 'known', 'unknown', 'late-known']) || (operation.selectionToken !== null && !token(operation.selectionToken)) ||
           (operation.assessment !== null && !assessment(operation.assessment))) return null;
       const storage = operation.storageOutcome;
-      if (value.mode === 'session' && (storage !== null || one(operation.operation, ['open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup']))) return null;
-      if (storage !== null && (!keys(storage, ['effect', 'durability', 'cleanup']) || !one(operation.operation, ['initialize', 'commit', 'import-backup']) ||
+      if (value.mode === 'session' && (storage !== null || one(operation.operation, ['open-vault', 'prepare-initialize', 'initialize', 'unlock', 'prepare-backup-export', 'import-backup', 'generate-upload-key']))) return null;
+      if (storage !== null && (!keys(storage, ['effect', 'durability', 'cleanup']) || !one(operation.operation, ['initialize', 'commit', 'import-backup', 'generate-upload-key']) ||
           !one(storage.effect, ['not-started', 'known-none', 'known-applied', 'unknown']) || !one(storage.durability, ['not-run', 'confirmed', 'unknown']) ||
           !one(storage.cleanup, ['pending', 'known', 'unknown']) || storage.durability === 'confirmed' && storage.effect !== 'known-applied')) return null;
       if (operation.operation === 'inspect-installation' && (!one(operation.phase, ['idle', 'admitting', 'capturing', 'stopping', 'unknown']) || storage !== null)) return null;
       if (operation.operation === 'choose-images' && !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'stopping', 'unknown'])) return null;
-      if (['choose-images', 'inspect-installation', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare-backup-export', 'import-backup'].includes(operation.operation as string) &&
+      if (['choose-images', 'inspect-installation', 'choose-project-path', 'choose-android-source', 'choose-evidence-folder', 'inspect-evidence', 'prepare-backup-export', 'import-backup', 'generate-upload-key'].includes(operation.operation as string) &&
           (operation.selectionToken !== null || operation.assessment !== null || operation.preview !== null)) return null;
+      if (operation.operation === 'generate-upload-key' && !one(operation.phase, ['idle', 'admitting', 'mutating', 'stopping', 'unknown'])) return null;
       if (isCredentialBackupOperation(operation.operation) && !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'mutating', 'stopping', 'unknown'])) return null;
       if (Object.hasOwn(operation, 'backupDelivered') && (operation.backupDelivered !== true || operation.operation !== 'prepare-backup-export' ||
           operation.phase !== 'idle' || operation.settlement !== 'known' || operation.reason !== 'none' || !one(operation.source, ['not-run', 'captured']) || storage !== null ||

@@ -23,6 +23,7 @@ impl Id {
         Ok(Self(value.to_owned()))
     }
     pub fn as_str(&self) -> &str { &self.0 }
+    pub(crate) fn retained_bytes(&self) -> usize { self.0.capacity() }
     pub(crate) fn random() -> Result<Self, Error> {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes).map_err(|_| Error::Unavailable)?;

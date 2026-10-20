@@ -47,6 +47,7 @@ CURRENT_BOOTSTRAPS = (
     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
     "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py", "android_upload_key_bootstrap.py",
 )
+APPLE_PROVISIONING_BOOTSTRAP = "apple_provisioning_bootstrap.py"
 STORE_BOOTSTRAP = "local_store_preflight_bootstrap.py"
 STORE_PREPARE_BOOTSTRAP = "local_store_prepare_bootstrap.py"
 STORE_EXECUTE_BOOTSTRAP = "local_store_execute_bootstrap.py"
@@ -427,7 +428,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
             {"aarch64-apple-darwin", "x86_64-apple-darwin"} or not isinstance(store_component, Path)):
         raise PreparationError("Store component is an explicit current Mac input only")
     if store_component is not None:
-        bootstrap_names = (*bootstrap_names, STORE_BOOTSTRAP, STORE_PREPARE_BOOTSTRAP, STORE_EXECUTE_BOOTSTRAP, STORE_RECONCILE_BOOTSTRAP)
+        bootstrap_names = (*bootstrap_names, STORE_BOOTSTRAP, STORE_PREPARE_BOOTSTRAP, STORE_EXECUTE_BOOTSTRAP, STORE_RECONCILE_BOOTSTRAP, APPLE_PROVISIONING_BOOTSTRAP)
     source, runtime = _root(source), _root(runtime)
     provider = None
     provider_paths = None

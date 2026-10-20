@@ -226,6 +226,16 @@ impl ToolAcquisitionInstalledProfile {
     }
 }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct AppleProvisioningInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl AppleProvisioningInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("apple_provisioning_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct LocalStorePreflightInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl LocalStorePreflightInstalledProfile {
@@ -2164,6 +2174,12 @@ impl RuntimeConfig {
         if !self.local_release_history_installed_profile_available() { return Err(unavailable()); }
         originals.inspect_once(LocalReleaseHistoryInstalledProfile { _private: () },end,stop)
     }
+    pub(crate) fn apple_provisioning_installed_profile_available(&self) -> bool {
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        { false }
+    }
     pub(crate) fn local_store_preflight_installed_profile_available(&self) -> bool {
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
         { macos_bindings() }
@@ -2187,6 +2203,12 @@ impl RuntimeConfig {
         { macos_bindings() }
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
         { false }
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+    pub(crate) fn resolve_apple_provisioning_installed(&self, originals: &mut crate::installed_runtime::StoreRuntimeSlots)
+        -> Result<VerifiedRuntime, BridgeError> {
+        if !self.apple_provisioning_installed_profile_available() { return Err(unavailable()); }
+        originals.inspect_apple_provisioning_once(AppleProvisioningInstalledProfile { _private: () })
     }
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     pub(crate) fn resolve_local_store_preflight_installed(&self, originals: &mut crate::installed_runtime::StoreRuntimeSlots)

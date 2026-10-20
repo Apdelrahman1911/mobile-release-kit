@@ -1,5 +1,8 @@
 //! Typed desktop services. Passive queries and finite configuration transactions
 //! have separate original-resource owners; neither is a generic release runner.
+// The shipping Mac graph includes concrete, weakly linked Document/Edit/native
+// owners. Allow its finite Send/Sync traversal without changing those traits.
+#![recursion_limit = "256"]
 // Fixed nonshipping cuts must never unify with another executable/image role.
 // The ordinary Installer build selects none; no environment/argument enables one.
 #[cfg(all(any(
@@ -131,6 +134,7 @@ mod environment_diagnostics_owner;
 mod offline_preflight_protocol;
 mod local_release_history_protocol;
 mod local_release_history_owner;
+mod apple_provisioning_protocol;
 mod local_store_preflight_protocol;
 mod local_store_preflight_owner;
 mod local_store_prepare_protocol;

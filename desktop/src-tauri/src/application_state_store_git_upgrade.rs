@@ -52,7 +52,7 @@ impl PrivateStateDirectory {
             }
         }
 
-        let preflight = (|| {
+        let preflight: Result<(Vec<u8>, Option<Snapshot>)> = (|| {
             book.check()?;
             let dir = book.directory()?.file()?;
             for name in UPGRADE_FILES {

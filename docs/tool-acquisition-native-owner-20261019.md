@@ -45,16 +45,23 @@ Java21 workflow examples cannot replace the existing compiled Java17 policy.
 using local APFS, no-follow, private ownership and descriptor-only new writes.
 Native cache: `<native app-local-data>/tool-cache-v1/` with `.lease`, `origins/`
 and `archives/`; native app-local-data must be the original resolver's
-`dev.mobile-release-kit.desktop` directory. **That application directory must
-already exist**; a fresh installation with missing app-data remains unavailable
-in this slice. Missing is not authorization to create another service's root.
-Before the first cache mkdir, the SAME retained `asset_source::SourceBook`
+`dev.mobile-release-kit.desktop` directory. Its parent must already exist.
+Only that exact application leaf may be created when the original native
+proof observed it missing and there is no previous cache witness or origin.
+Missing parents, a changed edge or a disappeared prior cache are not repaired.
+Before the first application/cache mkdir, the SAME retained `asset_source::SourceBook`
 probes physical exclusion against the complete actual native project roster.
 Its opaque result and original close result remain retained. The cache book
-matches that proof's full Expected Existing parent/leaf metadata against its
+matches that proof's full parent and Expected Missing/Existing leaf against its
 own no-follow original descriptor chain, then rechecks the full forward chain
 and current original Document/catalogue context before effects. No CLI grant,
 host startup or renderer path/inventory supplies this exclusion.
+A prearmed creation fence remains until the new0700 leaf has a retained actual
+Application root, held no-follow/ACL-checked descriptor, leaf/parent fsyncs and
+final forward/current/STOP checks. Failure during that interval still attempts
+independent original closes but preserves unknown, never absence or retry.
+Existing directories are neither chmodded nor deleted; no mkdir-all or service
+initialization is added. This path remains native-qualification-disabled.
 Pending is fsynced before the child.
 The runtime-only close task first joins after actual child/IO. A separate cache
 POST/fsync/one-close/ACL tail starts only after actual driver/manager/runtime
@@ -140,7 +147,7 @@ No paths are opened or native processes/network acquired by those filters.
 The separate Mac-only native filesystem/slot path still requires actual target
 compilation and qualification; Linux cfg compilation does not cover it.
 Mac-only DATA filter `saved_command_owner::tool_acquisition::cache::tests::`
-adds3 unentered/unknown/Expected Missing-Existing DATA tests; it opens no FD and
+adds5 unentered/unknown/Expected Missing-Existing/creation-fence DATA tests; it opens no FD and
 arms no native ACL book. These do not test real project/cache ancestry or Mac
 GO/close behavior. The actual saved-stamp/roster native race path still requires
 Root's integrated/native test gate, not a synthetic positive receipt.

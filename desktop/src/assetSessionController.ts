@@ -4,6 +4,8 @@ import type { ProjectSession } from './drafts.ts';
 import type { DesktopApi } from './types.ts';
 import type { AssetDisplayState, AssetFileKind, AssetIntent, AssetKind, AssetOperationName, AssetPreviewAction, AssetRecordIntent, AssetRecordRef, AssetScope, AssetStatus, CredentialPrepareRequest, KeystoreFields, P12Fields, AscP8Fields, TokenFields, WifFields, AppleReviewContactFields, AppleReviewDemoFields, OperationCommitmentFields } from './assetSessionTypes.ts';
 import { ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetRequestFits, assetStorageWritable, parseAssetStatus } from './assetSessionProtocol.ts';
+import { CredentialUploadKeyController } from './credentialUploadKeyController.ts';
+import { parseUploadKeyStatus, UPLOAD_KEY_OPERATION } from './credentialUploadKey.ts';
 import { BACKUP_EXPORT_OPERATION, BACKUP_IMPORT_OPERATION, credentialBackupExportRequest, credentialBackupImportRequest } from './credentialBackup.ts';
 
 function freeze<T>(value: T): T {
@@ -78,6 +80,7 @@ export function assetCancellationReason(state: AssetDisplayState): string | null
     return 'This is a project-path selection, not a credential operation. Cancel belongs to its original native picker; credential discard cannot cancel it.';
   if (operation?.operation === 'inspect-installation')
     return 'This is an installation check, not a credential operation. Cancel belongs to the exact original check in Environment; credential discard cannot cancel it.';
+  if (state.busy === 'prepare-upload-key') return 'Wait for the original signing setup check; it has no credential operation to cancel yet.';
   if (state.originPending) return 'The new action has not supplied a usable acknowledgement of its original operation. Wait for its reply or check status; no cancellation has been sent for it. Cancelling the previous step would not cancel this action.';
   if (cancellationPending(state)) return 'Cancellation has already been requested for the original operation. Wait for its cleanup status.';
   return null;
@@ -117,6 +120,9 @@ export class AssetSessionController {
     contextCurrent: false, busy: null, updatingContext: false, observing: false,
     observationFailed: false, blocked: false, error: null, previewDeadline: null, entryGeneration: 0, selectionKind: null, cancelledOperationId: null, originPending: false, intent: null, reviewReady: false,
   });
+  private uploadKey = new CredentialUploadKeyController();
+  private uploadReading: Promise<void> | null = null;
+  private uploadPreparationPending = false;
   private api: DesktopApi | null = null;
   private disposed = false;
   private listeners = new Set<() => void>();
@@ -145,6 +151,7 @@ export class AssetSessionController {
   private update(patch: Partial<AssetDisplayState>): void {
     if (this.disposed) return;
     this.state = freeze({ ...this.state, ...patch });
+    this.uploadKey.sync(this.state);
     this.listeners.forEach((listener) => listener());
   }
   private current(status = this.state.status): boolean {
@@ -230,7 +237,7 @@ export class AssetSessionController {
         }
       }
     }
-    const originPending = this.intentPhase !== null && (this.intentPhase.operationId === null || this.intentPhase.uncertain);
+    const originPending = this.uploadPreparationPending || this.intentPhase !== null && (this.intentPhase.operationId === null || this.intentPhase.uncertain);
     const old = this.state.status;
     if (old && status.statusRevision < old.statusRevision) {
       this.update({ originPending, reviewReady: this.reviewMatches(old) });
@@ -344,7 +351,7 @@ export class AssetSessionController {
   private run(action: NonNullable<AssetDisplayState['busy']>, invoke: () => Promise<AssetStatus>, phase?: IntentPhase): boolean {
     if (this.disposed || this.state.busy || (assetImageOperationPending(this.state.status) || assetInstallationOperationPending(this.state.status)) || action !== 'lock' && this.otherOperationReason()) return false;
     if (phase) this.intentPhase = phase;
-    this.update({ busy: action, error: null, originPending: phase ? true : this.state.originPending, reviewReady: false, intent: phase?.intent ?? this.state.intent, entryGeneration: this.state.entryGeneration + 1 });
+    this.update({ busy: action, error: null, originPending: this.uploadPreparationPending || (phase ? true : this.state.originPending), reviewReady: false, intent: phase?.intent ?? this.state.intent, entryGeneration: this.state.entryGeneration + 1 });
     void (async () => {
       try { this.receive(await invoke(), phase); }
       catch (error) { if (phase) phase.uncertain = true; this.fail(error); }
@@ -413,6 +420,84 @@ export class AssetSessionController {
     this.reviewCeiling = null;
     return this.run('prepare', () => this.api!.prepareCredential(request), this.phase({ type: 'record', kind, change: replacement ? 'replace' : 'new', record: replacement }, 'prepare', 'save'));
   }
+  uploadKeySnapshot = () => this.uploadKey.getSnapshot();
+  uploadKeySaved(expected: AssetDisplayState): boolean {
+    return expected === this.state && this.current() && this.uploadKey.saved(this.state);
+  }
+  canConfirmUploadKey(expected: AssetDisplayState): boolean {
+    return expected === this.state && !this.otherOperationReason() && this.uploadKey.canCreate(this.state, false);
+  }
+  confirmNewUploadKey(expected: AssetDisplayState, checked: boolean): boolean {
+    if (expected !== this.state || this.otherOperationReason()) return false;
+    const accepted = this.uploadKey.confirm(this.state, checked); this.update({}); return accepted;
+  }
+  async checkUploadKeyStatus(): Promise<void> {
+    if (this.disposed || this.api?.mode !== 'native' || this.uploadReading) return;
+    const request = this.uploadKey.refreshRequest(this.state);
+    if (!request) return;
+    const api = this.api;
+    const work = Promise.resolve().then(async () => {
+      try {
+        if (!api.uploadKeyStatus) { this.uploadKey.unavailable(); this.update({}); return; }
+        const result = parseUploadKeyStatus(await api.uploadKeyStatus(request));
+        // Same existing monotonic/context receiver; a side status cannot grant
+        // an operation origin or replace a newer asset observation.
+        if (!this.receive(result.assets) || !this.uploadKey.accept(result, this.state, null)) return;
+        this.update({});
+      } catch { this.uploadKey.failed(null); this.update({}); }
+    });
+    this.uploadReading = work;
+    try { await work; } finally { if (this.uploadReading === work) this.uploadReading = null; }
+  }
+  prepareUploadKey(expected: AssetDisplayState): boolean {
+    if (expected !== this.state || !this.contextReady() || expected !== this.state || !this.api?.prepareUploadKey) return false;
+    const request = this.uploadKey.prepareRequest(this.state);
+    if (!request) return false;
+    const api = this.api, localRevision = this.localRevision, failureRevision = this.failureRevision;
+    const project = this.selectedProject(), status = this.state.status, intent = this.intentPhase;
+    this.uploadPreparationPending = true;
+    const started = this.run('prepare-upload-key', async () => {
+      try {
+        // run publishes busy synchronously. A subscriber can retire context,
+        // consent, the API or a peer owner before this closure actually sends.
+        const peer = this.otherOperationReason(), selected = this.selectedProject(), current = this.current();
+        if (peer || !current || this.disposed || this.api !== api || selected !== project ||
+            this.localRevision !== localRevision || this.failureRevision !== failureRevision ||
+            this.state.status !== status || !this.state.contextCurrent || this.state.updatingContext ||
+            this.state.blocked || this.state.observationFailed || this.state.busy !== 'prepare-upload-key' ||
+            this.intentPhase !== intent || !this.uploadPreparationPending) throw new Error('stale');
+        const result = parseUploadKeyStatus(await api.prepareUploadKey!(request));
+        if (!this.receive(result.assets) || !this.uploadKey.accept(result, this.state, 'prepare')) throw new Error('stale');
+        this.uploadPreparationPending = false;
+        return result.assets;
+      } catch { this.uploadKey.failed('prepare'); this.update({}); throw { code: 'assessment_context_stale' }; }
+    });
+    if (!started) { this.uploadKey.failed('prepare'); this.update({ originPending: true }); }
+    return started;
+  }
+  createNewUploadKey(expected: AssetDisplayState): boolean {
+    if (expected !== this.state || !this.contextReady() || expected !== this.state || !this.api?.createUploadKey) return false;
+    const request = this.uploadKey.createRequest(this.state);
+    if (!request) return false;
+    const api = this.api, localRevision = this.localRevision, failureRevision = this.failureRevision;
+    const project = this.selectedProject(), status = this.state.status;
+    const phase = this.phase({ type: 'upload-key', change: 'generate' }, UPLOAD_KEY_OPERATION, null);
+    const started = this.run(UPLOAD_KEY_OPERATION, async () => {
+      try {
+        const peer = this.otherOperationReason(), selected = this.selectedProject(), current = this.current();
+        if (peer || !current || this.disposed || this.api !== api || selected !== project ||
+            this.localRevision !== localRevision || this.failureRevision !== failureRevision ||
+            this.state.status !== status || !this.state.contextCurrent || this.state.updatingContext ||
+            this.state.blocked || this.state.observationFailed || this.state.busy !== UPLOAD_KEY_OPERATION ||
+            this.intentPhase !== phase || phase.uncertain) throw new Error('stale');
+        const result = parseUploadKeyStatus(await api.createUploadKey!(request));
+        if (!this.receive(result.assets, phase) || phase.uncertain || !this.uploadKey.accept(result, this.state, 'create')) throw new Error('stale');
+        return result.assets;
+      } catch { this.uploadKey.failed('create'); this.update({}); throw { code: 'assessment_context_stale' }; }
+    }, phase);
+    if (!started) { this.uploadKey.failed('create'); this.update({ originPending: true }); }
+    return started;
+  }
   prepareRecord(record: AssetRecordRef): boolean {
     if (!this.contextReady() || !this.idle()) return false;
     const intent = this.recordIntent(record, 'assign');
@@ -471,6 +556,7 @@ export class AssetSessionController {
   discard(): boolean {
     const operation = this.state.status?.operation;
     if (!this.api || this.state.mode !== 'native' || !operation || (operation.phase === 'idle' && operation.settlement === 'known') || this.cancelling === operation.operationId || this.disposed) return false;
+    if (this.uploadPreparationPending) return false;
     if (operation.operation === 'inspect-installation' || operation.operation === 'choose-images' || operation.operation === 'choose-project-path' || operation.operation === 'choose-evidence-folder' || operation.operation === 'inspect-evidence') return false;
     // Each explicit phase has a fresh native ID. A prior selected/preview
     // status cannot identify a new in-flight operation, even if an event has

@@ -1713,6 +1713,7 @@ def current_source(*, history_provider=False, store_runtime=False):
     fixed = {"desktop/" + name: 64 * 1024 for name in CURRENT_BOOTSTRAPS}
     if store_runtime:
         fixed["desktop/local_store_preflight_bootstrap.py"] = 64 * 1024
+        fixed["desktop/apple_provisioning_bootstrap.py"] = 64 * 1024
         fixed["desktop/local_store_prepare_bootstrap.py"] = 64 * 1024
         fixed["desktop/local_store_execute_bootstrap.py"] = 64 * 1024
         fixed["desktop/local_store_reconcile_bootstrap.py"] = 64 * 1024
@@ -1870,7 +1871,7 @@ def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, h
     expected_store = {"store/" + name: (sha, size) for name, sha, size in store_rows}
     need(len(expected_store) == len(store_rows) and not set(expected_store) & set(preadmitted),
          "current-store-input-collision")
-    bootstraps = CURRENT_BOOTSTRAPS | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py"} if store_rows else set())
+    bootstraps = CURRENT_BOOTSTRAPS | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_rows else set())
     required = set(preadmitted) | set(expected_store) | bootstraps | {"core.zip", "github-ca.pem", "manifest.json"}
     need(set(files) == required, "current-runtime-complete-roster")
     for name, value in preadmitted.items():
@@ -1954,7 +1955,7 @@ def current_runtime_command(args):
     if provider_enabled:
         capacity = history_provider_capacity(supplier_bytes=sum(len(body) for body, _ in supplier.values()),
             supplier_files=len(supplier), fixed_bytes=sum(len(projection["desktop/" + name][0])
-                for name in CURRENT_BOOTSTRAPS | {"github-ca.pem"} | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py"} if store_enabled else set())))
+                for name in CURRENT_BOOTSTRAPS | {"github-ca.pem"} | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_enabled else set())))
         provider_scope = history_provider_original(args.history_provider, provider_nomination, capacity, target=target)
     with provider_scope as provider:
         provider_body, provider_post = (None, None) if provider is None else provider

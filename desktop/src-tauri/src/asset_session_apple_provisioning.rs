@@ -21,6 +21,21 @@ fn changed() -> BridgeError {
     )
 }
 
+fn startup_error(error: crate::service_protocol::Error) -> BridgeError {
+    use crate::service_protocol::Error;
+    match error {
+        Error::StateUnknown => BridgeError::cleanup_unknown(),
+        Error::RecoveryRequired => BridgeError::new("apple_provisioning_state_recovery_required",
+            "The local automation history needs recovery. Preserve its files; do not reset it."),
+        Error::Busy => BridgeError::new("apple_provisioning_state_busy",
+            "Another local setup operation is still finishing. Wait before preparing again."),
+        Error::Conflict | Error::AccessDenied | Error::Expired => changed(),
+        Error::InvalidRequest => wire::invalid(),
+        Error::Unavailable | Error::UnsupportedPlatform => BridgeError::new("apple_provisioning_state_unavailable",
+            "Local Apple setup is unavailable in this application environment."),
+    }
+}
+
 /// Constructible only under the actual Document/Edit admission below. Public
 /// request fields are comparisons. The native input retains the originals
 /// which make those comparisons useful; no status/receipt can reconstruct it.
@@ -34,6 +49,15 @@ pub(crate) struct AppleProvisioningDocumentInput {
     state: Arc<NativeStateReady>,
     account: AccountRef,
     target: BundleTarget,
+}
+/// The same admission's owned inputs. Collect gates/material/census before
+/// SavedEditGuard, then carry them through publication without re-locking Edit.
+struct PreparedAppleSources {
+    gate: wire::Availability,
+    registration: u32,
+    root: asset_source::RegisteredRoot,
+    saved: AppleProvisioningSavedInput,
+    material: Arc<SelectedStoreMaterial>,
 }
 impl AppleProvisioningDocumentInput {
     pub(crate) fn context(&self) -> &wire::Context {
@@ -278,26 +302,83 @@ impl DocumentBinding {
         // than making this operation reject itself through reciprocal checks.
         self.local_store_base_gate(state)
     }
-    pub(crate) fn prepare_apple_provisioning(
+    /// This explicit user action prepares local state only. The Host retains
+    /// its actual originals; no CLI endpoint, read grant or provider operation
+    /// is created here. A dropped observer can never publish a Ready binding.
+    pub(crate) async fn prepare_apple_provisioning(
         &self,
         input: wire::Prepare,
+        app_data: &std::path::Path,
     ) -> Result<wire::Status, BridgeError> {
-        if !input.context.valid() {
-            return Err(wire::invalid());
-        }
-        let state = self.lock();
+        if !input.context.valid() { return Err(wire::invalid()); }
+        let host = &self.inner.bridge.application_service;
+        let (project, stamp, ticket, registration, root, saved, material) = {
+            let state = self.lock();
+            let gate = self.apple_provisioning_gate(&state);
+            if gate != wire::Availability::Available {
+                return self.inner.bridge.apple_provisioning.status_apple_provisioning(gate);
+            }
+            let (registration, root) = self.inner.bridge.native_project(&input.context.project_id)
+                .map_err(|_| changed())?;
+            let material = self.review_apple_provisioning_material(&state, &input.context, registration, &root)?;
+            let future = crate::saved_command_owner::apple_provisioning_document_backing_bytes().ok_or_else(changed)?;
+            lookup_memory::store_admission_bytes(&self.inner, &state, &material, future).map_err(|_| changed())?;
+            let project = self.service_project_locked(&state, &input.context.project_id)?;
+            let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+            let saved = self.apple_provisioning_saved_input(&state, &input.context, registration, &root, &edit)?;
+            if let Some(ready) = &state.apple_provisioning_ready {
+                match host.native_state_current(ready, &project) {
+                    Ok(()) => return self.prepare_apple_provisioning_locked(&state, input, &edit,
+                        PreparedAppleSources { gate, registration, root, saved, material }),
+                    // Only a fresh explicit Prepare may establish a new binding.
+                    Err(crate::service_protocol::Error::Conflict) => {},
+                    Err(error) => return Err(startup_error(error)),
+                }
+            }
+            let stamp = edit.stamp()?;
+            let roster = self.inner.bridge.native_roster().map_err(|_| changed())?;
+            host.reserve_native_state_location(app_data, &roster.roots).map_err(startup_error)?;
+            let ticket = host.begin_native_state(project.clone()).map_err(startup_error)?;
+            (project, stamp, ticket, registration, root, saved, material)
+        };
+        // No Document/Edit/Host guard is held across this original startup.
+        host.prepare_native_state(&ticket, app_data).await.map_err(startup_error)?;
+        let mut state = self.lock();
         let gate = self.apple_provisioning_gate(&state);
         if gate != wire::Availability::Available {
-            return self
-                .inner
-                .bridge
-                .apple_provisioning
-                .status_apple_provisioning(gate);
+            return self.inner.bridge.apple_provisioning.status_apple_provisioning(gate);
         }
-        let (registration, root) = self
-            .inner
-            .bridge
-            .native_project(&input.context.project_id)?;
+        let current = self.service_allow_current_locked(&state, &project, &stamp)?;
+        self.recheck_apple_provisioning_material(&state, &material, &input.context, registration, &root)?;
+        let future = crate::saved_command_owner::apple_provisioning_document_backing_bytes().ok_or_else(changed)?;
+        let admitted_bytes = lookup_memory::store_admission_bytes(&self.inner, &state, &material, future)
+            .map_err(|_| changed())?;
+        let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)?;
+        if !edit.matches(&stamp)
+            || !saved.current_locked(&self.inner, &state, &edit, &input.context, registration, &root)
+            || !material.provisioning_current_locked(&self.inner, &state, &input.context, registration, &root)
+        { return Err(changed()); }
+        let ready = Arc::new(host.finish_native_state(ticket, &current).map_err(startup_error)?);
+        // Count the actual new Ready before retaining it in Document. The
+        // pre-Edit census already counted any previous Ready still held here.
+        let ready_bytes = lookup_memory::native_state_ready_bytes(&ready).map_err(|_| changed())?;
+        if admitted_bytes.checked_add(ready_bytes).is_none_or(|bytes| bytes > SESSION_BYTES) {
+            return Err(changed());
+        }
+        state.apple_provisioning_ready = Some(ready);
+        // Same Document AND Edit originals span Ready publication and the
+        // actual operation preparation. No re-locking public call or gap.
+        self.prepare_apple_provisioning_locked(&state, input, &edit,
+            PreparedAppleSources { gate, registration, root, saved, material })
+    }
+    fn prepare_apple_provisioning_locked(
+        &self,
+        state: &DocumentState,
+        input: wire::Prepare,
+        edit: &crate::edit_owner::SavedEditGuard<'_>,
+        sources: PreparedAppleSources,
+    ) -> Result<wire::Status, BridgeError> {
+        let PreparedAppleSources { gate, registration, root, saved, material } = sources;
         let ready = state
             .apple_provisioning_ready
             .as_ref()
@@ -308,26 +389,8 @@ impl DocumentBinding {
                     "Explicitly prepare local state before reviewing Bundle-ID registration.",
                 )
             })?;
-        let material =
-            self.review_apple_provisioning_material(&state, &input.context, registration, &root)?;
         let (account, target) =
             material.provisioning_account_target(&input.context, registration, &root)?;
-        let future = crate::saved_command_owner::apple_provisioning_document_backing_bytes()
-            .ok_or_else(changed)?;
-        lookup_memory::store_admission_bytes(&self.inner, &state, &material, future)
-            .map_err(|_| changed())?;
-        let edit = self
-            .inner
-            .bridge
-            .edits
-            .saved_registration_guard(&self.inner.session_identity)?;
-        let saved = self.apple_provisioning_saved_input(
-            &state,
-            &input.context,
-            registration,
-            &root,
-            &edit,
-        )?;
         let original = Arc::new(AppleProvisioningDocumentInput {
             document: Arc::downgrade(&self.inner),
             context: input.context.clone(),
@@ -339,7 +402,7 @@ impl DocumentBinding {
             account,
             target,
         });
-        original.current_locked(&self.inner, &state, &edit)?;
+        original.current_locked(&self.inner, state, edit)?;
         // Future quote already covers the maximum wrapper/lane; check its
         // actual current backing so a later bigger lane cannot bypass the cap.
         if original
@@ -368,7 +431,8 @@ impl DocumentBinding {
         let (registration, root) = self
             .inner
             .bridge
-            .native_project(&original.context.project_id)?;
+            .native_project(&original.context.project_id)
+            .map_err(|_| changed())?;
         let future = crate::saved_command_owner::apple_provisioning_document_backing_bytes()
             .ok_or_else(changed)?;
         lookup_memory::store_admission_bytes(&self.inner, &state, original.material(), future)

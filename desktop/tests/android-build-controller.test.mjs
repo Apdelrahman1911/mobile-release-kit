@@ -188,6 +188,10 @@ function harness(t, { initial = status(), initialCatalog = catalogStatus(), init
       assert.ok(parseAndroidToolRegistrationStatus(value), 'Synthetic registration must satisfy the closed status contract');
       registrationRegistry = clone(value); call.resolve(clone(value));
     },
+    emitRegistration(value) {
+      assert.ok(parseAndroidToolRegistrationStatus(value), 'Synthetic event must satisfy the closed registration contract');
+      registrationRegistry = clone(value); registrationSubscriptions.at(-1)?.callback(clone(value));
+    },
     setAssets(value) { assets = clone(value); controller.syncAssetSession(); },
     emitService(value) { serviceRegistry = clone(value); serviceSubscriptions.at(-1)?.callback(clone(value)); },
     replyService(call, value) { serviceRegistry = clone(value); call.resolve(clone(value)); },
@@ -1047,4 +1051,189 @@ test('candidate option never follows its prior project into a new project select
   assert.equal(h.state.retainCandidateInputs,false);assert.equal(h.state.consent,null);
   const cancel=h.calls.at(-1);assert.equal(cancel.kind,'cancel');assert.equal(cancel.input.operationId,op.operationId);
   h.reply(cancel,status(2,terminal(op)));await flush();
+});
+
+// The Tools page uses this existing app-owned controller, not a second native owner.
+function toolSetupHarness(t) {
+  return harness(t, { initialCatalog: readyCatalog({ selected: TOOL_A }), initialService: serviceIdle(),
+    initialRegistration: { schemaVersion: 1, statusRevision: 0, registrationGeneration: 0,
+      availability: 'available', prerequisite: 'ready', phase: 'idle', reason: 'not-inspected',
+      operation: null, review: null, report: null },
+    sourceSelections: ['jdk', 'sdk', 'gradle'].map(role => ({ role, displayName: 'Example-' + role })) });
+}
+function sourceReview(inspect) {
+  const context = clone(inspect.input.context);
+  return { schemaVersion: 1, statusRevision: 1, registrationGeneration: 1, availability: 'available',
+    prerequisite: 'ready', phase: 'review', reason: 'none',
+    operation: { operationId: OP, registrationGeneration: 1, sourceGeneration: 1, kind: 'inspection', context },
+    review: { reviewId: OTHER, sourceGeneration: 1, context, consentVersion: ANDROID_TOOL_REGISTRATION_CONSENT,
+      licenseAcknowledgmentRequired: true, sources: ['jdk', 'sdk', 'gradle'].map(role => ({ role, version: '17.0.1',
+        logicalBytes: 1, files: 1, entries: 1, aliases: 0, complete: true, compatibility: 'compatible' })) },
+    report: null };
+}
+async function reviewInToolSetup(h) {
+  await h.ready; h.controller.setVisible(false); h.controller.setToolSetupVisible(true);
+  const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls.at(-1);
+  assert.equal(inspect?.kind, 'inspect', h.controller.inspectToolSourcesReason());
+  const review = sourceReview(inspect); h.replyRegistration(inspect, review); await inspecting;
+  return review;
+}
+const discardedSourceReview = review => ({ ...review, statusRevision: review.statusRevision + 1,
+  phase: 'cancelled', reason: 'cancelled', review: null });
+
+test('tool setup view is passive and cannot prepare or approve an Android build', async (t) => {
+  const h = toolSetupHarness(t); await h.ready; h.controller.setVisible(false);
+  assert.match(h.controller.inspectToolSourcesReason(), /Open Set up build tools/);
+  assert.match(h.controller.serviceActionReason(), /Open Set up build tools/);
+  const contextGeneration = h.state.contextGeneration, requestGeneration = h.state.requestGeneration;
+  const sources = h.state.toolSources, selection = h.state.catalogStatus.selected;
+  h.controller.setToolSetupVisible(true);
+  assert.equal(h.state.visible, false);
+  assert.equal(h.state.contextGeneration, contextGeneration); assert.equal(h.state.requestGeneration, requestGeneration);
+  assert.equal(h.state.toolSources, sources); assert.equal(h.state.catalogStatus.selected, selection);
+  assert.equal(h.controller.inspectToolSourcesReason(), null); assert.equal(h.controller.serviceActionReason(), null);
+  assert.match(h.controller.prepareReason(), /Open Releases/);
+  await h.controller.prepare(); h.controller.setAcknowledged(OP, OWNER, true); await h.controller.start(OP, OWNER);
+  assert.equal(h.state.consent, null); assert.equal(h.state.registrationConsent, null); assert.equal(h.state.serviceConsent, null);
+  assert.deepEqual([h.calls.length, h.registrationCalls.length, h.serviceCalls.length, h.catalogCalls.length], [0, 0, 0, 0]);
+});
+
+test('tool setup view uses the original inspection and one-use unchecked protected-copy consent', async (t) => {
+  const h = toolSetupHarness(t), review = await reviewInToolSetup(h);
+  assert.equal(h.state.visible, false); assert.equal(h.state.registrationConsent?.acknowledged, false);
+  await h.controller.registerToolSources(OP, 1, OTHER); assert.equal(h.registrationCalls.length, 1);
+  h.controller.setRegistrationAcknowledged(OP, 1, OTHER, true);
+  const registering = h.controller.registerToolSources(OP, 1, OTHER), copy = h.registrationCalls[1];
+  assert.equal(copy?.kind, 'register'); assert.deepEqual(copy.input.context, h.registrationCalls[0].input.context);
+  assert.equal(copy.input.consentVersion, ANDROID_TOOL_REGISTRATION_CONSENT);
+  assert.equal(copy.input.licenseAcknowledged, true); assert.equal(copy.input.reviewId, OTHER);
+  assert.equal(h.state.registrationConsent, null);
+  await h.controller.registerToolSources(OP, 1, OTHER); assert.equal(h.registrationCalls.length, 2);
+  // Settle this fake port with refusal, never fabricated native protected-copy qualification.
+  h.replyRegistration(copy, { ...review, statusRevision: 2, registrationGeneration: 2, phase: 'refused',
+    reason: 'registration-refused', review: null,
+    operation: { ...review.operation, operationId: OWNER, registrationGeneration: 2, kind: 'registration' } });
+  await registering;
+  assert.equal(h.state.toolRegistration.phase, 'refused'); assert.equal(h.state.registrationPending, null);
+  assert.equal(h.state.integrityFailed, false); assert.equal(h.calls.length, 0);
+});
+
+test('tool setup view leaving discards only the original review and returning cannot adopt it from Status', async (t) => {
+  const h = toolSetupHarness(t), review = await reviewInToolSetup(h);
+  h.controller.setRegistrationAcknowledged(OP, 1, OTHER, true);
+  h.controller.setToolSetupVisible(false);
+  assert.equal(h.state.registrationConsent, null);
+  const cancel = h.registrationCalls[1];
+  assert.equal(cancel?.kind, 'cancel'); assert.deepEqual(cancel.input, { schemaVersion: 1, operationId: OP, registrationGeneration: 1 });
+  h.controller.setToolSetupVisible(true); await h.controller.checkToolRegistration();
+  assert.equal(h.state.registrationConsent, null); assert.equal(h.state.registrationCancelPending, true);
+  await h.controller.registerToolSources(OP, 1, OTHER); await h.controller.inspectToolSources();
+  assert.equal(h.registrationCalls.length, 2);
+  h.replyRegistration(cancel, discardedSourceReview(review)); await flush();
+  assert.equal(h.state.registrationCancelPending, false); assert.equal(h.state.toolRegistration.phase, 'cancelled');
+  assert.equal(h.state.registrationConsent, null); assert.equal(h.calls.length, 0);
+});
+
+test('tool setup view retains an unresolved inspection and cancels its late original review, not a new request', async (t) => {
+  const h = toolSetupHarness(t); await h.ready; h.controller.setVisible(false); h.controller.setToolSetupVisible(true);
+  const inspecting = h.controller.inspectToolSources(), inspect = h.registrationCalls[0];
+  assert.equal(inspect?.kind, 'inspect');
+  h.controller.setToolSetupVisible(false); h.controller.setToolSetupVisible(true);
+  assert.equal(h.state.registrationPending, 'inspect'); assert.equal(h.state.registrationUnconfirmed, true);
+  await h.controller.inspectToolSources(); assert.equal(h.registrationCalls.length, 1);
+  const review = sourceReview(inspect); h.replyRegistration(inspect, review); await inspecting;
+  assert.equal(h.state.registrationConsent, null);
+  const cancel = h.registrationCalls[1];
+  assert.equal(cancel?.kind, 'cancel'); assert.equal(cancel.input.operationId, OP);
+  assert.equal(h.registrationSubscriptions[0].closed, false);
+  h.replyRegistration(cancel, discardedSourceReview(review)); await flush();
+  assert.equal(h.state.registrationPending, null); assert.equal(h.state.registrationCancelPending, false);
+  assert.equal(h.registrationCalls.length, 2);
+});
+
+test('tool setup view keeps active copy Status and Cancel and cannot clear an unknown original', async (t) => {
+  const h = toolSetupHarness(t), review = await reviewInToolSetup(h);
+  h.controller.setRegistrationAcknowledged(OP, 1, OTHER, true);
+  const registering = h.controller.registerToolSources(OP, 1, OTHER), copy = h.registrationCalls[1];
+  const copying = { ...review, statusRevision: 2, registrationGeneration: 2, availability: 'busy', phase: 'copying', review: null,
+    operation: { ...review.operation, operationId: OWNER, registrationGeneration: 2, kind: 'registration' } };
+  h.emitRegistration(copying);
+  h.controller.setToolSetupVisible(false); h.controller.setToolSetupVisible(true);
+  assert.equal(h.state.registrationPending, 'register'); assert.equal(h.registrationCalls.length, 2);
+  assert.equal(h.state.toolRegistration.operation.operationId, OWNER); assert.equal(h.controller.canCheckToolRegistration(), true);
+  await h.controller.checkToolRegistration(); assert.equal(h.state.registrationPending, 'register');
+  assert.equal(h.controller.canCancelToolRegistration(), true); h.controller.cancelToolRegistration();
+  const cancel = h.registrationCalls[2];
+  assert.deepEqual(cancel.input, { schemaVersion: 1, operationId: OWNER, registrationGeneration: 2 });
+  const unknown = { ...copying, statusRevision: 3, availability: 'cleanup-unknown', phase: 'unknown', reason: 'cleanup-unknown' };
+  h.replyRegistration(copy, unknown); await registering; h.replyRegistration(cancel, unknown); await flush();
+  h.controller.setToolSetupVisible(false); h.controller.setToolSetupVisible(true); await h.controller.checkToolRegistration();
+  assert.equal(h.state.nativeBlocked, true); assert.equal(h.state.toolRegistration.phase, 'unknown');
+  assert.equal(h.state.toolRegistration.operation.operationId, OWNER); assert.equal(h.state.registrationConsent, null);
+  await h.controller.inspectToolSources(); await h.controller.registerToolSources(OP, 1, OTHER);
+  assert.equal(h.registrationCalls.length, 3); assert.equal(h.calls.length, 0);
+  h.controller.dispose(); assert.equal(h.registrationSubscriptions[0].closed, false);
+});
+
+test('tool setup view allows explicit helper check, clears unused helper consent and retains a lost reply', async (t) => {
+  const h = toolSetupHarness(t); await h.ready; h.controller.setVisible(false); h.controller.setToolSetupVisible(true);
+  h.controller.setServiceRegistrationAcknowledged(0, true); assert.ok(h.state.serviceConsent);
+  h.controller.setToolSetupVisible(false); assert.equal(h.state.serviceConsent, null);
+  h.controller.setToolSetupVisible(true);
+  await h.controller.requestAndroidToolServiceRegistration(); assert.equal(h.serviceCalls.length, 0);
+  const checking = h.controller.checkAndroidToolService(), call = h.serviceCalls[0];
+  assert.equal(call?.kind, 'check'); assert.equal(call.input.consentVersion, undefined);
+  h.controller.setToolSetupVisible(false); h.controller.setToolSetupVisible(true);
+  assert.equal(h.state.servicePending, 'check'); assert.equal(h.state.serviceUnconfirmed, true);
+  call.reject({ code: 'reply_lost' }); await checking;
+  h.controller.setToolSetupVisible(false); h.controller.setToolSetupVisible(true); await h.controller.checkToolServiceStatus();
+  assert.equal(h.state.serviceUnconfirmed, true); assert.equal(h.state.serviceConsent, null);
+  await h.controller.checkAndroidToolService(); assert.equal(h.serviceCalls.length, 1);
+  const pending = servicePending(call, 1); h.emitService(pending); await flush();
+  const cancel = h.serviceCalls[1]; assert.equal(cancel?.kind, 'cancel');
+  assert.equal(cancel.input.operationId, pending.operation.operationId);
+  h.replyService(cancel, serviceComplete(pending, { state: 'unavailable', phase: 'cancelled', reason: 'cancelled', observation: false }));
+  await flush(); assert.equal(h.state.toolService.phase, 'cancelled'); assert.equal(h.calls.length, 0);
+});
+
+test('tool setup view cannot bypass other-owner gates, native unavailability or reentrant navigation', async (t) => {
+  const h = toolSetupHarness(t); await h.ready; h.controller.setVisible(false); h.controller.setToolSetupVisible(true);
+  h.other('Another original operation is still running.');
+  assert.equal(h.controller.inspectToolSourcesReason(), 'Another original operation is still running.');
+  assert.equal(h.controller.serviceActionReason(), 'Another original operation is still running.');
+  await h.controller.inspectToolSources(); await h.controller.checkAndroidToolService();
+  assert.equal(h.registrationCalls.length, 0); assert.equal(h.serviceCalls.length, 0);
+  h.other(null);
+  const unsubscribe = h.controller.subscribe(() => {
+    if (h.state.registrationPending === 'inspect') h.controller.setToolSetupVisible(false);
+  });
+  await h.controller.inspectToolSources(); unsubscribe();
+  assert.equal(h.registrationCalls.length, 0); assert.equal(h.state.registrationPending, null);
+  assert.equal(h.state.registrationUnconfirmed, false); assert.equal(h.state.registrationConsent, null);
+  h.controller.setToolSetupVisible(true); h.controller.setSelectionPending(true);
+  await h.controller.inspectToolSources(); await h.controller.checkAndroidToolService();
+  assert.equal(h.registrationCalls.length, 0); assert.equal(h.serviceCalls.length, 0);
+  const unavailable = harness(t, { initialService: serviceIdle({ availability: 'runtime-unqualified' }) });
+  await unavailable.ready; unavailable.controller.setVisible(false); unavailable.controller.setToolSetupVisible(true);
+  assert.ok(unavailable.controller.serviceActionReason()); await unavailable.controller.checkAndroidToolService();
+  assert.equal(unavailable.serviceCalls.length, 0);
+});
+
+test('tool setup view never carries Build consent across navigation or resets a started Build', async (t) => {
+  const unstarted = harness(t), review = await reviewed(unstarted);
+  unstarted.controller.setToolSetupVisible(true); unstarted.controller.setVisible(false);
+  assert.equal(unstarted.state.consent, null);
+  const cancel = unstarted.calls.at(-1); assert.equal(cancel.kind, 'cancel');
+  assert.deepEqual(cancel.input, { operationId: review.operationId, ownerGeneration: review.ownerGeneration });
+  await unstarted.controller.start(review.operationId, review.ownerGeneration);
+  assert.equal(unstarted.calls.filter(call => call.kind === 'start').length, 0);
+  unstarted.reply(cancel, status(2, terminal(review))); await flush();
+  const h = harness(t), op = await reviewed(h), sent = start(h, op);
+  h.controller.setVisible(false); h.controller.setToolSetupVisible(true); h.controller.setToolSetupVisible(false);
+  assert.equal(h.calls.filter(call => call.kind === 'cancel').length, 0); assert.equal(h.state.pending, 'start');
+  assert.equal(h.controller.canCancel(), true); assert.equal(h.controller.canCheckStatus(), true);
+  h.controller.cancel(); const stop = h.calls.at(-1);
+  assert.deepEqual(stop.input, { operationId: op.operationId, ownerGeneration: op.ownerGeneration });
+  h.reply(sent.call, status(2, terminal(op))); await sent.done; h.reply(stop, status(2, terminal(op))); await flush();
+  assert.equal(h.state.pending, null);
 });

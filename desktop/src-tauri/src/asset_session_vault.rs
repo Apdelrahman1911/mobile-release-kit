@@ -6,6 +6,7 @@ use crate::{vault_crypto as crypto, vault_format as format, vault_store as store
 #[path = "credential_assignment_native.rs"]
 mod assignment_native;
 use assignment_native::upload_key;
+pub(crate) use upload_key::controls as upload_key_controls;
 pub(crate) use upload_key::{UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal};
 pub(super) use upload_key::parent_stop as upload_key_parent_stop;
 #[path = "credential_backup_native.rs"]
@@ -101,12 +102,13 @@ pub(super) struct Session {
     state: State, reason: Reason, revoked: bool, read_only: bool, registry_generation: u32, release_end: Option<Instant>,
     pub(super) bound: [Option<Box<BoundLoan>>; BOUND_LOAN_LIMIT],
     upload_key_observation: Option<upload_key::UploadKeyObservation>,
+    upload_key_setup: upload_key_controls::Setup,
 }
 impl Session {
     fn new(store: Arc<Mutex<store::StoreBook>>, generation: u32) -> Self {
         Self { store, root: None, header: None, identity: None, key: None, rows: Vec::new(), inventory: Vec::new(),
             state: State::Unknown, reason: Reason::None, revoked: false, read_only: false, registry_generation: generation, release_end: None,
-            bound: std::array::from_fn(|_| None), upload_key_observation: None }
+            bound: std::array::from_fn(|_| None), upload_key_observation: None, upload_key_setup: Default::default() }
     }
     fn writable(&self) -> bool { !self.revoked && !self.read_only && self.state == State::Unlocked && self.key.is_some() }
     fn row(&self, key: &RecordKey) -> Option<&Descriptor> { self.rows.iter().find(|row| row.matches(key)) }
@@ -118,7 +120,7 @@ impl Session {
         // Direct data_bytes consumers also need these actual pointees, not
         // merely the inline Box handles. Shared Arc backing is visited apart.
         total = total.checked_add(self.bound.iter().flatten().count().checked_mul(BOUND_LOAN_BYTES)?)?;
-        Some(total)
+        total.checked_add(self.upload_key_setup.retained_bytes()?)
     }
     pub(super) fn store(&self) -> &Arc<Mutex<store::StoreBook>> { &self.store }
     pub(super) fn key(&self) -> Option<&Arc<crypto::VaultKey>> { self.key.as_ref() }
@@ -190,6 +192,7 @@ pub(super) struct SlotData {
     // New-only publisher. Generic STOP/Idle/status never authorizes disposal.
     backup_discard: bool, backup_new_published: bool, backup_export_published: bool,
     upload_key_new_published: bool,
+    upload_key_context: Option<(u32, StoredRef)>,
     // Nonsecret current-display stamp; the ordinary private working reference
     // is cleared by retirement. This grants no loan, retry or disposal right.
     backup_export_context: Option<(u32, StoredRef)>,
@@ -197,6 +200,9 @@ pub(super) struct SlotData {
 
 pub(super) fn mode(state: &DocumentState) -> bool { state.vault.is_some() }
 pub(super) fn writable(state: &DocumentState) -> bool { state.vault.as_ref().is_some_and(Session::writable) }
+pub(super) fn upload_key_setup_pending(state: &DocumentState) -> bool {
+    state.vault.as_ref().is_some_and(|session| session.upload_key_setup.pending())
+}
 pub(super) fn backup_pending(state: &DocumentState) -> bool {
     state.slot.as_ref().is_some_and(|slot| slot.owner.vault.try_lock()
         .map_or(true, |work| work.backup_blocks_reuse() || work.upload_key_blocks_reuse()))
@@ -439,6 +445,8 @@ pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slo
                 })();
                 match observed {
                     Ok(observation) => {
+                        slot.vault.upload_key_context = upload_key_controls::publication_stamp(slot,
+                            row.as_ref().expect("validated generated row"), session.identity.expect("validated generated identity"));
                         session.upload_key_observation = Some(observation);
                         slot.vault.upload_key_new_published = true;
                     },

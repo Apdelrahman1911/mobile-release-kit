@@ -177,6 +177,8 @@ mod known {
         census.document_cells()?;
         if let Some(lane) = &state.saved_observation { census.saved_observation(lane)?; }
         if let Some(binding) = &state.saved_input { census.saved_observation(&binding.lane)?; }
+        // lookup_memory::Census already counts the independently retained
+        // Apple Ready; this function supplies only its additional fields.
         census.evidence(&state.evidence)?;
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
         census.add(capacity(state.maintenance.notice_bytes())?)?;
@@ -462,6 +464,11 @@ mod known {
         fn saved_observation_rows(&mut self,heap:Option<usize>)->Count<()>{
             self.arc::<SavedObservationLane>()?; self.add(capacity(heap)?)
         }
+        fn native_state_ready(&mut self, ready: &Arc<crate::application_service_host::NativeStateReady>) -> Count<()> {
+            if !self.seen.insert(ready)? { return Ok(()); }
+            self.arc::<crate::application_service_host::NativeStateReady>()?;
+            self.heap::<crate::application_service_host::NativeStateReady>(ready.retained_bytes())
+        }
         fn document_cells(&mut self)->Count<()>{
             self.arc::<Inner>()?; self.arc::<()>()?; self.add(SESSION_SIGNAL_BYTES)
         }
@@ -489,6 +496,7 @@ mod known {
             self.add(capacity(state.maintenance.notice_bytes())?)?;
             if let Some(lane) = &state.saved_observation { self.saved_observation(lane)?; }
             if let Some(binding) = &state.saved_input { self.saved_observation(&binding.lane)?; }
+            if let Some(ready) = &state.apple_provisioning_ready { self.native_state_ready(ready)?; }
             self.add(capacity(version_allocation::retained_bytes(state))?)?;
             self.records(&state.records)?; self.assignments(&state.assignments)?;
             if let Some(context) = &state.context { self.context(context)?; }
@@ -547,9 +555,9 @@ mod known {
             root:project.clone(),role:crate::android_tool_sources::Role::Jdk,acquired:None}));
         let state=DocumentState{lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
-            retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,version_allocation_source:None,
+            retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,apple_provisioning_ready:None,version_allocation_source:None,
             session_owner_reason:None,maintenance:macos_maintenance::Closure::default(),context:Some(context),slot:Some(slot),records,assignments,
-            quit:None,quit_accepted:false,quit_cleanup_end:None,github:ConnectionState::new(),gh_auth:None,
+            quit:None,quit_accepted:false,quit_cleanup_end:None,github:ConnectionState::new(),gh_auth:None,git_read:None,
             evidence:EvidenceRegistry::new(),images:images::Registry::new(),installation:installation::Registry::new(),vault:None};
         // Two mentions of one identity proxy, not two made-up returned lanes.
         // Its smaller layout is never used: saved_observation_rows charges the
@@ -653,7 +661,7 @@ mod known {
         fn state() -> DocumentState {
             DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
-                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, git_read: None, version_allocation_source: None,
+                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, version_allocation_source: None,
                 session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
                 quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None,
                 evidence: EvidenceRegistry::new(), images: images::Registry::new(),

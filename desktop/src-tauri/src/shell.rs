@@ -1,6 +1,6 @@
 use std::{sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::Duration};
 use serde_json::Value;
-use tauri::{Emitter, Manager, State, Webview, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::{watch, oneshot, Mutex as AsyncMutex};
 use crate::{
     asset_commands::{self, AssetError, CommandError, Reason},
@@ -333,6 +333,43 @@ async fn cancel_local_release_history(webview: Webview, request: tauri::ipc::Req
     let value = crate::local_release_history_protocol::raw_request(bytes)?;
     let args = crate::local_release_history_protocol::cancel(&value)?;
     state.document.cancel_local_release_history(args)
+}
+#[tauri::command]
+async fn prepare_apple_provisioning(app: tauri::AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::apple_provisioning_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::apple_provisioning_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::apple_provisioning_protocol::invalid()); };
+    let value = crate::apple_provisioning_protocol::raw_request(bytes)?;
+    let args = crate::apple_provisioning_protocol::prepare(&value)?;
+    let app_data = app.path().app_local_data_dir().map_err(|_| BridgeError::unavailable("The application's private data folder is unavailable."))?;
+    state.document.prepare_apple_provisioning(args, &app_data).await
+}
+#[tauri::command]
+async fn start_apple_provisioning(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::apple_provisioning_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::apple_provisioning_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::apple_provisioning_protocol::invalid()); };
+    let value = crate::apple_provisioning_protocol::raw_request(bytes)?;
+    let args = crate::apple_provisioning_protocol::start(&value)?;
+    state.document.start_apple_provisioning(args)
+}
+#[tauri::command]
+async fn apple_provisioning_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::apple_provisioning_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::apple_provisioning_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::apple_provisioning_protocol::invalid()); };
+    let value = crate::apple_provisioning_protocol::raw_request(bytes)?;
+    crate::apple_provisioning_protocol::status_request(&value)?;
+    state.document.status_apple_provisioning()
+}
+#[tauri::command]
+async fn cancel_apple_provisioning(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::apple_provisioning_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::apple_provisioning_protocol::invalid())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::apple_provisioning_protocol::invalid()); };
+    let value = crate::apple_provisioning_protocol::raw_request(bytes)?;
+    let args = crate::apple_provisioning_protocol::cancel(&value)?;
+    state.document.cancel_apple_provisioning(args)
 }
 #[tauri::command]
 async fn prepare_local_store_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::local_store_preflight_protocol::Status, BridgeError> {
@@ -2200,6 +2237,49 @@ async fn credential_prepare(webview: Webview, request: tauri::ipc::Request<'_>, 
     }.await;
     installed_session_result!(session_observed, Prepare, &result); result
 }
+// Only this fixed nonsecret status DTO is serialized. On unsupported targets
+// the vault child is absent and the whole closed command refuses; no fallback
+// tool, key material, path or generic process API is admitted.
+#[tauri::command]
+async fn upload_key_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, AssetError> {
+    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
+    asset_window(&webview)?;
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    {
+        let args = crate::asset_session::upload_key_controls::context_request(asset_body(&request)?)?;
+        serde_json::to_value(state.document.upload_key_status(args)?).map_err(|_| AssetError::invalid())
+    }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+    { let _ = request; Err(AssetError::new(Reason::UnsupportedPlatform)) }
+}
+#[tauri::command]
+async fn upload_key_prepare(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, AssetError> {
+    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
+    asset_window(&webview)?;
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+    {
+        let args = crate::asset_session::upload_key_controls::context_request(asset_body(&request)?)?;
+        let location = app.path().app_local_data_dir().map_err(|_| AssetError::new(Reason::ExclusionUnconfirmed))?;
+        let document = state.document.clone(); drop(state); drop(request);
+        let result = document.prepare_upload_key_setup(args, &location).await?;
+        serde_json::to_value(result).map_err(|_| AssetError::invalid())
+    }
+    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
+    { let _ = (app, request); Err(AssetError::new(Reason::UnsupportedPlatform)) }
+}
+#[tauri::command]
+async fn upload_key_create(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, AssetError> {
+    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
+    asset_window(&webview)?;
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+    {
+        let args = crate::asset_session::upload_key_controls::create_request(asset_body(&request)?)?;
+        serde_json::to_value(state.document.create_upload_key(args)?).map_err(|_| AssetError::invalid())
+    }
+    #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
+    { let _ = request; Err(AssetError::new(Reason::UnsupportedPlatform)) }
+}
+
 #[tauri::command]
 async fn vault_backup_export(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
     fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
@@ -2357,6 +2437,10 @@ struct LocalHistoryRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for LocalHistoryRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.local_release_history_relay_lost(); } }
 }
+struct AppleProvisioningRelayGuard { document: DocumentBinding, closed: bool }
+impl Drop for AppleProvisioningRelayGuard {
+    fn drop(&mut self) { if !self.closed { self.document.apple_provisioning_relay_lost(); } }
+}
 struct StorePreflightRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for StorePreflightRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.local_store_preflight_relay_lost(); } }
@@ -2404,6 +2488,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let mut diagnostics = document.environment_diagnostics_subscribe();
     let mut local_history = document.local_release_history_subscribe();
     let local_history_guard = LocalHistoryRelayGuard { document: document.clone(), closed: false };
+    let mut apple_provisioning = document.apple_provisioning_subscribe();
+    let apple_provisioning_guard = AppleProvisioningRelayGuard { document: document.clone(), closed: false };
     let mut local_store = document.local_store_preflight_subscribe();
     let mut local_store_prepare = document.local_store_prepare_subscribe();
     let mut local_store_execute = document.local_store_execute_subscribe();
@@ -2431,6 +2517,9 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut local_history_guard = local_history_guard;
         let mut local_history_revision = None;
         let mut local_history_relay_failed = false;
+        let mut apple_provisioning_guard = apple_provisioning_guard;
+        let mut apple_provisioning_revision = None;
+        let mut apple_provisioning_relay_failed = false;
         let mut local_store_guard = local_store_guard;
         let mut local_store_prepare_guard = local_store_prepare_guard;
         let mut local_store_execute_guard = local_store_execute_guard;
@@ -2483,7 +2572,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
         let mut removal_notice_open=removal_notice.is_some();
         loop {
-            if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+            if *stop.borrow() { preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
             document.finish_macos_maintenance(app.clone());
             // Optional history performs bounded synchronous service IO only
@@ -2606,6 +2695,17 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                         }
                     },
                     Err(_) => {local_history_relay_failed=true;document.local_release_history_relay_lost();},
+                }
+            }
+            if !apple_provisioning_relay_failed {
+                match document.status_apple_provisioning() {
+                    Ok(status) => if apple_provisioning_revision != Some(status.status_revision) {
+                        apple_provisioning_revision = Some(status.status_revision);
+                        if app.emit_to(MAIN_WINDOW, crate::apple_provisioning_protocol::EVENT, &status).is_err() {
+                            apple_provisioning_relay_failed=true;document.apple_provisioning_relay_lost();
+                        }
+                    },
+                    Err(_) => {apple_provisioning_relay_failed=true;document.apple_provisioning_relay_lost();},
                 }
             }
             if !local_store_relay_failed {
@@ -2793,11 +2893,12 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             };
             tokio::select! {
                 biased;
-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
+                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
                 result = assets.changed() => { if result.is_err() { return; } },
                 result = diagnostics.changed() => { if result.is_err() { return; } },
                 result = local_history.changed() => { if result.is_err() { return; } },
+                result = apple_provisioning.changed() => { if result.is_err() { return; } },
                 result = local_store.changed() => { if result.is_err() { return; } },
                 result = local_store_prepare.changed() => { if result.is_err() { return; } },
                 result = local_store_execute.changed() => { if result.is_err() { return; } },
@@ -4334,6 +4435,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             release_evidence_choose, release_evidence_status, release_evidence_observe, release_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
             prepare_local_release_history, start_local_release_history, local_release_history_status, cancel_local_release_history,
+            prepare_apple_provisioning, start_apple_provisioning, apple_provisioning_status, cancel_apple_provisioning,
             prepare_local_store_preflight, start_local_store_preflight, local_store_preflight_status, cancel_local_store_preflight,
             prepare_local_store_prepare, start_local_store_prepare, local_store_prepare_status, cancel_local_store_prepare,
             prepare_local_store_execute, start_local_store_execute, local_store_execute_status, cancel_local_store_execute,
@@ -4375,6 +4477,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
             github_history_status, github_history_start, github_history_cancel,
             vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,
+            upload_key_status, upload_key_prepare, upload_key_create,
             vault_prepare_delete, vault_backup_export, vault_backup_import, vault_commit, vault_bind, vault_discard, vault_lock,
             ];
             handler(invoke)

@@ -75,21 +75,9 @@ export function AndroidBuildResultView({ state, operationProjectName = null }: {
   </section>;
 }
 
-export function AndroidBuild({ state, controller, projectName, operationProjectName, compact = false, onShow, onRefresh, onReadVersion,
-  refreshReason = null, versionReason = null, onHelp, onCredentials, onSettings, onRecovery }: {
-  state: AndroidBuildState; controller: AndroidBuildController; projectName: string | null; operationProjectName: string | null;
-  compact?: boolean; onShow?: () => void; onRefresh?: () => void; onReadVersion?: () => void;
-  onCredentials?: () => void; onSettings?: () => void; onRecovery?: () => void;
-  refreshReason?: string | null; versionReason?: string | null; onHelp?: (help: HelpContent) => void;
-}) {
-  const label = useId(), op = state.status?.operation, consent = state.consent, project = state.project;
-  const owned = androidBuildOwnerReason(state);
-  if (compact && !owned) return null;
-  const prepareReason = controller.prepareReason(), startReason = controller.startReason();
-  const cancelRequested = !!op && state.cancelClaimed?.operationId === op.operationId && state.cancelClaimed.ownerGeneration === op.ownerGeneration;
-  const controls = <div className="button-row">
-    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} />{state.readPending ? 'Reading build status…' : 'Check build status'}</button>
-    {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · waiting for cleanup' : 'Cancel this Android build'}</button>}
+/** Shared status/cancel controls retain the same original tool operations on either page. */
+export function AndroidToolSetupControls({ state, controller }: { state: AndroidBuildState; controller: AndroidBuildController }) {
+  return <>
     {state.catalogStatus?.availability !== 'unsupported-platform' && <>
       <button type="button" className="button secondary small" disabled={!controller.canCheckCatalogStatus()} onClick={() => void controller.checkCatalogStatus()}>{state.catalogReadPending ? 'Reading tool status…' : 'Check tool status'}</button>
       {androidCatalogActive(state.catalogStatus) && <button type="button" className="button secondary small" disabled={!controller.canCancelCatalog()} onClick={() => controller.cancelCatalog()}>{state.catalogCancelClaimed ? 'Tool cancellation requested' : 'Cancel tool read'}</button>}
@@ -111,6 +99,25 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
         {sameAndroidToolServiceIdentity(state.serviceCancelClaimed, state.toolService?.operation ?? null)
           ? 'Service cancellation requested · waiting for cleanup' : 'Cancel this service action'}</button>}
     </>}
+  </>;
+}
+
+export function AndroidBuild({ state, controller, projectName, operationProjectName, compact = false, onShow, onRefresh, onReadVersion,
+  refreshReason = null, versionReason = null, onHelp, onCredentials, onSettings, onRecovery }: {
+  state: AndroidBuildState; controller: AndroidBuildController; projectName: string | null; operationProjectName: string | null;
+  compact?: boolean; onShow?: () => void; onRefresh?: () => void; onReadVersion?: () => void;
+  onCredentials?: () => void; onSettings?: () => void; onRecovery?: () => void;
+  refreshReason?: string | null; versionReason?: string | null; onHelp?: (help: HelpContent) => void;
+}) {
+  const label = useId(), op = state.status?.operation, consent = state.consent, project = state.project;
+  const owned = androidBuildOwnerReason(state);
+  if (compact && !owned) return null;
+  const prepareReason = controller.prepareReason(), startReason = controller.startReason();
+  const cancelRequested = !!op && state.cancelClaimed?.operationId === op.operationId && state.cancelClaimed.ownerGeneration === op.ownerGeneration;
+  const controls = <div className="button-row">
+    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} />{state.readPending ? 'Reading build status…' : 'Check build status'}</button>
+    {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · waiting for cleanup' : 'Cancel this Android build'}</button>}
+    <AndroidToolSetupControls state={state} controller={controller} />
     {onHelp && <HelpButton content={androidBuildCancelHelp} onHelp={onHelp} />}
     {compact && onShow && <button type="button" className="button secondary small" onClick={onShow}>Show in Releases</button>}
   </div>;
@@ -234,7 +241,7 @@ const serviceHelp: HelpContent = {
   format: 'No service name, administrator command, path or certificate is entered here. Select the separate checkbox only when you want this installed helper registered with macOS. Afterwards choose Check installed service again.',
   failure: 'A missing shipping signature must be fixed by the publisher, not with local administrator commands or ad-hoc signing. Denied, awaiting approval and unavailable are different states. Cancel does not unregister or undo a completed system action; keep original Status until cleanup is confirmed.',
 };
-function AndroidToolService({ state, controller, onHelp }: {
+export function AndroidToolService({ state, controller, onHelp }: {
   state: AndroidBuildState; controller: AndroidBuildController; onHelp?: (help: HelpContent) => void;
 }) {
   const status = state.toolService, reason = controller.serviceActionReason(), registrationReason = controller.serviceRegistrationReason();
@@ -284,7 +291,7 @@ const sourceReason: Record<AndroidToolSourcesStatus['reason'], string> = {
   shutdown: 'The app is closing the original selection before it exits.',
   'cleanup-unknown': 'Status cannot prove that the original work is closed. Further actions remain blocked; a retry does not resolve this.',
 };
-function AndroidToolSources({ state, controller, onHelp }: {
+export function AndroidToolSources({ state, controller, onHelp }: {
   state: AndroidBuildState; controller: AndroidBuildController; onHelp?: (help: HelpContent) => void;
 }) {
   const sources = state.toolSources, reason = controller.sourceActionReason();
@@ -339,7 +346,7 @@ const registrationHelp: HelpContent = {
   format: 'The private review binds saved inputs, complete source observations, the exact proposal and original service prerequisites. Displayed source totals cover the three picked roles only, not the separate fixed support group.',
   failure: 'A changed, expired or incomplete review is refused. Missing supplier, signing, approval or fresh service prerequisites stay unavailable. Cancel is not rollback; retained partial output is not eligible for selection or permission to delete.',
 };
-function AndroidToolRegistration({ state, controller, onHelp }: {
+export function AndroidToolRegistration({ state, controller, onHelp }: {
   state: AndroidBuildState; controller: AndroidBuildController; onHelp?: (help: HelpContent) => void;
 }) {
   const status = state.toolRegistration, consent = state.registrationConsent, review = status?.review;
@@ -393,7 +400,7 @@ function AndroidToolRegistration({ state, controller, onHelp }: {
   </section>;
 }
 
-function AndroidToolchainCatalog({ state, controller, onHelp }: {
+export function AndroidToolchainCatalog({ state, controller, onHelp }: {
   state: AndroidBuildState; controller: AndroidBuildController; onHelp?: (help: HelpContent) => void;
 }) {
   const catalog = state.catalogStatus, reason = controller.catalogActionReason();
@@ -428,7 +435,7 @@ function AndroidToolchainCatalog({ state, controller, onHelp }: {
           onClick={() => void controller.selectToolchain(entry.instance, entry.selection.recordSha256)}>{selected ? 'This copy is selected' : 'Choose this tool copy'}</button>}
       </div>;
     })}
-    <p className="save-note">Browse above to choose source folders, inspect them, then explicitly approve protected registration when its prerequisites are available. A published copy is never selected automatically. Build still compares the project's original Gradle wrapper URL and SHA-256 and performs fresh runtime/tool admission.</p>
+    <p className="save-note">Use Browse to choose source folders, inspect them, then explicitly approve protected registration when its prerequisites are available. A published copy is never selected automatically. Build still compares the project's original Gradle wrapper URL and SHA-256 and performs fresh runtime/tool admission.</p>
     {state.catalogCancelPending && <p className="review-caution">The original catalog cancellation invoke is still pending. A terminal event does not release that pending request.</p>}
     {state.catalogUnconfirmed && <p className="review-caution">The original catalog request is unconfirmed. Use Check tool status or Cancel tool read below; do not repeat the request.</p>}
     {state.catalogError && <ErrorNotice error={state.catalogError} title="No new tool-catalog outcome was confirmed" />}
