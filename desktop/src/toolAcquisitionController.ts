@@ -221,6 +221,10 @@ export class ToolAcquisitionController {
     const reason = this.checkReason(); if (reason) return reason;
     const i = this.inspection;
     if (!i || !this.current(i)) return 'Check this project’s required tools before reviewing a download.';
+    if (i.result.protectedTools === 'reuse-selected')
+      return 'The selected protected tools match this project. No download or replacement is needed; builds still run their own checks.';
+    if (i.result.protectedTools !== 'none-in-supported-catalogue')
+      return 'A matching supported tool selection was not confirmed. Use the existing Recover or Choose tools controls; do not replace working tools.';
     const a = i.result.requirements.android;
     if ([a.jdk, a.agp, a.sdkPlatform, a.sdkBuildTools].some((hint) => hint.state === 'unknown') ||
         a.gradle.state !== 'literal' || a.gradle.sha256 === null)

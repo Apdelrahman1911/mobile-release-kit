@@ -54,6 +54,7 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
   </section>;
 
   const requirements = state.inspection?.requirements.android;
+  const reuseSelected = state.inspection?.protectedTools === 'reuse-selected';
   const report = op?.result?.kind === 'staged-tool-sources' ? op.result : null;
   const staged = report && stagedToolSourceGuidance(report, state.presentation);
   const busy = toolsBusy || retained;
@@ -69,16 +70,19 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
       {checkReason && <p className="save-note">{checkReason}</p>}
     </>}
     {requirements && !report && <>
-      <h3>Required tool sources</h3>
+      <h3>{reuseSelected ? 'No tool download needed' : 'Required tool sources'}</h3>
+      {reuseSelected && <p role="status">Your selected protected JDK, Android platform, build tools and Gradle match this project’s saved requirements. Keep using them unchanged. This check downloaded and installed nothing; builds still run their own checks.</p>}
       <p>The saved project’s source hints were checked without running its build scripts. This is not a build-readiness check.</p>
       <dl className="environment-baseline"><dt>Java JDK</dt><dd>{hint(requirements.jdk)}</dd>
         <dt>Android platform</dt><dd>{hint(requirements.sdkPlatform)}</dd>
         <dt>Android build tools</dt><dd>{hint(requirements.sdkBuildTools)}</dd>
         <dt>Gradle</dt><dd>{requirements.gradle.version ?? 'Could not be read safely'}</dd></dl>
       {!consent && !active && <>
-        <p>Already have these tools elsewhere? Choose them instead. The supported lookup covers registered copies, selected folders and known locations—not every folder on this computer.</p>
-        <button type="button" className="button primary" disabled={reviewReason !== null} onClick={() => void controller.reviewDownload()}>Review download</button>
-        {reviewReason && <p className="save-note">{reviewReason}</p>}
+        {!reuseSelected && <>
+          <p>Already have these tools elsewhere? Choose them instead. This check covers the supported protected catalogue, not every folder on this computer.</p>
+          <button type="button" className="button primary" disabled={reviewReason !== null} onClick={() => void controller.reviewDownload()}>Review download</button>
+          {reviewReason && <p className="save-note">{reviewReason}</p>}
+        </>}
       </>}
     </>}
     {consent && <div className="notice notice-info"><div>
@@ -101,7 +105,7 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
           onClick={() => void chooseSource(role)}>Choose {role === 'jdk' ? 'JDK' : role === 'sdk' ? 'Android SDK' : 'Gradle'}</button>)}
         <button type="button" className="button secondary" onClick={openRegistration}>Open tool inspection &amp; approval</button></div>
       <p>For manual preparation, use the exact supported releases shown in the existing tool review. Do not upgrade a compatible installation, change global Java settings or run a project wrapper just to discover its version.</p>
-      <p>Guided downloads currently require a supported, separately enabled Mac app build, an empty supported tool catalogue, no selected source folders, a clean registration state and an existing app-data folder. Missing app data, incompatible or dynamic requirements and unfinished operations keep this route unavailable. Do not delete existing selections or working tools to bypass these checks.</p>
+      <p>A current, verified protected tool selection is reused without a download. A saved catalogue entry may need the existing Recover and Choose steps first. Downloads require a supported, separately enabled Mac build, an empty supported catalogue and no picked source folders. Incompatible or dynamic requirements and unfinished operations use the manual route. Do not delete selections or working tools to bypass these checks.</p>
       <p>Literal source hints are not Gradle’s resolved configuration. The native operation rechecks exact project sources and its pinned tool profile before any download. iOS/Xcode setup remains a separate check.</p>
       {report && <p>Staging folder identifier: <code>{report.cacheJob}</code>. A folder name is not an installation or completion receipt.</p>}
     </details>

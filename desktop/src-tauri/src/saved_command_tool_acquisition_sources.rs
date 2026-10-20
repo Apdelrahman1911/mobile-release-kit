@@ -209,8 +209,8 @@ impl SavedCommandOwner {
         let r = binding.android.registry.try_lock().map_err(|_| source_wire::invalid())?;
         if r.android_sources.census_generation() != input.source_generation || r.android_sources.busy() || r.android_sources.unknown()
             || r.android_registration.busy() || r.android_registration.unknown() || r.android_catalog.busy() || r.android_catalog.unknown()
-            || !r.android_catalog.same_source_picker_empty_loan(&intent.known.catalog, continuing)
-            || r.android_registration.pristine_tool_acquisition_generation() != Some(intent.known.registration_generation)
+            || !r.android_catalog.same_source_picker_empty_loan(intent.known.catalog.empty().ok_or_else(source_wire::invalid)?, continuing)
+            || r.android_registration.tool_acquisition_generation() != Some(intent.known.registration_generation)
             || r.disabled || r.document_lost || r.stopping || r.exhausted || r.active.is_some() || r.prepared.is_some()
             || binding.android.poisoned.load(Ordering::SeqCst) { return Err(source_wire::invalid()); }
         drop(r);

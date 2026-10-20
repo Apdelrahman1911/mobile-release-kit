@@ -653,6 +653,15 @@ impl Lifetime {
             && self.resources_closed
     }
 }
+/// Public post-join comparison only. It is deliberately NOT accepted from the
+/// child wire, and does not lend a tool lease or claim build readiness.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ProtectedTools {
+    ReuseSelected,
+    NoneInSupportedCatalogue,
+    ManualCheckRequired,
+}
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Terminal {
@@ -663,8 +672,26 @@ pub(crate) struct Terminal {
     #[serde(deserialize_with = "present")]
     pub(crate) result: Option<Value>,
     pub(crate) lifetime: Lifetime,
+    #[serde(skip)]
+    protected_tools: Option<ProtectedTools>,
 }
 impl Terminal {
+    pub(crate) fn protected_tools(&self) -> Option<ProtectedTools> {
+        self.protected_tools
+    }
+    /// The saved owner calls this only after its original positive retirement
+    /// and current native catalogue check. The field itself is still DATA.
+    pub(crate) fn observe_protected_tools(&mut self, finding: ProtectedTools) {
+        if self.protected_tools.is_none()
+            && self.context.action == Action::Inspect
+            && self.outcome == Outcome::Complete
+            && self.reason == Reason::None
+            && self.lifetime.settled()
+            && self.lifetime.stop_observed == CoreStop::None
+        {
+            self.protected_tools = Some(finding);
+        }
+    }
     fn valid(&self, operation: &str, context: &Context) -> bool {
         if self.schema_version != 1
             || &self.context != context
@@ -707,7 +734,8 @@ impl Terminal {
     pub(crate) fn public_result(&self) -> Option<Value> {
         self.result.as_ref().map(|v| match self.context.action {
             Action::Inspect => {
-                json!({"kind":"tool-requirements-observation","requirements":v["requirements"]})
+                json!({"kind":"tool-requirements-observation","requirements":v["requirements"],
+                    "protectedTools":self.protected_tools})
             }
             Action::Acquire => v.clone(),
         })
@@ -945,6 +973,30 @@ mod tests {
             &"e".repeat(32),
             &prepare(&context_value()).unwrap(),
         )
+    }
+    #[test]
+    fn child_cannot_supply_native_protected_tool_finding() {
+        let Frame::Terminal(mut terminal) = decode_terminal(terminal_value()).unwrap() else { panic!() };
+        assert_eq!(terminal.protected_tools(), None);
+        assert_eq!(terminal.public_result().unwrap()["protectedTools"], Value::Null);
+        for finding in ["reuse-selected", "none-in-supported-catalogue", "manual-check-required"] {
+            for outer in [true, false] {
+                let mut value = terminal_value();
+                if outer { value["protectedTools"] = json!(finding); }
+                else { value["result"]["protectedTools"] = json!(finding); }
+                assert!(decode_terminal(value).is_err());
+            }
+        }
+        // Setter/serialization DATA, not an original native join fixture.
+        terminal.observe_protected_tools(ProtectedTools::ReuseSelected);
+        assert_eq!(terminal.public_result().unwrap()["protectedTools"], "reuse-selected");
+        terminal.observe_protected_tools(ProtectedTools::NoneInSupportedCatalogue);
+        assert_eq!(terminal.protected_tools(), Some(ProtectedTools::ReuseSelected));
+        assert!(terminal.public_result().unwrap().get("footprint").is_none());
+        let Frame::Terminal(mut refused) = decode_terminal(terminal_value()).unwrap() else { panic!() };
+        refused.outcome = Outcome::Refused;
+        refused.observe_protected_tools(ProtectedTools::ReuseSelected);
+        assert_eq!(refused.protected_tools(), None);
     }
     #[test]
     fn closed_ipc_requires_current_review_and_explicit_exact_consent() {

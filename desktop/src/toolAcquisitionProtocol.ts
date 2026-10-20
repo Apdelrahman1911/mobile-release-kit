@@ -19,8 +19,12 @@ export interface ToolAcquisitionContext {
 }
 export type ToolAcquisitionStart = ToolAcquisitionIdentity & { consentVersion: typeof TOOL_ACQUISITION_CONSENT };
 export type ToolRequirementHint = { state: 'literal'; value: string } | { state: 'unspecified' | 'unknown'; value: null };
+export type ProtectedToolsFinding = 'reuse-selected' | 'none-in-supported-catalogue' | 'manual-check-required';
 export interface ToolRequirementsObservation {
   kind: 'tool-requirements-observation';
+  // Only native post-join publication adds this comparison. It is not a tool
+  // lease or build-readiness claim; null never permits a download review.
+  protectedTools: ProtectedToolsFinding | null;
   requirements: {
     schemaVersion: 1; basis: 'unverified-static-source-hints'; sourcesSha256: string;
     complete: true; platform: 'android'; projectCodeExecuted: false;
@@ -80,7 +84,8 @@ function hint(v: unknown, optional: boolean): boolean {
 }
 function requirements(v: unknown): v is ToolRequirementsObservation {
   // The native public result deliberately omits its private source footprint.
-  if (!keys(v, ['kind', 'requirements']) || v.kind !== 'tool-requirements-observation') return false;
+  if (!keys(v, ['kind', 'requirements', 'protectedTools']) || v.kind !== 'tool-requirements-observation' ||
+      v.protectedTools !== null && !oneOf(v.protectedTools, ['reuse-selected', 'none-in-supported-catalogue', 'manual-check-required'])) return false;
   const r = v.requirements;
   if (!keys(r, ['schemaVersion', 'basis', 'sourcesSha256', 'complete', 'platform', 'projectCodeExecuted', 'xcode', 'android']) ||
       r.schemaVersion !== 1 || r.basis !== 'unverified-static-source-hints' || !sha(r.sourcesSha256) || r.complete !== true ||

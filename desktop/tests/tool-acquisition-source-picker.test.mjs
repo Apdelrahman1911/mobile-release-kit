@@ -150,7 +150,7 @@ async function controllers(t) {
         context: clone(input), phase: 'awaiting-consent', intentUsable: true, reason: 'none', outcome: null, result: null } }; return clone(native);
     }, start: async () => {
       const op = native.operation;
-      const requirements = { kind: 'tool-requirements-observation', requirements: { schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA,
+      const requirements = { kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', requirements: { schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA,
         complete: true, platform: 'android', projectCodeExecuted: false, xcode: { version: '26.3', build: '17C529' }, android: {
           jdk: { state: 'literal', value: '17' }, agp: { state: 'literal', value: '8.9.2' }, sdkPlatform: { state: 'literal', value: 'android-35' },
           sdkBuildTools: { state: 'unspecified', value: null }, gradle: { state: 'literal', version: '8.14.5',

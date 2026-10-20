@@ -201,6 +201,11 @@ pub(super) fn inspect(
         return Err(wire::invalid());
     };
     let intent = owner.tools.intent.as_ref().ok_or_else(wire::invalid)?;
+    // The current selected protected tuple is read-only reuse. Do not even
+    // arm a CA loan or touch a cache namespace for that inspection's selection.
+    if !intent.known.catalog.permits_action(context.action) {
+        return Err(wire::invalid());
+    }
     let mut original = original
         .try_lock()
         .map_err(|_| BridgeError::cleanup_unknown())?;

@@ -22,7 +22,7 @@ const status = (revision = 1, operation = null, availability = operation && oper
   ({ schemaVersion: 1, statusRevision: revision, availability, operation });
 const operation = (context, acquire = false) => ({ operationId: acquire ? ACQUIRE : OP, ownerGeneration: acquire ? ACQUIRE_OWNER : OWNER,
   context: clone(context), phase: 'awaiting-consent', intentUsable: true, outcome: null, reason: 'none', result: null });
-const requirements = () => ({ kind: 'tool-requirements-observation', requirements: {
+const requirements = () => ({ kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', requirements: {
   schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA, complete: true, platform: 'android', projectCodeExecuted: false,
   xcode: { version: '26.3', build: '17C529' }, android: { jdk: { state: 'literal', value: '17' }, agp: { state: 'literal', value: '8.9.2' },
     sdkPlatform: { state: 'literal', value: 'android-35' }, sdkBuildTools: { state: 'unspecified', value: null },
@@ -64,16 +64,18 @@ function harness(t, initial = status()) {
     known() { known = [{}, {}, {}]; controller.syncProject(); },
   };
 }
-async function inspected(h) {
+async function inspected(h, protectedTools = 'none-in-supported-catalogue') {
   await h.ready;
   const flow = h.controller.inspect(), prepare = h.calls.at(-1);
   assert.equal(prepare.kind, 'prepare'); assert.equal(prepare.request.action, 'inspect');
   const op = operation(prepare.request);
   h.reply(prepare, status(2, op)); await flush();
   const start = h.calls.at(-1); assert.equal(start.kind, 'start');
-  h.reply(start, status(3, terminal(op))); await flow;
+  const done = terminal(op); done.result.protectedTools = protectedTools;
+  h.reply(start, status(3, done)); await flow;
   assert.equal(h.state.inspection?.kind, 'tool-requirements-observation');
-  assert.equal(h.state.reviewReason, null); return op;
+  assert.equal(h.state.inspection.protectedTools, protectedTools);
+  assert.equal(h.state.reviewReason === null, protectedTools === 'none-in-supported-catalogue'); return op;
 }
 async function reviewed(h) {
   await inspected(h);
@@ -96,6 +98,59 @@ test('mount/status refresh perform no preparation; unqualified route keeps origi
   assert.equal(h.calls.length, 0); assert.match(h.state.checkReason, /not enabled/);
   assert.equal(h.state.canRead, true); assert.equal(h.controller.ownerReason(), null);
   assert.equal(h.state.inspection, null); assert.notEqual(h.state.presentation, 'current-staged');
+});
+
+test('current selected protected tuple needs only inspection, never prepares or starts a download', async (t) => {
+  const h = harness(t); await inspected(h, 'reuse-selected');
+  assert.match(h.state.reviewReason, /No download or replacement/);
+  assert.equal(h.state.consent, null);
+  await h.controller.reviewDownload();
+  h.controller.setAcknowledged(ACQUIRE, ACQUIRE_OWNER, true);
+  await h.controller.download(ACQUIRE, ACQUIRE_OWNER); await h.controller.checkStatus();
+  assert.deepEqual(h.calls.map((c) => [c.kind, c.request.action]), [['prepare', 'inspect'], ['start', undefined]]);
+  assert.equal(h.state.inspection.protectedTools, 'reuse-selected');
+  assert.equal(h.state.consent, null); assert.equal(h.controller.ownerReason(), null);
+});
+
+test('missing native catalogue finding and manual fallback never authorize guessed replacement', async (t) => {
+  for (const finding of [null, 'manual-check-required']) {
+    const h = harness(t); await inspected(h, finding);
+    assert.match(h.state.reviewReason, /Recover or Choose/);
+    await h.controller.reviewDownload(); await h.controller.download(ACQUIRE, ACQUIRE_OWNER);
+    assert.equal(h.calls.length, 2); assert.equal(h.state.consent, null);
+  }
+});
+
+test('reuse finding waits for original invocation and a new terminal status read', async (t) => {
+  const h = harness(t); await h.ready;
+  const flow = h.controller.inspect(), prepare = h.calls.at(-1), op = operation(prepare.request);
+  h.reply(prepare, status(2, op)); await flush();
+  const start = h.calls.at(-1), done = terminal(op); done.result.protectedTools = 'reuse-selected';
+  h.emit(status(4, done)); await flush();
+  assert.equal(h.state.inspection, null); assert.equal(h.state.requestPending, true);
+  const read = deferred(); h.readQueue.push(read);
+  start.resolve(status(3, running(op))); await flush();
+  assert.equal(h.state.inspection, null); assert.equal(h.state.reading, true);
+  await h.controller.reviewDownload(); assert.equal(h.calls.length, 2);
+  read.resolve(status(4, done)); await flow;
+  assert.equal(h.state.inspection.protectedTools, 'reuse-selected');
+  assert.equal(h.state.consent, null);
+});
+
+test('reuse observation is retired by saved-lane, known-tool, project or protocol loss', async (t) => {
+  for (const change of ['snapshot', 'tools', 'project', 'protocol']) {
+    const h = harness(t); await inspected(h, 'reuse-selected');
+    if (change === 'snapshot') h.replace({ snapshot: clone(h.project.snapshot), observationGeneration: h.project.observationGeneration + 1 });
+    else if (change === 'tools') h.known();
+    else if (change === 'project') h.dispatch({ type: 'select', project: { id: 'project-2', name: 'Other', path: '/never-opened-two' } });
+    else h.emit({ notAStatus: true });
+    assert.equal(h.state.inspection, null);
+    await h.controller.reviewDownload(); assert.equal(h.calls.length, 2);
+    if (change === 'protocol') {
+      assert.equal(h.state.issue, 'protocol'); assert.equal(h.state.canRead, true);
+      assert.notEqual(h.controller.ownerReason(), null);
+    }
+  }
 });
 
 test('explicit inspect alone chains prepare/start; acquisition always needs distinct unchecked one-use consent', async (t) => {

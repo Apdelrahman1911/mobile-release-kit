@@ -13,7 +13,7 @@ const context = () => ({ projectId: 'inert-project', draftRevision: 1, baselineG
 const operation = () => ({ operationId: OP, ownerGeneration: OWNER, context: context(), phase: 'awaiting-consent',
   intentUsable: true, outcome: null, reason: 'none', result: null });
 const status = (op = null) => ({ schemaVersion: 1, statusRevision: 4, availability: op ? 'busy' : 'available', operation: op });
-const requirements = () => ({ kind: 'tool-requirements-observation', requirements: {
+const requirements = () => ({ kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', requirements: {
   schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA, complete: true, platform: 'android', projectCodeExecuted: false,
   xcode: { version: '26.3', build: '17C529' }, android: { jdk: { state: 'literal', value: '17' }, agp: { state: 'literal', value: '8.9.2' },
     sdkPlatform: { state: 'literal', value: 'android-35' }, sdkBuildTools: { state: 'unspecified', value: null },
@@ -96,6 +96,22 @@ test('phase/outcome/result contradictions, dangerous objects and bounded status 
   assert.equal(parseToolAcquisitionStatus({ ...status(), padding: 'x'.repeat(65537) }), null);
   const cycle = status(); cycle.operation = cycle; assert.equal(parseToolAcquisitionStatus(cycle), null);
   assert.equal(parseToolAcquisitionStatus({ ...status(), toJSON() { got++; return {}; } }), null); assert.equal(got, 0);
+});
+
+test('public protected-tool comparison is closed and cannot be used as request authority', () => {
+  for (const finding of [null, 'reuse-selected', 'none-in-supported-catalogue', 'manual-check-required']) {
+    const op = complete(); op.result.protectedTools = finding;
+    assert.equal(parseToolAcquisitionStatus(status(op)).operation.result.protectedTools, finding);
+    assert.equal(encodeToolAcquisitionRequest('prepare_tool_acquisition', { ...context(), protectedTools: finding }), null);
+  }
+  for (const finding of [true, {}, ['jdk'], 'ready', 'installed', 'partial-reuse']) {
+    const op = complete(); op.result.protectedTools = finding;
+    assert.equal(parseToolAcquisitionStatus(status(op)), null);
+  }
+  const missing = complete(); delete missing.result.protectedTools;
+  assert.equal(parseToolAcquisitionStatus(status(missing)), null);
+  const extra = complete(); extra.result.readyToBuild = true;
+  assert.equal(parseToolAcquisitionStatus(status(extra)), null);
 });
 
 test('native staged result requires all four sources, same operation and no installation assertions', () => {
