@@ -569,7 +569,7 @@ jobs:
               android_service_prepare::tests::fixed_layout_role_and_reserved_bytes_cannot_alias \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-native-contracts.log"
             grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-native-contracts.log"
-            # Fourteen Mac-only cache, acquisition and Git-source comparisons in
+            # Nineteen Mac-only cache, acquisition and Git-source comparisons in
             # the ordinary library, never in the shipping image. These methods
             # open no files, services or tools; native acquisition is separate.
             rustup run 1.98.1 cargo test --locked --no-default-features \
@@ -588,8 +588,13 @@ jobs:
               installed_runtime::android_registration_source::acquisition::discovery::tests::fixed_lookup_paths_require_native_account_home_and_keep_unentered_account_settled \
               asset_source::macos::git_local_sources::branch_tests::new_branch_source_head_stays_original_and_only_destination_must_be_absent \
               asset_source::macos::git_local_sources::branch_tests::old_commit_ref_edge_retains_its_own_branch_and_stage_cannot_select_a_ref \
+              asset_source::macos::git_local_sources::switch_sources::tests::switch_positive_metadata_prefix_is_exact_and_does_not_accept_generic_index_or_ref_receipts \
+              asset_source::macos::git_local_sources::switch_sources::tests::ambiguous_target_lock_acquisition_retains_all_original_routes_without_fake_cleanup_or_retry \
+              asset_source::macos::git_local_sources::switch_sources::tests::one_attempt_slot_retirement_keeps_unknown_and_never_invents_missing_owned_descriptor_success \
+              asset_source::macos::git_local_sources::switch_sources::tests::switch_extra_roster_is_charged_without_discount_for_aliases_review_or_future_close \
+              asset_source::macos::git_local_sources::switch_sources::tests::uncertain_return_promotes_prior_known_refusal_so_original_lock_cleanup_cannot_run \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
-            grep -Eq '^test result: ok\. 14 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            grep -Eq '^test result: ok\. 19 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
             # Real synthetic-record backup backend, not picker/Keychain/signing
             # or Desktop lifecycle qualification. The injected lost-close receipt
             # is retained until this exact, synchronous test process has exited.

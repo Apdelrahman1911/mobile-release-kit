@@ -72,10 +72,10 @@ jobs:
     # Explicit current-runtime identity4 alone selects the nonshipping observer.
     # Conservative selected step maxima (minutes), NOT an expected duration:
     # setup13 + compiler/argv9 + signed suppliers/current-runtime39 +
-    # helper/vault/app/assembly78 + REQUIRED notary/package/install98 +
-    # identity4 15 =252; the independent264 cap leaves12 for job overhead.
+    # helper/vault/app/assembly102 + REQUIRED notary/package/install98 +
+    # identity4 15 =276; the independent288 cap leaves12 for job overhead.
     # No per-case renewal, legacy suite, ordinary prepared export or final image.
-    timeout-minutes: ${{ matrix.native_scope == 'project-identity-native' && 264 || github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
+    timeout-minutes: ${{ matrix.native_scope == 'project-identity-native' && 288 || github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -1261,7 +1261,7 @@ jobs:
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: ${{ matrix.native_scope == 'project-identity-native' && 'Build the current nonshipping observer and embedded frontend' || 'Build the ordinary selected-target desktop image and embedded frontend' }}
         id: app_build
-        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
+        timeout-minutes: ${{ matrix.native_scope == 'project-identity-native' && 48 || matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
         shell: bash
         env:
           MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
