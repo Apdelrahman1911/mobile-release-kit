@@ -62,7 +62,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
       {(selectedAction==='review-inputs'||selectedAction==='abandon-inputs'||selectedAction==='review-prepared') && <p>Input platform: {op?.context.platform==='ios'?'iOS':'Android'}. No cross-platform conversion or Store action.</p>}
       {originalId && <p>Operation: <code>{originalId}</code></p>}
       <label><input type="checkbox" checked={state.acknowledged} onChange={event => controller.acknowledge(event.target.checked)} /> I authorize this specific local action.</label>
-      <button disabled={!state.acknowledged || state.pending} onClick={() => void controller.start()}>{labels[selectedAction]}</button>
+      <button disabled={!state.acknowledged || state.pending || state.callersPending} onClick={() => void controller.start()}>{labels[selectedAction]}</button>
     </div>}
     {retained && <div role="status"><p>{op?.phase === 'running' ? 'Checking local history and Keychain. Keep the application open until the original operation finishes.' : retained}</p><button onClick={() => void controller.cancel()}>Cancel original operation</button></div>}
     <button disabled={state.mode !== 'native'} onClick={() => void controller.checkStatus()}>Refresh history status</button>

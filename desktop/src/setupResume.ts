@@ -32,6 +32,7 @@ export interface SetupResume {
   build: Step | null;
   signing: Step | null;
   reviewBuild: boolean;
+  completedBuild: 'local' | 'candidate' | null; // Same current-result branch; presentation only.
   activities: SetupActivity[];
   facts: string[];
 }
@@ -148,7 +149,7 @@ function buildStatusCurrent(state: AndroidBuildState | IOSArchiveState, session:
 
 export function setupResume(session: ProjectSession | null, preview: boolean, readReason: string | null,
   source: SetupResumeSource): SetupResume {
-  const result: SetupResume = { configuration: null, tools: null, build: null, signing: null, reviewBuild: false,
+  const result: SetupResume = { configuration: null, tools: null, build: null, signing: null, reviewBuild: false, completedBuild: null,
     activities: originalActivities(source), facts: [] };
   // The existing app guard covers the other original owners. Do not invent a
   // project, phase or recovery action when their compact controls are the only
@@ -197,6 +198,7 @@ export function setupResume(session: ProjectSession | null, preview: boolean, re
       op.context.projectId === session.project.id && op.context.draftRevision === session.revision &&
       op.context.baselineGeneration === session.baselineGeneration && sameSavedConfig(op.context.savedConfig, session.savedConfigContent)) {
     const candidate = op.result.scope === 'local-android-candidate-inputs' || op.result.scope === 'local-ios-candidate-inputs';
+    result.completedBuild = candidate ? 'candidate' : 'local';
     result.build = step(candidate ? 'Review your local candidate' : 'Review the local build result', candidate ?
       'This original build kept local candidate inputs. Review the result and Local release history before a later release. Nothing was submitted to a Store.' :
       'This original local build returned a result. Review its checks and limitations; the files have not been re-inspected and no Store release was approved.',

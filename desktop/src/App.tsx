@@ -6,6 +6,9 @@ import { LocalStorePrepareController, localStorePrepareOwnerReason } from './loc
 import { LocalStorePrepare } from './components/LocalStorePrepare.tsx';
 import { LocalReleaseHistoryController, localHistoryOwnerReason } from './localReleaseHistory.ts';
 import { LocalReleaseHistory } from './components/LocalReleaseHistory.tsx';
+import { ReleaseRehearsal } from './components/ReleaseRehearsal.tsx';
+import { selectRehearsalCandidate } from './releaseRehearsal.ts';
+import type { RehearsalAction, RehearsalContext, RehearsalTarget } from './releaseRehearsal.ts';
 import { LocalStorePreflightController, localStoreOwnerReason, localStoreProjectObservation } from './localStorePreflight.ts';
 import { LocalStorePreflight } from './components/LocalStorePreflight.tsx';
 import { AppleProvisioningController } from './appleProvisioningController.ts';
@@ -1816,6 +1819,47 @@ export function App() {
       reason: bootstrapPending.current ? 'Wait for the current application capabilities.' :
         projectPathOwnerReason(pathPickerRef.current) ?? savedCommandBusy() ?? savedCommandPrerequisiteReason(false, false, undefined, false, true) };
   };
+  // Same live owners as Home; this view only reveals existing controls or
+  // selects an exact returned history row. It cannot start a check or build.
+  const rehearsalContext = (): RehearsalContext => {
+    const current = workspaceRef.current, service = pathService.current;
+    const selected = current.selectedId ? current.projects[current.selectedId] ?? null : null;
+    return { session: selected, nativeSession: service.api?.mode === 'native' ? service : null,
+      epoch: identityEpoch.current, preview: service.api?.mode === 'preview',
+      readReason: (bootstrapPending.current ? 'Wait for the current application capabilities.' : savedCommandBusy() ??
+        methodReason(service.info, 'project.snapshot', service.api?.mode ?? 'unavailable')) ??
+        configurationOwnerReason(configEdit.getSnapshot(), selected?.project.id ?? '') ??
+        workflowOwnerReason(workflowEdit.getSnapshot(), selected?.project.id ?? '') ??
+        metadataOwnerReason(metadataText.getSnapshot(), selected?.project.id ?? '') ??
+        (passivePending.current > 0 ? 'An original project read is still pending.' : null),
+      resume: { platform: environment.getSnapshot().platform, android: androidBuild.getSnapshot(), ios: iosArchive.getSnapshot(),
+        toolPreparation: toolAcquisition.getSnapshot(), diagnostics: diagnostics.getSnapshot(), credentials: assetSession.getSnapshot(),
+        localChecks: offlinePreflight.getSnapshot(), androidSubmissionPending: androidBuild.hasPendingGuiSubmission(),
+        iosSubmissionPending: iosArchive.hasPendingGuiSubmission(), localChecksSubmissionPending: offlinePreflight.hasPendingGuiSubmission(),
+        otherOwnerReason: savedCommandBusy() },
+      version: releaseVersion.getSnapshot(), history: localHistory.getSnapshot(), historyController: localHistory,
+      historyReason: localHistory.prepareReason(), store: localStore.getSnapshot(), storeReason: localStore.prepareReason() };
+  };
+  const showRehearsalTarget = (target: RehearsalTarget) => {
+    if (target === 'original-controls') { main.current?.focus({ preventScroll: true }); main.current?.scrollTo({ top: 0 }); return; }
+    const ids = { 'local-checks': 'release-local-checks', 'android-build': 'release-android-build',
+      'ios-build': 'release-ios-build', history: 'release-local-history', 'store-access': 'release-store-access' } as const;
+    const section = document.getElementById(ids[target]);
+    section?.focus({ preventScroll: true }); section?.scrollIntoView({ block: 'start' });
+  };
+  const rehearsalAction = (action: RehearsalAction) => {
+    if (action.kind === 'select-candidate') { selectRehearsalCandidate(action, rehearsalContext, showRehearsalTarget); return; }
+    if (action.kind === 'show') { showRehearsalTarget(action.target); return; }
+    const next = action.action;
+    if (next.kind === 'navigate') { navigate(next.page); return; }
+    if (next.kind === 'open-build-tools') {
+      environment.setContext(next.platform, 'build'); diagnostics.setContext(next.platform, 'build'); navigate('environment'); return;
+    }
+    if (next.kind === 'show-original-controls') { showRehearsalTarget('original-controls'); return; }
+    // Refresh/Choose/Read remain separate explicit Home actions, never effects
+    // of this walkthrough's navigation.
+    navigate('dashboard');
+  };
   const editor = (metadataOnly = false) => <DraftEditor
     key={`${session?.project.id ?? 'none'}-${metadataOnly ? 'metadata' : 'settings'}`}
     catalog={catalog} session={session} metadataOnly={metadataOnly} preview={preview}
@@ -2179,29 +2223,30 @@ export function App() {
               content: <VersionEnrollmentPanel controller={versionEnrollment} /> },
           ]} />}
         {page === 'releases' && <Releases onOpenGitHub={() => navigate('github')}
+          rehearsal={<ReleaseRehearsal context={rehearsalContext()} onAction={rehearsalAction} />}
           storeNeedsAttention={!!(localHistoryBusy() ?? storeBusy()) || [localHistoryState, localStoreState, localStorePrepareState, localStoreExecuteState, localStoreReconcileState].some((state) => state.error !== null || state.status?.operation?.phase === 'terminal' && state.status.operation.outcome !== 'complete')}
           workflowNeedsAttention={githubReleaseOwnerReason(githubReleaseState) !== null || githubReleaseState.error !== null || githubRelease.currentPrepared() !== null}
           storeOperations={<>
-            <LocalReleaseHistory state={localHistoryState} controller={localHistory} onShow={()=>navigate('releases')}/>
-            <LocalStorePreflight state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+            <section id="release-local-history" tabIndex={-1} aria-label="Original local release history controls"><LocalReleaseHistory state={localHistoryState} controller={localHistory} onShow={()=>navigate('releases')}/></section>
+            <section id="release-store-access" tabIndex={-1} aria-label="Original Store access check controls"><LocalStorePreflight state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
             <LocalStorePrepare state={localStorePrepareState} controller={localStorePrepare} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
             <LocalStoreExecute state={localStoreExecuteState} controller={localStoreExecute} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
             <LocalStoreReconcile state={localStoreReconcileState} controller={localStoreReconcile} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
           </>}
-          protectedWorkflows={<GitHubRelease state={githubReleaseState} controller={githubRelease} onHelp={setHelp} onGitHub={() => navigate('github')} />} evidence={<ReleaseEvidence state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />} offlineChecks={<div ref={offlineCheckSection} tabIndex={-1} aria-label="Saved offline checks review"><OfflinePreflight state={offlinePreflightState} controller={offlinePreflight}
+          protectedWorkflows={<GitHubRelease state={githubReleaseState} controller={githubRelease} onHelp={setHelp} onGitHub={() => navigate('github')} />} evidence={<ReleaseEvidence state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />} offlineChecks={<div id="release-local-checks" ref={offlineCheckSection} tabIndex={-1} aria-label="Saved offline checks review"><OfflinePreflight state={offlinePreflightState} controller={offlinePreflight}
           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}
           onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason} /></div>}
-          androidBuild={<div ref={androidSigningSection} tabIndex={-1} aria-label="Android build and signing review"><AndroidBuild state={androidBuildState} controller={androidBuild}
+          androidBuild={<div id="release-android-build" ref={androidSigningSection} tabIndex={-1} aria-label="Android build and signing review"><AndroidBuild state={androidBuildState} controller={androidBuild}
             projectName={session?.project.name ?? null} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
             onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />
             <AgentAndroidBuildAccess controller={agentAndroidBuild} /></div>}
-          iosArchive={<><IOSArchive state={iosArchiveState} controller={iosArchive}
+          iosArchive={<section id="release-ios-build" tabIndex={-1} aria-label="Original iOS archive controls"><IOSArchive state={iosArchiveState} controller={iosArchive}
             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
-            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /><AgentIOSArchiveAccess controller={agentIOSArchive} /></>} />}
+            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /><AgentIOSArchiveAccess controller={agentIOSArchive} /></section>} />}
         {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} inspectionState={artifactInspectionState} inspectionController={artifactInspection} projectName={session?.project.name ?? null} onHelp={setHelp} />
           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} />
           <IOSArchiveResultView state={iosArchiveState} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} /></>}
