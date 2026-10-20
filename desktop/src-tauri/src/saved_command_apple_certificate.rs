@@ -155,7 +155,7 @@ fn originals(owner: &Arc<Session>) -> Result<(Arc<AppleKeySession>, Arc<Original
     Ok((parent, asset, loan, request))
 }
 
-pub(super) fn key_ack(owner: &Arc<Session>, sequence: u32, input: wire::CertificateKeyInput) -> Result<Vec<u8>, BridgeError> {
+pub(in crate::saved_command_owner) fn key_ack(owner: &Arc<Session>, sequence: u32, input: wire::CertificateKeyInput) -> Result<Vec<u8>, BridgeError> {
     let (parent, asset, loan, binding) = originals(owner)?;
     if sequence != 1 || !loan.matches_public_material(&asset, input.csr.as_bytes(), &input.spki) {
         return Err(invalid());
@@ -176,7 +176,7 @@ pub(super) fn key_ack(owner: &Arc<Session>, sequence: u32, input: wire::Certific
     Ok(bytes)
 }
 
-pub(super) fn identities_ack(owner: &Arc<Session>, sequence: u32, input: wire::CertificateIdentityInput) -> Result<Vec<u8>, BridgeError> {
+pub(in crate::saved_command_owner) fn identities_ack(owner: &Arc<Session>, sequence: u32, input: wire::CertificateIdentityInput) -> Result<Vec<u8>, BridgeError> {
     let (parent, asset, loan, binding) = originals(owner)?;
     let (spki_sha256, csr, spki) = {
         let facts = state(&parent)?.facts.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
@@ -224,7 +224,7 @@ pub(super) fn identities_ack(owner: &Arc<Session>, sequence: u32, input: wire::C
     Ok(bytes)
 }
 
-pub(super) fn policy_ack(owner: &Arc<Session>, sequence: u32, input: wire::CertificatePolicyInput, digest: String) -> Result<Vec<u8>, BridgeError> {
+pub(in crate::saved_command_owner) fn policy_ack(owner: &Arc<Session>, sequence: u32, input: wire::CertificatePolicyInput, digest: String) -> Result<Vec<u8>, BridgeError> {
     let (parent, asset, loan, binding) = originals(owner)?;
     let mut facts = state(&parent)?.facts.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
     let key = facts.key.as_ref().ok_or_else(invalid)?;
@@ -246,7 +246,7 @@ pub(super) fn policy_ack(owner: &Arc<Session>, sequence: u32, input: wire::Certi
     Ok(bytes)
 }
 
-pub(super) fn current_pending(owner: &Arc<Session>, intent: &CertificateIssuanceIntent) -> Result<(), BridgeError> {
+pub(in crate::saved_command_owner) fn current_pending(owner: &Arc<Session>, intent: &CertificateIssuanceIntent) -> Result<(), BridgeError> {
     let (parent, asset, loan, binding) = originals(owner)?;
     let facts = state(&parent)?.facts.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
     let key = facts.key.as_ref().ok_or_else(invalid)?;
@@ -258,7 +258,7 @@ pub(super) fn current_pending(owner: &Arc<Session>, intent: &CertificateIssuance
         || !loan.matches_public_material(&asset, key.csr.as_bytes(), &key.spki) { return Err(invalid()); }
     Ok(())
 }
-pub(super) fn pending_ack(owner: &Arc<Session>, ack: &CertificateJournalAck) -> Result<(), BridgeError> {
+pub(in crate::saved_command_owner) fn pending_ack(owner: &Arc<Session>, ack: &CertificateJournalAck) -> Result<(), BridgeError> {
     current_pending(owner, ack.original.intent())?;
     if ack.row.update.sequence != 1 || ack.row.native_settlement != NativeSettlement::Pending
         || ack.row.update.receipt.is_some() { return Err(invalid()); }
@@ -272,7 +272,7 @@ pub(super) fn pending_ack(owner: &Arc<Session>, ack: &CertificateJournalAck) -> 
 /// Invoked only from the existing native finish path AFTER the actual original
 /// worker/IO/runtime/driver joins and BEFORE Asset loan release. No DTO or ACK
 /// calls it. A nonpositive/cancelled outcome simply has no association.
-pub(super) fn producer_joined(owner: &Arc<Session>, result: Option<&wire::CertificateResult>) -> Result<(), BridgeError> {
+pub(in crate::saved_command_owner) fn producer_joined(owner: &Arc<Session>, result: Option<&wire::CertificateResult>) -> Result<(), BridgeError> {
     let parent = original(owner)?;
     if !parent.worker_joined.load(Ordering::SeqCst) { return Err(BridgeError::cleanup_unknown()); }
     let Some(result) = result.filter(|value| value.positive_identity()) else { return Ok(()); };
@@ -289,7 +289,7 @@ pub(super) fn producer_joined(owner: &Arc<Session>, result: Option<&wire::Certif
     }).map_err(|_| invalid())
 }
 
-pub(super) fn native_joined(owner: &Arc<Session>, native_use: Arc<NativeUse>, reservation: Arc<CertificateOriginalReservation>) -> Result<AppleCertificateNativeJoined, BridgeError> {
+pub(in crate::saved_command_owner) fn native_joined(owner: &Arc<Session>, native_use: Arc<NativeUse>, reservation: Arc<CertificateOriginalReservation>) -> Result<AppleCertificateNativeJoined, BridgeError> {
     let parent = original(owner)?;
     if !parent.mode.certificate() || !parent.worker_joined.load(Ordering::SeqCst)
         || owner.resource_unknown.load(Ordering::SeqCst) || parent.phase() != Some(SavePhase::ReturnedRefused)
