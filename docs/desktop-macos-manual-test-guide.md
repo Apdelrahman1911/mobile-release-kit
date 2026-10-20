@@ -104,8 +104,9 @@ unknown or unfinished result; do not repeatedly start the same operation.
   setup and required platform installation. The separately supplied, matching
   **Prepare Xcode.pkg** prepares a protected copy; it is not part of this app ZIP
   and does not download Xcode or accept Apple's licenses. Its signing/notarization
-  and first/repeat installation were tested on both architectures; that is not a
-  complete iOS-build or signed-export result. See [iOS archive guidance](desktop-ios-archive.md).
+  and first/repeat installation were tested on macOS 26 on both architectures;
+  actual macOS 27 use and complete iOS-build/signed-export verification remain
+  pending. See [iOS archive guidance](desktop-ios-archive.md).
 - **Mobile signing is separate from Mac app signing.** Developer ID Application,
   Developer ID Installer and notarization credentials do not sign an iOS app for
   distribution. Local signed IPA export needs an Apple Distribution certificate
@@ -116,17 +117,17 @@ unknown or unfinished result; do not repeatedly start the same operation.
 
 ### Download the matching Xcode setup package
 
-These earlier signed/notarized companions are **macOS 26-only**. Do not use them
-on macOS 27: their Installer and native setup have the old version restriction.
-A corrected companion for macOS 27 has not yet been delivered. The application's
-OS correction does not modify a previously downloaded setup package.
+The **Apple Silicon** companion below uses corrected source `bf9d397b`: minimum
+macOS 26, without the old macOS 27 upper restriction. The **Intel** companion is
+still **macOS 26-only**; do not use it on macOS 27. Updating the application does
+not change an older downloaded setup package.
 
 | Mac | Download | Current expiration (UTC) |
 | --- | --- | --- |
-| Apple Silicon | [Prepare Xcode.pkg artifact 12121286678](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39083122098/artifacts/12121286678) | November 1, 2026, 01:39 |
+| Apple Silicon (corrected `bf9d397b`) | [Prepare Xcode.pkg artifact 12211884317](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39301915324/artifacts/12211884317) | November 2, 2026 |
 | Intel | [Prepare Xcode.pkg artifact 12119409553](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/39082603257/artifacts/12119409553) | November 1, 2026, 00:40 |
 
-On the matching macOS 26 Mac, first install genuine Apple Xcode at
+On a matching Mac, first install genuine Apple Xcode at
 `/Applications/Xcode.app`, complete Apple's first-launch/license setup, and install
 the required iOS platform. Then extract the companion ZIP and open
 **Prepare Xcode.pkg** through macOS Installer, approving its administrator prompt.
@@ -139,8 +140,9 @@ Apple's licenses, alter your original Xcode, or change `xcode-select`. Reopen Mo
 Release Kit normally afterward. On failure, preserve the result and files; do not
 delete or change permissions in the protected tool directory.
 
-Both companions passed signing/notarization, first/repeat installation and managed
-tool admission. These results do **not** establish a complete iOS archive/export.
+Both listed companions passed signing/notarization, first/repeat installation and
+managed tool admission **on macOS 26**. Actual **macOS 27 Xcode setup/use remains
+unverified**; these results do not establish a complete iOS archive/export.
 
 ## Update, removal and interrupted installation
 

@@ -569,7 +569,7 @@ jobs:
               android_service_prepare::tests::fixed_layout_role_and_reserved_bytes_cannot_alias \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-native-contracts.log"
             grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-native-contracts.log"
-            # Twenty-three Mac-only cache, acquisition, Git-source and Apple
+            # Twenty-six Mac-only cache, acquisition, Git-source and Apple
             # credential/codec cases in the ordinary library, not the shipping
             # image. These open no files, services or tools; native operations
             # and persisted credential storage are verified separately.
@@ -594,12 +594,15 @@ jobs:
               asset_source::macos::git_local_sources::switch_sources::tests::one_attempt_slot_retirement_keeps_unknown_and_never_invents_missing_owned_descriptor_success \
               asset_source::macos::git_local_sources::switch_sources::tests::switch_extra_roster_is_charged_without_discount_for_aliases_review_or_future_close \
               asset_source::macos::git_local_sources::switch_sources::tests::uncertain_return_promotes_prior_known_refusal_so_original_lock_cleanup_cannot_run \
+              asset_source::macos::git_local_sources::rename_sources::tests::ambiguous_rename_lock_preserves_original_slots_without_fake_close_or_retry \
+              asset_source::macos::git_local_sources::rename_sources::tests::rename_roster_counts_full_ref_and_log_chains_without_future_close_credit \
+              asset_source::macos::git_local_sources::rename_sources::tests::failed_original_rename_rematch_is_sticky_and_cannot_release_ref_locks \
               asset_session::vault::provisioning_native::profile_store::tests::self_mutation_exception_keeps_original_loan_checks_and_excludes_other_owners \
               asset_session::vault::provisioning_native::profile_store::tests::known_storage_effect_alone_cannot_retire_unknown_original_or_rearm_save \
               asset_session::vault::provisioning_native::profile_store::tests::no_save_requires_unattempted_original_even_after_known_refusal \
               vault_crypto::apple_profile::tests::profile_cipher_uses_the_reserved_revision_and_full_authenticated_bytes \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
-            grep -Eq '^test result: ok\. 23 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            grep -Eq '^test result: ok\. 26 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
             # Real synthetic-record backup backend, not picker/Keychain/signing
             # or Desktop lifecycle qualification. The injected lost-close receipt
             # is retained until this exact, synchronous test process has exited.
