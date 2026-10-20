@@ -18,6 +18,10 @@ pub(crate) mod backup;
 #[path = "vault_crypto_apple_distribution_key.rs"]
 mod apple_distribution_key;
 pub(crate) use apple_distribution_key::{ReservedAppleDistributionKey, KEY_CRYPTO_BYTES as APPLE_KEY_CRYPTO_BYTES};
+#[path = "vault_crypto_apple_profile.rs"]
+mod apple_profile;
+pub(crate) use apple_profile::{ReservedAppleProfile, PROFILE_BYTES as APPLE_PROFILE_BYTES,
+    PROFILE_CRYPTO_BYTES as APPLE_PROFILE_CRYPTO_BYTES};
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 type WrappingKeyCandidate = secret_service::checked_lookup::WrappingKeyCandidate;
@@ -166,8 +170,8 @@ impl VaultKey {
         fields: &Fields, file: Option<&[u8]>, allowance: usize, random: &mut impl Entropy) -> Result<SealedRecord> {
         self.seal_record_with_revision(record, previous, descriptor, fields, file, allowance, random, None)
     }
-    // SAME parent-private seam used by the fixed Apple-profile reservation.
-    // Root composes that child's separate kind arm, never an arbitrary kind.
+    // Parent-private seam for the two fixed Apple NEW reservation kinds only.
+    // Ordinary callers retain the original entropy order and None selection.
     fn seal_record_with_revision(&self, record: Id, previous: Option<Revision>, descriptor: &Descriptor,
         fields: &Fields, file: Option<&[u8]>, allowance: usize, random: &mut impl Entropy,
         reserved: Option<Revision>) -> Result<SealedRecord> {
@@ -186,7 +190,7 @@ impl VaultKey {
         let descriptor_bytes = Zeroizing::new(descriptor.encode()?);
         let counter = previous.map_or(Some(1), |previous| previous.counter.checked_add(1)).ok_or(Error::Bounds)?;
         let revision = match reserved {
-            Some(value) if previous.is_none() && value.counter == 1 && descriptor.kind == commands::Kind::AppleDistributionKey => value,
+            Some(value) if previous.is_none() && value.counter == 1 && matches!(descriptor.kind, commands::Kind::AppleDistributionKey | commands::Kind::AppleProfile) => value,
             Some(_) => return Err(Error::Format),
             None => Revision::new(fresh_id(random)?, counter)?,
         };

@@ -69,7 +69,8 @@ pub(crate) use store::document_backing_bytes as store_document_backing_bytes;
 mod apple_provisioning;
 #[path = "saved_command_apple_signing.rs"]
 mod apple_signing;
-pub(crate) use apple_signing::AppleProfileNativeJoined;
+pub(crate) use apple_signing::{AppleProfileNativeJoined, AppleProfileSession, AppleProvisioningClock,
+    AppleProfilePendingAck, AppleProfileSavePermit, AppleProfileNoSaveJoined};
 pub(crate) use apple_provisioning::{AppleProvisioningNativeJoined, AppleProvisioningAllJobsJoined, APPLE_PROVISIONING_INPUT_LIMIT};
 pub(crate) use apple_provisioning::document_backing_bytes as apple_provisioning_document_backing_bytes;
 pub(crate) use apple_provisioning::retained_document_backing_bytes as apple_provisioning_retained_document_backing_bytes;
@@ -1122,7 +1123,7 @@ impl Terminal {
     } }
     fn settled(&self) -> bool { match self {
         Self::GenerateUploadKey(t) => t.settled(),
-        Self::AppleProvisioning(t) => t.lifetime.settled(),
+        Self::AppleProvisioning(t) => t.settled(),
         Self::ToolAcquisition(t) => t.lifetime.settled(),
         Self::LocalReleaseHistory(t) => t.lifetime.settled(), Self::LocalStoreExecute(t) => t.lifetime.settled(), Self::LocalStorePrepare(t) => t.lifetime.settled(), Self::LocalStoreReconcile(t) => t.lifetime.settled(), Self::LocalStorePreflight(t) => t.lifetime.settled(), Self::OfflinePreflight(t) => t.lifetime.settled(), Self::AndroidBuild(t) => t.settled(),
         Self::ProjectRecovery(t) => t.settled(), Self::IOSArchive(t) => t.settled(), Self::ArtifactInspection(t) => t.lifetime.settled(),
@@ -1450,6 +1451,7 @@ impl RunProjection {
 struct Session { agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>,
     upload_key: upload_key::State,
     apple: apple_provisioning::State,
+    apple_profile: apple_signing::State,
     tools: tool_acquisition::State,
     local_history_consent:Option<Arc<crate::asset_session::LocalHistoryConsent>>,
     history:local_history::State,
@@ -1499,6 +1501,7 @@ impl Session {
     }
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn observe_failure_at(&self, reason: Reason, at: Instant, unknown: bool) {
+        apple_signing::stopped(self, reason, at);
         // The caller already captured F. Preserve its finite reason without
         // acquiring Registry or replacing this original Session's min latch.
         upload_key::forward_failure(self,reason,at);
@@ -2534,7 +2537,7 @@ impl SavedCommandOwner {
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
         let android_close=android_control.as_ref().map(|control|AndroidCloseSlot::reserved(executor.clone(),control.clone()));
         let requires_private_material = context.requires_private_material();
-        let owner = Arc::new(Session { agent_build: prepared.agent_build, agent_local_check: prepared.agent_local_check, upload_key:upload_key::State::new(prepared.upload_key), apple:apple_provisioning::State::new(prepared.apple), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
+        let owner = Arc::new(Session { agent_build: prepared.agent_build, agent_local_check: prepared.agent_local_check, upload_key:upload_key::State::new(prepared.upload_key), apple: apple_provisioning::State::new(prepared.apple), apple_profile: apple_signing::State::default(), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
             registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff,
             material: Mutex::new(prepared.material), material_retired: AtomicBool::new(!requires_private_material),
             recovery: prepared.recovery, android_selection: prepared.android_selection.clone(), artifact_selection: prepared.artifact_selection, artifact_tools:prepared.artifact_tools, artifact_binding:Mutex::new(None), native_failure: Mutex::new(None),
@@ -2624,6 +2627,7 @@ impl SavedCommandOwner {
         let mut watchdog_slot = owner.watchdog.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
         let mut manager = owner.manager.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
         let mut observer = owner.observer.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        apple_signing::initialize(&owner)?;
         r.active = Some(Active { owner: owner.clone(), projection, first_stop: None, work_expired: false, context_invalidated: false,
             accepted: false, terminal: false, unknown: false, final_join_seen: false });
         *watchdog_slot = Some(executor.spawn(watchdog(self.inner.clone(), owner.clone(), Guard::new(&self.inner, &owner))));
@@ -3262,6 +3266,7 @@ impl Inner {
         }
     }
     fn stop_locked(&self, r: &mut Registry, owner: &Session, reason: Reason, at: Instant) {
+        apple_signing::stopped(owner, reason, at);
         let Some(active) = r.active.as_mut().filter(|a| a.owner.id == owner.id) else { return; };
         owner.note_android_local(at,reason==Reason::CleanupUnknown);
         upload_key::forward_failure(owner,reason,at);
@@ -3769,6 +3774,10 @@ async fn enqueue_frame(inner: &Inner, owner: &Session, frame: Frame) -> bool {
 }
 async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, owner: Arc<Session>,
     slot: Arc<AsyncMutex<Pipe<T>>>, stderr: bool, mut guard: Guard) -> ReadEnd {
+    if !stderr && matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.profile()) {
+        return apple_signing::read_output(inner, owner, slot, guard).await;
+    }
+
     // Secret binary data never enters the JSON decoder or a String/event.
     if !stderr&&owner.domain==SavedCommandDomain::GenerateUploadKey{return upload_key::read_private(inner,owner,slot,guard).await;}
     match pipe_state(&owner).await {
@@ -5304,7 +5313,12 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
     // token-retire syscall, which this SAME observer also joins before Ready.
     let settled=if owner.domain==SavedCommandDomain::AppleProvisioning {
         let native=apple_provisioning::finish_after_manager(&inner,&owner).await;
-        settled && native && inner.endpoint(&owner).is_some()
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+        let private = if owner.apple_profile.get().is_some() && native { apple_signing::finish_private(&owner).await }
+            else { owner.apple_profile.get().is_none() };
+        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        let private = owner.apple_profile.get().is_none();
+        settled && native && private && inner.endpoint(&owner).is_some()
     }else{settled};
     if !settled { inner.unknown(&owner); }
     // Final observer owns no unjoined child/IO/acquisition at this point. Its

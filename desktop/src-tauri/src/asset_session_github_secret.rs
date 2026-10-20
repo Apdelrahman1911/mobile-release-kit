@@ -30,8 +30,11 @@ pub(super) fn assigned<'a>(state:&'a DocumentState,key:&RecordKey,kind:Kind,nati
 }
 fn platform(value:Platform)->wire::SecretPlatform{match value{Platform::Android=>wire::SecretPlatform::Android,
     Platform::Ios=>wire::SecretPlatform::Ios,Platform::Project=>wire::SecretPlatform::Project}}
-fn purpose(value:Purpose)->wire::SecretPurpose{match value{Purpose::Full=>wire::SecretPurpose::Full,
-    Purpose::Signing=>wire::SecretPurpose::Signing,Purpose::Store=>wire::SecretPurpose::Store}}
+fn purpose(value:Purpose)->Result<wire::SecretPurpose,BridgeError>{match value{
+    Purpose::Full=>Ok(wire::SecretPurpose::Full), Purpose::Signing=>Ok(wire::SecretPurpose::Signing),
+    Purpose::Store=>Ok(wire::SecretPurpose::Store),
+    Purpose::Provisioning=>Err(refused(wire::Reason::MaterialChanged)),
+}}
 fn stage(value:Stage)->wire::EnvironmentStage{match value{Stage::Candidate=>wire::EnvironmentStage::Candidate,
     Stage::ExternalTesting=>wire::EnvironmentStage::ExternalTesting,Stage::Production=>wire::EnvironmentStage::Production}}
 fn encoded_size(length:usize,encoding:wire::SecretEncoding)->Option<usize>{match encoding{
@@ -109,7 +112,7 @@ pub(super) fn borrow_material(state:&DocumentState,selection:&wire::SecretSelect
     let identity=root.identity.posix().map_err(|_|refused(wire::Reason::TargetChanged))?.preflight_identity();
     let source=wire::SecretSource{root:path.to_owned(),root_identity:wire::SecretRootIdentity{device:identity.device,inode:identity.inode,
         mode:identity.mode,uid:identity.uid,gid:identity.gid},draft:wire::SecretContent{bytes:native.draft.len()as u32,
-        sha256:format!("{:x}",Sha256::digest(&native.draft))},platform:platform(native.platform),purpose:purpose(native.purpose),
+        sha256:format!("{:x}",Sha256::digest(&native.draft))},platform:platform(native.platform),purpose:purpose(native.purpose)?,
         material:wire::SecretMaterialFacts{encoding:selection.requirement.encoding(),plaintext_bytes:plaintext as u32}};
     let result=Arc::new(GitHubSecretMaterial{native,key,payload,selection:selection.clone(),source});
     if !result.current(state,project_id,registration,root){return Err(refused(wire::Reason::MaterialChanged))}

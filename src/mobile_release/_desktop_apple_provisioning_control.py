@@ -24,11 +24,12 @@ class AppleProvisioningInput(_SavedCommandInput):
         self.initial = self.operation = self.engine = None
         self.material_pending = self.material_receiving = self._material_read = False
         self._material = None
+        self._profile_material = self._profile_parts = None
         self.reply_step = self.read_remaining = 0
         self.reading = self.audit_writing = False
         self.raw_clock = self.raw_work_end = self.raw_hard_end = None
         self.hard_end = started + wire.FINALITY_SECONDS
-        self._revision = self._pending_ack = None
+        self._revision = self._pending_ack = self._profile_identity = None
         self._ack_attempted = self._ack_consumed = False
 
     def _bind_engine(self, engine):
@@ -38,7 +39,16 @@ class AppleProvisioningInput(_SavedCommandInput):
         self.engine = engine
 
     _request_material = StorePreflightInput._request_material
-    receive_material = StorePreflightInput.receive_material
+    def receive_material(self, operation, scratch):
+        from .apple_provisioning_signing import MODES
+        if operation.request.context["mode"] in MODES:
+            from ._desktop_apple_profile_private import receive_material
+            return receive_material(self, operation, scratch)
+        return StorePreflightInput.receive_material(self, operation, scratch)
+
+    def profile_material(self, operation):
+        from ._desktop_apple_profile_private import profile_material
+        return profile_material(self, operation)
 
     def request(self):
         request = super().request()
@@ -106,7 +116,7 @@ class AppleProvisioningInput(_SavedCommandInput):
     def audit_point(self):
         """Only the already-armed attempt may report under original F/W/H."""
         operation = self.require_operation()
-        self._require(self.initial.context["mode"] == "register" and self._pending_ack is not None
+        self._require(self.initial.context["mode"] in {"register", "profile-reuse", "profile-create"} and self._pending_ack is not None
                       and not operation._close_claimed and operation._request_bytes == operation._request_data()
                       and not self.custody_unknown and not self.guard.lifetime_ledger.fatal
                       and self.guard.handler_state != "UNKNOWN" and self.fd is not None and not self.close_claimed)
@@ -126,7 +136,8 @@ class AppleProvisioningInput(_SavedCommandInput):
             self._owner(); self._clock(terminal=True)
             self._require(time.monotonic() < self.hard_endpoint())
         elif self.audit_writing:
-            self._require(self.reading and 2 <= self.reply_step <= wire.MAX_EVENTS)
+            self._require(self.reading and (3 if self.initial.context["mode"] in wire.PROFILE_MODES else 2)
+                          <= self.reply_step <= wire.max_events(self.initial.context["mode"]))
             self.audit_point()
         else:
             self.guard.check(); self._clock()
@@ -165,6 +176,9 @@ class AppleProvisioningInput(_SavedCommandInput):
             self.read_remaining = 0
 
     def exchange(self, kind, payload):
+        if self.initial.context["mode"] in wire.PROFILE_MODES:
+            from ._desktop_apple_profile_control import exchange
+            return exchange(self, kind, payload)
         operation = self.require_operation()
         sequence = self.reply_step + 1
         wire.validate_event(self.initial, kind, payload, sequence)
@@ -201,6 +215,9 @@ class AppleProvisioningInput(_SavedCommandInput):
         return ack
 
     def consume_pending_ack(self, operation, request):
+        if self.initial.context["mode"] in wire.PROFILE_MODES:
+            from ._desktop_apple_profile_control import consume_pending
+            return consume_pending(self, operation, request)
         self._owner()
         self._require(not self._ack_attempted)
         self._ack_attempted = True  # Foreign or expired consumption is final.
@@ -221,5 +238,8 @@ class AppleProvisioningInput(_SavedCommandInput):
         self.buffer[:] = b"\0" * len(self.buffer)
         self.buffer.clear()
         self._material = None  # No process-wide secure-erasure claim.
+        self._profile_material = self._profile_parts = None
 
-    material_closed = StorePreflightInput.material_closed
+    def material_closed(self):
+        return (StorePreflightInput.material_closed(self)
+                and self._profile_material is None and self._profile_parts is None)

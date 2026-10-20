@@ -8,6 +8,38 @@ use crate::credential_setup::KeyReference;
 pub(crate) const PROFILE_PROTOCOL: &str = "mrk-apple-provisioning-journal/2";
 pub(crate) const PROFILE_BYTES: u32 = 1024 * 1024;
 
+/// Closed comparison helpers for the original profile phase decoder. They
+/// reuse this journal's canonical encoder/time parser; none creates an intent,
+/// loan, native clock, completeness claim or permission to save.
+pub(crate) fn profile_unix_micros(value: &str) -> Option<u64> {
+    utc_micros(value)?.checked_sub(62_135_596_800_000_000)
+}
+pub(crate) fn profile_entitlements_sha256(value: &Value) -> Result<String> {
+    need(value.is_object())?;
+    Ok(hex(&Sha256::digest(canonical(value, 16 * 1024)?)))
+}
+pub(crate) fn profile_identity_sha256(value: &Value) -> Result<String> {
+    // The phase codec separately admits the exact six-field identity shape.
+    Ok(hex(&Sha256::digest(canonical(value, 128 * 1024)?)))
+}
+pub(crate) fn profile_choice_valid(
+    target: &ProfileTarget,
+    bundle: &ProfileBundle,
+    certificate: &ProfileCertificate,
+    profile: Option<&ProfileSelection>,
+    observed_at: &str,
+) -> bool {
+    let Some(observed) = utc_micros(observed_at) else { return false; };
+    target.valid() && bundle.valid(target) && certificate.valid(observed)
+        && profile.is_none_or(|row| {
+            identifier(&row.resource_id) && name(&row.name) && uuid(&row.uuid)
+                && row.bundle_id_resource == bundle.resource_id
+                && row.certificate_resource == certificate.resource_id
+                && utc_micros(&row.created_at).is_some_and(|created| created <= observed)
+                && utc_micros(&row.expires_at).is_some_and(|expires| observed < expires)
+        })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ProfileAction {
@@ -316,7 +348,7 @@ impl ProfileAttemptRecord {
             cancel_requested: self.cancel_requested,
         }
     }
-    fn validate(&self, intent: &ProfileSetupIntent) -> Result<()> {
+    pub(crate) fn validate(&self, intent: &ProfileSetupIntent) -> Result<()> {
         need(intent.action == ProfileAction::CreateProfile)?;
         self.fields()
             .validate_fields(&intent.context, &intent.plan_sha256)
@@ -401,7 +433,7 @@ impl ProfileUpdate {
     pub(crate) fn sha256(&self) -> Result<String> {
         hash(self)
     }
-    fn validate(&self, intent: &ProfileSetupIntent) -> Result<()> {
+    pub(crate) fn validate(&self, intent: &ProfileSetupIntent) -> Result<()> {
         need((1..=ATTEMPT_LIMIT).contains(&self.sequence))?;
         match (&self.provider, intent.action) {
             (ProfileProvider::Creation(record), ProfileAction::CreateProfile) => {

@@ -680,6 +680,11 @@ _LAYOUTS = {
     "signing-validation": {**_MATERIALS, **_EXTRACTIONS},
     "store-selection": {"asc-p8": _MATERIALS["asc-p8"],
                         "google-adc": _ScratchSpec("google-adc.json", _LARGE)},
+    "apple-provisioning-p12": {
+        # Closed automatic-profile mode; other P12/signing limits are unchanged.
+        "distribution-p12": _ScratchSpec("distribution.p12", 4 * 1024**2),
+        "p12-password": _ScratchSpec("p12-password", 4096),
+    },
     "bundletool": {"bundletool": _ScratchSpec("bundletool.jar", _BUNDLETOOL_BYTES)},
     # Public metadata plus bounded ZIP directory overhead; not a generic output role.
     "store-metadata": {"metadata": _ScratchSpec("store-metadata.zip", 512 * 1024**2)},

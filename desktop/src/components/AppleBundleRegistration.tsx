@@ -1,15 +1,17 @@
 import type { AppleProvisioningController, AppleProvisioningState } from '../appleProvisioningController.ts';
+import { AppleSigningSetup } from './AppleSigningSetup.tsx';
+import { isAppleProfileMode } from '../appleProfileSetup.ts';
 import type { AppleProvisioningMode, AppleProvisioningResult } from '../appleProvisioningTypes.ts';
 
 interface Props {
   controller: AppleProvisioningController; state: AppleProvisioningState;
-  onCredentials(): void; onProjectIdentity(): void;
+  onCredentials(): void; onProjectIdentity(): void; onSigningCredentials?(): void;
   compact?: boolean; onShow?(): void;
   // Display-only saved-configuration labels, not account/team authority.
   savedBundleId?: string | null; configuredTeamId?: string | null;
 }
-const modeLabel: Record<AppleProvisioningMode, string> = { review: 'reuse-first review', register: 'Bundle ID registration', reconcile: 'read-only reconciliation' };
-const consent: Record<AppleProvisioningMode, string> = {
+const modeLabel: Record<AppleProvisioningMode, string> = { review: 'reuse-first review', register: 'Bundle ID registration', reconcile: 'read-only reconciliation', 'profile-review': 'signing setup check', 'profile-reuse': 'reuse and save profile', 'profile-create': 'create and save profile', 'profile-reconcile': 'read-only profile check' };
+const consent: Record<'review' | 'register' | 'reconcile', string> = {
   review: 'Read Bundle ID registration visible to my selected App Store Connect key. Prepare or upgrade MRK’s private provisioning journal if needed. No registration write is authorized.',
   register: 'For this declared new app, recheck existing Bundle IDs, durably record the attempt, and send at most one registration request if still needed. Do not retry an uncertain write. No certificate, profile, build or release is authorized.',
   reconcile: 'Read back the exact prior registration attempt using my selected key and private journal. Do not repeat the write, adopt a new key, or clear unknown native settlement.',
@@ -29,16 +31,16 @@ function resultCopy(result: AppleProvisioningResult): { title: string; detail: s
   return { title: 'No registration decision is available', detail: 'The response, prerequisites or account-wide journal fence require attention. Do not create or revoke signing credentials to work around this result.' };
 }
 
-export function AppleBundleRegistration({ controller, state, onCredentials, onProjectIdentity, compact = false, onShow, savedBundleId, configuredTeamId }: Props) {
+export function AppleBundleRegistration({ controller, state, onCredentials, onProjectIdentity, onSigningCredentials, compact = false, onShow, savedBundleId, configuredTeamId }: Props) {
   const op = state.status?.operation, result = state.result, copy = result ? resultCopy(result) : null;
   if (compact) {
     if (!state.retained && !state.issue) return null;
-    return <section className="card" aria-label="Original Apple Bundle ID operation">
-      <h2>Apple Bundle ID · original operation retained</h2>
+    return <section className="card" aria-label="Original Apple setup operation">
+      <h2>Apple setup · original operation retained</h2>
       <p>{op ? `${modeLabel[op.context.mode]} · ${op.phase} · project ${op.context.projectId}` : 'Waiting for the original operation reference.'}</p>
       <p>{state.issue ? 'The outcome or cleanup is unconfirmed. Do not repeat registration or reconnect to dismiss it.' : 'Keep the original controls available until its native cleanup is known. Navigating does not finish the operation.'}</p>
       <div className="actions">
-        <button type="button" onClick={onShow}>Show Bundle ID setup</button>
+        <button type="button" onClick={onShow}>Show Apple setup</button>
         <button type="button" disabled={!state.canRead} onClick={() => void controller.checkStatus()}>Refresh original status</button>
         <button type="button" disabled={!state.canCancel} onClick={() => void controller.cancel()}>Cancel original operation</button>
       </div>
@@ -46,12 +48,12 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
     </section>;
   }
   return <section className="card" aria-labelledby="apple-bundle-registration-title">
-    <h2 id="apple-bundle-registration-title">Apple Bundle ID setup</h2>
+    <h2 id="apple-bundle-registration-title">Apple setup</h2>
     <p>Reuse first. Review the saved Bundle ID with the selected API key before considering one new-app registration.</p>
-    <p><strong>Bundle ID only:</strong> no App Store listing, certificate or profile issuance, private-key generation, signing assignment, build or release.</p>
+    <p><strong>Bundle ID step only:</strong> no App Store listing, certificate or profile issuance, private-key generation, signing assignment, build or release.</p>
     {(savedBundleId || configuredTeamId) && <p>Saved Bundle ID: <code>{savedBundleId ?? 'not available'}</code> · Configured team (not verified): <code>{configuredTeamId ?? 'not available'}</code></p>}
     <p>Prepare is an explicit local action: it may initialize or reuse MRK’s private state. It does not grant external agents access. Apple requests require the separate confirmation below.</p>
-    <label>Bundle ID display name
+    <label>Apple setup display name
       <input type="text" value={state.displayName} maxLength={256} onChange={event => controller.setDisplayName(event.target.value)} autoComplete="off" />
     </label>
     <p className="save-note">Use an explicit name, unchanged through review and registration. Changing saved inputs, the key or this name invalidates consent.</p>
@@ -69,9 +71,9 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
       <button disabled={!state.ios || !!state.registerReason} onClick={() => void controller.prepare('register')}>Prepare one registration</button>
       {state.registerReason && <p className="save-note">{state.registerReason}</p>}
     </details>
-    {state.consent && <div className="notice">
+    {state.consent && !isAppleProfileMode(state.consent.mode) && <div className="notice">
       <h3>Confirm {modeLabel[state.consent.mode]}</h3>
-      <p>{consent[state.consent.mode]}</p>
+      <p>{consent[state.consent.mode as 'review' | 'register' | 'reconcile']}</p>
       <p>Apple may log or rate-limit requests. Cancel cannot undo a request already sent. The native operation keeps uncertain outcomes for read-only reconciliation.</p>
       <label><input type="checkbox" checked={state.consent.acknowledged} onChange={event => controller.acknowledge(state.consent!.operationId, state.consent!.ownerGeneration, event.target.checked)} /> I authorize this exact operation once.</label>
       <button disabled={!!state.startReason} onClick={() => void controller.start(state.consent!.operationId, state.consent!.ownerGeneration)}>Start {modeLabel[state.consent.mode]}</button>
@@ -107,6 +109,7 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
       {state.previousAttempts.hiddenUnresolved > 0 && <p>Another saved context has an unresolved attempt for this App Store Connect account. Its details are not shown here. Do not start another registration to bypass it.</p>}
       <details><summary>What these saved records mean</summary><p>These are historical local records, not a new Apple result or permission to register. The selected key and current project are checked again. A missing, denied or incomplete response never clears an uncertain attempt.</p></details>
     </section>}
+    <AppleSigningSetup controller={controller} state={state} onSigningCredentials={onSigningCredentials ?? onCredentials} onCredentials={onCredentials} />
     <details open={!!state.registrationReference}>
       <summary>Read back a prior registration without retrying</summary>
       <p>This checks the selected prior attempt without repeating its write. Missing history or uncertain cleanup never means it is safe to register again.</p>

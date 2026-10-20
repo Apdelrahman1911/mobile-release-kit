@@ -22,8 +22,11 @@ PROTOCOL = "mrk-apple-bundle-provisioning/1"
 REQUEST_LIMIT, RESPONSE_LIMIT = 64 * 1024, 128 * 1024
 EVENT_LIMIT, ACK_LIMIT, MAX_EVENTS = 16 * 1024, 2048, 3
 WORK_SECONDS, FINALITY_SECONDS = 1200, 1210
-MODES = frozenset({"review", "register", "reconcile"})
-CONSENTS = {mode: "local-ios-bundle-" + mode + "-v1" for mode in MODES}
+BUNDLE_MODES = frozenset({"review", "register", "reconcile"})
+from .apple_provisioning_signing import MODES as PROFILE_MODES
+MODES = BUNDLE_MODES | PROFILE_MODES
+CONSENTS = {mode: "local-ios-bundle-" + mode + "-v1" for mode in BUNDLE_MODES}
+CONSENTS.update({mode: "local-ios-" + mode + "-v1" for mode in PROFILE_MODES})
 OBSERVATIONS = frozenset({"found", "not-returned", "not-permitted", "inconclusive", "not-checked"})
 DECISIONS = frozenset({"reuse", "review-required", "blocked", "registration-unconfirmed", "registration-confirmed", "comparison-only"})
 ATTEMPT_STATUSES = frozenset({"running", "cancellation_requested", "succeeded", "failed", "cancelled", "recovery_required", "unknown"})
@@ -142,6 +145,9 @@ def pending(value, account):
 
 
 def context(value):
+    if type(value) is dict and value.get("mode") in PROFILE_MODES:
+        from ._desktop_apple_profile_protocol import context as profile_context
+        return profile_context(value)
     require(type(value) is dict and value.get("operation") == "apple-bundle-provisioning" and value.get("platform") == "ios")
     extras = {"mode", "reference", "newApplication", "displayName"}
     require(extras <= value.keys() and type(value["mode"]) is str and value["mode"] in MODES)
@@ -226,7 +232,8 @@ def parse_request(raw):
         require(value["protocol"] == PROTOCOL and token(value["operationId"]) and token(value["ownerGeneration"]))
         selected = context(value["context"])
         native = _keys(value["native"], {"profile", "projectRoot", "rootIdentity", "cwd", "credentialConfig", "clock", "nonce",
-            "provisioning", "target", "reviewedAt", "journalRevision", "pending", "prior"})
+            "provisioning", "target", "reviewedAt", "journalRevision", "pending", "prior"} |
+            ({"signing"} if selected["mode"] in PROFILE_MODES else set()))
         require(native["profile"] in access.PROFILES and token(native["nonce"]))
         _path(native["projectRoot"]); _path(native["cwd"]); _identity(native["rootIdentity"]); content(native["credentialConfig"])
         clock = _keys(native["clock"], {"workEndNs", "hardEndNs"})
@@ -240,7 +247,10 @@ def parse_request(raw):
         require(chosen.display_name == selected["displayName"])
         pending(native["pending"], owned.account_ref)
         require(integer(native["journalRevision"], 2**64 - 2))
-        if selected["mode"] == "register":
+        if selected["mode"] in PROFILE_MODES:
+            from ._desktop_apple_profile_protocol import validate_native
+            validate_native(selected, native)
+        elif selected["mode"] == "register":
             require(not chosen.existing_application and chosen.app_id_prefix == chosen.team_id)
             timestamp(native["reviewedAt"])
         else:
@@ -258,7 +268,17 @@ def parse_request(raw):
 
 def command_count(mode):
     require(mode in MODES)
-    return 9 if mode == "register" else 7
+    return 15 if mode in PROFILE_MODES else 9 if mode == "register" else 7
+
+
+def max_events(mode):
+    require(mode in MODES)
+    return 4 if mode in PROFILE_MODES else MAX_EVENTS
+
+
+def response_limit(mode):
+    require(mode in MODES)
+    return 256 * 1024 if mode in PROFILE_MODES else RESPONSE_LIMIT
 
 
 def expected_plan(request):
@@ -273,6 +293,9 @@ def expected_plan(request):
 
 
 def validate_event(request, kind, payload, sequence):
+    if request.context["mode"] in PROFILE_MODES:
+        from ._desktop_apple_profile_protocol import validate_event as profile_event
+        return profile_event(request, kind, payload, sequence)
     require(type(request) is AppleProvisioningRequest and integer(sequence, MAX_EVENTS, 1))
     mode = request.context["mode"]
     if mode != "register":
@@ -312,8 +335,8 @@ def validate_event(request, kind, payload, sequence):
 
 
 def response(request, kind, payload, sequence):
-    require(type(request) is AppleProvisioningRequest and integer(sequence, MAX_EVENTS + 1)
-            and kind in {"accepted", "observed", "pending", "attempt", "terminal"})
+    require(type(request) is AppleProvisioningRequest and integer(sequence, max_events(request.context["mode"]) + 1)
+            and kind in {"accepted", "observed", "pending", "attempt", "terminal", "identity", "profile-observed", "profile-pending", "profile-attempt"})
     if kind == "accepted":
         require(sequence == 0 and payload == {"schemaVersion": 1, "context": request.context})
     elif kind == "terminal":
@@ -322,7 +345,8 @@ def response(request, kind, payload, sequence):
         validate_event(request, kind, payload, sequence)
     raw = api.canonical({"protocol": PROTOCOL, "operationId": request.operation_id, "ownerGeneration": request.owner_generation,
         "nonce": request.native["nonce"], "requestSha256": request.digest, "sequence": sequence, "kind": kind, "payload": payload}) + b"\n"
-    require(len(raw) <= (EVENT_LIMIT if kind not in {"accepted", "terminal"} else 32 * 1024))
+    require(len(raw) <= (128 * 1024 if kind == "identity" and request.context["mode"] in PROFILE_MODES else
+        EVENT_LIMIT if kind not in {"accepted", "terminal"} else 32 * 1024))
     return raw
 
 
@@ -341,6 +365,9 @@ def reply(raw, request, sequence, record_sha256):
 
 
 def validate_result(value, request):
+    if request.context["mode"] in PROFILE_MODES:
+        from ._desktop_apple_profile_protocol import validate_result as profile_result
+        return profile_result(value, request)
     value = _keys(value, {"schemaVersion", "scope", "mode", "observation", "decision", "attempt", "comparison", "limitations"})
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == "local-ios-bundle-provisioning"
             and value["mode"] == request.context["mode"] and value["observation"] in OBSERVATIONS
@@ -372,7 +399,8 @@ def validate_terminal(value, request):
                                      "handlersRestored", "invocationClosed", "stopObserved"})
     require(all(type(life[name]) is bool for name in ("complete", "fatal", "contained", "inputClosed", "handlersRestored", "invocationClosed"))
             and (life["commandDispatched"] is None or type(life["commandDispatched"]) is bool)
-            and integer(life["commands"], command_count(request.context["mode"])) and type(life["profileCalls"]) is int and life["profileCalls"] == 0
+            and integer(life["commands"], command_count(request.context["mode"]))
+            and integer(life["profileCalls"], 1 if request.context["mode"] in PROFILE_MODES else 0)
             and life["stopObserved"] in {"none", "cancelled", "timed-out"})
     settled = (life["complete"] and not life["fatal"] and life["contained"] and life["inputClosed"] and life["handlersRestored"]
                and life["invocationClosed"] and life["commandDispatched"] is not None)

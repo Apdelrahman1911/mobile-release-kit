@@ -69,7 +69,7 @@ pub(crate) enum Platform { Android, Ios, Project }
 pub(crate) enum Stage { Candidate, ExternalTesting, Production }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Purpose { Full, Signing, Store }
+pub(crate) enum Purpose { Full, Signing, Store, Provisioning }
 #[derive(Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ExecutionMode { #[default] Github, Local }
@@ -414,7 +414,9 @@ pub(crate) fn context(body: &Value) -> Result<Context<'_>, AssetError> {
     if !protocol::valid_id(project_id) || !object["draft"].is_object() || !within(&object["draft"], DRAFT_LIMIT) { return Err(AssetError::invalid()); }
     let platform = match text(&object["platform"])? { "android" => Platform::Android, "ios" => Platform::Ios, "project" => Platform::Project, _ => return Err(AssetError::invalid()) };
     let stage = match text(&object["stage"])? { "candidate" => Stage::Candidate, "external-testing" => Stage::ExternalTesting, "production" => Stage::Production, _ => return Err(AssetError::invalid()) };
-    let purpose = match text(&object["purpose"])? { "full" => Purpose::Full, "signing" => Purpose::Signing, "store" => Purpose::Store, _ => return Err(AssetError::invalid()) };
+    let purpose = match text(&object["purpose"])? { "full" => Purpose::Full, "signing" => Purpose::Signing, "store" => Purpose::Store, "provisioning" => Purpose::Provisioning, _ => return Err(AssetError::invalid()) };
+    if purpose == Purpose::Provisioning && (execution_mode != ExecutionMode::Local
+        || platform != Platform::Ios || stage != Stage::Candidate) { return Err(AssetError::invalid()); }
     Ok(Context { project_id, draft: &object["draft"], platform, stage, purpose, execution_mode })
 }
 pub(crate) fn choose(body: &Value) -> Result<Choose<'_>, AssetError> {

@@ -57,6 +57,7 @@ fn binding(mode: Mode) -> Arc<RequestBinding> {
         generation: "5".repeat(32),
         context,
         scope: ScopeData {
+            signing: None,
             provisioning,
             provenance,
             target: BundleTarget {
@@ -438,3 +439,6 @@ fn reconciliation_has_no_attempt_or_registration_success_and_unknown_has_no_resu
     assert!(!terminal.lifetime.settled());
     assert!(terminal.result.is_none());
 }
+
+#[path = "apple_provisioning_profile_protocol_tests.rs"]
+mod profile_contract;

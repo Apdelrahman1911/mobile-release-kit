@@ -20,6 +20,8 @@ use std::{collections::BTreeSet, sync::Arc};
 #[path = "apple_provisioning_journal_data.rs"]
 mod data;
 use data::{canonical, need, PROTOCOL};
+pub(crate) use data::profile::{profile_choice_valid, profile_entitlements_sha256,
+    profile_identity_sha256, profile_unix_micros};
 pub(crate) use data::{
     AccountRef, Action, AttemptReason, AttemptRecord, AttemptStatus, AttemptUpdate,
     BundleRegistrationIntent, BundleTarget, JournalRow, NativeProvenance, NativeSettlement,

@@ -5,6 +5,8 @@ use crate::local_store_preflight_protocol as wire;
 use sha2::{Digest, Sha256};
 #[path="asset_session_apple_provisioning_material.rs"]
 mod apple_provisioning;
+#[path="asset_session_apple_profile_material.rs"]
+mod apple_profile;
 #[path="asset_session_store_versions.rs"]
 mod store_versions;
 pub(crate) use store_versions::StoreVersionMaterial;
@@ -17,6 +19,7 @@ pub(crate) struct SelectedStoreMaterial {
     command: Option<StoreCommand>, prepare_document:Option<std::sync::Weak<Inner>>,
     execute_tools:Option<Arc<crate::saved_command_owner::ExecuteToolLoan>>,
     supplemental:[Option<(RecordKey,Arc<Payload>)>;3],
+    profile_sources: Option<Arc<vault::profile_sources::AppleProfileSources>>,
 }
 #[derive(Clone,PartialEq,Eq)]
 enum StoreCommand {Provisioning(crate::apple_provisioning_protocol::Context),Access(wire::Context),Prepare(crate::local_store_prepare_protocol::Context),Reconcile(crate::local_store_reconcile_protocol::Context),Execute(crate::local_store_execute_protocol::Context)}
@@ -58,6 +61,7 @@ impl SelectedStoreMaterial {
     // header rows are fixed stack DATA and serialization reserves exactly1024.
     // Payload/Fields originals are counted separately, never copied here.
     pub(super) fn supplemental_frame_bytes(&self)->usize {
+        if self.profile_sources.is_some() { return 2*5*std::mem::size_of::<(&str,&[u8])>()+1024+5*std::mem::size_of::<(&str,usize)>(); }
         if self.apple_material()&&self.command.as_ref().and_then(StoreCommand::assignments).is_some(){
             2*11*std::mem::size_of::<(&str,&[u8])>()+1024+11*std::mem::size_of::<(&str,usize)>()
         }else{0}
@@ -84,6 +88,7 @@ impl SelectedStoreMaterial {
         if let Some(StoreCommand::Execute(c))=&self.command {if let Some(id)=&c.stage_operation_id{bytes=bytes.checked_add(id.capacity())?;}}
         for (key,_) in self.supplemental.iter().flatten(){bytes=bytes.checked_add(key.id.0.capacity())?;}
         if let Some(loan)=&self.execute_tools{bytes=bytes.checked_add(loan.own_backing_bytes()?)?;}
+        if let Some(StoreCommand::Provisioning(c))=&self.command { bytes=bytes.checked_add(c.p12_record_id.as_ref().map_or(0,String::capacity))?; }
         Some(bytes)
     }
     fn apple_material(&self)->bool {self.command.as_ref().is_some_and(StoreCommand::apple_material)}
@@ -105,6 +110,7 @@ impl SelectedStoreMaterial {
     // Only the admitted original Session's private writer consumes these same
     // payload bytes; holding the Arc keeps them alive until all original joins.
     pub(crate) fn parts(&self) -> Result<Vec<(&'static str, &[u8])>, BridgeError> {
+        if self.profile_sources.is_some() { return self.profile_parts(); }
         if self.command.is_none() { return Err(refused()); }
         let assignments=self.command.as_ref().and_then(StoreCommand::assignments);
         let count=if self.apple_material(){if let Some(a)=assignments{if a.review_demo.is_some(){11}else{9}}else{3}}else{1};
@@ -157,6 +163,7 @@ impl SelectedStoreMaterial {
                 &&payload.kind==kind&&payload.fields.is_some()&&github_secret::assigned(state,key,kind,&self.native).is_some_and(|p|Arc::ptr_eq(p,payload)),_=>false})
     }
     pub(super) fn current(&self, state: &DocumentState, registration: u32, root: &asset_source::RegisteredRoot) -> bool {
+        if self.profile_sources.is_some() { return self.profile_current(state, registration, root); }
         let apple=self.apple_material();
         self.native.execution_mode == commands::ExecutionMode::Local
             && self.native.platform == if apple{Platform::Ios}else{Platform::Android}
@@ -201,7 +208,7 @@ fn borrow_selected_material(state:&DocumentState,record:commands::RecordRef<'_>,
             }
         }
     }
-    let original = Arc::new(SelectedStoreMaterial { native, key, payload, command,prepare_document:None,execute_tools:None,supplemental });
+    let original = Arc::new(SelectedStoreMaterial { native, key, payload, command,prepare_document:None,execute_tools:None,supplemental,profile_sources:None });
     if !original.current(state, original.native.registry_generation, &original.native.project) { return Err(refused()); }
     Ok(original)
 }

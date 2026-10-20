@@ -49,7 +49,7 @@ fn apple_original_clock_and_finite_representation_quote_are_not_renewed() {
     let active = document_backing_bytes().unwrap();
     assert!(retained >= APPLE_PROVISIONING_INPUT_LIMIT + 2 * apple_wire::STATUS_LIMIT);
     assert!(active >= 8 * crate::apple_provisioning_journal::STATE_LIMIT);
-    assert!(active.checked_add(retained).unwrap() < 16 * 1024 * 1024);
+    assert!(active.checked_add(retained).unwrap() < 64 * 1024 * 1024);
     // This is a fixed representation census only, not a native/RSS bound.
 }
 
@@ -330,4 +330,75 @@ fn apple_unadmitted_original_status_cannot_start_state_or_borrow_access_consent(
     let registry = owner.inner.lock();
     assert!(registry.prepared.is_none() && registry.active.is_none() && registry.last.is_none());
     assert!(registry.apple.review.is_none());
+}
+
+
+#[test]
+fn apple_original_terminal_dispatch_uses_the_retained_profile_mode() {
+    // Exercise the SAME enum method used by enqueue/final disposition. The
+    // serialized lifetime is invented DATA; it cannot create native joins.
+    let Some(Terminal::AppleProvisioning(original)) = projection().result else {
+        panic!("fixture terminal")
+    };
+    let baseline = serde_json::to_value(original).unwrap();
+    for (mode, profile) in [
+        ("review", false), ("register", false), ("reconcile", false),
+        ("profile-review", true), ("profile-reuse", true),
+        ("profile-create", true), ("profile-reconcile", true),
+    ] {
+        for calls in 0..=2 {
+            let mut value = baseline.clone();
+            value["context"]["mode"] = json!(mode);
+            value["lifetime"]["profileCalls"] = json!(calls);
+            let terminal: apple_wire::Terminal = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(terminal.settled(), calls <= u32::from(profile));
+            assert_eq!(Terminal::AppleProvisioning(terminal).settled(), calls <= u32::from(profile));
+            for missing in ["complete", "contained", "inputClosed", "handlersRestored", "invocationClosed"] {
+                let mut incomplete = value.clone();
+                incomplete["lifetime"][missing] = json!(false);
+                let terminal: apple_wire::Terminal = serde_json::from_value(incomplete).unwrap();
+                assert!(!Terminal::AppleProvisioning(terminal).settled());
+            }
+        }
+    }
+}
+
+#[test]
+fn profile_original_clock_and_preasset_refusal_do_not_invent_completion() {
+    let mut scope = context();
+    scope.mode = apple_wire::Mode::ProfileReview;
+    scope.p12_record_id = Some("d".repeat(32));
+    scope.p12_record_revision = Some(1);
+    let application = SavedCommandOwner::apple_provisioning(RuntimeConfig::packaged(
+        std::path::PathBuf::from("/unopened-profile-clock-runtime"),
+    ));
+    let (application, original) = super::super::tests::active_with_context(
+        application, Context::AppleProvisioning(scope),
+    );
+    super::super::apple_signing::initialize(&original).unwrap();
+    let profile = original.apple_profile.get().unwrap();
+    assert_eq!(profile.clock().work_end(), original.clocks.work);
+    assert_eq!(profile.clock().hard_end(), original.clocks.cleanup);
+    let first = original.clocks.admitted + Duration::from_secs(3);
+    let later = first + Duration::from_secs(2);
+    {
+        let mut registry = application.inner.lock();
+        application.inner.stop_locked(&mut registry, &original, Reason::Cancelled, first);
+        application.inner.stop_locked(&mut registry, &original, Reason::Shutdown, later);
+    }
+    assert_eq!(profile.clock().failure().unwrap().1, first);
+    assert_eq!(profile.clock().cleanup_end(), first + SETTLEMENT);
+    assert_eq!(*original.native_audit_cutoff.borrow(), first + SETTLEMENT);
+    assert!(!profile.clock().completed());
+    profile.decline_before_asset(crate::asset_commands::Reason::UserCancelled, later).unwrap();
+    assert!(profile.decline_before_asset(crate::asset_commands::Reason::UserCancelled, later).is_err());
+    assert!(!profile.clock().completed());
+    assert_eq!(profile.clock().failure().unwrap().1, first);
+    assert!(!native_complete(&original));
+    assert!(!original.driver_joined.load(Ordering::SeqCst));
+    assert!(!original.watchdog_joined.load(Ordering::SeqCst));
+    let registry = application.inner.lock();
+    let mut publication = Registry::default();
+    retire_review(&mut publication, registry.active.as_ref().unwrap(), &original);
+    assert!(publication.profile_review.is_none() && publication.profile_saved.is_none());
 }

@@ -102,6 +102,9 @@ impl SelectedStoreMaterial {
             && Arc::ptr_eq(&self.native, &other.native)
             && Arc::ptr_eq(&self.payload, &other.payload)
             && self.key == other.key
+            && match (&self.profile_sources,&other.profile_sources) {
+                (None,None)=>true,(Some(left),Some(right))=>left.same_selection(right),_=>false
+            }
             && self
                 .prepare_document
                 .as_ref()
@@ -126,7 +129,9 @@ impl SelectedStoreMaterial {
             && self.key.revision == context.record_revision
             && self.native.execution_mode == commands::ExecutionMode::Local
             && self.native.platform == Platform::Ios
-            && matches!(self.native.purpose, Purpose::Full | Purpose::Store)
+            && if context.mode.profile() { self.native.purpose == Purpose::Provisioning
+                && self.native.stage == Stage::Candidate && self.profile_sources.is_some()
+            } else { matches!(self.native.purpose, Purpose::Full | Purpose::Store) && self.profile_sources.is_none() }
     }
     fn provisioning_document_matches(
         &self,
@@ -214,6 +219,9 @@ impl DocumentBinding {
             || encrypted_mode(state) && !self.persistence_qualified()
         {
             return Err(refused());
+        }
+        if context.mode.profile() {
+            return super::apple_profile::borrow(self, state, context, registration, root);
         }
         let mut material = borrow_selected_material(
             state,

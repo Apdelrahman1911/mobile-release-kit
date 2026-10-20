@@ -22,6 +22,9 @@ use saved_observation::{SavedObservationLane, SavedInputBinding, AppleProvisioni
 #[path="asset_session_apple_provisioning.rs"]
 mod apple_provisioning;
 pub(crate) use apple_provisioning::AppleProvisioningDocumentInput;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+#[path="asset_session_apple_profile.rs"]
+mod apple_profile;
 pub(crate) use saved_observation::{SavedObservationCompletion, ValidatedSavedInput, UploadKeySavedInput};
 #[path = "asset_session_version_allocation.rs"]
 mod version_allocation;
@@ -89,7 +92,7 @@ use crate::vault_keyring_macos as keyring;
 #[path = "asset_session_keyring_macos.rs"]
 mod keyring_macos;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-pub(crate) use vault::{upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
+pub(crate) use vault::{AppleP12Loan, AppleProfileDestination, upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
 
 // A borrowed original session record is not a serialized credential or a new
 // credential owner. Only this document module can construct the signed loan.
@@ -287,7 +290,7 @@ pub(crate) enum Phase { Idle, Admitting, Picking, Capturing, Selected, Assessing
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseAndroidSource, ChooseArtifact, ChooseImages, InspectInstallation, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
-    OpenVault, PrepareInitialize, Initialize, Unlock, PrepareBackupExport, ImportBackup, GenerateUploadKey, RecoverUploadKey }
+    OpenVault, PrepareInitialize, Initialize, Unlock, PrepareBackupExport, ImportBackup, GenerateUploadKey, RecoverUploadKey, AppleProfileSetup }
 impl Operation {
     fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
     fn project_path(self) -> bool { self == Self::ChooseProjectPath }
@@ -426,6 +429,10 @@ pub(crate) struct OriginalWork {
     backup_selection: std::sync::OnceLock<vault::BackupSelectors>,
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     upload_key_clock: std::sync::OnceLock<Arc<vault::UploadKeyClock>>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    apple_profile_clock: std::sync::OnceLock<Arc<crate::saved_command_owner::AppleProvisioningClock>>,
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    apple_profile: std::sync::OnceLock<apple_profile::Work>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_capture: Mutex<Option<Arc<asset_source::InstalledCaptureCheckpoint>>>,
     #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -464,6 +471,10 @@ impl OriginalWork {
             backup_selection: std::sync::OnceLock::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             upload_key_clock: std::sync::OnceLock::new(),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            apple_profile_clock: std::sync::OnceLock::new(),
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+            apple_profile: std::sync::OnceLock::new(),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_capture: Mutex::new(None),
             #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -502,16 +513,24 @@ impl OriginalWork {
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     fn original_gui_call(&self, call: &GuiCall) -> bool { std::ptr::eq(call, self.gui.as_ref()) }
     fn stop(&self) {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if let Some(clock)=self.apple_profile_clock.get() {
+            clock.observe_failure_at(Reason::UserCancelled,Instant::now()); self.signal_stop(); return;
+        }
         if self.installation.is_some() { installation::failure(self, crate::installation::CheckReason::Cancelled, Instant::now()); }
         else { self.signal_stop(); }
     }
     pub(crate) fn endpoint(&self) -> Option<Instant> {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if let Some(clock)=self.apple_profile_clock.get() { return (!clock.completed()).then(|| clock.work_end()); }
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if let Some(clock) = self.upload_key_clock.get() { return clock.endpoint(); }
         if let Some(work) = &self.installation { return Some(work.end); }
         match self.deadline.lock() { Ok(end) => *end, Err(_) => Some(Instant::now()) }
     }
     pub(crate) fn set_endpoint(&self, end: Option<Instant>) {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        if self.apple_profile_clock.get().is_some() { return; }
         // Reconciliation's generic None never erases this admitted clock.
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         if self.upload_key_clock.get().is_some() { return; }
@@ -574,7 +593,7 @@ impl OriginalWork {
     fn lookup_allocations_allowed(&self) -> bool {
         if self.installation.as_ref().is_some_and(|work| !work.settled()) { return false; }
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-        if !self.vault.try_lock().is_ok_and(|work| !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse()) { return false; }
+        if !self.vault.try_lock().is_ok_and(|work| !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse() && !work.apple_profile_blocks_reuse()) { return false; }
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { self.keyring.try_lock().is_ok_and(|book| !book.memory_held()) }
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
@@ -625,7 +644,7 @@ impl OriginalWork {
         // proof. Attempt concrete native private disposal before taking data;
         // failed disposal keeps this holding and cannot become empty/Idle.
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-        if !holding.vault.dispose_private_upload_key() { return false; }
+        if !holding.vault.dispose_private_upload_key() || !holding.vault.dispose_private_apple_profile() { return false; }
         let retirement = std::mem::take(&mut *holding);
         // Still off the document/admission lock, but retain THIS custody mutex
         // through the actual drop and receipt. A census cannot see empty data
@@ -804,7 +823,8 @@ impl Slot {
         // cancellation was observed. Contract to that first timestamp, never
         // renew either the slot or retained original's cleanup interval.
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-        let generation_end = vault::upload_key_parent_stop(&self.owner, reason, at);
+        let generation_end = self.owner.apple_profile_stop(reason, at)
+            .or_else(|| vault::upload_key_parent_stop(&self.owner, reason, at));
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let generation_end: Option<Instant> = None;
         let end = generation_end.unwrap_or_else(|| first_cleanup_end(at, self.owner.endpoint(), self.review_end));
@@ -1067,8 +1087,8 @@ fn session_data_empty(state: &DocumentState) -> bool {
 fn slot_private_data_empty(_slot: &Slot) -> bool {
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     { _slot.vault.loaded.is_none()
-        && _slot.owner.vault.try_lock().is_ok_and(|work| !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse())
-        && _slot.owner.retirement.try_lock().is_ok_and(|holding| !holding.vault.backup_blocks_reuse() && !holding.vault.upload_key_blocks_reuse()) }
+        && _slot.owner.vault.try_lock().is_ok_and(|work| !work.backup_blocks_reuse() && !work.upload_key_blocks_reuse() && !work.apple_profile_blocks_reuse())
+        && _slot.owner.retirement.try_lock().is_ok_and(|holding| !holding.vault.backup_blocks_reuse() && !holding.vault.upload_key_blocks_reuse() && !holding.vault.apple_profile_blocks_reuse()) }
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
     { true }
 }
@@ -1851,6 +1871,11 @@ mod lookup_memory {
         fn vault_loan(&mut self, value: &vault::BoundLoan) -> Result<(), Problem> {
             self.context(&value.context)?; self.payload(&value.payload)?; self.vault_store(&value.store)?; self.vault_key(&value.key)
         }
+        fn apple_profile_source(&mut self, value: &Arc<AppleP12Loan>) -> Result<(), Problem> {
+            if !self.secret_loans.insert(value)? { return Ok(()); }
+            self.add(value.own_retained_bytes())?;
+            self.vault_loan(value.census_loan())
+        }
         fn vault_session(&mut self, value: &vault::Session) -> Result<(), Problem> {
             self.add(value.data_bytes().ok_or(Problem::Capacity)?)?; self.vault_store(value.store())?;
             if let Some(key) = value.key() { self.vault_key(key)?; }
@@ -1928,6 +1953,7 @@ mod lookup_memory {
         fn retirement(&mut self, retirement: &Retirement) -> Result<(), Problem> {
             if let Some(assessment) = &retirement.assessment { self.assessment(assessment)?; }
             self.add(retirement.vault.data_bytes().ok_or(Problem::Capacity)?)?;
+            if let Some(source) = retirement.vault.apple_profile_source() { self.apple_profile_source(source)?; }
             if let Some(vault) = &retirement.vault.session { self.vault_session(vault)?; }
             for key in retirement.vault.keys.iter().flatten() { self.vault_key(key)?; }
             if let Some(payload) = &retirement.vault.loaded { self.payload(payload)?; }
@@ -1948,6 +1974,12 @@ mod lookup_memory {
         fn owner(&mut self, owner: &Arc<OriginalWork>) -> Result<(), Problem> {
             if !self.owners.insert(owner)? { return Ok(()); }
             self.arc_cells::<OriginalWork>()?; self.arc_cells::<GuiCall>()?;
+            if let Some(work)=owner.apple_profile.get() {
+                self.add(work.own_bytes())?;
+                if let Some(sources)=work.census_sources().map_err(|_|Problem::CleanupUnknown)? { self.profile_sources(&sources)?; }
+            }
+            // The same parent clock/receive/journal backing is quoted by the
+            // SavedSession. Only the Arc/OnceLock cells live inline here.
             if let Some(selectors) = owner.backup_selection.get() {
                 self.add(selectors.settled_census_bytes().ok_or(Problem::CleanupUnknown)?)?;
             }
@@ -1957,6 +1989,8 @@ mod lookup_memory {
             let vault = owner.vault.try_lock().map_err(|_| Problem::CleanupUnknown)?;
             self.add(vault.backup_retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(vault.upload_key_retained_bytes().ok_or(Problem::Capacity)?)?;
+            self.add(vault.apple_profile_retained_bytes().ok_or(Problem::Capacity)?)?;
+            if let Some(source) = vault.apple_profile_source() { self.apple_profile_source(source)?; }
             if owner.upload_key_clock.get().is_some() { self.arc_cells::<vault::UploadKeyClock>()?; }
             if let Some(store) = vault.store_ref() { self.vault_store(store)?; }
             if let Some(key) = vault.key_ref() { self.vault_key(key)?; }
@@ -1985,6 +2019,12 @@ mod lookup_memory {
                 retirement_known(owner, &retirement)?;
                 self.source(&owner.source, &source)?; self.retirement(&retirement)
             }
+        }
+        fn profile_sources(&mut self, sources:&Arc<vault::profile_sources::AppleProfileSources>)->Result<(),Problem>{
+            if !self.secret_loans.insert(sources)? { return Ok(()); }
+            self.add(sources.own_retained_bytes().ok_or(Problem::Capacity)?)?;
+            for loan in sources.loans() { self.vault_loan(loan)?; }
+            Ok(())
         }
         fn secret_loan(&mut self,loan:&Arc<GitHubSecretMaterial>)->Result<(),Problem>{
             if !self.secret_loans.insert(loan)?{return Ok(())}
@@ -2149,6 +2189,7 @@ mod lookup_memory {
         }
         let(context,payload)=loan.census_parts();census.context(context)?;census.payload(payload)?;
         for(_,payload)in loan.supplemental_census(){census.payload(payload)?;}
+        if let Some(sources)=loan.profile_sources(){census.profile_sources(sources)?;}
         census.arc_cells::<SelectedStoreMaterial>()?;census.add(loan.own_retained_heap_bytes().ok_or(Problem::Capacity)?)?;census.add(loan.supplemental_frame_bytes())?;
         if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
         census.add(std::mem::size_of::<Census<'_>>())?;census.add(future)?;
@@ -2618,6 +2659,7 @@ fn ordinary_asset_platform_gate() -> Result<(), AssetError> {
     Ok(())
 }
 fn macos_session_context(platform: Platform, stage: Stage, purpose: Purpose) -> bool {
+    if purpose == Purpose::Provisioning { return platform == Platform::Ios && stage == Stage::Candidate; }
     match platform {
         // These are implemented input routes, not a copy of core requiredness.
         // The core alone decides whether this stage/purpose needs the input.
@@ -2635,11 +2677,17 @@ fn macos_session_kind(platform: Platform, stage: Stage, purpose: Purpose, kind: 
             Purpose::Full | Purpose::Store => kind == Kind::AscP8
                 || stage != Stage::Candidate && matches!(kind, Kind::AppleReviewContact | Kind::AppleReviewDemo | Kind::OperationCommitment),
             Purpose::Signing => matches!(kind, Kind::AppleP12 | Kind::AppleProfile | Kind::IosFirebase | Kind::ProjectReadToken),
+            Purpose::Provisioning => matches!(kind, Kind::AscP8 | Kind::AppleP12 | Kind::AppleProfile),
         },
     }
 }
 fn session_kind_gate(context: &NativeContext, kind: Kind) -> Result<(), AssetError> {
     if kind == Kind::AppleDistributionKey { return Err(AssetError::new(Reason::UnsupportedFormat)); }
+    if context.purpose == Purpose::Provisioning && (context.execution_mode != commands::ExecutionMode::Local
+        || context.platform != Platform::Ios || context.stage != Stage::Candidate
+        || !matches!(kind, Kind::AscP8 | Kind::AppleP12 | Kind::AppleProfile)) {
+        return Err(AssetError::new(Reason::UnsupportedFormat));
+    }
     if kind == Kind::GoogleServiceAccount {
         return if context.execution_mode == commands::ExecutionMode::Local && context.platform == Platform::Android
             && matches!(context.purpose, Purpose::Full | Purpose::Store) && kind.enabled() { Ok(()) }
@@ -3138,6 +3186,9 @@ impl DocumentBinding {
         self.local_store_base_gate(state)
     }
     fn local_store_base_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
+        self.local_store_base_gate_current_profile(state,None)
+    }
+    fn local_store_base_gate_current_profile(&self,state:&DocumentState,profile:Option<&Arc<vault::profile_sources::AppleProfileSources>>)->crate::local_store_preflight_protocol::Availability {
         use crate::local_store_preflight_protocol::Availability;
         if ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled()) || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
         if ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping()) || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
@@ -3153,7 +3204,8 @@ impl DocumentBinding {
         // Observe the actual retained private session, never a public tombstone.
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
-            || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+            || state.slot.as_ref().is_some_and(|slot| (slot.phase != Phase::Idle || !slot.owner.resources_settled())
+                && !profile.is_some_and(|sources| apple_profile::current_slot(slot,sources)))
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
             || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))))) { return Availability::Busy; }
@@ -4938,6 +4990,8 @@ enum Job {
     Prepare { payload: Arc<Payload>, context: Arc<NativeContext> }, Delete, Retire { bind: Option<Token> }, Bind(Assignment),
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     Vault(vault::Job),
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    AppleProfile(apple_profile::Request),
 }
 
 async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Reason> {
@@ -5471,7 +5525,12 @@ impl DocumentBinding {
         let cleanup_data_ready = vault::retirement_ready(&state, &slot);
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let cleanup_data_ready = false;
-        if (resources || cleanup_data_ready) && (slot.discard || slot.phase == Phase::Idle || state.lock_pending || state.stopping || state.unknown || cleanup_data_ready) {
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        let profile_retirement_deferred = apple_profile::retirement_deferred(&slot)
+            || vault::apple_profile_retirement_deferred(&slot);
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+        let profile_retirement_deferred = false;
+        if !profile_retirement_deferred && (resources || cleanup_data_ready) && (slot.discard || slot.phase == Phase::Idle || state.lock_pending || state.stopping || state.unknown || cleanup_data_ready) {
             let retire_context = slot.cleanup_end.is_some() || slot.candidate.is_some() || state.lock_pending || state.stopping || state.unknown || !state.lifetime.original_bound();
             let mut retirement = Retirement { candidate: slot.candidate.take(), staged: slot.staged.take(),
                 payload: slot.retired_payload.take(), image_batch: slot.image_batch.take(),
@@ -5904,6 +5963,8 @@ impl DocumentBinding {
                 worker.gui.not_created(Reason::UserCancelled);
                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
                 worker.credential_backup_no_dispatch_end(Reason::UserCancelled);
+                #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                worker.apple_profile_no_dispatch();
                 worker.release_retirement(); document.stage(&worker, Staged::Refused(Reason::UserCancelled)); return;
             }
             run_job(document, worker, job).await;
@@ -6062,6 +6123,8 @@ async fn run_job(document: DocumentBinding, owner: Arc<OriginalWork>, job: Job) 
 async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job: Job) -> Staged {
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if matches!(&job, Job::Vault(vault::Job::Release)) { return vault::run(document, owner, vault::Job::Release).await; }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    let job = match job { Job::AppleProfile(request) => return apple_profile::run(document,owner,request).await, other=>other };
     if owner.interrupted() {
         owner.gui.not_created(Reason::UserCancelled);
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
@@ -6073,6 +6136,8 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
         Job::Images { app, binding } => images::run(document, owner, app, binding).await,
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         Job::Vault(job) => vault::run(document, owner, job).await,
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        Job::AppleProfile(_) => Staged::Refused(Reason::CleanupUnknown), // consumed only by the fixed branch above
         Job::Retire { bind } => Staged::Committed { bind },
         Job::Bind(assignment) => Staged::Bound(assignment),
         Job::ChooseEvidenceFolder { app, purpose } => {

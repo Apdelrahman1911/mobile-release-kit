@@ -151,6 +151,7 @@ pub(crate) mod tests {
                 "status":"unknown","reason":"provider_outcome_unknown","possibleSend":true,"responseResourceId":null,
                 "responseResourceSha256":null,"observedResourceId":null,"cancelRequested":false}}})).unwrap();
         let mut scope = ScopeData {
+            signing: None,
             provisioning: intent.context.clone(),
             provenance,
             target: intent.target,
@@ -199,6 +200,7 @@ pub(crate) mod tests {
         let (account, scope) = sample();
         for field in 0..14 {
             let mut changed = ScopeData {
+            signing: None,
                 provisioning: scope.provisioning.clone(),
                 provenance: scope.provenance.clone(),
                 target: scope.target.clone(),

@@ -19,7 +19,13 @@ const INITIAL: usize = 0;
 const AUDIT: usize = 4;
 const FINISH: usize = 5;
 const RETIRE: usize = 6;
-const JOBS: usize = 7;
+const PROFILE_ARM: usize = 7;
+const PROFILE_SAVED: usize = 8;
+const PROFILE_FINISH: usize = 9;
+const PROFILE_RETIRE: usize = 10;
+const JOBS: usize = 11;
+#[path = "saved_command_apple_profile_native.rs"]
+mod profile;
 const STATE_CALL: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
@@ -30,6 +36,7 @@ struct Hold {
 enum Value {
     Account(AccountSnapshot),
     Written(JournalAck),
+    ProfileWritten(crate::apple_provisioning_journal::ProfileJournalAck),
     Retired,
 }
 enum Call {
@@ -42,6 +49,9 @@ enum Call {
         AppleProvisioningNativeJoined,
     ),
     Retire(AppleProvisioningAllJobsJoined),
+    ProfileReserve(crate::apple_provisioning_journal::ProfileSetupIntent, crate::apple_provisioning_journal::ProfileUpdate),
+    ProfileRecord(Revision, Arc<crate::apple_provisioning_journal::ProfileOriginalReservation>, crate::apple_provisioning_journal::ProfileUpdate),
+    ProfileFinish(Revision, Arc<crate::apple_provisioning_journal::ProfileOriginalReservation>, AppleProfileNativeJoined),
 }
 #[derive(Default)]
 struct Slot {
@@ -87,6 +97,11 @@ impl Jobs {
             sealed: false,
             complete: false,
         }
+    }
+    fn last_profile_ack(&self) -> Option<&crate::apple_provisioning_journal::ProfileJournalAck> {
+        self.slots.iter().rev().find_map(|slot| match slot.returned.as_ref() {
+            Some(Ok(Value::ProfileWritten(ack))) => Some(ack), _ => None,
+        })
     }
     fn last_ack(&self) -> Option<&JournalAck> {
         self.slots[1..=FINISH].iter().rev().find_map(Slot::ack)
@@ -156,6 +171,7 @@ pub(super) fn work_clear(owner: &Session) -> Result<(), BridgeError> {
             return Err(apple_wire::invalid());
         }
     }
+    if intent.profile_review.as_ref().is_some_and(|review|!review.current_claim(&intent.input)) { return Err(apple_wire::invalid()); }
     intent.input.current()
 }
 fn audit_clear(owner: &Session, end: Instant) -> bool {
@@ -186,21 +202,25 @@ async fn call(
     index: usize,
     selected: Call,
 ) -> Result<(), BridgeError> {
-    let role_ok = matches!(
+    let profile_mode = owner.apple.input()?.context().mode.profile();
+    let role_ok = !profile_mode && matches!(
         (&selected, index),
         (Call::Initialize, INITIAL)
             | (Call::Reserve(_, _), 1)
             | (Call::Record(_, _, _), 2..=AUDIT)
             | (Call::Finish(_, _, _), FINISH)
             | (Call::Retire(_), RETIRE)
-    );
-    if !role_ok || index >= JOBS || jobs.slots[index].started || (jobs.sealed && index != RETIRE) {
+    ) || profile_mode && matches!((&selected, index),
+        (Call::Initialize, INITIAL) | (Call::ProfileReserve(_, _), 1)
+        | (Call::ProfileRecord(_, _, _), 2 | 3 | PROFILE_ARM | PROFILE_SAVED)
+        | (Call::ProfileFinish(_, _, _), PROFILE_FINISH) | (Call::Retire(_), PROFILE_RETIRE));
+    if !role_ok || index >= JOBS || jobs.slots[index].started || (jobs.sealed && index != if profile_mode { PROFILE_RETIRE } else { RETIRE }) {
         return Err(local_error(owner, apple_wire::invalid()));
     }
     let end = call_end(owner)?;
     // New effects require currentness; an already-armed audit uses only the
     // original immutable reservation and cannot authorize a provider call.
-    if matches!(&selected, Call::Initialize | Call::Reserve(_, _)) {
+    if matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _)) {
         work_clear(owner).map_err(|error| local_error(owner, error))?;
     }
     let input = owner.apple.input()?.clone();
@@ -216,7 +236,7 @@ async fn call(
         if !audit_clear(&original, end) {
             return Err(local_error(&original, BridgeError::cleanup_unknown()));
         }
-        if matches!(&selected, Call::Initialize | Call::Reserve(_, _)) {
+        if matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _)) {
             work_clear(&original).map_err(|error| local_error(&original, error))?;
         }
         // This mutex is ONLY the finite operation's journal backing. Neither
@@ -274,6 +294,15 @@ async fn call(
                 .ok_or_else(apple_wire::invalid)?
                 .finish_native(revision, &reservation, &joined)
                 .map(Value::Written),
+            Call::ProfileReserve(intent, update) => {
+                let binding = original.apple.request_binding()?;
+                held.journal.as_mut().ok_or_else(apple_wire::invalid)?
+                    .reserve_profile(binding.revision, intent, update).map(Value::ProfileWritten)
+            },
+            Call::ProfileRecord(revision, reservation, update) => held.journal.as_mut().ok_or_else(apple_wire::invalid)?
+                .record_profile(revision, &reservation, update).map(Value::ProfileWritten),
+            Call::ProfileFinish(revision, reservation, joined) => held.journal.as_mut().ok_or_else(apple_wire::invalid)?
+                .finish_profile_native(revision, &reservation, &joined).map(Value::ProfileWritten),
             Call::Retire(joined) => {
                 let lease = held.lease.as_ref().ok_or_else(apple_wire::invalid)?;
                 if !joined.matches(lease.native_use()) {
@@ -344,6 +373,7 @@ pub(super) async fn initialize(
     owner: &Arc<Session>,
 ) -> Result<(), BridgeError> {
     work_clear(owner).map_err(|error| local_error(owner, error))?;
+    super::super::apple_signing::wait_source(inner, owner).await?;
     let mut jobs = owner.apple.native.lock().await;
     call(inner, owner, &mut jobs, INITIAL, Call::Initialize).await?;
     drop(jobs);
@@ -356,7 +386,7 @@ pub(super) fn request(
 ) -> Result<Vec<u8>, BridgeError> {
     work_clear(owner).map_err(|error| local_error(owner, error))?;
     let input = owner.apple.input()?;
-    let scope = input.scope(
+    let mut scope = input.scope(
         &owner.id,
         &owner.generation,
         owner
@@ -364,8 +394,14 @@ pub(super) fn request(
             .intent
             .as_ref()
             .and_then(|intent| intent.review.as_ref())
-            .map(|review| review.observed_at.clone()),
+            .map(|review| review.observed_at.clone())
+            .or_else(|| owner.apple.intent.as_ref().and_then(|intent|intent.profile_review.as_ref()).map(|review|review.data().observed_at)),
     )?;
+    if input.context().mode.profile() {
+        let parent=owner.apple_profile.get().ok_or_else(apple_wire::invalid)?;
+        let review=owner.apple.intent.as_ref().and_then(|intent|intent.profile_review.as_ref()).map(|review|review.data());
+        scope.signing=Some(input.profile_scope(parent,review)?);
+    }
     let jobs = owner
         .apple
         .native
@@ -427,6 +463,7 @@ pub(super) fn request(
     if binding.is_some() {
         return Err(apple_wire::invalid());
     }
+    super::super::apple_signing::bind_request(owner, &encoded.bytes)?;
     *binding = Some(encoded.binding);
     Ok(encoded.bytes)
 }
@@ -452,7 +489,8 @@ pub(super) async fn write_phases(
     owner: &Arc<Session>,
     writer: &mut ChildStdin,
 ) -> Result<(), BridgeError> {
-    if owner.apple.input()?.context().mode != apple_wire::Mode::Register {
+    let mode = owner.apple.input()?.context().mode;
+    if mode != apple_wire::Mode::Register && !mode.profile() {
         return Ok(());
     }
     loop {
@@ -477,38 +515,30 @@ pub(super) async fn write_phases(
             _ = tokio::time::sleep_until(owner.clocks.work.into()) => return Ok(()) }
             continue;
         };
-        let (selected, update, previous) = {
-            let jobs = owner.apple.native.lock().await;
-            match event.data {
-                apple_wire::EventData::Pending { intent, update } if event.sequence == 1 => (
-                    Call::Reserve(intent, update.clone()),
-                    update,
-                    owner.apple.request_binding()?.revision,
-                ),
-                apple_wire::EventData::Attempt(update)
-                    if (2..=apple_wire::MAX_EVENTS).contains(&event.sequence) =>
-                {
-                    let ack = jobs.last_ack().ok_or_else(apple_wire::invalid)?;
-                    (
-                        Call::Record(ack.revision, ack.original.clone(), update.clone()),
-                        update,
-                        ack.revision,
-                    )
-                }
-                _ => return Err(apple_wire::invalid()),
-            }
-        };
         let index = usize::try_from(event.sequence).map_err(|_| apple_wire::invalid())?;
-        let bytes = {
+        let (bytes, audit) = if mode.profile() {
+            profile::event_reply(inner, owner, event.sequence, event.data).await?
+        } else {
+            let (selected, update, previous) = {
+                let jobs = owner.apple.native.lock().await;
+                match event.data {
+                    apple_wire::EventData::Pending { intent, update } if event.sequence == 1 => (
+                        Call::Reserve(intent, update.clone()), update, owner.apple.request_binding()?.revision),
+                    apple_wire::EventData::Attempt(update) if (2..=apple_wire::MAX_EVENTS).contains(&event.sequence) => {
+                        let ack = jobs.last_ack().ok_or_else(apple_wire::invalid)?;
+                        (Call::Record(ack.revision, ack.original.clone(), update.clone()), update, ack.revision)
+                    },
+                    _ => return Err(apple_wire::invalid()),
+                }
+            };
             let mut jobs = owner.apple.native.lock().await;
             call(inner, owner, &mut jobs, index, selected).await?;
             let ack = jobs.slots[index].ack().ok_or_else(apple_wire::invalid)?;
             let binding = owner.apple.request_binding()?;
-            apple_wire::journal_ack(binding.as_ref(), ack, &update, previous)?
+            (apple_wire::journal_ack(binding.as_ref(), ack, &update, previous)?, audit_only(&update))
         };
         let current = work_clear(owner);
-        let allow_audit = current.is_err()
-            && audit_only(&update)
+        let allow_audit = current.is_err() && audit
             && !owner.resource_unknown.load(Ordering::SeqCst)
             && Instant::now() < *owner.native_audit_cutoff.borrow();
         if let Err(error) = current {
@@ -561,7 +591,8 @@ pub(super) async fn write_phases(
             if !written {
                 route.failed = true;
             } else {
-                route.completed = event.sequence;
+                route.completed = if mode.profile() && !mode.profile_save() && event.sequence == 1
+                    && route.profile_observed.is_some() { 2 } else { event.sequence };
             }
         }
         if !written {
@@ -626,7 +657,7 @@ fn worker_joined(inner: &Inner, owner: &Session, book: &Resources) -> bool {
                 active.accepted
                     && active.terminal
                     && matches!(&active.projection.result,
-                    Some(Terminal::AppleProvisioning(terminal)) if terminal.lifetime.settled())
+                    Some(Terminal::AppleProvisioning(terminal)) if terminal.lifetime.settled_for(terminal.context.mode))
             })
     };
     runtime
@@ -676,6 +707,9 @@ pub(super) async fn finish_after_manager(inner: &Arc<Inner>, owner: &Arc<Session
         let book = owner.resources.lock().await;
         worker_joined(inner, owner, &book)
     };
+    if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.profile()) {
+        return profile::finish(inner, owner).await;
+    }
     let mut jobs = owner.apple.native.lock().await;
     if jobs.sealed || !jobs.pre_joined() || !worker {
         return false;

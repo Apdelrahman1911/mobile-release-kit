@@ -1976,8 +1976,14 @@ export function App() {
           appleProvisioningPanel={<AppleBundleRegistration controller={appleProvisioning} state={appleProvisioningState}
             savedBundleId={textValue(getValue(session?.snapshot?.config.data ?? null, 'ios.bundleId'))}
             configuredTeamId={textValue(getValue(session?.snapshot?.config.data ?? null, 'ios.teamId'))}
+            onSigningCredentials={() => {
+              if (appleProvisioning.ownerReason()) return;
+              appleProvisioning.beforeWorkspaceAction();
+              assetSession.setScope({ executionMode: 'local', platform: 'ios', stage: 'candidate', purpose: 'provisioning' });
+              navigate('credentials');
+            }}
             onCredentials={() => navigate('credentials')} onProjectIdentity={() => { navigate('settings'); setIdentityReveal(n => n + 1); }} />}
-          appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
+          appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.profileResult?.decision === 'creation-unconfirmed' || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
           initializationState={initializationState} versionEditState={versionEditState}
           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
           versionEditor={<><VersionReservePanel controller={versionReserve} /><ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} /></>}

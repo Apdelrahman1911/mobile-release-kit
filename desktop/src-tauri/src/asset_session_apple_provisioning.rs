@@ -14,6 +14,9 @@ use crate::{
     service_protocol::Id,
 };
 
+#[path="asset_session_apple_profile_input.rs"]
+mod profile_input;
+
 fn changed() -> BridgeError {
     BridgeError::new(
         "apple_provisioning_changed",
@@ -49,6 +52,7 @@ pub(crate) struct AppleProvisioningDocumentInput {
     state: Arc<NativeStateReady>,
     account: AccountRef,
     target: BundleTarget,
+    profile_asset: Mutex<Option<Arc<OriginalWork>>>,
 }
 /// The same admission's owned inputs. Collect gates/material/census before
 /// SavedEditGuard, then carry them through publication without re-locking Edit.
@@ -207,7 +211,7 @@ impl AppleProvisioningDocumentInput {
         let binding = DocumentBinding {
             inner: document.clone(),
         };
-        if binding.apple_provisioning_gate(&state) != wire::Availability::Available {
+        if binding.apple_provisioning_current_gate(&state, self.profile_sources()) != wire::Availability::Available {
             return Err(changed());
         }
         let edit = document
@@ -263,6 +267,7 @@ impl AppleProvisioningDocumentInput {
             provenance,
             target: self.target.clone(),
             reviewed_at,
+            signing: None,
         })
     }
     fn own_backing_bytes(&self) -> Option<usize> {
@@ -285,6 +290,9 @@ impl DocumentBinding {
         self.inner.bridge.apple_provisioning.document_lost();
     }
     fn apple_provisioning_gate(&self, state: &DocumentState) -> wire::Availability {
+        self.apple_provisioning_current_gate(state,None)
+    }
+    fn apple_provisioning_current_gate(&self,state:&DocumentState,source:Option<&Arc<vault::profile_sources::AppleProfileSources>>)->wire::Availability {
         use wire::Availability;
         // The Access gate excludes its own owner. Add it explicitly here;
         // Root's reciprocal-hook patch must NOT call this gate from Access.
@@ -300,7 +308,7 @@ impl DocumentBinding {
         // local_store_gate is the original non-Apple registry/credential/setup
         // gate. The shared patch factors its unrelated-owner checks, rather
         // than making this operation reject itself through reciprocal checks.
-        self.local_store_base_gate(state)
+        self.local_store_base_gate_current_profile(state,source)
     }
     /// This explicit user action prepares local state only. The Host retains
     /// its actual originals; no CLI endpoint, read grant or provider operation
@@ -401,6 +409,7 @@ impl DocumentBinding {
             state: ready,
             account,
             target,
+            profile_asset: Mutex::new(None),
         });
         original.current_locked(&self.inner, state, edit)?;
         // Future quote already covers the maximum wrapper/lane; check its
@@ -421,7 +430,7 @@ impl DocumentBinding {
         input: wire::Start,
     ) -> Result<wire::Status, BridgeError> {
         let admitted_at = Instant::now();
-        let state = self.lock();
+        let mut state = self.lock();
         let gate = self.apple_provisioning_gate(&state);
         let original = self
             .inner
@@ -459,10 +468,31 @@ impl DocumentBinding {
                 admitted_at,
                 Some((registration, root)),
                 gate,
-                original,
+                original.clone(),
             )?;
         drop(edit);
+        // All gates/census/saved originals were checked under the SAME Doc.
+        // The retained SavedSession exists before any destination reservation.
+        #[cfg(feature="desktop-shell")]
+        let asset_start = if let Some(profile)=admitted.profile() {
+            match self.attach_apple_profile(&mut state,&original,profile) {
+                Ok(start)=>Some(start),
+                Err(error)=> {
+                    // Keep both original books, request STOP, and drop their
+                    // existing GO senders. No replacement work/retry is made.
+                    profile.admission_failed(&original,error.code=="cleanup_unknown",Instant::now());
+                    drop(state);drop(admitted);return Err(error);
+                }
+            }
+        } else { None };
+        #[cfg(not(feature="desktop-shell"))]
+        if let Some(profile)=admitted.profile() {
+            let _=profile.decline_before_asset(Reason::Unqualified,Instant::now());
+            drop(state);drop(admitted);return Err(wire::invalid());
+        }
         drop(state);
+        #[cfg(feature="desktop-shell")]
+        if let Some(start)=asset_start { let _=start.send(()); }
         Ok(admitted.release())
     }
     pub(crate) fn status_apple_provisioning(&self) -> Result<wire::Status, BridgeError> {

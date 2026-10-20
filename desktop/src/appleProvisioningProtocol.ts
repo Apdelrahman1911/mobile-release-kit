@@ -1,6 +1,7 @@
 // Exactly the original native Bundle-ID protocol. No Access query/consent,
 // provider JSON, journal row, issuer override, secret or local path is accepted.
 import { copyBoundedComparisonData, parseSavedConfigContent, sameOfflineData } from './offlinePreflightProtocol.ts';
+import { APPLE_PROFILE_MODES, isAppleProfileMode, parseAppleProfileSetupResult, parseAppleProfileSavedReference } from './appleProfileSetup.ts';
 import { parseAndroidBuildSavedVersion } from './androidBuildProtocol.ts';
 import type { AppleProvisioningContext, AppleProvisioningIdentity, AppleProvisioningMode, AppleProvisioningConsent,
   AppleProvisioningOperation, AppleProvisioningStatus, AppleRecoveryHistory, PrepareAppleProvisioning } from './appleProvisioningTypes.ts';
@@ -12,7 +13,7 @@ export const APPLE_PROVISIONING_LIMITATIONS = Object.freeze(['bundle-id-only', '
 export type AppleProvisioningCommand = 'prepare_apple_provisioning' | 'start_apple_provisioning' |
   'apple_provisioning_status' | 'cancel_apple_provisioning';
 const encoder = new TextEncoder();
-const modes = ['review', 'register', 'reconcile'] as const;
+const modes = ['review', 'register', 'reconcile', ...APPLE_PROFILE_MODES] as const;
 const phases = ['awaiting-consent', 'starting', 'running', 'stopping', 'terminal', 'unknown'] as const;
 const outcomes = ['complete', 'refused', 'cancelled', 'timed-out', 'failed', 'unknown'] as const;
 const reasons = ['none', 'cancelled', 'context-changed', 'document-lost', 'shutdown', 'timed-out', 'protocol-error',
@@ -59,15 +60,18 @@ export function parseAppleRecoveryHistory(value: unknown): AppleRecoveryHistory 
   } catch { return null; }
 }
 export function appleProvisioningConsent(mode: AppleProvisioningMode): AppleProvisioningConsent {
+  if (isAppleProfileMode(mode)) return `local-ios-${mode}-v1`;
   return mode === 'register' ? 'local-ios-bundle-register-v1' : mode === 'reconcile' ? 'local-ios-bundle-reconcile-v1' : 'local-ios-bundle-review-v1';
 }
+const requestFields = (value: unknown): readonly string[] => value && typeof value === 'object' && 'mode' in value && isAppleProfileMode(value.mode) ? [...fields, 'p12RecordId', 'p12RecordRevision'] : fields;
 function request(value: unknown): value is PrepareAppleProvisioning {
-  if (!keys(value, fields) || typeof value.projectId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(value.projectId) ||
+  if (!keys(value, requestFields(value)) || typeof value.projectId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(value.projectId) ||
       !counter(value.draftRevision, 0xfffffffe) || !counter(value.baselineGeneration, 0xfffffffe) || !parseSavedConfigContent(value.savedConfig) ||
       !parseAndroidBuildSavedVersion(value.savedVersion) || !counter(value.credentialContextRevision, 0xfffffffe) || value.credentialContextRevision < 1 ||
       !token(value.recordId) || !counter(value.recordRevision, 0xfffffffe) || value.recordRevision < 1 || value.executionMode !== 'local' ||
       value.platform !== 'ios' || !oneOf(value.mode, modes) || !appleDisplayName(value.displayName) || value.newApplication !== (value.mode === 'register')) return false;
-  return value.mode === 'review' ? value.reference === null : identity(value.reference);
+  if (isAppleProfileMode(value.mode) && (!token(value.p12RecordId) || !counter(value.p12RecordRevision, 0xfffffffe) || value.p12RecordRevision < 1)) return false;
+  return value.mode === 'review' || value.mode === 'profile-review' ? value.reference === null : identity(value.reference);
 }
 export function parseAppleProvisioningRequest(value: unknown): PrepareAppleProvisioning | null {
   try { const v = copyBoundedComparisonData(value, 8192); return request(v) ? v : null; } catch { return null; }
@@ -89,6 +93,7 @@ export function encodeAppleProvisioningRequest(command: AppleProvisioningCommand
   } catch { return null; }
 }
 function result(value: unknown, op: Record<string, unknown>, context: AppleProvisioningContext): boolean {
+  if (isAppleProfileMode(context.mode)) return parseAppleProfileSetupResult(value, context.mode) !== null;
   if (!keys(value, ['schemaVersion', 'scope', 'mode', 'observation', 'decision', 'attempt', 'comparison', 'limitations']) || value.schemaVersion !== 1 ||
       value.scope !== 'local-ios-bundle-provisioning' || value.mode !== context.mode ||
       !oneOf(value.observation, ['found', 'not-returned', 'not-permitted', 'inconclusive', 'not-checked']) ||
@@ -118,11 +123,16 @@ export function parseAppleProvisioningStatus(value: unknown): AppleProvisioningS
         !oneOf(v.availability, ['available', 'busy', 'shutdown', 'cleanup-unknown', 'document-lost', 'unsupported-platform', 'runtime-unqualified'])) return null;
     const op = v.operation;
     if (op === null) return v as unknown as AppleProvisioningStatus;
-    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'recovery']) ||
+    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'recovery', ...(typeof op === 'object' && Object.hasOwn(op, 'savedProfile') ? ['savedProfile'] : [])]) ||
         !token(op.operationId) || !token(op.ownerGeneration) || !oneOf(op.phase, phases) || typeof op.intentUsable !== 'boolean' || !oneOf(op.reason, reasons) ||
-        !keys(op.context, [...fields, 'operation']) || op.context.operation !== 'apple-bundle-provisioning') return null;
+        !keys(op.context, [...requestFields(op.context), 'operation']) || op.context.operation !== 'apple-bundle-provisioning') return null;
     const prepared = { ...op.context }; delete prepared.operation;
     if (!request(prepared)) return null;
+    const saved = Object.hasOwn(op, 'savedProfile') ? parseAppleProfileSavedReference(op.savedProfile) : null;
+    if (Object.hasOwn(op, 'savedProfile') && (!saved || saved.revisionCounter !== 1 ||
+        [prepared.recordId, prepared.p12RecordId].includes(saved.recordId) ||
+        !['profile-reuse', 'profile-create'].includes(prepared.mode) || op.phase !== 'terminal' || op.outcome !== 'complete' ||
+        parseAppleProfileSetupResult(op.result, prepared.mode)?.decision !== 'download-returned')) return null;
     if (op.recovery !== null) {
       const history = parseAppleRecoveryHistory(op.recovery);
       if (!history || op.context.mode !== 'review' || op.phase !== 'terminal' || op.outcome !== 'complete') return null;
@@ -150,6 +160,10 @@ export function appleProvisioningProgress(before: AppleProvisioningOperation, af
   if (before.phase === 'terminal') return sameOfflineData(before, after) ||
     // Context loss may withdraw historical DATA at a newer original status
     // revision. No terminal result, recorded disposition or list is replaced.
-    before.recovery !== null && after.recovery === null && sameOfflineData({ ...before, recovery: null }, after);
+    before.recovery !== null && after.recovery === null && sameOfflineData({ ...before, recovery: null }, after) ||
+    // Native context loss may also withdraw the exact detached saved-record DATA.
+    before.savedProfile !== undefined && after.savedProfile === undefined && (() => {
+      const { savedProfile: _saved, ...withoutSaved } = before; return sameOfflineData(withoutSaved, after);
+    })();
   return (before.intentUsable || !after.intentUsable) && phases.indexOf(after.phase) >= phases.indexOf(before.phase);
 }

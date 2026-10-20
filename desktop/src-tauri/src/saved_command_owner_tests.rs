@@ -144,7 +144,7 @@ pub(super) fn active_with_context(application: SavedCommandOwner, context: Conte
         SavedCommandDomain::IOSArchive => Profile::IOSArchive(ios_wire::Profile::MacArm64),
         SavedCommandDomain::ArtifactInspection => Profile::ArtifactInspection(artifact_wire::Profile::MacosArm64),
         SavedCommandDomain::LocalStorePreflight => Profile::LocalStorePreflight(store_wire::Profile::MacosArm64) };
-    let owner = Arc::new(Session { agent_build: None, agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+    let owner = Arc::new(Session { agent_build: None, agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile, clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None, artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
