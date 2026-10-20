@@ -77,7 +77,9 @@ pub(crate) use apple_signing::{AppleProfileNativeJoined, AppleProfileSession, Ap
     AppleProfilePendingAck, AppleProfileSavePermit, AppleProfileNoSaveJoined};
 pub(crate) use apple_provisioning::{AppleProvisioningNativeJoined, AppleProvisioningAllJobsJoined, APPLE_PROVISIONING_INPUT_LIMIT};
 pub(crate) use apple_provisioning::document_backing_bytes as apple_provisioning_document_backing_bytes;
-pub(crate) use apple_key::AppleDistributionCertificateBinding;
+pub(crate) use apple_key::{AppleDistributionCertificateBinding,AppleKeySaveCommand,AppleP12PendingAck,AppleP12SavePermit,AppleP12NoSaveJoined,AppleP12NativeJoined};
+#[cfg(all(feature="desktop-shell",target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(crate) use apple_key::PrivateAppleP12Input;
 pub(crate) use apple_provisioning::retained_document_backing_bytes as apple_provisioning_retained_document_backing_bytes;
 
 #[path = "saved_command_android_catalog.rs"]
@@ -267,7 +269,7 @@ impl Context {
     fn signing_check_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signing_check()) }
     fn requires_private_material(&self) -> bool { self.signed_ios() || matches!(self, Self::AndroidBuild(c) if c.signed()) || matches!(self, Self::AppleProvisioning(_) | Self::LocalStorePreflight(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_)) }
     fn recovery_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.recovery()) }
-    fn frame_limit(&self) -> usize { match self { Self::AppleProvisioning(context) if context.mode.certificate() => context.mode.events() as usize + 2, Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), Self::LocalStoreReconcile(context)=>context.frame_limit(), _ => self.domain().frame_limit() } }
+    fn frame_limit(&self) -> usize { match self { Self::AppleProvisioning(context) if (context.mode.certificate() || context.mode.p12()) => context.mode.events() as usize + 2, Self::IOSArchive(context) => context.frame_limit(), Self::AndroidBuild(context) => context.frame_limit(), Self::LocalStoreReconcile(context)=>context.frame_limit(), _ => self.domain().frame_limit() } }
     fn domain(&self) -> SavedCommandDomain { match self {
         Self::GenerateUploadKey(_) => SavedCommandDomain::GenerateUploadKey,
         Self::AppleProvisioning(_) => SavedCommandDomain::AppleProvisioning,
@@ -3539,11 +3541,15 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
         Some(PrivateSigningMaterial::Store(value)) => value.certificate_input(),
         _ => Ok(None),
     };
-    let header = match &certificate {
+    let p12 = match material.as_ref() {
+        Some(PrivateSigningMaterial::Store(value)) => value.p12_input(), _=>Ok(None),
+    };
+    let header = if let Ok(Some(value))=&p12 { value.header().map(Some) }
+        else if p12.is_err() { Err(BridgeError::protocol()) } else { match &certificate {
         Ok(Some(value)) => value.header().map(Some),
         Ok(None) => material.as_ref().map(|value| value.header()).transpose(),
         Err(_) => Err(BridgeError::protocol()),
-    };
+    }};
     if owner.context.requires_private_material() != material.is_some() || header.is_err()
         || material.as_ref().is_some_and(|value| !value.matches(&owner.context, owner.registration, &owner.project)) { failed = true; }
     if !*stop.borrow() {
@@ -3556,7 +3562,18 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                         if let Some(material) = material.as_ref().filter(|_|!owner.candidate_android()&&!owner.candidate_ios()&&!matches!(owner.domain,SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile|SavedCommandDomain::LocalStoreExecute)) {
                             let header = header.as_ref().ok().and_then(Option::as_ref)
                                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
-                            if let Some(certificate)=certificate.as_ref().ok().and_then(Option::as_ref) {
+                            if let Some(p12)=p12.as_ref().ok().and_then(Option::as_ref) {
+                                if matches!(&owner.context,Context::AppleProvisioning(context) if context.mode==apple_wire::Mode::P12Save) {
+                                    #[cfg(all(feature="desktop-shell",target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+                                    apple_key::p12::write_material(&owner,writer,material,p12,header).await?;
+                                    #[cfg(not(all(feature="desktop-shell",target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                                    return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+                                } else {
+                                    let parts=p12.parts().map_err(|_|std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+                                    writer.write_all(material.prefix()).await?;writer.write_all(header).await?;
+                                    for(_,bytes)in parts{writer.write_all(bytes).await?;}writer.write_all(material.suffix()).await?;
+                                }
+                            } else if let Some(certificate)=certificate.as_ref().ok().and_then(Option::as_ref) {
                                 let parts=certificate.parts().map_err(|_|std::io::Error::from(std::io::ErrorKind::InvalidData))?;
                                 writer.write_all(material.prefix()).await?;writer.write_all(header).await?;
                                 for(_,bytes)in parts{writer.write_all(bytes).await?;}writer.write_all(material.suffix()).await?;
@@ -3798,6 +3815,9 @@ async fn enqueue_frame(inner: &Inner, owner: &Session, frame: Frame) -> bool {
 }
 async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, owner: Arc<Session>,
     slot: Arc<AsyncMutex<Pipe<T>>>, stderr: bool, mut guard: Guard) -> ReadEnd {
+    if !stderr && matches!(&owner.context, Context::AppleProvisioning(context) if context.mode == apple_wire::Mode::P12Save) {
+        return apple_key::p12::read_output(inner,owner,slot,guard).await;
+    }
     if !stderr && matches!(&owner.context, Context::AppleProvisioning(context) if context.mode == apple_wire::Mode::KeyPrepare) {
         return apple_key::read_output(inner, owner, slot, guard).await;
     }
@@ -3814,7 +3834,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
     // Only certificate mode enlarges the original JSON reader's aggregate.
     // Profile/key private receivers and every other domain retain their limits.
     let response_limit = match &owner.context {
-        Context::AppleProvisioning(context) if context.mode.certificate() => context.mode.response_limit(),
+        Context::AppleProvisioning(context) if (context.mode.certificate() || context.mode.p12()) => context.mode.response_limit(),
         _ => owner.domain.response_limit(),
     };
     let mut pipe = slot.lock().await; let mut buffer = [0u8; 4096]; let mut bytes = Vec::new();

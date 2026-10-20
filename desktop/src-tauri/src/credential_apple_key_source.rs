@@ -8,6 +8,8 @@ use std::sync::{OnceLock, Weak};
 
 #[path = "credential_apple_certificate_source.rs"]
 pub(in crate::asset_session) mod certificate;
+#[path = "credential_apple_p12_source.rs"]
+pub(in crate::asset_session) mod p12;
 
 pub(crate) struct AppleKeySources {
     p8: BoundLoan,
@@ -15,6 +17,7 @@ pub(crate) struct AppleKeySources {
     owner: OnceLock<Weak<OriginalWork>>,
     inventory: OnceLock<Arc<AppleDistributionKeyInventory>>,
     certificate: Option<certificate::CertificateSource>,
+    p12: Option<p12::P12Source>,
 }
 impl AppleKeySources {
     pub(in crate::asset_session) fn capture(
@@ -24,6 +27,7 @@ impl AppleKeySources {
         key: &RecordKey,
         payload: &Arc<Payload>,
         selected_key: Option<&RecordKey>,
+        p12_mode: bool, selected_p12: Option<&RecordKey>,
     ) -> Result<Arc<Self>, Reason> {
         if !document.native_qualified()
             || !document.persistence_qualified()
@@ -58,6 +62,19 @@ impl AppleKeySources {
         {
             return Err(Reason::ContextStale);
         }
+        let p12 = if p12_mode {
+            let key=selected_key.ok_or(Reason::SourceRefused)?;
+            let mut rows=session.rows.iter().filter(|row| row.reference(loan.reference.identity).matches(key));
+            let keyref=rows.next().ok_or(Reason::SourceChanged)?.reference(loan.reference.identity);
+            if rows.next().is_some() { return Err(Reason::SourceChanged); }
+            let selected=selected_p12.map(|expected| {
+                let mut rows=session.rows.iter().filter(|row| row.reference(loan.reference.identity).matches(expected));
+                let first=rows.next().ok_or(Reason::SourceChanged)?.reference(loan.reference.identity);
+                if rows.next().is_some(){return Err(Reason::SourceChanged);}
+                Ok(KeyReference::native(first.identity,first.record,first.revision))
+            }).transpose()?;
+            Some(p12::P12Source::capture(document,state,loan,&KeyReference::native(keyref.identity,keyref.record,keyref.revision),selected.as_ref())?)
+        } else { if selected_p12.is_some(){return Err(Reason::SourceRefused);} None };
         let certificate = selected_key.map(|key| certificate::CertificateSource::capture(state, key, loan)).transpose()?;
         Ok(Arc::new(Self {
             p8: BoundLoan {
@@ -70,7 +87,7 @@ impl AppleKeySources {
             roster,
             owner: OnceLock::new(),
             inventory: OnceLock::new(),
-            certificate,
+            certificate, p12,
         }))
     }
     pub(in crate::asset_session) fn native(&self) -> &Arc<NativeContext> {
@@ -104,6 +121,7 @@ impl AppleKeySources {
             && left.revision == right.revision
             && left.original == right.original
             && match (&self.certificate, &other.certificate) { (None,None)=>true,(Some(a),Some(b))=>a.same(b),_=>false }
+            && match (&self.p12,&other.p12) { (None,None)=>true,(Some(a),Some(b))=>a.same(b),_=>false }
             && self.roster.generation == other.roster.generation
             && self.roster.roots == other.roster.roots
     }
@@ -115,8 +133,9 @@ impl AppleKeySources {
         state
             .vault
             .as_ref()
-            .is_some_and(|session| self.p8.current(state, session))
+            .is_some_and(|session| self.p8.current(state, session) || self.owner().is_some_and(|owner| self.p8.current_for_apple_p12(state,session,&owner)))
             && self.certificate.as_ref().is_none_or(|source| source.current(self, document, state))
+            && self.p12.as_ref().is_none_or(|p12| p12.current(document,state))
             && document.inner.bridge.registry_generation() == self.roster.generation
             && document
                 .context_matches(state, &self.p8.context)
@@ -179,6 +198,7 @@ impl AppleKeySources {
                     && slot.settlement != Settlement::Unknown
                     && slot.phase != Phase::Unknown
             })
+            && self.p12.as_ref().is_none_or(|p12| p12.current(document,state))
             && document.inner.bridge.registry_generation() == self.roster.generation
             && document
                 .inner
@@ -232,6 +252,7 @@ impl AppleKeySources {
         for root in &self.roster.roots {
             bytes = bytes.checked_add(root.path.capacity())?;
         }
+        if let Some(p12)=&self.p12 { bytes=bytes.checked_add(p12.own_retained_bytes())?; }
         if self.certificate.is_some() {
             bytes=bytes.checked_add(certificate::CertificateSource::weak_backing_bytes()?)?;
         }

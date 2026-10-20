@@ -21,6 +21,7 @@ REQUIRED_TOOLING_FILES = (
     "fastlane/apple_provisioning_bundle_read.rb",
     "fastlane/apple_provisioning_profile_read.rb",
     "fastlane/apple_provisioning_p12.rb",
+    "fastlane/apple_provisioning_p12_assemble.rb",
     "fastlane/apple_provisioning_signing.rb",
     "fastlane/apple_provisioning_bundle_registration.rb",
     "fastlane/apple_distribution_key.rb",

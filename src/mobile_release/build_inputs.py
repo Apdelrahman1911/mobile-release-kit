@@ -695,6 +695,10 @@ _LAYOUTS = {
     "apple-distribution-key": {"pending-key": _ScratchSpec("pending-apple-key.mrk", 8233)},
     # One fixed public leaf+binding frame, not a general certificate/path API.
     "apple-distribution-certificate": {"certificate": _ScratchSpec("apple-distribution-certificate.mrk", 65843)},
+    # Fixed P12 assembler inputs only; native random password is never argv/env.
+    "apple-p12-assembly": {"pending-key": _ScratchSpec("pending-apple-key.mrk", 8233),
+        "p12-password": _ScratchSpec("p12-password", 64),
+        "certificate": _ScratchSpec("distribution-certificate.der", 64 * 1024)},
     "online-readback": {platform: _ScratchSpec(platform + ".json", _SMALL, "exclusive-output")
                         for platform in ("android", "ios")},
 }

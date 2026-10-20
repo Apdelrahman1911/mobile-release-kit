@@ -35,6 +35,11 @@ class _Engine(_SavedCommandEngine):
             from ._desktop_apple_key_private import KeyOutput
             self._require(type(key) is KeyOutput)
             key.retire(self)
+        p12 = getattr(original, "_p12_output", None)
+        if p12 is not None:
+            from ._desktop_apple_p12_private import P12Output
+            self._require(type(p12) is P12Output)
+            p12.retire(self)
 
     def _service_resources_closed(self):
         if not super()._service_resources_closed():
@@ -42,7 +47,8 @@ class _Engine(_SavedCommandEngine):
         original = self.service if self.service is not None else self.input.operation
         profile = getattr(original, "_profile_output", None)
         key = getattr(original, "_key_output", None)
-        return (profile is None or profile.closed()) and (key is None or key.closed())
+        p12 = getattr(original, "_p12_output", None)
+        return (profile is None or profile.closed()) and (key is None or key.closed()) and (p12 is None or p12.closed())
 
 
 def main(*, started):

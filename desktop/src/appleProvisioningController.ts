@@ -1,5 +1,7 @@
 // App-held UI coordination only. Neither promises, events nor comparison
 // counters can settle the original native Session or its account-wide journal.
+import { appleP12InputBase, retainedAppleP12Input, isAppleP12Mode } from './appleP12SetupProtocol.ts';
+import type { AppleP12Result } from './appleP12SetupProtocol.ts';
 import { appleCertificateKeyChoices, appleDistributionCertificateInputBase, retainedAppleDistributionCertificateInput, isAppleDistributionCertificateMode } from './appleDistributionCertificateSetupProtocol.ts';
 import type { AppleCertificateKeySelection, AppleDistributionCertificateResult, AppleCertificateRecoveryHistory } from './appleDistributionCertificateSetupProtocol.ts';
 import { appleDistributionKeyInputBase, retainedAppleDistributionKeyInput, isAppleDistributionKeyMode } from './appleDistributionKeySetupProtocol.ts';
@@ -24,13 +26,13 @@ interface Source {
   now?(): number;
 }
 type Base = Omit<PrepareAppleProvisioning, 'mode' | 'reference' | 'newApplication' | 'displayName'>;
-type InputFamily = 'bundle' | 'profile' | 'key' | 'certificate';
-const inputFamily = (mode: AppleProvisioningMode): InputFamily => isAppleDistributionCertificateMode(mode) ? 'certificate' : isAppleDistributionKeyMode(mode) ? 'key' : isAppleProfileMode(mode) ? 'profile' : 'bundle';
+type InputFamily = 'bundle' | 'profile' | 'key' | 'certificate' | 'p12';
+const inputFamily = (mode: AppleProvisioningMode): InputFamily => isAppleP12Mode(mode) ? 'p12' : isAppleDistributionCertificateMode(mode) ? 'certificate' : isAppleDistributionKeyMode(mode) ? 'key' : isAppleProfileMode(mode) ? 'profile' : 'bundle';
 interface Witness { family: InputFamily; base: Base; observation: number; entry: number }
 interface Attempt {
   request: PrepareAppleProvisioning; witness: Witness; epoch: number; after: number;
   previous: AppleProvisioningIdentity | null; identity: AppleProvisioningIdentity | null;
-  preparedAt: number; startedAt: number | null; keyReviewExpires: number | null; certificateReviewExpires: number | null; retired: boolean; prepareAccepted: boolean;
+  preparedAt: number; startedAt: number | null; keyReviewExpires: number | null; certificateReviewExpires: number | null; p12ReviewExpires: number | null; retired: boolean; prepareAccepted: boolean;
   prepareJoined: boolean; startClaimed: boolean; startJoined: boolean; terminalRead: boolean;
 }
 interface Reference { identity: AppleProvisioningIdentity; witness: Witness; displayName: string; expires: number | null }
@@ -47,6 +49,8 @@ export interface AppleProvisioningState {
   previousCertificateAttempts: AppleCertificateRecoveryHistory | null; certificateContinueReason: string | null;
   certificateKeyChoices: readonly AppleCertificateKeySelection[]; certificateKeySelection: AppleCertificateKeySelection | null;
   certificateResult: AppleDistributionCertificateResult | null; certificateTerminalRead: boolean;
+  p12Result: AppleP12Result | null; savedP12: AppleProfileSavedReference | null; p12TerminalRead: boolean;
+  p12ReviewReference: AppleProvisioningIdentity | null; p12ReviewReason: string | null; p12ReuseReason: string | null; p12SaveReason: string | null;
   certificateReviewReference: AppleProvisioningIdentity | null; certificateAttemptReference: AppleProvisioningIdentity | null;
   certificateReviewReason: string | null; certificateCreateReason: string | null; certificateReconcileReason: string | null;
   displayName: string; newApplication: boolean; issue: Issue | null; historical: boolean;
@@ -90,6 +94,7 @@ export class AppleProvisioningController {
   private keyReview: Reference | null = null;
   private certificateKey: AppleCertificateKeySelection | null = null;
   private certificateReview: Reference | null = null;
+  private p12Review: (Reference & { action: 'p12-reuse' | 'p12-save' }) | null = null;
   private certificateAttempt: Reference | null = null;
   private restoredCertificate: Reference | null = null;
   private inputFamily: InputFamily | null = null;
@@ -121,7 +126,7 @@ export class AppleProvisioningController {
       if (this.selectionPending) return null;
       const project = this.source.project(), assets = this.source.assets();
       const family = requestedFamily ?? (assets?.scope.purpose === 'provisioning' ? 'profile' : 'bundle');
-      let base = family === 'certificate' ? appleDistributionCertificateInputBase(project, assets, this.certificateKey) : family === 'key' ? appleDistributionKeyInputBase(project, assets) :
+      let base = family === 'p12' ? appleP12InputBase(project, assets, this.certificateKey) : family === 'certificate' ? appleDistributionCertificateInputBase(project, assets, this.certificateKey) : family === 'key' ? appleDistributionKeyInputBase(project, assets) :
         family === 'profile' ? appleProfileInputBase(project, assets) : localStoreRequest(project, assets);
       const a = this.attempt;
       if (!base && family === 'key' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionKeyMode(a.request.mode)) {
@@ -129,6 +134,9 @@ export class AppleProvisioningController {
       }
       if (!base && family === 'certificate' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleDistributionCertificateMode(a.request.mode)) {
         base = retainedAppleDistributionCertificateInput(project, assets, this.certificateKey, a.witness.base);
+      }
+      if (!base && family === 'p12' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleP12Mode(a.request.mode)) {
+        base = retainedAppleP12Input(project, assets, this.certificateKey, a.witness.base, a.request.mode);
       }
       if (!base && family === 'profile' && a?.startClaimed && !a.terminalRead && !a.retired && !this.issue && isAppleProfileMode(a.request.mode)) {
         base = retainedAppleProfileInput(project, assets, a.witness.base);
@@ -158,6 +166,7 @@ export class AppleProvisioningController {
     const witness = this.capture(family);
     if (family === 'key' && !witness) return 'Choose the App Store Connect key, unlock encrypted storage, then assess and assign its P8, Key ID and Issuer ID in Set up Apple signing. Save the app settings and read the saved version first. No P12 is needed.';
     if (family === 'certificate' && !witness) return 'Choose the current encrypted signing key and assign the App Store Connect P8 in Set up Apple signing. Unlock storage and save the app settings/version first. A previous saved-key result is not a current selection.';
+    if (family === 'p12' && !witness) return 'Choose a current saved signing key above, unlock encrypted storage and assign the App Store Connect P8 in Set up Apple signing. To reuse a P12, assess and assign it in that same context first. Save the app settings and read its version.';
     if (family === 'profile' && !witness?.base.p12RecordId) return 'Choose Set up Apple signing, unlock encrypted storage, then assess and assign the existing P12/password and App Store Connect P8 in that context. Save the app settings and read its saved version first.';
     if (!witness) return 'Select This Mac → iOS → Store (or Full), save the configuration, read its saved version and assign the original App Store Connect P8 with its Key ID and Issuer ID.';
     if (!appleDisplayName(this.displayName)) return 'Enter an explicit Bundle ID display name (1–128 characters, no control characters).';
@@ -198,6 +207,7 @@ export class AppleProvisioningController {
     const base = this.baseReason(inputFamily(mode)); if (base) return base;
     if (mode === 'certificate-create' && !this.referenceCurrent(this.certificateReview)) return 'Finish a fresh certificate check for this saved key first. Its separate request review is one-use and expires; an old receipt cannot restore it.';
     if (mode === 'certificate-reconcile' && !this.certificateReconciliationReference()) return 'Choose a matching earlier certificate request. A read-only check never repeats issuance or clears earlier uncertainty.';
+    if ((mode === 'p12-reuse' || mode === 'p12-save') && (!this.referenceCurrent(this.p12Review) || this.p12Review.action !== mode)) return 'Finish a fresh P12 review for the same saved key and assigned inputs. Only its exact reuse or new-save choice may continue; an old result cannot restore it.';
     if (mode === 'key-prepare' && !this.referenceCurrent(this.keyReview)) return 'Finish a fresh existing-key check first. Its one-use local-key review expires and cannot be restored from an old result.';
     if (mode === 'profile-reuse' || mode === 'profile-create') {
       if (!this.referenceCurrent(this.profileReview) || this.profileReview?.action !== mode) return 'Finish a current signing review first. Only its exact reuse or create choice can continue.';
@@ -226,6 +236,8 @@ export class AppleProvisioningController {
       !this.issue && isAppleDistributionKeyMode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
     const certificateTerminalRead = !!a?.terminalRead && a.prepareJoined && a.startClaimed && a.startJoined && !this.action && !this.cancellation &&
       !this.issue && isAppleDistributionCertificateMode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
+    const p12TerminalRead = !!a?.terminalRead && a.prepareJoined && a.startClaimed && a.startJoined && !this.action && !this.cancellation &&
+      !this.issue && isAppleP12Mode(a.request.mode) && sameAppleIdentity(a.identity, op) && op?.phase === 'terminal';
     const cancelId = a?.identity ?? (active(op) ? op : null);
     return Object.freeze({ native: !!this.original && !this.connectionRetired, visible: this.visible, initialized: this.initialized,
       listening: !!this.off, reading: !!this.read, pending: this.action?.kind ?? null, requestPending: !!this.action && !this.action.joined,
@@ -237,6 +249,10 @@ export class AppleProvisioningController {
       result: readResult?.scope === 'local-ios-bundle-provisioning' ? readResult : null,
       profileResult: readResult?.scope === 'local-ios-profile-setup' ? readResult : null,
       certificateResult: certificateTerminalRead && readResult?.scope === 'local-ios-distribution-certificate' ? readResult : null, certificateTerminalRead,
+      p12Result: p12TerminalRead && readResult?.scope === 'local-ios-p12-setup' ? readResult : null,
+      savedP12: p12TerminalRead ? op?.savedP12 ?? null : null, p12TerminalRead,
+      p12ReviewReference: this.referenceCurrent(this.p12Review) ? this.p12Review.identity : null,
+      p12ReviewReason: this.reason('p12-review'), p12ReuseReason: this.reason('p12-reuse'), p12SaveReason: this.reason('p12-save'),
       certificateKeyChoices: appleCertificateKeyChoices(this.source.project(), this.source.assets()), certificateKeySelection: this.certificateKey,
       certificateReviewReference: this.referenceCurrent(this.certificateReview) ? this.certificateReview.identity : null,
       certificateAttemptReference: this.restoredCertificate?.identity ?? this.certificateAttempt?.identity ?? null,
@@ -261,13 +277,14 @@ export class AppleProvisioningController {
       retained: this.ownerReason() !== null, cancelRequested: this.cancelRequested });
   }
   private publish(): void { this.state = this.projected(); if (!this.disposed) for (const listener of this.listeners) listener(); }
+  private clearP12Review(): void { this.p12Review = null; }
   private clearCertificateReview(): void { this.certificateReview = null; this.restoredCertificate = null; }
   private clearConsent(): void {
     this.acknowledged = false; this.consentUntil = null;
     if (this.consentTimer !== null) clearTimeout(this.consentTimer); this.consentTimer = null;
   }
   private fail(issue: Issue = 'unconfirmed'): void {
-    this.issue ??= issue; this.clearConsent(); this.clearCertificateReview(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null;
+    this.issue ??= issue; this.clearConsent(); this.clearCertificateReview(); this.clearP12Review(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null;
     if (this.attempt) this.attempt.retired = true;
     this.cancelRequested = true; this.publish(); void this.cancelOriginal();
   }
@@ -279,7 +296,7 @@ export class AppleProvisioningController {
     this.publish();
   };
   invalidate = (): void => {
-    this.epoch++; this.clearConsent(); this.clearCertificateReview(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null; this.declaredNew = false;
+    this.epoch++; this.clearConsent(); this.clearCertificateReview(); this.clearP12Review(); this.review = null; this.restored = null; this.profileReview = null; this.restoredProfile = null; this.keyReview = null; this.declaredNew = false;
     if (this.attempt) this.attempt.retired = true;
     if (this.action || active(this.status?.operation)) { this.cancelRequested = true; void this.cancelOriginal(); }
     this.publish();
@@ -327,7 +344,7 @@ export class AppleProvisioningController {
       try { this.off?.(); } catch { this.fail(); return; }
     }
     this.original = api; this.off = null; this.connectionRetired = false; this.initialized = false;
-    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.profileReview = null; this.profileAttempt = null; this.restoredProfile = null; this.keyReview = null; this.clearCertificateReview(); this.certificateAttempt = null; this.certificateKey = null; this.inputFamily = null; this.clearConsent(); this.witness = this.capture(); this.publish();
+    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.profileReview = null; this.profileAttempt = null; this.restoredProfile = null; this.keyReview = null; this.clearCertificateReview(); this.clearP12Review(); this.certificateAttempt = null; this.certificateKey = null; this.inputFamily = null; this.clearConsent(); this.witness = this.capture(); this.publish();
     if (!api) return;
     const pending = (async () => {
       try {
@@ -376,6 +393,12 @@ export class AppleProvisioningController {
           op.result?.scope === 'local-ios-distribution-certificate' && op.result.decision === 'request-review' && op.result.reason === 'certificate-required' &&
           this.now() < a.startedAt + 300000) {
         this.certificateReview = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000 });
+      }
+      if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'p12-review' && op.outcome === 'complete' &&
+          op.result?.scope === 'local-ios-p12-setup' && ['assemble-review', 'reuse-review'].includes(op.result.decision) &&
+          this.now() < a.startedAt + 300000) {
+        this.p12Review = freeze({ identity: identity(op), witness: a.witness, displayName: a.request.displayName, expires: a.startedAt + 300000,
+          action: op.result.decision === 'reuse-review' ? 'p12-reuse' : 'p12-save' });
       }
       if (this.current(a) && a.startClaimed && a.startedAt !== null && a.request.mode === 'profile-review' && op.outcome === 'complete' &&
           op.result?.scope === 'local-ios-profile-setup' && ['reuse-available', 'create-available'].includes(op.result.decision) &&
@@ -464,7 +487,7 @@ export class AppleProvisioningController {
     // old comparison locally before publishing; no pending original is replaced.
     if (this.inputFamily !== family) {
       if (continuation || this.ownerReason()) return Promise.resolve();
-      this.epoch++; this.clearConsent(); this.clearCertificateReview(); this.review = null; this.restored = null;
+      this.epoch++; this.clearConsent(); this.clearCertificateReview(); this.clearP12Review(); this.review = null; this.restored = null;
       this.profileReview = null; this.restoredProfile = null; this.keyReview = null;
       this.declaredNew = false; if (this.attempt) this.attempt.retired = true;
       this.inputFamily = family; this.witness = target;
@@ -477,7 +500,8 @@ export class AppleProvisioningController {
         !sameWitness(target, this.witness) || !sameWitness(target, this.capture(family)) ||
         continuation && (this.original !== continuation.api || this.witness !== continuation.witness || this.epoch !== continuation.epoch) ||
         this.disposed || !this.visible || this.reason(mode) || !this.witness || !this.status) return Promise.resolve();
-    const reference = mode === 'review' || mode === 'profile-review' || mode === 'key-review' || mode === 'certificate-review' ? null :
+    const reference = mode === 'review' || mode === 'profile-review' || mode === 'key-review' || mode === 'certificate-review' || mode === 'p12-review' ? null :
+      mode === 'p12-reuse' || mode === 'p12-save' ? this.p12Review?.identity :
       mode === 'certificate-create' ? this.certificateReview?.identity : mode === 'certificate-reconcile' ? this.certificateReconciliationReference()?.identity : mode === 'key-prepare' ? this.keyReview?.identity :
       mode === 'register' ? this.review?.identity : mode === 'profile-reuse' || mode === 'profile-create' ? this.profileReview?.identity :
       mode === 'profile-reconcile' ? this.profileReconciliationReference()?.identity : this.reconciliationReference()?.identity;
@@ -486,8 +510,10 @@ export class AppleProvisioningController {
     const a: Attempt = { request: freeze(request), witness: this.witness, epoch: this.epoch, after: this.status.statusRevision,
       previous: this.status.operation ? identity(this.status.operation) : null, identity: null, preparedAt: this.now(), startedAt: null, keyReviewExpires: mode === 'key-prepare' ? this.keyReview?.expires ?? null : null,
       certificateReviewExpires: mode === 'certificate-create' ? this.certificateReview?.expires ?? null : null,
+      p12ReviewExpires: mode === 'p12-reuse' || mode === 'p12-save' ? this.p12Review?.expires ?? null : null,
       retired: false, prepareAccepted: false, prepareJoined: false, startClaimed: false, startJoined: false, terminalRead: false };
     this.attempt = a; if (isAppleProfileMode(mode)) this.profileReview = null;
+    if (isAppleP12Mode(mode)) this.clearP12Review(); // An uncertain Prepare never restores save/reuse consent.
     if (isAppleDistributionKeyMode(mode)) this.keyReview = null; // Consumed even if Prepare's reply is lost.
     if (isAppleDistributionCertificateMode(mode)) this.certificateReview = null; // Lost Prepare never restores issuance review.
     if (mode === 'register') this.review = null; // Consumed once, including failed/lost Prepare.
@@ -505,7 +531,7 @@ export class AppleProvisioningController {
         if (this.action === slot) this.action = null;
         const op = this.status?.operation;
         if (!this.issue && this.current(a) && a.prepareAccepted && sameAppleIdentity(a.identity, op) && op?.phase === 'awaiting-consent' && op.intentUsable) {
-          this.consentUntil = Math.min(a.preparedAt + 60000, a.keyReviewExpires ?? Infinity, a.certificateReviewExpires ?? Infinity); this.acknowledged = false;
+          this.consentUntil = Math.min(a.preparedAt + 60000, a.keyReviewExpires ?? Infinity, a.certificateReviewExpires ?? Infinity, a.p12ReviewExpires ?? Infinity); this.acknowledged = false;
           if (this.now() >= this.consentUntil) this.invalidate();
           else this.consentTimer = setTimeout(() => { if (this.attempt === a && !a.startClaimed) this.invalidate(); }, this.consentUntil - this.now());
         }

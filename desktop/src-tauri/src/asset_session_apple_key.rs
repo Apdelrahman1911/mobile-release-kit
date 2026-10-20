@@ -12,6 +12,9 @@ use vault::{
     key_sources::{self, AppleKeySources},
 };
 
+#[path = "asset_session_apple_p12.rs"]
+pub(in crate::asset_session) mod p12;
+
 pub(super) struct Work {
     parent: Weak<AppleKeySession>,
     sources: Mutex<Option<Arc<AppleKeySources>>>,
@@ -19,13 +22,15 @@ pub(super) struct Work {
     installed: AtomicBool,
     no_dispatch: AtomicBool,
     save_received: AtomicBool,
+    p12: Option<p12::P12Work>,
 }
 pub(super) struct Request {
     parent: Arc<AppleKeySession>,
     sources: Arc<AppleKeySources>,
-    receive: oneshot::Receiver<Option<AppleKeySavePermit>>,
+    receive: oneshot::Receiver<Option<crate::saved_command_owner::AppleKeySaveCommand>>,
     prepare: bool,
     certificate: bool,
+    p12: bool,
 }
 impl Work {
     fn parent(&self) -> Option<Arc<AppleKeySession>> {
@@ -62,6 +67,7 @@ impl OriginalWork {
         self.apple_key.get()?.parent()
     }
     pub(crate) fn apple_key_source_checked(&self, parent: &AppleKeySession) -> bool {
+        if parent.p12_mode().is_some() { return p12::source_checked(self,parent); }
         self.apple_key.get().is_some_and(|work| work.same_parent(parent) && work.sources().is_ok_and(|sources|
             sources.owner().is_some_and(|owner| std::ptr::eq(owner.as_ref(), self) &&
                 if sources.selected_certificate_key().is_some() {
@@ -115,7 +121,7 @@ fn known_controls(owner: &Arc<OriginalWork>, allow_not_started: bool) -> bool {
         && owner.installation.is_none()
 }
 pub(super) fn current_slot(slot: &Slot, sources: &Arc<AppleKeySources>) -> bool {
-    matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
+    matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12)
         && slot.target.is_none()
         && slot.reason == Reason::None
         && slot.cleanup_end.is_none()
@@ -138,9 +144,10 @@ pub(super) fn release_deferred(owner: &Arc<OriginalWork>) -> bool {
         .is_some_and(|work| !work.no_more_work(owner))
 }
 pub(super) fn source_release_ready(slot: &Slot) -> bool {
-    matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
+    matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12)
         && slot.owner.apple_key.get().is_some_and(|work| {
             work.destination.get().is_none()
+                && work.p12.as_ref().is_none_or(|p12| !p12.has_destination())
                 && !work.save_received.load(Ordering::SeqCst)
                 && work.no_more_work(&slot.owner)
                 && known_controls(&slot.owner, true)
@@ -149,7 +156,7 @@ pub(super) fn source_release_ready(slot: &Slot) -> bool {
 pub(super) fn cleanup_staged_allowed(slot: &Slot, retained: bool) -> bool {
     slot.staged.is_none()
         || retained
-            && matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
+            && matches!(slot.operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12)
             && matches!(
                 slot.staged.as_ref(),
                 Some(Staged::Refused(_)) | Some(Staged::Committed { bind: None })
@@ -172,6 +179,7 @@ pub(super) fn dispose_sources(owner: &Arc<OriginalWork>) -> bool {
     let Ok(mut sources) = work.sources.try_lock() else {
         return false;
     };
+    if !sources.as_ref().is_none_or(|source| source.retire_p12_private()) { return false; }
     sources.take();
     true
 }
@@ -198,7 +206,7 @@ impl DocumentBinding {
         input: &Arc<AppleProvisioningDocumentInput>,
         parent: &Arc<AppleKeySession>,
     ) -> Result<oneshot::Sender<()>, BridgeError> {
-        if !(input.context().mode.local_key() || input.context().mode.certificate()) {
+        if !(input.context().mode.local_key() || input.context().mode.certificate() || input.context().mode.p12()) {
             return Err(crate::apple_provisioning_protocol::invalid());
         }
         let sources = input
@@ -228,6 +236,7 @@ impl DocumentBinding {
                 installed: AtomicBool::new(false),
                 no_dispatch: AtomicBool::new(false),
                 save_received: AtomicBool::new(false),
+                p12: input.context().mode.p12().then(p12::P12Work::new),
             })
             .map_err(|_| BridgeError::cleanup_unknown())?;
         if let Err(reason) = key_sources::attach(state, &owner, &sources) {
@@ -236,15 +245,16 @@ impl DocumentBinding {
             return Err(key_error(reason));
         }
         let prepare = input.context().mode == crate::apple_provisioning_protocol::Mode::KeyPrepare;
-        let certificate = input.context().mode.certificate();
+        let p12=input.context().mode.p12();
+        let certificate = input.context().mode.certificate() || p12;
         let mut slot = Slot::new(
             owner.clone(),
-            if certificate { Operation::UseAppleDistributionKey } else { Operation::PrepareAppleDistributionKey },
+            if input.context().mode == crate::apple_provisioning_protocol::Mode::P12Save { Operation::AssembleAppleP12 } else if certificate { Operation::UseAppleDistributionKey } else { Operation::PrepareAppleDistributionKey },
             Some(sources.native().clone()),
             None,
             None,
         );
-        slot.kind = prepare.then_some(Kind::AppleDistributionKey);
+        slot.kind = if input.context().mode==crate::apple_provisioning_protocol::Mode::P12Save {Some(Kind::AppleP12)} else {prepare.then_some(Kind::AppleDistributionKey)};
         let start = match self.install(
             state,
             slot,
@@ -252,7 +262,7 @@ impl DocumentBinding {
                 parent: parent.clone(),
                 sources: sources.clone(),
                 receive,
-                prepare, certificate,
+                prepare, certificate, p12,
             }),
         ) {
             Ok(start) => start,
@@ -309,7 +319,7 @@ impl DocumentBinding {
 pub(super) async fn run(
     document: &DocumentBinding,
     owner: &Arc<OriginalWork>,
-    request: Request,
+    mut request: Request,
 ) -> Staged {
     if owner.interrupted() {
         owner.apple_key_no_dispatch();
@@ -334,6 +344,9 @@ pub(super) async fn run(
             .clock()
             .observe_failure_at(reason, Instant::now());
         return Staged::Refused(reason);
+    }
+    if request.p12 {
+        if let Err(reason)=p12::initial(document,owner,&request).await { return refused(&request.parent,reason); }
     }
     if request.prepare {
         let Some(inventory)=request.sources.inventory() else { return refused(&request.parent,Reason::CleanupUnknown); };
@@ -379,7 +392,6 @@ pub(super) async fn run(
     if request.parent.source_check_returned(owner).is_err() {
         return refused(&request.parent, Reason::ContextStale);
     }
-    let mut receive = request.receive;
     let permit = loop {
         let notified = owner.wake.notified();
         let now = Instant::now();
@@ -423,7 +435,7 @@ pub(super) async fn run(
             return refused(&request.parent, Reason::Deadline);
         }
         tokio::select! { biased;
-            returned = &mut receive => match returned {
+            returned = &mut request.receive => match returned {
                 Ok(permit) => break permit,
                 Err(_) => return refused(&request.parent, Reason::CleanupUnknown),
             },
@@ -434,9 +446,11 @@ pub(super) async fn run(
     let Some(permit) = permit else {
         return Staged::Committed { bind: None };
     };
-    if !request.prepare {
-        return refused(&request.parent, Reason::CleanupUnknown);
-    }
+    let permit = match permit {
+        crate::saved_command_owner::AppleKeySaveCommand::P12(permit) => return p12::save(document,owner,&request,permit).await,
+        crate::saved_command_owner::AppleKeySaveCommand::Key(permit) if request.prepare && !request.p12=>permit,
+        _=>return refused(&request.parent,Reason::CleanupUnknown),
+    };
     let Some(work) = owner.apple_key.get() else {
         return refused(&request.parent, Reason::CleanupUnknown);
     };
@@ -496,11 +510,11 @@ pub(in crate::asset_session) async fn joined(
         let notify = owner.wake.notified();
         document.reconcile();
         if known_controls(owner, true) {
-            let saved = work
+            let saved = if work.p12.is_some() { p12::published(owner) } else { work
                 .destination
                 .get()
                 .and_then(Weak::upgrade)
-                .and_then(|destination| destination.published_reference_data(owner));
+                .and_then(|destination| destination.published_reference_data(owner)) };
             // Full readback alone is insufficient: the original coordinator
             // must have published this exact NEW row under its same guard.
             if work.save_received.load(Ordering::SeqCst) && saved.is_none() {

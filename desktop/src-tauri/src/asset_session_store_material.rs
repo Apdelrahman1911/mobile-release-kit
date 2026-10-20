@@ -18,6 +18,7 @@ pub(crate) use store_versions::StoreVersionMaterial;
 pub(crate) const MATERIAL_PREFIX: &[u8] = b"MRK-STORE-MATERIAL/1\n";
 pub(crate) const MATERIAL_SUFFIX: &[u8] = b"\nMRK-STORE-MATERIAL-END\n";
 
+pub(crate) use apple_key::p12::P12Material;
 pub(crate) struct SelectedStoreMaterial {
     native: Arc<NativeContext>, key: RecordKey, payload: Arc<Payload>,
     command: Option<StoreCommand>, prepare_document:Option<std::sync::Weak<Inner>>,
@@ -67,6 +68,7 @@ impl SelectedStoreMaterial {
     // Payload/Fields originals are counted separately, never copied here.
     pub(super) fn supplemental_frame_bytes(&self)->usize {
         if self.paired_context().is_some() { return paired_material::FRAME_BYTES; }
+        if self.p12_material() { return std::mem::size_of::<P12Material<'_>>()+2*8*std::mem::size_of::<(&str,&[u8])>()+1024+8*std::mem::size_of::<(&str,usize)>(); }
         if self.certificate_material() { return std::mem::size_of::<apple_key::CertificateMaterial<'_>>()+2*6*std::mem::size_of::<(&str,&[u8])>()+1024+6*std::mem::size_of::<(&str,usize)>(); }
         if self.profile_sources.is_some() { return 2*5*std::mem::size_of::<(&str,&[u8])>()+1024+5*std::mem::size_of::<(&str,usize)>(); }
         if self.apple_material()&&self.command.as_ref().and_then(StoreCommand::assignments).is_some(){
@@ -120,7 +122,7 @@ impl SelectedStoreMaterial {
         if self.profile_sources.is_some() { return self.profile_parts(); }
         // Certificate private fields require the fixed writer-local borrow;
         // a retained review/source must not own another loaded payload Arc.
-        if self.certificate_material() { return Err(refused()); }
+        if self.certificate_material() || self.p12_material() { return Err(refused()); }
         if self.command.is_none() { return Err(refused()); }
         let assignments=self.command.as_ref().and_then(StoreCommand::assignments);
         let count=if self.apple_material(){if let Some(a)=assignments{if a.review_demo.is_some(){11}else{9}}else{3}}else{1};

@@ -15,6 +15,7 @@ pub const REQUIRED: &[&str] = &[
     "store/tooling/fastlane/apple_provisioning.rb", "store/tooling/fastlane/apple_provisioning_bundle_read.rb",
     "store/tooling/fastlane/apple_provisioning_profile_read.rb",
     "store/tooling/fastlane/apple_provisioning_p12.rb",
+    "store/tooling/fastlane/apple_provisioning_p12_assemble.rb",
     "store/tooling/fastlane/apple_provisioning_signing.rb",
     "store/tooling/fastlane/apple_provisioning_bundle_registration.rb",
     "store/tooling/fastlane/apple_distribution_key.rb",

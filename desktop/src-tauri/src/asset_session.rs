@@ -100,7 +100,7 @@ use crate::vault_keyring_macos as keyring;
 #[path = "asset_session_keyring_macos.rs"]
 mod keyring_macos;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-pub(crate) use vault::{AppleDistributionKeyDestination, AppleDistributionKeyInventory, AppleDistributionKeyLoan, AppleKeyInventoryPoint, AppleP12Loan, AppleProfileDestination, upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
+pub(crate) use vault::{AppleDistributionKeyDestination, AppleDistributionKeyInventory, AppleDistributionKeyLoan, AppleKeyInventoryPoint, AppleP12Destination, AppleP12Loan, AppleProfileDestination, upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
 
 // A borrowed original session record is not a serialized credential or a new
 // credential owner. Only this document module can construct the signed loan.
@@ -129,7 +129,7 @@ mod tool_acquisition;
 pub(crate) use tool_acquisition::ToolAcquisitionDocumentInput;
 #[path = "asset_session_store_material.rs"]
 mod store_material;
-pub(crate) use store_material::{StoreVersionMaterial, SelectedStoreMaterial, MATERIAL_PREFIX as STORE_MATERIAL_PREFIX, MATERIAL_SUFFIX as STORE_MATERIAL_SUFFIX};
+pub(crate) use store_material::{StoreVersionMaterial, SelectedStoreMaterial, P12Material, MATERIAL_PREFIX as STORE_MATERIAL_PREFIX, MATERIAL_SUFFIX as STORE_MATERIAL_SUFFIX};
 #[path = "asset_session_github_secret.rs"]
 mod github_secret;
 pub(crate) use github_secret::{GitHubSecretMaterial, GitHubSecretFrame};
@@ -303,7 +303,7 @@ pub(crate) enum Phase { Idle, Admitting, Picking, Capturing, Selected, Assessing
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Operation { ChooseFile, ChooseProject, ChooseProjectPath, ChooseAndroidSource, ChooseArtifact, ChooseImages, InspectInstallation, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock,
-    OpenVault, PrepareInitialize, Initialize, Unlock, PrepareBackupExport, ImportBackup, GenerateUploadKey, RecoverUploadKey, AppleProfileSetup, PrepareAppleDistributionKey, UseAppleDistributionKey }
+    OpenVault, PrepareInitialize, Initialize, Unlock, PrepareBackupExport, ImportBackup, GenerateUploadKey, RecoverUploadKey, AppleProfileSetup, PrepareAppleDistributionKey, UseAppleDistributionKey, AssembleAppleP12 }
 impl Operation {
     fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
     fn project_path(self) -> bool { self == Self::ChooseProjectPath }
@@ -1906,6 +1906,10 @@ mod lookup_memory {
                     self.bytes=self.bytes.checked_sub(inventory.own_retained_bytes().ok_or(Problem::Capacity)?).ok_or(Problem::Capacity)?;
                 }
             }
+            if let Some(destination)=value.p12_destination() {
+                let inventory=destination.inventory();
+                if !self.secret_loans.insert(inventory)? { self.bytes=self.bytes.checked_sub(inventory.own_retained_bytes().ok_or(Problem::Capacity)?).ok_or(Problem::Capacity)?; }
+            }
             if let Some(context) = value.context() { self.context(context)?; }
             if let Some(key) = value.key() { self.vault_key(key)?; }
             if let Some(store) = value.store() { self.vault_store(store)?; }
@@ -2076,6 +2080,7 @@ mod lookup_memory {
             self.add(sources.own_retained_bytes().ok_or(Problem::Capacity)?)?;
             self.vault_loan(sources.loan())?;
             if let Some(payload)=sources.certificate_payload() { self.payload(&payload)?; }
+            if let Some(selected)=sources.selected_p12() { self.apple_profile_source(&selected)?; }
             if let Some(inventory)=sources.inventory() {
                 if self.secret_loans.insert(inventory)? { self.add(inventory.own_retained_bytes().ok_or(Problem::Capacity)?)?; }
                 self.context(inventory.context())?; self.vault_key(inventory.key())?; self.vault_store(inventory.store())?;
@@ -5204,6 +5209,8 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
 fn key_preservation_child(_owner: &Arc<OriginalWork>, _job: &ChildJob) -> bool {
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if let ChildJob::Vault(vault::Child::SaveAppleDistributionKey(request)) = _job { return request.admitted(_owner); }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(vault::Child::SaveAppleP12(request)) = _job { return request.admitted(_owner); }
     false
 }
 fn cleanup_child(_job: &ChildJob) -> bool {
@@ -5217,11 +5224,13 @@ fn cleanup_child(_job: &ChildJob) -> bool {
 }
 fn child_allocation_admitted(_owner: &OriginalWork, _job: &ChildJob) -> bool {
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    if let ChildJob::Vault(vault::Child::CheckAppleP12Sources(sources,point)) = _job { return vault::key_sources::p12::child_admitted(_owner,sources,*point); }
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
     if let ChildJob::Vault(vault::Child::CheckAppleCertificateSources(sources, point)) = _job {
         return vault::key_sources::certificate::child_admitted(_owner, sources, *point);
     }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-    if let ChildJob::Vault(job @ (vault::Child::CheckAppleDistributionKeyInventory(_, _) | vault::Child::LoadAppleDistributionKey(_) | vault::Child::SaveAppleDistributionKey(_))) = _job {
+    if let ChildJob::Vault(job @ (vault::Child::CheckAppleDistributionKeyInventory(_, _) | vault::Child::LoadAppleDistributionKey(_) | vault::Child::SaveAppleDistributionKey(_) | vault::Child::SaveAppleP12(_))) = _job {
         return vault::distribution_key::child_admitted(_owner, job);
     }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]

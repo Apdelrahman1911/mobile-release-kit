@@ -3270,6 +3270,8 @@ class _Outer:
             bind_original_command_slot(apple_source.require_operation(), self, self.slot)
             from ._desktop_apple_certificate_control import bind_post_command_slot
             bind_post_command_slot(apple_source.require_operation(), self, self.slot)
+            from ._desktop_apple_p12_assembly import bind_original_command_slot as bind_p12_original
+            bind_p12_original(apple_source.require_operation(), self, self.slot)
 
     def prepared_reservation(self) -> bool:
         self.ctx.check()

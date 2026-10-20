@@ -23,6 +23,13 @@ mod private;
 #[path = "saved_command_apple_certificate.rs"]
 pub(in crate::saved_command_owner) mod certificate;
 pub(crate) use certificate::AppleDistributionCertificateBinding;
+#[path="saved_command_apple_p12.rs"]
+pub(in crate::saved_command_owner) mod p12;
+pub(crate) use p12::{AppleP12PendingAck,AppleP12SavePermit,AppleP12NoSaveJoined,AppleP12NativeJoined};
+#[cfg(all(feature="desktop-shell",target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(crate) use p12::PrivateAppleP12Input;
+/// Closed variants on the original one-use Asset save slot. Never a second writer.
+pub(crate) enum AppleKeySaveCommand { Key(AppleKeySavePermit), P12(AppleP12SavePermit) }
 
 /// Pre-final-CAS fact. The final journal CAS and NativeUse retirement are
 /// deliberately later original jobs, and are not claimed by this token.
@@ -75,12 +82,13 @@ pub(crate) struct AppleKeySession {
     clock: Arc<super::apple_signing::AppleProvisioningClock>,
     mode: wire::Mode,
     certificate: Option<certificate::State>,
+    p12: Option<p12::State>,
     original: OnceLock<Weak<OriginalWork>>,
     destination: OnceLock<Weak<AppleDistributionKeyDestination>>,
     loan: OnceLock<Weak<AppleDistributionKeyLoan>>,
     binding: OnceLock<Arc<wire::RequestBinding>>,
     receive: Option<Arc<private::ReceiveBook>>,
-    dispatch: Mutex<Option<oneshot::Sender<Option<AppleKeySavePermit>>>>,
+    dispatch: Mutex<Option<oneshot::Sender<Option<AppleKeySaveCommand>>>>,
     phase: AtomicU8,
     source_returned: AtomicBool,
     before_pending_returned: AtomicBool,
@@ -132,7 +140,8 @@ pub(super) fn initialize(owner: &Arc<Session>) -> Result<(), BridgeError> {
         owner: Arc::downgrade(owner),
         clock: super::apple_signing::AppleProvisioningClock::for_session(owner)?,
         mode: context.mode,
-        certificate: context.mode.certificate().then(certificate::State::default),
+        certificate: (context.mode.certificate() || context.mode.p12()).then(certificate::State::default),
+        p12: p12::State::reserve(context.mode)?,
         original: OnceLock::new(),
         destination: OnceLock::new(),
         loan: OnceLock::new(),
@@ -174,7 +183,8 @@ pub(super) fn backing_bytes(mode: wire::Mode) -> Option<usize> {
         .checked_add(std::mem::size_of::<AppleKeyNeverGeneratedJoined>())?
         .checked_add(std::mem::size_of::<AppleKeyUseJoined>())?
         .checked_add(2 * (4 * 32) + 3 * 64)?
-        .checked_add(if mode.certificate() { certificate::backing_bytes()? } else { 0 })
+        .checked_add(if mode.certificate() || mode.p12() { certificate::backing_bytes()? } else { 0 })?
+        .checked_add(p12::backing_bytes(mode)?)
 }
 
 pub(super) fn stopped(owner: &Session, reason: Reason, at: Instant) {
@@ -301,7 +311,7 @@ impl AppleKeySession {
     pub(crate) fn attach(
         &self,
         original: &Arc<OriginalWork>,
-        dispatch: oneshot::Sender<Option<AppleKeySavePermit>>,
+        dispatch: oneshot::Sender<Option<AppleKeySaveCommand>>,
     ) -> Result<(), BridgeError> {
         let owner = self.owner()?;
         let mut slot = self
@@ -772,6 +782,7 @@ pub(super) fn bind_request(
     if let Some(receive) = &key.receive {
         receive.bind_request(bytes)?;
     }
+    if key.mode.p12() { p12::bind_request(owner,binding,bytes)?; }
     key.binding.set(binding.clone()).map_err(|_| invalid())
 }
 
@@ -1035,7 +1046,7 @@ pub(super) fn dispatch_save(
         },
     )?;
     let send = slot.take().ok_or_else(BridgeError::cleanup_unknown)?;
-    if send.send(permit).is_err() && saving {
+    if send.send(permit.map(AppleKeySaveCommand::Key)).is_err() && saving {
         return Err(BridgeError::cleanup_unknown());
     }
     // A refused Initial/BeforePending child may already have returned before
@@ -1138,6 +1149,7 @@ pub(super) async fn finish_private(owner: &Arc<Session>) -> bool {
         if key.phase() != Some(SavePhase::NotCreated) {
             return false;
         }
+        if key.mode.p12() && !p12::finish_without_asset(key) { return false; }
         if key.receive.as_ref().is_some_and(|receive| {
             !key.generator_never_entered.load(Ordering::SeqCst) || !receive.drain_never_generated()
         }) {
@@ -1146,7 +1158,9 @@ pub(super) async fn finish_private(owner: &Arc<Session>) -> bool {
         key.private_drained.store(true, Ordering::SeqCst);
         return key.clock.mark_completed(owner);
     };
-    if key.phase() == Some(SavePhase::ReturnedRefused) {
+    if key.mode.p12() {
+        if p12::prepare_private_finish(key,&asset).is_err() { return false; }
+    } else if key.phase() == Some(SavePhase::ReturnedRefused) {
         if let Some(destination) = key.destination.get().and_then(Weak::upgrade) {
             if !key.generator_never_entered.load(Ordering::SeqCst) {
                 return false;
@@ -1194,6 +1208,10 @@ pub(super) async fn finish_private(owner: &Arc<Session>) -> bool {
     };
     if input.retire_key_asset(&asset).await.is_err() {
         return false;
+    }
+    if key.mode.p12() && !key.private_drained.load(Ordering::SeqCst)
+        && p12::finish_unloaded_after_asset(key) {
+        key.private_drained.store(true, Ordering::SeqCst);
     }
     key.private_drained.load(Ordering::SeqCst) && key.clock.mark_completed(owner)
 }

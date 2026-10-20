@@ -92,13 +92,16 @@ impl CertificateScopeData {
     }
     pub(super) fn valid(&self, context: &Context, scope: &ScopeData) -> bool {
         let Ok(target) = self.target(&scope.target) else { return false; };
-        if !context.mode.certificate() || self.source_key.validate().is_err() || self.source_p8.validate().is_err()
+        if !(context.mode.certificate() || context.mode.p12()) || self.source_key.validate().is_err() || self.source_p8.validate().is_err()
             || context.key_record_id.as_deref() != Some(&self.source_key.record_id)
             || context.key_record_revision != Some(self.source_key.revision_counter)
             || self.source_p8.record_id != context.record_id || self.source_p8.revision_counter != context.record_revision
             || self.source_key.vault_id != self.source_p8.vault_id || self.source_key.generation_id != self.source_p8.generation_id
             || self.source_key.record_id == self.source_p8.record_id || target.team_id != target.app_id_prefix {
             return false;
+        }
+        if context.mode.p12() {
+            return self.key_preparation.is_none() && self.review.is_none() && self.prior.is_none();
         }
         if let Some(key) = &self.key_preparation {
             if !key.reference.valid() || key.source_key != self.source_key || key.account_ref != scope.provisioning.account_ref
@@ -254,7 +257,7 @@ pub(super) struct CertificateDecoder {
 impl CertificateDecoder {
     pub(super) fn event(&mut self, binding: &RequestBinding, sequence: u32, kind: &str, value: Value)
         -> Result<CertificateEvent, BridgeError> {
-        need(binding.context.mode.certificate() && sequence > 0 && sequence <= CERTIFICATE_EVENTS)?;
+        need((binding.context.mode.certificate() || binding.context.mode.p12() && matches!(kind,"certificate-key"|"certificate-identities"|"certificate-policy")) && sequence > 0 && sequence <= binding.context.mode.events())?;
         let scope = binding.scope.certificate.as_ref().ok_or_else(invalid)?;
         let digest = certificate_phase_sha256(&value).map_err(|_| invalid())?;
         match kind {
@@ -399,8 +402,12 @@ impl CertificateDecoder {
 
 pub(crate) fn certificate_reply(binding: &RequestBinding, sequence: u32, kind: &str, payload: Value)
     -> Result<(Vec<u8>, String), BridgeError> {
-    need(binding.context.mode.certificate() && (1..=CERTIFICATE_EVENTS).contains(&sequence)
-        && matches!(kind, "certificate-key" | "certificate-identities" | "certificate-policy" | "certificate-pending" | "certificate-attempt"))?;
+    let mode = binding.context.mode;
+    need(mode.certificate() && (1..=CERTIFICATE_EVENTS).contains(&sequence)
+        && matches!(kind, "certificate-key" | "certificate-identities" | "certificate-policy" | "certificate-pending" | "certificate-attempt")
+        || mode.p12() && matches!((kind, sequence),
+            ("certificate-key", 1) | ("certificate-identities", 2) | ("certificate-policy", 3))
+        || mode == Mode::P12Save && matches!((kind, sequence), ("p12-pending", 4) | ("p12-output", 5)))?;
     let value = json!({"protocol":PROTOCOL,"operationId":binding.operation,"ownerGeneration":binding.generation,
         "nonce":binding.nonce,"requestSha256":binding.sha256,"kind":format!("{kind}-ack"),"step":sequence,"payload":payload});
     let digest = certificate_phase_sha256(&value).map_err(|_| invalid())?;

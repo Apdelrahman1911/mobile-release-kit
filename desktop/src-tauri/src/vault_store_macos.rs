@@ -166,6 +166,7 @@ impl ReadWitness {
 enum AppleKeyRead<'a> {
     Stored(&'a ReadWitness),
     New { record: Id, revision: format::Revision, length: usize },
+    P12New { record: Id, revision: format::Revision, length: usize },
 }
 struct AppleKeyBody { witness: ReadWitness, capacity_limit: usize }
 fn apple_key_read_limit(length: usize, allowance: usize) -> Result<usize> {
@@ -179,11 +180,15 @@ fn apple_key_read_bound(expected: AppleKeyRead<'_>, actual: ReadWitness, length:
     // The unauthenticated prefix never gets to choose a generic32MiB body
     // allocation. Charge the fixed codec/control partition before requesting
     // any full-body backing, even when the remaining document cap is larger.
-    let capacity_limit = apple_key_read_limit(length, allowance)?;
+    let capacity_limit = if matches!(expected,AppleKeyRead::P12New {..}) {
+        need(allowance<=crate::vault_crypto::APPLE_P12_CRYPTO_BYTES,Problem::Bounds)?;
+        let limit=allowance.checked_sub(crate::vault_crypto::CONTROL_BYTES).ok_or(Problem::Bounds)?;
+        need((format::RECORD_PREFIX_BYTES..=format::RECORD_LIMIT).contains(&length) && length<=limit,Problem::Bounds)?;limit
+    } else { apple_key_read_limit(length, allowance)? };
     need(actual.file.bytes == length as u64, Problem::Identity)?;
     match expected {
         AppleKeyRead::Stored(witness) => need(actual == *witness, Problem::Identity)?,
-        AppleKeyRead::New { record, revision, length: known } =>
+        AppleKeyRead::New { record, revision, length: known } | AppleKeyRead::P12New { record, revision, length: known } =>
             need(actual.record == record && actual.revision == revision && length == known, Problem::Identity)?,
     }
     Ok(AppleKeyBody { witness: actual, capacity_limit })
@@ -729,6 +734,16 @@ impl StoreBook {
                 && apple_key_new_read_intent(&book.mutation_files()?.prefix, record, revision, length), Problem::State)?;
             book.read_record_inner_with_apple_key(record, true,
                 Some((AppleKeyRead::New { record, revision, length }, allowance)), stop)
+        })
+    }
+    /// Only the fixed P12 NEW sink calls this, on this Book's actual
+    /// successful NEW intent. Bound the original prefix before body allocation.
+    pub(crate) fn read_new_apple_p12_record(&mut self,record:Id,revision:format::Revision,length:usize,
+        allowance:usize,stop:&mut dyn FnMut()->bool)->Result<ReadOriginal> {
+        self.work(Work::ReadRecord,stop,|book,stop| {
+            need(book.mutation.as_ref().is_some_and(MutationProgress::success)
+                && apple_key_new_read_intent(&book.mutation_files()?.prefix,record,revision,length),Problem::State)?;
+            book.read_record_inner_with_apple_key(record,true,Some((AppleKeyRead::P12New {record,revision,length},allowance)),stop)
         })
     }
     fn read_record_inner(&mut self, record: Id, complete: bool, stop: &mut dyn FnMut() -> bool) -> Result<ReadOriginal> {

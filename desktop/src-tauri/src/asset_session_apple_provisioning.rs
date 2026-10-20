@@ -3,6 +3,8 @@
 //! starts the state service, grants CLI access or constructs a replacement
 //! account/credential/registration capability.
 use super::*;
+#[path="asset_session_apple_p12_input.rs"]
+mod p12_input;
 use crate::{
     apple_provisioning_journal::{
         AccountRef, BundleTarget, NativeProvenance, ProvisioningContext, RegisteredRootData,
@@ -104,6 +106,8 @@ impl AppleProvisioningDocumentInput {
             && self.context.display_name == other.context.display_name
             && self.context.key_record_id == other.context.key_record_id
             && self.context.key_record_revision == other.context.key_record_revision
+            && self.context.p12_record_id == other.context.p12_record_id
+            && self.context.p12_record_revision == other.context.p12_record_revision
     }
     fn project(&self, document: &Arc<Inner>) -> Result<NativeProject, BridgeError> {
         let (device, inode) = self
@@ -273,7 +277,7 @@ impl AppleProvisioningDocumentInput {
             target: self.target.clone(),
             reviewed_at,
             signing: None,
-            key: None, certificate: None,
+            key: None, certificate: None,p12:None,
         })
     }
     fn own_backing_bytes(&self) -> Option<usize> {

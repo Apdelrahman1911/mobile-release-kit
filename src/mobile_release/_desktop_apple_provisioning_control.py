@@ -24,6 +24,7 @@ class AppleProvisioningInput(_SavedCommandInput):
         self.initial = self.operation = self.engine = None
         self.material_pending = self.material_receiving = self._material_read = False
         self._material = None
+        self._p12_material = self._p12_parts = self._p12_assembly_material = None
         self._profile_material = self._profile_parts = None
         self._certificate_material = self._certificate_parts = self._certificate_key_parts = None
         self.reply_step = self.read_remaining = 0
@@ -44,6 +45,9 @@ class AppleProvisioningInput(_SavedCommandInput):
 
     _request_material = StorePreflightInput._request_material
     def receive_material(self, operation, scratch):
+        if operation.request.context["mode"] in wire.P12_MODES:
+            from ._desktop_apple_p12_private import receive_material
+            return receive_material(self, operation, scratch)
         if operation.request.context["mode"] in wire.CERTIFICATE_MODES:
             from ._desktop_apple_certificate_private import receive_material
             return receive_material(self, operation, scratch)
@@ -54,12 +58,26 @@ class AppleProvisioningInput(_SavedCommandInput):
         return StorePreflightInput.receive_material(self, operation, scratch)
 
     def profile_material(self, operation):
+        if operation.request.context["mode"] in wire.P12_MODES:
+            from ._desktop_apple_p12_private import profile_material
+            return profile_material(self, operation)
         from ._desktop_apple_profile_private import profile_material
         return profile_material(self, operation)
 
     def distribution_key_material(self, operation):
+        if operation.request.context["mode"] in wire.P12_MODES:
+            from ._desktop_apple_p12_private import distribution_key_material
+            return distribution_key_material(self, operation)
         from ._desktop_apple_certificate_private import distribution_key_material
         return distribution_key_material(self, operation)
+
+    def p12_material(self, operation):
+        from ._desktop_apple_p12_private import p12_material
+        return p12_material(self, operation)
+
+    def consume_p12_pending_ack(self, operation, child):
+        from ._desktop_apple_p12_control import consume_pending
+        return consume_pending(self, operation, child)
 
     def request(self):
         request = super().request()
@@ -270,10 +288,12 @@ class AppleProvisioningInput(_SavedCommandInput):
         self.buffer[:] = b"\0" * len(self.buffer)
         self.buffer.clear()
         self._material = None  # No process-wide secure-erasure claim.
+        self._p12_material = self._p12_parts = self._p12_assembly_material = None
         self._profile_material = self._profile_parts = None
         self._certificate_material = self._certificate_parts = self._certificate_key_parts = None
 
     def material_closed(self):
         return (StorePreflightInput.material_closed(self)
+                and self._p12_material is None and self._p12_parts is None and self._p12_assembly_material is None
                 and self._profile_material is None and self._profile_parts is None
                 and self._certificate_material is None and self._certificate_parts is None and self._certificate_key_parts is None)

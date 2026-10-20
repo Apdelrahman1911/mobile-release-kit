@@ -27,7 +27,9 @@ class CertificateSteps:
     def __init__(self, operation):
         from .desktop_apple_provisioning import AppleProvisioningRun
         wire.need(type(operation) is AppleProvisioningRun and operation.source.require_operation() is operation
-                  and operation.request.context["mode"] in wire.MODES and operation._certificate is None)
+                  and (operation.request.context["mode"] in wire.MODES or
+                       operation.request.context["mode"] in wire.common.P12_MODES and operation._p12_steps is not None)
+                  and operation._certificate is None)
         self.operation = operation
         operation._certificate = self
         self.public_csr = self.key_payload = self.key_ack = self.key_ack_bytes = None
@@ -50,7 +52,13 @@ class CertificateSteps:
 
     def _bound(self):
         op = self.operation
-        wire.need(op._certificate is self and op.source.require_operation() is op and op.request.context["mode"] in wire.MODES)
+        wire.need(op._certificate is self and op.source.require_operation() is op)
+        if op.request.context["mode"] in wire.common.P12_MODES:
+            from ._desktop_apple_p12_worker import P12Steps
+            wire.need(type(op._p12_steps) is P12Steps and op._p12_steps.operation is op
+                      and op._p12_steps.certificate is self)
+        else:
+            wire.need(op.request.context["mode"] in wire.MODES)
         return op
 
     @staticmethod
@@ -98,7 +106,8 @@ class CertificateSteps:
 
     def admit_exchange(self, kind, payload):
         op = self._bound()
-        wire.need(self._exchange is None)
+        wire.need(self._exchange is None and (op.request.context["mode"] in wire.MODES
+                  or kind in {"certificate-key", "certificate-identities", "certificate-policy"}))
         if kind == "certificate-key":
             wire.need(not self._key_sent and op.source.reply_step == 0 and op._next_command == 7
                       and self.key_payload is payload and op._distribution_key is not None)
@@ -153,7 +162,7 @@ class CertificateSteps:
     def helper_environment(self):
         op = self._bound()
         request = op._wire_request
-        wire.need(request is not None)
+        wire.need(request is not None and (op.request.context["mode"] in wire.MODES or request.method == "GET"))
         issuance.validate_request(request, op.target, csr=self.public_csr)
         selected = op.material.lane_environment(platform="ios")
         wire.need(set(selected) == {"MOBILE_RELEASE_ASC_KEY_ID", "MOBILE_RELEASE_ASC_ISSUER_ID", "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"})
@@ -377,6 +386,7 @@ class CertificateSteps:
 
     def run(self):
         op = self._bound()
+        wire.need(op.request.context["mode"] in wire.MODES) # P12 borrows fixed GET/policy phases only.
         op.check(op.context)
         wire.need(op._next_command == 6)
         child = AppleDistributionKeyWork(op).run() # Fixed resource preflight + real fresh PKCS8/CSR/SPKI verifier.

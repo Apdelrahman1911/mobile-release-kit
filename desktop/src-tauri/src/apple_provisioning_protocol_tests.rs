@@ -7,6 +7,56 @@ use crate::{
     application_state_store::Revision,
 };
 
+#[test]
+fn p12_prepare_requires_explicit_selection_and_never_borrows_issuer_ack_modes() {
+    for mode in [Mode::P12Review, Mode::P12Reuse, Mode::P12Save] {
+        let mut value = prepare_value(Mode::Review);
+        value["mode"] = json!(mode);
+        value["keyRecordId"] = json!("b".repeat(32));
+        value["keyRecordRevision"] = json!(1);
+        value["p12RecordId"] = Value::Null;
+        value["p12RecordRevision"] = Value::Null;
+        if mode != Mode::P12Review {
+            value["reference"] = json!({"operationId":"8".repeat(32),"ownerGeneration":"9".repeat(32)});
+        }
+        if mode == Mode::P12Reuse {
+            value["p12RecordId"] = json!("a".repeat(32));
+            value["p12RecordRevision"] = json!(2);
+        }
+        let prepared = prepare(&value).unwrap();
+        assert!(prepared.context.mode == mode && mode.commands() == 15);
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove("p12RecordId");
+        assert!(prepare(&missing).is_err());
+        let mut mismatched = value.clone();
+        mismatched["p12RecordRevision"] = if mode == Mode::P12Reuse { Value::Null } else { json!(1) };
+        assert!(prepare(&mismatched).is_err());
+        let mut wrong = value.clone();
+        wrong["mode"] = json!(Mode::CertificateReview);
+        assert!(prepare(&wrong).is_err());
+        if mode == Mode::P12Save {
+            wrong = value.clone();
+            wrong["p12RecordId"] = json!("a".repeat(32));
+            wrong["p12RecordRevision"] = json!(2);
+            assert!(prepare(&wrong).is_err());
+        }
+        let mut original = binding(Mode::Review);
+        Arc::get_mut(&mut original).unwrap().context = prepared.context;
+        for (kind, step) in [("certificate-key", 1), ("certificate-identities", 2), ("certificate-policy", 3)] {
+            let (bytes, _) = certificate_reply(&original, step, kind, json!({})).unwrap();
+            let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(parsed["kind"], json!(format!("{kind}-ack")));
+            assert!(certificate_reply(&original, step + 1, kind, json!({})).is_err());
+        }
+        for (kind, step) in [("p12-pending", 4), ("p12-output", 5)] {
+            assert_eq!(certificate_reply(&original, step, kind, json!({})).is_ok(), mode == Mode::P12Save);
+        }
+        for kind in ["certificate-pending", "certificate-attempt", "key-pending", "profile-pending"] {
+            assert!(certificate_reply(&original, 4, kind, json!({})).is_err());
+        }
+    }
+}
+
 fn prepare_value(mode: Mode) -> Value {
     json!({"projectId":"project-1","draftRevision":1,"baselineGeneration":1,
         "savedConfig":{"bytes":123,"sha256":"3".repeat(64)},
@@ -57,7 +107,7 @@ fn binding(mode: Mode) -> Arc<RequestBinding> {
         generation: "5".repeat(32),
         context,
         scope: ScopeData {
-            signing: None, key: None, certificate: None,
+            signing: None, key: None, certificate: None, p12: None,
             provisioning,
             provenance,
             target: BundleTarget {

@@ -125,7 +125,9 @@ def returned_post_runtime_check(source, runtime, primary):
 
 def exchange(source, kind, payload):
     from ._desktop_apple_provisioning_control import AppleProvisioningInput
-    wire.need(type(source) is AppleProvisioningInput and source.initial.context["mode"] in wire.MODES)
+    wire.need(type(source) is AppleProvisioningInput and (source.initial.context["mode"] in wire.MODES
+              or source.initial.context["mode"] in wire.common.P12_MODES
+              and kind in {"certificate-key", "certificate-identities", "certificate-policy"}))
     operation = source.require_operation()
     steps = operation._certificate
     wire.need(steps is not None)

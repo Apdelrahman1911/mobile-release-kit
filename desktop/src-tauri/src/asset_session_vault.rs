@@ -5,7 +5,7 @@ use super::*;
 use crate::{vault_crypto as crypto, vault_format as format, vault_store as store};
 #[path = "credential_apple_distribution_key_native.rs"]
 pub(super) mod distribution_key;
-pub(crate) use distribution_key::{AppleDistributionKeyDestination, AppleDistributionKeyInventory, AppleDistributionKeyLoan, InventoryPoint as AppleKeyInventoryPoint};
+pub(crate) use distribution_key::{AppleDistributionKeyDestination, AppleDistributionKeyInventory, AppleDistributionKeyLoan, AppleP12Destination, InventoryPoint as AppleKeyInventoryPoint};
 #[path = "credential_apple_provisioning_native.rs"]
 mod provisioning_native;
 pub(crate) use provisioning_native::{AppleP12Loan, AppleProfileDestination};
@@ -100,6 +100,9 @@ impl BoundLoan {
     }
     fn current_for_apple_profile(&self, state: &DocumentState, session: &Session, owner: &Arc<OriginalWork>) -> bool {
         self.current_original(state, session) && apple_profile::owns_current_source(state, session, owner, self)
+    }
+    fn current_for_apple_p12(&self,state:&DocumentState,session:&Session,owner:&Arc<OriginalWork>)->bool {
+        self.current_original(state,session) && distribution_key::p12::owns_current_source(state,session,owner,self)
     }
     fn current_original(&self, state: &DocumentState, session: &Session) -> bool {
         !state.session && !state.stopping && !state.unknown && !state.exhausted && !state.lock_pending
@@ -204,6 +207,7 @@ impl Retired {
 }
 impl Work {
     pub(super) fn attach_apple_distribution_key(&mut self, destination: Arc<AppleDistributionKeyDestination>) -> Result<(),Reason> { self.apple_distribution_key.attach_destination(destination) }
+    pub(super) fn attach_apple_p12_destination(&mut self,value:Arc<AppleP12Destination>)->Result<(),Reason> { self.apple_distribution_key.attach_p12(value) }
     pub(super) fn attach_apple_distribution_key_loan(&mut self, loan: Arc<AppleDistributionKeyLoan>) -> Result<(),Reason> { self.apple_distribution_key.attach_loan(loan) }
     pub(super) fn apple_distribution_key_retained_bytes(&self) -> Option<usize> { self.apple_distribution_key.retained_bytes() }
     pub(super) fn attach_apple_profile(&mut self, destination: Arc<AppleProfileDestination>) -> Result<(),Reason> { self.apple_profile.attach(destination) }
@@ -348,6 +352,9 @@ fn token_bytes(tokens: &TokenBatch) -> Option<usize> {
 /// The caller temporarily removed its slot; compare that exact original rather
 /// than trying to recover authority through a status projection/current number.
 pub(super) fn publish(document: &DocumentBinding, state: &mut DocumentState, slot: &mut Slot, staged: Staged) {
+    if slot.operation==Operation::AssembleAppleP12 {
+        distribution_key::p12::p12_store::publish(state,slot,staged); return;
+    }
     if slot.operation == Operation::PrepareAppleDistributionKey {
         // Fixed returned-key preservation; ordinary mutations below retain
         // their original unconditional STOP/publication refusal.
@@ -795,7 +802,7 @@ pub(super) fn late_cleanup_install(state: &DocumentState, slot: &Slot) -> bool {
         && work.key.is_none() && work.store.as_ref().is_some_and(|store| Arc::ptr_eq(store, &session.store)))
 }
 pub(super) fn preserve_operation(slot: &Slot) -> bool {
-    slot.vault.lease.is_some() && matches!(slot.operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::PrepareBackupExport | Operation::GenerateUploadKey | Operation::RecoverUploadKey | Operation::AppleProfileSetup | Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey)
+    slot.vault.lease.is_some() && matches!(slot.operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::PrepareBackupExport | Operation::GenerateUploadKey | Operation::RecoverUploadKey | Operation::AppleProfileSetup | Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12)
 }
 pub(super) fn controls_released(owner: &OriginalWork) -> bool {
     owner.control_resources_settled() && owner.retired.load(Ordering::SeqCst)
@@ -941,12 +948,14 @@ pub(super) enum Child {
     CheckAppleDistributionKeyInventory(Arc<AppleDistributionKeyInventory>, AppleKeyInventoryPoint),
     LoadAppleDistributionKey(distribution_key::LoadRequest),
     SaveAppleDistributionKey(distribution_key::key_store::SaveRequest),
+    SaveAppleP12(distribution_key::p12::p12_store::SaveRequest),
     CheckAppleProfile(Arc<profile_sources::AppleProfileSources>, profile_sources::CheckPoint),
     CheckAppleCertificateSources(Arc<key_sources::AppleKeySources>, key_sources::certificate::CheckPoint),
+    CheckAppleP12Sources(Arc<key_sources::AppleKeySources>,key_sources::p12::CheckPoint),
     Release,
 }
 impl Child {
-    pub(super) fn large(&self) -> bool { matches!(self, Self::List { .. } | Self::Load { .. } | Self::ReviewDelete { .. } | Self::Mutate { .. } | Self::Backup(_) | Self::GenerateUploadKey(_) | Self::SaveAppleProfile(_) | Self::LoadAppleDistributionKey(_) | Self::SaveAppleDistributionKey(_)) }
+    pub(super) fn large(&self) -> bool { matches!(self, Self::List { .. } | Self::Load { .. } | Self::ReviewDelete { .. } | Self::Mutate { .. } | Self::Backup(_) | Self::GenerateUploadKey(_) | Self::SaveAppleProfile(_) | Self::LoadAppleDistributionKey(_) | Self::SaveAppleDistributionKey(_) | Self::SaveAppleP12(_)) }
     pub(super) fn cleanup(&self) -> bool { matches!(self, Self::Release) }
 }
 pub(super) enum ChildResult {
@@ -1153,8 +1162,10 @@ pub(super) fn execute(owner: &Arc<OriginalWork>, child: Child) -> Result<ChildRe
         Child::CheckAppleDistributionKeyInventory(inventory, point) => distribution_key::execute_inventory(owner, &mut book, &inventory, point),
         Child::LoadAppleDistributionKey(request) => distribution_key::execute_load(owner, &mut book, request),
         Child::SaveAppleDistributionKey(request) => distribution_key::key_store::execute(owner, &mut book, request),
+        Child::SaveAppleP12(request)=>distribution_key::p12::p12_store::execute(owner,&mut book,request),
         Child::CheckAppleProfile(sources, point) => profile_sources::execute(owner, &mut book, &sources, point),
         Child::CheckAppleCertificateSources(sources, point) => key_sources::certificate::execute(owner, &mut book, &sources, point),
+        Child::CheckAppleP12Sources(sources,point)=>key_sources::p12::execute(owner,&mut book,&sources,point),
         Child::Release => {
             let settled = book.release(&mut || cleanup_expired(owner));
             let mut work = owner.vault.lock().map_err(|_| Reason::CleanupUnknown)?;
@@ -1238,7 +1249,7 @@ pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
         let upload_key_recovery = upload_key_recovery && matches!(operation, Operation::GenerateUploadKey | Operation::RecoverUploadKey);
         let apple_profile_recovery = apple_profile_recovery && operation == Operation::AppleProfileSetup;
         let apple_key_recovery = apple_key_retained && !preserve_key && !key_cleanup_known
-            && matches!(operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey);
+            && matches!(operation, Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12);
         if backup_recovery || upload_key_recovery || apple_profile_recovery || apple_key_recovery {
             // Unknown pair effects are not StoreBook mutation outcomes and do
             // not overwrite the first failure. They still prevent a misleading
@@ -1247,7 +1258,7 @@ pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
         }
         if let Some(vault) = &mut state.vault {
             vault.reason = reason;
-            if matches!(operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::GenerateUploadKey | Operation::AppleProfileSetup | Operation::PrepareAppleDistributionKey) && !preserve_key { vault.state = State::Interrupted; vault.read_only = true; }
+            if matches!(operation, Operation::Initialize | Operation::Commit | Operation::ImportBackup | Operation::GenerateUploadKey | Operation::AppleProfileSetup | Operation::PrepareAppleDistributionKey | Operation::AssembleAppleP12) && !preserve_key { vault.state = State::Interrupted; vault.read_only = true; }
             if reason == Reason::CleanupUnknown || backup_recovery || upload_key_recovery || apple_profile_recovery || apple_key_recovery { vault.state = State::Unknown; vault.revoked = true; state.unknown = true; }
         }
         invalidate_all(&mut state); document.bump(&mut state);

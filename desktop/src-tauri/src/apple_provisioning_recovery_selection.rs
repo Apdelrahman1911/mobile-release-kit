@@ -159,7 +159,7 @@ pub(crate) mod tests {
                 "status":"unknown","reason":"provider_outcome_unknown","possibleSend":true,"responseResourceId":null,
                 "responseResourceSha256":null,"observedResourceId":null,"cancelRequested":false}}})).unwrap();
         let mut scope = ScopeData {
-            signing: None, key: None, certificate: None,
+            signing: None, key: None, certificate: None, p12: None,
             provisioning: intent.context.clone(),
             provenance,
             target: intent.target,
@@ -173,7 +173,7 @@ pub(crate) mod tests {
                 revision: Revision(7),
                 account,
                 rows: vec![row],
-                profile_rows: vec![], key_rows: vec![], certificate_rows: vec![],
+                profile_rows: vec![], key_rows: vec![], certificate_rows: vec![], p12_rows: vec![],
             },
             scope,
         )
@@ -208,7 +208,7 @@ pub(crate) mod tests {
         let (account, scope) = sample();
         for field in 0..14 {
             let mut changed = ScopeData {
-            signing: None, key: None, certificate: None,
+            signing: None, key: None, certificate: None, p12: None,
                 provisioning: scope.provisioning.clone(),
                 provenance: scope.provenance.clone(),
                 target: scope.target.clone(),

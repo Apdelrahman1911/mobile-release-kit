@@ -24,7 +24,7 @@ CHAIN_LIMIT = 8
 MAGIC = b"MRK-P12-PUBLIC/1\n"
 HEADER = struct.Struct(">IIB")
 OUTPUT_LIMIT = len(MAGIC) + HEADER.size + CERTIFICATE_LIMIT + SPKI_LIMIT + CHAIN_LIMIT * (4 + CERTIFICATE_LIMIT)
-MODES = frozenset(("profile-review", "profile-reuse", "profile-create", "profile-reconcile"))
+MODES = frozenset(("profile-review", "profile-reuse", "profile-create", "profile-reconcile", "p12-review", "p12-reuse"))
 LAYOUT = "apple-provisioning-p12"
 
 
@@ -38,6 +38,14 @@ def _expected(value):
     _need(bool(re.fullmatch(r"[0-9a-fA-F]{64}|(?:[0-9a-fA-F]{2}:){31}[0-9a-fA-F]{2}", value)),
           "p12_expected_certificate_required")
     return value.replace(":", "").lower()
+
+
+def _selected_expected(operation):
+    if operation.request.context["mode"] in {"p12-review", "p12-reuse"}:
+        # Comparison from the SAME native bound record, not a renderer hash or
+        # permission to rewrite the saved project's expected signer.
+        return _expected(operation.request.native["p12"]["expectedCertificateSha256"])
+    return _expected(operation.config.section("ios").get("distributionCertificateSha256"))
 
 
 def _material(value):
@@ -101,7 +109,7 @@ class P12Extraction:
         operation.checkpoint()
         self._operation, self._source, self._runtime = operation, operation.source, operation.runtime
         self._material = _material(self._source.profile_material(operation))
-        self._expected = _expected(operation.config.section("ios").get("distributionCertificateSha256"))
+        self._expected = _selected_expected(operation)
         self._started = self._claimed = self._complete = self._retired = False
         self._scratch = self._p12 = self._password = self._result = self._facts = self._failure = None
         # Retain the original before finite_scratch constructs/acquires any FD.
@@ -114,7 +122,7 @@ class P12Extraction:
               and self._source.profile_material(operation) is self._material)
         operation.checkpoint()
         self._runtime.require(root=operation.root, invocation=operation.invocation)
-        _need(_expected(operation.config.section("ios").get("distributionCertificateSha256")) == self._expected)
+        _need(_selected_expected(operation) == self._expected)
 
     def bind_scratch(self, scratch):
         """Called by original operation.bind_scratch BEFORE native acquire.

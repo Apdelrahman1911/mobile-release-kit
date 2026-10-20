@@ -30,6 +30,8 @@ mod profile;
 mod key_phases;
 #[path = "saved_command_apple_certificate_native.rs"]
 mod certificate_phases;
+#[path="saved_command_apple_p12_native.rs"]
+mod p12_phases;
 const STATE_CALL: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
@@ -43,9 +45,13 @@ enum Value {
     ProfileWritten(crate::apple_provisioning_journal::ProfileJournalAck),
     KeyWritten(crate::apple_provisioning_journal::KeyJournalAck),
     CertificateWritten(crate::apple_provisioning_journal::CertificateJournalAck),
+    P12Written(crate::apple_provisioning_journal::P12JournalAck),
     Retired,
 }
 enum Call {
+    P12Reserve(crate::apple_provisioning_journal::P12SaveIntent,crate::apple_provisioning_journal::P12SaveUpdate),
+    P12Record(Revision,Arc<crate::apple_provisioning_journal::P12OriginalReservation>,crate::apple_provisioning_journal::P12SaveUpdate),
+    P12Finish(Revision,Arc<crate::apple_provisioning_journal::P12OriginalReservation>,super::super::apple_key::AppleP12NativeJoined),
     Initialize,
     CertificateReserve(crate::apple_provisioning_journal::CertificateIssuanceIntent, crate::apple_provisioning_journal::CertificateUpdate),
     CertificateRecord(Revision, Arc<crate::apple_provisioning_journal::CertificateOriginalReservation>, crate::apple_provisioning_journal::CertificateUpdate),
@@ -119,6 +125,9 @@ impl Jobs {
         self.slots.iter().rev().find_map(|slot| match slot.returned.as_ref() {
             Some(Ok(Value::KeyWritten(ack))) => Some(ack), _ => None,
         })
+    }
+    fn last_p12_ack(&self)->Option<&crate::apple_provisioning_journal::P12JournalAck> {
+        self.slots.iter().rev().find_map(|slot|match slot.returned.as_ref(){Some(Ok(Value::P12Written(ack)))=>Some(ack),_=>None})
     }
     fn last_certificate_ack(&self) -> Option<&crate::apple_provisioning_journal::CertificateJournalAck> {
         self.slots.iter().rev().find_map(|slot|match slot.returned.as_ref() {
@@ -198,13 +207,14 @@ pub(super) fn work_clear(owner: &Session) -> Result<(), BridgeError> {
         return Err(apple_wire::invalid());
     }
     if intent.certificate_review.as_ref().is_some_and(|review|!review.current_claim(&intent.input)) { return Err(apple_wire::invalid()); }
+    if intent.p12_review.as_ref().is_some_and(|review|!review.current_claim(&intent.input)) {return Err(apple_wire::invalid());}
     intent.input.current()
 }
 fn journal_cutoff(owner: &Session) -> Instant {
     // Local key cleanup jobs (including final CAS/NativeUse retirement) use
-    // the SAME original cleanup window. Every new effect still work_clear;
+    // the SAME original cleanup window. New effects retain their work gate;
     // private preservation additionally checks its fixed all-failure permit.
-    if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.local_key()) {
+    if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.local_key() || context.mode.p12()) {
         owner.apple_key.get().map_or(*owner.native_audit_cutoff.borrow(), |key|key.clock().cleanup_end())
     } else { *owner.native_audit_cutoff.borrow() }
 }
@@ -237,8 +247,8 @@ async fn call(
     let mode = owner.apple.input()?.context().mode;
     let profile_mode = mode.profile();
     let key_mode = mode.local_key();
-    let certificate_mode=mode.certificate();
-    let role_ok = !profile_mode && !key_mode && !certificate_mode && matches!(
+    let certificate_mode=mode.certificate();let p12_mode=mode.p12();
+    let role_ok = !profile_mode && !key_mode && !certificate_mode && !p12_mode && matches!(
         (&selected, index),
         (Call::Initialize, INITIAL)
             | (Call::Reserve(_, _), 1)
@@ -255,15 +265,27 @@ async fn call(
             | (Call::KeyFinish(_, _, _), PROFILE_FINISH))
         || certificate_mode && matches!((&selected,index), (Call::Initialize,INITIAL)
             | (Call::CertificateReserve(_,_),1) | (Call::CertificateRecord(_,_,_),2..=AUDIT)
-            | (Call::CertificateFinish(_,_,_),PROFILE_FINISH) | (Call::Retire(_),PROFILE_RETIRE));
-    if !role_ok || index >= JOBS || jobs.slots[index].started || (jobs.sealed && index != if profile_mode || key_mode || certificate_mode { PROFILE_RETIRE } else { RETIRE }) {
+            | (Call::CertificateFinish(_,_,_),PROFILE_FINISH) | (Call::Retire(_),PROFILE_RETIRE))
+        || p12_mode && matches!((&selected,index),(Call::Initialize,INITIAL)|(Call::Retire(_),PROFILE_RETIRE))
+        || mode==apple_wire::Mode::P12Save && matches!((&selected,index),
+            (Call::P12Reserve(_,_),1)|(Call::P12Record(_,_,_),AUDIT|PROFILE_ARM|PROFILE_SAVED)|(Call::P12Finish(_,_,_),PROFILE_FINISH));
+    if !role_ok || index >= JOBS || jobs.slots[index].started || (jobs.sealed && index != if profile_mode || key_mode || certificate_mode || p12_mode { PROFILE_RETIRE } else { RETIRE }) {
         return Err(local_error(owner, apple_wire::invalid()));
     }
     let end = call_end(owner)?;
     // New effects require currentness; an already-armed audit uses only the
     // original immutable reservation and cannot authorize a provider call.
-    if matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _) | Call::KeyReserve(_, _) | Call::CertificateReserve(_,_)) {
+    let requires_work = matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _) | Call::KeyReserve(_, _) | Call::CertificateReserve(_,_) | Call::P12Reserve(_,_));
+    // Only this closed post-worker P12 CAS distinguishes a normal Terminal's
+    // input-close signal from genuine STOP. All pre-worker gates are unchanged.
+    let p12_save_parent = (index == PROFILE_ARM && matches!(&selected, Call::P12Record(_,_,_)))
+        .then(|| inner.clone());
+    if requires_work {
         work_clear(owner).map_err(|error| local_error(owner, error))?;
+    }
+    if let Some(parent) = &p12_save_parent {
+        super::super::apple_key::p12::post_worker_save_clear(parent, owner)
+            .map_err(|error| local_error(owner, error))?;
     }
     let input = owner.apple.input()?.clone();
     let held = jobs.hold.clone();
@@ -278,8 +300,12 @@ async fn call(
         if !audit_clear(&original, end) {
             return Err(local_error(&original, BridgeError::cleanup_unknown()));
         }
-        if matches!(&selected, Call::Initialize | Call::Reserve(_, _) | Call::ProfileReserve(_, _) | Call::KeyReserve(_, _) | Call::CertificateReserve(_,_)) {
+        if requires_work {
             work_clear(&original).map_err(|error| local_error(&original, error))?;
+        }
+        if let Some(parent) = &p12_save_parent {
+            super::super::apple_key::p12::post_worker_save_clear(parent, &original)
+                .map_err(|error| local_error(&original, error))?;
         }
         // This mutex is ONLY the finite operation's journal backing. Neither
         // STOP nor a Document/Host status path takes it. The slot's actual
@@ -345,6 +371,14 @@ async fn call(
                 .record_key(revision, &reservation, update).map(Value::KeyWritten),
             Call::KeyFinish(revision, reservation, joined) => held.journal.as_mut().ok_or_else(apple_wire::invalid)?
                 .finish_key_native(revision, &reservation, &joined).map(Value::KeyWritten),
+            Call::P12Reserve(intent,update)=>{
+                let binding=original.apple.request_binding()?;
+                held.journal.as_mut().ok_or_else(apple_wire::invalid)?.reserve_p12(binding.revision,intent,update).map(Value::P12Written)
+            },
+            Call::P12Record(revision,reservation,update)=>held.journal.as_mut().ok_or_else(apple_wire::invalid)?
+                .record_p12(revision,&reservation,update).map(Value::P12Written),
+            Call::P12Finish(revision,reservation,joined)=>held.journal.as_mut().ok_or_else(apple_wire::invalid)?
+                .finish_p12_native(revision,&reservation,&joined).map(Value::P12Written),
             Call::CertificateReserve(intent,update) => {
                 let binding=original.apple.request_binding()?;
                 held.journal.as_mut().ok_or_else(apple_wire::invalid)?
@@ -458,7 +492,8 @@ pub(super) fn request(
             .map(|review| review.observed_at.clone())
             .or_else(|| owner.apple.intent.as_ref().and_then(|intent|intent.profile_review.as_ref()).map(|review|review.data().observed_at))
             .or_else(|| owner.apple.intent.as_ref().and_then(|intent|intent.key_review.as_ref()).map(|review|review.data().observed_at))
-            .or_else(||owner.apple.intent.as_ref().and_then(|intent|intent.certificate_review.as_ref()).map(|review|review.data().observed_at)),
+            .or_else(||owner.apple.intent.as_ref().and_then(|intent|intent.certificate_review.as_ref()).map(|review|review.data().observed_at))
+            .or_else(||owner.apple.intent.as_ref().and_then(|intent|intent.p12_review.as_ref()).map(|review|review.data().observed_at)),
     )?;
     if input.context().mode.profile() {
         let parent=owner.apple_profile.get().ok_or_else(apple_wire::invalid)?;
@@ -474,6 +509,12 @@ pub(super) fn request(
         let review=owner.apple.intent.as_ref().and_then(|intent|intent.certificate_review.as_ref()).map(|review|review.data());
         scope.certificate=Some(input.certificate_scope(review)?);
     }
+    if input.context().mode.p12() {
+        let parent=owner.apple_key.get().ok_or_else(apple_wire::invalid)?;
+        scope.certificate=Some(input.certificate_scope(None)?);
+        let review=owner.apple.intent.as_ref().and_then(|intent|intent.p12_review.as_ref()).map(|review|review.data());
+        scope.p12=Some(input.p12_scope(parent,review)?);
+    }
     let jobs = owner
         .apple
         .native
@@ -485,6 +526,19 @@ pub(super) fn request(
     let Some(Ok(Value::Account(account))) = jobs.slots[INITIAL].returned.as_ref() else {
         return Err(apple_wire::invalid());
     };
+    if input.context().mode.p12() {
+        let held=scope.p12.as_mut().ok_or_else(apple_wire::invalid)?;
+        held.previous.try_reserve_exact(account.p12_rows.len()).map_err(|_|apple_wire::invalid())?;
+        for row in &account.p12_rows {
+            // Bounded relevant hints only. Never decrypt all rows, and never
+            // promote a saved/journal descriptor to a current selected loan.
+            if row.intent.target.team_id==scope.target.team_id && row.intent.source_key==held.source_key {
+                held.previous.push(apple_wire::P12HistoryHint {destination:row.intent.destination.clone(),
+                    certificate_sha256:row.intent.certificate.certificate_sha256.clone(),
+                    public_key_sha256:row.intent.certificate.public_key_sha256.clone(),unresolved:row.unresolved()});
+            }
+        }
+    }
     if input.context().mode.certificate() {
         let key_preparation=apple_wire::certificate_key_preparation(account,&scope)?;
         let prior=if input.context().mode == apple_wire::Mode::CertificateReconcile {
@@ -575,6 +629,7 @@ pub(super) async fn write_phases(
         return key_phases::write_phases(inner, owner, writer).await;
     }
     if mode.certificate() { return certificate_phases::write_phases(inner,owner,writer).await; }
+    if mode.p12() {return p12_phases::write_phases(inner,owner,writer).await;}
     if mode != apple_wire::Mode::Register && !mode.profile() {
         return Ok(());
     }
@@ -801,6 +856,7 @@ pub(super) async fn finish_after_manager(inner: &Arc<Inner>, owner: &Arc<Session
     if matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.certificate()) {
         return certificate_phases::finish(inner,owner).await;
     }
+    if owner.apple.input().is_ok_and(|input|input.context().mode.p12()) {return p12_phases::finish(inner,owner).await;}
     let mut jobs = owner.apple.native.lock().await;
     if jobs.sealed || !jobs.pre_joined() || !worker {
         return false;

@@ -202,7 +202,9 @@ def journal_update(value, expected_context, expected_plan):
 
 
 def validate_event(request, kind, value, sequence):
-    need(request.context["mode"] in MODES and integer(sequence, EVENTS, 1) and kind in KEYS)
+    need((request.context["mode"] in MODES or request.context["mode"] in common.P12_MODES
+          and kind in {"certificate-key", "certificate-identities", "certificate-policy"})
+         and integer(sequence, EVENTS, 1) and kind in KEYS)
     if kind == "certificate-key":
         need(sequence == 1)
         validate_key(request, value)

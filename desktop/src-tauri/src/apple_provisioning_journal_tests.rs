@@ -276,7 +276,7 @@ fn historical_selection_after_real_store_reopen_preserves_unknown_and_native_fen
     let before = reopened.read(Namespace::AppleProvisioning).unwrap();
     let found = later.inspect_account(&value.context.account_ref).unwrap();
     let mut current = crate::apple_provisioning_protocol::ScopeData {
-        signing: None, key: None, certificate: None,
+        signing: None, key: None, certificate: None, p12: None,
         provisioning: value.context.clone(), provenance: value.provenance.clone(),
         target: value.target.clone(), reviewed_at: None,
     };

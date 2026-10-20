@@ -14,17 +14,22 @@ use std::sync::Weak;
 #[path = "credential_apple_distribution_key_store.rs"]
 pub(in crate::asset_session) mod key_store;
 pub(crate) use key_store::AppleDistributionKeyDestination;
+#[path="credential_apple_p12_native.rs"]
+pub(in crate::asset_session) mod p12;
+pub(crate) use p12::AppleP12Destination;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Purpose {
     Prepare,
     Use,
+    P12,
 }
 impl Purpose {
     fn operation(self) -> Operation {
         match self {
             Self::Prepare => Operation::PrepareAppleDistributionKey,
             Self::Use => Operation::UseAppleDistributionKey,
+            Self::P12 => Operation::AssembleAppleP12,
         }
     }
 }
@@ -162,7 +167,7 @@ impl VaultOriginal {
             && !session.revoked
             && !session.read_only
             && (session.state == State::Unlocked
-                || mutating && self.purpose == Purpose::Prepare && session.state == State::Mutating)
+                || mutating && matches!(self.purpose,Purpose::Prepare|Purpose::P12) && session.state == State::Mutating)
             && session.identity == Some(self.key.identity())
             && Arc::ptr_eq(&session.store, &self.store)
             && session
@@ -810,7 +815,7 @@ impl AppleDistributionKeyLoan {
         state: &DocumentState,
         owner: &Arc<OriginalWork>,
     ) -> bool {
-        self.original.current(document, state, owner, false)
+        self.original.current(document, state, owner, self.original.purpose==Purpose::P12)
             && state.vault.as_ref().is_some_and(|session| {
                 session.rows.iter().any(|row| {
                     !row.mutation_pending
@@ -1049,6 +1054,7 @@ pub(in crate::asset_session) fn child_admitted(owner: &OriginalWork, child: &Chi
         Child::CheckAppleDistributionKeyInventory(inventory, _) => &inventory.original,
         Child::LoadAppleDistributionKey(request) => &request.loan.original,
         Child::SaveAppleDistributionKey(request) => request.original(),
+        Child::SaveAppleP12(request)=>request.original(),
         _ => return false,
     };
     let Some(held_owner) = original
@@ -1102,6 +1108,7 @@ pub(in crate::asset_session) fn child_admitted(owner: &OriginalWork, child: &Chi
                     p.phase == LoadPhase::Reserved && p.first.is_none() && p.payload.is_none()
                 })
         }
+        Child::SaveAppleP12(request)=> !owner.interrupted() && work.first.is_none() && request.admitted(&held_owner),
         Child::SaveAppleDistributionKey(request) => {
             work.first
                 .is_none_or(|(reason, _)| preservation_reason(reason))
@@ -1123,7 +1130,7 @@ pub(in crate::asset_session) fn load_publication(
     let Some(loan) = work.apple_distribution_key.loan() else {
         return false;
     };
-    slot.operation == Operation::UseAppleDistributionKey
+    matches!(slot.operation,Operation::UseAppleDistributionKey|Operation::AssembleAppleP12)
         && generation == loan.original.roster.generation
         && loan
             .original
@@ -1257,6 +1264,7 @@ pub(in crate::asset_session) async fn run_load(
 enum Holding {
     Prepare(Arc<AppleDistributionKeyDestination>),
     Use(Arc<AppleDistributionKeyLoan>),
+    P12(Arc<AppleP12Destination>),
 }
 #[derive(Default)]
 pub(in crate::asset_session) struct Work {
@@ -1283,17 +1291,23 @@ impl Work {
         self.inner = Some(Holding::Use(value));
         Ok(())
     }
+    pub(in crate::asset_session) fn attach_p12(&mut self,value:Arc<AppleP12Destination>)->Result<(),Reason> {
+        if !self.loan().is_some_and(|loan|value.same_source(loan)) || !matches!(self.inner,Some(Holding::Use(_))) { return Err(Reason::SourceChanged); }
+        self.inner=Some(Holding::P12(value)); Ok(())
+    }
+    pub(in crate::asset_session) fn p12_destination(&self)->Option<&Arc<AppleP12Destination>> { match self.inner.as_ref()? {Holding::P12(value)=>Some(value),_=>None} }
     pub(in crate::asset_session) fn destination(
         &self,
     ) -> Option<&Arc<AppleDistributionKeyDestination>> {
         match self.inner.as_ref()? {
             Holding::Prepare(value) => Some(value),
-            Holding::Use(_) => None,
+            Holding::Use(_) | Holding::P12(_) => None,
         }
     }
     pub(in crate::asset_session) fn loan(&self) -> Option<&Arc<AppleDistributionKeyLoan>> {
         match self.inner.as_ref()? {
             Holding::Use(value) => Some(value),
+            Holding::P12(value)=>Some(&value.loan),
             Holding::Prepare(_) => None,
         }
     }
@@ -1301,6 +1315,7 @@ impl Work {
         match self.inner.as_ref()? {
             Holding::Prepare(value) => Some(&value.original),
             Holding::Use(value) => Some(&value.original),
+            Holding::P12(value)=>Some(&value.loan.original),
         }
     }
     pub(in crate::asset_session) fn empty(&self) -> bool {
@@ -1314,6 +1329,7 @@ impl Work {
             None => Some(0),
             Some(Holding::Prepare(value)) => value.retained_bytes(),
             Some(Holding::Use(value)) => value.own_retained_bytes(),
+            Some(Holding::P12(value))=>value.own_retained_bytes(),
         }
     }
     fn parent_ready(&self, owner: &Arc<OriginalWork>) -> bool {
@@ -1321,6 +1337,7 @@ impl Work {
             None => true,
             Some(Holding::Prepare(value)) => value.parent_retirement_ready(owner),
             Some(Holding::Use(value)) => value.parent_retirement_ready(owner),
+            Some(Holding::P12(value))=>value.parent_retirement_ready(owner),
         }
     }
     fn allows_unstarted_child(&self) -> bool {
@@ -1355,6 +1372,7 @@ impl Work {
         let disposed = match self.inner.as_ref() {
             Some(Holding::Prepare(value)) => value.dispose_private(&owner),
             Some(Holding::Use(value)) => value.dispose_private(&owner),
+            Some(Holding::P12(value))=>value.dispose_private(&owner),
             None => true,
         };
         if !disposed {
@@ -1463,6 +1481,7 @@ pub(in crate::asset_session) fn retirement_ready(owner: &Arc<OriginalWork>) -> b
         Ok(work) => match &work.apple_distribution_key.inner {
             Some(Holding::Prepare(value)) => Holding::Prepare(value.clone()),
             Some(Holding::Use(value)) => Holding::Use(value.clone()),
+            Some(Holding::P12(value))=>Holding::P12(value.clone()),
             None => return false,
         },
         Err(_) => return false,
@@ -1470,22 +1489,24 @@ pub(in crate::asset_session) fn retirement_ready(owner: &Arc<OriginalWork>) -> b
     let original = match &held {
         Holding::Prepare(value) => &value.original,
         Holding::Use(value) => &value.original,
+        Holding::P12(value)=>&value.loan.original,
     };
     let unstarted = match &held {
         Holding::Prepare(value) => value.allows_unstarted_child(),
-        Holding::Use(_) => false,
+        Holding::Use(_) | Holding::P12(_) => false,
     };
     original_cleanup_joins(owner, original, unstarted)
         && match held {
             Holding::Prepare(value) => value.parent_retirement_ready(owner),
             Holding::Use(value) => value.parent_retirement_ready(owner),
+            Holding::P12(value)=>value.parent_retirement_ready(owner),
         }
 }
 
 pub(in crate::asset_session) fn retirement_deferred(slot: &Slot) -> bool {
     if !matches!(
         slot.operation,
-        Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey
+        Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12
     ) {
         return false;
     }
@@ -1539,7 +1560,7 @@ pub(in crate::asset_session) fn release_retained_private_ready(
 ) -> bool {
     if !matches!(
         slot.operation,
-        Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey
+        Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12
     ) || slot.target.is_some()
     {
         return false;
@@ -1599,7 +1620,7 @@ pub(in crate::asset_session) fn cleanup_staged_allowed(slot: &Slot, retained_rea
     retained_ready
         && matches!(
             slot.operation,
-            Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey
+            Operation::PrepareAppleDistributionKey | Operation::UseAppleDistributionKey | Operation::AssembleAppleP12
         )
         && match slot.staged.as_ref() {
             Some(super::super::Staged::Refused(_))

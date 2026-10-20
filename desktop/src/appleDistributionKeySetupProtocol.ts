@@ -53,7 +53,7 @@ export function parseAppleDistributionKeySavedReference(value: unknown): AppleDi
 
 export type AppleDistributionKeyInputBase = Omit<PrepareAppleProvisioning,
   'mode' | 'reference' | 'newApplication' | 'displayName' | 'p12RecordId' | 'p12RecordRevision' | 'keyRecordId' | 'keyRecordRevision'>;
-function selectedBase(project: LocalStoreProject | null, assets: AssetDisplayState | null, retained: false | 'prepare-apple-distribution-key' | 'use-apple-distribution-key'): AppleDistributionKeyInputBase | null {
+function selectedBase(project: LocalStoreProject | null, assets: AssetDisplayState | null, retained: false | 'prepare-apple-distribution-key' | 'use-apple-distribution-key' | 'assemble-apple-p12'): AppleDistributionKeyInputBase | null {
   const s = assets?.status, c = s?.context;
   if (!project || project.inputIssue || project.dirtyDraft || project.snapshotPending || project.versionPending || project.saveRecoveryRequired ||
       !parseSavedConfigContent(project.savedConfig) || !parseAndroidBuildSavedVersion(project.savedVersion) ||
@@ -93,6 +93,14 @@ export function retainedAppleDistributionKeyInput(project: LocalStoreProject | n
 // It is never passed to Prepare/Start admission.
 export function retainedAppleDistributionCertificateKeyInput(project: LocalStoreProject | null, assets: AssetDisplayState | null, original: unknown): AppleDistributionKeyInputBase | null {
   const current = selectedBase(project, assets, 'use-apple-distribution-key');
+  return current && sameOfflineData(current, original) ? current : null;
+}
+
+// Correlate the already-started P12 original by its ACTUAL operation name.
+// No status relabeling, input adoption or new Prepare admission is allowed.
+export function retainedAppleP12KeyInput(project: LocalStoreProject | null, assets: AssetDisplayState | null,
+  original: unknown, operation: 'use-apple-distribution-key' | 'assemble-apple-p12'): AppleDistributionKeyInputBase | null {
+  const current = selectedBase(project, assets, operation);
   return current && sameOfflineData(current, original) ? current : null;
 }
 

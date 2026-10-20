@@ -2,6 +2,7 @@
 // provider JSON, journal row, issuer override, secret or local path is accepted.
 import { APPLE_DISTRIBUTION_CERTIFICATE_MODES, isAppleDistributionCertificateMode, parseAppleDistributionCertificateResult,
   parseAppleCertificateRecoveryHistory, appleCertificateHistoryUnresolved } from './appleDistributionCertificateSetupProtocol.ts';
+import { APPLE_P12_MODES, isAppleP12Mode, parseAppleP12Result, parseAppleP12SavedReference } from './appleP12SetupProtocol.ts';
 import { parseAppleProfileRecoveryHistory } from './appleProfileRecoverySelection.ts';
 import { copyBoundedComparisonData, parseSavedConfigContent, sameOfflineData } from './offlinePreflightProtocol.ts';
 import { APPLE_DISTRIBUTION_KEY_MODES, isAppleDistributionKeyMode, parseAppleDistributionKeyResult, parseAppleDistributionKeySavedReference } from './appleDistributionKeySetupProtocol.ts';
@@ -17,7 +18,7 @@ export const APPLE_PROVISIONING_LIMITATIONS = Object.freeze(['bundle-id-only', '
 export type AppleProvisioningCommand = 'prepare_apple_provisioning' | 'start_apple_provisioning' |
   'apple_provisioning_status' | 'cancel_apple_provisioning';
 const encoder = new TextEncoder();
-const modes = ['review', 'register', 'reconcile', ...APPLE_PROFILE_MODES, ...APPLE_DISTRIBUTION_KEY_MODES, ...APPLE_DISTRIBUTION_CERTIFICATE_MODES] as const;
+const modes = ['review', 'register', 'reconcile', ...APPLE_PROFILE_MODES, ...APPLE_DISTRIBUTION_KEY_MODES, ...APPLE_DISTRIBUTION_CERTIFICATE_MODES, ...APPLE_P12_MODES] as const;
 const phases = ['awaiting-consent', 'starting', 'running', 'stopping', 'terminal', 'unknown'] as const;
 const outcomes = ['complete', 'refused', 'cancelled', 'timed-out', 'failed', 'unknown'] as const;
 const reasons = ['none', 'cancelled', 'context-changed', 'document-lost', 'shutdown', 'timed-out', 'protocol-error',
@@ -64,15 +65,22 @@ export function parseAppleRecoveryHistory(value: unknown): AppleRecoveryHistory 
   } catch { return null; }
 }
 export function appleProvisioningConsent(mode: AppleProvisioningMode): AppleProvisioningConsent {
-  if (isAppleProfileMode(mode) || isAppleDistributionKeyMode(mode) || isAppleDistributionCertificateMode(mode)) return `local-ios-${mode}-v1`;
+  if (isAppleProfileMode(mode) || isAppleDistributionKeyMode(mode) || isAppleDistributionCertificateMode(mode) || isAppleP12Mode(mode)) return `local-ios-${mode}-v1`;
   return mode === 'register' ? 'local-ios-bundle-register-v1' : mode === 'reconcile' ? 'local-ios-bundle-reconcile-v1' : 'local-ios-bundle-review-v1';
 }
 const requestFields = (value: unknown): readonly string[] => {
   if (value && typeof value === 'object' && 'mode' in value) {
+    if (isAppleP12Mode(value.mode)) return [...fields, 'keyRecordId', 'keyRecordRevision', 'p12RecordId', 'p12RecordRevision'];
     if (isAppleProfileMode(value.mode)) return [...fields, 'p12RecordId', 'p12RecordRevision'];
     if (isAppleDistributionCertificateMode(value.mode)) return [...fields, 'keyRecordId', 'keyRecordRevision'];
   }
   return fields;
+};
+const contextFields = (value: unknown): readonly string[] => {
+  const names = requestFields(value);
+  return value && typeof value === 'object' && 'mode' in value && isAppleP12Mode(value.mode) &&
+    !Object.hasOwn(value, 'p12RecordId') && !Object.hasOwn(value, 'p12RecordRevision') ?
+    names.filter(name => name !== 'p12RecordId' && name !== 'p12RecordRevision') : names;
 };
 function request(value: unknown): value is PrepareAppleProvisioning {
   if (!keys(value, requestFields(value)) || typeof value.projectId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(value.projectId) ||
@@ -81,16 +89,26 @@ function request(value: unknown): value is PrepareAppleProvisioning {
       !token(value.recordId) || !counter(value.recordRevision, 0xfffffffe) || value.recordRevision < 1 || value.executionMode !== 'local' ||
       value.platform !== 'ios' || !oneOf(value.mode, modes) || !appleDisplayName(value.displayName) || value.newApplication !== (value.mode === 'register')) return false;
   if (isAppleProfileMode(value.mode) && (!token(value.p12RecordId) || !counter(value.p12RecordRevision, 0xfffffffe) || value.p12RecordRevision < 1)) return false;
-  if (isAppleDistributionCertificateMode(value.mode) && (!token(value.keyRecordId) || value.keyRecordId === '0'.repeat(32) ||
+  if ((isAppleDistributionCertificateMode(value.mode) || isAppleP12Mode(value.mode)) && (!token(value.keyRecordId) || value.keyRecordId === '0'.repeat(32) ||
       value.keyRecordId === value.recordId || !counter(value.keyRecordRevision, 0xfffffffe) || value.keyRecordRevision < 1)) return false;
-  return value.mode === 'review' || value.mode === 'profile-review' || value.mode === 'key-review' || value.mode === 'certificate-review' ?
-    value.reference === null : identity(value.reference) && (!isAppleDistributionCertificateMode(value.mode) ||
+  if (isAppleP12Mode(value.mode)) {
+    const absent = value.p12RecordId === null && value.p12RecordRevision === null;
+    if (value.recordId === '0'.repeat(32) || !absent && (!token(value.p12RecordId) || value.p12RecordId === '0'.repeat(32) ||
+        [value.recordId, value.keyRecordId].includes(value.p12RecordId) || !counter(value.p12RecordRevision, 0xfffffffe) || value.p12RecordRevision < 1) ||
+        value.mode === 'p12-save' && !absent || value.mode === 'p12-reuse' && absent) return false;
+  }
+  return value.mode === 'review' || value.mode === 'profile-review' || value.mode === 'key-review' || value.mode === 'certificate-review' || value.mode === 'p12-review' ?
+    value.reference === null : identity(value.reference) && (!(isAppleDistributionCertificateMode(value.mode) || isAppleP12Mode(value.mode)) ||
       value.reference.operationId !== '0'.repeat(32) && value.reference.ownerGeneration !== '0'.repeat(32));
 }
 export function parseAppleProvisioningRequest(value: unknown): PrepareAppleProvisioning | null {
   try { const v = copyBoundedComparisonData(value, 8192); return request(v) ? v : null; } catch { return null; }
 }
 export function appleProvisioningContext(value: PrepareAppleProvisioning): AppleProvisioningContext {
+  if (isAppleP12Mode(value.mode) && value.p12RecordId === null && value.p12RecordRevision === null) {
+    const { p12RecordId: _id, p12RecordRevision: _revision, ...context } = value;
+    return { ...context, operation: 'apple-bundle-provisioning' };
+  }
   return { ...value, operation: 'apple-bundle-provisioning' };
 }
 export function encodeAppleProvisioningRequest(command: AppleProvisioningCommand, value: unknown): Uint8Array | null {
@@ -107,6 +125,7 @@ export function encodeAppleProvisioningRequest(command: AppleProvisioningCommand
   } catch { return null; }
 }
 function result(value: unknown, op: Record<string, unknown>, context: AppleProvisioningContext): boolean {
+  if (isAppleP12Mode(context.mode)) return parseAppleP12Result(value, context) !== null;
   if (isAppleDistributionCertificateMode(context.mode)) return parseAppleDistributionCertificateResult(value, context.mode, op.operationId, context.reference) !== null;
   if (isAppleDistributionKeyMode(context.mode)) return parseAppleDistributionKeyResult(value, context.mode) !== null;
   if (isAppleProfileMode(context.mode)) return parseAppleProfileSetupResult(value, context.mode) !== null;
@@ -139,12 +158,23 @@ export function parseAppleProvisioningStatus(value: unknown): AppleProvisioningS
         !oneOf(v.availability, ['available', 'busy', 'shutdown', 'cleanup-unknown', 'document-lost', 'unsupported-platform', 'runtime-unqualified'])) return null;
     const op = v.operation;
     if (op === null) return v as unknown as AppleProvisioningStatus;
-    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'recovery', ...(typeof op === 'object' && Object.hasOwn(op, 'savedProfile') ? ['savedProfile'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'profileRecovery') ? ['profileRecovery'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'savedKey') ? ['savedKey'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'certificateRecovery') ? ['certificateRecovery'] : [])]) ||
+    if (!keys(op, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'result', 'recovery', ...(typeof op === 'object' && Object.hasOwn(op, 'savedProfile') ? ['savedProfile'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'profileRecovery') ? ['profileRecovery'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'savedKey') ? ['savedKey'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'certificateRecovery') ? ['certificateRecovery'] : []), ...(typeof op === 'object' && Object.hasOwn(op, 'savedP12') ? ['savedP12'] : [])]) ||
         !token(op.operationId) || !token(op.ownerGeneration) || !oneOf(op.phase, phases) || typeof op.intentUsable !== 'boolean' || !oneOf(op.reason, reasons) ||
-        !keys(op.context, [...requestFields(op.context), 'operation']) || op.context.operation !== 'apple-bundle-provisioning') return null;
+        !keys(op.context, [...contextFields(op.context), 'operation']) || op.context.operation !== 'apple-bundle-provisioning') return null;
     const prepared = { ...op.context }; delete prepared.operation;
+    if (isAppleP12Mode(prepared.mode)) {
+      if (!Object.hasOwn(prepared, 'p12RecordId') && !Object.hasOwn(prepared, 'p12RecordRevision')) {
+        prepared.p12RecordId = null; prepared.p12RecordRevision = null;
+      } else if (prepared.p12RecordId === null || prepared.p12RecordRevision === null) return null;
+    }
     if (!request(prepared)) return null;
-    if (isAppleDistributionCertificateMode(prepared.mode) && (op.operationId === '0'.repeat(32) || op.ownerGeneration === '0'.repeat(32))) return null;
+    if ((isAppleDistributionCertificateMode(prepared.mode) || isAppleP12Mode(prepared.mode)) && (op.operationId === '0'.repeat(32) || op.ownerGeneration === '0'.repeat(32))) return null;
+    if (Object.hasOwn(op, 'savedP12')) {
+      const savedP12 = parseAppleP12SavedReference(op.savedP12);
+      if (!savedP12 || [prepared.recordId, prepared.keyRecordId, prepared.p12RecordId].includes(savedP12.recordId) ||
+          prepared.mode !== 'p12-save' || op.phase !== 'terminal' || !oneOf(op.outcome, outcomes) || op.outcome === 'unknown' ||
+          op.reason === 'cleanup-unknown' || op.outcome === 'complete' && parseAppleP12Result(op.result, prepared)?.decision !== 'assembled') return null;
+    }
     const saved = Object.hasOwn(op, 'savedProfile') ? parseAppleProfileSavedReference(op.savedProfile) : null;
     if (Object.hasOwn(op, 'savedProfile') && (!saved || saved.revisionCounter !== 1 ||
         [prepared.recordId, prepared.p12RecordId].includes(saved.recordId) ||
@@ -209,6 +239,9 @@ export function appleProvisioningProgress(before: AppleProvisioningOperation, af
     })() ||
     before.savedProfile !== undefined && after.savedProfile === undefined && (() => {
       const { savedProfile: _saved, ...withoutSaved } = before; return sameOfflineData(withoutSaved, after);
+    })() ||
+    before.savedP12 !== undefined && after.savedP12 === undefined && (() => {
+      const { savedP12: _saved, ...withoutSaved } = before; return sameOfflineData(withoutSaved, after);
     })();
   return (before.intentUsable || !after.intentUsable) && phases.indexOf(after.phase) >= phases.indexOf(before.phase);
 }

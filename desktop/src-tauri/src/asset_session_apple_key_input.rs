@@ -13,7 +13,7 @@ impl AppleProvisioningDocumentInput {
         &self,
         original: &Arc<OriginalWork>,
     ) -> Result<(), BridgeError> {
-        if !(self.context.mode.local_key() || self.context.mode.certificate()) || self.key_sources().is_none() {
+        if !(self.context.mode.local_key() || self.context.mode.certificate() || self.context.mode.p12()) || self.key_sources().is_none() {
             return Err(wire::invalid());
         }
         let mut held = self
@@ -121,7 +121,7 @@ impl AppleProvisioningDocumentInput {
         &self,
         review: Option<wire::CertificateReviewData>,
     ) -> Result<wire::CertificateScopeData, BridgeError> {
-        if !self.context.mode.certificate() { return Err(wire::invalid()); }
+        if !(self.context.mode.certificate() || self.context.mode.p12()) || self.context.mode.p12() && review.is_some() { return Err(wire::invalid()); }
         let sources = self.key_sources().ok_or_else(wire::invalid)?;
         let original = sources.owner().ok_or_else(wire::invalid)?;
         if !sources.certificate_checked(&original, vault::key_sources::certificate::CheckPoint::Initial) {

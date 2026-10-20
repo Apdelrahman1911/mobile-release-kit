@@ -677,3 +677,6 @@ impl JournalRow {
 #[cfg(test)]
 #[path = "apple_provisioning_journal_data_tests.rs"]
 pub(super) mod tests;
+
+#[path="apple_provisioning_p12_journal_data.rs"]
+pub(super) mod p12;

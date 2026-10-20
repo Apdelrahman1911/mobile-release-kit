@@ -17,6 +17,8 @@ mod profile_review;
 mod key_review;
 #[path = "saved_command_apple_certificate_review.rs"]
 mod certificate_review;
+#[path="saved_command_apple_p12_review.rs"]
+mod p12_review;
 #[path = "saved_command_apple_profile_recovery.rs"]
 mod profile_recovery;
 
@@ -97,6 +99,7 @@ pub(super) struct Intent {
     profile_review: Option<Arc<profile_review::Review>>,
     key_review: Option<Arc<key_review::Review>>,
     certificate_review: Option<Arc<certificate_review::Review>>,
+    p12_review: Option<Arc<p12_review::Review>>,
 }
 #[derive(Default)]
 pub(super) struct Registry {
@@ -106,7 +109,9 @@ pub(super) struct Registry {
     profile_saved: Option<profile_review::SavedPublication>,
     key_review: Option<Arc<key_review::Review>>,
     certificate_review: Option<Arc<certificate_review::Review>>,
+    p12_review: Option<Arc<p12_review::Review>>,
     key_saved: Option<key_review::SavedPublication>,
+    p12_saved: Option<p12_review::SavedPublication>,
     profile_recovery: Option<profile_recovery::Publication>,
     certificate_recovery: Option<certificate_review::Publication>,
 }
@@ -216,17 +221,19 @@ pub(super) fn invalidate_review(registry: &mut Registry) -> bool {
     registry.key_review = None;
     let saved_changed=registry.profile_saved.take().is_some();
     let key_saved_changed = registry.key_saved.take().is_some();
+    registry.p12_review=None;let p12_saved_changed=registry.p12_saved.take().is_some();
     registry.certificate_review = None;
     let certificate_history_changed = registry.certificate_recovery.take().is_some();
     let profile_history_changed = registry.profile_recovery.take().is_some();
     // Public historical DATA may be withdrawn, never replaced or upgraded.
     // Idle context invalidation must advance the same original status revision.
-    registry.recovery.take().is_some() || saved_changed || profile_history_changed || key_saved_changed || certificate_history_changed
+    registry.recovery.take().is_some() || saved_changed || profile_history_changed || key_saved_changed || certificate_history_changed || p12_saved_changed
 }
 
 pub(super) fn project_recovery(registry: &Registry, projection: &mut apple_wire::Projection) {
     profile_review::project(registry,projection);
     key_review::project(registry, projection);
+    p12_review::project(registry,projection);
     profile_recovery::project(registry, projection);
     certificate_review::project(registry, projection);
     projection.recovery = None;
@@ -253,7 +260,8 @@ fn recovery_backing_bytes() -> Option<usize> {
         .checked_add(apple_wire::IPC_LIMIT)?
         .checked_add(std::mem::size_of::<RecoveryPublication>())?
         .checked_add(profile_recovery::backing_bytes()?)?
-        .checked_add(certificate_review::backing_bytes()?)
+        .checked_add(certificate_review::backing_bytes()?)?
+        .checked_add(p12_review::backing_bytes()?)
 }
 
 pub(crate) const APPLE_PROVISIONING_INPUT_LIMIT: usize = 128 * 1024;
@@ -305,7 +313,7 @@ pub(crate) fn document_backing_bytes() -> Option<usize> {
         .checked_add(super::apple_signing::backing_bytes()?)?
         .checked_add(std::mem::size_of::<key_review::Review>())?
         .checked_add(super::apple_key::backing_bytes(apple_wire::Mode::KeyPrepare)?.max(
-            super::apple_key::backing_bytes(apple_wire::Mode::CertificateCreate)?))?
+            super::apple_key::backing_bytes(apple_wire::Mode::CertificateCreate)?).max(super::apple_key::backing_bytes(apple_wire::Mode::P12Save)?))?
         .checked_add(6*1024*1024)?
         .checked_sub(retained_document_backing_bytes()?)
 }
@@ -392,6 +400,7 @@ struct Route {
     key_observed: Option<(apple_wire::KeyObserved, Instant)>,
     key_not_generated: Option<apple_wire::KeyNotGenerated>,
     certificate_observed: Option<(apple_wire::CertificateObserved, Instant)>,
+    p12_observed: Option<(apple_wire::P12Observed,Instant)>,
     certificate_pending: Option<u32>,
     ack_writing: bool,
     ack_entered: [bool; apple_wire::CERTIFICATE_EVENTS as usize],
@@ -420,7 +429,7 @@ impl State {
                 pending: None,
                 observed: None, profile_observed: None,
                 key_observed: None, key_not_generated: None,
-                certificate_observed: None, certificate_pending: None,
+                certificate_observed: None, certificate_pending: None,p12_observed:None,
                 ack_writing: false,
                 ack_entered: [false; apple_wire::CERTIFICATE_EVENTS as usize],
                 failed: false,
@@ -441,6 +450,22 @@ impl State {
             .as_ref()
             .map(|intent| &intent.input)
             .ok_or_else(apple_wire::invalid)
+    }
+    /// Same consumed P12 review and current Document only. The caller must
+    /// separately prove the original normal Terminal and positive worker joins;
+    /// this method is not a replacement for ordinary pre-worker work_clear.
+    pub(super) fn p12_save_current(&self) -> Result<(), BridgeError> {
+        let intent = self.intent.as_ref().ok_or_else(apple_wire::invalid)?;
+        if intent.input.context().mode != apple_wire::Mode::P12Save
+            || intent.review.is_some()
+            || intent.profile_review.is_some()
+            || intent.key_review.is_some()
+            || intent.certificate_review.is_some()
+            || !intent.p12_review.as_ref().is_some_and(|review| review.current_claim(&intent.input))
+        {
+            return Err(apple_wire::invalid());
+        }
+        intent.input.current()
     }
     pub(super) fn request_binding(&self) -> Result<Arc<apple_wire::RequestBinding>, BridgeError> {
         self.binding
@@ -516,7 +541,16 @@ impl State {
                 route.certificate_observed = Some((observed,at)); route.received = event.sequence;
                 if !route.ack_writing { route.completed=event.sequence; }
             },
-            data @ apple_wire::EventData::Certificate(_) if input.context().mode.certificate() => {
+            apple_wire::EventData::P12(apple_wire::P12Event::Observed(observed))
+                if input.context().mode==apple_wire::Mode::P12Review && route.p12_observed.is_none()=>{
+                route.p12_observed=Some((observed,at));route.received=event.sequence;
+                if !route.ack_writing {route.completed=event.sequence;}
+            },
+            data @ apple_wire::EventData::P12(apple_wire::P12Event::Pending{..}|apple_wire::P12Event::Output(_))
+                if input.context().mode==apple_wire::Mode::P12Save=>{
+                route.received=event.sequence;route.pending=Some(apple_wire::EventDataFrame{sequence:event.sequence,data});
+            },
+            data @ apple_wire::EventData::Certificate(_) if input.context().mode.certificate() || input.context().mode.p12() => {
                 if matches!(&data, apple_wire::EventData::Certificate(apple_wire::CertificateEvent::Pending { .. })) {
                     if route.certificate_pending.is_some() { route.failed=true; return Err(apple_wire::invalid()); }
                     route.certificate_pending=Some(event.sequence);
@@ -630,6 +664,10 @@ impl SavedCommandOwner {
             Some(registry.apple.certificate_review.as_ref().filter(|review|review.matches(&document,now))
                 .cloned().ok_or_else(apple_wire::invalid)?)
         } else { None };
+        let p12_review=if matches!(input.context.mode,apple_wire::Mode::P12Reuse|apple_wire::Mode::P12Save) {
+            let registry=self.inner.lock();Some(registry.apple.p12_review.as_ref().filter(|review|review.matches(&document,now))
+                .cloned().ok_or_else(apple_wire::invalid)?)
+        } else {None};
         let material = document.material().clone();
         let status = self.prepare_bound(
             Context::AppleProvisioning(input.context),
@@ -650,10 +688,11 @@ impl SavedCommandOwner {
         if let Some(review)=&profile_review { prepared.expires=prepared.expires.min(review.expires()); }
         if let Some(review) = &key_review { prepared.expires = prepared.expires.min(review.expires()); }
         if let Some(review)=&certificate_review { prepared.expires=prepared.expires.min(review.expires()); }
+        if let Some(review)=&p12_review {prepared.expires=prepared.expires.min(review.expires());}
         prepared.apple = Some(Arc::new(Intent {
             input: document,
             review,
-            profile_review, key_review, certificate_review,
+            profile_review, key_review, certificate_review,p12_review,
         }));
         status.apple()
     }
@@ -704,6 +743,7 @@ impl SavedCommandOwner {
             if let Some(review)=&intent.profile_review { review.claim(&document,Instant::now())?; }
             if let Some(review) = &intent.key_review { review.claim(&document, Instant::now())?; }
             if let Some(review) = &intent.certificate_review { review.claim(&document,Instant::now())?; }
+            if let Some(review)=&intent.p12_review {review.claim(&document,Instant::now())?;}
         }
         let admitted = self.start_bound(
             Start {
@@ -773,11 +813,12 @@ pub(super) fn retire_review(registry: &mut Registry, active: &super::Active, own
     registry.recovery = None;
     registry.profile_review=None;registry.profile_saved=None;
     registry.profile_recovery = None;
-    registry.key_review = None; registry.key_saved = None;
+    registry.key_review = None; registry.key_saved = None;registry.p12_review=None;registry.p12_saved=None;
     registry.certificate_review = None; registry.certificate_recovery = None;
     // Detached saved-key DATA may survive a known cancellation only after
     // the actual native/Asset/private/watchdog retirement. Never a new loan.
     key_review::publish_saved(registry, active, owner);
+    p12_review::publish_saved(registry,active,owner);
     if owner.domain != SavedCommandDomain::AppleProvisioning
         || active.unknown
         || active.context_invalidated
@@ -812,6 +853,7 @@ pub(super) fn retire_review(registry: &mut Registry, active: &super::Active, own
         key_review::publish_review(registry, owner, terminal); return;
     }
     if context.mode.certificate() { certificate_review::publish(registry,owner,terminal); return; }
+    if context.mode.p12() {p12_review::publish_review(registry,owner,terminal);return;}
     if context.mode != apple_wire::Mode::Review { return; }
     // A denied/inconclusive provider query may accompany a known joined local
     // journal read. Publish only that historical DATA, never a Register review.

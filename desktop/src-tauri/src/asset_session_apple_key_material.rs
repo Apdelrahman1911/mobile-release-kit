@@ -4,6 +4,8 @@
 use super::*;
 use crate::apple_provisioning_protocol as provisioning;
 use vault::key_sources::AppleKeySources;
+#[path="asset_session_apple_p12_material.rs"]
+pub(super) mod p12;
 
 pub(super) fn borrow(
     document: &DocumentBinding,
@@ -12,7 +14,7 @@ pub(super) fn borrow(
     registration: u32,
     root: &asset_source::RegisteredRoot,
 ) -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
-    if !(context.mode.local_key() || context.mode.certificate()) || !context.valid() {
+    if !(context.mode.local_key() || context.mode.certificate() || context.mode.p12()) || !context.valid() {
         return Err(refused());
     }
     let native = state
@@ -39,10 +41,14 @@ pub(super) fn borrow(
     let payload = github_secret::assigned(state, &key, Kind::AscP8, &native)
         .ok_or_else(refused)?
         .clone();
-    let selected_key = if context.mode.certificate() { Some(RecordKey {
+    let selected_key = if context.mode.certificate() || context.mode.p12() { Some(RecordKey {
         id: Token(context.key_record_id.clone().ok_or_else(refused)?), revision: context.key_record_revision.ok_or_else(refused)?,
     }) } else { None };
-    let sources = AppleKeySources::capture(document, state, &native, &key, &payload, selected_key.as_ref())
+    let selected_p12=match (&context.p12_record_id,context.p12_record_revision) {
+        (Some(id),Some(revision)) if context.mode.p12()=>Some(RecordKey {id:Token(id.clone()),revision}),
+        (None,None)=>None,_=>return Err(refused()),
+    };
+    let sources = AppleKeySources::capture(document, state, &native, &key, &payload, selected_key.as_ref(), context.mode.p12(), selected_p12.as_ref())
         .map_err(|_| refused())?;
     let result = Arc::new(SelectedStoreMaterial {
         native,
@@ -60,7 +66,7 @@ pub(super) fn borrow(
     {
         return Err(refused());
     }
-    if context.mode.certificate() { apple_parts(&result.payload).ok_or_else(refused)?; } else { result.parts()?; }
+    if context.mode.certificate() || context.mode.p12() { apple_parts(&result.payload).ok_or_else(refused)?; } else { result.parts()?; }
     Ok(result)
 }
 
@@ -116,7 +122,7 @@ impl SelectedStoreMaterial {
         let Some(document) = self.prepare_document.as_ref().and_then(Weak::upgrade) else {
             return false;
         };
-        (context.mode.local_key() || context.mode.certificate())
+        (context.mode.local_key() || context.mode.certificate() || context.mode.p12())
             && self.provisioning_matches(context, registration, root)
             && self.profile_sources.is_none()
             && self.supplemental.iter().all(Option::is_none)

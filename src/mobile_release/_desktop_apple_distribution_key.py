@@ -20,7 +20,7 @@ from .owned_process import run_owned
 
 
 PREPARE_MODE = "key-prepare"
-VERIFY_MODES = frozenset(("key-recover", "certificate-review", "certificate-create", "certificate-reconcile"))
+VERIFY_MODES = frozenset(("key-recover", "certificate-review", "certificate-create", "certificate-reconcile", "p12-review", "p12-reuse", "p12-save"))
 MODES = VERIFY_MODES | {PREPARE_MODE}
 MAGIC = b"MRK-APPLE-DISTRIBUTION-KEY/1\n"
 PUBLIC_MAGIC = b"MRK-APPLE-DISTRIBUTION-KEY-PUBLIC/1\n"
@@ -151,7 +151,7 @@ class AppleDistributionKeyWork:
         self._binding(self._operation)
         _need(runtime is self._runtime and type(self._scratch) is FiniteScratch)
         name = "apple_distribution_key.rb" if self._mode == PREPARE_MODE else "apple_distribution_key_verify.rb"
-        if self._mode in {"certificate-review", "certificate-create", "certificate-reconcile"}:
+        if self._mode in {"certificate-review", "certificate-create", "certificate-reconcile", "p12-review", "p12-reuse", "p12-save"}:
             # Same actual key verifier, preceded by fixed offline resources.
             # A missing/invalid G3/root refuses BEFORE any certificate POST.
             name = "apple_distribution_certificate_prepare.rb"

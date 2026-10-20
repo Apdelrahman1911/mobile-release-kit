@@ -116,7 +116,7 @@ pub(in crate::saved_command_owner) async fn write_ack<W: tokio::io::AsyncWrite +
     owner: &Arc<Session>, writer: &mut W, bytes: &[u8], stopped: bool,
 ) -> bool {
     use tokio::io::AsyncWriteExt;
-    if !matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.certificate())
+    if !matches!(&owner.context, Context::AppleProvisioning(context) if context.mode.certificate() || context.mode.p12() && !stopped)
         || bytes.is_empty() || bytes.len() > wire::ACK_LIMIT { return false; }
     let mut stop = owner.stop.subscribe();
     let mut cutoff = owner.native_audit_cutoff.subscribe();
@@ -145,7 +145,7 @@ fn originals(owner: &Arc<Session>) -> Result<(Arc<AppleKeySession>, Arc<Original
     let asset = parent.original.get().and_then(Weak::upgrade).ok_or_else(invalid)?;
     let loan = parent.loan.get().and_then(Weak::upgrade).ok_or_else(invalid)?;
     let request = parent.binding.get().ok_or_else(invalid)?.clone();
-    if !parent.mode.certificate() || !parent.same_asset(&asset)
+    if !(parent.mode.certificate() || parent.mode.p12()) || !parent.same_asset(&asset)
         || !parent.source_returned.load(Ordering::SeqCst) || parent.clock.interrupted()
         || owner.resource_unknown.load(Ordering::SeqCst)
         || request.scope.certificate.as_ref().is_none_or(|scope| scope.source_key != loan.reference()) {
@@ -273,20 +273,38 @@ pub(in crate::saved_command_owner) fn pending_ack(owner: &Arc<Session>, ack: &Ce
 /// worker/IO/runtime/driver joins and BEFORE Asset loan release. No DTO or ACK
 /// calls it. A nonpositive/cancelled outcome simply has no association.
 pub(in crate::saved_command_owner) fn producer_joined(owner: &Arc<Session>, result: Option<&wire::CertificateResult>) -> Result<(), BridgeError> {
-    let parent = original(owner)?;
-    if !parent.worker_joined.load(Ordering::SeqCst) { return Err(BridgeError::cleanup_unknown()); }
-    let Some(result) = result.filter(|value| value.positive_identity()) else { return Ok(()); };
-    let (_, asset, loan, binding) = originals(owner)?;
-    let mut facts = state(parent)?.facts.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
-    let key = facts.key.as_ref().ok_or_else(invalid)?;
-    if facts.policy.is_none() || !loan.matches_public_material(&asset, key.csr.as_bytes(), &key.spki) { return Err(invalid()); }
-    let spki_sha256 = key.spki_sha256.clone();
-    let selected = facts.batch.as_mut().and_then(|batch| batch.selected.take()).ok_or_else(invalid)?;
-    if result.certificate_id.as_ref() != Some(&selected.id) || current_time()? >= selected.after { return Err(invalid()); }
+    if !original(owner)?.mode.certificate() { return Err(invalid()); }
+    positive_joined(owner,result.filter(|value|value.positive_identity()).and_then(|value|value.certificate_id.as_deref()),None)
+}
+/// Same sole producer; P12 supplies its own typed result, never a fabricated
+/// certificate terminal or a holder transferred from an earlier operation.
+pub(in crate::saved_command_owner) fn producer_joined_p12(owner:&Arc<Session>,result:Option<&wire::P12Result>)->Result<(),BridgeError> {
+    if !original(owner)?.mode.p12() {return Err(invalid());}
+    let positive=result.filter(|value|value.positive_identity());
+    positive_joined(owner,positive.and_then(|value|value.certificate_id.as_deref()),
+        positive.and_then(|value|value.certificate_sha256.as_deref().zip(value.public_key_sha256.as_deref())))
+}
+fn positive_joined(owner:&Arc<Session>,id:Option<&str>,hashes:Option<(&str,&str)>)->Result<(),BridgeError> {
+    let parent=original(owner)?;
+    if !parent.worker_joined.load(Ordering::SeqCst) {return Err(BridgeError::cleanup_unknown());}
+    let Some(id)=id else{return Ok(());};
+    let (_,asset,loan,binding)=originals(owner)?;
+    let mut facts=state(parent)?.facts.try_lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    let key=facts.key.as_ref().ok_or_else(invalid)?;
+    if facts.policy.is_none() || !loan.matches_public_material(&asset,key.csr.as_bytes(),&key.spki) {return Err(invalid());}
+    let spki_sha256=key.spki_sha256.clone();
+    let selected=facts.batch.as_mut().and_then(|batch|batch.selected.take()).ok_or_else(invalid)?;
+    if id!=selected.id || current_time()? >= selected.after
+        || hashes.is_some_and(|(leaf,spki)|leaf!=selected.sha256 || spki!=spki_sha256) {return Err(invalid());}
     state(parent)?.association.set(AppleDistributionCertificateBinding {
-        parent: Arc::downgrade(parent), original: Arc::downgrade(&asset), loan: Arc::downgrade(&loan),
-        request: binding, certificate: selected, public_key_sha256: spki_sha256,
-    }).map_err(|_| invalid())
+        parent:Arc::downgrade(parent),original:Arc::downgrade(&asset),loan:Arc::downgrade(&loan),
+        request:binding,certificate:selected,public_key_sha256:spki_sha256,
+    }).map_err(|_|invalid())
+}
+pub(super) fn confirms_p12(parent:&Arc<AppleKeySession>,original:&Arc<OriginalWork>,loan:&Arc<AppleDistributionKeyLoan>,
+    request:&Arc<wire::RequestBinding>,leaf:&str,spki:&str)->bool {
+    parent.mode.p12() && state(parent).ok().and_then(|state|state.association.get())
+        .is_some_and(|binding|binding.confirms_p12(parent,original,loan,request,leaf,spki))
 }
 
 pub(in crate::saved_command_owner) fn native_joined(owner: &Arc<Session>, native_use: Arc<NativeUse>, reservation: Arc<CertificateOriginalReservation>) -> Result<AppleCertificateNativeJoined, BridgeError> {

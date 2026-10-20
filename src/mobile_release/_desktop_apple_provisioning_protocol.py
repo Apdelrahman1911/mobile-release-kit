@@ -28,9 +28,10 @@ from .apple_provisioning_signing import MODES as PROFILE_MODES
 # separate branches. A new mode is never an alias for local key-save authority.
 KEY_MODES = frozenset({"key-review", "key-prepare"})
 CERTIFICATE_MODES = frozenset({"certificate-review", "certificate-create", "certificate-reconcile"})
-MODES = BUNDLE_MODES | PROFILE_MODES | KEY_MODES | CERTIFICATE_MODES
+P12_MODES = frozenset({"p12-review", "p12-reuse", "p12-save"})
+MODES = BUNDLE_MODES | PROFILE_MODES | KEY_MODES | CERTIFICATE_MODES | P12_MODES
 CONSENTS = {mode: "local-ios-bundle-" + mode + "-v1" for mode in BUNDLE_MODES}
-CONSENTS.update({mode: "local-ios-" + mode + "-v1" for mode in PROFILE_MODES | KEY_MODES | CERTIFICATE_MODES})
+CONSENTS.update({mode: "local-ios-" + mode + "-v1" for mode in PROFILE_MODES | KEY_MODES | CERTIFICATE_MODES | P12_MODES})
 OBSERVATIONS = frozenset({"found", "not-returned", "not-permitted", "inconclusive", "not-checked"})
 DECISIONS = frozenset({"reuse", "review-required", "blocked", "registration-unconfirmed", "registration-confirmed", "comparison-only"})
 ATTEMPT_STATUSES = frozenset({"running", "cancellation_requested", "succeeded", "failed", "cancelled", "recovery_required", "unknown"})
@@ -140,8 +141,8 @@ def pending(value, account):
     for row in value:
         row = _keys(row, {"accountRef", "operationId", "action", "status", "nativeSettlement"})
         require(row["accountRef"] == account and token(row["operationId"]) and row["operationId"] not in seen
-                and row["action"] in {"register_bundle_id", "profile_setup", "key_prepare", "create_certificate"} and row["status"] in ATTEMPT_STATUSES)
-        if row["action"] in {"profile_setup", "key_prepare", "create_certificate"}:
+                and row["action"] in {"register_bundle_id", "profile_setup", "key_prepare", "create_certificate", "p12_setup"} and row["status"] in ATTEMPT_STATUSES)
+        if row["action"] in {"profile_setup", "key_prepare", "create_certificate", "p12_setup"}:
             require(row["status"] in {"unknown", "succeeded"})  # Native coarse cross-family fence only.
         seen.add(row["operationId"])
         result.append(PendingMutation(row["accountRef"], row["operationId"], row["action"], row["status"], row["nativeSettlement"]))
@@ -149,6 +150,9 @@ def pending(value, account):
 
 
 def context(value):
+    if type(value) is dict and value.get("mode") in P12_MODES:
+        from ._desktop_apple_p12_protocol import context as p12_context
+        return p12_context(value)
     if type(value) is dict and value.get("mode") in CERTIFICATE_MODES:
         from ._desktop_apple_certificate_protocol import context as certificate_context
         return certificate_context(value)
@@ -243,7 +247,7 @@ def parse_request(raw):
         selected = context(value["context"])
         native = _keys(value["native"], {"profile", "projectRoot", "rootIdentity", "cwd", "credentialConfig", "clock", "nonce",
             "provisioning", "target", "reviewedAt", "journalRevision", "pending", "prior"} |
-            ({"certificate"} if selected["mode"] in CERTIFICATE_MODES else
+            ({"p12", "certificate"} if selected["mode"] in P12_MODES else {"certificate"} if selected["mode"] in CERTIFICATE_MODES else
              {"signing"} if selected["mode"] in PROFILE_MODES else {"key"} if selected["mode"] in KEY_MODES else set()))
         require(native["profile"] in access.PROFILES and token(native["nonce"]))
         _path(native["projectRoot"]); _path(native["cwd"]); _identity(native["rootIdentity"]); content(native["credentialConfig"])
@@ -258,7 +262,10 @@ def parse_request(raw):
         require(chosen.display_name == selected["displayName"])
         pending(native["pending"], owned.account_ref)
         require(integer(native["journalRevision"], 2**64 - 2))
-        if selected["mode"] in CERTIFICATE_MODES:
+        if selected["mode"] in P12_MODES:
+            from ._desktop_apple_p12_protocol import validate_native as validate_p12_native
+            validate_p12_native(selected, native)
+        elif selected["mode"] in CERTIFICATE_MODES:
             from ._desktop_apple_certificate_protocol import validate_native as validate_certificate_native
             validate_certificate_native(selected, native)
         elif selected["mode"] in KEY_MODES:
@@ -285,6 +292,8 @@ def parse_request(raw):
 
 def command_count(mode):
     require(mode in MODES)
+    if mode in P12_MODES:
+        return 15
     if mode in CERTIFICATE_MODES:
         return 21 if mode == "certificate-create" else 14
     return 12 if mode == "key-review" else 7 if mode == "key-prepare" else 15 if mode in PROFILE_MODES else 9 if mode == "register" else 7
@@ -292,6 +301,8 @@ def command_count(mode):
 
 def max_events(mode):
     require(mode in MODES)
+    if mode in P12_MODES:
+        return 8
     if mode in CERTIFICATE_MODES:
         return 12
     return 5 if mode in KEY_MODES else 4 if mode in PROFILE_MODES else MAX_EVENTS
@@ -299,6 +310,9 @@ def max_events(mode):
 
 def response_limit(mode):
     require(mode in MODES)
+    if mode in P12_MODES:
+        from ._desktop_apple_p12_private import TRANSFER_LIMIT
+        return 768 * 1024 + (TRANSFER_LIMIT if mode == "p12-save" else 0)
     if mode in CERTIFICATE_MODES:
         return 768 * 1024
     if mode in KEY_MODES:
@@ -319,6 +333,12 @@ def expected_plan(request):
 
 
 def validate_event(request, kind, payload, sequence):
+    if request.context["mode"] in P12_MODES:
+        if kind in {"certificate-key", "certificate-identities", "certificate-policy"}:
+            from ._desktop_apple_certificate_protocol import validate_event as certificate_event
+            return certificate_event(request, kind, payload, sequence)
+        from ._desktop_apple_p12_protocol import validate_event as p12_event
+        return p12_event(request, kind, payload, sequence)
     if request.context["mode"] in CERTIFICATE_MODES:
         from ._desktop_apple_certificate_protocol import validate_event as certificate_event
         return certificate_event(request, kind, payload, sequence)
@@ -369,7 +389,7 @@ def validate_event(request, kind, payload, sequence):
 def response(request, kind, payload, sequence):
     require(type(request) is AppleProvisioningRequest and integer(sequence, max_events(request.context["mode"]) + 1)
             and kind in {"accepted", "observed", "pending", "attempt", "terminal", "identity", "profile-observed", "profile-pending", "profile-attempt", "key-observed", "key-pending", "key-output", "key-not-generated",
-                         "certificate-key", "certificate-identities", "certificate-policy", "certificate-observed", "certificate-pending", "certificate-attempt"})
+                         "certificate-key", "certificate-identities", "certificate-policy", "certificate-observed", "certificate-pending", "certificate-attempt", "p12-observed", "p12-pending", "p12-output"})
     if kind == "accepted":
         require(sequence == 0 and payload == {"schemaVersion": 1, "context": request.context})
     elif kind == "terminal":
@@ -378,7 +398,7 @@ def response(request, kind, payload, sequence):
         validate_event(request, kind, payload, sequence)
     raw = api.canonical({"protocol": PROTOCOL, "operationId": request.operation_id, "ownerGeneration": request.owner_generation,
         "nonce": request.native["nonce"], "requestSha256": request.digest, "sequence": sequence, "kind": kind, "payload": payload}) + b"\n"
-    require(len(raw) <= (256 * 1024 if kind == "certificate-identities" and request.context["mode"] in CERTIFICATE_MODES else
+    require(len(raw) <= (256 * 1024 if kind == "certificate-identities" and request.context["mode"] in CERTIFICATE_MODES | P12_MODES else
         128 * 1024 if kind == "identity" and request.context["mode"] in PROFILE_MODES else
         EVENT_LIMIT if kind not in {"accepted", "terminal"} else 32 * 1024))
     return raw
@@ -399,6 +419,9 @@ def reply(raw, request, sequence, record_sha256):
 
 
 def validate_result(value, request):
+    if request.context["mode"] in P12_MODES:
+        from ._desktop_apple_p12_protocol import validate_result as p12_result
+        return p12_result(value, request)
     if request.context["mode"] in CERTIFICATE_MODES:
         from ._desktop_apple_certificate_protocol import validate_result as certificate_result
         return certificate_result(value, request)

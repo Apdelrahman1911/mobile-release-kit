@@ -40,6 +40,10 @@ pub(crate) use profile::{ProfileOriginalReservation, ProfileJournalAck};
 #[path = "apple_provisioning_key_journal.rs"]
 mod key;
 pub(crate) use key::{KeyOriginalReservation, KeyJournalAck, CertificateOriginalReservation, CertificateJournalAck};
+pub(crate) use data::p12::*;
+#[path="apple_provisioning_p12_journal.rs"]
+mod p12;
+pub(crate) use p12::{P12OriginalReservation,P12JournalAck};
 type Result<T> = std::result::Result<T, StateError>;
 
 fn unknown() -> StateError {
@@ -63,6 +67,8 @@ struct State {
     key_rows: Option<Vec<KeyPrepareRow>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     certificate_rows: Option<Vec<CertificateIssuanceRow>>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    p12_rows: Option<Vec<P12SaveRow>>,
 }
 impl State {
     fn empty() -> Self {
@@ -73,30 +79,35 @@ impl State {
             profile_rows: None,
             key_rows: None,
             certificate_rows: None,
+            p12_rows: None,
         }
     }
     fn row_count(&self) -> usize {
         self.rows.len().saturating_add(self.profile_rows.as_ref().map_or(0,Vec::len))
             .saturating_add(self.key_rows.as_ref().map_or(0,Vec::len))
             .saturating_add(self.certificate_rows.as_ref().map_or(0,Vec::len))
+            .saturating_add(self.p12_rows.as_ref().map_or(0,Vec::len))
     }
     fn contains_operation(&self, operation: &str) -> bool {
         self.rows.iter().any(|row| row.intent.context.operation_id == operation)
             || self.profile_rows.iter().flatten().any(|row| row.intent.context.operation_id == operation)
             || self.key_rows.iter().flatten().any(|row| row.intent.context.operation_id == operation)
             || self.certificate_rows.iter().flatten().any(|row| row.intent.context.operation_id == operation)
+            || self.p12_rows.iter().flatten().any(|row| row.intent.context.operation_id == operation)
     }
     fn unresolved(&self, account: &AccountRef) -> bool {
         self.rows.iter().any(|row| &row.intent.context.account_ref == account && row.unresolved())
             || self.profile_rows.iter().flatten().any(|row| &row.intent.context.account_ref == account && row.unresolved())
             || self.key_rows.iter().flatten().any(|row| &row.intent.context.account_ref == account && row.unresolved())
             || self.certificate_rows.iter().flatten().any(|row| &row.intent.context.account_ref == account && row.unresolved())
+            || self.p12_rows.iter().flatten().any(|row| &row.intent.context.account_ref == account && row.unresolved())
     }
     fn validate(&self) -> Result<()> {
         need(self.row_count() <= ROWS && match self.schema_version {
-            1 => self.protocol == PROTOCOL && self.profile_rows.is_none() && self.key_rows.is_none() && self.certificate_rows.is_none(),
-            2 => self.protocol == PROFILE_PROTOCOL && self.profile_rows.is_some() && self.key_rows.is_none() && self.certificate_rows.is_none(),
-            3 => self.protocol == KEY_PROTOCOL && self.profile_rows.is_some() && self.key_rows.is_some() && self.certificate_rows.is_some(),
+            1 => self.protocol == PROTOCOL && self.profile_rows.is_none() && self.key_rows.is_none() && self.certificate_rows.is_none() && self.p12_rows.is_none(),
+            2 => self.protocol == PROFILE_PROTOCOL && self.profile_rows.is_some() && self.key_rows.is_none() && self.certificate_rows.is_none() && self.p12_rows.is_none(),
+            3 => self.protocol == KEY_PROTOCOL && self.profile_rows.is_some() && self.key_rows.is_some() && self.certificate_rows.is_some() && self.p12_rows.is_none(),
+            4 => self.protocol == P12_PROTOCOL && self.profile_rows.is_some() && self.key_rows.is_some() && self.certificate_rows.is_some() && self.p12_rows.is_some(),
             _ => false,
         })?;
         let mut operations = BTreeSet::new();
@@ -123,6 +134,11 @@ impl State {
             need(operations.insert(row.intent.provenance.operation_id.as_str()))?;
             if row.unresolved() { need(pending_accounts.insert(&row.intent.context.account_ref))?; }
         }
+        for row in self.p12_rows.iter().flatten() {
+            row.validate()?; need(operations.insert(row.intent.provenance.operation_id.as_str()))?;
+            if row.unresolved() { need(pending_accounts.insert(&row.intent.context.account_ref))?; }
+        }
+        need(self.p12_rows.as_ref().is_none_or(|rows| rows.windows(2).all(|pair| State::p12_key(&pair[0]) < State::p12_key(&pair[1]))))?;
         need(self.key_rows.as_ref().is_none_or(|rows| rows.windows(2)
             .all(|pair| key_key(&pair[0]) < key_key(&pair[1]))))?;
         need(self.certificate_rows.as_ref().is_none_or(|rows| rows.windows(2)
@@ -207,6 +223,7 @@ pub(crate) struct AccountSnapshot {
     pub(crate) profile_rows: Vec<ProfileSetupRow>,
     pub(crate) key_rows: Vec<KeyPrepareRow>,
     pub(crate) certificate_rows: Vec<CertificateIssuanceRow>,
+    pub(crate) p12_rows: Vec<P12SaveRow>,
 }
 
 pub(crate) struct AppleProvisioningJournal {
@@ -217,6 +234,7 @@ pub(crate) struct AppleProvisioningJournal {
     profile_original: Option<Arc<ProfileOriginalReservation>>,
     key_original: Option<Arc<KeyOriginalReservation>>,
     certificate_original: Option<Arc<CertificateOriginalReservation>>,
+    p12_original: Option<Arc<P12OriginalReservation>>,
     #[cfg(test)]
     lose_next_ack: bool,
 }
@@ -233,6 +251,7 @@ impl AppleProvisioningJournal {
             profile_original: None,
             key_original: None,
             certificate_original: None,
+            p12_original: None,
             #[cfg(test)]
             lose_next_ack: false,
         }
@@ -254,7 +273,7 @@ impl AppleProvisioningJournal {
     }
 
     fn reservation_taken(&self) -> bool {
-        self.original.is_some() || self.profile_original.is_some() || self.key_original.is_some() || self.certificate_original.is_some()
+        self.original.is_some() || self.profile_original.is_some() || self.key_original.is_some() || self.certificate_original.is_some() || self.p12_original.is_some()
     }
 
     fn healthy(&self) -> Result<()> {
@@ -349,6 +368,7 @@ impl AppleProvisioningJournal {
             account: account.clone(),
             key_rows: state.key_rows.into_iter().flatten()
                 .filter(|row| &row.intent.context.account_ref == account).collect(),
+            p12_rows: state.p12_rows.into_iter().flatten().filter(|row| &row.intent.context.account_ref==account).collect(),
             certificate_rows: state.certificate_rows.into_iter().flatten()
                 .filter(|row| &row.intent.context.account_ref == account).collect(),
             profile_rows: state.profile_rows.into_iter().flatten()

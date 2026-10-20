@@ -15,6 +15,9 @@ use zeroize::{Zeroize, Zeroizing};
 // key and does not turn a restored record into an assessment or assignment.
 #[path = "vault_backup.rs"]
 pub(crate) mod backup;
+#[path = "vault_crypto_apple_p12.rs"]
+mod apple_p12;
+pub(crate) use apple_p12::{ReservedAppleP12, P12_CRYPTO_BYTES as APPLE_P12_CRYPTO_BYTES};
 #[path = "vault_crypto_apple_distribution_key.rs"]
 mod apple_distribution_key;
 pub(crate) use apple_distribution_key::{ReservedAppleDistributionKey, KEY_CRYPTO_BYTES as APPLE_KEY_CRYPTO_BYTES};
@@ -190,7 +193,7 @@ impl VaultKey {
         let descriptor_bytes = Zeroizing::new(descriptor.encode()?);
         let counter = previous.map_or(Some(1), |previous| previous.counter.checked_add(1)).ok_or(Error::Bounds)?;
         let revision = match reserved {
-            Some(value) if previous.is_none() && value.counter == 1 && matches!(descriptor.kind, commands::Kind::AppleDistributionKey | commands::Kind::AppleProfile) => value,
+            Some(value) if previous.is_none() && value.counter == 1 && matches!(descriptor.kind, commands::Kind::AppleDistributionKey | commands::Kind::AppleProfile | commands::Kind::AppleP12) => value,
             Some(_) => return Err(Error::Format),
             None => Revision::new(fresh_id(random)?, counter)?,
         };

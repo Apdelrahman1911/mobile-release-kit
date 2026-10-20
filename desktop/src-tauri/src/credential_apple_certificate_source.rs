@@ -58,6 +58,7 @@ impl AppleKeySources {
         let reference = self.certificate.as_ref()?.reference;
         Some(KeyReference::native(reference.identity, reference.record, reference.revision))
     }
+    pub(in crate::asset_session) fn certificate_read_witness(&self) -> Option<&store::ReadWitness> { Some(&self.certificate.as_ref()?.reference.original) }
     pub(in crate::asset_session) fn certificate_loan(&self) -> Option<Arc<AppleDistributionKeyLoan>> {
         self.certificate.as_ref()?.loan.get()?.upgrade()
     }
@@ -68,8 +69,10 @@ impl AppleKeySources {
         let certificate = self.certificate.as_ref().ok_or(Reason::SourceRefused)?;
         if !self.same_owner(owner) || !self.current(document, state) || certificate.loan.get().is_some() { return Err(Reason::SourceChanged); }
         let expected = self.selected_certificate_key().ok_or(Reason::SourceRefused)?;
-        let loan = AppleDistributionKeyLoan::reserve(document, state, owner, &expected,
-            ProjectRoster { generation: self.roster.generation, roots: self.roster.roots.clone() })?;
+        let roster=ProjectRoster { generation:self.roster.generation, roots:self.roster.roots.clone() };
+        let loan=if owner.apple_key_parent().is_some_and(|parent|parent.p12_mode()==Some(crate::apple_provisioning_protocol::Mode::P12Save)) {
+            AppleDistributionKeyLoan::reserve_p12(document,state,owner,&expected,roster)?
+        } else { AppleDistributionKeyLoan::reserve(document,state,owner,&expected,roster)? };
         // reserve is zero-IO. The existing Work retains the exact original
         // BEFORE weak publication, parent attachment, or the first Load.
         owner.vault.try_lock().map_err(|_| Reason::CleanupUnknown)?.attach_apple_distribution_key_loan(loan.clone())?;

@@ -113,7 +113,7 @@ mod tests {
 
     fn account(scope:&ScopeData)->AccountSnapshot {
         AccountSnapshot { revision:crate::application_state_store::Revision(7),account:scope.provisioning.account_ref.clone(),
-            rows:vec![],profile_rows:vec![],key_rows:vec![],certificate_rows:vec![] }
+            rows:vec![],profile_rows:vec![],key_rows:vec![],certificate_rows:vec![],p12_rows:vec![] }
     }
     #[test]
     fn certificate_history_is_redacted_current_fullref_data_and_preserves_pending() {
