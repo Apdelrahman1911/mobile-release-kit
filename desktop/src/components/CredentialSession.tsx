@@ -5,6 +5,7 @@ import type { AssetDisplayState, AssetKind, AssetRecordRef, AssetScope, Credenti
 import { AssetSessionController, assetCancellationReason, assetContextReason, assetImageOperationPending, assetIntentPending, assetSessionReason } from '../assetSessionController.ts';
 import { ASSET_KINDS, ASSET_EXECUTION_MODES, ASSET_PLATFORMS, ASSET_PURPOSES, ASSET_REASON_HELP, ASSET_STAGES, SESSION_FIELDS, assetLabelFits, assetStorageWritable, isAssetFileKind } from '../assetSessionProtocol.ts';
 import { sessionControlHelp, sessionKindHelp, sessionTargetLabel } from '../assetSessionHelp.ts';
+import { CredentialUploadKey } from './CredentialUploadKey.tsx';
 import { credentialBackupMessage, credentialBackupReason, isCredentialBackupOperation } from '../credentialBackup.ts';
 import { RELEASE_INPUT_STAGES, preparationScopeChanged, preparationSessionReason, sessionPreparationKind } from '../releaseInputGuidance.ts';
 import type { ReleaseInputPreparationLocal, ReleaseInputPreparationTarget } from '../releaseInputGuidance.ts';
@@ -144,12 +145,13 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
   const installationActive = installationOperation && (!idle || state.blocked);
   const intentPending = assetIntentPending(state);
   const backupActive = state.intent?.type === 'backup' && intentPending || isCredentialBackupOperation(operation?.operation) && !idle;
+  const uploadKeyActive = state.intent?.type === 'upload-key' && intentPending || operation?.operation === 'generate-upload-key' && !idle;
   const effectiveKindId = intentPending && state.intent?.type === 'record' ? state.intent.kind : kindId;
   const originalKind = guide?.kinds.find((item) => item.id === (operation?.selectionToken ? state.selectionKind : effectiveKindId));
   const kind = originalKind ? sessionKindHelp(originalKind) : null;
   const originalSelectedKind = guide?.kinds.find((item) => item.id === effectiveKindId);
   const selectedKind = originalSelectedKind ? sessionKindHelp(originalSelectedKind) : null;
-  const selectionVisible = !!(nativeAvailable && writable && guide && !projectPathActive && !imageActive && !installationActive && !backupActive);
+  const selectionVisible = !!(nativeAvailable && writable && guide && !projectPathActive && !imageActive && !installationActive && !backupActive && !uploadKeyActive);
   // The complete existing outer + inner render condition protects even an
   // unsubmitted private form. Navigation never inspects or resets its values.
   const writeOnlyFormMounted = selectionVisible && !!kind && (!!(operation?.selectionToken && state.selectionKind) ||
@@ -210,6 +212,7 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
     <h3 id={`${id}-title`} className="inline-heading">Private-input storage {controlHelp('mode')}<Badge tone={writable ? 'info' : 'neutral'}>{inSession ? 'Memory-only session' : encrypted ? `Encrypted vault · ${persistence?.state ?? 'unknown'}` : 'Storage closed'}</Badge></h3>
     <p>Nothing is uploaded or written into your repository. Native selection preserves the original. Memory-only copies last for this launch; explicitly saved encrypted records can remain for later launches. Neither mode automatically assigns an input or starts a release.</p>
     {encrypted && persistence && <div className="session-context" role="status"><p><strong>Key access:</strong> {persistence.keyAccess}. {persistence.reason !== 'none' ? ASSET_REASON_HELP[persistence.reason] : writable ? 'Unlocked descriptors are not proof that their stored payloads are ready. Assess the exact revision before assigning.' : 'Wait for the original operation to settle before continuing.'}</p>{persistence.keyAccess === 'read-only' && <p>Read-only interrupted vault: authenticated labels only. Preparing, saving, removing and assigning inputs are unavailable; no automatic repair is attempted.</p>}</div>}
+    <CredentialUploadKey assets={state} controller={controller} disabledReason={nativeBusyReason ?? (confirmLock ? 'Finish or close the lock confirmation first.' : writeOnlyFormMounted ? 'Finish the open private-input form before starting signing setup.' : null)} />
     {preparation && <div className="session-context" aria-label="Current requirement preparation guide">
       <div className="inline-heading"><h3>Prepare this input</h3><Badge>Guidance only · no input checked</Badge></div>
       {preparationCurrent && preparationKind && <>
