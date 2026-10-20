@@ -18,6 +18,19 @@ function snapshot() {
       scan: { entries: 2, sourceFiles: 0, sourceBytes: 0, excludedEntries: 0 }, limits: { maxEntries: 10000, scanSeconds: 5 } },
     assurance: { ...assurance }, issues: [] };
 }
+function setupAnalysis() {
+  const rows = [
+    ['project-layout', 'local', null, 'detected'], ['release-settings', 'local', null, 'configured'],
+    ['version-source', 'local', 'version.source', 'configured'], ['android-identity', 'local', 'android.applicationId', 'configured'],
+    ['android-module', 'local', 'android.module', 'detected'], ['android-variant', 'local', 'android.variant', 'not-checked'],
+    ['android-tools', 'local', null, 'not-checked'], ['android-signing', 'signing', 'android.uploadCertificateSha256', 'not-checked'],
+    ['android-store', 'store', 'android.identityStatus', 'deferred'], ['android-testing', 'store', 'android.externalTrack', 'deferred'],
+    ['store-metadata', 'store', 'metadata.root', 'deferred'], ['github-automation', 'automation', null, 'deferred'],
+  ];
+  return { schemaVersion: 1, scope: 'local-setup-guidance', configurationState: 'format-valid', discoveryPartial: false, platforms: ['android'],
+    requirements: rows.map(([id, stage, field, state]) => ({ id, stage, field, state, reference: null, summary: 'Static guidance, not a passed operation.' })),
+    limitations: Array(6).fill('No native operation is established by this guidance.'), assurance: { ...assurance } };
+}
 function workspace(input = snapshot()) {
   let state = workspaceReducer(initialWorkspace, { type: 'select', project: { id: 'inert-app', name: 'Example app', path: '/inert/never-opened' } });
   state = workspaceReducer(state, { type: 'snapshot-start', projectId: 'inert-app', requestId: 1 });
@@ -125,6 +138,54 @@ test('exact-config-byte-change-preserves-clean-and-dirty-drafts-and-baselines', 
   }
   const h = harness(); const whitespace = snapshot(); whitespace.config.content = content('c', 92); h.snapshots.push(whitespace);
   await h.open(); assert.equal(h.outcomes[0].change, 'project-files', 'different saved bytes matter even with identical JSON');
+});
+
+test('optional-setup-analysis-allows-real-external-change-without-widening-the-snapshot-schema', async () => {
+  assert.ok(parseExternalProjectSnapshot(snapshot()), 'the original seven-key snapshot is still supported');
+  const input = { ...snapshot(), setupAnalysis: setupAnalysis() };
+  const parsed = parseExternalProjectSnapshot(input);
+  assert.ok(parsed);
+  assert.deepEqual(structuredClone(parsed.setupAnalysis), input.setupAnalysis);
+  assert.notEqual(parsed.setupAnalysis, input.setupAnalysis);
+  assert.ok(Object.isFrozen(parsed.setupAnalysis.requirements[0]));
+  input.setupAnalysis.requirements[0].summary = 'Changed source object';
+  assert.notEqual(parsed.setupAnalysis.requirements[0].summary, input.setupAnalysis.requirements[0].summary);
+
+  for (const dirty of [false, true]) {
+    const h = harness();
+    if (dirty) h.workspace = workspaceReducer(h.workspace, { type: 'edit', projectId: 'inert-app', path: 'android.enabled', value: false });
+    const original = h.session();
+    const changed = { ...snapshot(), setupAnalysis: setupAnalysis() };
+    changed.config.content = content('c', 92);
+    changed.config.data.version.source = 'release/other-version.properties';
+    h.snapshots.push(changed); await h.open();
+    assert.equal(h.outcomes[0].kind, 'observed');
+    assert.equal(h.outcomes[0].change, 'project-files');
+    assert.deepEqual(structuredClone(h.session().snapshot.setupAnalysis), changed.setupAnalysis);
+    assert.equal(h.session().draft, original.draft);
+    assert.equal(h.session().baseline, original.baseline);
+    assert.equal(h.session().revision, original.revision);
+    assert.equal(h.session().sourceChanged, true);
+    assert.deepEqual(h.actions.map((action) => action.type), ['snapshot-start', 'snapshot-done']);
+  }
+
+  const malformed = [
+    (value) => { value.setupAnalysis = null; }, (value) => { value.setupAnalysis = undefined; },
+    (value) => { value.setupAnalysis.extra = true; }, (value) => { value.setupAnalysis.assurance.toolsProbed = true; },
+    (value) => { value.setupAnalysis.requirements.pop(); },
+    (value) => { value.config = { ...value.config, state: 'missing', data: null, content: null }; },
+    (value) => { value.discovery.partial = true; },
+    (value) => { value.unknownObservation = {}; }, (value) => { value.scriptDiscovery = {}; },
+  ];
+  for (const mutate of malformed) {
+    const value = { ...snapshot(), setupAnalysis: setupAnalysis() }; mutate(value);
+    assert.equal(parseExternalProjectSnapshot(value), null);
+  }
+  let called = false;
+  const accessor = snapshot();
+  Object.defineProperty(accessor, 'setupAnalysis', { enumerable: true, get() { called = true; throw Error('must not run'); } });
+  assert.equal(parseExternalProjectSnapshot(accessor), null);
+  assert.equal(called, false);
 });
 
 test('only-top-level-observation-time-is-ignored-not-config-or-hint-timestamps', () => {

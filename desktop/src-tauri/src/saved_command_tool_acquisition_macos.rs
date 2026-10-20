@@ -3,6 +3,7 @@
 //! cache tail runs only AFTER actual child/pipe/driver/manager/runtime joins.
 use super::*;
 use crate::installed_runtime::{ToolAcquisitionRuntimeSlots, AndroidRegistrationSourceSlots};
+use std::path::PathBuf;
 use wire::components::Partition;
 
 pub(in crate::saved_command_owner) struct Original {
