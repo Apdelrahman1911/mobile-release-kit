@@ -338,7 +338,7 @@ async fn client_exchange(directory: &store::Directory, request: &p::Request, dea
 mod tests {
     use super::*;
     use crate::{application_service::tests::{passive, poison_fixture, register_fixture}, application_state_store::{Fixture, PrivateStateDirectory, DIRECTORY}};
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::{future::Future, os::unix::fs::{symlink, MetadataExt, PermissionsExt}, task::Poll};
     use tokio::time::timeout;
     fn list() -> p::Request { p::Request { version: 1, request_id: Id::random().unwrap(), request: p::RequestBody::Projects(p::Empty {}) } }
     fn runtime() -> tokio::runtime::Runtime { tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap() }
@@ -374,7 +374,20 @@ mod tests {
             let stalled = UnixStream::connect(f.app.join(DIRECTORY).join(SOCKET)).await.unwrap();
             let disconnected = UnixStream::connect(f.app.join(DIRECTORY).join(SOCKET)).await.unwrap(); close_stream(disconnected).unwrap();
             assert!(timeout(Duration::from_secs(2), request(&f.app, &list())).await.unwrap().is_ok());
+            // Cancel only this waiting observer after it has requested STOP.
+            // The same real accept task and worker joins stay in ServerHandle.
+            let mut waiting = Box::pin(host.shutdown());
+            std::future::poll_fn(|cx| {
+                assert!(waiting.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            }).await;
+            drop(waiting);
+            assert!(host.task.is_some() && host.outcome.is_none());
             let outcome = timeout(Duration::from_secs(2), host.shutdown()).await.unwrap().unwrap(); assert!(outcome.workers_joined >= 2);
+            assert!(host.task.is_none());
+            assert_eq!(host.shutdown().await.unwrap().workers_joined, outcome.workers_joined);
+            assert!(!f.app.join(DIRECTORY).join(SOCKET).exists());
+            assert!(!f.app.join(DIRECTORY).join(DESCRIPTOR).exists());
             close_stream(stalled).unwrap(); service.stop().unwrap(); store.close().unwrap();
         });
     }
@@ -382,7 +395,10 @@ mod tests {
     fn private_capability_wrong_instance_and_revoked_access_are_rejected() {
         runtime().block_on(async {
             let f = Fixture::short(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap()); let service = Arc::new(ApplicationService::open(store.clone()).unwrap());
-            let (id, _) = register_fixture(&service, &f.app, "project", "project-1"); service.allow_agent_read(vec![id], Duration::from_secs(30)).unwrap();
+            let (id, root) = register_fixture(&service, &f.app, "project", "project-1");
+            service.publish_passive_snapshot("project-1", &passive(&root, &"1".repeat(64))).unwrap();
+            service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
+            let first_instance = service.instance().clone();
             let mut host = start(service.clone()).await.unwrap();
             let raw = Zeroizing::new(std::fs::read(f.app.join(DIRECTORY).join(DESCRIPTOR)).unwrap());
             for byte in [8usize, 40usize] {
@@ -394,6 +410,40 @@ mod tests {
             service.revoke_agent_read().unwrap(); assert_eq!(request(&f.app, &list()).await.err(), Some(Error::AccessDenied));
             host.shutdown().await.unwrap(); service.stop().unwrap(); store.close().unwrap();
             assert_eq!(request(&f.app, &list()).await.err(), Some(Error::Unavailable));
+            drop((host, service, store));
+
+            // Reopen only this fixture's persisted reference state, not a
+            // Desktop/native operation. No alias or permission is restored.
+            let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
+            let service = Arc::new(ApplicationService::open(store.clone()).unwrap());
+            assert_ne!(service.instance(), &first_instance);
+            assert!(!service.read_access_status().unwrap().enabled);
+            assert!(service.native_binding("project-1").is_err());
+            let mut host = start(service.clone()).await.unwrap();
+            let fresh = Zeroizing::new(std::fs::read(f.app.join(DIRECTORY).join(DESCRIPTOR)).unwrap());
+            // Never include capability bytes in an assertion's diagnostics.
+            assert!(raw[40..] != fresh[40..], "launch capability must rotate");
+            let mut old_client = UnixStream::connect(f.app.join(DIRECTORY).join(SOCKET)).await.unwrap();
+            old_client.write_all(&raw).await.unwrap();
+            let mut answer = [0u8; 1]; old_client.read_exact(&mut answer).await.unwrap();
+            assert_eq!(answer, *b"D"); close_stream(old_client).unwrap();
+            assert_eq!(request(&f.app, &list()).await.err(), Some(Error::AccessDenied));
+
+            let held_root = std::fs::File::open(&root).unwrap();
+            let metadata = held_root.metadata().unwrap();
+            let restored = service.register_native("project-7", &root, metadata.dev(), metadata.ino()).unwrap();
+            nix::unistd::close(held_root).unwrap();
+            assert_eq!(restored.project_id, id);
+            service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
+            match request(&f.app, &list()).await.unwrap().response {
+                p::ResponseBody::Projects(rows) => {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0].project_id, id);
+                    assert!(rows[0].observation.as_ref().unwrap().stale);
+                }
+                _ => panic!("wrong response"),
+            }
+            host.shutdown().await.unwrap(); service.stop().unwrap(); store.close().unwrap();
         });
     }
     #[test]
