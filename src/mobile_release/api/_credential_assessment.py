@@ -18,7 +18,7 @@ from ..credential_policy import (
     CREDENTIAL_POLICY_VERSION, credential_format_error,
     firebase_payload_shape_and_match,
 )
-from ..credential_requirements import requirements
+from ..credential_requirements import local_ios_provisioning_requirements, requirements
 from ..errors import ConfigurationError
 from ._credential_guide import _KIND_LAYOUT, requirement_name, assessment_material_limit
 from ._json import MAX_DEPTH, MAX_NODES, bounded_json_text
@@ -249,9 +249,13 @@ def _applicability(config: ReleaseConfig, kind_platform: str, platform: str, sta
     elif platform != "project" and not config.platform_enabled(platform):
         reason = "platform-disabled"
     else:
-        selected_names = {item.name for item in requirements(
+        # Provisioning is a new, closed local context. Its rows are considered
+        # only for this one requested kind, never as an upfront all-input gate
+        # that would require the very profile being created.
+        rows = local_ios_provisioning_requirements(config) if purpose == "provisioning" else requirements(
             config, stage, purpose=purpose, platforms=() if platform == "project" else (platform,),
-        )}
+        )
+        selected_names = {item.name for item in rows}
         if execution_mode == "local" and platform == "android":
             wif = {"MOBILE_RELEASE_GOOGLE_WIF_PROVIDER", "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT"}
             if wif <= selected_names:
@@ -355,11 +359,15 @@ def _assess(params: object) -> CredentialAssessmentResult:
     execution_mode = _enum(context.get("executionMode", "github"), ("github", "local"))
     platform = _enum(context["platform"], ("android", "ios", "project"))
     stage = _enum(context["stage"], ("candidate", "external-testing", "production"))
-    purpose = _enum(context["purpose"], ("full", "signing", "store"))
+    purpose = _enum(context["purpose"], ("full", "signing", "store", "provisioning"))
+    if purpose == "provisioning" and (execution_mode, platform, stage) != ("local", "ios", "candidate"):
+        _refuse()
     if type(context["draft"]) is not dict:
         _refuse()
     supplied = _exact(request["input"], {"kind", "fields", "observation"})
     kind = _enum(supplied["kind"], tuple(_KIND_LAYOUT))
+    if purpose == "provisioning" and kind not in ("asc-p8", "apple-p12", "apple-profile"):
+        _refuse()
     kind_platform, layout = _KIND_LAYOUT[kind]
     scalar_fields = _exact(supplied["fields"], {field_id for field_id, _, input_kind, _ in layout if input_kind != "file"})
     scalar_bytes = 0

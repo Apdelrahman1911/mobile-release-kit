@@ -95,33 +95,7 @@ def requirements(
 
         if config.platform_enabled("ios") and "ios" in selected:
             if current == "candidate" and purpose in {"full", "signing"}:
-                values.extend(
-                    [
-                        Requirement(
-                            "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64",
-                            "secret",
-                            current,
-                            "ios",
-                            alternatives=("MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH",),
-                            reason="Apple distribution certificate and private key",
-                        ),
-                        Requirement(
-                            "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD",
-                            "secret",
-                            current,
-                            "ios",
-                            reason="Apple P12 password",
-                        ),
-                        Requirement(
-                            "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64",
-                            "secret",
-                            current,
-                            "ios",
-                            alternatives=("MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_PATH",),
-                            reason="App Store provisioning profile",
-                        ),
-                    ]
-                )
+                values.extend(_apple_signing_requirements(current))
                 if config.section("services").get("iosFirebase") == "required":
                     values.append(
                         Requirement(
@@ -153,6 +127,49 @@ def requirements(
                 )
             )
     return values
+
+
+def local_ios_provisioning_requirements(config: ReleaseConfig) -> list[Requirement]:
+    """Rows for separate credential assessments in the fixed local setup context.
+
+    This is not a release requirement selector or an upfront provisioning gate.
+    A P8/P12 assessment needs no existing profile: the profile row applies only
+    when that distinct kind is assessed, including a newly saved profile before
+    explicit Bind. The assessment caller admits local/iOS/candidate separately.
+    No build dependencies, Firebase, review or release-commitment inputs belong
+    to this purpose. ``requirements`` deliberately does not accept it.
+    """
+    if not config.platform_enabled("ios"):
+        return []
+    return _apple_signing_requirements("candidate") + _apple_api_requirements("candidate")
+
+
+def _apple_signing_requirements(stage: str) -> list[Requirement]:
+    return [
+        Requirement(
+            "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64",
+            "secret",
+            stage,
+            "ios",
+            alternatives=("MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH",),
+            reason="Apple distribution certificate and private key",
+        ),
+        Requirement(
+            "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD",
+            "secret",
+            stage,
+            "ios",
+            reason="Apple P12 password",
+        ),
+        Requirement(
+            "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64",
+            "secret",
+            stage,
+            "ios",
+            alternatives=("MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_PATH",),
+            reason="App Store provisioning profile",
+        ),
+    ]
 
 
 def _google_requirements(stage: str) -> list[Requirement]:
