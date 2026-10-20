@@ -358,7 +358,10 @@ impl GitLocalSources {
     fn check_rename_locks(&self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
         let state = self.rename.as_ref().ok_or(Reason::SourceChanged)?;
         let parent = state.source.as_ref().ok_or(Reason::SourceChanged)?.parent;
-        if self.rename_parent(parent, stop).ok() != state.parent_current {
+        // A missing expected parent and a failed original read are not a
+        // match. Preserve the original error before any lock retirement.
+        let expected_parent = state.parent_current.ok_or(Reason::SourceChanged)?;
+        if self.rename_parent(parent, stop)? != expected_parent {
             return Err(Reason::SourceChanged);
         }
         for lock in &state.locks {

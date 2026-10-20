@@ -32,7 +32,14 @@ fn ambiguous_rename_lock_preserves_original_slots_without_fake_close_or_retry() 
             unlinked: false,
         });
         owner.rename = Some(state);
+        assert!(owner.check_rename_locks(&mut || false).is_err());
         assert!(!owner.close_rename_book(&mut |_| false));
+        assert!(!owner.close_rename_book(&mut |_| false));
+        // Even a present expected identity cannot replace the unavailable
+        // original parent descriptor. This remains DATA, not native custody.
+        owner.rename.as_mut().unwrap().parent_current =
+            Some((1, 2, 0o040700, 501, 20, 2, 0, 0, 0));
+        assert!(owner.check_rename_locks(&mut || false).is_err());
         assert!(!owner.close_rename_book(&mut |_| false));
         assert!(
             owner.book.slots[index].state == phase
