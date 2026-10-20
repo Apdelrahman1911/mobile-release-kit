@@ -1,0 +1,1284 @@
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -10,7 +10,7 @@
+   "scripts": {
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/version-reserve.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-rename.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/version-reserve.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/git-local.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-rename.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-actions-retry.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build"
+   },
+   "dependencies": {
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -16,7 +16,9 @@
+ import { GitHubActivityController } from './githubActivityController.ts';
+ import { GitHubActivity } from './components/GitHubActivity.tsx';
+ import { GitHubPullRequestController } from './githubPullRequestController.ts';
++import { GitHubActionsRetryController } from './githubActionsRetryController.ts';
+ import { GitHubPullRequest } from './components/GitHubPullRequest.tsx';
++import { GitHubActionsRetry } from './components/GitHubActionsRetry.tsx';
+ import { GitHubRepositoryCreate } from './components/GitHubRepositoryCreate.tsx';
+ import { ArtifactInspectionController, artifactInspectionOwnerReason } from './artifactInspection.ts';
+ import { artifactInspectionError } from './artifactInspectionProtocol.ts';
+@@ -248,6 +250,9 @@
+   const pullRequestRef = useRef<GitHubPullRequestController | null>(null);
+   const pullRequestAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
+   const pullRequestBusy = useCallback(() => pullRequestRef.current?.ownerReason() ?? null, []);
++  const actionsRetryRef = useRef<GitHubActionsRetryController | null>(null);
++  const actionsRetryAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
++  const actionsRetryBusy = useCallback(() => actionsRetryRef.current?.ownerReason() ?? null, []);
+   // One read coordinator owns the original promises across all pages. Local
+   // commit drafts belong to immutable native-service/project ports, not rows.
+   const gitLocalRef = useRef<GitLocalController | null>(null);
+@@ -290,6 +295,7 @@
+     repositoryCreateRef.current?.beforeWorkspaceAction();
+     activityRef.current?.beforeWorkspaceAction();
+     pullRequestRef.current?.beforeWorkspaceAction();
++    actionsRetryRef.current?.beforeWorkspaceAction();
+     retireGitRead();
+     identityRef.current?.actions?.beforeContextIntent();
+     identityEpoch.current = Math.min(Number.MAX_SAFE_INTEGER, identityEpoch.current + 1);
+@@ -345,18 +351,19 @@
+   const historyBusy = useCallback(() => githubHistoryControllerRef.current ? githubHistoryOwnerReason(githubHistoryControllerRef.current.getSnapshot()) : null, []);
+   // Existing reciprocal admission callbacks also retain the original path
+   // picker, even after its display eligibility was retired by a local edit.
+-  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false, excludePullRequest = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
++  const savedOwnersWithoutToolsBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false, excludePublication = false, excludeRepositoryCreate = false, excludeActivity = false, excludePullRequest = false, excludeActionsRetry = false) => localHistoryBusy() ?? storeBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
+     (excludeHistory ? null : historyBusy()) ??
+     (excludeRepositoryCreate ? null : repositoryCreateBusy()) ??
+     (excludeActivity ? null : activityBusy()) ??
+     (excludePullRequest ? null : pullRequestBusy()) ??
++    (excludeActionsRetry ? null : actionsRetryBusy()) ??
+     (!excludePublication && githubPublicationControllerRef.current ? githubPublicationOwnerReason(githubPublicationControllerRef.current.getSnapshot()) : null) ??
+     (!excludeRemoteSetup && githubRemoteSetupControllerRef.current ? githubRemoteSetupOwnerReason(githubRemoteSetupControllerRef.current.getSnapshot()) : null) ??
+     (!excludeGitHubPreflight && githubPreflightControllerRef.current ? githubPreflightOwnerReason(githubPreflightControllerRef.current.getSnapshot()) : null) ??
+     (!excludeGitHubRelease && githubReleaseControllerRef.current ? githubReleaseOwnerReason(githubReleaseControllerRef.current.getSnapshot()) : null) ?? projectPathOwnerReason(pathPickerRef.current) ??
+     (!excludeInitialization && initializationControllerRef.current ? initializationOwnerReason(initializationControllerRef.current.getSnapshot(),workspaceRef.current.selectedId??'') : null) ??
+     (!excludeVersion && versionEditControllerRef.current ? versionOwnerReason(versionEditControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null) ??
+-    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy, repositoryCreateBusy, activityBusy, pullRequestBusy]);
++    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [localHistoryBusy, storeBusy, artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy, repositoryCreateBusy, activityBusy, pullRequestBusy, actionsRetryBusy]);
+   // Tools excludes only itself. Existing peers, passive observation and every
+   // ordinary mutation admission include the original tool operation below.
+   const savedOwnersBusy = useCallback((...args: Parameters<typeof savedOwnersWithoutToolsBusy>) =>
+@@ -381,6 +388,7 @@
+     repositoryCreateRef.current?.syncContext();
+     activityRef.current?.syncContext();
+     pullRequestRef.current?.syncContext();
++    actionsRetryRef.current?.syncContext();
+   }, [connectionDocumentId]);
+   const advanceConnectionContext = () => {
+     if (connectionProjectGeneration.current === 0xffff_ffff) connectionGenerationLost.current = true;
+@@ -461,7 +469,7 @@
+       (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
+       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null),
+     selectedProject: () => { const w = workspaceRef.current; return w.selectedId ? w.projects[w.selectedId] ?? null : null; },
+-    recoveryUnavailable: () => pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
++    recoveryUnavailable: () => actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
+       !pathService.current.api || !pathService.current.info ? 'Wait for the current service capabilities.' : null),
+     onRecovered: (completion) => dispatch({ type: 'config-recovery-final', projectId: completion.binding.projectId, completion }),
+     onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
+@@ -536,6 +544,13 @@
+     githubConnection.getSnapshot, () => pullRequestAdmission.current()));
+   pullRequestRef.current = githubPullRequest;
+   const pullRequestState = useSyncExternalStore(githubPullRequest.subscribe, githubPullRequest.getSnapshot, githubPullRequest.getSnapshot);
++  const [githubActionsRetry] = useState(() => new GitHubActionsRetryController(
++    githubConnection.getSnapshot, () => {
++      const observation = githubActivity.currentResult(), status = githubActivity.getSnapshot().status;
++      return observation && status ? { revision: status.revision, observation } : null;
++    }, () => actionsRetryAdmission.current()));
++  actionsRetryRef.current = githubActionsRetry;
++  const actionsRetryState = useSyncExternalStore(githubActionsRetry.subscribe, githubActionsRetry.getSnapshot, githubActionsRetry.getSnapshot);
+   const [versionEnrollment] = useState(() => new VersionEnrollmentController({ current: () => {
+     const service = pathService.current;
+     return { port: service.api?.mode === 'native' ? service.api.versionEnrollment ?? null : null,
+@@ -771,7 +786,7 @@
+   // Reserve reads the SAME connected account and retains a real native Store
+   // receipt. UI data only explains prerequisites; it cannot supply a floor.
+   versionReserveAdmission.current = () => {
+-    const blocked = pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentRef.current?.ownerReason() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
++    const blocked = actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentRef.current?.ownerReason() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+       savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason();
+     if (blocked) return blocked;
+     if (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared)
+@@ -793,6 +808,19 @@
+     return selected && current?.session?.projectId === selected && connection.context?.projectId === selected &&
+       current.account.state === 'observed' && current.repository.state === 'observed'
+       ? null : 'Connect the intended existing GitHub repository and account first.';
++  };
++  // Exact run retry excludes only itself. It retains its review even when its
++  // own native Prepare deliberately retires the preceding Activity result.
++  actionsRetryAdmission.current = () => {
++    const blocked = savedCommandBusy(false, false, false, false, false, false, false, false, false, false, false, true) ??
++      savedOwnersPrerequisiteReason(false, false, undefined, false, true);
++    if (blocked) return blocked;
++    if (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared)
++      return 'Finish the prepared GitHub release review before retrying a workflow.';
++    const connection = githubConnection.getSnapshot(), selected = workspaceRef.current.selectedId, current = connection.status;
++    return selected && current?.session?.projectId === selected && connection.context?.projectId === selected &&
++      current.account.state === 'observed' && current.repository.state === 'observed'
++      ? null : 'Connect the intended GitHub repository and account first.';
+   };
+   // Identity excludes ONLY itself; all original passive/private/build owners
+   // and retained GitHub reviews still block a new source edit.
+@@ -809,7 +837,7 @@
+     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
+       ? 'Finish the prepared GitHub review before connecting another account.' : null);
+   const savedCommandPrerequisiteReason = (...args: Parameters<typeof savedOwnersPrerequisiteReason>): string | null =>
+-    pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
++    actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
+   const [artifactInspection] = useState(() => new ArtifactInspectionController({
+     selectedProject: () => {
+       const current=workspaceRef.current;
+@@ -1002,7 +1030,7 @@
+     const port = service.api?.mode === 'native' ? service.api.agentIdentity : null;
+     const book = agentRequestWork.current, slot = action === 'revoke' ? 'revoke' : 'normal';
+     const project = workspaceRef.current.selectedId;
+-    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || pullRequestBusy() || activityBusy() || repositoryCreateBusy() || versionEnrollmentBusy() || gitBusy() || identityBusy())) return;
++    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || actionsRetryBusy() || pullRequestBusy() || activityBusy() || repositoryCreateBusy() || versionEnrollmentBusy() || gitBusy() || identityBusy())) return;
+     if (book.epoch === Number.MAX_SAFE_INTEGER && action !== 'revoke') { setAgentMessage({ service, text: 'Request controls need attention. Keep the original Desktop task; do not replay.' }); return; }
+     const epoch = book.epoch = Math.min(Number.MAX_SAFE_INTEGER, book.epoch + 1);
+     // Bound normal+revoke slots; revoke remains available during first Allow.
+@@ -1027,7 +1055,7 @@
+       if (book[slot] === work) book[slot] = null;
+       setAgentRequestPending(book.normal !== null || book.revoke !== null);
+     }
+-  }, [pullRequestBusy, activityBusy, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, identityBusy]);
++  }, [actionsRetryBusy, pullRequestBusy, activityBusy, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, identityBusy]);
+   identityInvalidation.current = (projectId) => {
+     snapshotIntentBatch(projectId);
+     dispatch({ type: 'project-identity-intent', projectId });
+@@ -1220,6 +1248,8 @@
+   const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
+
+   const bootstrap = useCallback(async () => {
++    const originalActionsRetry = actionsRetryBusy();
++    if (originalActionsRetry) { setBootError({ code: 'github_actions_retry_busy', message: originalActionsRetry, retryable: false }); return; }
+     const originalPullRequest = pullRequestBusy();
+     if (originalPullRequest) { setBootError({ code: 'github_pull_request_busy', message: originalPullRequest, retryable: false }); return; }
+     const originalActivity = activityBusy();
+@@ -1273,7 +1303,7 @@
+     connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null;
+     githubGhEntry.attach(null, null); // Refuses replacement if an original read intervened.
+     void githubConnection.attach(null);
+-    void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null);
++    void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); githubActionsRetry.connect(null);
+     void githubPreflight.connect(null);
+     void githubRelease.connect(null);
+     void githubHistory.connect(null);
+@@ -1320,7 +1350,7 @@
+       void githubRemoteSetup.connect(connection); void githubPublication.connect(connection);
+       repositoryCreate.connect(connection.githubRepositoryCreate ?? null);
+       githubActivity.connect(connection.githubActivity ?? null);
+-      githubPullRequest.connect(connection.githubPullRequest ?? null);
++      githubPullRequest.connect(connection.githubPullRequest ?? null); githubActionsRetry.connect(connection.githubActionsRetry ?? null);
+       void githubPreflight.connect(connection);
+       void githubRelease.connect(connection);
+       void githubHistory.connect(connection);
+@@ -1369,14 +1399,14 @@
+         githubGhEntry.beforeContextIntent();
+         connectionHandoffRef.current = null; connectionPortRef.current = null; githubGhApiRef.current = null;
+         githubGhEntry.attach(null, null);
+-        githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); void githubPreflight.connect(null); void githubRelease.connect(null); void githubHistory.connect(null);
++        githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubRemoteSetup.connect(null); void githubPublication.connect(null); repositoryCreate.connect(null); githubActivity.connect(null); githubPullRequest.connect(null); githubActionsRetry.connect(null); void githubPreflight.connect(null); void githubRelease.connect(null); void githubHistory.connect(null);
+         setInfo(null); setCatalog(null); versionEdit.setHelp(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); releaseVersion.connectionUnavailable(); releaseInputs.connectionUnavailable(); setBootError(apiError(error));
+       }
+     } finally {
+       passivePending.current -= 1; setPassivePending(passivePending.current);
+       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); }
+     }
+-  }, [githubPullRequest, pullRequestBusy, githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
++  }, [githubActionsRetry, actionsRetryBusy, githubPullRequest, pullRequestBusy, githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
+
+   // Before bootstrap: retire consent on the actual saved/key projection, and
+   // keep the view responsive to peer-owner changes without renewing an intent.
+@@ -1423,6 +1453,7 @@
+   useEffect(() => githubConnection.subscribe(repositoryCreate.syncContext), [githubConnection, repositoryCreate]);
+   useEffect(() => githubConnection.subscribe(githubActivity.syncContext), [githubConnection, githubActivity]);
+   useEffect(() => githubConnection.subscribe(githubPullRequest.syncContext), [githubConnection, githubPullRequest]);
++  useEffect(() => githubConnection.subscribe(githubActionsRetry.syncContext), [githubConnection, githubActionsRetry]);
+   useEffect(() => githubConnection.subscribe(githubPublication.syncContext), [githubConnection, githubPublication]);
+   useEffect(() => githubConnection.subscribe(githubRemoteSetup.syncContext), [githubConnection, githubRemoteSetup]);
+   useEffect(() => githubConnection.subscribe(githubPreflight.syncContext), [githubConnection, githubPreflight]);
+@@ -1501,6 +1532,7 @@
+   useEffect(() => () => repositoryCreate.dispose(), [repositoryCreate]);
+   useEffect(() => () => githubActivity.dispose(), [githubActivity]);
+   useEffect(() => () => githubPullRequest.dispose(), [githubPullRequest]);
++  useEffect(() => () => githubActionsRetry.dispose(), [githubActionsRetry]);
+   useEffect(() => () => githubRemoteSetup.dispose(), [githubRemoteSetup]);
+   useEffect(() => () => githubPreflight.dispose(), [githubPreflight]);
+   useEffect(() => () => githubRelease.dispose(), [githubRelease]);
+@@ -1966,6 +1998,7 @@
+         {page !== 'github' && <GitHubRepositoryCreate controller={repositoryCreate} state={repositoryCreateState} compact onShow={() => navigate('github')} />}
+         {page !== 'github' && <GitHubActivity controller={githubActivity} state={activityState} compact onShow={() => navigate('github')} />}
+         {page !== 'github' && <GitHubPullRequest controller={githubPullRequest} state={pullRequestState} compact onShow={() => navigate('github')} />}
++        {page !== 'github' && <GitHubActionsRetry controller={githubActionsRetry} state={actionsRetryState} compact onShow={() => navigate('github')} />}
+         {page !== 'github' && <VersionEnrollmentPanel controller={versionEnrollment} compact />}
+         <VersionReservePanel controller={versionReserve} compact />
+         {page !== 'github' && <GitHubPublication state={githubPublicationState} controller={githubPublication} compact onShow={() => navigate('github')} />}
+@@ -2081,9 +2114,10 @@
+             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
+             {!gitRepository && gitRepositories.current.length >= 64 && <p className="review-caution">The local draft limit has been reached. Earlier drafts are kept; use your Git client for additional projects or service sessions.</p>}
+           </>}
+-          activityView={<GitHubActivity controller={githubActivity} state={activityState}
++          activityView={<><GitHubActivity controller={githubActivity} state={activityState}
+             branchSuggestion={!gitReadState.stale && gitReadState.observationProject === session?.project.id
+-              ? gitReadState.observation?.observation.branch ?? null : null} />}
++              ? gitReadState.observation?.observation.branch ?? null : null} />
++            <GitHubActionsRetry controller={githubActionsRetry} state={actionsRetryState} /></>}
+           pullRequestView={<GitHubPullRequest controller={githubPullRequest} state={pullRequestState}
+             repository={connectionState.context?.repository ?? null}
+             baseSuggestion={connectionState.status?.repository.state === 'observed' ? connectionState.status.repository.value?.defaultBranch ?? null : null}
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -95,12 +95,13 @@
+ import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
+ import { createGitHubActivityPort } from './githubActivityProtocol.ts';
+ import { createGitHubPullRequestPort } from './githubPullRequestProtocol.ts';
++import { createGitHubActionsRetryPort } from './githubActionsRetryProtocol.ts';
+ import { createGitLocalApi } from './gitLocalProtocol.ts';
+ import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
+ import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
+
+ export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+-export type NativeEditListen = (event: 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
++export type NativeEditListen = (event: 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+
+ function connectionReply(value: unknown): GitHubConnectionStatus {
+   const status = parseGitHubConnectionStatus(value);
+@@ -418,6 +419,7 @@
+     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+     githubActivity: createGitHubActivityPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+     githubPullRequest: createGitHubPullRequestPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
++    githubActionsRetry: createGitHubActionsRetryPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+     gitLocal: createGitLocalApi(mode, invoke),
+     toolAcquisition: createToolAcquisitionApi(mode, invoke, listen),
+     appleProvisioning: createAppleProvisioningApi(mode, invoke, listen),
+--- a/desktop/src/components/GitHubActivity.tsx
++++ b/desktop/src/components/GitHubActivity.tsx
+@@ -88,7 +88,7 @@
+       <ProgressiveDisclosure title="Help: access, limits and separate write actions">
+         <p>The connected account needs read access to this repository’s Pull requests, Actions, Checks and commit statuses. Organization SSO and token restrictions still apply. Missing access is not an empty or successful result.</p>
+         <p>Each explicit read uses one bounded page per section. GitHub can change between reads; the selected head or attempt is checked again at the end. Provider links, raw bodies, patches, logs and artifact contents are not shown here.</p>
+-        <p>Draft pull request creation has a separate explicit review below. Marking a PR ready for review and rerunning failed jobs remain unfinished actions with their own authorization. Reading this view does not enable them. Existing toolkit publication and release tasks remain separate below.</p>
++        <p>Draft pull request creation and run-specific failed/dependent job retry have separate explicit reviews below when native support is available. Marking a PR ready for review remains unsupported here. Reading Activity does not authorize any of these actions. Existing toolkit publication and release tasks remain separate below.</p>
+       </ProgressiveDisclosure>
+     </>}
+   </section>;
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -436,6 +436,7 @@
+   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;
+   readonly githubActivity?: import('./githubActivityProtocol.ts').GitHubActivityPort | null;
+   readonly githubPullRequest?: import('./githubPullRequestProtocol.ts').PullRequestPort | null;
++  readonly githubActionsRetry?: import('./githubActionsRetryProtocol.ts').ActionsRetryPort | null;
+   readonly gitLocal?: import('./gitLocalProtocol.ts').GitLocalApi | null;
+   // Fixed original native owner only; no preview or generic transport fallback.
+   readonly toolAcquisition?: import('./toolAcquisitionNative.ts').ToolAcquisitionApi | null;
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -339,6 +339,7 @@
+             "github_remote_setup_status", "github_remote_setup_prepare", "github_remote_setup_apply", "github_remote_setup_discard", "github_remote_setup_cancel",
+             "github_activity_status", "github_activity_read", "github_activity_cancel",
+             "github_pull_request_status", "github_pull_request_prepare", "github_pull_request_create", "github_pull_request_pending", "github_pull_request_reconcile", "github_pull_request_discard", "github_pull_request_cancel",
++            "github_actions_retry_status", "github_actions_retry_prepare", "github_actions_retry_start", "github_actions_retry_pending", "github_actions_retry_reconcile", "github_actions_retry_discard", "github_actions_retry_cancel",
+             "github_repository_create_status", "github_repository_create_prepare", "github_repository_create_create", "github_repository_create_pending", "github_repository_create_reconcile", "github_repository_create_discard", "github_repository_create_cancel",
+             "github_setup_publication_status", "github_setup_publication_prepare", "github_setup_publication_publish", "github_setup_publication_pending", "github_setup_publication_reconcile", "github_setup_publication_discard", "github_setup_publication_cancel",
+             "github_history_status", "github_history_start", "github_history_cancel",
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -75,6 +75,13 @@
+     "allow-github-activity-status",
+     "allow-github-activity-read",
+     "allow-github-activity-cancel",
++    "allow-github-actions-retry-status",
++    "allow-github-actions-retry-prepare",
++    "allow-github-actions-retry-start",
++    "allow-github-actions-retry-pending",
++    "allow-github-actions-retry-reconcile",
++    "allow-github-actions-retry-discard",
++    "allow-github-actions-retry-cancel",
+     "allow-github-pull-request-status",
+     "allow-github-pull-request-prepare",
+     "allow-github-pull-request-create",
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -152,6 +152,9 @@
+ #[path = "asset_session_github_pull_request.rs"]
+ mod pull_request;
+ pub(crate) use pull_request::GitHubPullRequestGoGate;
++#[path = "asset_session_github_actions_retry.rs"]
++mod actions_retry;
++pub(crate) use actions_retry::GitHubActionsRetryGoGate;
+ pub(crate) use github_variable::GitHubVariableMaterial;
+
+ #[path = "asset_session_android_signing.rs"]
+@@ -4059,6 +4062,7 @@
+         self.repository_create_observe_locked(state, now, gate);
+         self.github_activity_observe_locked(state, now, gate);
+         self.pull_request_observe_locked(state, now, gate);
++        self.actions_retry_observe_locked(state, now, gate);
+         self.github_history_observe_locked(state, now, gate);
+     }
+     fn github_setup_registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Option<T> {
+--- a/desktop/src-tauri/src/github_activity_session.rs
++++ b/desktop/src-tauri/src/github_activity_session.rs
+@@ -98,6 +98,27 @@
+             active: None,
+             exhausted: false,
+         }
++    }
++    pub(super) fn actions_retry_selection(
++        &self, revision:u32, session_id:&str, project_id:&str,
++        scope:&crate::github_actions_retry_protocol::Scope, run_id:&str, attempt:u32, marker:String,
++    ) -> Option<crate::github_actions_retry_protocol::Selection> {
++        if self.exhausted || self.active.is_some() || self.view.revision != revision
++            || self.view.session_id.as_deref() != Some(session_id) { return None; }
++        let o=self.view.operation.as_ref()?;
++        let r=self.view.result.as_ref()?;
++        let selected=p::Selection::WorkflowRun { run_id:run_id.into(),attempt };
++        let current=p::Target { project_binding:scope.project_binding.clone(),repository:scope.repository.clone(),
++            account_id:scope.account_id.clone(),repository_id:scope.repository_id.clone() };
++        if o.phase!=p::Phase::Settled || o.reason!=p::Reason::None || o.project_id!=project_id
++            || o.target!=current || r.target!=current || o.selection!=selected || r.selection!=selected
++            || !p::data_valid(&r.data,&p::Request { target:current,selection:selected })
++            || r.data["run"]["status"]!="completed"
++            || !matches!(r.data["run"]["conclusion"].as_str(),Some("failure"|"timed_out"))
++            || !crate::github_preflight_protocol::hex(&marker,32) { return None; }
++        Some(crate::github_actions_retry_protocol::Selection {
++            run_id:run_id.into(), attempt, head_sha:r.data["run"]["headSha"].as_str()?.into(),marker,
++        })
+     }
+     pub(super) fn native_work_pending(&self) -> bool {
+         self.active.is_some()
+@@ -335,6 +356,7 @@
+         self.publication.context_changed();
+         self.repository_create.context_changed();
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+         self.activity.view.result = None;
+         self.activity.view.operation = Some(p::Operation {
+             id: ticket.operation_id().into(),
+@@ -420,7 +442,7 @@
+             || self.setup.native_work_pending()
+             || self.history.native_work_pending()
+             || self.publication.native_work_pending()
+-            || self.pull_request.native_work_pending() || self.repository_create.native_work_pending()
++            || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending()) || self.repository_create.native_work_pending()
+             || self.enrollment.is_some()
+             || self.version_reserve_pending()
+         {
+@@ -612,3 +634,29 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod actions_retry_selection_tests {
++    use super::*;
++    #[test]
++    fn actions_retry_selection_requires_exact_original_activity_and_never_proves_go() {
++        let mut state=State::new();
++        let target=p::Target {project_binding:"d".repeat(64),repository:"owner/app".into(),account_id:"11".into(),repository_id:"22".into()};
++        let scope=crate::github_actions_retry_protocol::Scope {project_binding:target.project_binding.clone(),repository:target.repository.clone(),account_id:target.account_id.clone(),repository_id:target.repository_id.clone()};
++        let selection=p::Selection::WorkflowRun {run_id:"31".into(),attempt:2};
++        state.view.revision=19;state.view.session_id=Some("session-a".into());
++        state.view.operation=Some(p::Operation {id:"activity-a".into(),project_id:"project-a".into(),target:target.clone(),selection:selection.clone(),phase:p::Phase::Settled,reason:p::Reason::None});
++        state.view.result=Some(p::Observation {target,selection,observed_at:"2026-10-20T20:01:00Z".into(),data:serde_json::json!({
++            "kind":"workflow-run","attemptChecked":true,"run":{"id":"31","attempt":2,"name":"Checks","status":"completed","conclusion":"failure","headSha":"c".repeat(40),
++                "headBranch":"main","headRepository":"owner/app","event":"push","createdAt":"2026-10-20T20:00:00Z","updatedAt":"2026-10-20T20:01:00Z"},
++            "jobs":{"state":"read","reason":"none","coverage":"complete","total":0,"rows":[]}})});
++        let read=|s:&State,revision,session,project,scope:&crate::github_actions_retry_protocol::Scope,attempt|s.actions_retry_selection(revision,session,project,scope,"31",attempt,"a".repeat(32));
++        let selected=read(&state,19,"session-a","project-a",&scope,2).unwrap();assert_eq!(selected.head_sha,"c".repeat(40));
++        assert!(read(&state,18,"session-a","project-a",&scope,2).is_none());assert!(read(&state,19,"other","project-a",&scope,2).is_none());
++        assert!(read(&state,19,"session-a","other",&scope,2).is_none());assert!(read(&state,19,"session-a","project-a",&scope,3).is_none());
++        let mut wrong=scope.clone();wrong.account_id="12".into();assert!(read(&state,19,"session-a","project-a",&wrong,2).is_none());
++        state.view.result.as_mut().unwrap().data["attemptChecked"]=serde_json::json!(false);assert!(read(&state,19,"session-a","project-a",&scope,2).is_none());
++        state.view.result.as_mut().unwrap().data["attemptChecked"]=serde_json::json!(true);state.view.result.as_mut().unwrap().data["run"]["conclusion"]=serde_json::json!("success");assert!(read(&state,19,"session-a","project-a",&scope,2).is_none());
++        state.view.result.as_mut().unwrap().data["run"]["conclusion"]=serde_json::json!("failure");state.view.operation.as_mut().unwrap().phase=p::Phase::CleanupUnknown;assert!(read(&state,19,"session-a","project-a",&scope,2).is_none());
++    }
++}
+--- a/desktop/src-tauri/src/github_connection_session.rs
++++ b/desktop/src-tauri/src/github_connection_session.rs
+@@ -19,6 +19,8 @@
+ pub(crate) mod activity;
+ #[path = "github_pull_request_session.rs"]
+ pub(crate) mod pull_request;
++#[path = "github_actions_retry_session.rs"]
++pub(crate) mod actions_retry;
+ #[path = "github_version_enrollment_session.rs"]
+ pub(crate) mod enrollment;
+ #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -546,6 +548,7 @@
+     repository_create: repository_create::State,
+     activity: activity::State,
+     pull_request: pull_request::State,
++    actions_retry: actions_retry::State,
+     enrollment: Option<enrollment::Hold>,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     reserve: Option<reserve::Hold>,
+@@ -555,7 +558,7 @@
+     pub(crate) fn new() -> Self {
+         Self { status: empty_status(1, Reason::Unqualified), private: None, next_session: 0,
+             cooldown: None, cooldown_blocked: false, unknown: false, exhausted: false,
+-            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), publication:publication::State::new(), repository_create:repository_create::State::new(),activity:activity::State::new(),pull_request:pull_request::State::new(), enrollment:None,
++            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), publication:publication::State::new(), repository_create:repository_create::State::new(),activity:activity::State::new(),pull_request:pull_request::State::new(),actions_retry:actions_retry::State::new(), enrollment:None,
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             reserve:None, history: crate::github_history_session::State::new() }
+     }
+@@ -589,13 +592,13 @@
+         self.private.as_ref().map(|s| (s.project_id.as_str(), s.generation))
+     }
+     pub(crate) fn material_settled(&self) -> bool {
+-        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) && self.enrollment.is_none() && !self.version_reserve_pending()
++        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) && self.enrollment.is_none() && !self.version_reserve_pending()
+     }
+     fn version_reserve_pending(&self)->bool {
+         #[cfg(any(target_os="linux",target_os="macos"))] {self.reserve.is_some()}
+         #[cfg(not(any(target_os="linux",target_os="macos")))] {false}
+     }
+-    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.gh_hold.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() }
++    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.gh_hold.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() }
+     fn fact_retirement(&mut self, reason: Reason) {
+         stale(&mut self.status.account, reason); stale(&mut self.status.repository, reason); stale(&mut self.status.automation, reason);
+     }
+@@ -607,7 +610,7 @@
+         }
+     }
+     fn room(&mut self) -> Result<(), BridgeError> {
+-        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
++        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
+         if self.unknown { return Err(refused(Reason::CleanupUnknown)); } Ok(())
+     }
+     pub(crate) fn exhaust(&mut self) {
+@@ -627,6 +630,7 @@
+         self.repository_create.retired(Reason::CleanupUnknown);
+         self.activity.retired(Reason::CleanupUnknown);
+         self.pull_request.retired(Reason::CleanupUnknown);
++        self.actions_retry.retired(Reason::CleanupUnknown);
+         self.unknown_operation();
+         self.retire_inner(Reason::CleanupUnknown, false);
+         if let Some(session) = &mut self.status.session {
+@@ -658,6 +662,7 @@
+         if let Some(hold)=&self.reserve {hold.stop(reason==Reason::CleanupUnknown);}
+         self.activity.retired(reason);
+         self.pull_request.retired(reason);
++        self.actions_retry.retired(reason);
+         if let Some(hold)=&self.enrollment { hold.stop(reason==Reason::CleanupUnknown); }
+         let history_before=self.history.snapshot();
+         if reason==Reason::CleanupUnknown{self.history.unknown();}else{self.history.stop();}
+@@ -678,12 +683,12 @@
+         let reason = private.retirement.unwrap_or(reason);
+         if let Some(session) = &mut self.status.session { session.state = if self.unknown { SessionState::CleanupUnknown } else { SessionState::Disconnecting }; }
+         self.fact_retirement(if self.unknown { Reason::CleanupUnknown } else { reason });
+-        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) && self.enrollment.is_none() && !self.version_reserve_pending() { self.complete_retirement(); }
++        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) && self.enrollment.is_none() && !self.version_reserve_pending() { self.complete_retirement(); }
+     }
+     fn complete_retirement(&mut self) {
+         let version_reserve_pending = self.version_reserve_pending();
+         let Some(private) = &mut self.private else { return; };
+-        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || version_reserve_pending { return; }
++        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || version_reserve_pending { return; }
+         private.token = None;
+         if self.unknown {
+             if let Some(session) = &mut self.status.session { session.state = SessionState::CleanupUnknown; }
+@@ -880,12 +885,14 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent();
+         self.setup.view.operation = None; self.setup.view.session_id = None; self.setup.view.observed = None;
+         self.publication.reset();
+         self.repository_create.reset();
+         self.activity.reset();
+         self.pull_request.reset();
++        self.actions_retry.reset();
+         self.setup.finish(setup_before);
+         let before = self.status.clone();
+         self.status.session = Some(session); self.status.operation = Some(operation);
+@@ -896,7 +903,7 @@
+         self.room()?;
+         if revision != self.status.revision { return Err(refused(Reason::TargetChanged)); }
+         let private = self.private.as_ref().filter(|s| s.id == id).ok_or_else(|| refused(Reason::InvalidInput))?;
+-        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(refused(Reason::Busy)); }
++        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(refused(Reason::Busy)); }
+         if let Some(reason) = private.retirement { return Err(refused(reason)); }
+         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
+         if now >= private.clock.end { self.retire(Reason::Expired); return Err(refused(Reason::Expired)); }
+@@ -912,6 +919,7 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
+         operation.id.push_str(ticket.operation_id());
+         // There is no await or callback between the recheck and storing the
+@@ -936,7 +944,7 @@
+     pub(crate) fn preflight_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_preflight_protocol::Status {
+         use crate::{github_preflight_protocol::Reason as R, github_preflight_session::connection_reason};
+         let before = self.preflight.snapshot(); self.preflight.expire_consent(now);
+-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { R::CleanupUnknown }
++        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { R::CleanupUnknown }
+             else if external != Reason::None { connection_reason(external) }
+             else if !crate::github_preflight_protocol::publisher_bound() { R::PublisherUnconfigured }
+             else if !qualified { R::Unqualified }
+@@ -995,6 +1003,7 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
+         self.preflight.start(s::Active { ticket, request, session_id, project_id, generation, root });
+         let before = self.status.clone(); self.capability(now, Reason::None); self.finish(before);
+@@ -1061,8 +1070,8 @@
+         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(s::refused(p::Reason::CleanupUnknown)); }
++        if self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
+         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
+         let (account, repository, coordinate) = request.action.as_ref().map(|a|
+@@ -1176,7 +1185,7 @@
+     pub(crate) fn release_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_release_protocol::Status {
+         use crate::{github_release_protocol::Reason as R, github_release_session::connection_reason};
+         let before = self.release.snapshot(); self.release.expire_consent(now);
+-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { R::CleanupUnknown }
++        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { R::CleanupUnknown }
+             else if external != Reason::None { connection_reason(external) }
+             else if !crate::github_release_protocol::publisher_bound() { R::PublisherUnconfigured }
+             else if !qualified { R::Unqualified }
+@@ -1240,6 +1249,7 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
+         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
+         self.release.start(s::Active { ticket, request, session_id, project_id, generation, root });
+@@ -1307,8 +1317,8 @@
+         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.preflight.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(s::refused(p::Reason::CleanupUnknown)); }
++        if self.preflight.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
+         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
+         let (account, repository, coordinate) = request.action.as_ref().map(|a|
+@@ -1422,7 +1432,7 @@
+     pub(crate) fn setup_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_setup_protocol::Status {
+         use crate::{github_setup_protocol::Reason as R, github_setup_session::connection_reason};
+         let before = self.setup.snapshot(); self.setup.expire_consent(now); self.setup.observe_go();
+-        let reason = if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { R::CleanupUnknown }
++        let reason = if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { R::CleanupUnknown }
+             else if external != Reason::None { connection_reason(external) }
+             else if !qualified { R::Unqualified }
+             else if self.native_work_pending() { R::Busy }
+@@ -1445,10 +1455,11 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+     }
+     pub(crate) fn setup_ensure_idle(&self) -> Result<(), BridgeError> {
+-        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::CleanupUnknown)); }
+-        if self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::CleanupUnknown)); }
++        if self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
+         Ok(())
+     }
+     pub(crate) fn setup_secret_work_pending(&self)->bool{
+@@ -1546,6 +1557,7 @@
+         self.repository_create.context_changed();
+         self.activity.context_changed();
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
+         let other = self.release.snapshot(); self.release.revoke_consent(); self.release.finish(other);
+         self.setup.start(s::Active { ticket, request, session_id, project_id, generation, root, edit_stamp, consent_id, consent_end }, setup_before);
+@@ -1650,8 +1662,8 @@
+         let active = self.setup.active.as_ref().filter(|v| v.ticket.operation_id() == id && &v.request == request
+             && v.generation == generation && &v.root == root && edit.matches(&v.edit_stamp))
+             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
+-        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+-        if self.preflight.native_work_pending() || self.release.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
++        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(s::refused(p::Reason::CleanupUnknown)); }
++        if self.preflight.native_work_pending() || self.release.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+         if active.consent_end.is_some_and(|end| now >= end) { return Err(s::refused(p::Reason::ConsentExpired)); }
+         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
+             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
+@@ -1870,6 +1882,7 @@
+         let other=self.release.snapshot();self.release.revoke_consent();self.release.finish(other);
+         let other=self.setup.snapshot();self.setup.revoke_consent();self.setup.finish(other);
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+         self.history.start(s::Active{ticket,nomination},before);
+         let before=self.status.clone();self.capability(now,Reason::None);self.finish(before);Ok(self.history.snapshot())
+     }
+@@ -1987,7 +2000,7 @@
+             .checked_add(self.release.retained_heap_bytes_if_quiescent()?.checked_add(self.setup.retained_heap_bytes_if_quiescent()?)?)?
+             .checked_add(self.history.retained_heap_bytes_if_quiescent()?)?
+             .checked_add(self.publication.heap()?)?
+-            .checked_add(self.repository_create.heap()?)?.checked_add(self.activity.heap()?)?.checked_add(self.pull_request.heap()?)?;
++            .checked_add(self.repository_create.heap()?)?.checked_add(self.activity.heap()?)?.checked_add(self.pull_request.heap()?)?.checked_add(self.actions_retry.heap()?)?;
+         if let Some(private) = &self.private {
+             if private.ticket.is_some() || private.gh_hold.is_some() || private.retirement == Some(Reason::CleanupUnknown) { return None; }
+             // Borrow the private original. Never clone its token or print bytes.
+--- a/desktop/src-tauri/src/github_publication_session.rs
++++ b/desktop/src-tauri/src/github_publication_session.rs
+@@ -412,6 +412,7 @@
+         self.setup.revoke_consent();
+         self.setup.finish(old);
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+         self.publication.revoke_consent();
+         self.publication.view.pending.clear();
+         self.publication.view.pull = None;
+@@ -664,6 +665,7 @@
+         }
+         self.publication.context_changed();
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+         Ok(self.publication.view.clone())
+     }
+     pub(crate) fn publication_discard(
+@@ -716,7 +718,7 @@
+         if self.preflight.native_work_pending()
+             || self.release.native_work_pending()
+             || self.setup.native_work_pending()
+-            || (self.history.native_work_pending() || self.pull_request.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
++            || (self.history.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending()) || self.activity.native_work_pending() || self.repository_create.native_work_pending())
+             || self.version_reserve_pending()
+         {
+             return Err(refused(p::Reason::Busy));
+--- a/desktop/src-tauri/src/github_pull_request_session.rs
++++ b/desktop/src-tauri/src/github_pull_request_session.rs
+@@ -420,6 +420,7 @@
+         self.publication.context_changed();
+         self.repository_create.context_changed();
+         self.activity.context_changed();
++        self.actions_retry.context_changed();
+         self.pull_request.revoke_consent();
+         // Pending records are retained for explanation across a readback. They
+         // never substitute for the private prepared consent or authorize POST.
+@@ -727,6 +728,7 @@
+             || self.publication.native_work_pending()
+             || self.repository_create.native_work_pending()
+             || self.activity.native_work_pending()
++            || self.actions_retry.native_work_pending()
+             || self.enrollment.is_some()
+             || self.version_reserve_pending()
+         {
+--- a/desktop/src-tauri/src/github_repository_create_session.rs
++++ b/desktop/src-tauri/src/github_repository_create_session.rs
+@@ -410,6 +410,7 @@
+         self.setup.finish(b);
+         self.publication.context_changed();
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+         self.repository_create.revoke_consent();
+         // Pending records are retained for explanation across a readback. They
+         // never substitute for the private prepared consent or authorize POST.
+@@ -672,6 +673,7 @@
+         }
+         self.repository_create.context_changed();
+         self.pull_request.context_changed();
++        self.actions_retry.context_changed();
+         Ok(self.repository_create.view.clone())
+     }
+     pub(crate) fn repository_create_discard(
+@@ -726,7 +728,7 @@
+             || self.setup.native_work_pending()
+             || self.history.native_work_pending()
+             || self.publication.native_work_pending()
+-            || self.pull_request.native_work_pending() || self.activity.native_work_pending()
++            || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending()) || self.activity.native_work_pending()
+             || self.enrollment.is_some()
+             || self.version_reserve_pending()
+         {
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -303,6 +303,7 @@
+ mod github_repository_create_protocol;
+ mod github_activity_protocol;
+ mod github_pull_request_protocol;
++mod github_actions_retry_protocol;
+ mod github_setup_session;
+ mod github_history_protocol;
+ mod github_history_session;
+--- a/desktop/src-tauri/src/passive_management_tests.rs
++++ b/desktop/src-tauri/src/passive_management_tests.rs
+@@ -28,6 +28,7 @@
+         publication_receipt: None, publication_request: None, publication_gate: None,
+         repository_create_receipt: None, repository_create_request: None, repository_create_gate: None,
+         pull_request_receipt: None, pull_request_request: None, pull_request_gate: None,
++        actions_retry_receipt: None, actions_retry_request: None, actions_retry_gate: None,
+         github_activity_receipt: None, github_activity_request: None, github_activity_gate: None,
+         setup_material: None, setup_first_bound: None, secret_sealed: Mutex::new(None),
+         history_receipt: None, history_nomination: None, history_gate: None, history_endpoints: None, gh_auth: None, gh_auth_endpoints: None,
+@@ -74,7 +75,7 @@
+     let outcome = match rig.owner.profile {
+         Profile::Passive(_) => ReadOutcome::Passive(Value::String("inert-result".into())),
+         Profile::GitHubReadOnly => ReadOutcome::GitHub(inert_github_outcome()),
+-        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource | Profile::VersionEnrollment => panic!("action profiles are not passive/GitHub-read fixtures"),
++        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubHistory | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource | Profile::VersionEnrollment => panic!("action profiles are not passive/GitHub-read fixtures"),
+     };
+     *rig.owner.driver.try_lock().unwrap() = Some(tokio::spawn(async move {
+         driver.await.unwrap();
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -2421,6 +2421,49 @@
+ async fn github_pull_request_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_pull_request_protocol::Status, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Draft pull requests have no fixture admission."));
+     pull_request_command("github_pull_request_cancel", &webview, &request, &state)
++}
++
++
++fn actions_retry_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
++    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
++    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
++    let value = crate::github_actions_retry_protocol::raw_input(name, bytes)?;
++    state.document.actions_retry_command(name, &value)
++}
++#[tauri::command]
++async fn github_actions_retry_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
++    actions_retry_command("github_actions_retry_status", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_actions_retry_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
++    actions_retry_command("github_actions_retry_prepare", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_actions_retry_start(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
++    actions_retry_command("github_actions_retry_start", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_actions_retry_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
++    actions_retry_command("github_actions_retry_pending", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_actions_retry_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
++    actions_retry_command("github_actions_retry_reconcile", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_actions_retry_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
++    actions_retry_command("github_actions_retry_discard", &webview, &request, &state)
++}
++#[tauri::command]
++async fn github_actions_retry_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
++    actions_retry_command("github_actions_retry_cancel", &webview, &request, &state)
+ }
+
+ fn github_activity_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_activity_protocol::Status, BridgeError> {
+@@ -3038,6 +3081,7 @@
+         let mut github_publication_revision = None;
+         let mut repository_create_revision = None;
+         let mut pull_request_revision = None;
++        let mut actions_retry_revision = None;
+         let mut github_activity_revision = None;
+         let mut github_history_revision = None;
+         let mut preflight_revision = None;
+@@ -3188,6 +3232,11 @@
+             if pull_request_revision!=Some(status.revision){
+                 pull_request_revision=Some(status.revision);
+                 let _=app.emit_to(MAIN_WINDOW,crate::github_pull_request_protocol::EVENT,&status);
++            }
++            let status=document.actions_retry_status();
++            if actions_retry_revision!=Some(status.revision){
++                actions_retry_revision=Some(status.revision);
++                let _=app.emit_to(MAIN_WINDOW,crate::github_actions_retry_protocol::EVENT,&status);
+             }
+             let status=document.github_activity_status();
+             if github_activity_revision!=Some(status.revision){
+@@ -5016,6 +5065,7 @@
+             github_remote_setup_status, github_remote_setup_prepare, github_remote_setup_apply, github_remote_setup_discard, github_remote_setup_cancel,
+             github_repository_create_status, github_repository_create_prepare, github_repository_create_create, github_repository_create_pending, github_repository_create_reconcile, github_repository_create_discard, github_repository_create_cancel,
+             github_pull_request_status, github_pull_request_prepare, github_pull_request_create, github_pull_request_pending, github_pull_request_reconcile, github_pull_request_discard, github_pull_request_cancel,
++            github_actions_retry_status, github_actions_retry_prepare, github_actions_retry_start, github_actions_retry_pending, github_actions_retry_reconcile, github_actions_retry_discard, github_actions_retry_cancel,
+             github_activity_status, github_activity_read, github_activity_cancel,
+             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
+             github_history_status, github_history_start, github_history_cancel,
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -66,6 +66,10 @@
+ #[path = "supervisor_github_pull_request.rs"]
+ mod pull_request;
+ pub(crate) use pull_request::{GitHubPullRequestReceipt, GitHubPullRequestTicket};
++use crate::github_actions_retry_protocol as actions_retry_protocol;
++#[path = "supervisor_github_actions_retry.rs"]
++mod actions_retry;
++pub(crate) use actions_retry::{GitHubActionsRetryReceipt, GitHubActionsRetryTicket};
+ use crate::github_activity_protocol;
+ #[path = "supervisor_github_activity.rs"]
+ mod activity;
+@@ -256,6 +260,9 @@
+     pull_request_receipt: Option<Arc<Mutex<GitHubPullRequestReceipt>>>,
+     pull_request_request: Option<pull_request_protocol::Request>,
+     pull_request_gate: Option<crate::asset_session::GitHubPullRequestGoGate>,
++    actions_retry_receipt: Option<Arc<Mutex<GitHubActionsRetryReceipt>>>,
++    actions_retry_request: Option<actions_retry_protocol::Request>,
++    actions_retry_gate: Option<crate::asset_session::GitHubActionsRetryGoGate>,
+     github_activity_receipt: Option<Arc<Mutex<GitHubActivityReceipt>>>,
+     github_activity_request: Option<github_activity_protocol::Request>,
+     github_activity_gate: Option<crate::asset_session::GitHubActivityGoGate>,
+@@ -321,11 +328,11 @@
+     }
+ }
+ #[derive(Debug, PartialEq)]
+-enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), RepositoryCreate(repository_create_protocol::Reply), GitHubPullRequest(pull_request_protocol::Reply), GitHubActivity(github_activity_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), GitLocal, VersionAllocationSource, VersionEnrollment(crate::version_enrollment_protocol::Reply) }
++enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), RepositoryCreate(repository_create_protocol::Reply), GitHubPullRequest(pull_request_protocol::Reply), GitHubActionsRetry(actions_retry_protocol::Reply), GitHubActivity(github_activity_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), GitLocal, VersionAllocationSource, VersionEnrollment(crate::version_enrollment_protocol::Reply) }
+ enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
+
+ #[derive(Clone, Copy)]
+-enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, RepositoryCreate, GitHubPullRequest, GitHubActivity, GitHubHistory, GitHubAuth, GitRead, GitLocal, VersionAllocationSource, VersionEnrollment }
++enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, RepositoryCreate, GitHubPullRequest, GitHubActionsRetry, GitHubActivity, GitHubHistory, GitHubAuth, GitRead, GitLocal, VersionAllocationSource, VersionEnrollment }
+ impl Profile {
+     fn stdout_limit(self) -> usize {
+         match self {
+@@ -338,6 +345,7 @@
+             Self::GitHubPublication => publication_protocol::RESPONSE_LIMIT,
+             Self::RepositoryCreate => repository_create_protocol::RESPONSE_LIMIT,
+             Self::GitHubPullRequest => pull_request_protocol::RESPONSE_LIMIT,
++            Self::GitHubActionsRetry => actions_retry_protocol::RESPONSE_LIMIT,
+             Self::GitHubActivity => github_activity_protocol::RESPONSE_LIMIT,
+             Self::GitHubHistory => 64*1024,
+             Self::GitHubAuth => crate::github_auth_capture_wire::RESPONSE_LIMIT,
+@@ -362,7 +370,7 @@
+             Self::GitHubPublication => publication_protocol::decode_reply(id, bytes,
+                 publication.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Publication),
+             // Only drive's actual sealed-source branch may decode History.
+-            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::GitLocal | Self::VersionAllocationSource | Self::VersionEnrollment | Self::RepositoryCreate | Self::GitHubPullRequest | Self::GitHubActivity => Err(BridgeError::protocol()),
++            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::GitLocal | Self::VersionAllocationSource | Self::VersionEnrollment | Self::RepositoryCreate | Self::GitHubPullRequest | Self::GitHubActionsRetry | Self::GitHubActivity => Err(BridgeError::protocol()),
+         }
+     }
+ }
+@@ -378,6 +386,7 @@
+     Publication { request: publication_protocol::Request, gate: crate::asset_session::GitHubPublicationGoGate, end: Instant },
+     RepositoryCreate { request: repository_create_protocol::Request, gate: crate::asset_session::RepositoryCreateGoGate, end: Instant },
+     GitHubPullRequest { request: pull_request_protocol::Request, gate: crate::asset_session::GitHubPullRequestGoGate, end: Instant },
++    GitHubActionsRetry { request: actions_retry_protocol::Request, gate: crate::asset_session::GitHubActionsRetryGoGate, end: Instant },
+     GitHubActivity { request: github_activity_protocol::Request, gate: crate::asset_session::GitHubActivityGoGate, end: Instant },
+     History(GitHubHistoryAdmission),
+     GitHubAuth(GitHubAuthAdmission),
+@@ -389,13 +398,13 @@
+ impl AdmissionRequest<'_> {
+     fn profile(&self) -> Profile {
+         match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly,
+-            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::RepositoryCreate { .. } => Profile::RepositoryCreate, Self::GitHubPullRequest { .. } => Profile::GitHubPullRequest, Self::GitHubActivity { .. } => Profile::GitHubActivity, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::GitLocal(_) => Profile::GitLocal, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource, Self::VersionEnrollment(_) => Profile::VersionEnrollment }
++            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::RepositoryCreate { .. } => Profile::RepositoryCreate, Self::GitHubPullRequest { .. } => Profile::GitHubPullRequest, Self::GitHubActionsRetry { .. } => Profile::GitHubActionsRetry, Self::GitHubActivity { .. } => Profile::GitHubActivity, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::GitLocal(_) => Profile::GitLocal, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource, Self::VersionEnrollment(_) => Profile::VersionEnrollment }
+     }
+     fn encode(self, id: &str) -> Result<(Vec<u8>, Option<preflight_protocol::Request>, Option<crate::asset_session::GitHubPreflightGoGate>,
+         Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>,
+         Option<setup_protocol::Request>, Option<crate::asset_session::GitHubSetupGoGate>, Option<SetupNativeAdmission>), BridgeError> {
+         match self {
+-            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::GitLocal(_) | Self::VersionAllocationSource(_) | Self::VersionEnrollment(_) | Self::Publication { .. } | Self::RepositoryCreate { .. } | Self::GitHubPullRequest { .. } | Self::GitHubActivity { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
++            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::GitLocal(_) | Self::VersionAllocationSource(_) | Self::VersionEnrollment(_) | Self::Publication { .. } | Self::RepositoryCreate { .. } | Self::GitHubPullRequest { .. } | Self::GitHubActionsRetry { .. } | Self::GitHubActivity { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
+             Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None, None, None, None)),
+             Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
+                 Ok((github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?, None, None, None, None, None, None, None)),
+@@ -470,6 +479,7 @@
+     Publication(Arc<Mutex<GitHubPublicationReceipt>>),
+     RepositoryCreate(Arc<Mutex<RepositoryCreateReceipt>>),
+     GitHubPullRequest(Arc<Mutex<GitHubPullRequestReceipt>>),
++    GitHubActionsRetry(Arc<Mutex<GitHubActionsRetryReceipt>>),
+     GitHubActivity(Arc<Mutex<GitHubActivityReceipt>>),
+     History(Arc<Mutex<GitHubHistoryReceipt>>),
+     GitHubAuth,
+@@ -965,6 +975,10 @@
+             let mut receipt = lock(receipt);
+             if matches!(&*receipt, GitHubPullRequestReceipt::Pending) { *receipt = GitHubPullRequestReceipt::RetainedUnknown; }
+         }
++        if let Some(receipt) = &self.actions_retry_receipt {
++            let mut receipt = lock(receipt);
++            if matches!(&*receipt, GitHubActionsRetryReceipt::Pending) { *receipt = GitHubActionsRetryReceipt::RetainedUnknown; }
++        }
+         if let Some(receipt) = &self.github_activity_receipt {
+             let mut receipt = lock(receipt);
+             if matches!(&*receipt, GitHubActivityReceipt::Pending) { *receipt = GitHubActivityReceipt::RetainedUnknown; }
+@@ -1154,6 +1168,21 @@
+                     }
+                 }
+             }
++            Profile::GitHubActionsRetry => {
++                drop(reply);
++                let outcome = result.and_then(|value| match value {
++                    ReadOutcome::GitHubActionsRetry(value) => Ok(value), _ => Err(BridgeError::protocol()),
++                });
++                if let Some(receipt) = &self.actions_retry_receipt {
++                    let mut receipt = lock(receipt);
++                    let was_unknown = was_unknown || matches!(&*receipt, GitHubActionsRetryReceipt::RetainedUnknown);
++                    if !matches!(&*receipt, GitHubActionsRetryReceipt::Settled { .. }) {
++                        *receipt = GitHubActionsRetryReceipt::Settled {
++                            outcome: if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome }, settled_at, was_unknown,
++                        };
++                    }
++                }
++            }
+             Profile::GitHubActivity => {
+                 drop(reply);
+                 let outcome = result.and_then(|value| match value {
+@@ -1394,7 +1423,7 @@
+         let version_allocation_source_endpoints = match &request { AdmissionRequest::VersionAllocationSource(admission) => Some(admission.endpoints), _ => None };
+         let gh_auth_endpoints = match &request { AdmissionRequest::GitHubAuth(admission) => Some(admission.endpoints), _ => None };
+         let history_endpoints=match &request{AdmissionRequest::History(admission)=>Some(admission.endpoints),_=>None};
+-        let publication_end=match &request{AdmissionRequest::Publication{end,..}|AdmissionRequest::RepositoryCreate{end,..}|AdmissionRequest::GitHubPullRequest{end,..}|AdmissionRequest::GitHubActivity{end,..}=>Some(*end),
++        let publication_end=match &request{AdmissionRequest::Publication{end,..}|AdmissionRequest::RepositoryCreate{end,..}|AdmissionRequest::GitHubPullRequest{end,..}|AdmissionRequest::GitHubActionsRetry{end,..}|AdmissionRequest::GitHubActivity{end,..}=>Some(*end),
+             AdmissionRequest::VersionEnrollment(admission)=>Some(admission.work_end),_=>None};
+         let now=Instant::now();
+         if publication_end.is_some_and(|end|end<=now || end>now+Duration::from_secs(60)){return Err(BridgeError::invalid())}
+@@ -1402,6 +1431,7 @@
+         let profile = request.profile();
+         let repository_create_receipt = match &completion { CompletionTarget::RepositoryCreate(value) => Some(value.clone()), _ => None };
+         let pull_request_receipt = match &completion { CompletionTarget::GitHubPullRequest(value) => Some(value.clone()), _ => None };
++        let actions_retry_receipt = match &completion { CompletionTarget::GitHubActionsRetry(value) => Some(value.clone()), _ => None };
+         let github_activity_receipt = match &completion { CompletionTarget::GitHubActivity(value) => Some(value.clone()), _ => None };
+         let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt,publication_receipt) = match (profile, completion) {
+             (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
+@@ -1416,6 +1446,7 @@
+             (Profile::GitHubPublication,CompletionTarget::Publication(receipt))=>(None,None,None,None,None,None,Some(receipt)),
+             (Profile::RepositoryCreate,CompletionTarget::RepositoryCreate(_))=>(None,None,None,None,None,None,None),
+             (Profile::GitHubPullRequest,CompletionTarget::GitHubPullRequest(_))=>(None,None,None,None,None,None,None),
++            (Profile::GitHubActionsRetry,CompletionTarget::GitHubActionsRetry(_))=>(None,None,None,None,None,None,None),
+             (Profile::GitHubActivity,CompletionTarget::GitHubActivity(_))=>(None,None,None,None,None,None,None),
+             (Profile::GitHubAuth, CompletionTarget::GitHubAuth) | (Profile::GitRead, CompletionTarget::GitRead) | (Profile::GitLocal, CompletionTarget::GitLocal) | (Profile::VersionAllocationSource, CompletionTarget::VersionAllocationSource) | (Profile::VersionEnrollment, CompletionTarget::VersionEnrollment) => (None,None,None,None,None,None,None),
+             _ => return Err(BridgeError::invalid()),
+@@ -1429,7 +1460,7 @@
+         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
+             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
+         let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}"),
+-            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::RepositoryCreate=>format!("repository-create-{key}"),Profile::GitHubPullRequest=>format!("github-pull-request-{key}"),Profile::GitHubActivity=>format!("github-activity-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::GitLocal=>format!("git-local-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}"),Profile::VersionEnrollment=>format!("version-enrollment-{key}") };
++            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::RepositoryCreate=>format!("repository-create-{key}"),Profile::GitHubPullRequest=>format!("github-pull-request-{key}"),Profile::GitHubActionsRetry=>format!("github-actions-retry-{key}"),Profile::GitHubActivity=>format!("github-activity-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::GitLocal=>format!("git-local-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}"),Profile::VersionEnrollment=>format!("version-enrollment-{key}") };
+         let (version_enrollment,request)=match request {
+             AdmissionRequest::VersionEnrollment(admission)=>(Some(admission.invocation),None),
+             other=>(None,Some(other)),
+@@ -1440,6 +1471,10 @@
+         };
+         let (pull_request,request)=match request {
+             Some(AdmissionRequest::GitHubPullRequest{request,gate,..})=>(Some((request,gate)),None),
++            other=>(None,other),
++        };
++        let (actions_retry,request)=match request {
++            Some(AdmissionRequest::GitHubActionsRetry{request,gate,..})=>(Some((request,gate)),None),
+             other=>(None,other),
+         };
+         let (github_activity,request)=match request {
+@@ -1464,6 +1499,10 @@
+         };
+         let (pull_request_request,pull_request_gate)=match pull_request {
+             Some((request,gate))=>{bytes=pull_request_protocol::encode_initial(&id,&request)?;(Some(request),Some(gate))},
++            None=>(None,None),
++        };
++        let (actions_retry_request,actions_retry_gate)=match actions_retry {
++            Some((request,gate))=>{bytes=actions_retry_protocol::encode_initial(&id,&request)?;(Some(request),Some(gate))},
+             None=>(None,None),
+         };
+         let (github_activity_request,github_activity_gate)=match github_activity {
+@@ -1513,6 +1552,7 @@
+             publication_receipt,publication_request,publication_gate,
+             repository_create_receipt,repository_create_request,repository_create_gate,
+             pull_request_receipt,pull_request_request,pull_request_gate,
++            actions_retry_receipt,actions_retry_request,actions_retry_gate,
+             github_activity_receipt,github_activity_request,github_activity_gate,
+             setup_material, setup_first_bound, secret_sealed: Mutex::new(secret_cipher),
+             history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, git_read, git_read_endpoints, git_local, git_local_endpoints, version_allocation_source, version_allocation_source_endpoints, version_enrollment,
+@@ -1852,7 +1892,7 @@
+ }
+
+ #[derive(Clone, Copy)]
+-enum ReadyKind { Preflight(preflight_protocol::Kind), Release(preflight_protocol::Kind), Setup, Publication, RepositoryCreate, GitHubPullRequest, GitHubActivity, History, VersionEnrollment }
++enum ReadyKind { Preflight(preflight_protocol::Kind), Release(preflight_protocol::Kind), Setup, Publication, RepositoryCreate, GitHubPullRequest, GitHubActionsRetry, GitHubActivity, History, VersionEnrollment }
+
+ async fn read_preflight<R: AsyncRead + Unpin>(mut reader: R, id: String, digest: String,
+     kind: ReadyKind, profile: Profile, ready: oneshot::Sender<Result<(), BridgeError>>,
+@@ -1879,6 +1919,7 @@
+                         (Profile::GitHubPublication,ReadyKind::Publication)=>publication_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::RepositoryCreate,ReadyKind::RepositoryCreate)=>repository_create_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::GitHubPullRequest,ReadyKind::GitHubPullRequest)=>pull_request_protocol::decode_ready(&header,&id,&digest),
++                        (Profile::GitHubActionsRetry,ReadyKind::GitHubActionsRetry)=>actions_retry_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::GitHubActivity,ReadyKind::GitHubActivity)=>github_activity_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::VersionEnrollment,ReadyKind::VersionEnrollment)=>crate::version_enrollment_protocol::decode_ready(&header,&id,&digest),
+                         (Profile::GitHubHistory, ReadyKind::History) => history_protocol::decode_ready(&header, &id, &digest),
+@@ -1987,6 +2028,13 @@
+                 => gate.claim(&owner.id,&digest,request,||claim_preflight_go(&inner,&owner,Profile::GitHubPullRequest)),
+             _=>Err(BridgeError::cleanup_unknown()),
+         },
++        Profile::GitHubActionsRetry => match (&owner.actions_retry_gate,&owner.actions_retry_request) {
++            (Some(gate),Some(request)) if owner.preflight_gate.is_none() && owner.preflight_request.is_none()
++                && owner.release_gate.is_none() && owner.release_request.is_none() && owner.setup_gate.is_none()
++                && owner.setup_request.is_none() && owner.publication_gate.is_none() && owner.publication_request.is_none()
++                => gate.claim(&owner.id,&digest,request,||claim_preflight_go(&inner,&owner,Profile::GitHubActionsRetry)),
++            _=>Err(BridgeError::cleanup_unknown()),
++        },
+         Profile::GitHubActivity => match (&owner.github_activity_gate,&owner.github_activity_request) {
+             (Some(gate),Some(request)) if owner.preflight_gate.is_none() && owner.preflight_request.is_none()
+                 && owner.release_gate.is_none() && owner.release_request.is_none() && owner.setup_gate.is_none()
+@@ -2090,14 +2138,14 @@
+ }
+ fn github_setup_selected(profile: Profile) -> bool {
+     cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && !cfg!(all(feature = "development-runtime", debug_assertions))
+-        && matches!(profile, Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment)
++        && matches!(profile, Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment)
+ }
+
+ fn preflight_claim_clear(original: bool, profile: Profile, expected: Profile, state: &OwnerState, now: Instant,
+     stopping: bool, disabled: bool, stop: bool) -> bool {
+     original && matches!((profile, expected), (Profile::GitHubPreflight, Profile::GitHubPreflight)
+         | (Profile::GitHubRelease, Profile::GitHubRelease) | (Profile::GitHubSetup, Profile::GitHubSetup)
+-        | (Profile::GitHubPublication,Profile::GitHubPublication) | (Profile::RepositoryCreate,Profile::RepositoryCreate) | (Profile::GitHubPullRequest,Profile::GitHubPullRequest) | (Profile::GitHubActivity,Profile::GitHubActivity) | (Profile::VersionEnrollment,Profile::VersionEnrollment)
++        | (Profile::GitHubPublication,Profile::GitHubPublication) | (Profile::RepositoryCreate,Profile::RepositoryCreate) | (Profile::GitHubPullRequest,Profile::GitHubPullRequest) | (Profile::GitHubActionsRetry,Profile::GitHubActionsRetry) | (Profile::GitHubActivity,Profile::GitHubActivity) | (Profile::VersionEnrollment,Profile::VersionEnrollment)
+         | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth) | (Profile::GitRead, Profile::GitRead) | (Profile::GitLocal, Profile::GitLocal)) && !state.terminal && !state.unknown && state.error.is_none()
+         && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
+ }
+@@ -2591,7 +2639,7 @@
+             let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+             let owners = lock(&inner.owners); let state = lock(&owner.state);
+             if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+-                match owner.profile { Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment=>owner.profile, _=>return Err(BridgeError::protocol()) }, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
++                match owner.profile { Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment=>owner.profile, _=>return Err(BridgeError::protocol()) }, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                 return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+             }
+             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+@@ -2794,7 +2842,7 @@
+     // no environment/native call is added between claim and child creation.
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
+-    let expected=match owner.profile{Profile::GitHubSetup=>Profile::GitHubSetup,Profile::GitHubPublication=>Profile::GitHubPublication,Profile::RepositoryCreate=>Profile::RepositoryCreate,Profile::GitHubPullRequest=>Profile::GitHubPullRequest,Profile::GitHubActivity=>Profile::GitHubActivity,Profile::VersionEnrollment=>Profile::VersionEnrollment,
++    let expected=match owner.profile{Profile::GitHubSetup=>Profile::GitHubSetup,Profile::GitHubPublication=>Profile::GitHubPublication,Profile::RepositoryCreate=>Profile::RepositoryCreate,Profile::GitHubPullRequest=>Profile::GitHubPullRequest,Profile::GitHubActionsRetry=>Profile::GitHubActionsRetry,Profile::GitHubActivity=>Profile::GitHubActivity,Profile::VersionEnrollment=>Profile::VersionEnrollment,
+         _=>return Err(AcquisitionError::unsupported("Unexpected Setup runtime profile"))};
+     let owners = lock(&inner.owners); let state = lock(&owner.state);
+     if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+@@ -3205,7 +3253,7 @@
+                 }
+                 return Err(BridgeError::unavailable("The GitHub release action runtime is not qualified."));
+             },
+-            Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment => {
++            Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment => {
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 if github_setup_selected(profile) {
+                     let native = inspection_setup.ok_or_else(|| {
+@@ -3327,7 +3375,7 @@
+         #[cfg(all(windows, test, feature = "development-runtime"))]
+         let runtime = match profile {
+             Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
+-            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
++            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
+         };
+         Ok(runtime)
+     }));
+@@ -3403,7 +3451,7 @@
+         if acquire_enter.blocking_recv().is_err() {
+             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource) {
++            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource) {
+                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
+             }
+             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -3633,10 +3681,10 @@
+             Ok(value)=>(Some(value.candidate),Some(value.ack)),Err(error)=>{owner.fail(error);owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;}
+         }
+     }else{(None,None)};
+-    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal) {
++    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal) {
+         let (send, receive) = oneshot::channel(); (Some(send), Some(receive))
+     } else { (None, None) };
+-    let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
++    let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActionsRetry | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
+     // History/Auth/GitRead share this fixed POST/wait slot; SOURCE retains its separate posts.
+     let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal){
+         let (send,receive)=oneshot::channel();(Some(send),Some(receive))
+@@ -3725,6 +3773,7 @@
+                 Profile::GitHubPublication=>owner.publication_request.as_ref().map(|_|ReadyKind::Publication),
+                 Profile::RepositoryCreate=>owner.repository_create_request.as_ref().map(|_|ReadyKind::RepositoryCreate),
+                 Profile::GitHubPullRequest=>owner.pull_request_request.as_ref().map(|_|ReadyKind::GitHubPullRequest),
++                Profile::GitHubActionsRetry=>owner.actions_retry_request.as_ref().map(|_|ReadyKind::GitHubActionsRetry),
+                 Profile::GitHubActivity=>owner.github_activity_request.as_ref().map(|_|ReadyKind::GitHubActivity),
+                 Profile::VersionEnrollment=>owner.version_enrollment.as_ref().map(|_|ReadyKind::VersionEnrollment),
+                 Profile::GitHubHistory => owner.history_nomination.as_ref().map(|_| ReadyKind::History), _ => None,
+@@ -4102,6 +4151,9 @@
+         Some(output) if matches!(profile,Profile::GitHubPullRequest)=>owner.pull_request_request.as_ref().ok_or_else(BridgeError::protocol)
+             .and_then(|request|pull_request_protocol::decode_reply(&owner.id,&output.bytes,request))
+             .map(ReadOutcome::GitHubPullRequest),
++        Some(output) if matches!(profile,Profile::GitHubActionsRetry)=>owner.actions_retry_request.as_ref().ok_or_else(BridgeError::protocol)
++            .and_then(|request|actions_retry_protocol::decode_reply(&owner.id,&output.bytes,request))
++            .map(ReadOutcome::GitHubActionsRetry),
+         Some(output) if matches!(profile,Profile::GitHubActivity)=>owner.github_activity_request.as_ref().ok_or_else(BridgeError::protocol)
+             .and_then(|request|github_activity_protocol::decode_reply(&owner.id,&output.bytes,request))
+             .map(ReadOutcome::GitHubActivity),
+@@ -6389,6 +6441,7 @@
+             publication_receipt:None,publication_request:None,publication_gate:None,
+             repository_create_receipt:None,repository_create_request:None,repository_create_gate:None,
+             pull_request_receipt:None,pull_request_request:None,pull_request_gate:None,
++            actions_retry_receipt:None,actions_retry_request:None,actions_retry_gate:None,
+             github_activity_receipt:None,github_activity_request:None,github_activity_gate:None,
+             history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, git_read:None, git_read_endpoints:None, git_local:None, git_local_endpoints:None, version_allocation_source:None, version_enrollment:None, version_allocation_source_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
+             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -78,6 +78,7 @@
+ #[path = "../src/github_repository_create_protocol.rs"] mod github_repository_create_protocol;
+ #[path = "../src/github_activity_protocol.rs"] mod github_activity_protocol;
+ #[path = "../src/github_pull_request_protocol.rs"] mod github_pull_request_protocol;
++#[path = "../src/github_actions_retry_protocol.rs"] mod github_actions_retry_protocol;
+ #[path = "../src/error.rs"] mod error;
+ #[path = "../src/protocol.rs"] mod protocol;
+ #[path = "../src/environment.rs"] mod environment;
+--- a/src/mobile_release/_desktop_github_setup_engine.py
++++ b/src/mobile_release/_desktop_github_setup_engine.py
+@@ -76,6 +76,11 @@
+         header = policy._frame(initial, policy.MAX_INITIAL_BYTES, nodes=256, depth=8)
+         if type(header) is dict and header.get("protocol") == "mrk-github-setup-publication/1":
+             from ._github_setup_publication_runtime import run_owned
++            end = started + 60.0
++            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
++            request = None
++        elif type(header) is dict and header.get("protocol") == "mrk-github-actions-retry/1":
++            from ._desktop_github_actions_retry import run_owned
+             end = started + 60.0
+             run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+             request = None
+--- a/src/mobile_release/_github_connection_transport.py
++++ b/src/mobile_release/_github_connection_transport.py
+@@ -57,9 +57,12 @@
+     REPOSITORY_CREATE = "repository-create"
+     ACTIVITY = "activity"
+     PULL_REQUEST = "pull-request"
++    ACTIONS_RETRY = "actions-retry"
+
+
+ class _ResponseRole(Enum):
++    ACTIONS_RETRY_READ = "actions-retry-read"
++    ACTIONS_RETRY_WRITE = "actions-retry-write"
+     PULL_REQUEST_OBJECT = "pull-request-object"
+     PULL_REQUEST_LIST = "pull-request-list"
+     PULL_REQUEST_WRITE = "pull-request-write"
+@@ -126,6 +129,10 @@
+     """Closed private roles, never caller-provided numeric limits."""
+     if type(profile) is not _ExchangeProfile or type(role) is not _ResponseRole:
+         raise ValueError("Invalid fixed GitHub response role")
++    if role in {_ResponseRole.ACTIONS_RETRY_READ, _ResponseRole.ACTIONS_RETRY_WRITE}:
++        if profile is not _ExchangeProfile.ACTIONS_RETRY:
++            raise ValueError("Fixed Actions retry role belongs to another action")
++        return 256 * 1024, 1024
+     if role in {_ResponseRole.PULL_REQUEST_OBJECT, _ResponseRole.PULL_REQUEST_LIST, _ResponseRole.PULL_REQUEST_WRITE}:
+         if profile is not _ExchangeProfile.PULL_REQUEST:
+             raise ValueError("Fixed draft-PR role belongs to another action")
+@@ -161,6 +168,10 @@
+
+ def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str, path: str) -> tuple[int, int]:
+     limits = _role_limits(profile, role)
++    if profile is _ExchangeProfile.ACTIONS_RETRY:
++        from ._github_actions_retry_transport import validate_endpoint
++        validate_endpoint(role, method, path)
++        return limits
+     if profile is _ExchangeProfile.PULL_REQUEST:
+         from ._github_pull_request_transport import validate_endpoint
+         validate_endpoint(role, method, path)
+@@ -346,7 +357,7 @@
+         if type(started) not in (int, float):
+             raise ReadFailure("network-unavailable")
+         self.started = started
+-        self.end = started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} else READ_SECONDS)
++        self.end = started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else READ_SECONDS)
+         self.monotonic = monotonic
+         self.wall = wall
+         self.body_bytes = 0
+@@ -354,16 +365,16 @@
+         self.profile = _profile
+         self.requests = 0
+         self.body_total_limit = (4 * 1024 * 1024 if _profile is _ExchangeProfile.PUBLICATION else
+-                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} else MAX_BODY_TOTAL)
++                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else MAX_BODY_TOTAL)
+         if not math.isfinite(started) or not math.isfinite(self.end):
+             raise ReadFailure("network-unavailable")
+
+     def claim_request(self) -> None:
+         # Other existing profiles retain their own original finite schedules.
+         # Allocation adds a second private bound, never a logical retry owner.
+-        if self.profile in {_ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST}:
++        if self.profile in {_ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}:
+             self.remaining()
+-            if self.requests >= (12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else 10):
++            if self.requests >= (12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
+                 raise ReadFailure("response-limit")
+             self.requests += 1
+
+@@ -759,7 +770,8 @@
+             delays.append(delay)
+     delay = None if blocked else max(delays) if delays else 60 if recognized else None
+     base = _status_reason(head.status)
+-    if (head.status in {201, 409, 422} and _role is _ResponseRole.PULL_REQUEST_WRITE
++    if (head.status in {201, 409, 422} and _role is _ResponseRole.ACTIONS_RETRY_WRITE
++            or head.status in {201, 409, 422} and _role is _ResponseRole.PULL_REQUEST_WRITE
+             or head.status in {201, 409, 422} and _role is _ResponseRole.REPOSITORY_CREATE_WRITE
+             or head.status == 404 and _role is _ResponseRole.REPOSITORY_CREATE_LOOKUP
+             or head.status == 201 and _role is _ResponseRole.PUBLICATION_CREATE
+@@ -808,6 +820,29 @@
+                 raise ReadFailure("response-invalid")
+             response.done = True
+             return ReadResult({"status": 204, "body": None, "failure": "none"}, control)
++        except ReadFailure as error:
++            return _failed(error.reason, control)
++    if head.status == 201 and response.role is _ResponseRole.ACTIONS_RETRY_WRITE:
++        try:
++            # Documented empty acceptance, not PR creation JSON or workflow
++            # success. Observe the original framed body and clean TLS EOF.
++            if head.length not in (None, 0):
++                raise ReadFailure("response-invalid")
++            media, present, valid = _single(head.headers, "content-type")
++            if not valid or present and re.fullmatch(
++                    r"application/(?:json|vnd\.github\+json)(?: *; *charset=utf-8)?", media, re.ASCII | re.IGNORECASE) is None:
++                raise ReadFailure("response-invalid")
++            if response.read(1):
++                raise ReadFailure("response-invalid")
++            if head.framing != "eof":
++                probe = response._raw(1)
++                response.body_bytes += len(probe); budget.body_bytes += len(probe)
++                if budget.body_bytes > budget.body_total_limit:
++                    raise ReadFailure("response-limit")
++                if probe:
++                    raise ReadFailure("response-invalid")
++            budget.remaining()
++            return ReadResult({"status": 201, "body": None, "failure": "none"}, control)
+         except ReadFailure as error:
+             return _failed(error.reason, control)
+     if head.status == 201 and response.role in {_ResponseRole.SETUP_SECRET_WRITE, _ResponseRole.SETUP_VARIABLE_CREATE}:
+@@ -1097,13 +1132,13 @@
+             or not 1 <= len(token) <= 4096 or any(not 0x21 <= ord(c) <= 0x7e for c in token)):
+         raise ValueError("Invalid fixed GitHub transport input")
+     _role_limits(_profile, _ResponseRole.STANDARD)
+-    if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} and api_version != "2026-03-10":
++    if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} and api_version != "2026-03-10":
+         raise ValueError("Fixed Setup API version differs")
+     if _setup_budget is not None:
+-        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST}
++        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}
+                 or _setup_budget.profile is not _profile
+                 or _setup_budget.started != started
+-                or _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} else READ_SECONDS)
++                or _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY} else READ_SECONDS)
+                 or getattr(_setup_budget, "_secret_exchange_claimed", False)):
+             raise ValueError("Invalid same-original Setup budget")
+         _setup_budget._secret_exchange_claimed = True
+@@ -1133,6 +1168,9 @@
+             _setup_body(_profile, _role, body, path=path)
+         elif _profile is _ExchangeProfile.VERSION_ALLOCATION:
+             _allocation_body(_profile, _role, body, path=path)
++        elif _profile is _ExchangeProfile.ACTIONS_RETRY:
++            from ._github_actions_retry_transport import validate_body
++            validate_body(_role, body)
+         elif _profile is _ExchangeProfile.PULL_REQUEST:
+             from ._github_pull_request_transport import validate_body
+             validate_body(_role, body)

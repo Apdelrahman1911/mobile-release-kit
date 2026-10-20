@@ -99,6 +99,27 @@ impl State {
             exhausted: false,
         }
     }
+    pub(super) fn actions_retry_selection(
+        &self, revision:u32, session_id:&str, project_id:&str,
+        scope:&crate::github_actions_retry_protocol::Scope, run_id:&str, attempt:u32, marker:String,
+    ) -> Option<crate::github_actions_retry_protocol::Selection> {
+        if self.exhausted || self.active.is_some() || self.view.revision != revision
+            || self.view.session_id.as_deref() != Some(session_id) { return None; }
+        let o=self.view.operation.as_ref()?;
+        let r=self.view.result.as_ref()?;
+        let selected=p::Selection::WorkflowRun { run_id:run_id.into(),attempt };
+        let current=p::Target { project_binding:scope.project_binding.clone(),repository:scope.repository.clone(),
+            account_id:scope.account_id.clone(),repository_id:scope.repository_id.clone() };
+        if o.phase!=p::Phase::Settled || o.reason!=p::Reason::None || o.project_id!=project_id
+            || o.target!=current || r.target!=current || o.selection!=selected || r.selection!=selected
+            || !p::data_valid(&r.data,&p::Request { target:current,selection:selected })
+            || r.data["run"]["status"]!="completed"
+            || !matches!(r.data["run"]["conclusion"].as_str(),Some("failure"|"timed_out"))
+            || !crate::github_preflight_protocol::hex(&marker,32) { return None; }
+        Some(crate::github_actions_retry_protocol::Selection {
+            run_id:run_id.into(), attempt, head_sha:r.data["run"]["headSha"].as_str()?.into(),marker,
+        })
+    }
     pub(super) fn native_work_pending(&self) -> bool {
         self.active.is_some()
     }
@@ -335,6 +356,7 @@ impl ConnectionState {
         self.publication.context_changed();
         self.repository_create.context_changed();
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
         self.activity.view.result = None;
         self.activity.view.operation = Some(p::Operation {
             id: ticket.operation_id().into(),
@@ -420,7 +442,7 @@ impl ConnectionState {
             || self.setup.native_work_pending()
             || self.history.native_work_pending()
             || self.publication.native_work_pending()
-            || self.pull_request.native_work_pending() || self.repository_create.native_work_pending()
+            || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending()) || self.repository_create.native_work_pending()
             || self.enrollment.is_some()
             || self.version_reserve_pending()
         {
@@ -610,5 +632,31 @@ impl ConnectionState {
         {
             self.complete_retirement();
         }
+    }
+}
+
+#[cfg(test)]
+mod actions_retry_selection_tests {
+    use super::*;
+    #[test]
+    fn actions_retry_selection_requires_exact_original_activity_and_never_proves_go() {
+        let mut state=State::new();
+        let target=p::Target {project_binding:"d".repeat(64),repository:"owner/app".into(),account_id:"11".into(),repository_id:"22".into()};
+        let scope=crate::github_actions_retry_protocol::Scope {project_binding:target.project_binding.clone(),repository:target.repository.clone(),account_id:target.account_id.clone(),repository_id:target.repository_id.clone()};
+        let selection=p::Selection::WorkflowRun {run_id:"31".into(),attempt:2};
+        state.view.revision=19;state.view.session_id=Some("session-a".into());
+        state.view.operation=Some(p::Operation {id:"activity-a".into(),project_id:"project-a".into(),target:target.clone(),selection:selection.clone(),phase:p::Phase::Settled,reason:p::Reason::None});
+        state.view.result=Some(p::Observation {target,selection,observed_at:"2026-10-20T20:01:00Z".into(),data:serde_json::json!({
+            "kind":"workflow-run","attemptChecked":true,"run":{"id":"31","attempt":2,"name":"Checks","status":"completed","conclusion":"failure","headSha":"c".repeat(40),
+                "headBranch":"main","headRepository":"owner/app","event":"push","createdAt":"2026-10-20T20:00:00Z","updatedAt":"2026-10-20T20:01:00Z"},
+            "jobs":{"state":"read","reason":"none","coverage":"complete","total":0,"rows":[]}})});
+        let read=|s:&State,revision,session,project,scope:&crate::github_actions_retry_protocol::Scope,attempt|s.actions_retry_selection(revision,session,project,scope,"31",attempt,"a".repeat(32));
+        let selected=read(&state,19,"session-a","project-a",&scope,2).unwrap();assert_eq!(selected.head_sha,"c".repeat(40));
+        assert!(read(&state,18,"session-a","project-a",&scope,2).is_none());assert!(read(&state,19,"other","project-a",&scope,2).is_none());
+        assert!(read(&state,19,"session-a","other",&scope,2).is_none());assert!(read(&state,19,"session-a","project-a",&scope,3).is_none());
+        let mut wrong=scope.clone();wrong.account_id="12".into();assert!(read(&state,19,"session-a","project-a",&wrong,2).is_none());
+        state.view.result.as_mut().unwrap().data["attemptChecked"]=serde_json::json!(false);assert!(read(&state,19,"session-a","project-a",&scope,2).is_none());
+        state.view.result.as_mut().unwrap().data["attemptChecked"]=serde_json::json!(true);state.view.result.as_mut().unwrap().data["run"]["conclusion"]=serde_json::json!("success");assert!(read(&state,19,"session-a","project-a",&scope,2).is_none());
+        state.view.result.as_mut().unwrap().data["run"]["conclusion"]=serde_json::json!("failure");state.view.operation.as_mut().unwrap().phase=p::Phase::CleanupUnknown;assert!(read(&state,19,"session-a","project-a",&scope,2).is_none());
     }
 }

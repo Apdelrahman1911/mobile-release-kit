@@ -152,6 +152,9 @@ pub(crate) use activity::GitHubActivityGoGate;
 #[path = "asset_session_github_pull_request.rs"]
 mod pull_request;
 pub(crate) use pull_request::GitHubPullRequestGoGate;
+#[path = "asset_session_github_actions_retry.rs"]
+mod actions_retry;
+pub(crate) use actions_retry::GitHubActionsRetryGoGate;
 pub(crate) use github_variable::GitHubVariableMaterial;
 
 #[path = "asset_session_android_signing.rs"]
@@ -4059,6 +4062,7 @@ impl DocumentBinding {
         self.repository_create_observe_locked(state, now, gate);
         self.github_activity_observe_locked(state, now, gate);
         self.pull_request_observe_locked(state, now, gate);
+        self.actions_retry_observe_locked(state, now, gate);
         self.github_history_observe_locked(state, now, gate);
     }
     fn github_setup_registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Option<T> {

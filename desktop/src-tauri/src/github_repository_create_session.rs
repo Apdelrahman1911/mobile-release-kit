@@ -410,6 +410,7 @@ impl ConnectionState {
         self.setup.finish(b);
         self.publication.context_changed();
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
         self.repository_create.revoke_consent();
         // Pending records are retained for explanation across a readback. They
         // never substitute for the private prepared consent or authorize POST.
@@ -672,6 +673,7 @@ impl ConnectionState {
         }
         self.repository_create.context_changed();
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
         Ok(self.repository_create.view.clone())
     }
     pub(crate) fn repository_create_discard(
@@ -726,7 +728,7 @@ impl ConnectionState {
             || self.setup.native_work_pending()
             || self.history.native_work_pending()
             || self.publication.native_work_pending()
-            || self.pull_request.native_work_pending() || self.activity.native_work_pending()
+            || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending()) || self.activity.native_work_pending()
             || self.enrollment.is_some()
             || self.version_reserve_pending()
         {

@@ -412,6 +412,7 @@ impl ConnectionState {
         self.setup.revoke_consent();
         self.setup.finish(old);
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
         self.publication.revoke_consent();
         self.publication.view.pending.clear();
         self.publication.view.pull = None;
@@ -664,6 +665,7 @@ impl ConnectionState {
         }
         self.publication.context_changed();
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
         Ok(self.publication.view.clone())
     }
     pub(crate) fn publication_discard(
@@ -716,7 +718,7 @@ impl ConnectionState {
         if self.preflight.native_work_pending()
             || self.release.native_work_pending()
             || self.setup.native_work_pending()
-            || (self.history.native_work_pending() || self.pull_request.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
+            || (self.history.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending()) || self.activity.native_work_pending() || self.repository_create.native_work_pending())
             || self.version_reserve_pending()
         {
             return Err(refused(p::Reason::Busy));

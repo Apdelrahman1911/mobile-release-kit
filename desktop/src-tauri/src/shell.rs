@@ -2423,6 +2423,49 @@ async fn github_pull_request_cancel(webview: Webview, request: tauri::ipc::Reque
     pull_request_command("github_pull_request_cancel", &webview, &request, &state)
 }
 
+
+fn actions_retry_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
+    let value = crate::github_actions_retry_protocol::raw_input(name, bytes)?;
+    state.document.actions_retry_command(name, &value)
+}
+#[tauri::command]
+async fn github_actions_retry_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_status", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_prepare", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_start(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_start", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_pending(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_pending", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_reconcile(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_reconcile", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_discard", &webview, &request, &state)
+}
+#[tauri::command]
+async fn github_actions_retry_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_actions_retry_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Actions retry has no fixture admission."));
+    actions_retry_command("github_actions_retry_cancel", &webview, &request, &state)
+}
+
 fn github_activity_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>, state: &ShellState) -> Result<crate::github_activity_protocol::Status, BridgeError> {
     if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
@@ -3038,6 +3081,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut github_publication_revision = None;
         let mut repository_create_revision = None;
         let mut pull_request_revision = None;
+        let mut actions_retry_revision = None;
         let mut github_activity_revision = None;
         let mut github_history_revision = None;
         let mut preflight_revision = None;
@@ -3188,6 +3232,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if pull_request_revision!=Some(status.revision){
                 pull_request_revision=Some(status.revision);
                 let _=app.emit_to(MAIN_WINDOW,crate::github_pull_request_protocol::EVENT,&status);
+            }
+            let status=document.actions_retry_status();
+            if actions_retry_revision!=Some(status.revision){
+                actions_retry_revision=Some(status.revision);
+                let _=app.emit_to(MAIN_WINDOW,crate::github_actions_retry_protocol::EVENT,&status);
             }
             let status=document.github_activity_status();
             if github_activity_revision!=Some(status.revision){
@@ -5016,6 +5065,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_remote_setup_status, github_remote_setup_prepare, github_remote_setup_apply, github_remote_setup_discard, github_remote_setup_cancel,
             github_repository_create_status, github_repository_create_prepare, github_repository_create_create, github_repository_create_pending, github_repository_create_reconcile, github_repository_create_discard, github_repository_create_cancel,
             github_pull_request_status, github_pull_request_prepare, github_pull_request_create, github_pull_request_pending, github_pull_request_reconcile, github_pull_request_discard, github_pull_request_cancel,
+            github_actions_retry_status, github_actions_retry_prepare, github_actions_retry_start, github_actions_retry_pending, github_actions_retry_reconcile, github_actions_retry_discard, github_actions_retry_cancel,
             github_activity_status, github_activity_read, github_activity_cancel,
             github_setup_publication_status, github_setup_publication_prepare, github_setup_publication_publish, github_setup_publication_pending, github_setup_publication_reconcile, github_setup_publication_discard, github_setup_publication_cancel,
             github_history_status, github_history_start, github_history_cancel,

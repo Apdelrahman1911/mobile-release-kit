@@ -19,6 +19,8 @@ pub(crate) mod repository_create;
 pub(crate) mod activity;
 #[path = "github_pull_request_session.rs"]
 pub(crate) mod pull_request;
+#[path = "github_actions_retry_session.rs"]
+pub(crate) mod actions_retry;
 #[path = "github_version_enrollment_session.rs"]
 pub(crate) mod enrollment;
 #[cfg(any(target_os="linux",target_os="macos"))]
@@ -546,6 +548,7 @@ pub(crate) struct ConnectionState {
     repository_create: repository_create::State,
     activity: activity::State,
     pull_request: pull_request::State,
+    actions_retry: actions_retry::State,
     enrollment: Option<enrollment::Hold>,
     #[cfg(any(target_os="linux",target_os="macos"))]
     reserve: Option<reserve::Hold>,
@@ -555,7 +558,7 @@ impl ConnectionState {
     pub(crate) fn new() -> Self {
         Self { status: empty_status(1, Reason::Unqualified), private: None, next_session: 0,
             cooldown: None, cooldown_blocked: false, unknown: false, exhausted: false,
-            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), publication:publication::State::new(), repository_create:repository_create::State::new(),activity:activity::State::new(),pull_request:pull_request::State::new(), enrollment:None,
+            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), publication:publication::State::new(), repository_create:repository_create::State::new(),activity:activity::State::new(),pull_request:pull_request::State::new(),actions_retry:actions_retry::State::new(), enrollment:None,
             #[cfg(any(target_os="linux",target_os="macos"))]
             reserve:None, history: crate::github_history_session::State::new() }
     }
@@ -589,13 +592,13 @@ impl ConnectionState {
         self.private.as_ref().map(|s| (s.project_id.as_str(), s.generation))
     }
     pub(crate) fn material_settled(&self) -> bool {
-        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) && self.enrollment.is_none() && !self.version_reserve_pending()
+        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none() && s.gh_hold.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) && self.enrollment.is_none() && !self.version_reserve_pending()
     }
     fn version_reserve_pending(&self)->bool {
         #[cfg(any(target_os="linux",target_os="macos"))] {self.reserve.is_some()}
         #[cfg(not(any(target_os="linux",target_os="macos")))] {false}
     }
-    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.gh_hold.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() }
+    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some() || s.gh_hold.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() }
     fn fact_retirement(&mut self, reason: Reason) {
         stale(&mut self.status.account, reason); stale(&mut self.status.repository, reason); stale(&mut self.status.automation, reason);
     }
@@ -607,7 +610,7 @@ impl ConnectionState {
         }
     }
     fn room(&mut self) -> Result<(), BridgeError> {
-        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
+        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
         if self.unknown { return Err(refused(Reason::CleanupUnknown)); } Ok(())
     }
     pub(crate) fn exhaust(&mut self) {
@@ -627,6 +630,7 @@ impl ConnectionState {
         self.repository_create.retired(Reason::CleanupUnknown);
         self.activity.retired(Reason::CleanupUnknown);
         self.pull_request.retired(Reason::CleanupUnknown);
+        self.actions_retry.retired(Reason::CleanupUnknown);
         self.unknown_operation();
         self.retire_inner(Reason::CleanupUnknown, false);
         if let Some(session) = &mut self.status.session {
@@ -658,6 +662,7 @@ impl ConnectionState {
         if let Some(hold)=&self.reserve {hold.stop(reason==Reason::CleanupUnknown);}
         self.activity.retired(reason);
         self.pull_request.retired(reason);
+        self.actions_retry.retired(reason);
         if let Some(hold)=&self.enrollment { hold.stop(reason==Reason::CleanupUnknown); }
         let history_before=self.history.snapshot();
         if reason==Reason::CleanupUnknown{self.history.unknown();}else{self.history.stop();}
@@ -678,12 +683,12 @@ impl ConnectionState {
         let reason = private.retirement.unwrap_or(reason);
         if let Some(session) = &mut self.status.session { session.state = if self.unknown { SessionState::CleanupUnknown } else { SessionState::Disconnecting }; }
         self.fact_retirement(if self.unknown { Reason::CleanupUnknown } else { reason });
-        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) && self.enrollment.is_none() && !self.version_reserve_pending() { self.complete_retirement(); }
+        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() && !(self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) && self.enrollment.is_none() && !self.version_reserve_pending() { self.complete_retirement(); }
     }
     fn complete_retirement(&mut self) {
         let version_reserve_pending = self.version_reserve_pending();
         let Some(private) = &mut self.private else { return; };
-        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || version_reserve_pending { return; }
+        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || version_reserve_pending { return; }
         private.token = None;
         if self.unknown {
             if let Some(session) = &mut self.status.session { session.state = SessionState::CleanupUnknown; }
@@ -880,12 +885,14 @@ impl ConnectionState {
         self.repository_create.context_changed();
         self.activity.context_changed();
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
         let setup_before = self.setup.snapshot(); self.setup.revoke_consent();
         self.setup.view.operation = None; self.setup.view.session_id = None; self.setup.view.observed = None;
         self.publication.reset();
         self.repository_create.reset();
         self.activity.reset();
         self.pull_request.reset();
+        self.actions_retry.reset();
         self.setup.finish(setup_before);
         let before = self.status.clone();
         self.status.session = Some(session); self.status.operation = Some(operation);
@@ -896,7 +903,7 @@ impl ConnectionState {
         self.room()?;
         if revision != self.status.revision { return Err(refused(Reason::TargetChanged)); }
         let private = self.private.as_ref().filter(|s| s.id == id).ok_or_else(|| refused(Reason::InvalidInput))?;
-        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(refused(Reason::Busy)); }
+        if private.ticket.is_some() || private.gh_hold.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(refused(Reason::Busy)); }
         if let Some(reason) = private.retirement { return Err(refused(reason)); }
         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
         if now >= private.clock.end { self.retire(Reason::Expired); return Err(refused(Reason::Expired)); }
@@ -912,6 +919,7 @@ impl ConnectionState {
         self.repository_create.context_changed();
         self.activity.context_changed();
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
         operation.id.push_str(ticket.operation_id());
         // There is no await or callback between the recheck and storing the
@@ -936,7 +944,7 @@ impl ConnectionState {
     pub(crate) fn preflight_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_preflight_protocol::Status {
         use crate::{github_preflight_protocol::Reason as R, github_preflight_session::connection_reason};
         let before = self.preflight.snapshot(); self.preflight.expire_consent(now);
-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { R::CleanupUnknown }
+        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { R::CleanupUnknown }
             else if external != Reason::None { connection_reason(external) }
             else if !crate::github_preflight_protocol::publisher_bound() { R::PublisherUnconfigured }
             else if !qualified { R::Unqualified }
@@ -995,6 +1003,7 @@ impl ConnectionState {
         self.repository_create.context_changed();
         self.activity.context_changed();
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
         self.preflight.start(s::Active { ticket, request, session_id, project_id, generation, root });
         let before = self.status.clone(); self.capability(now, Reason::None); self.finish(before);
@@ -1061,8 +1070,8 @@ impl ConnectionState {
         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
-        if self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+        if self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
         let (account, repository, coordinate) = request.action.as_ref().map(|a|
@@ -1176,7 +1185,7 @@ impl ConnectionState {
     pub(crate) fn release_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_release_protocol::Status {
         use crate::{github_release_protocol::Reason as R, github_release_session::connection_reason};
         let before = self.release.snapshot(); self.release.expire_consent(now);
-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { R::CleanupUnknown }
+        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { R::CleanupUnknown }
             else if external != Reason::None { connection_reason(external) }
             else if !crate::github_release_protocol::publisher_bound() { R::PublisherUnconfigured }
             else if !qualified { R::Unqualified }
@@ -1240,6 +1249,7 @@ impl ConnectionState {
         self.repository_create.context_changed();
         self.activity.context_changed();
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
         let setup_before = self.setup.snapshot(); self.setup.revoke_consent(); self.setup.finish(setup_before);
         self.release.start(s::Active { ticket, request, session_id, project_id, generation, root });
@@ -1307,8 +1317,8 @@ impl ConnectionState {
         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
-        if self.preflight.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+        if self.preflight.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
         let (account, repository, coordinate) = request.action.as_ref().map(|a|
@@ -1422,7 +1432,7 @@ impl ConnectionState {
     pub(crate) fn setup_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_setup_protocol::Status {
         use crate::{github_setup_protocol::Reason as R, github_setup_session::connection_reason};
         let before = self.setup.snapshot(); self.setup.expire_consent(now); self.setup.observe_go();
-        let reason = if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { R::CleanupUnknown }
+        let reason = if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { R::CleanupUnknown }
             else if external != Reason::None { connection_reason(external) }
             else if !qualified { R::Unqualified }
             else if self.native_work_pending() { R::Busy }
@@ -1445,10 +1455,11 @@ impl ConnectionState {
         self.repository_create.context_changed();
         self.activity.context_changed();
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
     }
     pub(crate) fn setup_ensure_idle(&self) -> Result<(), BridgeError> {
-        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::CleanupUnknown)); }
-        if self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
+        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::CleanupUnknown)); }
+        if self.setup.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
         Ok(())
     }
     pub(crate) fn setup_secret_work_pending(&self)->bool{
@@ -1546,6 +1557,7 @@ impl ConnectionState {
         self.repository_create.context_changed();
         self.activity.context_changed();
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
         let other = self.release.snapshot(); self.release.revoke_consent(); self.release.finish(other);
         self.setup.start(s::Active { ticket, request, session_id, project_id, generation, root, edit_stamp, consent_id, consent_end }, setup_before);
@@ -1650,8 +1662,8 @@ impl ConnectionState {
         let active = self.setup.active.as_ref().filter(|v| v.ticket.operation_id() == id && &v.request == request
             && v.generation == generation && &v.root == root && edit.matches(&v.edit_stamp))
             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
-        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || self.pull_request.exhausted) { return Err(s::refused(p::Reason::CleanupUnknown)); }
-        if self.preflight.native_work_pending() || self.release.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || self.pull_request.native_work_pending()) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
+        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted || (self.publication.exhausted || self.repository_create.exhausted || self.activity.exhausted || (self.pull_request.exhausted || self.actions_retry.exhausted)) { return Err(s::refused(p::Reason::CleanupUnknown)); }
+        if self.preflight.native_work_pending() || self.release.native_work_pending() || self.history.native_work_pending() || (self.publication.native_work_pending() || self.repository_create.native_work_pending() || self.activity.native_work_pending() || (self.pull_request.native_work_pending() || self.actions_retry.native_work_pending())) || self.enrollment.is_some() || self.version_reserve_pending() { return Err(s::refused(p::Reason::Busy)); }
         if active.consent_end.is_some_and(|end| now >= end) { return Err(s::refused(p::Reason::ConsentExpired)); }
         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
@@ -1870,6 +1882,7 @@ impl ConnectionState {
         let other=self.release.snapshot();self.release.revoke_consent();self.release.finish(other);
         let other=self.setup.snapshot();self.setup.revoke_consent();self.setup.finish(other);
         self.pull_request.context_changed();
+        self.actions_retry.context_changed();
         self.history.start(s::Active{ticket,nomination},before);
         let before=self.status.clone();self.capability(now,Reason::None);self.finish(before);Ok(self.history.snapshot())
     }
@@ -1987,7 +2000,7 @@ impl ConnectionState {
             .checked_add(self.release.retained_heap_bytes_if_quiescent()?.checked_add(self.setup.retained_heap_bytes_if_quiescent()?)?)?
             .checked_add(self.history.retained_heap_bytes_if_quiescent()?)?
             .checked_add(self.publication.heap()?)?
-            .checked_add(self.repository_create.heap()?)?.checked_add(self.activity.heap()?)?.checked_add(self.pull_request.heap()?)?;
+            .checked_add(self.repository_create.heap()?)?.checked_add(self.activity.heap()?)?.checked_add(self.pull_request.heap()?)?.checked_add(self.actions_retry.heap()?)?;
         if let Some(private) = &self.private {
             if private.ticket.is_some() || private.gh_hold.is_some() || private.retirement == Some(Reason::CleanupUnknown) { return None; }
             // Borrow the private original. Never clone its token or print bytes.
