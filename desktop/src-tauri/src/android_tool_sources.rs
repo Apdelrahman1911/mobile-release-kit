@@ -36,6 +36,8 @@ pub(crate) struct Choose {
     // Omission preserves ordinary Browse. Explicit null/path/URL is refused.
     #[serde(default, deserialize_with = "acquired")]
     pub(crate) acquired: Option<Acquired>,
+    #[serde(default, deserialize_with = "acquired")]
+    pub(crate) discovered: Option<Acquired>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -74,7 +76,8 @@ impl Choose {
         if raw.len() > REQUEST_LIMIT { return Err(invalid()); }
         let item: Self = serde_json::from_value(strict_json(raw).map_err(|_| invalid())?).map_err(|_| invalid())?;
         if item.schema_version != 1 || item.source_generation == u32::MAX || !valid_id(&item.project_id)
-            || item.acquired.as_ref().is_some_and(|a| !crate::edit_protocol::token(&a.operation_id)
+            || item.acquired.is_some() && item.discovered.is_some()
+            || item.acquired.iter().chain(item.discovered.iter()).any(|a| !crate::edit_protocol::token(&a.operation_id)
                 || !crate::edit_protocol::token(&a.owner_generation)) { return Err(invalid()); }
         Ok(item)
     }
@@ -128,6 +131,20 @@ mod tests {
             let mut bad=good.clone();bad["acquired"]=value;assert!(Choose::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
         }
         assert!(Choose::parse(br#"{"schemaVersion":1,"sourceGeneration":0,"projectId":"p","role":"jdk","acquired":{},"acquired":{}}"#).is_err());
+    }
+    #[test]
+    fn discovered_location_ids_are_exclusive_and_cannot_borrow_an_acquired_or_arbitrary_path() {
+        let mut good = serde_json::json!({"schemaVersion":1,"sourceGeneration":2,"projectId":"project-a","role":"sdk",
+            "discovered":{"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32)}});
+        let parsed = Choose::parse(&serde_json::to_vec(&good).unwrap()).unwrap();
+        assert!(parsed.discovered.is_some() && parsed.acquired.is_none());
+        good["acquired"] = good["discovered"].clone();
+        assert!(Choose::parse(&serde_json::to_vec(&good).unwrap()).is_err());
+        good.as_object_mut().unwrap().remove("acquired");
+        for value in [serde_json::Value::Null, serde_json::json!({}), serde_json::json!("/Users/inert/sdk"),
+            serde_json::json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"path":"/Users/inert/sdk"})] {
+            good["discovered"] = value; assert!(Choose::parse(&serde_json::to_vec(&good).unwrap()).is_err());
+        }
     }
     #[test]
     fn status_selector_only_demotes_available_with_an_unqualified_source_picker() {

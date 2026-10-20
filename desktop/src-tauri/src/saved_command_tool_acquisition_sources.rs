@@ -1,17 +1,21 @@
-//! Completed-acquisition LOCATION nomination for the ordinary source picker.
+//! Completed acquisition/discovery LOCATION nomination for the ordinary source picker.
 //! No source/copy/tool authority, new filesystem walk, task, or restart receipt.
 use super::*;
 use crate::{android_tool_sources as source_wire, asset_session::OriginalWork};
 use std::{path::PathBuf, sync::OnceLock};
 
 /// Minted only in the existing positive after_final branch. The original
-/// Session remains in the bounded producer roster; its joins are rechecked.
+/// Session remains in the existing bounded retained-session census; its joins
+/// are rechecked. Discovery does not acquire a cache-producer role.
 pub(super) struct CompletedSources {
     original: Arc<Session>,
-    root: PathBuf,
+    locations: [Option<PathBuf>; 3],
+    origin: Origin,
     roles: u8,
     progress: Mutex<Progress>,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin { Acquired, Discovered }
 struct Progress {
     epoch: u64,
     picker: Option<Weak<OriginalWork>>,
@@ -29,6 +33,7 @@ pub(crate) struct SourceNomination {
     work: OnceLock<Weak<OriginalWork>>,
 }
 
+fn index(role: source_wire::Role) -> usize { match role { source_wire::Role::Jdk => 0, source_wire::Role::Sdk => 1, source_wire::Role::Gradle => 2 } }
 fn bit(role: source_wire::Role) -> u8 {
     match role { source_wire::Role::Jdk => 1, source_wire::Role::Sdk => 2, source_wire::Role::Gradle => 4 }
 }
@@ -81,39 +86,71 @@ fn original_root(owner: &Session) -> Option<PathBuf> {
     not(feature = "macos-android-registration-helper"))))]
 fn original_root(_: &Session) -> Option<PathBuf> { None }
 
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),
+    not(feature = "macos-android-registration-helper")))]
+fn discovered_location(owner: &Session, role: usize) -> Option<PathBuf> { native::discovered_directory(owner, role) }
+#[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),
+    not(feature = "macos-android-registration-helper"))))]
+fn discovered_location(_: &Session, _: usize) -> Option<PathBuf> { None }
+fn copy_location(path: &Path) -> Option<PathBuf> {
+    let text = path.to_str()?;
+    if text.len() > 4096 || !text.starts_with('/') || text == "/" || text.as_bytes().contains(&0)
+        || text[1..].split('/').any(|p|p.is_empty() || p == "." || p == ".." || p.len() > 255) { return None; }
+    let mut copy = PathBuf::new(); copy.try_reserve_exact(text.len()).ok()?; copy.push(path);
+    (copy.capacity() <= 4096).then_some(copy)
+}
 // The original common Terminal handler sets stop=true even on success to close
 // its already-finished input. Only the SAME Active's first failure/context and
 // accepted terminal distinguish cancellation here. This is not native finality.
-fn accepted_acquire_terminal<'a>(owner: &Arc<Session>, active: &'a Active) -> Option<&'a wire::Terminal> {
+fn accepted_terminal<'a>(owner: &Arc<Session>, active: &'a Active) -> Option<&'a wire::Terminal> {
     if owner.domain != SavedCommandDomain::ToolAcquisition || !Arc::ptr_eq(&active.owner, owner)
         || active.context_invalidated || active.unknown || !active.accepted || !active.terminal
         || active.first_stop.is_some() || active.projection.reason != Reason::None
         || active.projection.outcome != Some(Outcome::Complete) || active.projection.context != owner.context { return None; }
     let Context::ToolAcquisition(context) = &owner.context else { return None; };
     let Some(Terminal::ToolAcquisition(terminal)) = &active.projection.result else { return None; };
-    (context.action == wire::Action::Acquire && terminal.context == *context
+    (terminal.context == *context
         && terminal.outcome == wire::Outcome::Complete && terminal.reason == wire::Reason::None
         && terminal.lifetime.settled()).then_some(terminal)
 }
 
 impl CompletedSources {
     pub(super) fn capture(owner: &Arc<Session>, active: &Active) -> Option<Arc<Self>> {
-        let terminal = accepted_acquire_terminal(owner, active)?;
-        if !active.final_join_seen || !original_joined(owner) || !producer(owner) { return None; }
+        let terminal = accepted_terminal(owner, active)?;
+        if !active.final_join_seen || !original_joined(owner) { return None; }
         let intent = owner.tools.intent.as_ref()?;
         if !intent.current() { return None; }
-        let roles = complete_roles(terminal.result.as_ref()?)?;
-        let root = original_root(owner)?;
-        // Validate all nominated locations BEFORE retaining any shortcut.
-        for role in [source_wire::Role::Jdk, source_wire::Role::Sdk, source_wire::Role::Gradle] {
-            if roles & bit(role) != 0 { bounded_initial(&root, role)?; }
-        }
-        Some(Arc::new(Self { original: owner.clone(), root, roles,
+        let mut locations = std::array::from_fn(|_| None);
+        let (roles, origin) = match terminal.context.action {
+            wire::Action::Acquire => {
+                if !producer(owner) { return None; }
+                let roles = complete_roles(terminal.result.as_ref()?)?;
+                let root = original_root(owner)?;
+                for role in [source_wire::Role::Jdk, source_wire::Role::Sdk, source_wire::Role::Gradle] {
+                    if roles & bit(role) != 0 { locations[index(role)] = Some(bounded_initial(&root, role)?); }
+                }
+                (roles, Origin::Acquired)
+            },
+            wire::Action::Inspect => {
+                // Native post-join finding exists only after exact PROJECT
+                // requirements admit the protected profile, not version DATA.
+                let found = terminal.discovered_sources()?;
+                if !found.needs_selection() || terminal.protected_tools() != Some(wire::ProtectedTools::NoneInSupportedCatalogue)
+                    || !terminal.components().is_some_and(|parts|found.matches(parts)) { return None; }
+                let roles = found.candidate_roles();
+                for (role, location) in locations.iter_mut().enumerate() {
+                    if roles & (1 << role) != 0 { *location = Some(discovered_location(owner, role)?); }
+                }
+                (roles, Origin::Discovered)
+            },
+        };
+        Some(Arc::new(Self { original: owner.clone(), locations, origin, roles,
             progress: Mutex::new(Progress { epoch: intent.document.source_picker_epoch(), picker: None, published: false, retired: false }) }))
     }
     pub(super) fn original(&self) -> &Arc<Session> { &self.original }
     pub(super) fn retained_bytes(&self) -> Option<usize> {
-        std::mem::size_of::<Self>().checked_add(2 * std::mem::size_of::<usize>())?.checked_add(self.root.capacity())
+        self.locations.iter().flatten().try_fold(std::mem::size_of::<Self>().checked_add(2 * std::mem::size_of::<usize>())?,
+            |bytes, path| bytes.checked_add(path.capacity()))
     }
 }
 
@@ -179,7 +216,11 @@ impl SavedCommandOwner {
         registration: u32, root: &RegisteredRoot, publisher: &android_registration::Publisher) -> Result<Arc<SourceNomination>, BridgeError> {
         self.require_domain(SavedCommandDomain::ToolAcquisition)?;
         if !NATIVE_QUALIFIED { return Err(source_wire::unavailable()); }
-        let acquired = input.acquired.as_ref().ok_or_else(source_wire::invalid)?;
+        let (acquired, origin) = match (&input.acquired, &input.discovered) {
+            (Some(ids), None) => (ids, Origin::Acquired),
+            (None, Some(ids)) => (ids, Origin::Discovered),
+            _ => return Err(source_wire::invalid()),
+        };
         let binding = self.inner.tool_acquisition.get().ok_or_else(source_wire::unavailable)?;
         if binding.document.as_ptr() != Arc::as_ptr(document) || !publisher.same_slot(&binding.android.android_registration_control)
             || publisher.accepted() || !binding.android.android_original_document_matches(Some(document)) { return Err(source_wire::invalid()); }
@@ -193,9 +234,9 @@ impl SavedCommandOwner {
         let owner = &completed.original;
         let Context::ToolAcquisition(context) = &owner.context else { return Err(source_wire::invalid()); };
         let intent = owner.tools.intent.as_ref().ok_or_else(source_wire::invalid)?;
-        if owner.id != acquired.operation_id || owner.generation != acquired.owner_generation || owner.registration != registration
+        if completed.origin != origin || owner.id != acquired.operation_id || owner.generation != acquired.owner_generation || owner.registration != registration
             || owner.project != *root || context.project_id != input.project_id || completed.roles & bit(input.role) == 0
-            || !original_joined(owner) || !producer(owner) || !intent.document.same_document(document)
+            || !original_joined(owner) || origin == Origin::Acquired && !producer(owner) || !intent.document.same_document(document)
             || !intent.known.catalog.joined_for(&binding.android) {
             return Err(source_wire::invalid());
         }
@@ -214,7 +255,7 @@ impl SavedCommandOwner {
             || r.disabled || r.document_lost || r.stopping || r.exhausted || r.active.is_some() || r.prepared.is_some()
             || binding.android.poisoned.load(Ordering::SeqCst) { return Err(source_wire::invalid()); }
         drop(r);
-        let initial = bounded_initial(&completed.root, input.role).ok_or_else(source_wire::invalid)?;
+        let initial = copy_location(completed.locations[index(input.role)].as_deref().ok_or_else(source_wire::invalid)?).ok_or_else(source_wire::invalid)?;
         Ok(Arc::new(SourceNomination { completed, role: input.role, initial, before: epoch, continuing, work: OnceLock::new() }))
     }
 }
@@ -256,7 +297,7 @@ mod tests {
                 let r = application.inner.lock(); let active = r.active.as_ref().unwrap();
                 assert!(*owner.stop.borrow()); // SAME signal also closes successful terminal input.
                 assert_eq!(active.first_stop, cancel_first.then_some(at));
-                assert_eq!(accepted_acquire_terminal(&owner,active).is_some(), !cancel_first);
+                assert_eq!(accepted_terminal(&owner,active).is_some(), !cancel_first);
                 assert!(!active.final_join_seen && !original_joined(&owner));
                 assert!(CompletedSources::capture(&owner,active).is_none());
                 assert!(r.tool_acquisition.completed_sources.is_none() && owner.watchdog_return.lock().unwrap().is_none());
@@ -266,7 +307,7 @@ mod tests {
             application.inner.stop_locked(&mut application.inner.lock(),&owner,Reason::Cancelled,at);
             let r = application.inner.lock(); let active = r.active.as_ref().unwrap();
             assert_eq!(active.first_stop,Some(at)); assert_eq!(active.projection.reason,Reason::Cancelled);
-            assert!(accepted_acquire_terminal(&owner,active).is_none());
+            assert!(accepted_terminal(&owner,active).is_none());
             assert!(CompletedSources::capture(&owner,active).is_none());
         }
     }

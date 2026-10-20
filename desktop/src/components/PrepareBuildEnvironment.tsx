@@ -2,6 +2,8 @@ import type { AndroidToolSourceRole } from '../androidToolSources.ts';
 import type { ToolAcquisitionController, ToolAcquisitionState } from '../toolAcquisitionController.ts';
 import { stagedToolSourceGuidance, toolAcquisitionFailureGuidance } from '../toolAcquisitionGuidance.ts';
 import type { ToolRequirementHint } from '../toolAcquisitionProtocol.ts';
+import { DiscoveredToolSources } from './DiscoveredToolSources.tsx';
+import { foundToolRoles, TOOL_DISCOVERY_HELP } from '../toolSourceDiscovery.ts';
 import { PreparedToolSourceFolders } from './PreparedToolSourceFolders.tsx';
 import { hasIncompleteSdk, MANUAL_ANDROID_SDK_STEPS, toolComponentLabel } from '../toolAcquisitionComponents.ts';
 
@@ -57,7 +59,8 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
   const requirements = state.inspection?.requirements.android;
   const reuseSelected = state.inspection?.protectedTools === 'reuse-selected';
   const parts = state.inspection?.components;
-  const chosenComplete = !reuseSelected && !!parts && parts.missing.length === 0;
+  const foundExisting = foundToolRoles(state.inspection?.discoveredSources).length > 0;
+  const chosenComplete = !reuseSelected && !foundExisting && !!parts && parts.missing.length === 0;
   const report = op?.result?.kind === 'staged-tool-sources' ? op.result : null;
   const staged = report && stagedToolSourceGuidance(report, state.presentation);
   const busy = toolsBusy || retained;
@@ -73,14 +76,15 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
       {checkReason && <p className="save-note">{checkReason}</p>}
     </>}
     {requirements && !report && <>
-      <h3>{reuseSelected || chosenComplete ? 'No tool download needed' : 'Required tool sources'}</h3>
+      <h3>{foundExisting ? 'Found existing tools' : reuseSelected || chosenComplete ? 'No tool download needed' : 'Required tool sources'}</h3>
+      {foundExisting && !state.preparedFolders && <p>Matching components were found at a conventional location. Choose the existing folders below and check the remaining tools. The native picker is still required; no duplicate download or automatic selection is allowed.</p>}
       {reuseSelected && <p role="status">Your selected protected JDK, Android platform, build tools and Gradle match this project’s saved requirements. Keep using them unchanged. This check downloaded and installed nothing; builds still run their own checks.</p>}
       {chosenComplete && <p role="status">Your chosen JDK, Android SDK packages and Gradle match the supported profile. Nothing was downloaded. Inspect the selected tools next, then review and approve any protected copy.</p>}
       {!reuseSelected && parts && <dl className="environment-baseline">
         <dt>Keep unchanged</dt><dd>{parts.compatible.map(toolComponentLabel).join(', ') || 'No matching chosen sources'}</dd>
         <dt>Download only</dt><dd>{parts.missing.map(toolComponentLabel).join(', ') || 'Nothing'}</dd>
       </dl>}
-      {!reuseSelected && parts && hasIncompleteSdk(parts) && <p className="save-note">Only one SDK package is missing. The app will copy your checked matching package into a separate prepared SDK, then add only the missing package. Your existing SDK and other packages stay unchanged. You still inspect and approve the complete prepared folder.</p>}
+      {!reuseSelected && parts && !foundExisting && hasIncompleteSdk(parts) && <p className="save-note">Only one SDK package is missing. The app will copy your checked matching package into a separate prepared SDK, then add only the missing package. Your existing SDK and other packages stay unchanged. You still inspect and approve the complete prepared folder.</p>}
       <p>The saved project’s source hints were checked without running its build scripts. This is not a build-readiness check.</p>
       <dl className="environment-baseline"><dt>Java JDK</dt><dd>{hint(requirements.jdk)}</dd>
         <dt>Android platform</dt><dd>{hint(requirements.sdkPlatform)}</dd>
@@ -89,7 +93,7 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
       {!consent && !active && <>
         {chosenComplete && <button type="button" className="button primary" disabled={toolsBusy} onClick={openRegistration}>Inspect selected tools</button>}
         {!reuseSelected && !chosenComplete && <>
-          <p>Already have these tools elsewhere? Choose them instead. This check covers the supported protected catalogue and your chosen folders, not every folder on this computer.</p>
+          <p>Already have these tools elsewhere? Choose them instead. This check covers the supported protected catalogue, your chosen folders and three fixed Mac locations, not every folder on this computer.</p>
           <button type="button" className="button primary" disabled={reviewReason !== null} onClick={() => void controller.reviewDownload()}>Review download</button>
           {reviewReason && <p className="save-note">{reviewReason}</p>}
         </>}
@@ -104,7 +108,9 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
         onClick={() => void controller.download(consent.operationId, consent.ownerGeneration)}>Download required tools</button></div>
       {downloadReason && <p className="save-note">{downloadReason}</p>}
     </div></div>}
-    {state.preparedFolders ? <PreparedToolSourceFolders folders={state.preparedFolders} busy={busy}
+    {state.preparedFolders ? state.preparedFolders.existing ? <DiscoveredToolSources folders={state.preparedFolders} busy={busy}
+      checkReason={checkReason} chooseFound={choosePreparedSource} chooseExisting={chooseSource} checkAgain={() => controller.inspect()} /> :
+      <PreparedToolSourceFolders folders={state.preparedFolders} busy={busy}
       choosePrepared={choosePreparedSource} chooseExisting={chooseSource} openRegistration={openRegistration} /> :
       staged && <div className="notice notice-info" role="status"><div><strong>{staged.title}</strong><p>{staged.body}</p></div></div>}
     {originalControls}
@@ -116,6 +122,7 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
         <button type="button" className="button secondary" onClick={openRegistration}>Open tool inspection &amp; approval</button></div>
       <p>For manual preparation, use the exact supported releases shown in the existing tool review. Do not upgrade a compatible installation, change global Java settings or run a project wrapper just to discover its version.</p>
       <p>A current, verified protected tool selection is reused without a download. A saved catalogue entry may need the existing Recover and Choose steps first. Downloads require a supported, separately enabled Mac build and a complete check of the supported catalogue and chosen folders. Only confirmed missing pieces are downloaded; present but incompatible or unreadable tools need manual review. Incompatible or dynamic requirements and unfinished operations use the manual route. Do not delete selections or working tools to bypass these checks.</p>
+      <p>{TOOL_DISCOVERY_HELP}</p>
       <h3>Complete an Android SDK manually</h3>
       <ol>{MANUAL_ANDROID_SDK_STEPS.map((step) => <li key={step}>{step}</li>)}</ol>
       <p>The supported downloaded SDK contains API 35 revision 2 and Build-Tools 35.0.0 only. NDK, CMake, emulator, platform-tools and other versions are not installed by this action. A complete prepared SDK contains both required packages, reusing your checked package when only one was missing. If that source changes or cannot be copied safely, review the operation and use manual setup; no license acceptance is automated.</p>

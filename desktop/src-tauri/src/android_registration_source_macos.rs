@@ -268,6 +268,7 @@ impl SourceSlots {
         if let Some(closure) = &self.closure { bytes = bytes.checked_add(closure.retained_bytes()?.checked_sub(size_of::<Closure>())?)?; }
         if let Some(proposal) = &self.proposal { bytes = bytes.checked_add(proposal.retained_bytes()?.checked_sub(size_of::<ProposalDocuments>())?)?; }
         if let Some(instance) = &self.instance { bytes = bytes.checked_add(instance.capacity())?; }
+        if let Some(work) = &self.acquisition { bytes = bytes.checked_add(work.discovery_bytes()?)?; }
         Some(bytes)
     }
     pub(crate) fn first_failure(&self) -> Option<(AdmissionFailure, Instant)> {
@@ -1090,7 +1091,8 @@ impl SourceSlots {
         });
         self.first = first;
         self.settled = true;
-        self.unknown |= !self.frame_settled || support != CloseOutcome::Settled || self.live != 0
+        self.unknown |= self.acquisition.as_ref().is_some_and(|work| !work.account_call_settled())
+            || !self.frame_settled || support != CloseOutcome::Settled || self.live != 0
             || self.originals.iter().any(|original| original.fd.is_some() || !matches!(original.state, State::Closed | State::NoHandle));
         if self.unknown {
             self.first = earliest_failure(self.first, Some((AdmissionFailure::Unknown, Instant::now())));

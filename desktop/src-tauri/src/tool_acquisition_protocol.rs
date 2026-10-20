@@ -29,6 +29,8 @@ pub(crate) const MANIFEST_LIMIT: usize = 8 * 1024 * 1024;
 pub(crate) mod components;
 #[path = "tool_acquisition_sdk.rs"]
 pub(crate) mod sdk;
+#[path = "tool_source_discovery.rs"]
+pub(crate) mod discovery;
 use components::Partition;
 pub(crate) const COMPONENTS: [&str; 4] = components::ALL;
 pub(crate) const FIXED: [&str; 7] = [
@@ -612,6 +614,8 @@ pub(crate) enum Reason {
     Unsupported,
     Stale,
     CensusIncomplete,
+    ExistingToolsIncompatible,
+    ExistingToolsUnreadable,
     RecoveryRequired,
     CacheConflict,
     DiskSpace,
@@ -683,9 +687,21 @@ pub(crate) struct Terminal {
     protected_tools: Option<ProtectedTools>,
     #[serde(skip)]
     components: Option<Partition>,
+    #[serde(skip)]
+    discovered_sources: Option<discovery::Discovery>,
 }
 impl Terminal {
     pub(crate) fn components(&self) -> Option<Partition> { self.components }
+    pub(crate) fn discovered_sources(&self) -> Option<discovery::Discovery> { self.discovered_sources }
+    pub(crate) fn observe_discovered_sources(&mut self, value: discovery::Discovery) {
+        if self.discovered_sources.is_none() && value.searched()
+            && self.context.action == Action::Inspect && self.outcome == Outcome::Complete
+            && self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
+            && self.protected_tools == Some(ProtectedTools::NoneInSupportedCatalogue)
+            && self.components.is_some_and(|parts| value.matches(parts)) {
+            self.discovered_sources = Some(value);
+        }
+    }
     /// Added only by the original native owner after source/child/driver joins.
     /// A child-supplied field is rejected by the closed wire decoder.
     pub(crate) fn observe_components(&mut self, value: Partition) {
@@ -758,7 +774,8 @@ impl Terminal {
         self.result.as_ref().map(|v| match self.context.action {
             Action::Inspect => {
                 json!({"kind":"tool-requirements-observation","requirements":v["requirements"],
-                    "protectedTools":self.protected_tools,"components":self.components.map(Partition::data)})
+                    "protectedTools":self.protected_tools,"components":self.components.map(Partition::data),
+                    "discoveredSources":self.discovered_sources.map(|value|value.data())})
             }
             Action::Acquire => v.clone(),
         })
@@ -1133,6 +1150,30 @@ mod tests {
         forged["downloadedArchives"]=json!(["sdk-platform"]);
         assert!(result_valid(&forged,&operation,&context).is_ok()); // Well-shaped DATA still cannot replace native Expected.
         assert!(!staged_matches_partition(&forged,partition));
+    }
+    #[test]
+    fn discovered_sources_require_native_postjoin_component_projection_and_reject_child_forgery() {
+        let parts = Partition::observed([Some(true), Some(true), Some(false), Some(false)]).unwrap();
+        let found = discovery::Discovery::observed(7, 3, parts).unwrap();
+        for outer in [false, true] {
+            let mut value = terminal_value();
+            if outer { value["discoveredSources"] = found.data(); }
+            else { value["result"]["discoveredSources"] = found.data(); }
+            assert!(decode_terminal(value).is_err());
+        }
+        let Frame::Terminal(mut terminal) = decode_terminal(terminal_value()).unwrap() else { panic!() };
+        terminal.observe_discovered_sources(found);
+        assert_eq!(terminal.discovered_sources(), None);
+        terminal.observe_protected_tools(ProtectedTools::NoneInSupportedCatalogue);
+        terminal.observe_components(parts);
+        let mut stopped = terminal.clone(); stopped.lifetime.stop_observed = CoreStop::Cancelled;
+        stopped.observe_discovered_sources(found); assert_eq!(stopped.discovered_sources(), None);
+        let mut failed = terminal.clone(); failed.outcome = Outcome::Refused;
+        failed.observe_discovered_sources(found); assert_eq!(failed.discovered_sources(), None);
+        terminal.observe_discovered_sources(found);
+        assert_eq!(terminal.public_result().unwrap()["discoveredSources"], found.data());
+        assert!(!terminal.public_result().unwrap().to_string().contains(discovery::JDK));
+        // Setter/serialization DATA only, not a native join or path selection.
     }
     #[test]
     fn closed_ipc_requires_current_review_and_explicit_exact_consent() {

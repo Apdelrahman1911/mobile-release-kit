@@ -6484,7 +6484,7 @@ impl DocumentBinding {
                 || before.source_generation != input.source_generation { return Err(crate::android_tool_sources::invalid()); }
             let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(&input.project_id), None)
                 .map_err(|_| crate::android_tool_sources::unavailable())?;
-            let acquired = if input.acquired.is_some() {
+            let acquired = if input.acquired.is_some() || input.discovered.is_some() {
                 let nomination=self.inner.bridge.tool_acquisition.nominate_acquired_tool_source(
                     &self.inner.session_identity,&input,generation,&root,&publisher)?;
                 self.tool_source_nomination_current(&state,&nomination,generation,&root,None)?;

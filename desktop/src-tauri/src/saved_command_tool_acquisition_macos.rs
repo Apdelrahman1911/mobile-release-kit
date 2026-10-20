@@ -69,10 +69,6 @@ impl Original {
             || !intent.known.sources.matches_project(&context.project_id, owner.registration, &owner.project)
             || !intent.known.sources.originals_settled() || !context_current(inner, owner) { return Err(wire::invalid()); }
         if intent.known.catalog.empty().is_none() { return Ok(()); } // Existing selected protected tuple wins.
-        if !intent.known.sources.has_picks() {
-            self.picked = Some((Partition::missing_all(), [0; 32]));
-            return Ok(());
-        }
         let Profile::ToolAcquisition(profile) = owner.profile else { return Err(wire::invalid()); };
         let reservation = AndroidRegistrationSourceSlots::acquisition_reservation(profile.android()).ok_or_else(wire::invalid)?;
         let bound = reservation.acquisition_retained_bytes().ok_or_else(wire::invalid)?;
@@ -100,6 +96,11 @@ impl Original {
             || !intent.known.sources.originals_settled() || !context_current(inner, owner) { return Err(wire::invalid()); }
         self.picked = Some(source.acquisition_finding().ok_or_else(wire::invalid)?);
         if context.action == wire::Action::Acquire {
+            // A compatible unchosen conventional source must go through the
+            // ordinary picker first, never be duplicated or silently selected.
+            if source.acquisition_discovery().is_none_or(|finding| finding.needs_selection()) {
+                return Err(wire::invalid());
+            }
             if let Some(root) = intent.known.sources.roots()[1].as_ref() {
                 // Same actually closed original records; a child will open NEW
                 // read-only originals. No renderer path or revived native loan.
@@ -117,7 +118,6 @@ impl Original {
         let finding = self.picked?;
         match &self.sources {
             Some(source) if source.acquisition_finding() == Some(finding) => Some(finding),
-            None if finding == (Partition::missing_all(), [0; 32]) => Some(finding),
             _ => None,
         }
     }
@@ -177,6 +177,22 @@ pub(super) fn picked_finding(owner: &Session) -> Option<(Partition, [u8; 32])> {
     let resources = owner.resources.try_lock().ok()?;
     let original = resources.tools.original.as_ref()?.try_lock().ok()?;
     original.picked_finding()
+}
+pub(super) fn discovery(owner: &Session) -> Option<wire::discovery::Discovery> {
+    if !original_joined(owner) { return None; }
+    let resources = owner.resources.try_lock().ok()?;
+    let original = resources.tools.original.as_ref()?.try_lock().ok()?;
+    if !original.settled() { return None; }
+    original.sources.as_ref()?.acquisition_discovery()
+}
+pub(super) fn discovered_directory(owner: &Session, role: usize) -> Option<PathBuf> {
+    if !original_joined(owner) { return None; }
+    let resources = owner.resources.try_lock().ok()?;
+    let original = resources.tools.original.as_ref()?.try_lock().ok()?;
+    if !original.settled() { return None; }
+    let path = original.sources.as_ref()?.acquisition_discovered_directory(role)?;
+    let mut copy = PathBuf::new(); copy.try_reserve_exact(path.as_os_str().len()).ok()?; copy.push(path);
+    (copy.capacity() <= 4096).then_some(copy)
 }
 fn copy_runtime(v: &VerifiedRuntime) -> VerifiedRuntime {
     VerifiedRuntime {

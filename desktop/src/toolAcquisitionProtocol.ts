@@ -7,6 +7,9 @@ import type { StagedToolSourcesData } from './toolAcquisitionGuidance.ts';
 import { parseToolComponentPartition } from './toolAcquisitionComponents.ts';
 import type { ToolComponentPartition } from './toolAcquisitionComponents.ts';
 
+import { parseToolSourceDiscovery } from './toolSourceDiscovery.ts';
+import type { ToolSourceDiscovery } from './toolSourceDiscovery.ts';
+
 export const TOOL_ACQUISITION_EVENT = 'tool-acquisition-state-changed';
 export const TOOL_ACQUISITION_CONSENT = 'pinned-public-tool-sources-v1';
 export const TOOL_ACQUISITION_REQUEST_LIMIT = 8192;
@@ -28,6 +31,7 @@ export interface ToolRequirementsObservation {
   // lease or build-readiness claim; null never permits a download review.
   protectedTools: ProtectedToolsFinding | null;
   components: ToolComponentPartition | null;
+  discoveredSources?: ToolSourceDiscovery | null;
   requirements: {
     schemaVersion: 1; basis: 'unverified-static-source-hints'; sourcesSha256: string;
     complete: true; platform: 'android'; projectCodeExecuted: false;
@@ -43,7 +47,7 @@ const availabilities = ['available', 'busy', 'shutdown', 'cleanup-unknown', 'doc
 const phases = ['awaiting-consent', 'starting', 'running', 'stopping', 'terminal', 'unknown'] as const;
 const reasons = ['none', 'cancelled', 'timed-out', 'context-changed', 'document-lost', 'shutdown', 'runtime-unavailable',
   'protocol-error', 'intent-expired', 'stale-intent', 'cleanup-unknown', 'input-limit', 'result-limit', 'input', 'unsupported',
-  'stale', 'census-incomplete', 'recovery-required', 'cache-conflict', 'disk-space', 'network', 'redirect', 'framing',
+  'stale', 'census-incomplete', 'existing-tools-incompatible', 'existing-tools-unreadable', 'recovery-required', 'cache-conflict', 'disk-space', 'network', 'redirect', 'framing',
   'archive-digest', 'archive-layout', 'archive-member', 'limit', 'already-used', 'unknown'] as const;
 export interface ToolAcquisitionOperation extends ToolAcquisitionIdentity {
   context: ToolAcquisitionContext; phase: typeof phases[number]; intentUsable: boolean;
@@ -87,11 +91,14 @@ function hint(v: unknown, optional: boolean): boolean {
 }
 function requirements(v: unknown): v is ToolRequirementsObservation {
   // The native public result deliberately omits its private source footprint.
-  if (!keys(v, ['kind', 'requirements', 'protectedTools', 'components']) || v.kind !== 'tool-requirements-observation' ||
+  const withDiscovery = !!v && typeof v === 'object' && Object.hasOwn(v, 'discoveredSources');
+  if (!keys(v, ['kind', 'requirements', 'protectedTools', 'components', ...(withDiscovery ? ['discoveredSources'] : [])]) || v.kind !== 'tool-requirements-observation' ||
       v.protectedTools !== null && !oneOf(v.protectedTools, ['reuse-selected', 'none-in-supported-catalogue', 'manual-check-required'])) return false;
   const parts = v.components === null ? null : parseToolComponentPartition(v.components);
   if (v.components !== null && (!parts || !['reuse-selected', 'none-in-supported-catalogue'].includes(v.protectedTools as string) ||
       v.protectedTools === 'reuse-selected' && parts.missing.length !== 0)) return false;
+  if (withDiscovery && v.discoveredSources !== null && (!parts || v.protectedTools !== 'none-in-supported-catalogue' ||
+      !parseToolSourceDiscovery(v.discoveredSources, parts))) return false;
   const r = v.requirements;
   if (!keys(r, ['schemaVersion', 'basis', 'sourcesSha256', 'complete', 'platform', 'projectCodeExecuted', 'xcode', 'android']) ||
       r.schemaVersion !== 1 || r.basis !== 'unverified-static-source-hints' || !sha(r.sourcesSha256) || r.complete !== true ||

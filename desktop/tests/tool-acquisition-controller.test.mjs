@@ -414,3 +414,15 @@ test('assembled result waits for original invoke and fresh status; wrong copied 
   assert.equal(other.state.issue, 'protocol'); assert.equal(other.state.canCancel, true);
   assert.notEqual(other.state.presentation, 'current-staged');
 });
+
+test('native source refusal keeps incompatible, unreadable and stale distinct without a download review', async (t) => {
+  for (const reason of ['existing-tools-incompatible','existing-tools-unreadable','stale']) {
+    const h=harness(t); await h.ready;
+    const flow=h.controller.inspect(), prepare=h.calls.at(-1), op=operation(prepare.request);
+    h.reply(prepare,status(2,op)); await flush();
+    h.reply(h.calls.at(-1),status(3,{...terminal(op,'refused'),reason})); await flow;
+    assert.equal(h.state.status.operation.reason,reason); assert.equal(h.state.inspection,null);
+    await h.controller.reviewDownload(); assert.equal(h.calls.filter((c)=>c.request.action==='acquire').length,0);
+    assert.equal(h.state.consent,null);
+  }
+});

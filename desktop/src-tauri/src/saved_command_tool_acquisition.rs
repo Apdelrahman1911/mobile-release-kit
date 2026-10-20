@@ -219,7 +219,8 @@ pub(super) struct Registry {
     // A later known pre-effect refusal must not discard the earlier actual
     // app-data nomination. This is a second original reference, not a receipt.
     application_observation: Option<Arc<Session>>,
-    // Only accepted Complete Acquire + positive original joins mint this.
+    // Only accepted Complete Acquire/Inspect + positive original joins mint
+    // locations. Discovery never supplies a cache-producer or source role.
     completed_sources: Option<Arc<sources::CompletedSources>>,
 }
 pub(super) struct State {
@@ -788,14 +789,13 @@ pub(super) fn after_final(r: &mut super::Registry, active: &mut Active, owner: &
     {
         observe_protected_tools(owner, active);
         if let Some(Terminal::ToolAcquisition(t)) = &active.projection.result {
-            if t.context.action == wire::Action::Acquire {
-                r.tool_acquisition.completed_sources = sources::CompletedSources::capture(owner, active);
-            }
+            r.tool_acquisition.completed_sources = sources::CompletedSources::capture(owner, active);
             if t.context.action == wire::Action::Inspect
                 && t.outcome == wire::Outcome::Complete
                 && t.lifetime.settled()
                 && t.protected_tools() == Some(wire::ProtectedTools::NoneInSupportedCatalogue)
                 && t.components().is_some_and(|parts| parts.needs_download())
+                && !t.discovered_sources().is_some_and(|found| found.needs_selection())
             {
                 r.tool_acquisition.review = Some(Arc::new(Inspection {
                     original: owner.clone(), terminal: t.clone(),
@@ -816,7 +816,10 @@ fn observe_protected_tools(owner: &Session, active: &mut Active) {
         wire::ProtectedTools::ReuseSelected => terminal.observe_components(wire::components::Partition::compatible_all()),
         wire::ProtectedTools::NoneInSupportedCatalogue => {
             #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
-            if let Some((parts, _)) = native::picked_finding(owner) { terminal.observe_components(parts); }
+            if let Some((parts, _)) = native::picked_finding(owner) {
+                terminal.observe_components(parts);
+                if let Some(found) = native::discovery(owner) { terminal.observe_discovered_sources(found); }
+            }
         },
         wire::ProtectedTools::ManualCheckRequired => {},
     }
@@ -918,7 +921,7 @@ fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>, picker
     let mut seen = BTreeSet::new();
     let mut queue = r.tool_acquisition.producers.clone();
     if let Some(completed) = &r.tool_acquisition.completed_sources {
-        queue.push(completed.original().clone()); // SAME producer, deduplicated below.
+        queue.push(completed.original().clone()); // SAME original Session, deduplicated below.
         bytes = bytes.checked_add(completed.retained_bytes()?)?;
     }
     if let Some(application) = &r.tool_acquisition.application {
@@ -1020,8 +1023,9 @@ fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>, picker
                 .checked_add(expected.projection_sha256.capacity())?;
         }
         if let Some(intent) = &owner.tools.intent {
-            // Only missing-tool Inspect/Acquire Sessions are retained as cache
-            // producers or download Reviews. No uncounted old selected loan.
+            // Only empty-catalogue Inspect/Acquire Sessions are retained as
+            // cache producers, discovery locations or download Reviews.
+            // No uncounted old selected loan.
             if intent.known.catalog.empty().is_none() { return None; }
             pickers.record(intent.known.sources.picker_originals())?;
             bytes = bytes

@@ -117,6 +117,10 @@ export function stagedToolSourceGuidance(value: unknown, presentation: StagedToo
 export function toolAcquisitionFailureGuidance(reason: string): { title: string; body: string } {
   if (['unknown', 'recovery-required', 'already-used'].includes(reason)) return { title: 'Review the previous download',
     body: 'Preserve the existing files and read the original status. An absent folder or a late result does not authorize a retry.' };
+  if (reason === 'existing-tools-incompatible') return { title: 'An existing tool needs review',
+    body: 'A chosen or conventional tool folder does not match the exact supported profile. It has not been replaced or called missing. Choose a matching installation elsewhere, or review the supported manual setup versions.' };
+  if (reason === 'existing-tools-unreadable') return { title: 'An existing tool could not be checked safely',
+    body: 'The source or its parent directories could not be read with the required ownership, permissions and no-link checks. Nothing was replaced. Keep the installation and choose another supported folder or review its setup manually; do not weaken its permissions to force a download.' };
   if (reason === 'disk-space') return { title: 'More free space is needed',
     body: 'Allow room for missing archives, extracted sources and the download reserve. A later protected copy needs its own space. Keep working tools; no automatic cleanup is performed.' };
   if (['stale', 'census-incomplete', 'unsupported'].includes(reason)) return { title: 'Check existing tools first',

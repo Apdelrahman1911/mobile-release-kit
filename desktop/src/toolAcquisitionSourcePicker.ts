@@ -5,6 +5,8 @@ import { parseAndroidToolSourcesStatus, sameAndroidToolSourceIdentity } from './
 import type { AndroidToolSourceRole, AndroidToolSourcesStatus } from './androidToolSources.ts';
 import { parseAndroidToolchainCatalogStatus } from './androidToolchainCatalogProtocol.ts';
 import { parseAndroidToolRegistrationStatus } from './androidToolRegistration.ts';
+import { foundToolRoles, parseToolSourceDiscovery } from './toolSourceDiscovery.ts';
+import { parseToolAcquisitionStatus } from './toolAcquisitionProtocol.ts';
 import { parseStagedToolSources } from './toolAcquisitionGuidance.ts';
 import type { StagedToolPresentation } from './toolAcquisitionGuidance.ts';
 import { sameToolAcquisitionData } from './toolAcquisitionProtocol.ts';
@@ -16,7 +18,7 @@ export interface ToolSourceFolderContext {
   catalog: unknown; registration: unknown; sources: unknown;
 }
 export interface PreparedToolFolders {
-  roles: readonly AndroidToolSourceRole[]; incompleteSdk: boolean; continuing: boolean; waiting: boolean;
+  roles: readonly AndroidToolSourceRole[]; incompleteSdk: boolean; continuing: boolean; waiting: boolean; existing?: true;
 }
 function sameSaved(a: ToolSourceFolderContext, b: ToolSourceFolderContext): boolean {
   return a.connection === b.connection && a.observation === b.observation && a.draft === b.draft &&
@@ -26,10 +28,22 @@ function sameSaved(a: ToolSourceFolderContext, b: ToolSourceFolderContext): bool
 function eligible(operation: ToolAcquisitionOperation | null | undefined, presentation: StagedToolPresentation,
   context: ToolSourceFolderContext): { identity: ToolAcquisitionIdentity; view: PreparedToolFolders } | null {
   if (presentation !== 'current-staged' || operation?.phase !== 'terminal' || operation.outcome !== 'complete' ||
-      operation.reason !== 'none' || operation.context.action !== 'acquire' ||
+      operation.reason !== 'none' ||
       operation.context.projectId !== context.context.projectId || operation.context.draftRevision !== context.context.draftRevision ||
       operation.context.baselineGeneration !== context.context.baselineGeneration ||
       !sameToolAcquisitionData(operation.context.savedConfig, context.context.savedConfig)) return null;
+  if (operation.context.action === 'inspect') {
+    // Same strict native status/result coherence as the original controller;
+    // no acquisition-shaped result, paths or renderer-added role list.
+    const safe = parseToolAcquisitionStatus({schemaVersion:1,statusRevision:0,availability:'available',operation})?.operation;
+    const result = safe?.result;
+    if (result?.kind !== 'tool-requirements-observation' || result.protectedTools !== 'none-in-supported-catalogue' || !result.components) return null;
+    const found = parseToolSourceDiscovery(result.discoveredSources, result.components), roles = foundToolRoles(found);
+    if (!roles.length) return null;
+    return { identity: { operationId: operation.operationId, ownerGeneration: operation.ownerGeneration },
+      view: { roles, incompleteSdk: roles.includes('sdk') && result.components.missing.some((part) => part === 'sdk-platform' || part === 'sdk-build-tools'),
+        continuing: false, waiting: false, existing: true } };
+  }
   const report = parseStagedToolSources(operation.result);
   if (!report || !report.groups.length || report.operationId !== operation.operationId || !/^[0-9a-f]{32}$/.test(operation.operationId) ||
       !/^[0-9a-f]{32}$/.test(operation.ownerGeneration)) return null;
@@ -148,7 +162,7 @@ export class PreparedToolSourceHandoff {
     if (retained.pending || retained.peerRevision > retained.sources.statusRevision || retained.joinedPick && !peersSettled(retained) ||
         !retained.view.roles.includes(role) || retained.sources.availability !== 'available' ||
         !['idle', 'selected'].includes(retained.sources.phase) || retained.sources.sourceGeneration >= 0xffff_fffe) return null;
-    const pick = new PreparedToolSourcePick(this, role, retained.sources.sourceGeneration, current);
+    const pick = new PreparedToolSourcePick(this, role, retained.sources.sourceGeneration, current, retained.view.existing === true);
     retained.pending = { pick, claimed: false, returned: false };
     return pick;
   }
@@ -180,10 +194,12 @@ export class PreparedToolSourceHandoff {
 export class PreparedToolSourcePick {
   readonly role: AndroidToolSourceRole;
   readonly before: number;
+  readonly origin: 'acquired' | 'discovered';
   readonly #handoff: PreparedToolSourceHandoff;
   readonly #current: () => ToolSourceFolderContext | null;
   constructor(handoff: PreparedToolSourceHandoff, role: AndroidToolSourceRole, before: number,
-    current: () => ToolSourceFolderContext | null) {
+    current: () => ToolSourceFolderContext | null, existing = false) {
+    this.origin = existing ? 'discovered' : 'acquired';
     this.#handoff = handoff; this.role = role; this.before = before; this.#current = current; Object.freeze(this);
   }
   context(): ToolSourceFolderContext | null { try { return this.#current(); } catch { return null; } }

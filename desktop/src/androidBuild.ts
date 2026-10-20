@@ -674,7 +674,7 @@ export class AndroidBuildController {
     const acquired = prepared?.claim(this.state.project.projectId,role,previous.sourceGeneration);
     if (prepared && !acquired) return;
     const request = { schemaVersion: 1 as const, sourceGeneration: previous.sourceGeneration, projectId: this.state.project.projectId, role,
-      ...(acquired ? { acquired } : {}) };
+      ...(acquired ? prepared?.origin === 'discovered' ? { discovered: acquired } : { acquired } : {}) };
     this.retire(this.advance('contextGeneration'));
     if (prepared && !prepared.stillCurrent()) return;
     const attempt = { observer, before: previous.sourceGeneration, after: previous.statusRevision, role, projectId: request.projectId, retired: false,
