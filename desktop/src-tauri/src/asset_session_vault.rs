@@ -9,7 +9,7 @@ use assignment_native::upload_key;
 pub(crate) use upload_key::controls as upload_key_controls;
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use upload_key::observation as installed_upload_observation;
-pub(crate) use upload_key::{UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal};
+pub(crate) use upload_key::{UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
 pub(super) use upload_key::parent_stop as upload_key_parent_stop;
 #[path = "credential_backup_native.rs"]
 mod backup_native;
@@ -697,6 +697,7 @@ pub(super) fn take_retirement(state: &mut DocumentState, slot: &mut Slot) -> Ret
     let retire_backup = (slot.vault.backup_discard || slot.vault.backup_new_published || slot.vault.backup_export_published)
         && backup_native::retirement_ready(&slot.owner);
     let retire_upload_key = slot.vault.upload_key_new_published && upload_key::retirement_ready(&slot.owner);
+    let retire_cancelled_upload_key = upload_key::cancellation::retirement_ready(state, slot);
     let mut retired = Retired { loaded: slot.vault.loaded.take(), label: slot.vault.label.take(),
         previous_bound: slot.vault.previous_bound.take(), ..Retired::default() };
     let stale: [bool; BOUND_LOAN_LIMIT] = std::array::from_fn(|index| state.vault.as_ref().is_some_and(|session|
@@ -709,6 +710,7 @@ pub(super) fn take_retirement(state: &mut DocumentState, slot: &mut Slot) -> Ret
         retired.keys[0] = work.key.take();
         if retire_backup { retired.backup = std::mem::take(&mut work.backup); }
         if retire_upload_key { retired.upload_key = work.upload_key.take_for_retirement(); }
+        else if retire_cancelled_upload_key { retired.upload_key = work.upload_key.take_cancelled_retirement(); }
     }
     if closing {
         if let Some(session) = &mut state.vault {
@@ -1072,7 +1074,7 @@ fn begin_backup_import(state: &mut DocumentState, owner: &Arc<OriginalWork>) -> 
 }
 pub(super) fn report(document: &DocumentBinding, owner: &Arc<OriginalWork>) {
     let Some((first, outcome, backup_recovery, upload_key_recovery)) = owner.vault.try_lock().ok()
-        .map(|work| (work.first, work.outcome, work.backup.recovery_required(), work.upload_key.recovery_required())) else { return; };
+        .map(|work| (work.first, work.outcome, work.backup.recovery_required(), upload_key::cancellation::report_recovery(&work))) else { return; };
     let mut state = document.lock();
     let mut changed = false;
     if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) {
@@ -1961,6 +1963,7 @@ pub(super) async fn after_job(document: &DocumentBinding, owner: &Arc<OriginalWo
             report(document, owner);
         },
     }
+    upload_key::cancellation::prepare_after_release(document, owner);
 }
 
 #[cfg(feature = "desktop-shell")]
@@ -2023,6 +2026,7 @@ pub(super) fn start_cleanup(document: &DocumentBinding, state: &mut DocumentStat
             if let Ok(mut work) = worker.vault.lock() { work.fail(reason, Instant::now()); }
             report(&binding, &worker);
         }
+        upload_key::cancellation::prepare_after_release(&binding, &worker);
     }));
     drop((coordinator, work));
     slot.phase = if state.unknown { Phase::Unknown } else { Phase::Stopping };

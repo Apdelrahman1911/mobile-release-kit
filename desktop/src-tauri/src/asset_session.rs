@@ -75,7 +75,7 @@ use crate::vault_keyring_macos as keyring;
 #[path = "asset_session_keyring_macos.rs"]
 mod keyring_macos;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-pub(crate) use vault::{upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal};
+pub(crate) use vault::{upload_key_controls, KeyringInitializationAdmission, CredentialBackupChoice, UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal, UploadKeyCancellationDisposal};
 
 // A borrowed original session record is not a serialized credential or a new
 // credential owner. Only this document module can construct the signed loan.

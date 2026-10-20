@@ -3,6 +3,8 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
+#[path = "saved_command_upload_key_cancellation.rs"]
+pub(super) mod cancellation;
 
 pub(super) struct ReceiveBook {
     pub(super) backing: AsyncMutex<Backing>,

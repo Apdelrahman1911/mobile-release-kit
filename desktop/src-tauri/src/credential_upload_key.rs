@@ -18,6 +18,9 @@ use std::sync::{OnceLock, Weak};
 const NATIVE_UPLOAD_KEY_QUALIFIED: bool = false;
 #[path = "credential_upload_key_controls.rs"]
 pub(crate) mod controls;
+#[path = "credential_upload_key_cancellation.rs"]
+pub(in crate::asset_session) mod cancellation;
+pub(crate) use cancellation::UploadKeyCancellationDisposal;
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[path = "credential_upload_key_observation.rs"]
 pub(crate) mod observation;
@@ -201,6 +204,7 @@ struct Progress {
     saved: Option<StoredRef>,
     certificate: Option<[u8; 32]>,
     journal_revision: Option<u64>,
+    authenticated_new: Option<cancellation::AuthenticatedNew>,
 }
 impl Progress {
     fn new() -> Self {
@@ -211,6 +215,7 @@ impl Progress {
             saved: None,
             certificate: None,
             journal_revision: None,
+            authenticated_new: None,
         }
     }
     fn enter(&mut self, expected: ProgressPhase, next: ProgressPhase) -> Result<(), Reason> {
@@ -270,6 +275,7 @@ struct Holding {
     secrets: OnceLock<Arc<commands::UploadKeySecrets>>,
     gate: OnceLock<Arc<UploadKeyGoGate>>,
     run: OnceLock<Arc<UploadKeyRun>>,
+    cancellation: cancellation::CancellationState,
 }
 impl Holding {
     fn progress(&self) -> Result<std::sync::MutexGuard<'_, Progress>, Reason> {
@@ -376,6 +382,7 @@ impl Holding {
 pub(in crate::asset_session) struct Work {
     inner: Option<Arc<Holding>>,
     disposal: Option<UploadKeyDisposal>,
+    cancelled: Option<cancellation::CancellationRetirement>,
 }
 impl Work {
     pub(in crate::asset_session) fn empty(&self) -> bool {
@@ -644,12 +651,14 @@ impl Work {
         Self {
             inner: self.inner.take(),
             disposal: Some(disposal),
+            cancelled: None,
         }
     }
     /// Concrete memory disposal OFF the Document lock, while the existing
     /// retirement mutex still retains/counts this Work. On any failure keep
     /// originals/proof and return false; never credit scheduled Drop as empty.
     pub(in crate::asset_session) fn dispose_private(&mut self) -> bool {
+        if self.cancelled.is_some() { return self.dispose_cancelled(); }
         let Some(held) = &self.inner else {
             return true;
         };
@@ -1183,6 +1192,7 @@ impl DocumentBinding {
             secrets: OnceLock::new(),
             gate: OnceLock::new(),
             run: OnceLock::new(),
+            cancellation: Default::default(),
         });
         slot.owner
             .vault
@@ -1191,6 +1201,7 @@ impl DocumentBinding {
             .upload_key = Work {
             inner: Some(held.clone()),
             disposal: None,
+            cancelled: None,
         };
         let live = lookup_memory::pending_slot_bytes(&state, &slot)
             .map_err(|_| AssetError::new(Reason::Capacity))?
@@ -1551,6 +1562,8 @@ pub(in crate::asset_session) fn execute(
             progress.saved = Some(row.reference(key.identity()));
             progress.certificate = Some(certificate);
             progress.enter(ProgressPhase::Storing, ProgressPhase::Stored)?;
+            progress.authenticated_new = Some(cancellation::AuthenticatedNew::capture(
+                held, row.reference(key.identity()), certificate));
             Ok(ChildResult::Mutated {
                 record: context.record,
                 row: Some(row),

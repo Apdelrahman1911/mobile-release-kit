@@ -12,6 +12,9 @@ mod private;
 mod installed_observation;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) use private::GeneratedUploadCandidate;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(crate) use private::cancellation::UploadKeyCancelledNative;
+pub(super) use private::cancellation::{cancelled_no_go_writer, private_write_failed};
 #[cfg(all(
     target_os = "macos",
     target_pointer_width = "64",
@@ -266,6 +269,7 @@ pub(super) struct State {
     disposal: Mutex<Option<crate::asset_session::UploadKeyDisposal>>,
     final_seen: AtomicBool,
     final_wake: Notify,
+    cancellation: private::cancellation::CancellationState,
 }
 impl State {
     pub(super) fn new(intent: Option<Arc<Intent>>) -> Self {
@@ -287,6 +291,7 @@ impl State {
             disposal: Mutex::new(None),
             final_seen: AtomicBool::new(false),
             final_wake: Notify::new(),
+            cancellation: Default::default(),
         }
     }
 }

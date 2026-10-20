@@ -25,6 +25,8 @@ use crate::{installed_runtime::{AdmissionFailure, CloseOutcome, IOSArchiveRuntim
 mod upload_key;
 pub(crate) use upload_key::{UploadKeyPreparation,UploadKeyToolLoan,UploadKeyRun,UploadKeyAdmitted,PrivateUploadKeyInput};
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(crate) use upload_key::UploadKeyCancelledNative;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) use upload_key::document_backing_bytes as upload_key_document_backing_bytes;
 use crate::android_upload_key_protocol as upload_wire;
 
@@ -3501,7 +3503,7 @@ async fn write_request(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
         // Do not cancel/drop the original phase while its reservation token
         // or private writer is borrowed. STOP shortens the same actual gate.
         failed=match input.io.as_mut(){Some(writer)=>upload_key::write_private(&owner,writer).await.is_err(),None=>true};
-        if failed{inner.stop(&owner,Reason::CommandIncomplete);}
+        if failed{upload_key::private_write_failed(&inner,&owner);}
     }
     if sent&&!failed&&owner.candidate_ios(){
         failed=match(input.io.as_mut(),material.as_ref(),header.as_ref().ok().and_then(Option::as_ref)){
@@ -4445,12 +4447,13 @@ fn native_consumers_returned(book: &Resources, startup: &Startup, inner: &Inner,
         || !book.acquisition_joined || book.acquisition_failed || book.wait_failed
         || book.waited.as_ref().is_none_or(|s| !s.success()) || startup.child.is_some() || book.writer.is_some()
         || book.stdout.is_some() || book.stderr.is_some() || book.write_failed || book.out_failed || book.err_failed { return false; }
-    let io = book.write_end.as_ref().is_some_and(|e| e.sent && e.closed && !e.failed)
-        && book.out_end.as_ref().is_some_and(|e| e.eof && e.closed && e.protocol_settled_for(&owner.context))
+    let io = book.out_end.as_ref().is_some_and(|e| e.eof && e.closed && e.protocol_settled_for(&owner.context))
         && book.err_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.frames == 0);
     let registry = inner.lock();
     io && original_session(&registry, owner) && registry.active.as_ref().is_some_and(|a| a.accepted && a.terminal
-        && a.projection.result.as_ref().is_some_and(Terminal::settled))
+        && a.projection.result.as_ref().is_some_and(Terminal::settled)
+        && (book.write_end.as_ref().is_some_and(|e| e.sent && e.closed && !e.failed)
+            || upload_key::cancelled_no_go_writer(owner, a, book)))
 }
 // Typed references to the existing single native-settlement slot, not an owner.
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
@@ -5199,7 +5202,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                     &&(owner.domain!=SavedCommandDomain::AppleProvisioning||terminal.outcome()!=Outcome::Complete||apple_provisioning::complete(&owner))))
                 && book.out_end.as_ref().is_some_and(|r| r.protocol_settled_for(&owner.context))
                 && book.err_end.as_ref().is_some_and(|r| r.frames == 0 && !r.failed)
-                && book.write_end.as_ref().is_some_and(|r| r.sent && !r.failed)
+                && (book.write_end.as_ref().is_some_and(|r| r.sent && !r.failed)
+                    || r.active.as_ref().is_some_and(|a| upload_key::cancelled_no_go_writer(owner, a, &book)))
         } else { true };
         let dependents=manager_joined && startup_settled && io_joined && io && protocol
             && owner.driver_joined.load(Ordering::SeqCst)
