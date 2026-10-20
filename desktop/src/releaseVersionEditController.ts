@@ -487,7 +487,7 @@ export class ReleaseVersionEditController {
     if (!next) { this.observationFailed(true); return; }
     const reserved = attempt.binding.reserved;
     if (reserved) {
-      if (!opened.iosEnabled || opened.baseline.savedVersion.state !== 'present' || next.revision >= U32_MAX - 1) { this.invalidate(); return; }
+      if (opened.baseline.savedVersion.state !== 'present' || next.revision >= U32_MAX - 1) { this.invalidate(); return; }
       // The original native Open must have returned this bound checkout first.
       // Never autofill a detached manual draft or auto-prepare/auto-apply.
       next = { ...next, revision: next.revision + 1, values: { name: reserved.name, build: String(reserved.build) } };

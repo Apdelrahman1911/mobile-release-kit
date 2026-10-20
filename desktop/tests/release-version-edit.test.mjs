@@ -22,17 +22,17 @@ const clone = (value) => structuredClone(value);
 const digest = (text) => ({ bytes: Buffer.byteLength(text), sha256: createHash('sha256').update(text).digest('hex') });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let i = 0; i < 16; i += 1) await Promise.resolve(); };
-function snapshot() {
+function snapshot(config = BASE) {
   return { root: '/inert-not-opened', observedAt: '', observationScope: 'single-request-non-atomic',
-    config: { content: null, path: 'release/mobile-release.json', state: 'format-valid', data: clone(BASE), issues: [] },
+    config: { content: null, path: 'release/mobile-release.json', state: 'format-valid', data: clone(config), issues: [] },
     discovery: { state: 'unverified', partial: false, hints: {}, scan: { entries: 0, sourceFiles: 0, sourceBytes: 0, excludedEntries: 0 }, limits: {} },
     assurance: { basis: 'static-text', projectCodeExecuted: false, toolsProbed: false, credentialsRead: false,
       gitObserved: false, storeContacted: false, writesPerformed: false, releaseReadiness: 'unknown' }, issues: [] };
 }
-function addProject(workspace, id = 'p') {
+function addProject(workspace, id = 'p', config = BASE) {
   workspace = workspaceReducer(workspace, { type: 'select', project: { id, name: 'Inert ' + id, path: '/inert-not-opened' } });
   workspace = workspaceReducer(workspace, { type: 'snapshot-start', projectId: id, requestId: 1 });
-  return workspaceReducer(workspace, { type: 'snapshot-done', projectId: id, requestId: 1, snapshot: snapshot(), observedAt: 0 });
+  return workspaceReducer(workspace, { type: 'snapshot-done', projectId: id, requestId: 1, snapshot: snapshot(config), observedAt: 0 });
 }
 function checkout(raw = ORIGINAL, values = { name: '1.2.3', build: '7' }, options = {}) {
   return { revision: ID.revision, source: SOURCE, nameKey: 'VERSION_NAME', buildKey: 'BUILD_NUMBER', iosEnabled: true,
@@ -68,8 +68,8 @@ function projection(phase, opened = checkout(), preparedView = view(opened, open
       journal: versionNoOp(preparedView) ? 'not_created' : 'clean', resources: 'settled', reason: 'none' } : null,
     nativeReason: 'none', nativeFinality: phase === 'final' ? 'settled' : phase === 'unknown' ? 'unknown' : 'pending', lateSettled: false, ...options };
 }
-function harness({ raw = ORIGINAL, opened = checkout(raw), nativeStatus = status(), onSaveBoundary = () => {}, reservedOperationReason } = {}) {
-  let workspace = addProject(initialWorkspace), registry = clone(nativeStatus), listener, clock = 100, other = null, operation = null;
+function harness({ raw = ORIGINAL, opened = checkout(raw), config = BASE, nativeStatus = status(), onSaveBoundary = () => {}, reservedOperationReason } = {}) {
+  let workspace = addProject(initialWorkspace, 'p', config), registry = clone(nativeStatus), listener, clock = 100, other = null, operation = null;
   let sessionId = ID.session; const calls = [], boundaries = [], reads = [];
   const selected = () => workspace.projects[workspace.selectedId] ?? null;
   const request = (kind, args) => { const pending = deferred(); calls.push({ kind, args: clone(args), ...pending }); return pending.promise; };
@@ -723,13 +723,42 @@ test('reserved handoff waits for real Open then explicit review and Apply on sam
   h.publish(h.owner('final')); assert.equal(h.count('apply'), 1);
   assert.deepEqual(h.controller.selectedEntry().original.values, VALUES); assert.equal(h.state.edit.attempt.handled, true);
 });
-test('reserved handoff preserves dirty draft and refuses foreign checkout or missing native writer', async () => {
+test('Android-only reserved handoff above 9999 reaches explicit review and Save on the original controller', async () => {
+  const config = { ...clone(BASE), android: { enabled: true }, ios: { enabled: false } };
+  const opened = checkout(ORIGINAL, { name: '1.2.3', build: '7' }, { iosEnabled: false,
+    baseline: { savedConfig: digest(JSON.stringify(config)), savedVersion: { state: 'present', ...digest(ORIGINAL) } } });
+  const h = await connected({ opened, config }), reservation = { ...RESERVATION, build: 10000 };
+  assert.deepEqual(h.selected().snapshot.config.data, config);
+  assert.equal(h.controller.openReserved(reservation), true);
+  assert.deepEqual(h.last('open').args, { projectId: 'p', reservationId: reservation.id });
+  assert.equal(h.controller.selectedEntry(), null);
+  const opening = h.publish(h.owner('opening')); h.last('open').resolve(opening); await flush();
+  h.publish(h.owner('editing'));
+  assert.equal(h.state.edit.attempt.invalidated, false);
+  assert.equal(h.controller.selectedEntry().original.iosEnabled, false);
+  const values = { name: reservation.name, build: '10000' };
+  assert.deepEqual(h.controller.selectedEntry().values, values);
+  assert.equal(h.controller.editField('build', '10001'), false);
+  assert.equal(h.count('prepare'), 0); assert.equal(h.count('apply'), 0);
+  assert.equal(h.controller.review(), true); assert.deepEqual(h.last('prepare').args.values, values);
+  const reviewing = h.publish(h.owner('reviewing')); h.last('prepare').resolve(reviewing); await flush();
+  assert.equal(h.state.edit.attempt.projection.prepared.view.iosEnabled, false);
+  const binding = currentVersionApplyBinding(h.state); assert.ok(binding);
+  assert.equal(h.count('apply'), 0); assert.equal(h.controller.apply(binding), true);
+  const applying = h.publish(h.owner('applying')); h.last('apply').resolve(applying); await flush();
+  h.publish(h.owner('final'));
+  assert.equal(h.count('prepare'), 1); assert.equal(h.count('apply'), 1);
+  assert.deepEqual(h.controller.selectedEntry().original.values, values);
+  assert.equal(h.controller.selectedEntry().outcome.coreOutcome.journal, 'clean');
+  assert.equal(h.state.edit.attempt.handled, true);
+});
+test('reserved handoff preserves dirty draft and refuses absent version source or missing native writer', async () => {
   const h = await connected(); await openSaved(h); h.controller.editField('build', '91'); h.closeFinal();
   const before = clone(h.controller.selectedEntry()); assert.equal(h.controller.openReserved(RESERVATION), false);
   assert.deepEqual(h.controller.selectedEntry(), before); assert.equal(h.count('open'), 1);
-  const foreign = await connected({ opened: checkout(ORIGINAL, {name:'1.2.3',build:'7'}, {iosEnabled:false}) });
-  assert.equal(foreign.controller.openReserved(RESERVATION), true); foreign.publish(foreign.owner('editing'));
-  assert.equal(foreign.state.edit.attempt.invalidated, true); assert.equal(foreign.count('prepare'), 0);
+  const absent = await connected({ raw: null });
+  assert.equal(absent.controller.openReserved(RESERVATION), true); absent.publish(absent.owner('editing'));
+  assert.equal(absent.state.edit.attempt.invalidated, true); assert.equal(absent.count('prepare'), 0); assert.equal(absent.count('apply'), 0);
   const unavailable = harness(); assert.equal(unavailable.controller.openReserved(RESERVATION), false);
 });
 test('reserved handoff subscriber ABA peer and API invalidation prevent native Open', async () => {

@@ -39,8 +39,8 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
     {status?.reservation && <p>Candidate version: <strong>{status.reservation.name} · Build {status.reservation.build}</strong>. This is not a Store acceptance or a saved-file receipt.</p>}
     {!compact && status?.reservation?.ci && <details>
       <summary>Use this reserved version in GitHub Actions</summary>
-      <p>This is a manual setup step, not automatic CI configuration or a new reservation. CI can check and use this existing number; it cannot reserve a number on a hosted runner.</p>
-      <ol><li>Apply the reserved version using the separate editor. Commit only that version-file change, directly after the source you reserved. Include the message below. Commit other setup changes before reserving.</li>
+      <p>These settings let CI check and use the number already reserved here. Copying them does not configure CI or reserve again. To reserve in GitHub Actions instead, use the separate protected <code>reserve-version</code> workflow with its required credentials and approvals.</p>
+      <ol><li>In Desktop, choose “Open reserved version for review”, validate and review the values, then confirm Save. Commit only that version-file change, directly after the source you reserved. Include the message below. Commit other setup changes before reserving.</li>
         <li>In the application repository, set the protected Actions variable <code>MOBILE_RELEASE_VERSION_AUTHORITY</code> from the settings below once. Keep the existing setting for the same counter; do not reset it to bypass a refusal.</li>
         <li>Run the candidate workflow on that exact commit, using tooling that supports this check. Its original Store/build approvals and recovery rules still apply.</li></ol>
       <label htmlFor={`${id}-ci-message`}>Commit message · copy after reviewing the version-only diff</label>
