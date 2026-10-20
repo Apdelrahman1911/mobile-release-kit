@@ -50,7 +50,7 @@ function harness(t, otherOperationReason = () => null) {
   const pending = (command, args) => { const work = deferred(); calls.push({ command, args, ...work }); return work.promise; };
   const api = { mode: 'native', subscribeAssets: async (listener) => { event = listener; return () => {}; },
     assetStatus: async () => structuredClone(current), setAssetContext: (args) => pending('context', args),
-    uploadKeyStatus: (args) => pending('status', args), prepareUploadKey: (args) => pending('setup', args), createUploadKey: (args) => pending('create', args),
+    uploadKeyStatus: (args) => pending('status', args), prepareUploadKey: (args) => pending('setup', args), createUploadKey: (args) => pending('create', args), recoverUploadKey: (args) => pending('recover', args),
     prepareCredential: (args) => pending('assess', args), commitAsset: (args) => pending('commit', args), bindAsset: (args) => pending('bind', args),
     exportCredentialBackup: (args) => pending('backup', args), discardAsset: (args) => pending('discard', args),
   };
@@ -348,4 +348,199 @@ test('foreign operation and changed stored revision retire completion instead of
   assert.equal(h.controller.uploadKeySaved(h.controller.getSnapshot()), false);
   assert.equal(h.controller.uploadKeySnapshot().uncertain, true);
   assert.equal(h.controller.createNewUploadKey(h.controller.getSnapshot()), false);
+});
+
+// Recovery is an explicit reference-journal action, not another generation or
+// Bind path. These native-result DTOs are inert tests of caller correlation.
+function recoveryStatus(revision = 2, state = 'acknowledge-unstarted', patch = {}) {
+  const hasRecord = ['check-saved-key', 'remember-bound'].includes(state);
+  return status(revision, { setup: 'ready', plan: 'recovery-required',
+    assets: assets(revision, { records: hasRecord ? [record({ availability: state === 'remember-bound' ? 'assigned' : 'unassigned' })] : [] }),
+    recovery: { preferenceRevision: '21', state, record: hasRecord ? { ...reference } : null, operation: null }, ...patch });
+}
+function recoveryPending(revision = 3, action = 'acknowledge-unstarted') {
+  const value = recoveryStatus(revision, 'recovery-required');
+  value.assets.operation = operation({ operationId: 8, operation: 'recover-upload-key' });
+  value.recovery.preferenceRevision = null;
+  value.recovery.operation = { operationId: 8, action, phase: 'pending', preferenceRevision: null };
+  return value;
+}
+function recoveryComplete(revision = 4, action = 'acknowledge-unstarted') {
+  const value = recoveryStatus(revision, action === 'acknowledge-unstarted' ? 'none' : 'check-saved-key');
+  value.assets.operation = operation({ operationId: 8, operation: 'recover-upload-key', phase: 'idle', settlement: 'known' });
+  value.recovery.preferenceRevision = '22';
+  value.recovery.operation = { operationId: 8, action, phase: 'completed', preferenceRevision: '22' };
+  return value;
+}
+async function recoveryReady(h, state = 'acknowledge-unstarted') { await ready(h); await checked(h, recoveryStatus(2, state)); }
+function recover(h, action = 'acknowledge-unstarted') {
+  assert.equal(h.controller.canRecoverUploadKey(h.controller.getSnapshot(), action), true);
+  assert.equal(h.controller.recoverUploadKey(h.controller.getSnapshot(), action), true);
+}
+
+test('closed recovery request uses canonical u64 revision and no path, key, declaration or noGO assertion', async () => {
+  const input = { contextRevision: 1, expectedStatusRevision: 2, expectedPreferenceRevision: '18446744073709551615', action: 'acknowledge-unstarted' };
+  assert.equal(uploadKeyRequestFits('upload_key_recover', input), true);
+  assert.equal(uploadKeyRequestFits('upload_key_recover', { ...input, expectedPreferenceRevision: '0', action: 'remember-bound' }), true);
+  for (const bad of [1, '01', '+1', '-1', ' 1', '1 ', '', '18446744073709551616', '9'.repeat(100), null])
+    assert.equal(uploadKeyRequestFits('upload_key_recover', { ...input, expectedPreferenceRevision: bad }), false);
+  for (const key of ['path', 'recordId', 'password', 'noGo', 'declaration', 'overwrite'])
+    assert.equal(uploadKeyRequestFits('upload_key_recover', { ...input, [key]: true }), false);
+  assert.equal(uploadKeyRequestFits('upload_key_recover', { ...input, action: 'retry-generation' }), false);
+  let read = false;
+  assert.equal(uploadKeyRequestFits('upload_key_recover', { ...input, get expectedPreferenceRevision() { read = true; return '21'; } }), false);
+  assert.equal(read, false);
+  const calls = [];
+  const api = createNativeApi('native', async (command, args) => { calls.push({ command, args }); return recoveryPending(); });
+  await api.recoverUploadKey(input); input.expectedPreferenceRevision = '1';
+  assert.deepEqual(calls, [{ command: 'upload_key_recover', args: { ...input, expectedPreferenceRevision: '18446744073709551615' } }]);
+  await assert.rejects(api.recoverUploadKey({ ...input, password: 'inert-refused' })); assert.equal(calls.length, 1);
+});
+
+test('missing recovery capability is unavailable and read-only status never acknowledges an absent record', async (t) => {
+  const h = harness(t); await ready(h); await checked(h, status(2, { setup: 'ready', plan: 'recovery-required' }));
+  assert.equal(Object.hasOwn(h.controller.uploadKeySnapshot().status, 'recovery'), false);
+  assert.equal(h.controller.recoverUploadKey(h.controller.getSnapshot(), 'acknowledge-unstarted'), false);
+  await checked(h, recoveryStatus(3, 'recovery-required'));
+  assert.equal(h.controller.recoverUploadKey(h.controller.getSnapshot(), 'acknowledge-unstarted'), false);
+  assert.equal(h.calls.some((c) => ['recover', 'setup', 'create'].includes(c.command)), false);
+  const old = harness(t); delete old.api.recoverUploadKey; await recoveryReady(old);
+  assert.equal(old.controller.canRecoverUploadKey(old.controller.getSnapshot(), 'acknowledge-unstarted'), false);
+  assert.equal(old.controller.recoverUploadKey(old.controller.getSnapshot(), 'acknowledge-unstarted'), false);
+});
+
+test('recovery completed DTO requires exact operation, current row, confirmed parent phase and distinct full reference', () => {
+  assert.deepEqual(parseUploadKeyStatus(recoveryComplete()), recoveryComplete());
+  assert.deepEqual(parseUploadKeyStatus(recoveryComplete(4, 'remember-bound')), recoveryComplete(4, 'remember-bound'));
+  for (const mutate of [
+    (v) => { v.recovery.preferenceRevision = '01'; }, (v) => { v.recovery.operation.preferenceRevision = null; },
+    (v) => { v.recovery.operation.operationId = 9; }, (v) => { v.recovery.operation.action = 'generate'; },
+    (v) => { v.assets.operation.phase = 'stopping'; }, (v) => { v.assets.operation.settlement = 'unknown'; },
+    (v) => { v.assets.operation.reason = 'user-cancelled'; }, (v) => { v.assets.operation.operation = 'generate-upload-key'; },
+    (v) => { v.assets.operation.storageOutcome = { effect: 'known-applied', durability: 'confirmed', cleanup: 'known' }; },
+    (v) => { v.capability = { ...unavailable }; }, (v) => { v.recovery.record.revisionId = reference.recordId; },
+    (v) => { v.recovery.record.revisionCounter = 2; }, (v) => { v.recovery.record.path = 'inert-refused'; },
+    (v) => { v.recovery.state = 'remember-bound'; v.recovery.record = null; },
+  ]) { const value = recoveryComplete(4, 'remember-bound'); mutate(value); assert.throws(() => parseUploadKeyStatus(value)); }
+  assert.equal(parseAssetStatus({ ...recoveryPending().assets, mode: 'session', persistence: null }), null);
+  assert.equal(parseAssetStatus({ ...recoveryPending().assets, operation: { ...recoveryPending().assets.operation, phase: 'mutating' } }), null);
+});
+
+test('explicit noGO acknowledgement is single-flight and never creates, binds, overwrites or backs up', async (t) => {
+  const h = harness(t); await recoveryReady(h); const rendered = h.controller.getSnapshot(); recover(h);
+  assert.equal(h.controller.recoverUploadKey(rendered, 'acknowledge-unstarted'), false);
+  assert.equal(h.controller.recoverUploadKey(h.controller.getSnapshot(), 'acknowledge-unstarted'), false);
+  assert.deepEqual(h.last('recover').args, { contextRevision: 1, expectedStatusRevision: 2, expectedPreferenceRevision: '21', action: 'acknowledge-unstarted' });
+  assert.equal(h.controller.uploadKeyRecoveryCompleted(h.controller.getSnapshot()), null);
+  h.reply('recover', recoveryPending()); await settle(); await checked(h, recoveryComplete());
+  assert.equal(h.controller.uploadKeyRecoveryCompleted(h.controller.getSnapshot()), 'acknowledge-unstarted');
+  assert.equal(h.controller.uploadKeySnapshot().confirmed, false);
+  assert.equal(h.controller.createNewUploadKey(h.controller.getSnapshot()), false);
+  assert.equal(h.controller.uploadKeySaved(h.controller.getSnapshot()), false);
+  assert.equal(h.calls.filter((c) => c.command === 'recover').length, 1);
+  assert.equal(h.calls.some((c) => ['setup', 'create'].includes(c.command)), false); noAutomaticWork(h);
+});
+
+test('saved-key guidance cannot remember until native current Bind is observed; remembered choice is not generation success', async (t) => {
+  const h = harness(t); await recoveryReady(h, 'check-saved-key');
+  assert.equal(h.controller.recoverUploadKey(h.controller.getSnapshot(), 'remember-bound'), false); noAutomaticWork(h);
+  await checked(h, recoveryStatus(3, 'remember-bound')); recover(h, 'remember-bound');
+  h.reply('recover', recoveryPending(4, 'remember-bound')); await settle();
+  await checked(h, recoveryComplete(5, 'remember-bound'));
+  assert.equal(h.controller.uploadKeyRecoveryCompleted(h.controller.getSnapshot()), 'remember-bound');
+  assert.equal(h.controller.uploadKeySaved(h.controller.getSnapshot()), false);
+  assert.equal(h.controller.createNewUploadKey(h.controller.getSnapshot()), false); noAutomaticWork(h);
+});
+
+test('read-only completed-looking status cannot supply the recovery command origin', async (t) => {
+  const h = harness(t); await recoveryReady(h); recover(h);
+  const complete = recoveryComplete(); h.emit(complete.assets); await checked(h, complete);
+  assert.equal(h.controller.getSnapshot().originPending, true);
+  assert.equal(h.controller.uploadKeyRecoveryCompleted(h.controller.getSnapshot()), null);
+  h.reply('recover', recoveryPending()); await settle();
+  assert.equal(h.controller.getSnapshot().originPending, false);
+  assert.equal(h.controller.uploadKeyRecoveryCompleted(h.controller.getSnapshot()), 'acknowledge-unstarted');
+});
+
+test('lost recovery acknowledgement stays uncertain even after completed-looking refresh or navigation', async (t) => {
+  const h = harness(t); await recoveryReady(h); recover(h); h.last('recover').reject({ code: 'native-unavailable' }); await settle();
+  const complete = recoveryComplete(); h.emit(complete.assets); await h.controller.checkStatus(); await checked(h, complete);
+  assert.equal(h.controller.uploadKeyRecoveryCompleted(h.controller.getSnapshot()), null);
+  assert.equal(h.controller.recoverUploadKey(h.controller.getSnapshot(), 'acknowledge-unstarted'), false);
+  h.controller.setScope({ platform: 'ios', stage: 'candidate', purpose: 'signing' });
+  h.controller.setScope({ platform: 'android', stage: 'candidate', purpose: 'signing' });
+  assert.equal(h.calls.filter((c) => c.command === 'recover').length, 1);
+  assert.equal(h.calls.some((c) => c.command === 'create'), false); noAutomaticWork(h);
+});
+
+test('actual recovery Unknown is absorbing and healthy stopping stays pending until the exact completion', async (t) => {
+  const h = harness(t); await recoveryReady(h); recover(h);
+  const pending = recoveryPending(); pending.assets.operation.phase = 'stopping'; h.reply('recover', pending); await settle();
+  assert.equal(h.controller.uploadKeySnapshot().uncertain, false);
+  assert.equal(h.controller.uploadKeyRecoveryCompleted(h.controller.getSnapshot()), null);
+  await checked(h, recoveryComplete());
+  assert.equal(h.controller.uploadKeyRecoveryCompleted(h.controller.getSnapshot()), 'acknowledge-unstarted');
+  const bad = harness(t); await recoveryReady(bad); recover(bad);
+  const unknown = recoveryPending(); unknown.assets.operation.phase = 'unknown'; unknown.assets.operation.settlement = 'unknown';
+  unknown.assets.operation.reason = 'cleanup-unknown'; unknown.recovery.operation.phase = 'recovery-required';
+  bad.reply('recover', unknown); await settle(); await checked(bad, recoveryComplete());
+  assert.equal(bad.controller.uploadKeyRecoveryCompleted(bad.controller.getSnapshot()), null);
+  assert.equal(bad.controller.recoverUploadKey(bad.controller.getSnapshot(), 'acknowledge-unstarted'), false);
+});
+
+test('stale view or changed preference revision cannot dispatch the previously displayed recovery action', async (t) => {
+  const h = harness(t); await recoveryReady(h); const stale = h.controller.getSnapshot();
+  const fresh = recoveryStatus(3); fresh.recovery.preferenceRevision = '22'; await checked(h, fresh);
+  assert.equal(h.controller.recoverUploadKey(stale, 'acknowledge-unstarted'), false); recover(h);
+  assert.equal(h.last('recover').args.expectedPreferenceRevision, '22');
+  assert.equal(h.last('recover').args.expectedStatusRevision, 3);
+});
+
+test('reentrant recovery handoff refuses context retirement, ABA, peer acquisition and disposed controller before invoke', async (t) => {
+  for (const change of ['project', 'aba', 'peer', 'dispose']) {
+    let peer = null; const h = harness(t, () => peer); await recoveryReady(h);
+    let fired = false;
+    const unlisten = h.controller.subscribe(() => {
+      if (fired || h.controller.getSnapshot().busy !== 'recover-upload-key') return;
+      fired = true;
+      if (change === 'project') { h.changeProject(); h.controller.syncProject(); }
+      if (change === 'aba') {
+        h.controller.setScope({ platform: 'ios', stage: 'candidate', purpose: 'signing' });
+        h.controller.setScope({ platform: 'android', stage: 'candidate', purpose: 'signing' });
+      }
+      if (change === 'peer') peer = 'another original started';
+      if (change === 'dispose') h.controller.dispose();
+    });
+    assert.equal(h.controller.recoverUploadKey(h.controller.getSnapshot(), 'acknowledge-unstarted'), true); await settle(); unlisten();
+    assert.equal(fired, true); assert.equal(h.calls.filter((c) => c.command === 'recover').length, 0, change);
+    assert.equal(h.calls.some((c) => c.command === 'create'), false); noAutomaticWork(h);
+  }
+});
+
+test('current ref change, wrong action and wrong preference result cannot relabel a recovery acknowledgement', async (t) => {
+  for (const fault of ['record-revision', 'action', 'preference']) {
+    const h = harness(t); await recoveryReady(h, 'remember-bound'); recover(h, 'remember-bound');
+    h.reply('recover', recoveryPending(3, 'remember-bound')); await settle();
+    const complete = recoveryComplete(4, 'remember-bound');
+    if (fault === 'record-revision') complete.recovery.record.revisionId = '5'.repeat(32);
+    if (fault === 'action') complete.recovery.operation.action = 'acknowledge-unstarted';
+    if (fault === 'preference') complete.recovery.operation.preferenceRevision = '23';
+    await checked(h, complete);
+    assert.equal(h.controller.uploadKeyRecoveryCompleted(h.controller.getSnapshot()), null, fault);
+    assert.equal(h.controller.uploadKeySaved(h.controller.getSnapshot()), false); noAutomaticWork(h);
+  }
+});
+
+test('explicit recovery setup may check reopened state but cannot clear old generation uncertainty or authorize create', async (t) => {
+  const h = harness(t); await ready(h); await checked(h, status(2, { setup: 'failed', recovery: { preferenceRevision: null, state: 'recovery-required', record: null, operation: null } }));
+  assert.equal(h.controller.uploadKeySnapshot().uncertain, true);
+  assert.equal(h.controller.prepareUploadKey(h.controller.getSnapshot()), false);
+  assert.equal(h.controller.prepareUploadKey(h.controller.getSnapshot(), true), true);
+  h.reply('setup', recoveryStatus(3)); await settle();
+  assert.equal(h.controller.uploadKeySnapshot().uncertain, true);
+  assert.equal(h.controller.confirmNewUploadKey(h.controller.getSnapshot(), true), false);
+  recover(h); h.reply('recover', recoveryPending(4)); await settle(); await checked(h, recoveryComplete(5));
+  assert.equal(h.controller.uploadKeyRecoveryCompleted(h.controller.getSnapshot()), 'acknowledge-unstarted');
+  assert.equal(h.controller.uploadKeySnapshot().uncertain, false);
+  assert.equal(h.calls.some((c) => c.command === 'create'), false); noAutomaticWork(h);
 });

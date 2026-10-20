@@ -5,11 +5,24 @@ import { ASSET_REASON_HELP, parseAssetStatus } from './assetSessionProtocol.ts';
 
 export const NEW_UPLOAD_KEY_DECLARATION = 'new-application-no-existing-upload-key' as const;
 export const UPLOAD_KEY_OPERATION = 'generate-upload-key' as const;
-export type UploadKeyCommand = 'upload_key_status' | 'upload_key_prepare' | 'upload_key_create';
+export const RECOVER_UPLOAD_KEY_OPERATION = 'recover-upload-key' as const;
+export type UploadKeyCommand = 'upload_key_status' | 'upload_key_prepare' | 'upload_key_create' | 'upload_key_recover';
 export interface UploadKeyContextRequest { contextRevision: number }
 export interface UploadKeyCreateRequest extends UploadKeyContextRequest {
   expectedStatusRevision: number;
   declaration: typeof NEW_UPLOAD_KEY_DECLARATION;
+}
+export type UploadKeyRecoveryAction = 'acknowledge-unstarted' | 'remember-bound';
+export interface UploadKeyRecoverRequest extends UploadKeyContextRequest {
+  expectedStatusRevision: number;
+  expectedPreferenceRevision: string;
+  action: UploadKeyRecoveryAction;
+}
+export interface UploadKeyRecoveryStatus {
+  preferenceRevision: string | null;
+  state: 'none' | 'recovery-required' | 'acknowledge-unstarted' | 'check-saved-key' | 'remember-bound';
+  record: UploadKeyReference | null;
+  operation: { operationId: number; action: UploadKeyRecoveryAction; phase: 'pending' | 'completed' | 'recovery-required'; preferenceRevision: string | null } | null;
 }
 export type UploadKeyPlan = 'unavailable' | 'unlock-storage' | 'recovery-required' | 'reuse-ready' |
   'assessment-needed' | 'select-existing' | 'existing-key-required' | 'conflict' | 'confirm-application-history';
@@ -24,11 +37,14 @@ export interface UploadKeyStatus {
   plan: UploadKeyPlan;
   operation: { operationId: number; phase: 'generating' | 'saving' | 'finishing' | 'saved' | 'recovery-required'; reason: AssetReason } | null;
   saved: UploadKeyReference | null;
+  // Missing on an older native host means unavailable, not an empty journal.
+  recovery?: UploadKeyRecoveryStatus;
 }
 export interface UploadKeyApi {
   uploadKeyStatus(request: UploadKeyContextRequest): Promise<UploadKeyStatus>;
   prepareUploadKey(request: UploadKeyContextRequest): Promise<UploadKeyStatus>;
   createUploadKey(request: UploadKeyCreateRequest): Promise<UploadKeyStatus>;
+  recoverUploadKey(request: UploadKeyRecoverRequest): Promise<UploadKeyStatus>;
 }
 function object(value: unknown, names: readonly string[]): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -54,10 +70,40 @@ function reference(value: unknown): value is UploadKeyReference {
   const ids = [value.vaultId, value.generationId, value.recordId, value.revisionId];
   return ids.every(id) && new Set(ids).size === 4;
 }
+function preferenceRevision(value: unknown): value is string {
+  return typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/u.test(value) &&
+    (value.length < 20 || value <= '18446744073709551615');
+}
+function recoveryAction(value: unknown): value is UploadKeyRecoveryAction {
+  return value === 'acknowledge-unstarted' || value === 'remember-bound';
+}
+function recoveryStatus(value: unknown, assets: AssetStatus, available: boolean): value is UploadKeyRecoveryStatus {
+  if (!object(value, ['preferenceRevision', 'state', 'record', 'operation']) ||
+      value.preferenceRevision !== null && !preferenceRevision(value.preferenceRevision) ||
+      !['none', 'recovery-required', 'acknowledge-unstarted', 'check-saved-key', 'remember-bound'].includes(value.state as string)) return false;
+  const row = value.record;
+  if (row !== null && (!reference(row) || !assets.records.some((actual) => actual.kind === 'android-keystore' &&
+      actual.storage === 'encrypted' && actual.recordId === row.recordId && actual.revision === row.revisionCounter &&
+      actual.availability !== 'mutation-pending'))) return false;
+  if (['check-saved-key', 'remember-bound'].includes(value.state as string) && row === null ||
+      ['none', 'acknowledge-unstarted'].includes(value.state as string) && row !== null ||
+      value.state !== 'recovery-required' && value.preferenceRevision === null) return false;
+  const original = value.operation;
+  if (original === null) return true;
+  if (!object(original, ['operationId', 'action', 'phase', 'preferenceRevision']) || !revision(original.operationId) ||
+      !recoveryAction(original.action) || !['pending', 'completed', 'recovery-required'].includes(original.phase as string) ||
+      assets.operation?.operation !== RECOVER_UPLOAD_KEY_OPERATION || assets.operation.operationId !== original.operationId ||
+      (original.phase === 'completed' ? !preferenceRevision(original.preferenceRevision) : original.preferenceRevision !== null)) return false;
+  return original.phase !== 'completed' || available && assets.mode === 'encrypted' && assets.persistence?.state === 'unlocked' &&
+    assets.persistence.keyAccess === 'read-write' && assets.operation.phase === 'idle' && assets.operation.settlement === 'known' &&
+    assets.operation.reason === 'none' && assets.operation.storageOutcome === null;
+}
 export function uploadKeyRequestFits(command: UploadKeyCommand, value: unknown): boolean {
   try {
     if (command === 'upload_key_status' || command === 'upload_key_prepare')
       return object(value, ['contextRevision']) && revision(value.contextRevision);
+    if (command === 'upload_key_recover') return object(value, ['contextRevision', 'expectedStatusRevision', 'expectedPreferenceRevision', 'action']) &&
+      revision(value.contextRevision) && revision(value.expectedStatusRevision) && preferenceRevision(value.expectedPreferenceRevision) && recoveryAction(value.action);
     return command === 'upload_key_create' && object(value, ['contextRevision', 'expectedStatusRevision', 'declaration']) &&
       revision(value.contextRevision) && revision(value.expectedStatusRevision) && value.declaration === NEW_UPLOAD_KEY_DECLARATION;
   } catch { return false; }
@@ -65,7 +111,8 @@ export function uploadKeyRequestFits(command: UploadKeyCommand, value: unknown):
 export function parseUploadKeyStatus(value: unknown): UploadKeyStatus {
   const invalid = () => { throw new Error('Upload-key status is unavailable. Check the original action; do not create another key.'); };
   try {
-    if (!object(value, ['schemaVersion', 'assets', 'capability', 'setup', 'plan', 'operation', 'saved']) || value.schemaVersion !== 1 ||
+    if (!(object(value, ['schemaVersion', 'assets', 'capability', 'setup', 'plan', 'operation', 'saved']) ||
+        object(value, ['schemaVersion', 'assets', 'capability', 'setup', 'plan', 'operation', 'saved', 'recovery'])) || value.schemaVersion !== 1 ||
         !object(value.capability, ['available', 'reason']) || typeof value.capability.available !== 'boolean' || !reason(value.capability.reason) ||
         value.capability.available !== (value.capability.reason === 'none') ||
         !['required', 'checking', 'ready', 'attempted', 'failed'].includes(value.setup as string) ||
@@ -88,11 +135,13 @@ export function parseUploadKeyStatus(value: unknown): UploadKeyStatus {
         !assets.records.some((row) => row.recordId === saved.recordId && row.revision === saved.revisionCounter &&
           row.kind === 'android-keystore' && row.storage === 'encrypted' && row.availability !== 'mutation-pending'))) return invalid();
     if (object(operation, ['operationId', 'phase', 'reason']) && operation.phase === 'saved' && saved === null) return invalid();
+    if (Object.hasOwn(value, 'recovery') && !recoveryStatus(value.recovery, assets, value.capability.available)) return invalid();
     // The parser checks shape/consistency only. Native publication, reference,
     // disposal and joins are independently proved by the original parent.
     return { schemaVersion: 1, assets, capability: { ...value.capability }, setup: value.setup,
       plan: value.plan, operation: operation === null ? null : { ...operation as Record<string, unknown> },
-      saved: saved === null ? null : { ...saved as UploadKeyReference } } as UploadKeyStatus;
+      saved: saved === null ? null : { ...saved as UploadKeyReference },
+      ...(Object.hasOwn(value, 'recovery') ? { recovery: structuredClone(value.recovery) } : {}) } as UploadKeyStatus;
   } catch { return invalid(); }
 }
 export function uploadKeyContext(state: AssetDisplayState): string | null {
