@@ -147,6 +147,15 @@ impl CompletedSources {
         Some(Arc::new(Self { original: owner.clone(), locations, origin, roles,
             progress: Mutex::new(Progress { epoch: intent.document.source_picker_epoch(), picker: None, published: false, retired: false }) }))
     }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(super) fn observed_sdk(&self, operation: &str, generation: &str) -> Option<PathBuf> {
+        let progress=self.progress.try_lock().ok()?;
+        if self.origin!=Origin::Acquired || self.roles & bit(source_wire::Role::Sdk)==0
+            || self.original.id!=operation || self.original.generation!=generation
+            || progress.retired || progress.picker.is_some() || progress.published
+            || !self.original.tools.intent.as_ref()?.current() || !original_joined(&self.original) { return None; }
+        copy_location(self.locations[index(source_wire::Role::Sdk)].as_deref()?)
+    }
     pub(super) fn original(&self) -> &Arc<Session> { &self.original }
     pub(super) fn retained_bytes(&self) -> Option<usize> {
         self.locations.iter().flatten().try_fold(std::mem::size_of::<Self>().checked_add(2 * std::mem::size_of::<usize>())?,
@@ -215,7 +224,7 @@ impl SavedCommandOwner {
     pub(crate) fn nominate_acquired_tool_source(&self, document: &Arc<()>, input: &source_wire::Choose,
         registration: u32, root: &RegisteredRoot, publisher: &android_registration::Publisher) -> Result<Arc<SourceNomination>, BridgeError> {
         self.require_domain(SavedCommandDomain::ToolAcquisition)?;
-        if !NATIVE_QUALIFIED { return Err(source_wire::unavailable()); }
+        if !self.inner.tool_acquisition_selected() { return Err(source_wire::unavailable()); }
         let (acquired, origin) = match (&input.acquired, &input.discovered) {
             (Some(ids), None) => (ids, Origin::Acquired),
             (None, Some(ids)) => (ids, Origin::Discovered),

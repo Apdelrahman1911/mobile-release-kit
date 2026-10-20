@@ -33,6 +33,10 @@ pub(crate) use picked::SourceGate;
 mod sources;
 pub(crate) use sources::SourceNomination;
 
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[path="saved_command_tool_acquisition_observation.rs"]
+pub(super) mod observation;
+
 // A complete source implementation is not installed-profile qualification.
 // Root's native observation/packaging gate must be exercised before enabling.
 const NATIVE_QUALIFIED: bool = false;
@@ -54,6 +58,8 @@ const _: () = assert!(FUTURE_PUBLIC_BYTES <= PUBLIC_WORK_LIMIT);
 pub(super) struct Binding {
     android: Arc<Inner>,
     document: Weak<()>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    observation: std::sync::OnceLock<Weak<crate::shell::installed_observation::tool_setup::Control>>,
     #[cfg(all(
         target_os = "macos",
         target_pointer_width = "64",
@@ -328,6 +334,8 @@ impl SavedCommandOwner {
                     android: android.inner.clone(),
                     document: Arc::downgrade(document),
                     location,
+                    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                    observation: std::sync::OnceLock::new(),
                 })
                 .map_err(|_| wire::invalid())
         }
@@ -401,6 +409,8 @@ impl SavedCommandOwner {
         {
             return Err(wire::invalid());
         }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if !observation::claim_prepare(&self.inner, &input, &root) { return Err(wire::invalid()); }
         let intent = {
             let r = self
                 .inner
@@ -604,7 +614,13 @@ impl SavedCommandOwner {
 }
 impl Inner {
     pub(super) fn tool_acquisition_selected(&self) -> bool {
-        NATIVE_QUALIFIED
+        let qualified = {
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            { NATIVE_QUALIFIED || observation::selected(self) }
+            #[cfg(not(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))))]
+            { NATIVE_QUALIFIED }
+        };
+        qualified
             && self.domain == SavedCommandDomain::ToolAcquisition
             && cfg!(all(
                 feature = "desktop-shell",
@@ -731,7 +747,8 @@ fn application_root(owner: &Session) -> Result<Option<RegisteredRoot>, BridgeErr
         Err(BridgeError::cleanup_unknown())
     }
 }
-pub(super) fn after_final(r: &mut super::Registry, active: &mut Active, owner: &Arc<Session>) {
+pub(super) fn after_final(inner: &Inner, r: &mut super::Registry, active: &mut Active, owner: &Arc<Session>) {
+    let _ = inner;
     if owner.domain != SavedCommandDomain::ToolAcquisition {
         return;
     }
@@ -803,6 +820,8 @@ pub(super) fn after_final(r: &mut super::Registry, active: &mut Active, owner: &
             }
         }
     }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    observation::returned(inner, r, active, owner);
 }
 fn observe_protected_tools(owner: &Session, active: &mut Active) {
     let (Some(intent), Profile::ToolAcquisition(profile)) = (&owner.tools.intent, owner.profile) else { return; };
@@ -918,6 +937,8 @@ fn retained_bytes(inner: &Inner, r: &super::Registry, document: &Arc<()>, picker
                     .android_registration_retained_heap_bytes(document)?,
             )?;
     }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    { bytes = bytes.checked_add(observation::charge(inner)?)?; }
     let mut seen = BTreeSet::new();
     let mut queue = r.tool_acquisition.producers.clone();
     if let Some(completed) = &r.tool_acquisition.completed_sources {

@@ -32,6 +32,8 @@ use crate::android_upload_key_protocol as upload_wire;
 
 #[path = "saved_command_tool_acquisition.rs"]
 mod tool_acquisition;
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+pub(crate) use tool_acquisition::observation::Sample as InstalledToolSetupSample;
 pub(crate) use tool_acquisition::{Admitted as ToolAcquisitionAdmitted, Census as ToolAcquisitionCensus, SourceNomination as ToolSourceNomination};
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
 pub(crate) use tool_acquisition::SourceGate as ToolAcquisitionSourceGate;
@@ -2851,7 +2853,7 @@ impl SavedCommandOwner {
                         };
                     }
                 }
-                tool_acquisition::after_final(&mut r,&mut active,&owner);
+                tool_acquisition::after_final(&self.inner,&mut r,&mut active,&owner);
                 upload_key::after_final(&active,&owner);
                 agent_local_checks::retired(&active,r.revision.saturating_add(1));
                 agent_build::retired(&active,r.revision.saturating_add(1));
@@ -4977,6 +4979,8 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     if owner.domain==SavedCommandDomain::ArtifactInspection && transfer_artifact_installed(&book,inner,owner).is_err(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if matches!(owner.domain,SavedCommandDomain::AppleProvisioning|SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile|SavedCommandDomain::LocalStorePreflight) && store::transfer_installed(&book,inner,owner).is_err(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    if owner.domain==SavedCommandDomain::ToolAcquisition && !tool_acquisition::observation::before_transfer(&book,inner,owner) { return; }
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     if owner.domain==SavedCommandDomain::ToolAcquisition && tool_acquisition::transfer(&book,inner,owner).is_err(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]

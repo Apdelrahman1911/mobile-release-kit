@@ -4635,15 +4635,20 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             // or binding failure leaves only tool acquisition unavailable;
             // no alternate path, retry, directory creation or action is used.
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
-            if let Ok(application_data) = app.path().app_local_data_dir() {
-                let _ = document.bind_tool_acquisition(&application_data);
+            {
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                let observed_application=observation.as_ref().and_then(|q|q.tool_setup_application());
+                #[cfg(not(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))))]
+                let observed_application:Option<&std::path::Path>=None;
+                if let Some(path)=observed_application {document.bind_tool_acquisition(path)?;}
+                else if let Ok(application_data)=app.path().app_local_data_dir(){let _=document.bind_tool_acquisition(&application_data);}
             }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             if let Some(q) = &observation { q.bind_diagnostic_document(document.clone()); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = &observation { q.attach_session(&document)?; q.attach_commands(&document)?; }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; q.attach_vault(&document)?; q.attach_recovery(&document, &bridge.project_recovery)?; }
+            if let Some(q) = &observation { q.attach_ios(&document, &bridge.ios_archive)?; q.attach_project_fields(&document)?; q.attach_vault(&document)?; q.attach_tool_setup(&document)?; q.attach_recovery(&document, &bridge.project_recovery)?; }
             let (relay_stop, stop_receiver) = watch::channel(false);
             app.manage(ShellState {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

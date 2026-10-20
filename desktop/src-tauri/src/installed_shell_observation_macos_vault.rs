@@ -179,7 +179,7 @@ impl Observation {
     pub(crate) fn attach_vault(self: &Arc<Self>, document: &DocumentBinding) -> Result<(), BridgeError> {
         match self.vault.as_ref() { Some(control) => control.attach(self, document), None => Ok(()) }
     }
-    pub(super) fn quit_id(&self) -> u32 { self.vault.as_ref().map_or_else(|| self.case.quit_id(), |c| c.quit_id()) }
+    pub(super) fn quit_id(&self) -> u32 { self.tool_setup.as_ref().map_or_else(||self.vault.as_ref().map_or_else(|| self.case.quit_id(), |c| c.quit_id()),|c|c.quit_id()) }
     pub(super) fn vault_tick(self: &Arc<Self>, document: &DocumentBinding, step: Step) {
         let Some(control) = &self.vault else { self.fail_with("vault-original-contract"); return; };
         // Calls below run outside Observation::Record. All action admission and

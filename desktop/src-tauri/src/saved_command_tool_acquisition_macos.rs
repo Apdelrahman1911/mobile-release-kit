@@ -16,6 +16,10 @@ pub(in crate::saved_command_owner) struct Original {
     picked: Option<(Partition, [u8; 32])>,
     sdk_copy: Option<wire::sdk::CopyInput>,
     unknown: bool,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    observed_ca_armed: bool,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    observed_transfer_attempted: bool,
 }
 impl Original {
     pub(super) fn new() -> Self {
@@ -29,7 +33,24 @@ impl Original {
             picked: None,
             sdk_copy: None,
             unknown: false,
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            observed_ca_armed: false,
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            observed_transfer_attempted: false,
         }
+    }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(super) fn observation(&self) -> (bool,Option<wire::Reason>,bool,bool,bool,bool,bool,bool) {
+        // No source original is legitimate for protected reuse, but cannot
+        // demonstrate that the drift case actually entered source inspection.
+        let inspected = self.sources.as_ref().is_some_and(|s|s.settled());
+        let first = self.sources.as_ref().filter(|s|s.settled()).and_then(|s|s.first_failure())
+            .and_then(|(failure,_)|match failure {
+                AdmissionFailure::Inventory=>Some(wire::Reason::ExistingToolsIncompatible),
+                AdmissionFailure::Identity=>Some(wire::Reason::Stale), _=>None,
+            });
+        (inspected, first, self.sources.as_ref().is_none_or(|s|s.settled()), self.runtime_closed && self.runtime.settled(),
+            self.cache.settled(), self.cache.observed_application_attempt(), self.observed_ca_armed, self.observed_transfer_attempted)
     }
     pub(super) fn interrupted(&mut self) {
         self.unknown = true;
@@ -312,6 +333,8 @@ pub(super) fn inspect(
         if !inspection.matches(context, owner.registration, &owner.project) || !permits(profile, inspection)
             || !parts.0.needs_download() || picked_finding(&inspection.original) != Some(parts)
             || inspection.terminal.components() != Some(parts.0) { return Err(wire::invalid()); }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        { original.observed_ca_armed = true; }
         let armed = original.runtime.arm_public_ca_once();
         original.runtime_failure(owner, armed.as_ref().err().copied());
         armed.map_err(|_| owner.domain.unavailable())?;
@@ -546,6 +569,8 @@ pub(super) fn transfer(
     if original.request.is_some() || original.unknown || original.runtime_closed {
         return Err(wire::invalid());
     }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    { original.observed_transfer_attempted = true; }
     let transferred = original.runtime.transfer_once();
     original.runtime_failure(owner, transferred.as_ref().err().copied());
     transferred.map_err(|_| wire::invalid())

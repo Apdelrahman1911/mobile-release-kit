@@ -6882,6 +6882,7 @@ mod installed_macos_observation {
     /// Observer-only references to actual registered originals, not synthetic
     /// receipts or custody owners. Slots are never removed or reused. Keeping
     /// the original work book does not retain its retired private payloads.
+    include!("asset_session_tool_setup_observation.rs");
     pub(super) struct SessionBook {
         pub(super) originals: Vec<(Arc<OriginalWork>, Option<Operation>)>,
         // A distinct one-use instrumented P2 admission, never an asset/iOS
@@ -6891,6 +6892,7 @@ mod installed_macos_observation {
         // does not confer native/private-input availability or a live permit.
         input_case: Option<crate::shell::installed_observation::ios::Case>,
         pub(super) vault: Option<Arc<crate::shell::installed_observation::vault::Control>>,
+        pub(super) tool_setup: Option<Arc<crate::shell::installed_observation::tool_setup::Control>>,
     }
     fn session_original_limit(project_fields: bool, input_case: Option<crate::shell::installed_observation::ios::Case>) -> Option<u32> {
         match (project_fields, input_case) {
@@ -6901,6 +6903,7 @@ mod installed_macos_observation {
     }
     impl SessionBook {
         fn original_limit(&self) -> Option<u32> {
+            if let Some(control)=&self.tool_setup {return (self.project_fields.is_none() && self.input_case.is_none() && self.vault.is_none()).then_some(control.case().maximum_original());}
             if let Some(control) = &self.vault {
                 return (self.project_fields.is_none() && self.input_case.is_none()).then_some(control.case.maximum_original());
             }
@@ -6998,7 +7001,7 @@ mod installed_macos_observation {
             let mut book = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if book.is_some() { return Err(BridgeError::invalid()); }
             let control = token.consume(&self.inner.session_identity)?;
-            *book = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: None, vault: Some(control) });
+            *book = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: None, vault: Some(control),tool_setup:None });
             Ok(())
         }
         pub(crate) fn installed_macos_vault_action(&self, action: crate::shell::installed_observation::vault::Action) -> Result<AssetStatus, AssetError> {
@@ -7144,7 +7147,7 @@ mod installed_macos_observation {
             if observation.is_some() { return Err(BridgeError::invalid()); }
             let input_case = token.consume(&self.inner.session_identity)?;
             self.inner.bridge.supervisor.assert_installed_session_available(&self.inner.session_identity)?;
-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case), vault: None }); Ok(())
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: None, input_case: Some(input_case), vault: None,tool_setup:None }); Ok(())
         }
         pub(crate) fn installed_macos_project_fields_identity(&self) -> Weak<()> { Arc::downgrade(&self.inner.session_identity) }
         pub(crate) fn register_installed_macos_project_fields(&self,
@@ -7157,12 +7160,23 @@ mod installed_macos_observation {
             let mut observation = self.inner.installed_macos_session.lock().map_err(|_| BridgeError::cleanup_unknown())?;
             if observation.is_some() { return Err(BridgeError::invalid()); }
             let control = token.consume(&self.inner.session_identity, self.inner.bridge.installed_project_path_selection_available())?;
-            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None, vault: None }); Ok(())
+            *observation = Some(SessionBook { originals: Vec::new(), project_fields: Some(control), input_case: None, vault: None,tool_setup:None }); Ok(())
         }
         pub(super) fn installed_macos_record_original(&self, owner: &Arc<OriginalWork>, operation: Option<Operation>) -> Result<(), AssetError> {
             let mut book = self.inner.installed_macos_session.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
             let Some(book) = book.as_mut() else { return Ok(()); };
             let limit = book.original_limit().ok_or_else(|| AssetError::new(Reason::CleanupUnknown))?;
+            if let Some(control) = &book.tool_setup {
+                // Same exact observation may register only its ordinary
+                // project/source picks and an early or final original Quit.
+                let expected = match (owner.id, operation) {
+                    (1, Some(Operation::ChooseProject)) => true,
+                    (id, Some(Operation::ChooseAndroidSource)) => control.case().picker(id).is_some(),
+                    (id, None) => (2..=control.case().maximum_original()).contains(&id),
+                    _ => false,
+                };
+                if !control.bound(&self.inner.session_identity) || !expected { return Err(AssetError::new(Reason::Unqualified)); }
+            }
             if let Some(control) = &book.project_fields {
                 // Binding history survives observer failure for ordinary Quit
                 // cleanup. Success still requires exactly all12 originals;
@@ -7475,7 +7489,7 @@ mod installed_macos_observation {
                         && state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::Shutdown
                             && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
                         || self.macos_session_selected(&state, project) || self.macos_project_fields_selected(&state, project)
-                         || self.macos_vault_selected(&state, project)),
+                         || self.macos_vault_selected(&state, project) || self.macos_tool_setup_selected(&state,project)),
                 (Some(project), None, true) => self.macos_project_loss(&state, project),
                 (None, Some(picker), true) => self.macos_picker_loss(&state, picker),
                 _ => false,
