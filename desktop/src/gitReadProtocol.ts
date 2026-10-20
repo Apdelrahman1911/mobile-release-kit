@@ -2,6 +2,8 @@
 // repository paths, executable paths, tokens or generic command capability.
 import { connectionBounded, connectionKeys } from './githubConnectionProtocol.ts';
 import { GIT_REASONS, parseGitDiff, parseGitObservation } from './gitRepositoryProtocol.ts';
+import { isGitBranches } from './gitBranchesProtocol.ts';
+import type { GitBranches } from './gitBranchesProtocol.ts';
 import type { GitDiff, GitObservation, GitReason } from './gitRepositoryProtocol.ts';
 
 export interface GitReadApi {
@@ -23,7 +25,7 @@ export function createGitReadApi(mode: string, invoke: (command: string, raw: Ui
   return Object.freeze({ start: (raw: Uint8Array) => call('start', raw), status: (raw: Uint8Array) => call('status', raw),
     cancel: (raw: Uint8Array) => call('cancel', raw) });
 }
-export interface GitReadAction { readonly kind: 'observe' | 'diff' | 'history'; readonly expectedRevision: string | null;
+export interface GitReadAction { readonly kind: 'observe' | 'diff' | 'history' | 'branches'; readonly expectedRevision: string | null;
   readonly paths: readonly string[]; readonly staged: boolean }
 export interface GitReadContext { readonly projectId: string; readonly generation: number; readonly revision: string }
 export interface GitTracking { readonly state: 'detached' | 'not-configured' | 'unborn' | 'unsupported' | 'gone' | 'shallow' | 'limit' | 'complete';
@@ -34,7 +36,7 @@ export interface GitReadObservation { readonly observation: GitObservation; read
 export interface GitReadHistory { readonly revision: string; readonly referenceRevision: string; readonly head: string | null;
   readonly commits: readonly { readonly oid: string; readonly parents: readonly string[]; readonly committedAt: number }[];
   readonly hasMore: boolean; readonly shallow: boolean; readonly withheld: readonly ['message', 'author', 'email', 'signature']; readonly basis: 'local-refs-no-fetch' }
-export type GitReadResult = GitReadObservation | GitReadHistory | GitDiff;
+export type GitReadResult = GitReadObservation | GitReadHistory | GitDiff | GitBranches;
 export interface GitReadOperation { readonly operationId: string; readonly context: GitReadContext; readonly action: GitReadAction;
   readonly phase: 'starting' | 'running' | 'stopping' | 'settled' | 'cleanup-unknown';
   readonly outcome: 'ok' | 'refused' | 'cancelled' | 'timed-out' | 'cleanup-unknown' | null;
@@ -72,7 +74,7 @@ function action(v: unknown): v is GitReadAction {
   const paths = v.paths;
   if (!paths.every((p, i) => i === 0 || gitReadPathOrder(paths[i - 1] as string, p) < 0)) return false;
   return v.kind === 'observe' ? v.expectedRevision === null && !v.paths.length && !v.staged :
-    digest(v.expectedRevision) && (v.kind === 'history' ? !v.paths.length && !v.staged : v.kind === 'diff' && v.paths.length > 0);
+    digest(v.expectedRevision) && (v.kind === 'history' || v.kind === 'branches' ? !v.paths.length && !v.staged : v.kind === 'diff' && v.paths.length > 0);
 }
 function tracking(v: unknown, observed: GitObservation): boolean {
   if (!connectionKeys(v, ['state', 'remote', 'mergeRef', 'localRef', 'head', 'ahead', 'behind']) ||
@@ -91,6 +93,7 @@ function tracking(v: unknown, observed: GitObservation): boolean {
   }
 }
 function result(v: unknown, expected: GitReadAction): boolean {
+  if (expected.kind === 'branches') return isGitBranches(v, expected.expectedRevision);
   if (expected.kind === 'observe') {
     if (!connectionKeys(v, ['observation', 'referenceRevision', 'tracking', 'basis'])) return false;
     const observed = parseGitObservation(v.observation);

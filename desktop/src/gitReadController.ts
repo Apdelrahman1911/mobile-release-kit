@@ -3,6 +3,7 @@
 import { gitReadPathOrder, gitReadRequest, parseGitReadStatus, parseGitReadStartResult, sameGitReadAction, sameGitReadContext, sameGitReadOperation } from './gitReadProtocol.ts';
 import type { GitReadAction, GitReadApi, GitReadHistory, GitReadObservation, GitReadOperation, GitReadStatus, GitReadStartResult } from './gitReadProtocol.ts';
 import type { GitIssue, GitReason } from './gitRepositoryProtocol.ts';
+import type { GitBranches } from './gitBranchesProtocol.ts';
 import type { GitRepositoryPort } from './gitRepositoryController.ts';
 
 export interface GitReadBinding { readonly api: GitReadApi | null; readonly session: object | null;
@@ -10,7 +11,8 @@ export interface GitReadBinding { readonly api: GitReadApi | null; readonly sess
 export interface GitReadView { readonly status: GitReadStatus | null; readonly busy: boolean; readonly checking: boolean;
   readonly original: GitReadOperation | null; readonly issue: GitIssue | null; readonly uncertain: boolean;
   readonly observation: GitReadObservation | null; readonly observationProject: string | null;
-  readonly history: GitReadHistory | null; readonly historyProject: string | null; readonly historyCurrent: boolean; readonly stale: boolean }
+  readonly history: GitReadHistory | null; readonly historyProject: string | null; readonly historyCurrent: boolean;
+  readonly branches: GitBranches | null; readonly branchesProject: string | null; readonly branchesCurrent: boolean; readonly stale: boolean }
 interface Attempt { readonly binding: GitReadBinding; readonly api: GitReadApi; readonly action: GitReadAction;
   readonly baseline: string | null; readonly documentRevision: number; readonly observedOnly: boolean;
   resolve: ((value: unknown) => void) | null; reject: ((error: unknown) => void) | null;
@@ -30,7 +32,8 @@ export class GitReadController {
   private attempt: Attempt | null = null;
   private baseline: GitReadBinding | null = null;
   private state: GitReadView = Object.freeze({ status: null, busy: false, checking: false, original: null, issue: null, uncertain: false,
-    observation: null, observationProject: null, history: null, historyProject: null, historyCurrent: false, stale: true });
+    observation: null, observationProject: null, history: null, historyProject: null, historyCurrent: false,
+    branches: null, branchesProject: null, branchesCurrent: false, stale: true });
   constructor(source: { current(): GitReadBinding }) { this.source = source; }
   getSnapshot = (): GitReadView => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -50,10 +53,10 @@ export class GitReadController {
     const context = this.current();
     if (!this.baseline || !same(this.baseline, context)) {
       this.baseline = context;
-      this.publish({ status: this.attempt ? this.state.status : null, stale: true, historyCurrent: false });
+      this.publish({ status: this.attempt ? this.state.status : null, stale: true, historyCurrent: false, branchesCurrent: false });
     }
   }
-  beforeContextIntent(): void { this.baseline = null; this.publish({ stale: true, historyCurrent: false, status: this.attempt ? this.state.status : null }); }
+  beforeContextIntent(): void { this.baseline = null; this.publish({ stale: true, historyCurrent: false, branchesCurrent: false, status: this.attempt ? this.state.status : null }); }
   readReason(projectId: string): GitIssue | null {
     const current = this.current();
     if (!current.api || !current.session) return 'unavailable';
@@ -80,6 +83,10 @@ export class GitReadController {
     try { await this.start(projectId, { kind: 'history', expectedRevision, paths: [], staged: false }); return true; }
     catch { return false; } // Original fixed issue remains visible, never raw text.
   }
+  async readBranches(projectId: string, expectedRevision: string): Promise<boolean> {
+    try { await this.start(projectId, { kind: 'branches', expectedRevision, paths: [], staged: false }); return true; }
+    catch { return false; } // Original fixed issue remains visible; never a retry.
+  }
   private start(projectId: string, action: GitReadAction, original?: GitReadBinding): Promise<unknown> {
     const reason = this.readReason(projectId); if (reason) return Promise.reject(new Declined(reason));
     const binding = this.current(), status = this.state.status!;
@@ -92,7 +99,7 @@ export class GitReadController {
         refusal: null, operation: null, entered: false, startReturned: false, hardUnknown: false, uncertain: false, cancelSent: false, resolve, reject };
       this.attempt = attempt;
       // Latch reciprocal UI admission before any rendering callback/invoke.
-      this.publish({ original: null, issue: null, uncertain: false, ...(action.kind === 'observe' ? { stale: true } : {}) });
+      this.publish({ original: null, issue: null, uncertain: false, ...(action.kind === 'observe' ? { stale: true, branchesCurrent: false } : action.kind === 'branches' ? { branchesCurrent: false } : {}) });
       const now = this.current();
       if (!same(binding, now) || now.blocked) {
         this.attempt = null; reject(new Declined('inactive')); this.publish(); return;
@@ -248,13 +255,14 @@ export class GitReadController {
       attempt.reject?.(new Declined(reply.reason));
       this.publish({ status: this.attempt ? reply.status : null, original: previous,
         issue: previous?.phase === 'cleanup-unknown' ? 'unknown' : reply.reason,
-        uncertain: previous?.phase === 'cleanup-unknown', stale: true, historyCurrent: false });
+        uncertain: previous?.phase === 'cleanup-unknown', stale: true, historyCurrent: false, branchesCurrent: false });
       return; // A fresh explicit status check is required; no resubmission.
     }
     if (!operation || operation.phase !== 'settled' || attempt.uncertain) return;
     const current = same(attempt.binding, this.current());
     if (!attempt.observedOnly && operation.outcome === 'ok' && current) {
       if (attempt.action.kind === 'observe') this.publish({ observation: operation.result as GitReadObservation, observationProject: operation.context.projectId, stale: false });
+      if (attempt.action.kind === 'branches') this.publish({ branches: operation.result as GitBranches, branchesProject: operation.context.projectId, branchesCurrent: true });
       if (attempt.action.kind === 'history') this.publish({ history: operation.result as GitReadHistory, historyProject: operation.context.projectId, historyCurrent: true });
       if (same(attempt.binding, this.current())) {
         attempt.resolve?.(attempt.action.kind === 'observe' ? (operation.result as GitReadObservation).observation : operation.result);
@@ -266,6 +274,6 @@ export class GitReadController {
     this.attempt = null;
     this.baseline = stillCurrent ? attempt.binding : null;
     this.publish({ status: stillCurrent ? this.state.status : null, issue: stillCurrent ? operation.reason : 'stale-observation',
-      ...(!stillCurrent ? { stale: true, historyCurrent: false } : {}) });
+      ...(!stillCurrent ? { stale: true, historyCurrent: false, branchesCurrent: false } : {}) });
   }
 }

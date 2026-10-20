@@ -3,6 +3,7 @@
 // This is UI coordination, not a native project lease or an authorization issuer.
 import { gitDiscardAcknowledged, gitDraftFieldFits, gitSamePaths, gitStagedPaths, parseGitApplyReceipt,
   parseGitDiff, parseGitFailure, parseGitObservation, parseGitPlan } from './gitRepositoryProtocol.ts';
+import { gitBranchDraftFits } from './gitBranchesProtocol.ts';
 import type { GitAction, GitApplyReceipt, GitCommitDraft, GitDiff, GitIssue, GitMutationResult, GitObservation, GitPlan } from './gitRepositoryProtocol.ts';
 
 interface PathRequest { readonly paths: readonly string[]; readonly expectedRevision: string }
@@ -44,7 +45,7 @@ export interface GitAttempt {
 }
 export interface GitRepositoryView {
   readonly projectId: string; readonly active: boolean; readonly observation: GitObservation | null;
-  readonly stale: boolean; readonly selected: readonly string[]; readonly draft: GitCommitDraft;
+  readonly stale: boolean; readonly selected: readonly string[]; readonly draft: GitCommitDraft; readonly branchDraft: { readonly name: string };
   readonly diff: GitDiff | null; readonly review: GitReview | null; readonly attempt: GitAttempt | null;
   readonly busy: 'observe' | 'diff' | 'review' | 'discard' | 'apply' | null; readonly checkingStatus: boolean;
   readonly issue: GitIssue | null; readonly blocked: 'unknown' | 'response-invalid' | 'recovery-required' | null;
@@ -75,7 +76,7 @@ export class GitRepositoryController {
   constructor(projectId: string, port: GitRepositoryPort | null) {
     this.port = port?.projectId === projectId ? port : null;
     this.state = freeze({ projectId, active: true, observation: null, stale: true, selected: freeze([]),
-      draft: freeze({ message: '', authorName: '', authorEmail: '' }), diff: null, review: null, attempt: null,
+      draft: freeze({ message: '', authorName: '', authorEmail: '' }), branchDraft: freeze({ name: '' }), diff: null, review: null, attempt: null,
       busy: null, checkingStatus: false, issue: port && !this.port ? 'authorization' : null, blocked: null });
   }
   getSnapshot = (): GitRepositoryView => this.state;
@@ -103,6 +104,11 @@ export class GitRepositoryController {
     this.patch({ draft: freeze({ ...this.state.draft, [field]: value }),
       review: this.state.review?.plan.action === 'commit' ? this.staleReview() : this.state.review });
     return true;
+  }
+  editBranchName(value: string): boolean {
+    if (!gitBranchDraftFits(value)) return this.report('limit');
+    if (this.state.branchDraft.name !== value) this.patch({ branchDraft: freeze({ name: value }) });
+    return true; // Original project-local draft; changed-and-restored is a new capture.
   }
   select(path: string, selected: boolean): boolean {
     if (!this.state.observation?.changes.some((row) => row.path === path)) return this.report('selection-changed');

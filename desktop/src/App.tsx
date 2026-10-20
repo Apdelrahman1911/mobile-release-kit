@@ -77,6 +77,7 @@ import { GitHubRemoteSetup } from './components/GitHubRemoteSetup.tsx';
 import { GitReadController } from './gitReadController.ts';
 import { GitLocalController } from './gitLocalController.ts';
 import { GitLocalChanges, GitLocalControls } from './components/GitLocalChanges.tsx';
+import { GitBranches } from './components/GitBranches.tsx';
 import { GitRepositoryController } from './gitRepositoryController.ts';
 import { LocalGitRead, LocalGitReadControls } from './components/LocalGitRead.tsx';
 import { GitHubConnectionController } from './githubConnectionController.ts';
@@ -972,7 +973,7 @@ export function App() {
       const entry = gitRepositories.current.find((value) => value.service === service && value.projectId === projectId);
       return { api: service.api?.gitLocal ?? null,
         session: service.api?.mode === 'native' && !gitReadGenerationLost.current ? service : null,
-        projectId, epoch: gitReadEpoch.current, repository: entry?.controller ?? null, blocked: gitLocalAdmission.current() };
+        projectId, epoch: gitReadEpoch.current, repository: entry?.controller ?? null, reader: gitReadRef.current, blocked: gitLocalAdmission.current() };
     },
     onMutationSubmitted: (projectId) => {
       // After actual Apply entry, including a lost/throwing acknowledgement.
@@ -1890,7 +1891,8 @@ export function App() {
           imageEditor={<MetadataImagesEditor state={metadataImagesState} controller={metadataImages} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} credentialHelp={catalog?.credentials ?? null} onHelp={setHelp} nativeReview={workflowPanel(true)}
           connectionView={<><LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
-            localActions={gitRepository ? <GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} /> : undefined}
+            localActions={gitRepository ? <><GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
+              <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} /></> : undefined}
             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
             {!gitRepository && gitRepositories.current.length >= 64 && <p className="review-caution">The local draft limit has been reached. Earlier drafts are kept; use your Git client for additional projects or service sessions.</p>}
             <GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp} nativeBusyReason={savedCommandBusy()}
