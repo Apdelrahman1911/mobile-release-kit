@@ -944,7 +944,12 @@ impl ConnectionState {
         if let Some(reason) = retire {
             self.retire_inner(reason, false);
         }
-        self.complete_retirement();
+        // Finishing a publication request does not itself disconnect the
+        // account. Only complete an already-requested original retirement.
+        // CleanupUnknown retains its separate fail-closed path above.
+        if self.private.as_ref().is_some_and(|v| v.retirement.is_some()) {
+            self.complete_retirement();
+        }
     }
 }
 
@@ -1090,6 +1095,43 @@ mod tests {
             now,
             || control.claim(),
         )
+    }
+    #[test]
+    fn settled_publication_request_only_retires_an_explicitly_retiring_connection() {
+        for retirement in [None, Some(Reason::Cancelled), Some(Reason::Expired)] {
+            let at = Instant::now();
+            let (mut state, _edit, _doc, _root, control) = fixture(p::Kind::Prepare, at);
+            let end = state.private.as_ref().unwrap().clock.end;
+            state.private.as_mut().unwrap().retirement = retirement;
+
+            // Supplied settled error DATA exercises the actual state handler,
+            // not native completion, a provider call or an acquired credential.
+            state.accept_publication(
+                Err(refused(p::Reason::NetworkUnavailable)),
+                at,
+                false,
+                at,
+                true,
+            );
+
+            let private = state.private.as_ref().unwrap();
+            assert_eq!(private.clock.end, end);
+            assert_eq!(private.token.is_some(), retirement.is_none());
+            assert_eq!(
+                state.status.session.as_ref().unwrap().state,
+                match retirement {
+                    None => SessionState::Connected,
+                    Some(Reason::Expired) => SessionState::Expired,
+                    _ => SessionState::Failed,
+                }
+            );
+            assert!(state.publication.active.is_none());
+            assert_eq!(
+                state.publication.view.operation.as_ref().unwrap().phase,
+                p::Phase::Settled
+            );
+            assert!(control.retained());
+        }
     }
     #[test]
     fn final_go_uses_original_edit_root_request_and_one_use_owner_claim() {
