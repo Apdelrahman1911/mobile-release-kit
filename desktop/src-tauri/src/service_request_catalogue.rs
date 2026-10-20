@@ -1,4 +1,4 @@
-//! Closed discovery DATA for the two existing request inboxes. This is not
+//! Closed discovery DATA for the existing request inboxes. This is not
 //! complete operation history, native finality, or permission to replay a job.
 //! The installed client imports no Desktop, document, tool or material owner.
 use crate::{
@@ -7,7 +7,11 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const LIMIT: usize = local::LIMIT + build::LIMIT;
+pub(crate) const DETAIL_LIMIT: usize = local::LIMIT + build::LIMIT;
+pub(crate) const ADDITIONAL_LIMIT: usize = crate::service_git_protocol::REQUEST_LIMIT
+    + crate::agent_identity_requests::LIMIT
+    + crate::service_version_reserve_protocol::REQUEST_LIMIT;
+pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
 pub const VIEW_BYTES: usize = 64 * 1024;
 // Same eight IPC workers: one typed view, its encoded output, finite borrowed
 // inbox-handle lists and small scalar projection scratch each. Existing inbox
@@ -18,7 +22,10 @@ pub(crate) const DOCUMENT_BACKING: usize = 8
     * (VIEW_BYTES
         + std::mem::size_of::<Catalogue>()
         + 64
-        + LIMIT * (std::mem::size_of::<Request>() + 3 * 32 + std::mem::size_of::<usize>())
+        + DETAIL_LIMIT * (std::mem::size_of::<Request>() + 3 * 32 + std::mem::size_of::<usize>())
+        // The returned IDs plus ONE temporary immutable-input list. The three
+        // additional inboxes are copied in sequence, never held concurrently.
+        + (ADDITIONAL_LIMIT + 32) * (std::mem::size_of::<AdditionalRequest>() + 32)
         + 1024);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +157,50 @@ impl Request {
         Ok(())
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdditionalFamily {
+    GitIndex,
+    GitCommit,
+    Identity,
+    VersionReservation,
+}
+impl AdditionalFamily {
+    fn namespace(self) -> usize {
+        match self {
+            Self::GitIndex | Self::GitCommit => 0,
+            Self::Identity => 1,
+            Self::VersionReservation => 2,
+        }
+    }
+    fn status_command(self) -> &'static str {
+        match self {
+            Self::GitIndex => "git-index-status",
+            Self::GitCommit => "git-commit-status",
+            Self::Identity => "identity-request-status",
+            Self::VersionReservation => "version-reserve-status",
+        }
+    }
+}
+
+/// Immutable original IDs only. Reading these rows must not call an inbox's
+/// status method: those methods can expire or stop an original request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AdditionalRequest {
+    pub family: AdditionalFamily,
+    pub request_id: Id,
+}
+
+// A missing field is valid ONLY for schema 1. In particular, explicit null
+// cannot masquerade as an absent legacy field or an empty schema-2 response.
+fn present_requests<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<AdditionalRequest>>, D::Error> {
+    Vec::<AdditionalRequest>::deserialize(d).map(Some)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Catalogue {
@@ -160,10 +211,17 @@ pub struct Catalogue {
     pub project_id: Id,
     pub do_not_replay: bool,
     pub requests: Vec<Request>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_requests")]
+    pub additional_requests: Option<Vec<AdditionalRequest>>,
 }
 impl Catalogue {
     pub fn validate(&self) -> Result<(), Error> {
-        if self.schema_version != 1 || !self.do_not_replay || self.requests.len() > LIMIT {
+        let additional = match (self.schema_version, &self.additional_requests) {
+            (1, None) => &[][..],
+            (2, Some(rows)) if rows.len() <= ADDITIONAL_LIMIT => rows.as_slice(),
+            _ => return Err(Error::InvalidRequest),
+        };
+        if !self.do_not_replay || self.requests.len() > DETAIL_LIMIT {
             return Err(Error::InvalidRequest);
         }
         let mut local_count = 0;
@@ -183,6 +241,22 @@ impl Catalogue {
         if local_count > local::LIMIT || self.requests.len() - local_count > build::LIMIT {
             return Err(Error::InvalidRequest);
         }
+        let mut counts = [0usize; 3];
+        for (index, row) in additional.iter().enumerate() {
+            let namespace = row.family.namespace();
+            counts[namespace] += 1;
+            if additional[..index].iter().any(|old| {
+                old.family.namespace() == namespace && old.request_id == row.request_id
+            }) {
+                return Err(Error::InvalidRequest);
+            }
+        }
+        if counts[0] > crate::service_git_protocol::REQUEST_LIMIT
+            || counts[1] > crate::agent_identity_requests::LIMIT
+            || counts[2] > crate::service_version_reserve_protocol::REQUEST_LIMIT
+        {
+            return Err(Error::InvalidRequest);
+        }
         Ok(())
     }
 }
@@ -195,8 +269,20 @@ pub(crate) fn human(view: &Catalogue) -> String {
         view.service_instance.as_str(),
         view.project_id.as_str()
     );
-    if view.requests.is_empty() {
+    let additional = view.additional_requests.as_deref().unwrap_or_default();
+    if view.requests.is_empty() && additional.is_empty() {
         text.push_str("No requests retained in this instance. A Desktop restart does not prove earlier work settled.\n");
+    }
+    for row in additional {
+        text.push_str(&format!(
+            "\n{}  retained original request; inspect its existing status route.\n\
+             \x20 Inspect: mrk {} {} {} {}\n",
+            row.request_id.as_str(),
+            row.family.status_command(),
+            view.project_id.as_str(),
+            view.service_instance.as_str(),
+            row.request_id.as_str()
+        ));
     }
     for row in &view.requests {
         let (command, phase) = match &row.progress {
@@ -316,6 +402,7 @@ mod tests {
             project_id: id(2),
             do_not_replay: true,
             requests,
+            additional_requests: None,
         }
     }
     #[test]
@@ -375,8 +462,23 @@ mod tests {
             });
             row.history_available = true;
         }
+        fullest.schema_version = 2;
+        fullest.additional_requests = Some(
+            [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation]
+                .into_iter()
+                .flat_map(|family| (1..=32).map(move |n| AdditionalRequest { family, request_id: id(n) }))
+                .collect(),
+        );
         fullest.validate().unwrap();
-        let encoded = serde_json::to_vec(&fullest).unwrap();
+        let response = crate::service_protocol::Response {
+            version: crate::service_protocol::VERSION,
+            request_id: id(10),
+            service_instance: fullest.service_instance.clone(),
+            client_id: id(11),
+            session_id: id(12),
+            response: crate::service_protocol::ResponseBody::Requests(fullest),
+        };
+        let encoded = crate::service_protocol::encode_response(&response).unwrap();
         assert!(encoded.len() <= VIEW_BYTES);
         assert!(DOCUMENT_BACKING < 1024 * 1024);
         data.requests[63].progress = Progress::IosArchive {
@@ -390,6 +492,56 @@ mod tests {
         data.requests.remove(0);
         data.requests.push(row(33, build())); // 64 total is not enough: now 33 builds.
         assert!(data.validate().is_err());
+    }
+    #[test]
+    fn additional_ids_have_strict_schema_presence_privacy_and_original_commands() {
+        let legacy = view(vec![]);
+        let old = serde_json::to_value(&legacy).unwrap();
+        assert!(old.get("additionalRequests").is_none());
+        let accepted = |value: serde_json::Value| {
+            serde_json::from_value::<Catalogue>(value).is_ok_and(|v| v.validate().is_ok())
+        };
+        assert!(accepted(old.clone()));
+        for version in [1, 2, 3] {
+            for field in [None, Some(serde_json::Value::Null), Some(serde_json::json!([]))] {
+                let mut changed = old.clone();
+                changed["schemaVersion"] = serde_json::json!(version);
+                if let Some(value) = &field { changed["additionalRequests"] = value.clone(); }
+                assert_eq!(accepted(changed), version == 1 && field.is_none()
+                    || version == 2 && field.as_ref().is_some_and(|v| v.is_array()));
+            }
+        }
+        let mut current = legacy;
+        current.schema_version = 2;
+        current.additional_requests = Some(vec![
+            AdditionalRequest { family: AdditionalFamily::GitIndex, request_id: id(3) },
+            AdditionalRequest { family: AdditionalFamily::GitCommit, request_id: id(4) },
+            AdditionalRequest { family: AdditionalFamily::Identity, request_id: id(3) },
+            AdditionalRequest { family: AdditionalFamily::VersionReservation, request_id: id(3) },
+        ]);
+        current.validate().unwrap();
+        let text = human(&current);
+        assert!(!text.contains("No requests retained"));
+        for (command, n) in [("git-index-status",3), ("git-commit-status",4),
+            ("identity-request-status",3), ("version-reserve-status",3)] {
+            assert!(text.contains(&format!("mrk {command} {} {} {}", id(2).as_str(), id(1).as_str(), id(n).as_str())));
+        }
+        let encoded = serde_json::to_value(&current).unwrap();
+        assert!(accepted(encoded.clone()));
+        for field in ["report", "draft", "root", "desiredIdentity", "grantId", "credential", "state", "review"] {
+            let mut changed = encoded.clone();
+            changed["additionalRequests"][0][field] = serde_json::json!("private sentinel");
+            assert!(!accepted(changed));
+        }
+        let mut changed = encoded;
+        changed["additionalRequests"][0]["family"] = serde_json::json!("publish");
+        assert!(!accepted(changed));
+        current.additional_requests.as_mut().unwrap()[1].request_id = id(3);
+        assert!(current.validate().is_err()); // Stage and Commit share one namespace.
+        for family in [AdditionalFamily::GitIndex, AdditionalFamily::Identity, AdditionalFamily::VersionReservation] {
+            current.additional_requests = Some((1..=33).map(|n| AdditionalRequest { family, request_id: id(n) }).collect());
+            assert!(current.validate().is_err());
+        }
     }
     #[test]
     fn unknown_pending_and_missing_history_never_become_settlement() {

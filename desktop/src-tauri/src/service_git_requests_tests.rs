@@ -65,6 +65,35 @@ fn start(input: &p::Prepare) -> p::Start {
     }
 }
 #[test]
+fn catalogue_discovery_preserves_pending_and_unknown_without_expiring_or_claiming() {
+    use crate::service_request_catalogue::AdditionalFamily;
+    let (_doc, inbox, input) = setup();
+    inbox.prepare(input.clone()).unwrap();
+    let entry = inbox.book.lock().unwrap().entries[0].clone();
+    entry.row.lock().unwrap().lease.as_ref().unwrap().revoked.store(true, Ordering::Release);
+    let before = entry.row.lock().unwrap().status.clone();
+    let rows = inbox.catalogue_requests(&id('b'), &id('a')).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].family, AdditionalFamily::GitIndex);
+    assert_eq!(rows[0].request_id, input.origin.request_id);
+    assert_eq!(entry.row.lock().unwrap().status, before);
+    assert!(entry.row.lock().unwrap().stop.is_none());
+    entry.unknown();
+    let unknown = entry.row.lock().unwrap().status.clone();
+    assert_eq!(inbox.catalogue_requests(&id('b'), &id('a')).unwrap(), rows);
+    assert_eq!(entry.row.lock().unwrap().status, unknown);
+    assert!(inbox.catalogue_requests(&id('b'), &id('e')).unwrap().is_empty());
+    assert_eq!(inbox.catalogue_requests(&id('e'), &id('a')), Err(Error::StateUnknown));
+    inbox.close();
+    assert_eq!(inbox.catalogue_requests(&id('b'), &id('a')), Err(Error::Unavailable));
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = inbox.book.lock().unwrap();
+        panic!("inert catalogue lock poison");
+    }));
+    assert!(panic.is_err());
+    assert_eq!(inbox.catalogue_requests(&id('b'), &id('a')), Err(Error::StateUnknown));
+}
+#[test]
 fn read_access_and_foreign_grant_or_instance_never_create_a_request() {
     let (_doc, inbox, input) = setup();
     let empty = Inbox::new(id('b'));

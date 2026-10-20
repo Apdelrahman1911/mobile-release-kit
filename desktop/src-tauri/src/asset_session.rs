@@ -7383,10 +7383,8 @@ mod installed_macos_observation {
                     (2..=7, None) => true,
                     _ => false,
                 };
-                let expected = if matches!(control.case,crate::shell::installed_observation::vault::Case::UploadKey(_)) {
-                    matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,Some(Operation::OpenVault))
-                        |(3,Some(Operation::PrepareInitialize))|(4,Some(Operation::Initialize))|(5,Some(Operation::GenerateUploadKey))
-                        |(6,Some(Operation::OpenVault))|(7,Some(Operation::Unlock))|(8,Some(Operation::Prepare))|(2..=9,None))
+                let expected = if let crate::shell::installed_observation::vault::Case::UploadKey(case) = control.case {
+                    vault::installed_upload_observation::original_allowed(case, owner.id, operation)
                 }else{expected};
                 if !expected || !control.bound(&self.inner.session_identity) { return Err(AssetError::new(Reason::Unqualified)); }
             }
@@ -9815,4 +9813,4 @@ pub(crate) fn github_setup_consent_data_checks() {
 }
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub(crate) use vault::installed_upload_observation::{Sample as InstalledUploadSample, Trace as InstalledUploadTrace, ProducerSample as InstalledUploadProducerSample};
+pub(crate) use vault::installed_upload_observation::{Sample as InstalledUploadSample, Trace as InstalledUploadTrace, ProducerSample as InstalledUploadProducerSample, ColdState as InstalledUploadColdState};

@@ -267,7 +267,7 @@ impl Case {
         Self::ProjectFields => project_fields::NAME, Self::Vault(case) => case.name(),
         Self::Installation => installation_check::NAME, Self::PendingRecovery => recovery::NAME, Self::LocalEdits(case) => case.name(), Self::Checks(case) => case.name(), Self::Identity(case) => case.name(),
     }}
-    fn project_name(self) -> &'static str { if self == Self::PendingRecovery { "project" } else { self.name() } }
+    fn project_name(self) -> &'static str { if let Self::Vault(vault::Case::UploadKey(case))=self { return case.fixture_name(); } if self == Self::PendingRecovery { "project" } else { self.name() } }
     fn selected_id(self) -> u32 { if self == Self::FirstSave { 2 } else { 1 } }
     fn quit_id(self) -> u32 { if let Self::Ios(case) = self { if case.inputs() { return session::quit_original(case); } }
         if let Self::Vault(case) = self { return case.maximum_original(); }
@@ -3137,6 +3137,7 @@ impl Observation {
             Step::ChooseProject => { r.project_calls += 1; if self.case == Case::PickerLoss { Step::PickerPending } else { Step::OpenProject } },
             Step::Snapshot => if self.checks_case(){Step::Checks(checks::Step::Navigate)}else if self.local_case(){Step::LocalEdits(local_edits::Step::Navigate)}else if self.case == Case::PendingRecovery { Step::Recovery(recovery::Step::Navigate) }
                 else if self.case.inputs() { Step::Session(session::Step::Navigate) }
+                else if self.case == Case::Vault(vault::Case::UploadKey(vault::upload_key::Case::ColdReopen)) { Step::UploadKey(vault::upload_key::Step::Cold(vault::upload_key::restart::Step::Open)) }
                 else if matches!(self.case, Case::Vault(_)) { Step::Vault(vault::Step::Open) }
                 else if self.case == Case::ProjectFields { Step::ProjectFields(project_fields::Step::Navigate(0)) }
                 else if matches!(self.case, Case::Ios(_)) { Step::Ios(ios::Step::Navigate) } else { Step::Settings },
@@ -3911,7 +3912,7 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
     if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread() { return None; }
     let uid = mrk_macos_installed_native::real_user().ok()?;
     let upload_suffix;
-    let suffix = if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){"-tool-service-prerequisite"}else if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
+    let suffix = if matches!(case,Case::ToolSetup(tool_setup::Case::ServicePreparation)){"-tool-service-prerequisite"}else if matches!(case,Case::ToolSetup(_)){"-tool-setup"}else if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.fixture_name());upload_suffix.as_str()}else if matches!(case,Case::Identity(_)){"-project-identity-native"}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
         else if case == Case::Installation { "-installation-inspection" } else if case == Case::PendingRecovery { "-project-recovery" } else { "" };
     let root = if let Case::ToolSetup(tool_case) = case {
         let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
@@ -3933,7 +3934,7 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
         else if case == ios::Case::RecoveryPending { directory(&root,uid,0o700,PENDING_ACCOUNT_ROSTER).ok()?; }
         else { directory_rosters(&root,uid,0o700,CURRENT_IOS_ROSTER,ios_alternate_roster(case),None).ok()?; }
     } else if let Case::Vault(vault::Case::UploadKey(case))=case {
-        directory(&root,uid,0o700,&[case.name(),"state"]).ok()?;
+        directory(&root,uid,0o700,&[case.fixture_name(),"state"]).ok()?;
     } else if matches!(case,Case::Vault(_)) {
         directory(&root,uid,0o700,&["vault-helper-roundtrip","vault-helper-stop-before-go","vault-helper-stop-after-add","state"]).ok()?;
     } else if case == Case::ProjectFields {
@@ -4676,7 +4677,7 @@ pub(crate) fn main() -> std::process::ExitCode {
         Some(v) if ios::Case::parse(v).is_some() => Case::Ios(ios::Case::parse(v).expect("exact iOS selector")),
         _ => { super::diagnostic(b"MRK_MACOS_AQUA=route-refused\n"); return std::process::ExitCode::FAILURE; },
     };
-    let input = route(case).filter(|_| args.next().is_none()).and_then(|(root,uid)| Fixture::capture(if case == Case::PendingRecovery { root.join(case.name()).join("project") } else { root.join(case.name()) },uid,case).ok())
+    let input = route(case).filter(|_| args.next().is_none()).and_then(|(root,uid)| Fixture::capture(if case == Case::PendingRecovery { root.join(case.name()).join("project") } else { root.join(case.project_name()) },uid,case).ok())
         .and_then(|fixture| Observation::new(case,fixture).ok());
     let Some(q) = input.map(Arc::new) else { super::diagnostic(b"MRK_MACOS_AQUA=fixture-refused\n"); return std::process::ExitCode::FAILURE; };
     let report = observe(&q);

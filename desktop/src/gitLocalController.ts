@@ -1,3 +1,6 @@
+import { isGitFastForwardAction } from './gitFastForwardProtocol.ts';
+import type { GitFastForwardAction } from './gitFastForwardProtocol.ts';
+import type { GitReadObservation } from './gitReadProtocol.ts';
 // UI coordination for the five original GitLocal calls, not a process owner.
 // Root retains this controller across navigation and supplies only native ports.
 import { gitLocalIntentMatchesReview, gitLocalPreparedResult, gitLocalRequest, parseGitLocalStartResult, parseGitLocalStatus, sameGitLocalAction, sameGitLocalData, samePaths } from './gitLocalProtocol.ts';
@@ -18,7 +21,7 @@ export interface GitLocalBinding { readonly api: GitLocalApi | null; readonly se
   readonly reader?: GitReadController | null }
 interface Capture { readonly binding: GitLocalBinding; readonly repository: GitRepositoryController; readonly observation: GitObservation;
   readonly selected: readonly string[]; readonly draft: GitCommitDraft; readonly action: GitLocalAction; readonly paths: readonly string[];
-  readonly branches: GitBranches | null; readonly branchDraft: { readonly name: string }; readonly switchDraft: { readonly name: string }; readonly renameDraft: { readonly name: string } }
+  readonly tracking: GitReadObservation | null; readonly branches: GitBranches | null; readonly branchDraft: { readonly name: string }; readonly switchDraft: { readonly name: string }; readonly renameDraft: { readonly name: string } }
 interface HeldReview { readonly api: GitLocalApi; readonly binding: GitLocalBinding; readonly prepared: GitLocalPrepared; readonly capture: Capture | null;
   stale: boolean; consumed: boolean; discardSent: boolean; discardConfirmed: boolean; uncertain: boolean }
 interface Attempt { readonly binding: GitLocalBinding; readonly api: GitLocalApi; readonly request: GitLocalStartRequest;
@@ -92,7 +95,7 @@ export class GitLocalController {
     const now = this.current(), r = c.repository.getSnapshot();
     return same(c.binding, now) && (!peers || !now.blocked) && r.projectId === now.projectId && r.active && !r.stale && !r.blocked &&
       r.busy === null && !r.checkingStatus && r.observation === c.observation &&
-      (c.action.kind === 'branch-rename' ? r.renameDraft === c.renameDraft && this.branchList(now) === c.branches :
+      (c.action.kind === 'fast-forward' ? this.cachedTracking(now) === c.tracking : c.action.kind === 'branch-rename' ? r.renameDraft === c.renameDraft && this.branchList(now) === c.branches :
         c.action.kind === 'branch-switch' ? r.switchDraft === c.switchDraft && this.branchList(now) === c.branches :
         c.action.kind === 'branch-create' ? r.branchDraft === c.branchDraft && this.branchList(now) === c.branches : r.selected === c.selected && r.draft === c.draft);
   }
@@ -100,6 +103,12 @@ export class GitLocalController {
     const read = binding.reader?.getSnapshot(), r = binding.repository?.getSnapshot();
     return read && r?.observation && !read.stale && read.branchesCurrent && read.branchesProject === binding.projectId &&
       read.branches?.revision === r.observation.revision && read.branches.head === r.observation.head && read.branches.branch === r.observation.branch ? read.branches : null;
+  }
+  private cachedTracking(binding: GitLocalBinding): GitReadObservation | null {
+    const read = binding.reader?.getSnapshot(), r = binding.repository?.getSnapshot(), observed = read?.observation;
+    return observed && r?.observation && !read.stale && !read.busy && !read.checking && read.observationProject === binding.projectId &&
+      observed.observation.revision === r.observation.revision && observed.observation.head === r.observation.head &&
+      observed.observation.branch === r.observation.branch ? observed : null;
   }
   private currentReason(): GitIssue | null {
     const now = this.current();
@@ -140,7 +149,35 @@ export class GitLocalController {
     const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action: input });
     if (!raw) return this.report('invalid-input');
     const capture: Capture = Object.freeze({ binding, repository, observation: r.observation!, selected: r.selected, draft: r.draft, action,
-      paths: Object.freeze([...(kind === 'commit' ? gitStagedPaths(r.observation!) : r.selected)].sort(gitReadPathOrder)), branches: null, branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft });
+      paths: Object.freeze([...(kind === 'commit' ? gitStagedPaths(r.observation!) : r.selected)].sort(gitReadPathOrder)), tracking: null, branches: null, branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft });
+    const attempt = this.newAttempt(binding, request, action, capture, null);
+    this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
+    await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
+  }
+  prepareFastForwardReason(): GitLocalIssue | null {
+    if (this.ownerReason()) return this.state.recovery ? 'recovery-required' : this.state.uncertain ? 'unknown' : 'busy';
+    const reason = this.currentReason(); if (reason) return reason;
+    const binding = this.current(), r = binding.repository!.getSnapshot(), cached = this.cachedTracking(binding);
+    if (!cached) return 'ff-observation-required';
+    if (!r.observation?.head || !r.observation.branch || r.observation.unborn || r.observation.detached) return 'ff-target';
+    if (r.observation.changes.length) return 'switch-dirty';
+    const t = cached.tracking;
+    if (t.state !== 'complete' || t.ahead !== 0 || t.behind === null || t.behind < 1 || t.behind > 10000) return 'ff-not-descendant';
+    return isGitFastForwardAction({ kind: 'fast-forward', expectedRevision: r.observation.revision,
+      expectedReferenceRevision: cached.referenceRevision, targetRef: t.localRef, targetOid: t.head }) ? null : 'ff-target';
+  }
+  async prepareFastForward(): Promise<boolean> {
+    const reason = this.prepareFastForwardReason(); if (reason) return this.report(reason);
+    const binding = this.current(), repository = binding.repository!, r = repository.getSnapshot(), tracking = this.cachedTracking(binding);
+    if (!tracking || !r.observation || !tracking.tracking.localRef || !tracking.tracking.head) return this.report('ff-observation-required');
+    const action: GitFastForwardAction = Object.freeze({ kind: 'fast-forward', expectedRevision: r.observation.revision,
+      expectedReferenceRevision: tracking.referenceRevision, targetRef: tracking.tracking.localRef, targetOid: tracking.tracking.head });
+    const request: GitLocalStartRequest = Object.freeze({ phase: 'prepare', projectId: binding.projectId!,
+      expectedDocumentRevision: this.state.status!.documentRevision, action, reviewId: null });
+    const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
+    if (!raw) return this.report('invalid-input');
+    const capture: Capture = Object.freeze({ binding, repository, observation: r.observation, selected: r.selected, draft: r.draft, action,
+      paths: Object.freeze([]), tracking, branches: null, branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft });
     const attempt = this.newAttempt(binding, request, action, capture, null);
     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
@@ -165,7 +202,7 @@ export class GitLocalController {
     const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
     if (!raw) return this.report('invalid-input');
     const capture: Capture = Object.freeze({ binding, repository, observation: r.observation, selected: r.selected, draft: r.draft,
-      branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft, action, branches, paths: Object.freeze([]) });
+      branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft, action, tracking: null, branches, paths: Object.freeze([]) });
     const attempt = this.newAttempt(binding, request, action, capture, null);
     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
@@ -192,7 +229,7 @@ export class GitLocalController {
     const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
     if (!raw) return this.report('invalid-input');
     const capture: Capture = Object.freeze({ binding, repository, observation: r.observation, selected: r.selected, draft: r.draft,
-      branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft, action, branches, paths: Object.freeze([]) });
+      branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft, action, tracking: null, branches, paths: Object.freeze([]) });
     const attempt = this.newAttempt(binding, request, action, capture, null);
     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
@@ -221,7 +258,7 @@ export class GitLocalController {
     const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
     if (!raw) return this.report('invalid-input');
     const capture: Capture = Object.freeze({ binding, repository, observation: r.observation, selected: r.selected, draft: r.draft,
-      branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft, action, branches, paths: Object.freeze([]) });
+      branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft, action, tracking: null, branches, paths: Object.freeze([]) });
     const attempt = this.newAttempt(binding, request, action, capture, null);
     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
@@ -229,13 +266,16 @@ export class GitLocalController {
   private preparedMatchesCapture(prepared: GitLocalPrepared, capture: Capture): boolean {
     const r = prepared.review;
     if (r.head !== capture.observation.head || r.branch !== capture.observation.branch) return false;
+    if (capture.action.kind === 'fast-forward') return r.action === 'fast-forward' && !!capture.tracking &&
+      r.targetRef === capture.action.targetRef && r.targetOid === capture.action.targetOid &&
+      r.expectedReferenceRevision === capture.tracking.referenceRevision;
     if (capture.action.kind === 'branch-rename') return r.action === 'branch-rename' && r.name === capture.action.name &&
       r.expectedReferenceRevision === capture.branches?.referenceRevision;
     if (capture.action.kind === 'branch-switch') return r.action === 'branch-switch' && r.name === capture.action.name && !!capture.branches &&
       r.expectedReferenceRevision === capture.branches.referenceRevision &&
       capture.branches.branches.some((b) => b.ref === r.targetRef && b.oid === r.targetOid);
     return capture.action.kind === 'branch-create' ? r.action === 'branch-create' && r.name === capture.action.name &&
-      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
+      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'fast-forward' && r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
   }
   reviewReason(): GitIssue | null {
     const h = this.held;

@@ -46,6 +46,14 @@ if _upload_spec is None or _upload_spec.loader is None:
 UPLOAD = module_from_spec(_upload_spec)
 _upload_spec.loader.exec_module(UPLOAD)
 
+# One fixed two-process comparison, still using this Fixtures/run_cases owner.
+_cold_spec = spec_from_file_location("mrk_macos_upload_key_restart_observation", Path(__file__).with_name("macos_upload_key_restart_observation.py"))
+if _cold_spec is None or _cold_spec.loader is None:
+    raise RuntimeError("upload-key-cold-data-module-unavailable")
+COLD = module_from_spec(_cold_spec)
+_cold_spec.loader.exec_module(COLD)
+del _cold_spec
+
 # Fixed synthetic literals only. The reviewed project producer body is kept
 # unchanged inside a module-level diagnostic try; no historical runner is imported.
 RECOVERY_CASE = "project-recovery-pending"
@@ -1093,7 +1101,7 @@ PROJECT_FIELD_CHOICES = (
 )
 PROJECT_FIELD_PANELS = {f"ProjectFields(Native({i}))": (i + 2, choice[1])
                         for i, choice in enumerate(PROJECT_FIELD_CHOICES)}
-ALL_CASES = TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES
+ALL_CASES = TOOLS.SERVICE_CASES + TOOLS.CASES + UPLOAD.CASES + COLD.CASES + CASES + IOS_CURRENT_CASES + (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE) + VAULT_HELPER_CASES + (INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE,) + LOCAL_EDIT_CASES + LOCAL_CHECK_CASES + identity_qualification.CASES
 EXECUTABLE = "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop"
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REF = "refs/heads/verify/desktop-macos-aqua"
@@ -1152,6 +1160,8 @@ FAILURE_STEPS |= frozenset(f"UploadKey({step})" for step in (
     "Context Refresh Refreshed Recovered Saved Prepare Create Running Repeat Lock Locked Reopen Reopened Unlock Unlocked Recontext "
     "Read Readback BindSaved BoundReadback BoundSaved BoundPrepare RememberBound BoundRecoveryReadback "
     "RecoverySaved RecoveryPrepare AcknowledgeUnstarted RecoveryReadback Relock Relocked Missing MissingLocked").split())
+FAILURE_STEPS |= frozenset(f"UploadKey(Cold({name}))" for name in (
+    "Open Opened Unlock Unlocked Context Load Loaded Bind Bound Lock Locked").split())
 FAILURE_STEPS |= frozenset(f"ToolSetup({name})" for name in (
     "Context Service ServiceWait Catalog CatalogWait Inspect InspectWait Acquire AcquireWait RegisterInspect RegisterReview Register Registered Recover Recovered Select Reuse ReuseWait Finish"
 ).split()) | frozenset(f"ToolSetup({name}({i}))" for name in ("Choose", "Native", "Chosen") for i in range(4))
@@ -1688,7 +1698,7 @@ class Binding:
         self.checked()
         flags = (project_fields, vault_helper, installation_inspection, recovery, local_edits, local_checks, identity_native, tool_setup, tool_service)
         need(all(type(flag) is bool for flag in flags) and sum(flags) + (upload_key is not None) <= 1
-             and (upload_key is None or type(upload_key) is str and upload_key in UPLOAD.CASES), "scope-not-supported")
+             and (upload_key is None or type(upload_key) is str and upload_key in (*UPLOAD.CASES, COLD.SCOPE)), "scope-not-supported")
         if tool_setup or tool_service:
             return TOOLS.fixture_path(self, native_home, service=tool_service, need=need)
         need(native_home is None, "scope-not-supported")
@@ -1724,7 +1734,7 @@ def _expected_completion_selection(case):
 
 
 def selected_cases(scope=None):
-    need(scope in (*UPLOAD.CASES, TOOLS.SERVICE_SCOPE, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
+    need(scope in (*UPLOAD.CASES, COLD.SCOPE, TOOLS.SERVICE_SCOPE, TOOLS.SCOPE, None, "ios-unsigned-archive", "ios-current-synthetic", PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, VAULT_HELPER_SCOPE, INSTALLATION_INSPECTION_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE, LOCAL_EDITS_SCOPE, LOCAL_CHECK_SCOPE, identity_qualification.SCOPE), "scope-not-supported")
     if scope == TOOLS.SERVICE_SCOPE:
         return TOOLS.SERVICE_CASES
     if scope == TOOLS.SCOPE:
@@ -1735,6 +1745,8 @@ def selected_cases(scope=None):
         return LOCAL_CHECK_CASES
     if scope == LOCAL_EDITS_SCOPE:
         return LOCAL_EDIT_CASES
+    if scope == COLD.SCOPE:
+        return COLD.CASES
     if scope in UPLOAD.CASES:
         return (scope,)
     if scope == VAULT_HELPER_SCOPE:
@@ -1787,7 +1799,7 @@ def case_timeout(case):
         return (105, 1875)[LOCAL_CHECK_CASES.index(case)]
     if case in LOCAL_EDIT_CASES:
         return (135, 105, 195)[LOCAL_EDIT_CASES.index(case)]
-    return UPLOAD.TIMEOUT if case in UPLOAD.CASES else 525 if case == IOS_ACCOUNT_CASE else 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES or case == RECOVERY_CASE else 135 if case in VAULT_HELPER_CASES else 60
+    return UPLOAD.TIMEOUT if case in UPLOAD.CASES or case in COLD.CASES else 525 if case == IOS_ACCOUNT_CASE else 95 if case == INSTALLATION_INSPECTION_CASE else 325 if case in IOS_OPERATION_CASES or case == RECOVERY_CASE else 135 if case in VAULT_HELPER_CASES else 60
 
 
 def ios_config(case):
@@ -2548,7 +2560,7 @@ def expected_result(binding, case):
         value["native"]["panelAttachments"] = [False, True, False, False]
         value["reload"] = dict.fromkeys(value["reload"], False)
         return value
-    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES or case == TOOLS.SERVICE_CASE:
+    if case in IOS_CURRENT_CASES or case in (PROJECT_FIELDS_CASE, ANDROID_INPUT_CASE, RECOVERY_CASE, IOS_ACCOUNT_CASE) or case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES or case in LOCAL_EDIT_CASES or case in LOCAL_CHECK_CASES or case in identity_qualification.CASES or case in TOOLS.CASES or case == TOOLS.SERVICE_CASE:
         value = expected_result(binding, "noop-stale")
         value.update(case=case, saveSessions=[], staleMarkerWriterReturnedAndClosed=False)
         if case in TOOLS.CASES or case == TOOLS.SERVICE_CASE:
@@ -2567,7 +2579,7 @@ def expected_result(binding, case):
             value["projectFields"] = _expected_project_fields()
         if case in VAULT_HELPER_CASES:
             value["vaultHelper"] = _expected_vault_helper(case)
-        if case in UPLOAD.CASES:
+        if case in UPLOAD.CASES or case in COLD.CASES:
             value["vaultHelper"] = None  # Never synthesize native generation facts.
         value["native"]["projectOpenBinding"]["case"] = case
         value["native"]["projectCompletionSelection"]["case"] = case
@@ -2827,6 +2839,14 @@ def parse_result(stdout, stderr, binding, case):
     if case in UPLOAD.CASES:
         need(type(value) is dict and "vaultHelper" in value,"upload-key-report")
         expected["vaultHelper"]=_upload_report(value["vaultHelper"],case)
+    if case in COLD.CASES:
+        need(type(value) is dict and "vaultHelper" in value, "upload-key-cold-report")
+        if case == COLD.PRODUCE:
+            _upload_report(value["vaultHelper"], UPLOAD.CASES[0])  # Unchanged actual RoundTrip body.
+        else:
+            need(type(value["vaultHelper"]) is dict, "upload-key-cold-report")
+            _vault_helper_original(value["vaultHelper"].get("lookupHelper"), "lookup")
+        expected["vaultHelper"] = COLD.report(value["vaultHelper"], case)
     if case in VAULT_HELPER_CASES:
         need(type(value) is dict and "vaultHelper" in value, "vault-helper-report")
         expected["vaultHelper"] = _vault_helper_report(value["vaultHelper"], case)
@@ -2956,6 +2976,8 @@ def _native_action_context(value, native, panel, *, case=None):
             spec = ("quit-confirm", "quit", (3,), 16) if value["step"] == "Quit" else None
         elif value["step"] == "Quit" and type(case) is str and (case in SESSION_CASES or case == PROJECT_FIELDS_CASE):
             spec = ("quit-confirm", "quit", (18 if case == ANDROID_INPUT_CASE else 12,), 16)
+        elif value["step"] == "Quit" and case in COLD.CASES:
+            spec = ("quit-confirm", "quit", (6,) if case == COLD.REOPEN else (5, 9), 16)
         elif value["step"] == "Quit" and case in UPLOAD.CASES:
             spec = ("quit-confirm", "quit", (5, 11) if case == UPLOAD.CASES[2] else (5, 9), 16)
         elif value["step"] == "Quit" and case in VAULT_HELPER_CASES:
@@ -3933,7 +3955,7 @@ def _vault_original_failure_data(value):
 
 
 def _vault_failure_context(value, source, step, reason, case):
-    need(source == "record" and (case in VAULT_HELPER_CASES or case in UPLOAD.CASES) and reason == "vault-finality-contract"
+    need(source == "record" and (case in VAULT_HELPER_CASES or case in UPLOAD.CASES or case in COLD.CASES) and reason == "vault-finality-contract"
          and type(step) is str and step in FAILURE_STEPS and step.startswith("Vault(")
          and type(value) is dict and set(value) == {"source", "step", "observationOnly", "snapshot"}
          and value["source"] == "first-original-vault-snapshot" and value["step"] == step
@@ -3946,7 +3968,7 @@ def _vault_failure_context(value, source, step, reason, case):
     need(type(snapshot) is dict and set(snapshot) == flags | fields
          and all(type(snapshot[k]) is bool for k in flags) and snapshot["unknown"]
          and snapshot["unknown"] == (snapshot["documentUnknown"] or snapshot["exhausted"] or snapshot["lostObserved"] or not snapshot["originalBound"])
-         and type(snapshot["originals"]) is int and 0 <= snapshot["originals"] <= (11 if case == UPLOAD.CASES[2] else 9 if case in UPLOAD.CASES else 7 if case == VAULT_HELPER_CASES[0] else 5), "failure-context")
+         and type(snapshot["originals"]) is int and 0 <= snapshot["originals"] <= (6 if case == COLD.REOPEN else 9 if case == COLD.PRODUCE else 11 if case == UPLOAD.CASES[2] else 9 if case in UPLOAD.CASES else 7 if case == VAULT_HELPER_CASES[0] else 5), "failure-context")
     phases = {"idle", "admitting", "picking", "capturing", "selected", "assessing", "preview", "mutating", "stopping", "unknown"}
     reasons = {"none", "closed", "unqualified", "unsupported-platform", "unsupported-filesystem", "unsupported-format",
                "invalid-request", "busy", "source-refused", "source-changed", "material-limit", "parser-limit", "project-overlap",
@@ -4428,7 +4450,7 @@ def fixture_data(case, final, *, ios_output_created=None):
             "app": (0o700, ("build.gradle.kts",)), "inputs": (0o700, ("VERSION", "kind-input", "link-input")),
             "ios": (0o700, ("Example.xcodeproj", "Example.xcworkspace")), "ios/Example.xcodeproj": (0o700, ()),
             "ios/Example.xcworkspace": (0o700, ()), "metadata": (0o700, ()), "release": (0o755, ("mobile-release.json",))}
-    saved = case in UPLOAD.CASES or case == "noop-stale" or final and case == "first-save"
+    saved = case in UPLOAD.CASES or case in COLD.CASES or case == "noop-stale" or final and case == "first-save"
     files = {"app/build.gradle.kts": SOURCE, "version.properties": VERSION, "keep.txt": KEEP,
              ".gitignore": IGNORE_PREFIX + (IGNORE_RULES if saved else b"") + (STALE if final and case == "noop-stale" else b"")}
     directories = {".": (0o700, (".gitignore", "app", "keep.txt", "version.properties")),
@@ -4573,7 +4595,7 @@ class Fixtures:
         self.path = None if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
-                                 upload_key=scope if scope in UPLOAD.CASES else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
+                                 upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
         self.fds = set()
         self.close_errors = 0
         self.first_close_error = None
@@ -4593,6 +4615,7 @@ class Fixtures:
         self.vault_ancestors, self.vault_parents = [], {}
         self.vault_namespace = self.vault_support = None
         self.vault_paths, self.vault_completed = {}, set()
+        self.upload_cold = COLD.Pair() if self.cases == COLD.CASES else None
         self.identity_inventories, self.identity_precursors = {}, {}
         self.identity_preserved = None
         self.recovery_case = None
@@ -4704,24 +4727,28 @@ class Fixtures:
         self.root = self._mkdir(self.parent, self.path.name)
         self.state = self._mkdir(self.root, "state")
         for case in self.cases:
-            project = self._mkdir(self.root, case)
+            if self.cases == COLD.CASES and case == COLD.REOPEN:
+                project = self.projects[COLD.PRODUCE]
+            else:
+                project = self._mkdir(self.root, COLD.PROJECT if self.cases == COLD.CASES else case)
             if case == RECOVERY_CASE:
                 self.recovery_case = project
                 project = self._mkdir(project, "project")
             self.projects[case] = project
-            files, directories = fixture_data(case, False)
-            with ExitStack() as children:
-                opened = {".": project}
-                # Closed literal roster, parents before children. No selected
-                # arbitrary project, pathname adoption, or source overwrite.
-                for path, (mode, _) in directories.items():
-                    if path == ".":
-                        continue
-                    parent, _, name = path.rpartition("/")
-                    opened[path] = children.enter_context(self._temporary(self._mkdir(opened[parent or "."], name, mode)))
-                for path, body in files.items():
-                    parent, _, name = path.rpartition("/")
-                    self._write(opened[parent or "."], name, body)
+            if self.cases != COLD.CASES or case == COLD.PRODUCE:
+                files, directories = fixture_data(case, False)
+                with ExitStack() as children:
+                    opened = {".": project}
+                    # Closed literal roster, parents before children. No selected
+                    # arbitrary project, pathname adoption, or source overwrite.
+                    for path, (mode, _) in directories.items():
+                        if path == ".":
+                            continue
+                        parent, _, name = path.rpartition("/")
+                        opened[path] = children.enter_context(self._temporary(self._mkdir(opened[parent or "."], name, mode)))
+                    for path, body in files.items():
+                        parent, _, name = path.rpartition("/")
+                        self._write(opened[parent or "."], name, body)
             state = self._mkdir(self.state, case)
             self.states[case] = state
             for child in ("home", "tmp"):
@@ -4746,7 +4773,7 @@ class Fixtures:
         self._namespace()
         if self.cases == TOOLS.CASES:
             TOOLS.prepare_parents(self, need, signature)
-        if self.cases == VAULT_HELPER_CASES or len(self.cases)==1 and self.cases[0] in UPLOAD.CASES:
+        if self.cases in (VAULT_HELPER_CASES, COLD.CASES) or len(self.cases)==1 and self.cases[0] in UPLOAD.CASES:
             self._prepare_vault_parents()
         if self.cases == (IOS_ACCOUNT_CASE,):
             self._prepare_account()
@@ -4758,7 +4785,7 @@ class Fixtures:
             need(signature(os.stat("/private/tmp", follow_symlinks=False))[:6] == signature(os.fstat(self.parent))[:6], "temporary-parent-replaced")
         self._named(self.parent, self.path.name, self.root, 0o700)
         self._named(self.root, "state", self.state, 0o700)
-        self._roster(self.root, (*self.cases, "state"), "fixture-namespace-roster")
+        self._roster(self.root, (COLD.PROJECT, "state") if self.cases == COLD.CASES else (*self.cases, "state"), "fixture-namespace-roster")
         self._roster(self.state, self.cases, "fixture-state-roster")
         for case in self.cases:
             if case == RECOVERY_CASE:
@@ -4766,7 +4793,7 @@ class Fixtures:
                 self._named(self.recovery_case, "project", self.projects[case], 0o700)
                 self._roster(self.recovery_case, ("project",), "recovery-case-roster")
             else:
-                self._named(self.root, case, self.projects[case], 0o700)
+                self._named(self.root, COLD.PROJECT if self.cases == COLD.CASES else case, self.projects[case], 0o700)
             self._named(self.state, case, self.states[case], 0o700)
 
     def _roster(self, fd, expected, label):
@@ -4915,6 +4942,8 @@ class Fixtures:
             self._vault_namespace_current()
             need(case not in self.vault_completed, "vault-case-reused")
             self._roster(self.vault_parents[case], (), "vault-application-collision")
+        if case in COLD.CASES:
+            self.upload_cold.before_call(self, case)
         for name in ("home", "tmp"):
             with self._temporary(self._open(name, state, directory=True)) as fd:
                 self._named(state, name, fd, 0o700)
@@ -5324,7 +5353,7 @@ class Fixtures:
 
     def admit_normal_account_runtime(self, source, work, *, application_source):
         """Same-job installed originals, not a fabricated producer/supplier result."""
-        need((self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES)
+        need((self.cases in ((IOS_ACCOUNT_CASE,), identity_qualification.CASES, TOOLS.CASES, TOOLS.SERVICE_CASES, COLD.CASES)
               or len(self.cases) == 1 and self.cases[0] in UPLOAD.CASES)
              and not self.inflight and self.recovery_runtime is None,
              "normal-account-runtime-order")
@@ -5453,7 +5482,8 @@ class Fixtures:
         # TMPDIR still isolate unrelated app state but cannot redirect Keychain.
         account = pwd.getpwuid(self.uid)
         need(account.pw_uid == self.uid and self.uid > 0, "vault-native-user")
-        self.vault_paths = {case: (UPLOAD.fixture_path(self.binding, account.pw_dir, case) if case in UPLOAD.CASES
+        self.vault_paths = {case: (COLD.fixture_path(self.binding, account.pw_dir, case) if case in COLD.CASES
+                                 else UPLOAD.fixture_path(self.binding, account.pw_dir, case) if case in UPLOAD.CASES
                                  else vault_fixture_path(self.binding, account.pw_dir, case)) for case in self.cases}
         support = self.vault_paths[self.cases[0]].parents[2]
         root = self._open("/", directory=True)
@@ -5473,13 +5503,14 @@ class Fixtures:
         namespace = self.vault_paths[self.cases[0]].parents[1].name
         self.vault_namespace = self._mkdir(current, namespace)
         for case in self.cases:
-            self.vault_parents[case] = self._mkdir(self.vault_namespace, case)
+            self.vault_parents[case] = (self.vault_parents[COLD.PRODUCE] if self.cases == COLD.CASES and case == COLD.REOPEN
+                                       else self._mkdir(self.vault_namespace, COLD.PROJECT if self.cases == COLD.CASES else case))
             self._roster(self.vault_parents[case], (), "vault-case-collision")
         # The core, not the fixture owner, creates the application/vault leaves.
         self._vault_namespace_current()
 
     def _vault_namespace_current(self):
-        need((self.cases == VAULT_HELPER_CASES or len(self.cases)==1 and self.cases[0] in UPLOAD.CASES) and self.vault_namespace is not None
+        need((self.cases in (VAULT_HELPER_CASES, COLD.CASES) or len(self.cases)==1 and self.cases[0] in UPLOAD.CASES) and self.vault_namespace is not None
              and self.vault_support is not None and self.vault_ancestors, "vault-fixture-custody")
         for parent, name, fd, original in self.vault_ancestors:
             need(signature(os.fstat(fd))[:5] == original
@@ -5487,11 +5518,11 @@ class Fixtures:
                  "vault-ancestor-changed")
         name = self.vault_paths[self.cases[0]].parents[1].name
         self._named(self.vault_support, name, self.vault_namespace, 0o700)
-        self._roster(self.vault_namespace, self.cases, "vault-namespace-roster")
+        self._roster(self.vault_namespace, (COLD.PROJECT,) if self.cases == COLD.CASES else self.cases, "vault-namespace-roster")
         for case in self.cases:
-            self._named(self.vault_namespace, case, self.vault_parents[case], 0o700)
+            self._named(self.vault_namespace, COLD.PROJECT if self.cases == COLD.CASES else case, self.vault_parents[case], 0o700)
             self._roster(self.vault_parents[case], ("dev.mobile-release-kit.desktop",)
-                         if case in self.vault_completed else (), "vault-case-roster")
+                         if (COLD.PRODUCE if self.cases == COLD.CASES else case) in self.vault_completed else (), "vault-case-roster")
 
     # Fixed metadata-only accessors on this existing finite original FD owner.
     # New helper never opens a name/path supplied by a report.
@@ -5721,7 +5752,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
     cases = selected_cases(scope)
     need(getattr(fixtures, "cases", cases) == cases, "fixture-scope")
     not_executed = []
-    if scope in (identity_qualification.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE):
+    if scope in (identity_qualification.SCOPE, TOOLS.SCOPE, TOOLS.SERVICE_SCOPE, COLD.SCOPE):
         # Root's CURRENT normal-package preparation must call the same original
         # admit_normal_account_runtime first. No historical Aqua supplier route.
         fixtures.recovery_runtime_paths()
@@ -5738,7 +5769,7 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
         state_root = fixtures.path if scope in (TOOLS.SCOPE, TOOLS.SERVICE_SCOPE) else binding.root(project_fields=(scope == PROJECT_FIELDS_CASE), vault_helper=(scope == VAULT_HELPER_SCOPE),
                                  installation_inspection=(scope == INSTALLATION_INSPECTION_CASE), recovery=(scope == RECOVERY_CASE),
                                  local_edits=(scope == LOCAL_EDITS_SCOPE), local_checks=(scope == LOCAL_CHECK_SCOPE),
-                                 upload_key=scope if scope in UPLOAD.CASES else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
+                                 upload_key=scope if scope in (*UPLOAD.CASES, COLD.SCOPE) else None, identity_native=(scope == identity_qualification.SCOPE), tool_setup=(scope == TOOLS.SCOPE), tool_service=(scope == TOOLS.SERVICE_SCOPE))
         need(isinstance(state_root, Path), "fixture-state-not-prepared")
         state = state_root / "state" / case
         argv = [EXECUTABLE, case]
@@ -5797,6 +5828,8 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
             readback = identity_qualification.readback(fixtures, case, report["projectIdentity"])
         elif case == RECOVERY_CASE:
             readback = fixtures.readback_recovery(report["projectRecovery"])
+        elif case in COLD.CASES:
+            readback = fixtures.upload_cold.readback(fixtures, case, report["vaultHelper"])
         elif case in UPLOAD.CASES:
             readback = UPLOAD.readback(fixtures,case,report["vaultHelper"])
             if report["vaultHelper"]["testResult"]=="not-executed": not_executed.append(case)
@@ -5819,6 +5852,12 @@ def run_cases(binding, fixtures, run_owned, uid, username, emit, scope=None):
                  "fixture-local-readback")
         emit({"schemaVersion": 1, "type": "macos-aqua-case", **binding.public(), "case": case,
               "originalCallReturned": True, "observer": report, "independentReadback": readback})
+        if case in COLD.CASES:
+            # Current wrapper's emit_checked must really return from its held
+            # runtime POST before this can release the one second invocation.
+            fixtures.upload_cold.after_emit(fixtures, case)
+    if scope == COLD.SCOPE:
+        fixtures.upload_cold.finished(fixtures)
     return tuple(not_executed)
 
 

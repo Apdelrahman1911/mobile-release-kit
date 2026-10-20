@@ -16,6 +16,37 @@ pub(crate) fn pending(port: &VersionAllocationStatePort) -> Result<bool> {
     Ok(port.enrolled()?.pending.is_some())
 }
 
+/// Pure projection of the already persisted typed row. This is deliberately
+/// NOT a second ledger parser or a grant. Production calls it only below,
+/// after the SAME actual all-jobs return and NativeUse retirement.
+fn ci_reference(
+    port: &VersionAllocationStatePort,
+    finished: &dialogue::Finished,
+) -> Result<crate::service_version_reserve_protocol::CiReference> {
+    use crate::service_version_reserve_protocol::{CiReference, CI_SETTINGS_LIMIT};
+    let authority = port.enrolled()?;
+    let candidate = port.state()?.candidate(port.project.project_id.as_str()).ok_or_else(unknown)?;
+    let reservation = candidate.reservation.as_ref().ok_or_else(unknown)?;
+    port.admit_request(&reservation.request.0)?;
+    need(authority.pending.is_none() && finished.outcome["status"] == "reserved"
+        && finished.outcome["reason"] == "none" && finished.first_failure_ns.is_none()
+        && finished.control.valid()
+        && finished.control.reason == crate::github_connection_protocol::Reason::None
+        && finished.source.as_ref() == Some(&reservation.request.0["source"])
+        && finished.outcome["reservation"] == serde_json::to_value(reservation).map_err(|_| unknown())?
+        && finished.outcome["checkpoint"] == serde_json::to_value(&authority.checkpoint).map_err(|_| unknown())?)?;
+    // The complete secret-free authority and checkpoint are existing types.
+    // No raw state, account, local project path, Store response or key escapes.
+    let settings = canonical(&json!({"schemaVersion":1,"authority":authority.authority,
+        "checkpoint":authority.checkpoint}), CI_SETTINGS_LIMIT)?;
+    let result = CiReference {
+        authority_settings: String::from_utf8(settings).map_err(|_| unknown())?,
+        commit_trailer: format!("MRK-Version-Reservation: {} {}", reservation.request.candidate(), reservation.sha256),
+    };
+    need(result.valid(reservation.request.candidate()))?;
+    Ok(result)
+}
+
 pub(crate) const STATE_BYTES: usize = 256 * 1024;
 // Same bounded state quote reviewed for enrollment: full failed <=1MiB read,
 // 4096-node Seed before DOM/canonical clones, typed before/after/attempt copies.
@@ -271,6 +302,16 @@ impl StateHold {
         let port = port.lock().map_err(|_| unknown())?;
         port.bound.as_ref().map(|r| r.request_hash()).transpose()
     }
+    pub(crate) fn ci_reference(&self, finished: &dialogue::Finished)
+        -> Result<crate::service_version_reserve_protocol::CiReference>
+    {
+        need(!self.control.uncertain())?;
+        let c = self.custody.lock().map_err(|_| unknown())?;
+        need(c.entered && c.retirement_entered && matches!(c.retirement_result, Some(Ok(())))
+            && c.capture.failure.is_none())?;
+        let port = c.capture.port.as_ref().ok_or_else(unknown)?.lock().map_err(|_| unknown())?;
+        ci_reference(&port, finished)
+    }
     pub(crate) fn ready(&self) -> &Arc<NativeStateReady> {
         &self.ready
     }
@@ -439,4 +480,50 @@ mod tests {
         control.unknown();
         assert!(!Custody::new().never_entered(&control));
     }
+    #[test]
+    fn ci_copy_uses_exact_durable_typed_row_and_never_promotes_pending_or_forged_finished() {
+        // Actual local namespace transitions + pure copy only. This fixture
+        // does NOT construct a native join/retirement proof or call StateHold.
+        let f = Fixture::new();
+        let (store, mut port) = super::super::tests::prepared(&f);
+        let request = port.selected_request().unwrap().clone();
+        let pending = super::super::tests::pending(&request);
+        let checkpoint = super::super::tests::advanced(&pending);
+        let mut finished = dialogue::Finished {
+            outcome: json!({"status":"reserved","reason":"none","reservation":pending["reservation"],"checkpoint":checkpoint}),
+            control: crate::github_connection_protocol::GitHubReadControl {
+                reason: crate::github_connection_protocol::Reason::None,
+                credential_expires_at: None, cooldown_seconds: None, cooldown_blocked: false,
+            },
+            source: Some(request["source"].clone()), first_failure_ns: None,
+        };
+        assert!(ci_reference(&port, &finished).is_err());
+        port.apply(Revision(2), &request, Transition::Pending(pending.clone())).unwrap();
+        assert!(ci_reference(&port, &finished).is_err());
+        port.apply(Revision(3), &request, Transition::Checkpoint(checkpoint.clone())).unwrap();
+        port.apply(Revision(4), &request, Transition::Resolved { pending:pending.clone(),checkpoint }).unwrap();
+        let before = store.read(Namespace::VersionAllocations).unwrap();
+        let copied = ci_reference(&port, &finished).unwrap();
+        let settings: Value = serde_json::from_str(&copied.authority_settings).unwrap();
+        assert_eq!(settings, json!({"schemaVersion":1,"authority":port.authority,"checkpoint":port.enrolled().unwrap().checkpoint}));
+        assert_eq!(copied.commit_trailer, format!("MRK-Version-Reservation: {} {}",
+            request["candidateId"].as_str().unwrap(),pending["reservation"]["sha256"].as_str().unwrap()));
+        for (field, value) in [("status",json!("recovery-required")),("reason",json!("cancelled")),
+            ("reservation",json!(null)),("checkpoint",json!(null))] {
+            let mut wrong = finished.clone(); wrong.outcome[field] = value;
+            assert!(ci_reference(&port, &wrong).is_err());
+        }
+        let mut wrong = finished.clone(); wrong.source = None;
+        assert!(ci_reference(&port, &wrong).is_err());
+        wrong = finished.clone(); wrong.first_failure_ns = Some(1);
+        assert!(ci_reference(&port, &wrong).is_err());
+        wrong = finished.clone(); wrong.control.reason = crate::github_connection_protocol::Reason::Cancelled;
+        assert!(ci_reference(&port, &wrong).is_err());
+        finished.outcome["reservation"]["sha256"] = json!("b".repeat(64));
+        assert!(ci_reference(&port, &finished).is_err());
+        let after = store.read(Namespace::VersionAllocations).unwrap();
+        assert_eq!(before.revision,after.revision); assert_eq!(before.bytes,after.bytes);
+        store.close().unwrap();
+    }
+
 }

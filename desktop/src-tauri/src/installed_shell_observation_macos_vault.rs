@@ -17,7 +17,7 @@ impl Case {
         Self::StopAfterAdd => "vault-helper-stop-after-add", Self::UploadKey(case) => case.name(),
     } }
     pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> { Self::ALL.into_iter().find(|c| value == std::ffi::OsStr::new(c.name())).or_else(|| upload_key::Case::parse(value).map(Self::UploadKey)) }
-    pub(crate) fn maximum_original(self) -> u32 { if self == Self::UploadKey(upload_key::Case::StopAfterNew) { 11 } else if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
+    pub(crate) fn maximum_original(self) -> u32 { if self == Self::UploadKey(upload_key::Case::ColdReopen) { 6 } else if self == Self::UploadKey(upload_key::Case::StopAfterNew) { 11 } else if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,11 +68,11 @@ fn fixture_root(home: &Path, source: &str, run: &str, attempt: &str, case: Case)
     if !crate::asset_session::installed_macos_selection_path_bounded(home) || home == Path::new("/")
         || source.len() != 40 || !source.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         || !decimal(run) || !decimal(attempt) { return None; }
-    let namespace=if let Case::UploadKey(case)=case {format!("mrk-macos-aqua-upload-key-{source}-{run}-{attempt}-{}",case.name())}
+    let namespace=if let Case::UploadKey(case)=case {format!("mrk-macos-aqua-upload-key-{source}-{run}-{attempt}-{}",case.fixture_name())}
         else{format!("mrk-macos-aqua-vault-{source}-{run}-{attempt}")};
     Some(home.join("Library/Application Support")
         .join(namespace)
-        .join(case.name()).join("dev.mobile-release-kit.desktop"))
+        .join(if let Case::UploadKey(value)=case { value.fixture_name() } else { case.name() }).join("dev.mobile-release-kit.desktop"))
 }
 impl Control {
     pub(super) fn new(case: Case, project: &Path, uid: u32) -> Result<Arc<Self>, ()> {
@@ -102,6 +102,7 @@ impl Control {
     pub(crate) fn project(&self) -> &Path { &self.project }
     pub(crate) fn select(self: &Arc<Self>, document: &Arc<()>, action: Action, original: u32) -> Option<Selection> {
         if !self.permits(document) || original != action.previous_original()
+            || self.case == Case::UploadKey(upload_key::Case::ColdReopen) && action != Action::Open
             || self.case != Case::RoundTrip && action.index() > Action::LockInitialized.index()
             || self.next.compare_exchange(action.index(), action.index() + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() { return None; }
         Some(Selection { control: self.clone(), document: Arc::downgrade(document), action,

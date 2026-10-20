@@ -37,6 +37,18 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
       status?.phase === 'reviewed' ? 'Choices reviewed — no number reserved by this review' : 'No current usable reservation'}</p>
     {state.stale && status && <p>This earlier observation is not permission to reserve or edit.</p>}
     {status?.reservation && <p>Candidate version: <strong>{status.reservation.name} · Build {status.reservation.build}</strong>. This is not a Store acceptance or a saved-file receipt.</p>}
+    {!compact && status?.reservation?.ci && <details>
+      <summary>Use this reserved version in GitHub Actions</summary>
+      <p>This is a manual setup step, not automatic CI configuration or a new reservation. CI can check and use this existing number; it cannot reserve a number on a hosted runner.</p>
+      <ol><li>Apply the reserved version using the separate editor. Commit only that version-file change, directly after the source you reserved. Include the message below. Commit other setup changes before reserving.</li>
+        <li>In the application repository, set the protected Actions variable <code>MOBILE_RELEASE_VERSION_AUTHORITY</code> from the settings below once. Keep the existing setting for the same counter; do not reset it to bypass a refusal.</li>
+        <li>Run the candidate workflow on that exact commit, using tooling that supports this check. Its original Store/build approvals and recovery rules still apply.</li></ol>
+      <label htmlFor={`${id}-ci-message`}>Commit message · copy after reviewing the version-only diff</label>
+      <textarea id={`${id}-ci-message`} readOnly rows={4} value={`Save reserved version\n\n${status.reservation.ci.commitTrailer}\n`} />
+      <label htmlFor={`${id}-ci-authority`}>Nonsecret counter settings · copy into the protected Actions variable</label>
+      <textarea id={`${id}-ci-authority`} readOnly rows={4} value={status.reservation.ci.authoritySettings} />
+      <p className="save-note">Copying changes nothing. If neither setting nor trailer is present, CI stays unconfigured/manual. If only one is present, it refuses. This does not refresh Store inventory or guarantee that outside uploaders have not used the number.</p>
+    </details>}
     <p className="save-note">{state.issue ?? versionReserveHelp(status?.reason ?? null)}</p>
     <div className="button-row">
       {!compact && state.enabled && <><button type="button" className="button secondary" disabled={controller.reviewReason() !== null} onClick={() => void controller.review()}>Review version choices</button>

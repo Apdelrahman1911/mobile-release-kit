@@ -8,6 +8,29 @@ pub(crate) const REQUEST_LIMIT: usize = 32;
 pub(crate) const RAW_LIMIT: usize = 1024;
 pub(crate) const STATUS_LIMIT: usize = 2048;
 pub(crate) const REVIEW_MS: u64 = 120_000;
+pub(crate) const CI_SETTINGS_LIMIT: usize = 768;
+
+/// Copyable CI preparation DATA only. The installed CLI deliberately does not
+/// link the native allocator/ledger decoder; the workflow validates these
+/// protected settings and the exact row against the full shared ledger.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CiReference {
+    pub(crate) authority_settings: String,
+    pub(crate) commit_trailer: String,
+}
+impl CiReference {
+    pub(crate) fn valid(&self, candidate: &str) -> bool {
+        // Bounded display grammar, never repository/Store/native authority.
+        !self.authority_settings.is_empty()
+            && self.authority_settings.len() <= CI_SETTINGS_LIMIT
+            && self.authority_settings.bytes().all(|b| (0x20..=0x7e).contains(&b))
+            && self.commit_trailer.strip_prefix("MRK-Version-Reservation: ")
+                .and_then(|v| v.split_once(' ')).is_some_and(|(id, hash)|
+                    id == candidate && hash.len() == 64
+                        && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    }
+}
 
 fn required_nullable<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
@@ -125,6 +148,10 @@ pub(crate) struct Reservation {
     pub(crate) candidate_id: String,
     pub(crate) name: String,
     pub(crate) build: u64,
+    // Older completed observations remain useful but cannot fabricate a CI
+    // export. New exports originate only at the real joined native finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ci: Option<CiReference>,
 }
 impl Reservation {
     fn valid(&self) -> bool {
@@ -141,6 +168,7 @@ impl Reservation {
             && (1..=32).contains(&self.name.len())
             && self.name.bytes().all(|b| b.is_ascii_digit() || b == b'.')
             && (1..=2_100_000_000).contains(&self.build)
+            && self.ci.as_ref().is_none_or(|v| v.valid(&self.candidate_id))
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

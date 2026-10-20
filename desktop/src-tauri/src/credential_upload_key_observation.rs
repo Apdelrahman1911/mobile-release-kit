@@ -2,10 +2,16 @@
 //! No private value, user path, tool pathname or result-shaped grant is accepted.
 //! All observation storage is fixed, nonsecret DATA; it cannot settle anything.
 use super::*;
+#[path = "credential_upload_key_original_table.rs"]
+mod original_table;
+pub(in crate::asset_session) use original_table::original_allowed;
 #[path = "credential_upload_key_cancel_observation.rs"]
 mod cancelled;
 #[path = "credential_upload_key_bound_observation.rs"]
 mod bound_recovery;
+#[path = "credential_upload_key_restart_observation.rs"]
+mod cold_restart;
+pub(crate) use cold_restart::ColdState;
 pub(super) use cancelled::cancelled_disposed;
 use crate::shell::installed_observation::vault::{
     upload_key::{Action, Case, Selection},
@@ -141,7 +147,7 @@ impl Sample {
     /// Even an exact checkpoint cannot turn a lost join into a successful test.
     pub(crate) fn stopped_observed(self, case: Case) -> bool {
         let cut = match case {
-            Case::RoundTrip => return false,
+            Case::RoundTrip | Case::ColdProduce | Case::ColdReopen => return false,
             Case::StopBeforeGo => "before-go",
             Case::StopAfterNew => "after-new-before-journal",
         };
@@ -168,7 +174,7 @@ impl Sample {
                 Case::StopAfterNew => {
                     self.authenticated_new && self.producer.is_some_and(ProducerSample::generated)
                 }
-                Case::RoundTrip => false,
+                Case::RoundTrip | Case::ColdProduce | Case::ColdReopen => false,
             }
     }
 }

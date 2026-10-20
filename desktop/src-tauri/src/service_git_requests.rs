@@ -672,6 +672,45 @@ impl Inbox {
             Error::StateUnknown
         })
     }
+    /// Discovery copies immutable IDs, never status/expiry, claims or drafts.
+    pub(crate) fn catalogue_requests(
+        &self,
+        instance: &Id,
+        project: &Id,
+    ) -> Result<Vec<crate::service_request_catalogue::AdditionalRequest>, Error> {
+        use crate::service_request_catalogue::{AdditionalFamily, AdditionalRequest};
+        let book = self.lock()?;
+        if book.closed {
+            return Err(Error::Unavailable);
+        }
+        if &self.instance != instance || book.entries.len() > p::REQUEST_LIMIT {
+            return Err(Error::StateUnknown);
+        }
+        let mut rows = Vec::with_capacity(book.entries.len());
+        for entry in &book.entries {
+            if &entry.input.origin.service_instance != instance {
+                return Err(Error::StateUnknown);
+            }
+            if &entry.input.origin.project_id == project {
+                rows.push(AdditionalRequest {
+                    family: match entry.family {
+                        Family::Index => AdditionalFamily::GitIndex,
+                        Family::Commit => AdditionalFamily::GitCommit,
+                    },
+                    request_id: entry.input.origin.request_id.clone(),
+                });
+            }
+        }
+        if self.failed.load(Ordering::Acquire) {
+            return Err(Error::StateUnknown);
+        }
+        Ok(rows)
+    }
+    #[cfg(test)]
+    pub(crate) fn with_catalogue_book_locked<T>(&self, body: impl FnOnce() -> T) -> T {
+        let _original = self.book.lock().unwrap();
+        body()
+    }
     pub(crate) fn allow(&self, scope: Arc<NativeScope>) -> Result<p::Access, Error> {
         self.allow_for(scope, Family::Index)
     }

@@ -109,6 +109,7 @@ mod version_reserve_protocol;
 mod git_local_protocol;
 mod git_branch_protocol;
 mod git_switch_protocol;
+mod git_fast_forward_protocol;
 mod git_rename_protocol;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod git_local_state;

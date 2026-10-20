@@ -1,4 +1,4 @@
-//! Discovery over the SAME finite local-check and shared build inboxes. There
+//! Discovery over the SAME finite request inboxes. There
 //! is no native callback, new request owner, report access, startup or writer.
 use super::*;
 use crate::{agent_build_requests as build, service_request_catalogue as data};
@@ -22,7 +22,7 @@ impl ApplicationService {
         if !state.runtime_aliases.values().any(|id| id == project) {
             return Err(Error::Conflict);
         }
-        let mut requests = Vec::with_capacity(data::LIMIT);
+        let mut requests = Vec::with_capacity(data::DETAIL_LIMIT);
         let local = self.local_checks.entries()?;
         if local.len() > crate::agent_local_checks::LIMIT {
             return Err(Error::StateUnknown);
@@ -55,17 +55,31 @@ impl ApplicationService {
                 requests.push(entry.catalogue_metadata()?);
             }
         }
+        let mut additional_requests = Vec::with_capacity(data::ADDITIONAL_LIMIT);
+        additional_requests.extend(self.git_index_requests.catalogue_requests(&self.instance, project)?);
+        additional_requests.extend(self.identity_requests.catalogue_requests(&self.instance, project)?);
+        additional_requests.extend(self.version_reserve_requests.catalogue_requests(&self.instance, project)?);
         let view = data::Catalogue {
-            schema_version: 1,
+            schema_version: 2,
             scope: data::Scope::CurrentHostRetainedRequests,
             sampling: data::Sampling::PerRequestNotAtomic,
             service_instance: self.instance.clone(),
             project_id: project.clone(),
             do_not_replay: true,
             requests,
+            additional_requests: Some(additional_requests),
         };
         view.validate().map_err(|_| Error::StateUnknown)?;
         self.native_history_current()?;
+        // Lock custody prevents replacement, but elapsed time can still
+        // expire a grant during the bounded copies. Never return that view.
+        let grant = live_grant(&state)?;
+        if client.instance != self.instance
+            || client.grant_id != grant.id
+            || !grant.projects.contains(project)
+        {
+            return Err(Error::AccessDenied);
+        }
         // Same Service/grant guard across the complete bounded memory copy.
         // Entry/latest/publication guards never call back into Service or Doc.
         drop(state);
@@ -226,6 +240,129 @@ mod tests {
     fn finish(service: &ApplicationService, store: &PrivateStateDirectory) {
         service.stop().unwrap();
         store.close().unwrap();
+    }
+
+    #[test]
+    fn lost_ack_reconnect_discovers_git_identity_and_reservation_without_private_data_or_replay() {
+        use crate::{agent_identity_requests as identity, service_git_protocol as git,
+            service_git_requests as git_requests, service_version_reserve_protocol as version,
+            service_version_reserve_requests as version_requests};
+        let (_f, store, service, project, root, first) = setup();
+        let document = Arc::new(());
+        let review = Arc::new(());
+        let point = service.identity_request_point("project-1").unwrap();
+        service.identity_requests.allow(identity::NativeScope {
+            project_id: project.clone(), runtime_id: "project-1".into(), root: root.clone(),
+            device: point.device, inode: point.inode, registration: 1, input_revision: 1,
+            document: Arc::downgrade(&document),
+        }).unwrap();
+        let intent = identity::Submit {
+            service_instance: service.instance().clone(), project_id: project.clone(),
+            intent_id: Id::random().unwrap(), expected_observation_revision: point.revision,
+            change: identity::Change {
+                selection: identity::Selection {platform: identity::Platform::Android, target: ":app".into(), project: None},
+                desired_identity: "com.private.sentinel".into(), identity_intent: identity::IdentityIntent::NewApplication,
+            },
+        };
+        service.submit_identity(&first, intent.clone()).unwrap(); // Deliberately discard the ACK.
+        let git_scope = Arc::new(git_requests::NativeScope {
+            project_id: project.clone(), runtime_id: "project-1".into(), root,
+            device: point.device, inode: point.inode, registration: 1, document_revision: 1,
+            input_revision: 1, read_operation_id: "git-read-1".into(), document: Arc::downgrade(&document),
+            selection: git::Selection::new(git::Action::Stage, "d".repeat(64), vec!["private/sentinel".into()]).unwrap(),
+            commit: None, changes: tokio::sync::watch::channel(0).0,
+        });
+        let git_access = service.git_index_requests.allow(git_scope).unwrap();
+        let staged = git::Prepare {
+            origin: git::Query {project_id: project.clone(), service_instance: service.instance().clone(), request_id: Id::random().unwrap()},
+            grant_id: git_access.grant_id.unwrap(),
+        };
+        service.git_index_prepare(&first, staged.clone()).unwrap();
+        let reserve_point = service.version_reserve_point("project-1").unwrap();
+        let reserved = version::Submit {
+            origin: version::Query {project_id: project.clone(), service_instance: service.instance().clone(), request_id: Id::random().unwrap()},
+            grant_id: Id::random().unwrap(), review_id: Id::random().unwrap(),
+        };
+        service.version_reserve_requests.allow(Arc::new(version_requests::NativeScope {
+            project_id: project.clone(), runtime_id: "project-1".into(), review_id: reserved.review_id.clone(),
+            review_revision: 1, review_end: Instant::now() + Duration::from_secs(110), read: reserve_point.read,
+            document: Arc::downgrade(&document), review: Arc::downgrade(&review), changes: tokio::sync::watch::channel(0).0,
+        }), reserved.grant_id.clone()).unwrap();
+        service.service_version_reserve_submit(&first, reserved.clone()).unwrap();
+        let before = store.read(Namespace::Projects).unwrap();
+        let second = service.admit_client().unwrap();
+        assert_ne!(first.client_id, second.client_id);
+        let view = discover(&service, &second, &project);
+        assert_eq!(view.schema_version, 2);
+        assert!(view.requests.is_empty());
+        assert_eq!(view.additional_requests.as_ref().unwrap(), &vec![
+            data::AdditionalRequest {family: data::AdditionalFamily::GitIndex, request_id: staged.origin.request_id.clone()},
+            data::AdditionalRequest {family: data::AdditionalFamily::Identity, request_id: intent.intent_id.clone()},
+            data::AdditionalRequest {family: data::AdditionalFamily::VersionReservation, request_id: reserved.origin.request_id.clone()},
+        ]);
+        let encoded = serde_json::to_string(&view).unwrap();
+        for private in ["sentinel", "desiredIdentity", "grantId", "reviewId", "selection", "state"] {
+            assert!(!encoded.contains(private));
+        }
+        let p::ResponseBody::GitIndexRequest(status) = service.git_index_query(&second, &staged.origin, false).unwrap()
+            else {panic!("original Git status")};
+        assert_eq!(status.state, git::State::Queued);
+        let p::ResponseBody::VersionReserveRequest(status) = service.service_version_reserve_query(&second, &reserved.origin, false).unwrap()
+            else {panic!("original reservation status")};
+        assert_eq!(status.state, version::State::Queued);
+        let p::ResponseBody::IdentityIntent(status) = service.query_identity(&second, &identity::Query {
+            service_instance: intent.service_instance, project_id: project.clone(), intent_id: intent.intent_id,
+        }).unwrap() else {panic!("original identity status")};
+        assert_eq!(status.state, identity::IntentState::Queued);
+        assert_eq!(discover(&service, &second, &project), view);
+        let after = store.read(Namespace::Projects).unwrap();
+        assert_eq!((before.revision, before.bytes), (after.revision, after.bytes));
+        service.revoke_agent_read().unwrap();
+        assert!(matches!(service.discover_requests(&second, &project), Err(Error::AccessDenied)));
+        finish(&service, &store);
+    }
+
+    #[test]
+    fn read_expiring_during_original_inbox_copy_is_rechecked_before_return() {
+        let (_f, store, service, project, _root, client) = setup();
+        // A finite real mutex wait, not a production timing hook or fake clock.
+        let expires = Instant::now() + Duration::from_millis(150);
+        service.state.lock().unwrap().grant.as_mut().unwrap().expires = expires;
+        let (entered, result) = std::thread::scope(|scope| {
+            let (entered, worker) = service.git_index_requests.with_catalogue_book_locked(|| {
+                let worker = scope.spawn(|| service.discover_requests(&client, &project));
+                let until = Instant::now() + Duration::from_secs(2);
+                let mut entered = false;
+                while Instant::now() < until {
+                    if matches!(service.state.try_lock(), Err(std::sync::TryLockError::WouldBlock)) {
+                        entered = true;
+                        break;
+                    }
+                    if worker.is_finished() { break; }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                std::thread::sleep(expires.saturating_duration_since(Instant::now()) + Duration::from_millis(1));
+                (entered, worker)
+            }); // Release the SAME held book before joining on every path.
+            (entered, worker.join())
+        });
+        assert!(entered);
+        assert!(matches!(result, Ok(Err(Error::Expired))));
+        finish(&service, &store);
+    }
+
+    #[test]
+    fn unavailable_additional_inbox_is_not_successful_empty_discovery() {
+        for closed in 0..3 {
+            let (_f, store, service, project, _root, client) = setup();
+            match closed {
+                0 => service.git_index_requests.close(),
+                1 => service.identity_requests.close(),
+                _ => service.version_reserve_requests.close(Instant::now()),
+            }
+            assert!(matches!(service.discover_requests(&client, &project), Err(Error::Unavailable)));
+            finish(&service, &store);
+        }
     }
 
     #[test]

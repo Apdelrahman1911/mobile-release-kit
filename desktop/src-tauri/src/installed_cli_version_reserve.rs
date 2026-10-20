@@ -124,6 +124,13 @@ fn output(
         );
         if let Some(v) = &status.reservation {
             text.push_str(&format!("Reserved {} (build {}). Open the separate saved-version preview in Desktop; nothing has been applied.\n",v.name,v.build));
+            if let Some(ci) = &v.ci {
+                text.push_str("CI preparation only — not configured by this output and not hosted allocation.\nAfter applying, commit only the reserved version change directly after its original source. Add this exact trailer after a blank line:\n");
+                text.push_str(&ci.commit_trailer);
+                text.push_str("\nCopy these nonsecret settings into the protected MOBILE_RELEASE_VERSION_AUTHORITY Actions variable once. Keep the existing value for the same counter; never reset it to bypass a refusal:\n");
+                text.push_str(&ci.authority_settings);
+                text.push('\n');
+            }
         }
         text.push_str("This request does not apply source edits or authorize an upload.\n");
         text.into_bytes()

@@ -510,6 +510,34 @@ impl Inbox {
             Ok(())
         }
     }
+    /// Keep the original intent ID discoverable without advancing its phase,
+    /// expiring a pending intent or copying a private change proposal.
+    pub(crate) fn catalogue_requests(
+        &self,
+        instance: &Id,
+        project: &Id,
+    ) -> Result<Vec<crate::service_request_catalogue::AdditionalRequest>, Error> {
+        use crate::service_request_catalogue::{AdditionalFamily, AdditionalRequest};
+        let book = self.lock()?;
+        self.live(&book)?;
+        if &self.instance != instance || book.entries.len() > LIMIT {
+            return Err(Error::StateUnknown);
+        }
+        let mut rows = Vec::with_capacity(book.entries.len());
+        for entry in &book.entries {
+            if &entry.input.service_instance != instance {
+                return Err(Error::StateUnknown);
+            }
+            if &entry.input.project_id == project {
+                rows.push(AdditionalRequest {
+                    family: AdditionalFamily::Identity,
+                    request_id: entry.input.intent_id.clone(),
+                });
+            }
+        }
+        self.live(&book)?;
+        Ok(rows)
+    }
     pub(crate) fn allow(&self, scope: NativeScope) -> Result<LeaseStatus, Error> {
         if !scope.valid() {
             return Err(Error::InvalidRequest);
@@ -781,6 +809,28 @@ mod tests {
         let inbox = Inbox::new(id(1));
         inbox.allow(scope(&document)).unwrap();
         (inbox, document)
+    }
+    #[test]
+    fn catalogue_retains_intents_without_private_changes_or_phase_transitions() {
+        let (inbox, _document) = ready();
+        inbox.submit(origin(30), input(4), &point()).unwrap();
+        let entry = inbox.book.lock().unwrap().entries[0].clone();
+        entry.lease.revoked.store(true, Ordering::Release);
+        let rows = inbox.catalogue_requests(&id(1), &id(2)).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].family, crate::service_request_catalogue::AdditionalFamily::Identity);
+        assert_eq!(rows[0].request_id, input(4).intent_id);
+        assert_eq!(entry.phase.load(Ordering::Acquire), QUEUED);
+        assert!(!entry.claimed.load(Ordering::Acquire));
+        entry.unconfirmed();
+        assert_eq!(inbox.catalogue_requests(&id(1), &id(2)).unwrap(), rows);
+        assert_eq!(entry.phase.load(Ordering::Acquire), UNCONFIRMED);
+        assert!(inbox.catalogue_requests(&id(1), &id(99)).unwrap().is_empty());
+        assert_eq!(inbox.catalogue_requests(&id(99), &id(2)), Err(Error::StateUnknown));
+        inbox.close();
+        assert_eq!(inbox.catalogue_requests(&id(1), &id(2)), Err(Error::Unavailable));
+        inbox.failed.store(true, Ordering::Release);
+        assert_eq!(inbox.catalogue_requests(&id(1), &id(2)), Err(Error::StateUnknown));
     }
     #[test]
     fn read_connection_alone_has_no_request_permission() {

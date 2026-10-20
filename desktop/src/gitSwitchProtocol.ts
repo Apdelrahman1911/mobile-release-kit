@@ -42,12 +42,12 @@ function path(v: unknown): v is string {
   return text(v, 1024) && !v.includes('\\') && v.split('/').length <= 32 &&
     v.split('/').every((p) => !['', '.', '..', '.git'].includes(p) && utf8.encode(p).length <= 255);
 }
-function file(v: unknown, width: number): v is GitSwitchFile {
+export function isGitSwitchFile(v: unknown, width: number): v is GitSwitchFile {
   return connectionKeys(v, ['path', 'mode', 'sourceOid', 'targetOid', 'sourceSha256', 'targetSha256', 'targetSize']) && path(v.path) &&
     (v.mode === '100644' || v.mode === '100755') && oid(v.sourceOid) && oid(v.targetOid) && v.sourceOid.length === width && v.targetOid.length === width &&
     v.sourceOid !== v.targetOid && digest(v.sourceSha256) && digest(v.targetSha256) && uint(v.targetSize, 4 * 1024 * 1024);
 }
-function log(v: unknown): v is GitSwitchLog {
+export function isGitSwitchLog(v: unknown): v is GitSwitchLog {
   return connectionKeys(v, ['enabled', 'originalKind', 'originalSha256']) && typeof v.enabled === 'boolean' && digest(v.originalSha256) &&
     (v.originalKind === 'absent' ? v.originalSha256 === ABSENT : v.originalKind === 'file' && v.enabled);
 }
@@ -64,9 +64,9 @@ export function isGitSwitchReview(v: unknown, expected: GitSwitchAction): v is G
       v.targetRef !== `refs/heads/${expected.name}` || !reference(v.branch) || v.branch === v.targetRef || !oid(v.head) || !oid(v.targetOid) ||
       v.head.length !== v.targetOid.length || !digest(v.expectedIndex) || !digest(v.reviewDigest) || v.contentOnly !== true ||
       !uint(v.trackedCount, 256) || !Array.isArray(v.files) || v.files.length > 8 || v.files.length > v.trackedCount ||
-      !Array.isArray(v.paths) || v.paths.length !== v.files.length || !log(v.log)) return false;
+      !Array.isArray(v.paths) || v.paths.length !== v.files.length || !isGitSwitchLog(v.log)) return false;
   const width = v.head.length, files = v.files, paths = v.paths;
-  if (!files.every((f): f is GitSwitchFile => file(f, width))) return false;
+  if (!files.every((f): f is GitSwitchFile => isGitSwitchFile(f, width))) return false;
   return files.every((f, i) => paths[i] === f.path && (i === 0 || gitReadPathOrder(files[i - 1]!.path, f.path) < 0)) &&
     files.reduce((n, f) => n + f.targetSize, 0) <= 8 * 1024 * 1024;
 }

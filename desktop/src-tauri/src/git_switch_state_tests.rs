@@ -37,7 +37,7 @@ fn schema_three_is_closed_and_switch_candidate_requires_paired_index_metadata_an
     let mut state=State::empty();state.reserve(row(1)).unwrap();let original=snapshot(&state);
     for change in [
         (|v:&mut serde_json::Value|v["schemaVersion"]=json!(2)) as fn(&mut serde_json::Value),
-        |v|v["schemaVersion"]=json!(5),
+        |v|v["schemaVersion"]=json!(255),
         |v|{v["rows"][0].as_object_mut().unwrap().remove("switch");},
         |v|v["rows"][0]["switch"]["targetRef"]=json!("refs/heads/main"),
         |v|v["rows"][0]["switch"]["targetOid"]=json!("bad"),

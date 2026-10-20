@@ -60,7 +60,29 @@ fn data() -> Final {
         candidate_id: "12345678-1234-4234-9234-123456789abc".into(),
         name: "1.2.3".into(),
         build: 7,
+        ci: None,
     })
+}
+#[test]
+fn catalogue_keeps_original_reservation_ids_without_expiry_or_result_access() {
+    let r = Rig::new();
+    r.allowed();
+    r.inbox.submit(r.input.clone()).unwrap();
+    let entry = r.inbox.book.lock().unwrap().entries[0].clone();
+    r.scope.read.revoke(Instant::now());
+    let before = entry.row.lock().unwrap().status.clone();
+    let rows = r.inbox.catalogue_requests(&id(1), &id(2)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].family, crate::service_request_catalogue::AdditionalFamily::VersionReservation);
+    assert_eq!(rows[0].request_id, r.input.origin.request_id);
+    assert_eq!(entry.row.lock().unwrap().status, before);
+    assert!(entry.row.lock().unwrap().stop.is_none());
+    assert!(r.inbox.catalogue_requests(&id(1), &id(99)).unwrap().is_empty());
+    assert_eq!(r.inbox.catalogue_requests(&id(99), &id(2)), Err(Error::StateUnknown));
+    r.inbox.close(Instant::now());
+    assert_eq!(r.inbox.catalogue_requests(&id(1), &id(2)), Err(Error::Unavailable));
+    r.inbox.fence();
+    assert_eq!(r.inbox.catalogue_requests(&id(1), &id(2)), Err(Error::StateUnknown));
 }
 #[test]
 fn no_grant_no_claim_and_allow_refusals_do_not_insert_a_new_grant() {

@@ -1,3 +1,4 @@
+import { GitFastForward } from './GitFastForward.tsx';
 import { useId, useSyncExternalStore } from 'react';
 import type { GitReadController } from '../gitReadController.ts';
 import type { GitLocalController } from '../gitLocalController.ts';
@@ -20,7 +21,7 @@ export function GitBranches({ reader, controller, repository, originalProjectNam
   const branches = reads.branchesProject === files.projectId ? reads.branches : null;
   const fresh = !!branches && reads.branchesCurrent && !reads.stale && !files.stale && branches.revision === files.observation?.revision;
   const readReason = reader.readReason(files.projectId), prepareReason = controller.prepareBranchReason(), reviewReason = controller.reviewReason();
-  return <ProgressiveDisclosure title="Local branches" needsAttention={!!prepared || review?.prepared.review.action === 'branch-switch'}>
+  return <ProgressiveDisclosure title="Local branches" needsAttention={!!prepared || review?.prepared.review.action === 'branch-switch' || review?.prepared.review.action === 'fast-forward'}>
     <p>Read branches on this computer, then review a clean switch or create a new starting point. Nothing is pushed to GitHub.</p>
     <button type="button" className="button secondary" disabled={readReason !== null || !files.observation || files.stale}
       onClick={() => { if (files.observation) void reader.readBranches(files.projectId, files.observation.revision); }}>Read local branches</button>
@@ -33,6 +34,7 @@ export function GitBranches({ reader, controller, repository, originalProjectNam
         {b.ref === branches.branch ? ' · current' : ''} <code>{b.oid.slice(0, 12)}</code></li>)}</ul> : <p>No local branch commits were observed.</p>}
       <p className="save-note">Local references only; no fetch or online account check.</p>
     </>}
+    <GitFastForward reader={reader} controller={controller} repository={repository} originalProjectName={originalProjectName} />
     <GitBranchRename controller={controller} repository={repository} originalProjectName={originalProjectName} />
     <GitBranchSwitch reader={reader} controller={controller} repository={repository} originalProjectName={originalProjectName} />
     <h4>Create a new local branch without switching</h4>

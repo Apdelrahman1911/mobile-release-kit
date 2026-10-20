@@ -18686,6 +18686,54 @@ class MacNormalPreviewData(unittest.TestCase):
             with self.assertRaises(TOOL.Refused):
                 TOOL.remover_cargo_artifact(cargo_lines(*rows, final), binary.with_name("mrk-macos-install"), target, body, target=selected_target, package_version="0.1.2")
 
+    def test_observer_ignores_only_the_exact_cargo_auxiliary_main_binary(self):
+        final = {"reason": "build-finished", "success": True}
+        for build_target in TOOL.MAC_TARGETS:
+            target, observer, rows, body = observer_cargo_fixture(build_target=build_target)
+            output = target / build_target / "debug/mobile-release-kit-desktop"
+            auxiliary = copy.deepcopy(rows[0])
+            auxiliary["target"].update(name="mobile-release-kit-desktop", kind=["bin"],
+                src_path=str(TOOL.DESKTOP / "src-tauri/src/main.rs"),
+                **{"required-features": ["desktop-shell"]})
+            auxiliary.update(executable=str(output), filenames=[str(output)],
+                profile={"opt_level": "0", "debug_assertions": True, "test": False})
+
+            def parse(extra):
+                return TOOL.observer_cargo_artifact(cargo_lines(*rows, *extra, final),
+                    observer, target, body, target=build_target, package_version="0.1.2")
+
+            result = parse([auxiliary])
+            self.assertEqual(result["entrypoint"], "tests/installed_shell_observation.rs")
+            self.assertEqual(result["targetKind"], "test")
+            self.assertEqual(result["binarySha256"], TOOL.digest(body))
+            self.assertEqual(result["binarySize"], len(body))
+            self.assertEqual(parse([])["binarySha256"], result["binarySha256"])
+            for section, field, value in (
+                (None, "package_id", "registry+foreign"),
+                (None, "manifest_path", "/foreign/Cargo.toml"),
+                (None, "executable", str(observer)), (None, "filenames", [str(observer)]),
+                (None, "filenames", [str(output), str(observer)]),
+                (None, "features", ["installed-cli"]), (None, "fresh", 1),
+                ("target", "name", "mrk"), ("target", "kind", ["cdylib"]),
+                ("target", "crate_types", ["lib"]), ("target", "edition", "2018"),
+                ("target", "src_path", str(TOOL.DESKTOP / "src-tauri/src/bin/macos_install.rs")),
+                ("target", "required-features", ["macos-installed-installer"]),
+                ("profile", "test", True), ("profile", "debug_assertions", False),
+                ("profile", "opt_level", "3"),
+            ):
+                changed = copy.deepcopy(auxiliary)
+                (changed if section is None else changed[section])[field] = value
+                with self.subTest(target=build_target, section=section, field=field), self.assertRaises(TOOL.Refused):
+                    parse([changed])
+            with self.assertRaisesRegex(TOOL.Refused, "observer-cargo-one-auxiliary-bin"):
+                parse([auxiliary, copy.deepcopy(auxiliary)])
+            # This exception is solely an ignored observer-build dependency;
+            # it does not admit an executable into the shipping image graph.
+            image_target, image_binary, image_rows, image_body = normal_cargo_fixture(build_target=build_target)
+            with self.assertRaisesRegex(TOOL.Refused, "image-cargo-no-executable-role"):
+                TOOL.image_cargo_artifact(cargo_lines(*image_rows, auxiliary, final),
+                    image_binary, image_target, image_body, "desktop", target=build_target, package_version="0.1.2")
+
     def test_selected_application_version_keeps_native_and_helper_crates_fixed(self):
         final = {"reason": "build-finished", "success": True}
         for build_target in TOOL.MAC_TARGETS:

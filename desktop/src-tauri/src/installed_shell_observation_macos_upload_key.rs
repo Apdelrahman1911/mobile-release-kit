@@ -6,22 +6,32 @@ use crate::android_toolchain_catalog as catalog;
 use crate::asset_session::{InstalledUploadSample, InstalledUploadTrace};
 use std::sync::Mutex;
 use tauri::Manager;
+#[path = "installed_shell_observation_macos_upload_key_restart.rs"]
+pub(crate) mod restart;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Case {
     RoundTrip,
     StopBeforeGo,
     StopAfterNew,
+    ColdProduce,
+    ColdReopen,
 }
 impl Case {
-    pub(super) const ALL: [Self; 3] = [Self::RoundTrip, Self::StopBeforeGo, Self::StopAfterNew];
+    pub(super) const ALL: [Self; 5] = [Self::RoundTrip, Self::StopBeforeGo, Self::StopAfterNew, Self::ColdProduce, Self::ColdReopen];
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::RoundTrip => "upload-key-roundtrip",
             Self::StopBeforeGo => "upload-key-stop-before-go",
             Self::StopAfterNew => "upload-key-stop-after-new",
+            Self::ColdProduce => "upload-key-cold-produce",
+            Self::ColdReopen => "upload-key-cold-reopen",
         }
     }
+    pub(crate) fn fixture_name(self) -> &'static str {
+        if matches!(self, Self::ColdProduce | Self::ColdReopen) { restart::SCOPE } else { self.name() }
+    }
+    fn positive(self) -> bool { matches!(self, Self::RoundTrip | Self::ColdProduce) }
     pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -97,10 +107,11 @@ impl Action {
         }
     }
     fn allowed(self, case: Case) -> bool {
+        if case == Case::ColdReopen { return false; }
         match self {
             Self::RecoverySaved | Self::RecoveryPrepare | Self::AcknowledgeUnstarted | Self::RecoveredRelock => case == Case::StopBeforeGo,
             Self::Read => case != Case::StopBeforeGo,
-            Self::Relock => case == Case::RoundTrip,
+            Self::Relock => case.positive(),
             Self::BindSaved | Self::BoundSaved | Self::BoundPrepare | Self::RememberBound | Self::BoundRelock => case == Case::StopAfterNew,
             _ => true,
         }
@@ -114,6 +125,7 @@ impl Action {
 pub(crate) struct Flow {
     next: AtomicU8,
     pub(crate) trace: Mutex<InstalledUploadTrace>,
+    pub(crate) cold: restart::Flow,
 }
 impl Flow {
     pub(crate) fn case(&self, case: super::Case) -> Option<Case> {
@@ -163,11 +175,13 @@ impl Flow {
         })
     }
     pub(super) fn finished(&self, case: Case, originals: usize) -> bool {
+        if case == Case::ColdReopen { return self.cold.finished(originals); }
         let next = self.next.load(Ordering::SeqCst);
         (originals == 4 && next == 255) || match case {
-            Case::RoundTrip => originals == 8 && next == 14,
+            Case::RoundTrip | Case::ColdProduce => originals == 8 && next == 14,
             Case::StopBeforeGo => originals == 8 && next == 16,
             Case::StopAfterNew => originals == 10 && next == 18,
+            Case::ColdReopen => false,
         }
     }
 }
@@ -221,6 +235,7 @@ impl Selection {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in super::super) enum Step {
+    Cold(restart::Step),
     Context,
     Refresh,
     Refreshed,
@@ -257,6 +272,7 @@ pub(in super::super) enum Step {
 #[derive(Default)]
 pub(super) struct Record {
     pub(super) sample: Option<InstalledUploadSample>,
+    cold: restart::Record,
     repeated_refused: bool,
     readback: bool,
     acknowledged: bool,
@@ -342,6 +358,7 @@ impl Observation {
         }
     }
     async fn upload_tick(self: &Arc<Self>, document: &DocumentBinding, step: Step) {
+        if let Step::Cold(cold) = step { self.cold_tick(document, cold); return; }
         let Some(control) = &self.vault else {
             self.fail_with("upload-key-original-contract");
             return;
@@ -350,6 +367,7 @@ impl Observation {
             self.fail_with("upload-key-original-contract");
             return;
         };
+        if case == Case::ColdReopen { self.fail_with("upload-key-original-contract"); return; }
         let result: Result<Option<Step>, BridgeError> = async {
             let asset = |e: crate::asset_commands::AssetError| {
                 let _ = e;
@@ -362,6 +380,7 @@ impl Observation {
                     .map_err(asset)
             };
             Ok(match step {
+                Step::Cold(_) => return Err(BridgeError::invalid()),
                 Step::Context => {
                     let project = self
                         .record()
@@ -616,7 +635,8 @@ impl Observation {
                 Step::Relock => {
                     document
                         .installed_upload_vault(match case {
-                            Case::RoundTrip => Action::Relock,
+                            Case::RoundTrip | Case::ColdProduce => Action::Relock,
+                            Case::ColdReopen => return Err(BridgeError::invalid()),
                             Case::StopBeforeGo => Action::RecoveredRelock,
                             Case::StopAfterNew => Action::BoundRelock,
                         })
@@ -682,6 +702,7 @@ impl Observation {
 
 pub(super) fn report(record: &super::Record, control: &Control) -> Option<Value> {
     let case = control.upload.case(control.case)?;
+    if case == Case::ColdReopen { return restart::report(record, control); }
     let data = &record.upload;
     let not_executed = record.not_executed || data.not_executed;
     if !record.final_originals
@@ -692,7 +713,7 @@ pub(super) fn report(record: &super::Record, control: &Control) -> Option<Value>
         || data.bound != (case == Case::StopAfterNew && !not_executed)
         || data.remembered != (case == Case::StopAfterNew && !not_executed)
         || (!not_executed
-            && (!data.sample.is_some_and(|sample| if case == Case::RoundTrip { sample.positive() } else { sample.cancelled(case) })
+            && (!data.sample.is_some_and(|sample| if case.positive() { sample.positive() } else { sample.cancelled(case) })
                 || !data.repeated_refused
                 || data.readback != (case != Case::StopBeforeGo)
                 || data.acknowledged != (case == Case::StopBeforeGo)
@@ -702,7 +723,7 @@ pub(super) fn report(record: &super::Record, control: &Control) -> Option<Value>
     }
     let mut value = json!({"mechanism":"same-original-upload-key-v1","normalGenerationEnabled":false,
         "execution":if not_executed{"not-executed-prerequisite"}else{"executed"},
-        "testResult":if not_executed{"not-executed"}else if case == Case::RoundTrip{"positive"}else{"cancelled-cleanup"},
+        "testResult":if not_executed{"not-executed"}else if case.positive(){"positive"}else{"cancelled-cleanup"},
         "initializeHelper":record.initialization,"storage":record.storage,
         "generated":data.sample,"repeatedCreateRefused":data.repeated_refused,"authenticatedReopenReadback":data.readback,"stoppedIntentAcknowledged":data.acknowledged,
         "originalCount":record.original_count+1,"allOriginalsSettled":true,"finalDocumentEmpty":true,
@@ -788,11 +809,12 @@ pub(super) fn data_checks() -> bool {
         for next in [14, 16, 18, 255] {
             control.upload.next.store(next, Ordering::SeqCst);
             for originals in [4, 5, 7, 8, 9, 10, 11] {
-                let expected = (originals == 4 && next == 255) || match case {
-                    Case::RoundTrip => originals == 8 && next == 14,
+                let expected = case != Case::ColdReopen && ((originals == 4 && next == 255) || match case {
+                    Case::RoundTrip | Case::ColdProduce => originals == 8 && next == 14,
                     Case::StopBeforeGo => originals == 8 && next == 16,
                     Case::StopAfterNew => originals == 10 && next == 18,
-                };
+            Case::ColdReopen => false,
+                });
                 if control.upload.finished(case, originals) != expected { return false; }
             }
         }
@@ -826,7 +848,7 @@ pub(super) fn data_checks() -> bool {
         || !bound.claim(&document, 9, Some(&root))
         || bound.claim(&document, 9, Some(&root))
     { return false; }
-    Action::Create.original() == 4
+    restart::data_checks() && Action::Create.original() == 4
         && Action::RefuseRepeat.original() == 5
         && Action::Read.original() == 7
         && Action::Relock.original() == 8

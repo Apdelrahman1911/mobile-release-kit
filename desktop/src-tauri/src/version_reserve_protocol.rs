@@ -140,6 +140,7 @@ pub(crate) struct ReservationView {
     pub(crate) candidate_id: String,
     pub(crate) name: String,
     pub(crate) build: u64,
+    pub(crate) ci: crate::service_version_reserve_protocol::CiReference,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

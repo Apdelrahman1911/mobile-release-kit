@@ -54,3 +54,19 @@ test('wrong or unreadable source guidance never recommends overwriting or callin
   assert.match(toolAcquisitionFailureGuidance('existing-tools-unreadable').body,/do not weaken its permissions/);
   assert.match(toolAcquisitionFailureGuidance('unknown').body,/does not authorize a retry/);
 });
+
+test('SDKMAN lookup scope preserves legacy observations and keeps fallback paths private', () => {
+  const parts = { compatible:['jdk','sdk-platform','gradle'], missing:['sdk-build-tools'] };
+  const value = { scope:'fixed-macos-locations-v2', searched:['gradle'], present:['gradle'], compatibleComponents:['gradle'] };
+  assert.deepEqual(parseToolSourceDiscovery(value,parts),value);
+  assert.deepEqual(foundToolRoles(parseToolSourceDiscovery(value,parts)),['gradle']);
+  const old = {...value,scope:'fixed-macos-locations-v1'};
+  assert.deepEqual(parseToolSourceDiscovery(old,parts),old); // Never relabel an older search as the new one.
+  for (const patch of [{scope:'fixed-macos-locations-v3'},{path:'/Users/inert/.sdkman/candidates/gradle/8.14.5'},
+    {present:[]},{compatibleComponents:[]},{searched:['sdkman']},{version:'current'}])
+    assert.equal(parseToolSourceDiscovery({...value,...patch},parts),null);
+  assert.match(TOOL_DISCOVERY_HELP,/Only if that Gradle folder is absent/);
+  assert.match(TOOL_DISCOVERY_HELP,/\.sdkman\/candidates\/gradle\/8\.14\.5/);
+  assert.match(TOOL_DISCOVERY_HELP,/other SDKMAN versions/);
+  assert.match(TOOL_DISCOVERY_HELP,/ordinary Inspect\/Review\/Register/);
+});

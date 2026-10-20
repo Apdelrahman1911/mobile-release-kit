@@ -68,7 +68,7 @@ Usage:\n\
 Capabilities describe this CLI without opening Desktop or reading project data.\n\
 For the other commands, open Desktop, select a project, then enable agent read access in Settings.\n\
 Reads return observations; they do not rerun actions or validate a release.\n\
-requests lists retained local-check/build request IDs in this Desktop instance, not complete history or replay permission.\n\
+requests lists retained local-check/build, Git, identity and version request IDs in this Desktop instance, not complete history or replay permission.\n\
 android-tools returns historical Desktop catalogue labels, not current tools or project compatibility.\n\
 repository returns historical Desktop Git counts; local refs only, no inspection, fetch or current-checkout claim.\n\
 observe --json may include optional setup state codes, not a passed check or release approval.\n\
@@ -122,7 +122,7 @@ const READ_COMMANDS: [CommandCapability; 8] = [
     CommandCapability { command: "projects", arguments: &[], description: "List projects allowed by the current read grant." },
     CommandCapability { command: "observe", arguments: &["PROJECT_ID"], description: "Read a saved project observation and optional redacted setup guidance, which may be stale." },
     CommandCapability { command: "android-tools", arguments: &["PROJECT_ID"], description: "Read historical Desktop catalogue labels; not live tools, inspection or project compatibility." },
-    CommandCapability { command: "requests", arguments: &["PROJECT_ID"], description: "Discover current-instance local-check/Android/iOS request IDs; not complete history or replay permission." },
+    CommandCapability { command: "requests", arguments: &["PROJECT_ID"], description: "Discover retained local-check/build, Git, identity and version request IDs; not history or replay permission." },
     CommandCapability { command: "repository", arguments: &["PROJECT_ID"], description: "Read historical Desktop Git counts; local refs only, no inspection or fetch." },
     CommandCapability { command: "operations", arguments: &["PROJECT_ID"], description: "List saved operation observations for a project." },
     CommandCapability { command: "operation", arguments: &["PROJECT_ID", "OPERATION_ID"], description: "Read one saved operation observation; it is not native finality authority." },
@@ -227,7 +227,7 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "sharesGrantAndRequestLimitWithGitIndex":true,"readOrIndexGrantAuthorizesCommit":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
                 "includesPrivateDraft":false,"hooks":false,"signing":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":git_commit::COMMANDS},
             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
-            "requestDiscovery": {"scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "savedHistory":false, "includesReports":false, "grantsExecution":false},
+            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","identity","version-reservation"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
             "identityRequests": {
                 "scope": "desktop-reviewed-proposal",
                 "defaultEnabled": false,
@@ -452,7 +452,7 @@ mod tests {
             schema_version: 1, scope: crate::service_request_catalogue::Scope::CurrentHostRetainedRequests,
             sampling: crate::service_request_catalogue::Sampling::PerRequestNotAtomic,
             service_instance: Id::parse(id).unwrap(), project_id: Id::parse(id).unwrap(),
-            do_not_replay: true, requests: vec![],
+            do_not_replay: true, requests: vec![], additional_requests: None,
         };
         let mut response = p::Response { version: p::VERSION, request_id: options.request.request_id,
             service_instance: Id::parse(id).unwrap(), client_id: Id::parse(id).unwrap(), session_id: Id::parse(id).unwrap(),
@@ -464,7 +464,7 @@ mod tests {
         let caps: serde_json::Value = serde_json::from_slice(&capabilities(true).unwrap()).unwrap();
         assert_eq!(caps["requestDiscovery"]["grantsExecution"], false);
         assert_eq!(caps["requestDiscovery"]["includesReports"], false);
-        assert_eq!(caps["requestDiscovery"]["maxRequests"], 64);
+        assert_eq!(caps["requestDiscovery"]["maxRequests"], 160);
     }
     #[test]
     fn android_tools_is_a_closed_historical_read_with_no_action_parameters() {

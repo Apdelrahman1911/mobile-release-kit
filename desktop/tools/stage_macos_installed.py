@@ -479,7 +479,7 @@ def package_refusal_message(error):
 
 def runtime_refusal_annotation(command, error):
     """Bounded code locations only: never private values or exception messages."""
-    if command not in ("compose-store-runtime", "finalize-runtime-binding"):
+    if command not in ("compose-store-runtime", "finalize-runtime-binding", "app"):
         return
     try:
         kinds = {Refused: "refused", OSError: "os-error", ValueError: "value-error",
@@ -2363,7 +2363,27 @@ def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TA
              and item.get("profile", {}).get("opt_level") == "0"
              and type(item.get("fresh")) is bool, "observer-cargo-source-library")
         cargo_features(item, expected_features)
-    need(not any(item["target"].get("kind") in (["cdylib"], ["bin"], ["example"], ["bench"])
+    # Cargo also builds enabled ordinary binaries for integration tests, even
+    # with --no-run (the CARGO_BIN_EXE contract). This auxiliary main is never
+    # selected or packaged: only the exact test executable above may be used.
+    auxiliary = [item for item in records if item["target"].get("kind") == ["bin"]]
+    need(len(auxiliary) <= 1, "observer-cargo-one-auxiliary-bin")
+    for item in auxiliary:
+        output = target_dir / target / "debug/mobile-release-kit-desktop"
+        role = item["target"]
+        need(item.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@" + package_version
+             and item.get("manifest_path") == str(root / "Cargo.toml")
+             and role.get("name") == "mobile-release-kit-desktop"
+             and role.get("crate_types") == ["bin"] and role.get("edition") == "2021"
+             and role.get("src_path") == str(root / "src/main.rs")
+             and role.get("required-features") == ["desktop-shell"]
+             and item.get("executable") == str(output) and item.get("filenames") == [str(output)]
+             and type(item.get("profile")) is dict and item["profile"].get("test") is False
+             and item["profile"].get("debug_assertions") is True
+             and item["profile"].get("opt_level") == "0"
+             and type(item.get("fresh")) is bool, "observer-cargo-auxiliary-main")
+        cargo_features(item, features)
+    need(not any(item["target"].get("kind") in (["cdylib"], ["example"], ["bench"])
                  or item is not row and item["target"].get("kind") == ["test"]
                  for item in records), "observer-cargo-no-image-or-bin")
     macho(body, target=target)

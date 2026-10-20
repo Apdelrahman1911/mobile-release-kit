@@ -64,6 +64,21 @@ fn setup() -> (Arc<()>, Inbox, p::Prepare) {
     let request = input(&inbox, grant, id('c'));
     (doc, inbox, request)
 }
+#[test]
+fn catalogue_commit_ids_never_copy_the_private_draft_or_consume_the_claim() {
+    let (_doc, inbox, input) = setup();
+    let prepared = inbox.prepare_commit(input.clone()).unwrap();
+    let rows = inbox.catalogue_requests(&id('b'), &id('a')).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].family, crate::service_request_catalogue::AdditionalFamily::GitCommit);
+    assert_eq!(rows[0].request_id, input.origin.request_id);
+    let encoded = serde_json::to_value(&rows).unwrap();
+    assert_eq!(encoded[0].as_object().unwrap().len(), 2);
+    assert_eq!(inbox.query_commit(&input.origin, false).unwrap().0, prepared.0);
+    let claim = inbox.claim().unwrap().unwrap();
+    drop(claim); // Explicit DATA Unknown, not a native finality claim.
+    assert_eq!(inbox.catalogue_requests(&id('b'), &id('a')).unwrap(), rows);
+}
 fn prepared(inbox: &Inbox, request: &p::Prepare) -> Arc<NativeLink> {
     inbox.prepare_commit(request.clone()).unwrap();
     let mut claim = inbox.claim().unwrap().unwrap();

@@ -357,3 +357,24 @@ test('found location survives only its own picker relay, not project switch or a
     if(cut==='lost') assert.equal(h.android.getSnapshot().sourcesUnconfirmed,true);
   }
 });
+
+test('SDKMAN v2 result uses only the original Gradle picker and preserves chosen JDK and partial SDK', async (t) => {
+  const selections = [{role:'jdk',displayName:'Chosen JDK'}, {role:'sdk',displayName:'Chosen partial SDK'}];
+  const discovered = {scope:'fixed-macos-locations-v2',searched:['gradle'],present:['gradle'],compatibleComponents:['gradle']};
+  const h = await controllers(t,{initialSources:{...source(2,'sdk'),selections},missing:['sdk-build-tools'],discovered});
+  assert.deepEqual(h.tools.getSnapshot().preparedFolders.roles,['gradle']);
+  assert.equal(h.tools.getSnapshot().preparedFolders.existing,true);
+  await h.tools.reviewDownload(); assert.equal(h.tools.getSnapshot().status.operation.context.action,'inspect');
+  assert.equal(h.tools.getSnapshot().consent,null);
+  await h.choose('jdk'); await h.choose('sdk'); assert.equal(h.calls.length,0);
+  const picking = h.choose('gradle'); assert.equal(h.calls.length,1);
+  assert.deepEqual(h.calls[0].input,{schemaVersion:1,sourceGeneration:2,projectId:'p1',role:'gradle',
+    discovered:{operationId:INSPECT,ownerGeneration:INSPECT_GEN}}); // No native path, version or selected-source proof in renderer input.
+  const after = [...selections,{role:'gradle',displayName:'Found Gradle'}];
+  h.reply(h.calls[0],{...source(3,'gradle'),selections:after}); await picking;
+  assert.deepEqual(h.android.getSnapshot().toolSources.selections,after);
+  assert.equal(h.android.getSnapshot().toolSources.inspection,'not-run');
+  assert.equal(h.android.getSnapshot().toolSources.protectedCopy,'not-created');
+  assert.equal(h.tools.getSnapshot().presentation,'stale');
+  assert.equal(h.calls.length,1); // No download, Inspect, Register or build is automatic.
+});
