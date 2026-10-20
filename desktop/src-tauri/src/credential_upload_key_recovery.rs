@@ -787,10 +787,19 @@ impl DocumentBinding {
         &self,
         request: RecoveryRequest,
     ) -> Result<UploadKeyStatus, AssetError> {
+        self.recover_upload_key_selected(request, Qualification::Ordinary)
+    }
+    pub(in crate::asset_session) fn recover_upload_key_selected(
+        &self, request: RecoveryRequest, selection: Qualification,
+    ) -> Result<UploadKeyStatus, AssetError> {
+        let admission = selection.admit(self, SelectedAction::Recover, None)?;
+        if !admission.recovery_action(request.action) {
+            return Err(AssetError::new(Reason::Unqualified));
+        }
         self.reconcile();
         let mut state = self.lock();
         self.expire(&mut state, Instant::now());
-        if !available(self) {
+        if !admission.qualified(self) {
             return Err(AssetError::new(Reason::Unqualified));
         }
         self.durable_gate(&state, true)?;
@@ -812,6 +821,9 @@ impl DocumentBinding {
             .as_ref()
             .and_then(|session| session.upload_key_setup.ready.clone())
             .ok_or_else(|| AssetError::new(Reason::VaultInterrupted))?;
+        if !admission.same(&prepared.admission) {
+            return Err(AssetError::new(Reason::Unqualified));
+        }
         current_prepared(self, &state, &prepared)?;
         let observed = self.credential_observation_for_binding(
             &state,
@@ -898,6 +910,49 @@ pub(in crate::asset_session) struct StoppedWrite {
     change: Option<saved::Change>,
     revision: Option<u64>,
 }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl StoppedWrite {
+    pub(in crate::asset_session) fn installed_revision(&self) -> Option<u64> {
+        self.revision
+    }
+}
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(in crate::asset_session) fn installed_unstarted_request(
+    status: &UploadKeyStatus, expected: u64,
+) -> Result<RecoveryRequest, AssetError> {
+    let recovery = &status.recovery;
+    if recovery.state != "acknowledge-unstarted"
+        || recovery.preference_revision.as_deref() != Some(expected.to_string().as_str())
+        || recovery.record.is_some() || recovery.operation.is_some()
+    { return Err(AssetError::new(Reason::ContextStale)); }
+    let context = status.assets.context.as_ref().ok_or_else(AssetError::invalid)?;
+    Ok(RecoveryRequest { context_revision: context.revision,
+        status_revision: status.assets.status_revision, preference_revision: expected,
+        action: Action::AcknowledgeUnstarted })
+}
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(in crate::asset_session) fn installed_acknowledged(
+    document: &DocumentBinding, state: &DocumentState, stopped_revision: u64,
+) -> Option<bool> {
+    let slot = state.slot.as_ref()?;
+    if slot.operation != Operation::RecoverUploadKey || slot.owner.id != 8
+        || state.unknown || slot.owner.stopped() || slot.reason != Reason::None
+        || slot.error.is_some() || slot.settlement == Settlement::Unknown
+    { return Some(false); }
+    let status = projection(document, state, None);
+    let operation = status.operation?;
+    if operation.phase == "pending" { return None; }
+    Some(operation.operation_id == 8 && operation.action == Action::AcknowledgeUnstarted
+        && operation.phase == "completed"
+        && stopped_revision.checked_add(1).is_some_and(|revision|
+            operation.preference_revision.as_deref() == Some(revision.to_string().as_str()))
+        && status.record.is_none() && state.assignments.is_empty()
+        && state.vault.as_ref().is_some_and(|vault| vault.rows.is_empty()
+            && vault.bound.iter().all(Option::is_none)))
+}
+
 pub(in crate::asset_session) fn persist_stopped(
     held: &super::super::Holding,
     write: &mut StoppedWrite,

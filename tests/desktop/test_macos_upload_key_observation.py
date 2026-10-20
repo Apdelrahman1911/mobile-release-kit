@@ -31,9 +31,9 @@ def producer():
 
 
 def positive():
-    false = {"nativeUseRetained", "privateRetained", "stopped", "clockFailed", "documentUnknown"}
+    false = {"nativeUseRetained", "privateRetained", "stopped", "clockFailed", "documentUnknown", "cancelledDisposal"}
     return {**{key: key not in false for key in U.SAMPLE_FLAGS}, "operationId": 5,
-            "checkpoint": "none", "producer": producer(), "retainedProducer": None}
+            "checkpoint": "none", "producer": producer(), "retainedProducer": None, "stoppedPreferenceRevision": None}
 
 
 def stopped(case=BEFORE):
@@ -59,7 +59,7 @@ def report(*, missing=False, initialized=True):
             "execution": "not-executed-prerequisite" if missing else "executed",
             "testResult": "not-executed" if missing else "positive", "initializeHelper": old["initializeHelper"],
             "storage": old["storage"], "generated": None if missing else positive(),
-            "repeatedCreateRefused": not missing, "authenticatedReopenReadback": not missing,
+            "repeatedCreateRefused": not missing, "authenticatedReopenReadback": not missing, "stoppedIntentAcknowledged": False,
             "originalCount": 5 if missing else 9, "allOriginalsSettled": True, "finalDocumentEmpty": True,
             "automaticallyAssigned": False, "backupCreated": False, "releaseSigningQualified": False,
             "physicalMacEvidence": False, "privateContentsExported": False,
@@ -104,8 +104,9 @@ class MetadataPort:
     """Finite synthetic metadata slots, no FDs, filesystem or private bytes."""
     uid, gid = 501, 20
 
-    def __init__(self, *, generated=True, initialized=True):
-        self.cases, self.inflight, self.last_returned = (CASE,), False, True
+    def __init__(self, *, generated=True, initialized=True, case=CASE, host_started=None):
+        self.cases, self.inflight, self.last_returned = (case,), False, True
+        host_started = generated if host_started is None else host_started
         self.vault_completed, self.reads, self.opened, self.closed, self.active = set(), [], [], [], set()
         self.before = []
         self.fail_close = set()
@@ -115,8 +116,8 @@ class MetadataPort:
         self.next_id = 1
         self.vault_namespace = self.directory()
         parent = self.directory()
-        self.vault_parents = {CASE: parent}
-        self.entries[self.vault_namespace][CASE] = parent
+        self.vault_parents = {case: parent}
+        self.entries[self.vault_namespace][case] = parent
         self.app = self.directory()
         self.entries[parent]["dev.mobile-release-kit.desktop"] = self.app
         self.vault = self.directory()
@@ -127,6 +128,7 @@ class MetadataPort:
             self.file(self.vault, "vault-header", 104)
         if generated:
             self.file(self.vault, "record-" + "b" * 32, 4096)
+        if host_started:
             self.fence = self.file(self.app, "service-v1.reservation", len(b"MRK service root v1\n") + 16)
             self.service = self.directory()
             self.entries[self.app]["service-v1"] = self.service
@@ -187,7 +189,7 @@ class MetadataPort:
     _temporary = M.Fixtures._temporary
 
     def _vault_namespace_current(self):
-        U.need(self.vault_completed == {CASE})
+        U.need(self.vault_completed == set(self.cases))
 
     def readback(self, case):
         self.reads.append(case)

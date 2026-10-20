@@ -2,6 +2,9 @@
 //! No private value, user path, tool pathname or result-shaped grant is accepted.
 //! All observation storage is fixed, nonsecret DATA; it cannot settle anything.
 use super::*;
+#[path = "credential_upload_key_cancel_observation.rs"]
+mod cancelled;
+pub(super) use cancelled::cancelled_disposed;
 use crate::shell::installed_observation::vault::{
     upload_key::{Action, Case, Selection},
     Control,
@@ -64,6 +67,9 @@ pub(crate) struct Trace {
     disposed: bool,
     native_use_retired: bool,
     checkpoint: Option<Cut>,
+    cancelled_disposal: bool,
+    stopped_preference_revision: Option<u64>,
+    recovery_request: Option<controls::RecoveryRequest>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +100,8 @@ pub(crate) struct Sample {
     document_unknown: bool,
     unassigned: bool,
     checkpoint: &'static str,
+    cancelled_disposal: bool,
+    stopped_preference_revision: Option<u64>,
     // `producer` is the captured actual authenticated-NEW boundary when one
     // exists; otherwise it is the current pre-GO observation. A later STOP
     // cannot rewrite that earlier receipt, nor hide the current retained axes.
@@ -121,6 +129,8 @@ impl Sample {
             && !self.document_unknown
             && self.unassigned
             && self.checkpoint == "none"
+            && !self.cancelled_disposal
+            && self.stopped_preference_revision.is_none()
             && self.producer.is_some_and(ProducerSample::generated)
             && self.retained_producer.is_none()
     }
@@ -433,7 +443,11 @@ impl DocumentBinding {
             .ok_or_else(AssetError::invalid)
     }
     pub(crate) async fn installed_upload_saved(&self) -> Result<(), AssetError> {
-        let selection = self.installed_upload_select(Action::Saved)?;
+        self.installed_upload_saved_action(Action::Saved).await
+    }
+    async fn installed_upload_saved_action(&self, action: Action) -> Result<(), AssetError> {
+        if !matches!(action, Action::Saved | Action::RecoverySaved) { return Err(AssetError::invalid()); }
+        let selection = self.installed_upload_select(action)?;
         self.installed_upload_consume(selection, None)?;
         let project = self
             .lock()
@@ -509,7 +523,7 @@ impl DocumentBinding {
         let path = (action == Action::Reopen).then(|| control.root());
         self.installed_upload_consume(selection, path)?;
         match action {
-            Action::Lock | Action::Relock | Action::Missing => {
+            Action::Lock | Action::Relock | Action::RecoveredRelock | Action::Missing => {
                 self.lock_session()?;
             }
             Action::Reopen => {
@@ -635,6 +649,8 @@ impl DocumentBinding {
                 Some(Cut::BeforeGo) => "before-go",
                 Some(Cut::AfterNew) => "after-new-before-journal",
             },
+            cancelled_disposal: trace.cancelled_disposal,
+            stopped_preference_revision: trace.stopped_preference_revision,
             producer,
             retained_producer,
         })
@@ -666,6 +682,8 @@ mod tests {
             document_unknown: false,
             unassigned: true,
             checkpoint: "none",
+            cancelled_disposal: false,
+            stopped_preference_revision: None,
             producer: Some(ProducerSample {
                 ready: true,
                 go_claimed: true,
@@ -821,6 +839,8 @@ mod tests {
             document_unknown: true,
             unassigned: true,
             checkpoint: "before-go",
+            cancelled_disposal: false,
+            stopped_preference_revision: None,
             producer: Some(ProducerSample {
                 ready: true,
                 ..ProducerSample::default()

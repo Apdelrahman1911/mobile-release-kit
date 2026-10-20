@@ -44,6 +44,10 @@ pub(crate) enum Action {
     Recontext,
     Read,
     Relock,
+    RecoverySaved,
+    RecoveryPrepare,
+    AcknowledgeUnstarted,
+    RecoveredRelock,
     Missing,
 }
 impl Action {
@@ -63,6 +67,10 @@ impl Action {
             Self::Recontext => 11,
             Self::Read => 12,
             Self::Relock => 13,
+            Self::RecoverySaved => 12,
+            Self::RecoveryPrepare => 13,
+            Self::AcknowledgeUnstarted => 14,
+            Self::RecoveredRelock => 15,
             Self::Missing => 254,
         }
     }
@@ -70,9 +78,16 @@ impl Action {
         match self {
             Self::RefuseRepeat | Self::Lock | Self::Reopen => 5,
             Self::Unlock => 6,
-            Self::Recontext | Self::Read => 7,
-            Self::Relock => 8,
+            Self::Recontext | Self::Read | Self::RecoverySaved | Self::RecoveryPrepare | Self::AcknowledgeUnstarted => 7,
+            Self::Relock | Self::RecoveredRelock => 8,
             _ => 4,
+        }
+    }
+    fn allowed(self, case: Case) -> bool {
+        match self {
+            Self::RecoverySaved | Self::RecoveryPrepare | Self::AcknowledgeUnstarted | Self::RecoveredRelock => case == Case::StopBeforeGo,
+            Self::Read | Self::Relock => case != Case::StopBeforeGo,
+            _ => true,
         }
     }
     pub(crate) fn creates(self) -> bool {
@@ -101,7 +116,7 @@ impl Flow {
         original: u32,
     ) -> Option<Selection> {
         if !std::ptr::eq(self, &control.upload)
-            || self.case(control.case).is_none()
+            || !self.case(control.case).is_some_and(|case| action.allowed(case))
             || !control.permits(document)
             || original != action.original()
         {
@@ -133,7 +148,7 @@ impl Flow {
         })
     }
     pub(super) fn finished(&self, originals: usize) -> bool {
-        (originals == 8 && self.next.load(Ordering::SeqCst) == 14)
+        (originals == 8 && matches!(self.next.load(Ordering::SeqCst), 14 | 16))
             || (originals == 4 && self.next.load(Ordering::SeqCst) == 255)
     }
 }
@@ -163,7 +178,8 @@ impl Selection {
         Some(self.control)
     }
     fn claim(&self, document: &Arc<()>, original: u32, path: Option<&Path>) -> bool {
-        self.serial
+        self.control.upload.case(self.control.case).is_some_and(|case| self.action.allowed(case))
+            && self.serial
             == if self.action == Action::Missing {
                 255
             } else {
@@ -175,7 +191,7 @@ impl Selection {
                 .is_some_and(|same| Arc::ptr_eq(&same, document))
             && original == self.action.original()
             && self.control.upload.next.load(Ordering::SeqCst) == self.serial
-            && if matches!(self.action, Action::Prepare | Action::Reopen) {
+            && if matches!(self.action, Action::Prepare | Action::RecoveryPrepare | Action::Reopen) {
                 path == Some(self.control.root())
             } else {
                 path.is_none()
@@ -204,6 +220,10 @@ pub(in super::super) enum Step {
     Recontext,
     Read,
     Readback,
+    RecoverySaved,
+    RecoveryPrepare,
+    AcknowledgeUnstarted,
+    RecoveryReadback,
     Relock,
     Relocked,
     Missing,
@@ -214,6 +234,7 @@ pub(super) struct Record {
     pub(super) sample: Option<InstalledUploadSample>,
     repeated_refused: bool,
     readback: bool,
+    acknowledged: bool,
     not_executed: bool,
 }
 #[derive(Clone, Copy)]
@@ -384,30 +405,14 @@ impl Observation {
                             .upload
                             .sample = Some(sample);
                         Some(Step::Repeat)
-                    } else if sample.stopped_observed(case) {
-                        // Record the actual retained negative. Do NOT dispose,
-                        // claim all-originals-final, force exit or start another
-                        // fixture. The outer owner may time out/retain UNKNOWN.
-                        if !document.installed_upload_create(true).map_err(asset)? {
-                            return Err(BridgeError::invalid());
-                        }
-                        let mut r = self.record().ok_or_else(BridgeError::invalid)?;
-                        r.vault_record
-                            .as_mut()
-                            .ok_or_else(BridgeError::invalid)?
-                            .upload
-                            .repeated_refused = true;
-                        if super::super::latch_failure(
-                            &self.failure_reason,
-                            &self.failed,
-                            "upload-key-expected-retention",
-                        ) {
-                            r.upload_failure = Some(FailureSample {
-                                sample,
-                                repeated_create_refused: true,
-                            });
-                        }
-                        None
+                    } else if sample.cancelled(case) {
+                        // Observe only the original positive cleanup/CAS/use
+                        // retirement. UserCancelled stays UserCancelled; no
+                        // transient retained STOP becomes a pass or an exit.
+                        self.record().ok_or_else(BridgeError::invalid)?
+                            .vault_record.as_mut().ok_or_else(BridgeError::invalid)?
+                            .upload.sample = Some(sample);
+                        Some(Step::Repeat)
                     } else {
                         None
                     }
@@ -495,7 +500,7 @@ impl Observation {
                     document
                         .installed_upload_context(&self.base, &project, true)
                         .map_err(asset)?;
-                    Some(Step::Read)
+                    Some(if case == Case::StopBeforeGo { Step::RecoverySaved } else { Step::Read })
                 }
                 Step::Read => {
                     document
@@ -517,9 +522,31 @@ impl Observation {
                     Some(false) => return Err(BridgeError::invalid()),
                     None => None,
                 },
+                Step::RecoverySaved => {
+                    document.installed_upload_recovery_saved().await.map_err(asset)?;
+                    Some(Step::RecoveryPrepare)
+                }
+                Step::RecoveryPrepare => {
+                    document.installed_upload_recovery_prepare().await.map_err(asset)?;
+                    Some(Step::AcknowledgeUnstarted)
+                }
+                Step::AcknowledgeUnstarted => {
+                    document.installed_upload_acknowledge_unstarted().map_err(asset)?;
+                    Some(Step::RecoveryReadback)
+                }
+                Step::RecoveryReadback => match document.installed_upload_acknowledged() {
+                    Some(true) => {
+                        self.record().ok_or_else(BridgeError::invalid)?
+                            .vault_record.as_mut().ok_or_else(BridgeError::invalid)?
+                            .upload.acknowledged = true;
+                        Some(Step::Relock)
+                    }
+                    Some(false) => return Err(BridgeError::invalid()),
+                    None => None,
+                },
                 Step::Relock => {
                     document
-                        .installed_upload_vault(Action::Relock)
+                        .installed_upload_vault(if case == Case::StopBeforeGo { Action::RecoveredRelock } else { Action::Relock })
                         .map_err(asset)?;
                     Some(Step::Relocked)
                 }
@@ -590,10 +617,10 @@ pub(super) fn report(record: &super::Record, control: &Control) -> Option<Value>
         || !record.preview_consumed
         || !record.locked
         || (!not_executed
-            && (case != Case::RoundTrip
-                || !data.sample.is_some_and(InstalledUploadSample::positive)
+            && (!data.sample.is_some_and(|sample| if case == Case::RoundTrip { sample.positive() } else { sample.cancelled(case) })
                 || !data.repeated_refused
-                || !data.readback
+                || data.readback != (case != Case::StopBeforeGo)
+                || data.acknowledged != (case == Case::StopBeforeGo)
                 || record.original_count != 8))
     {
         return None;
@@ -601,9 +628,9 @@ pub(super) fn report(record: &super::Record, control: &Control) -> Option<Value>
     Some(
         json!({"mechanism":"same-original-upload-key-v1","normalGenerationEnabled":false,
         "execution":if not_executed{"not-executed-prerequisite"}else{"executed"},
-        "testResult":if not_executed{"not-executed"}else{"positive"},
+        "testResult":if not_executed{"not-executed"}else if case == Case::RoundTrip{"positive"}else{"cancelled-cleanup"},
         "initializeHelper":record.initialization,"storage":record.storage,
-        "generated":data.sample,"repeatedCreateRefused":data.repeated_refused,"authenticatedReopenReadback":data.readback,
+        "generated":data.sample,"repeatedCreateRefused":data.repeated_refused,"authenticatedReopenReadback":data.readback,"stoppedIntentAcknowledged":data.acknowledged,
         "originalCount":record.original_count+1,"allOriginalsSettled":true,"finalDocumentEmpty":true,
         "automaticallyAssigned":false,"backupCreated":false,"releaseSigningQualified":false,
         "physicalMacEvidence":false,"privateContentsExported":false,"rowRetirement":"disposable-hosted-account-only"}),
@@ -686,6 +713,16 @@ pub(super) fn data_checks() -> bool {
     if !control.upload.finished(4) || control.upload.finished(5) {
         return false;
     }
+    if Action::AcknowledgeUnstarted.allowed(Case::RoundTrip)
+        || Action::RecoveryPrepare.allowed(Case::StopAfterNew)
+        || Action::Read.allowed(Case::StopBeforeGo)
+        || Action::Relock.allowed(Case::StopBeforeGo)
+        || !Action::AcknowledgeUnstarted.allowed(Case::StopBeforeGo)
+        || Action::AcknowledgeUnstarted.original() != 7
+        || Action::RecoveredRelock.original() != 8
+    { return false; }
+    control.upload.next.store(16, Ordering::SeqCst);
+    if !control.upload.finished(8) || control.upload.finished(9) { return false; }
     Action::Create.original() == 4
         && Action::RefuseRepeat.original() == 5
         && Action::Read.original() == 7

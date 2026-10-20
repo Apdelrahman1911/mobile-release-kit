@@ -17,9 +17,9 @@ PRODUCER_FLAGS = frozenset(("ready", "goClaimed", "goSent", "readerJoined", "res
                            "tailClosed", "originalFinal", "cleanupUnknown", "privateDisposed"))
 SAMPLE_FLAGS = frozenset(("reserved", "authenticatedNew", "recorded", "published", "privateDisposed", "nativeUseRetired",
                         "nativeUseRetained", "privateRetained", "stopped", "clockFailed", "clockRetired", "coordinatorJoined",
-                        "childJoined", "sourcesClosed", "parentEnded", "documentUnknown", "unassigned"))
+                        "childJoined", "sourcesClosed", "parentEnded", "documentUnknown", "unassigned", "cancelledDisposal"))
 REPORT_FIELDS = frozenset(("mechanism", "normalGenerationEnabled", "execution", "testResult", "initializeHelper", "storage",
-                         "generated", "repeatedCreateRefused", "authenticatedReopenReadback", "originalCount",
+                         "generated", "repeatedCreateRefused", "authenticatedReopenReadback", "stoppedIntentAcknowledged", "originalCount",
                          "allOriginalsSettled", "finalDocumentEmpty", "automaticallyAssigned", "backupCreated",
                          "releaseSigningQualified", "physicalMacEvidence", "privateContentsExported", "rowRetirement"))
 
@@ -40,10 +40,12 @@ def producer(value):
 
 
 def sample(value):
-    need(type(value) is dict and value.keys() == SAMPLE_FLAGS | {"operationId", "checkpoint", "producer", "retainedProducer"})
+    need(type(value) is dict and value.keys() == SAMPLE_FLAGS | {"operationId", "checkpoint", "producer", "retainedProducer", "stoppedPreferenceRevision"})
     _flags(value, SAMPLE_FLAGS)
     need(type(value["operationId"]) is int and value["operationId"] == 5)
     need(value["checkpoint"] in ("none", "before-go", "after-new-before-journal"))
+    need(value["stoppedPreferenceRevision"] is None or (type(value["stoppedPreferenceRevision"]) is int
+         and 0 < value["stoppedPreferenceRevision"] <= 2**64 - 1))
     if value["producer"] is not None:
         producer(value["producer"])
     if value["retainedProducer"] is not None:
@@ -59,10 +61,30 @@ def _generated(value):
 
 def positive(value):
     value = sample(value)
-    false = {"nativeUseRetained", "privateRetained", "stopped", "clockFailed", "documentUnknown"}
+    false = {"nativeUseRetained", "privateRetained", "stopped", "clockFailed", "documentUnknown", "cancelledDisposal"}
     need(all(value[key] is (key not in false) for key in SAMPLE_FLAGS))
+    need(value["stoppedPreferenceRevision"] is None)
     need(value["checkpoint"] == "none" and value["producer"] is not None and _generated(value["producer"])
          and value["retainedProducer"] is None)
+    return value
+
+
+def cancelled(value, case):
+    """Completed test observation, not generation success or disposal authority."""
+    need(case in CASES[1:])
+    value = sample(value)
+    false = {"recorded", "published", "nativeUseRetained", "privateRetained", "documentUnknown"}
+    if case == CASES[1]:
+        false.add("authenticatedNew")
+    need(all(value[key] is (key not in false) for key in SAMPLE_FLAGS))
+    need(value["retainedProducer"] is None)
+    if case == CASES[1]:
+        need(value["checkpoint"] == "before-go" and value["producer"] is None
+             and value["stoppedPreferenceRevision"] is not None)
+    else:
+        need(value["checkpoint"] == "after-new-before-journal"
+             and value["stoppedPreferenceRevision"] is None
+             and value["producer"] is not None and _generated(value["producer"]))
     return value
 
 
@@ -73,6 +95,7 @@ def retained_stop(value, case):
     need(value["source"] == "original-upload-key-sample" and value["observationOnly"] is True
          and value["exitOrDisposalPermission"] is False and value["repeatedCreateRefused"] is True)
     data = sample(value["sample"])
+    need(not data["cancelledDisposal"] and data["stoppedPreferenceRevision"] is None)
     for key in ("reserved", "nativeUseRetained", "privateRetained", "stopped", "clockFailed", "unassigned"):
         need(data[key] is True)
     for key in ("recorded", "published", "privateDisposed", "nativeUseRetired", "clockRetired"):
@@ -98,14 +121,22 @@ def report(value, case):
         need(value[key] is False)
     need(value["rowRetirement"] == "disposable-hosted-account-only")
     need(type(value["originalCount"]) is int)
-    _flags(value, ("repeatedCreateRefused", "authenticatedReopenReadback"))
+    _flags(value, ("repeatedCreateRefused", "authenticatedReopenReadback", "stoppedIntentAcknowledged"))
     if value["testResult"] == "not-executed":
         need(value["execution"] == "not-executed-prerequisite" and value["generated"] is None
-             and not value["repeatedCreateRefused"] and not value["authenticatedReopenReadback"] and value["originalCount"] == 5)
+             and not value["repeatedCreateRefused"] and not value["authenticatedReopenReadback"]
+             and not value["stoppedIntentAcknowledged"] and value["originalCount"] == 5)
     else:
-        need(case == CASES[0] and value["testResult"] == "positive" and value["execution"] == "executed"
-             and value["repeatedCreateRefused"] and value["authenticatedReopenReadback"] and value["originalCount"] == 9)
-        positive(value["generated"])
+        need(value["execution"] == "executed" and value["repeatedCreateRefused"] and value["originalCount"] == 9)
+        if case == CASES[0]:
+            need(value["testResult"] == "positive" and value["authenticatedReopenReadback"]
+                 and not value["stoppedIntentAcknowledged"])
+            positive(value["generated"])
+        else:
+            need(value["testResult"] == "cancelled-cleanup"
+                 and value["authenticatedReopenReadback"] is (case == CASES[2])
+                 and value["stoppedIntentAcknowledged"] is (case == CASES[1]))
+            cancelled(value["generated"], case)
     # The existing runner separately validates original helper/storage syntax.
     # No fixture fills these fields from an expected report or report filename.
     need(type(value["initializeHelper"]) is dict and type(value["storage"]) is dict)
@@ -173,11 +204,13 @@ def readback(fixtures, case, value):
     report(value, case)
     need(fixtures.cases == (case,) and case not in fixtures.vault_completed
          and not fixtures.inflight and fixtures.last_returned, "upload-key-readback-order")
-    generated = value["testResult"] == "positive"
+    host_started = value["execution"] == "executed"
+    generated = host_started and case != CASES[1]
     initialized = value["storage"]["header"] == [True, True]
-    # Known no-tools exit has initialized the vault but never begins Host setup.
-    # Host is present only when the actual NEW generation sequence succeeded.
-    app_names = ("credential-vault-v1", "service-v1", "service-v1.reservation") if generated else ("credential-vault-v1",)
+    # Both known cancellations really reserved shared state. Before-GO has
+    # NO key; after-NEW preserves its one authenticated key despite cancellation.
+    # Only the explicit missing-tools path has never started the Host.
+    app_names = ("credential-vault-v1", "service-v1", "service-v1.reservation") if host_started else ("credential-vault-v1",)
     source = fixtures.readback(case)
     parent = fixtures.vault_parents[case]
     fixtures._named(fixtures.vault_namespace, case, parent, 0o700)
@@ -189,9 +222,9 @@ def readback(fixtures, case, value):
         with fixtures._temporary(fixtures._open("credential-vault-v1", app, directory=True)) as vault:
             fixtures._named(app, "credential-vault-v1", vault, 0o700)
             names = fixtures._upload_names(vault)
-            total += _files(fixtures, vault, private_roster(names, initialized=initialized, generated=generated, host_started=generated))
+            total += _files(fixtures, vault, private_roster(names, initialized=initialized, generated=generated, host_started=host_started))
             fixtures._named(app, "credential-vault-v1", vault, 0o700)
-        if generated:
+        if host_started:
             reservation = len(b"MRK application references v1\nprojects\ncredential-references\nversion-allocations\n")
             root_reservation = len(b"MRK service root v1\n") + 16
             # _files checks complete directory rosters; parent reservation has
@@ -217,5 +250,5 @@ def readback(fixtures, case, value):
     fixtures.vault_completed.add(case)
     fixtures._vault_namespace_current()
     return {**source, "uploadKeyOutput": {"nativeFixtureRootObserved": True, "newEncryptedRecordPresent": generated,
-        "referenceNamespacePresent": generated, "privateContentsExported": False, "keychainInspectedByOwner": False,
+        "referenceNamespacePresent": host_started, "privateContentsExported": False, "keychainInspectedByOwner": False,
         "retainedPrivateFileBytes": total, "retainedForDisposableAccountRetirement": True}}
