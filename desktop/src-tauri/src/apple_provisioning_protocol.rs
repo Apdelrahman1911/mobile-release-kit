@@ -417,7 +417,7 @@ pub(crate) fn request(
             && credential_config == &context.saved_config
             && scope.matches(context, operation, generation, root)
             && account.account == scope.provisioning.account_ref
-            && account.rows.len() <= ROWS
+            && account.rows.len().saturating_add(account.profile_rows.len()) <= ROWS
             // Reserve, up to two attempt writes, then final native CAS. Do not
             // arm a provider write if this fixed whole path can overflow.
             && account.revision.0 <= u64::MAX - 4
@@ -427,6 +427,10 @@ pub(crate) fn request(
     )?;
     let mut seen = std::collections::BTreeSet::new();
     need(account.rows.iter().all(|row| {
+        row.intent.context.account_ref == account.account
+            && seen.insert(row.intent.context.operation_id.as_str())
+    }))?;
+    need(account.profile_rows.iter().all(|row| {
         row.intent.context.account_ref == account.account
             && seen.insert(row.intent.context.operation_id.as_str())
     }))?;
@@ -443,10 +447,17 @@ pub(crate) fn request(
     } else {
         need(prior.is_none())?;
     }
-    let pending: Vec<_> = account.rows.iter().map(|row| json!({
+    let mut pending: Vec<_> = account.rows.iter().map(|row| json!({
         "accountRef":row.intent.context.account_ref,"operationId":row.intent.context.operation_id,
         "action":row.attempt.record.action,"status":row.attempt.record.status,"nativeSettlement":row.native_settlement,
     })).collect();
+    // Coarse closed fence only: never expose profile/private references or
+    // mistake local-save unknown for a terminal provider disposition.
+    pending.extend(account.profile_rows.iter().map(|row| json!({
+        "accountRef":row.intent.context.account_ref,"operationId":row.intent.context.operation_id,
+        "action":"profile_setup","status":if row.unresolved(){"unknown"}else{"succeeded"},
+        "nativeSettlement":row.native_settlement,
+    })));
     let identity = root
         .identity
         .posix()

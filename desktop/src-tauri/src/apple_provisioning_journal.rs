@@ -24,7 +24,13 @@ pub(crate) use data::{
     AccountRef, Action, AttemptReason, AttemptRecord, AttemptStatus, AttemptUpdate,
     BundleRegistrationIntent, BundleTarget, JournalRow, NativeProvenance, NativeSettlement,
     ProvisioningContext, RegisteredRootData, ATTEMPT_LIMIT, ROWS, ROW_LIMIT, STATE_LIMIT,
+    ProfileAction, ProfileTarget, ProfileBundle, ProfileCertificate, ProfileSelection, ProfileSetupIntent,
+    ProfileCreateAction, ProfileAttemptRecord, ProfileProvider, ProfileDownload, ProfileSaveState,
+    ProfileUpdate, ProfileSetupRow, PROFILE_PROTOCOL, PROFILE_BYTES,
 };
+#[path = "apple_provisioning_profile_journal.rs"]
+mod profile;
+pub(crate) use profile::{ProfileOriginalReservation, ProfileJournalAck};
 type Result<T> = std::result::Result<T, StateError>;
 
 fn unknown() -> StateError {
@@ -42,6 +48,8 @@ struct State {
     schema_version: u32,
     protocol: String,
     rows: Vec<JournalRow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile_rows: Option<Vec<ProfileSetupRow>>,
 }
 impl State {
     fn empty() -> Self {
@@ -49,10 +57,26 @@ impl State {
             schema_version: 1,
             protocol: PROTOCOL.into(),
             rows: Vec::new(),
+            profile_rows: None,
         }
     }
+    fn row_count(&self) -> usize {
+        self.rows.len().saturating_add(self.profile_rows.as_ref().map_or(0,Vec::len))
+    }
+    fn contains_operation(&self, operation: &str) -> bool {
+        self.rows.iter().any(|row| row.intent.context.operation_id == operation)
+            || self.profile_rows.iter().flatten().any(|row| row.intent.context.operation_id == operation)
+    }
+    fn unresolved(&self, account: &AccountRef) -> bool {
+        self.rows.iter().any(|row| &row.intent.context.account_ref == account && row.unresolved())
+            || self.profile_rows.iter().flatten().any(|row| &row.intent.context.account_ref == account && row.unresolved())
+    }
     fn validate(&self) -> Result<()> {
-        need(self.schema_version == 1 && self.protocol == PROTOCOL && self.rows.len() <= ROWS)?;
+        need(self.row_count() <= ROWS && match self.schema_version {
+            1 => self.protocol == PROTOCOL && self.profile_rows.is_none(),
+            2 => self.protocol == PROFILE_PROTOCOL && self.profile_rows.is_some(),
+            _ => false,
+        })?;
         let mut operations = BTreeSet::new();
         let mut pending_accounts = BTreeSet::new();
         for row in &self.rows {
@@ -62,6 +86,13 @@ impl State {
                 need(pending_accounts.insert(&row.intent.context.account_ref))?;
             }
         }
+        for row in self.profile_rows.iter().flatten() {
+            row.validate()?;
+            need(operations.insert(row.intent.provenance.operation_id.as_str()))?;
+            if row.unresolved() { need(pending_accounts.insert(&row.intent.context.account_ref))?; }
+        }
+        need(self.profile_rows.as_ref().is_none_or(|rows| rows.windows(2)
+            .all(|pair| profile_key(&pair[0]) < profile_key(&pair[1]))))?;
         need(
             self.rows
                 .windows(2)
@@ -88,7 +119,7 @@ impl State {
                 .map_err(|_| StateError::from(Error::InvalidRequest))?;
             let state: Self = serde_json::from_value(value)
                 .map_err(|_| StateError::from(Error::InvalidRequest))?;
-            need(!state.rows.is_empty() && state.bytes()? == snapshot.bytes)?;
+            need(state.row_count() > 0 && state.bytes()? == snapshot.bytes)?;
             Ok(state)
         })();
         result.map_err(|_: StateError| Error::RecoveryRequired.into())
@@ -99,6 +130,10 @@ fn row_key(row: &JournalRow) -> (&AccountRef, &str) {
         &row.intent.context.account_ref,
         row.intent.provenance.operation_id.as_str(),
     )
+}
+
+fn profile_key(row: &ProfileSetupRow) -> (&AccountRef, &str) {
+    (&row.intent.context.account_ref,row.intent.provenance.operation_id.as_str())
 }
 
 /// Original private reservation, retained in this port BEFORE the first CAS.
@@ -126,6 +161,7 @@ pub(crate) struct AccountSnapshot {
     pub(crate) revision: Revision,
     pub(crate) account: AccountRef,
     pub(crate) rows: Vec<JournalRow>,
+    pub(crate) profile_rows: Vec<ProfileSetupRow>,
 }
 
 pub(crate) struct AppleProvisioningJournal {
@@ -133,6 +169,7 @@ pub(crate) struct AppleProvisioningJournal {
     native_use: Arc<NativeUse>,
     failure: Option<StateError>,
     original: Option<Arc<OriginalReservation>>,
+    profile_original: Option<Arc<ProfileOriginalReservation>>,
     #[cfg(test)]
     lose_next_ack: bool,
 }
@@ -146,6 +183,7 @@ impl AppleProvisioningJournal {
             native_use,
             failure: None,
             original: None,
+            profile_original: None,
             #[cfg(test)]
             lose_next_ack: false,
         }
@@ -256,6 +294,8 @@ impl AppleProvisioningJournal {
         Ok(AccountSnapshot {
             revision,
             account: account.clone(),
+            profile_rows: state.profile_rows.into_iter().flatten()
+                .filter(|row| &row.intent.context.account_ref == account).collect(),
             rows: state
                 .rows
                 .into_iter()
@@ -273,7 +313,7 @@ impl AppleProvisioningJournal {
         armed: AttemptUpdate,
     ) -> Result<JournalAck> {
         self.healthy()?;
-        if self.original.is_some() {
+        if self.original.is_some() || self.profile_original.is_some() {
             return Err(Error::Conflict.into());
         }
         intent.validate()?;
@@ -282,19 +322,13 @@ impl AppleProvisioningJournal {
         if revision != expected {
             return Err(Error::Conflict.into());
         }
-        if state
-            .rows
-            .iter()
-            .any(|row| row.intent.provenance.operation_id == intent.provenance.operation_id)
-        {
+        if state.contains_operation(intent.provenance.operation_id.as_str()) {
             return Err(Error::Conflict.into());
         }
-        if state.rows.iter().any(|row| {
-            row.intent.context.account_ref == intent.context.account_ref && row.unresolved()
-        }) {
+        if state.unresolved(&intent.context.account_ref) {
             return Err(Error::RecoveryRequired.into());
         }
-        if state.rows.len() >= ROWS {
+        if state.row_count() >= ROWS {
             return Err(Error::Busy.into());
         }
         let row = JournalRow {

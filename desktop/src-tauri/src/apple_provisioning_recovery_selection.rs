@@ -59,7 +59,8 @@ pub(crate) fn recovery_history(
     account: &AccountSnapshot,
     scope: &ScopeData,
 ) -> Result<RecoveryHistory, BridgeError> {
-    need(account.account == scope.provisioning.account_ref && account.rows.len() <= ROWS)?;
+    need(account.account == scope.provisioning.account_ref
+        && account.rows.len().saturating_add(account.profile_rows.len()) <= ROWS)?;
     let mut seen = BTreeSet::new();
     let mut attempts = Vec::with_capacity(account.rows.len());
     let mut hidden_unresolved = 0;
@@ -93,6 +94,11 @@ pub(crate) fn recovery_history(
             native_settlement: row.native_settlement,
             cancellation_requested: row.attempt.record.cancel_requested,
         });
+    }
+    for row in &account.profile_rows {
+        need(row.intent.context.account_ref == account.account
+            && seen.insert(row.intent.context.operation_id.clone()))?;
+        if row.unresolved() { hidden_unresolved += 1; }
     }
     // Deterministic display only, not an automatic selection or latest-result
     // authority. Canonical UTC timestamps retain their original precision.
@@ -158,6 +164,7 @@ pub(crate) mod tests {
                 revision: Revision(7),
                 account,
                 rows: vec![row],
+                profile_rows: Vec::new(),
             },
             scope,
         )

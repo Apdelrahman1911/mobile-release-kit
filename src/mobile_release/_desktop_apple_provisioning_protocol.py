@@ -133,7 +133,9 @@ def pending(value, account):
     for row in value:
         row = _keys(row, {"accountRef", "operationId", "action", "status", "nativeSettlement"})
         require(row["accountRef"] == account and token(row["operationId"]) and row["operationId"] not in seen
-                and row["action"] == "register_bundle_id" and row["status"] in ATTEMPT_STATUSES)
+                and row["action"] in {"register_bundle_id", "profile_setup"} and row["status"] in ATTEMPT_STATUSES)
+        if row["action"] == "profile_setup":
+            require(row["status"] in {"unknown", "succeeded"})  # Native coarse cross-family fence only.
         seen.add(row["operationId"])
         result.append(PendingMutation(row["accountRef"], row["operationId"], row["action"], row["status"], row["nativeSettlement"]))
     return tuple(result)

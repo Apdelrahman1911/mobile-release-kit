@@ -65,6 +65,9 @@ mod store;
 pub(crate) use store::document_backing_bytes as store_document_backing_bytes;
 #[path = "saved_command_apple_provisioning.rs"]
 mod apple_provisioning;
+#[path = "saved_command_apple_signing.rs"]
+mod apple_signing;
+pub(crate) use apple_signing::AppleProfileNativeJoined;
 pub(crate) use apple_provisioning::{AppleProvisioningNativeJoined, AppleProvisioningAllJobsJoined, APPLE_PROVISIONING_INPUT_LIMIT};
 pub(crate) use apple_provisioning::document_backing_bytes as apple_provisioning_document_backing_bytes;
 pub(crate) use apple_provisioning::retained_document_backing_bytes as apple_provisioning_retained_document_backing_bytes;

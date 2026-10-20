@@ -31,6 +31,12 @@ pub(super) fn need(condition: bool) -> Result<()> {
         Err(Error::InvalidRequest.into())
     }
 }
+#[path = "apple_provisioning_profile_journal_data.rs"]
+pub(super) mod profile;
+pub(crate) use profile::{ProfileAction, ProfileTarget, ProfileBundle, ProfileCertificate, ProfileSelection,
+    ProfileSetupIntent, ProfileCreateAction, ProfileAttemptRecord, ProfileProvider, ProfileDownload,
+    ProfileSaveState, ProfileUpdate, ProfileSetupRow, PROFILE_PROTOCOL, PROFILE_BYTES};
+
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -417,11 +423,14 @@ pub(crate) struct AttemptRecord {
 }
 impl AttemptRecord {
     fn validate(&self, intent: &BundleRegistrationIntent) -> Result<()> {
+        self.validate_fields(&intent.context, &intent.plan_sha256)
+    }
+    fn validate_fields(&self, context: &ProvisioningContext, plan_sha256: &str) -> Result<()> {
         use AttemptReason as R;
         use AttemptStatus as S;
         need(
-            self.context == intent.context
-                && self.plan_sha256 == intent.plan_sha256
+            &self.context == context
+                && self.plan_sha256 == plan_sha256
                 && self
                     .response_resource_id
                     .as_ref()
@@ -546,7 +555,10 @@ impl AttemptUpdate {
         )
     }
     pub(super) fn follows(&self, previous: &Self, intent: &BundleRegistrationIntent) -> Result<()> {
-        self.record.validate(intent)?;
+        self.follows_fields(previous, &intent.context, &intent.plan_sha256)
+    }
+    fn follows_fields(&self, previous: &Self, context: &ProvisioningContext, plan_sha256: &str) -> Result<()> {
+        self.record.validate_fields(context, plan_sha256)?;
         let old = &previous.record;
         let next = &self.record;
         need(
