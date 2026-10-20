@@ -14,7 +14,7 @@ import type { IOSArchiveApi, IOSArchiveContext, IOSArchiveIdentity, IOSArchiveOp
   IOSSigningAssignment, IOSSigningPolicy, PrepareIOSArchive, StartIOSArchive } from './iosArchiveTypes.ts';
 import { IOS_SIGNING_CHECK_CONSENT, IOS_SIGNING_CHECK_CONSENT_MS, IOS_ARCHIVE_CONSENT, IOS_SIGNED_ARCHIVE_CONSENT, IOS_CANDIDATE_CONSENT, IOS_RECOVERY_CONSENT, IOS_ACCOUNT_RECOVERY_CONFIRMATION,
   IOS_PROJECT_RECOVERY_CONFIRMATION, IOS_ARCHIVE_CONSENT_MS, IOS_ARCHIVE_COUNTER_MAX, iosArchiveAvailabilityText, iosArchiveModeAvailability, isIOSRecoveryOperation,
-  iosArchiveSigned, iosArchiveCounter, iosArchiveError, iosArchiveOperationProgress, copyIOSArchiveRequest, parseIOSArchiveSavedConfig,
+  isIOSSigningCheckOperation, iosArchiveSigned, iosArchiveCounter, iosArchiveError, iosArchiveOperationProgress, copyIOSArchiveRequest, parseIOSArchiveSavedConfig,
   parseIOSArchiveSavedVersion, parseIOSArchiveSelection, parseIOSArchiveStatus, parseIOSSigningPolicy,
   sameIOSArchiveData, sameIOSArchiveIdentity, sameIOSArchiveSavedPair } from './iosArchiveProtocol.ts';
 
@@ -390,7 +390,7 @@ export class IOSArchiveController {
       // While Prepare is pending, repeated previous-terminal Status is allowed
       // but belongs to the old review, not this attempt's changed selection.
       const belongsToAttempt = sameIOSArchiveIdentity(attempt.identity, b) || this.originCandidate(attempt, status);
-      const selected = belongsToAttempt && b && !isIOSRecoveryOperation(b) ? b.activity?.selection : null;
+      const selected = belongsToAttempt && b && !isIOSRecoveryOperation(b) && !isIOSSigningCheckOperation(b) ? b.activity?.selection : null;
       if (selected && !sameIOSArchiveData(selected, attempt.binding.selection)) {
         this.fail({ code: 'ios_archive_protocol' }, true); return null;
       }
