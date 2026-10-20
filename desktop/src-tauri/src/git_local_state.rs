@@ -3,7 +3,7 @@
 //! IO methods run only in original finite jobs, outside Doc/Edit/Host locks.
 use crate::{application_service::ProjectBinding, application_state_store::{Cleanup,Durability,Effect,Namespace,NativeUse,
     PrivateStateDirectory,Revision,Snapshot,StateError},git_local_protocol as wire,protocol::{strict_json,valid_id},
-    service_protocol::Error,supervisor::GitLocalNativeJoined,git_branch_protocol as branch,git_switch_protocol as switch};
+    service_protocol::Error,supervisor::GitLocalNativeJoined,git_branch_protocol as branch,git_switch_protocol as switch,git_rename_protocol as rename};
 use serde::{Deserialize,Serialize};
 use std::sync::Arc;
 
@@ -35,6 +35,8 @@ pub(crate) struct Row {
     branch:Option<branch::Journal>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     switch:Option<switch::Journal>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    rename:Option<rename::Journal>,
 }
 impl Row {
     fn preparing(project:&ProjectBinding,id:&str,review:&wire::Review)->Result<Self> {
@@ -43,15 +45,18 @@ impl Row {
         let row=Self {project_id:project.project_id.as_str().to_owned(),operation_id:id.into(),action:review.action(),
             review_digest:review.review_digest().into(),expected_revision:review.expected_revision().into(),expected_ref:review.branch().map(str::to_owned),
             expected_head:review.head().map(str::to_owned),expected_index:review.expected_index().into(),candidate_index:None,candidate_commit:None,
-            phase:Phase::Preparing,outcome:None,branch:review.branch_details().map(branch::Journal::preparing),switch:review.switch_details().map(switch::Journal::preparing)};
+            phase:Phase::Preparing,outcome:None,branch:review.branch_details().map(branch::Journal::preparing),switch:review.switch_details().map(switch::Journal::preparing),rename:review.rename_details().map(rename::Journal::preparing)};
         row.validate()?;Ok(row)
     }
     fn has_candidate(&self)->bool {
         self.candidate_index.is_some()||self.candidate_commit.is_some()
             ||self.branch.as_ref().is_some_and(|b|b.candidate_ref_oid.is_some())
+            ||self.rename.as_ref().is_some_and(|r|r.candidate.is_some())
     }
     fn intent(&self)->Option<wire::Intent> {
-        if let Some(s)=&self.switch {
+        if let Some(r)=&self.rename {
+            r.intent(&self.expected_revision,self.expected_ref.as_deref()?,self.expected_head.as_deref()?,&self.expected_index).map(wire::Intent::Rename)
+        } else if let Some(s)=&self.switch {
             s.intent(&self.expected_revision,self.expected_ref.as_deref()?,self.expected_head.as_deref()?,
                 &self.expected_index,self.candidate_index.as_deref()?).map(wire::Intent::Switch)
         } else if let Some(b)=&self.branch {
@@ -73,12 +78,14 @@ impl Row {
             && (self.expected_head.is_some()||self.expected_ref.is_some())
             && (self.action!=wire::Kind::Commit||self.expected_ref.is_some())
             && match self.action {
-                wire::Kind::BranchSwitch=>self.branch.is_none() && self.candidate_commit.is_none()
+                wire::Kind::BranchRename=>self.branch.is_none() && self.switch.is_none() && self.candidate_index.is_none() && self.candidate_commit.is_none()
+                    && self.rename.as_ref().is_some_and(|r|r.valid(self.expected_head.as_deref(),self.expected_ref.as_deref())),
+                wire::Kind::BranchSwitch=>self.rename.is_none() && self.branch.is_none() && self.candidate_commit.is_none()
                     && self.switch.as_ref().is_some_and(|s|s.valid(self.expected_head.as_deref(),self.expected_ref.as_deref(),self.candidate_index.as_deref())),
-                wire::Kind::BranchCreate=>self.switch.is_none() && self.candidate_index.is_none() && self.candidate_commit.is_none()
+                wire::Kind::BranchCreate=>self.rename.is_none() && self.switch.is_none() && self.candidate_index.is_none() && self.candidate_commit.is_none()
                     && self.branch.as_ref().is_some_and(|b|b.valid(self.expected_head.as_deref())
                         && self.expected_ref.as_deref()!=Some(b.target_ref.as_str())),
-                _=>self.branch.is_none() && self.switch.is_none(),
+                _=>self.branch.is_none() && self.switch.is_none() && self.rename.is_none(),
             }
             && (!self.has_candidate()||self.intent().is_some_and(|v|v.valid())))?;
         need(self.switch.as_ref().is_none_or(|s|s.final_state.as_ref().is_none_or(|d|
@@ -86,6 +93,11 @@ impl Row {
             && match self.outcome {Some(Completion::Succeeded)=>d.successful(),Some(Completion::RecoveryRequired)=>d.valid(),_=>false})))?;
         need(self.action!=wire::Kind::BranchSwitch || self.outcome!=Some(Completion::Succeeded)
             || self.switch.as_ref().and_then(|s|s.final_state.as_ref()).is_some_and(switch::FinalData::successful))?;
+        need(self.rename.as_ref().is_none_or(|r|r.final_state.as_ref().is_none_or(|d|
+            self.phase==Phase::Finished && self.has_candidate()
+            && match self.outcome {Some(Completion::Succeeded)=>d.successful(r.config_moved),Some(Completion::RecoveryRequired)=>d.valid_for(r.logging,r.config_moved),_=>false})))?;
+        need(self.action!=wire::Kind::BranchRename || self.outcome!=Some(Completion::Succeeded)
+            || self.rename.as_ref().is_some_and(|r|r.final_state.as_ref().is_some_and(|d|d.successful(r.config_moved))))?;
         need(match self.phase {
             Phase::Preparing=> !self.has_candidate() && self.outcome.is_none(),
             Phase::Candidate=> self.has_candidate() && self.outcome.is_none(),
@@ -106,17 +118,22 @@ impl Row {
                 (Some(b),Some(o))=>b.same_original(o),(None,None)=>true,_=>false,
             } && match (&self.switch,&original.switch) {
                 (Some(s),Some(o))=>s.same_original(o),(None,None)=>true,_=>false,
+            } && match (&self.rename,&original.rename) {
+                (Some(r),Some(o))=>r.same_original(o),(None,None)=>true,_=>false,
             }
     }
     fn candidate(&mut self,intent:&wire::Intent)->Result<()> {
         need(self.phase==Phase::Preparing && intent.valid() && self.action==intent.action() && self.expected_revision==intent.expected_revision()
             && self.expected_ref.as_deref()==intent.expected_ref() && self.expected_head.as_deref()==intent.expected_head()
             && self.expected_index==intent.expected_index())?;
-        if let Some(s)=&mut self.switch {
+        if let Some(r)=&mut self.rename {
+            let i=intent.rename_details().ok_or_else(||StateError::from(Error::Conflict))?;
+            need(r.accepts(i))?;r.candidate(i);
+        } else if let Some(s)=&mut self.switch {
             let i=intent.switch_details().ok_or_else(||StateError::from(Error::Conflict))?;
             need(s.accepts(i))?;s.candidate(i);self.candidate_index=Some(i.candidate_index.clone());
         } else {
-            need(intent.switch_details().is_none())?;
+            need(intent.switch_details().is_none() && intent.rename_details().is_none())?;
             match (&mut self.branch,intent.branch_details()) {
                 (Some(b),Some(i))=>{need(b.accepts(i))?;b.candidate_ref_oid=Some(i.candidate_ref_oid.clone());},
                 (None,None)=>{self.candidate_index=intent.candidate_index().map(str::to_owned);self.candidate_commit=intent.candidate_commit().map(str::to_owned);},
@@ -126,7 +143,8 @@ impl Row {
         self.phase=Phase::Candidate;self.validate()
     }
     fn finish(&mut self,outcome:Completion)->Result<()> {self.finish_with_switch(outcome,None)}
-    fn finish_with_switch(&mut self,outcome:Completion,details:Option<&switch::FinalData>)->Result<()> {
+    fn finish_with_switch(&mut self,outcome:Completion,details:Option<&switch::FinalData>)->Result<()> {self.finish_with_details(outcome,details,None)}
+    fn finish_with_details(&mut self,outcome:Completion,details:Option<&switch::FinalData>,renamed:Option<&rename::FinalData>)->Result<()> {
         need(self.phase!=Phase::Finished)?;
         need(details.is_none() || self.action==wire::Kind::BranchSwitch && self.has_candidate()
             && matches!(outcome,Completion::Succeeded|Completion::RecoveryRequired)
@@ -134,12 +152,20 @@ impl Row {
             && self.switch.as_ref().is_some_and(|s|s.final_state.is_none()))?;
         need(self.action!=wire::Kind::BranchSwitch || outcome!=Completion::Succeeded
             || details.is_some_and(switch::FinalData::successful))?;
+        need(renamed.is_none() || self.action==wire::Kind::BranchRename && self.has_candidate()
+            && matches!(outcome,Completion::Succeeded|Completion::RecoveryRequired)
+            && self.rename.as_ref().is_some_and(|r|r.final_state.is_none() && renamed.is_some_and(|d|d.valid_for(r.logging,r.config_moved))))?;
+        need(self.action!=wire::Kind::BranchRename || outcome!=Completion::Succeeded
+            || self.rename.as_ref().is_some_and(|r|renamed.is_some_and(|d|d.successful(r.config_moved))))?;
         // A persisted candidate makes a cancelled/refused child uncertain with
         // respect to publication. No negative result is upgraded to unsent.
         need(!matches!(outcome,Completion::Failed|Completion::Cancelled)||!self.has_candidate())?;
         need(outcome!=Completion::Succeeded||self.has_candidate())?;
         if let Some(details)=details {
             self.switch.as_mut().ok_or_else(||StateError::from(Error::Conflict))?.final_state=Some(details.clone());
+        }
+        if let Some(details)=renamed {
+            self.rename.as_mut().ok_or_else(||StateError::from(Error::Conflict))?.final_state=Some(details.clone());
         }
         self.phase=Phase::Finished;self.outcome=Some(outcome);self.validate()
     }
@@ -150,14 +176,15 @@ struct State {schema_version:u8,protocol:String,rows:Vec<Row>}
 impl State {
     fn empty()->Self {Self {schema_version:1,protocol:PROTOCOL.into(),rows:vec![]}}
     fn bytes(&self)->Result<Vec<u8>> {
-        need(matches!(self.schema_version,1|2|3) && self.protocol==PROTOCOL && !self.rows.is_empty() && self.rows.len()<=MAX_ROWS
+        need(matches!(self.schema_version,1|2|3|4) && self.protocol==PROTOCOL && !self.rows.is_empty() && self.rows.len()<=MAX_ROWS
             && self.rows.windows(2).all(|p|p[0].project_id<p[1].project_id))?;
         // Supervisor text is process-local, not a global or durable operation
         // identity. Rows are partitioned by the service's stable project ID;
         // only the retained live Original/NativeUse can amend a pending row.
         for row in &self.rows {
             need(self.schema_version>=2 || row.branch.is_none() && row.action!=wire::Kind::BranchCreate)?;
-            need(self.schema_version==3 || row.switch.is_none() && row.action!=wire::Kind::BranchSwitch)?;
+            need(self.schema_version>=3 || row.switch.is_none() && row.action!=wire::Kind::BranchSwitch)?;
+            need(self.schema_version==4 || row.rename.is_none() && row.action!=wire::Kind::BranchRename)?;
             row.validate()?;
         }
         let value=serde_json::to_value(self).map_err(|_|StateError::from(Error::InvalidRequest))?;
@@ -176,7 +203,7 @@ impl State {
     }
     fn reserve(&mut self,row:Row)->Result<()> {
         need(row.phase==Phase::Preparing)?;
-        let schema = match row.action {wire::Kind::BranchSwitch=>3,wire::Kind::BranchCreate=>2,_=>1};
+        let schema = match row.action {wire::Kind::BranchRename=>4,wire::Kind::BranchSwitch=>3,wire::Kind::BranchCreate=>2,_=>1};
         if let Some(index)=self.rows.iter().position(|r|r.project_id==row.project_id) {
             if !self.rows[index].replaceable() {return Err(Error::RecoveryRequired.into());}
             self.rows[index]=row;
@@ -279,7 +306,7 @@ impl GitLocalJournal {
         self.retained(original)?;need(joined.matches(&self.native_use,original))?;
         let mut state=self.current(expected)?;
         let row=state.rows.iter_mut().find(|r|r.same_original(&original.preparing)).ok_or_else(||StateError::from(Error::Conflict))?;
-        row.finish_with_switch(joined.completion(),joined.switch_final())?;let row=row.clone();self.publish(expected,&state,row,original.clone())
+        row.finish_with_details(joined.completion(),joined.switch_final(),joined.rename_final())?;let row=row.clone();self.publish(expected,&state,row,original.clone())
     }
 }
 
@@ -294,3 +321,7 @@ mod branch_tests;
 #[cfg(test)]
 #[path="git_switch_state_tests.rs"]
 mod switch_tests;
+
+#[cfg(test)]
+#[path="git_rename_state_tests.rs"]
+mod rename_tests;

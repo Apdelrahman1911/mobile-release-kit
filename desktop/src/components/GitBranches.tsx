@@ -5,6 +5,7 @@ import type { GitRepositoryController } from '../gitRepositoryController.ts';
 import { gitLocalIssueHelp } from '../gitLocalProtocol.ts';
 import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
 import { GitBranchSwitch } from './GitBranchSwitch.tsx';
+import { GitBranchRename } from './GitBranchRename.tsx';
 
 // Pure rendering subscriber. The same retained GitRead/GitLocal controllers
 // own every original Promise; mounting or editing a draft sends no command.
@@ -30,8 +31,9 @@ export function GitBranches({ reader, controller, repository, originalProjectNam
       <p>{branches.branch ? <>Current branch: <strong><bdi>{branches.branch.slice('refs/heads/'.length)}</bdi></strong>.</> : 'The checkout is detached; creating a branch will not attach or switch it.'}</p>
       {branches.branches.length ? <ul>{branches.branches.map((b) => <li key={b.ref}><bdi>{b.ref.slice('refs/heads/'.length)}</bdi>
         {b.ref === branches.branch ? ' · current' : ''} <code>{b.oid.slice(0, 12)}</code></li>)}</ul> : <p>No local branch commits were observed.</p>}
-      <p className="save-note">Local references only; no fetch or online account check. Renaming is not included.</p>
+      <p className="save-note">Local references only; no fetch or online account check.</p>
     </>}
+    <GitBranchRename controller={controller} repository={repository} originalProjectName={originalProjectName} />
     <GitBranchSwitch reader={reader} controller={controller} repository={repository} originalProjectName={originalProjectName} />
     <h4>Create a new local branch without switching</h4>
     <form onSubmit={(event) => { event.preventDefault(); void controller.prepareBranch(); }}>

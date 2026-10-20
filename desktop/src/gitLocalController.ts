@@ -10,13 +10,15 @@ import type { GitReadController } from './gitReadController.ts';
 import { gitBranchName } from './gitBranchesProtocol.ts';
 import type { GitBranchAction, GitBranches } from './gitBranchesProtocol.ts';
 import type { GitSwitchAction } from './gitSwitchProtocol.ts';
+import { sameRenameParent } from './gitRenameProtocol.ts';
+import type { GitRenameAction } from './gitRenameProtocol.ts';
 
 export interface GitLocalBinding { readonly api: GitLocalApi | null; readonly session: object | null; readonly projectId: string | null;
   readonly epoch: number; readonly repository: GitRepositoryController | null; readonly blocked: string | null;
   readonly reader?: GitReadController | null }
 interface Capture { readonly binding: GitLocalBinding; readonly repository: GitRepositoryController; readonly observation: GitObservation;
   readonly selected: readonly string[]; readonly draft: GitCommitDraft; readonly action: GitLocalAction; readonly paths: readonly string[];
-  readonly branches: GitBranches | null; readonly branchDraft: { readonly name: string }; readonly switchDraft: { readonly name: string } }
+  readonly branches: GitBranches | null; readonly branchDraft: { readonly name: string }; readonly switchDraft: { readonly name: string }; readonly renameDraft: { readonly name: string } }
 interface HeldReview { readonly api: GitLocalApi; readonly binding: GitLocalBinding; readonly prepared: GitLocalPrepared; readonly capture: Capture | null;
   stale: boolean; consumed: boolean; discardSent: boolean; discardConfirmed: boolean; uncertain: boolean }
 interface Attempt { readonly binding: GitLocalBinding; readonly api: GitLocalApi; readonly request: GitLocalStartRequest;
@@ -90,7 +92,8 @@ export class GitLocalController {
     const now = this.current(), r = c.repository.getSnapshot();
     return same(c.binding, now) && (!peers || !now.blocked) && r.projectId === now.projectId && r.active && !r.stale && !r.blocked &&
       r.busy === null && !r.checkingStatus && r.observation === c.observation &&
-      (c.action.kind === 'branch-switch' ? r.switchDraft === c.switchDraft && this.branchList(now) === c.branches :
+      (c.action.kind === 'branch-rename' ? r.renameDraft === c.renameDraft && this.branchList(now) === c.branches :
+        c.action.kind === 'branch-switch' ? r.switchDraft === c.switchDraft && this.branchList(now) === c.branches :
         c.action.kind === 'branch-create' ? r.branchDraft === c.branchDraft && this.branchList(now) === c.branches : r.selected === c.selected && r.draft === c.draft);
   }
   private branchList(binding: GitLocalBinding): GitBranches | null {
@@ -137,7 +140,7 @@ export class GitLocalController {
     const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action: input });
     if (!raw) return this.report('invalid-input');
     const capture: Capture = Object.freeze({ binding, repository, observation: r.observation!, selected: r.selected, draft: r.draft, action,
-      paths: Object.freeze([...(kind === 'commit' ? gitStagedPaths(r.observation!) : r.selected)].sort(gitReadPathOrder)), branches: null, branchDraft: r.branchDraft, switchDraft: r.switchDraft });
+      paths: Object.freeze([...(kind === 'commit' ? gitStagedPaths(r.observation!) : r.selected)].sort(gitReadPathOrder)), branches: null, branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft });
     const attempt = this.newAttempt(binding, request, action, capture, null);
     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
@@ -162,7 +165,7 @@ export class GitLocalController {
     const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
     if (!raw) return this.report('invalid-input');
     const capture: Capture = Object.freeze({ binding, repository, observation: r.observation, selected: r.selected, draft: r.draft,
-      branchDraft: r.branchDraft, switchDraft: r.switchDraft, action, branches, paths: Object.freeze([]) });
+      branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft, action, branches, paths: Object.freeze([]) });
     const attempt = this.newAttempt(binding, request, action, capture, null);
     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
@@ -189,7 +192,36 @@ export class GitLocalController {
     const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
     if (!raw) return this.report('invalid-input');
     const capture: Capture = Object.freeze({ binding, repository, observation: r.observation, selected: r.selected, draft: r.draft,
-      branchDraft: r.branchDraft, switchDraft: r.switchDraft, action, branches, paths: Object.freeze([]) });
+      branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft, action, branches, paths: Object.freeze([]) });
+    const attempt = this.newAttempt(binding, request, action, capture, null);
+    this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
+    await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
+  }
+  prepareRenameReason(): GitLocalIssue | null {
+    if (this.ownerReason()) return this.state.recovery ? 'recovery-required' : this.state.uncertain ? 'unknown' : 'busy';
+    const reason = this.currentReason(); if (reason) return reason;
+    const binding = this.current(), r = binding.repository!.getSnapshot(), branches = this.branchList(binding);
+    if (!branches) return 'branch-list-required';
+    if (!branches.head || !branches.branch || !branches.branches.some((b) => b.ref === branches.branch && b.oid === branches.head)) return 'rename-layout';
+    if (!gitBranchName(r.renameDraft.name)) return 'rename-name-required';
+    const target = `refs/heads/${r.renameDraft.name}`;
+    if (!sameRenameParent(branches.branch, target)) return 'rename-target';
+    const lower = target.toLowerCase();
+    return branches.branches.some((b) => b.ref.toLowerCase() === lower || b.ref.toLowerCase().startsWith(`${lower}/`) ||
+      lower.startsWith(`${b.ref.toLowerCase()}/`)) ? 'rename-target' : null;
+  }
+  async prepareRename(): Promise<boolean> {
+    const reason = this.prepareRenameReason(); if (reason) return this.report(reason);
+    const binding = this.current(), repository = binding.repository!, r = repository.getSnapshot(), branches = this.branchList(binding);
+    if (!branches || !r.observation) return this.report('branch-list-required');
+    const action: GitRenameAction = Object.freeze({ kind: 'branch-rename', expectedRevision: r.observation.revision,
+      expectedReferenceRevision: branches.referenceRevision, name: r.renameDraft.name });
+    const request: GitLocalStartRequest = Object.freeze({ phase: 'prepare', projectId: binding.projectId!,
+      expectedDocumentRevision: this.state.status!.documentRevision, action, reviewId: null });
+    const raw = gitLocalRequest('prepare', { projectId: request.projectId, expectedDocumentRevision: request.expectedDocumentRevision, action });
+    if (!raw) return this.report('invalid-input');
+    const capture: Capture = Object.freeze({ binding, repository, observation: r.observation, selected: r.selected, draft: r.draft,
+      branchDraft: r.branchDraft, switchDraft: r.switchDraft, renameDraft: r.renameDraft, action, branches, paths: Object.freeze([]) });
     const attempt = this.newAttempt(binding, request, action, capture, null);
     this.attempt = attempt; this.approved = null; this.publish({ original: null, submitted: null, issue: null });
     await this.send('prepare', raw, binding, attempt, null); return attempt.entered;
@@ -197,11 +229,13 @@ export class GitLocalController {
   private preparedMatchesCapture(prepared: GitLocalPrepared, capture: Capture): boolean {
     const r = prepared.review;
     if (r.head !== capture.observation.head || r.branch !== capture.observation.branch) return false;
+    if (capture.action.kind === 'branch-rename') return r.action === 'branch-rename' && r.name === capture.action.name &&
+      r.expectedReferenceRevision === capture.branches?.referenceRevision;
     if (capture.action.kind === 'branch-switch') return r.action === 'branch-switch' && r.name === capture.action.name && !!capture.branches &&
       r.expectedReferenceRevision === capture.branches.referenceRevision &&
       capture.branches.branches.some((b) => b.ref === r.targetRef && b.oid === r.targetOid);
     return capture.action.kind === 'branch-create' ? r.action === 'branch-create' && r.name === capture.action.name &&
-      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'branch-create' && r.action !== 'branch-switch' && samePaths(r.paths, capture.paths);
+      r.expectedReferenceRevision === capture.branches?.referenceRevision : r.action !== 'branch-create' && r.action !== 'branch-switch' && r.action !== 'branch-rename' && samePaths(r.paths, capture.paths);
   }
   reviewReason(): GitIssue | null {
     const h = this.held;

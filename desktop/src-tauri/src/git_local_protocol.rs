@@ -2,7 +2,7 @@
 //! Draft author/message stay private; public projections contain only bounded
 //! review/intent facts. Child publication and terminal frames never settle the
 //! original native invocation. No serialized plan is accepted for execution.
-use crate::{error::BridgeError, git_read_protocol as read, git_branch_protocol as branch, git_switch_protocol as switch, protocol::{strict_json, valid_id}};
+use crate::{error::BridgeError, git_read_protocol as read, git_branch_protocol as branch, git_switch_protocol as switch, git_rename_protocol as rename, protocol::{strict_json, valid_id}};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -54,7 +54,7 @@ fn frame(bytes: &[u8], limit: usize) -> Result<Value, BridgeError> {
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="lowercase")]
-pub(crate) enum Kind { Stage, Unstage, Commit, #[serde(rename="branch-create")] BranchCreate, #[serde(rename="branch-switch")] BranchSwitch }
+pub(crate) enum Kind { Stage, Unstage, Commit, #[serde(rename="branch-create")] BranchCreate, #[serde(rename="branch-switch")] BranchSwitch, #[serde(rename="branch-rename")] BranchRename }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="lowercase")]
 pub(crate) enum Phase { Prepare, Apply }
@@ -74,7 +74,7 @@ impl Identity {
 // paths/message/identity nor a fabricated empty whole-index review.
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub(crate) enum Action { Files(FileAction), Branch(branch::Action), Switch(switch::Action) }
+pub(crate) enum Action { Files(FileAction), Branch(branch::Action), Switch(switch::Action), Rename(rename::Action) }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct FileAction {
@@ -91,17 +91,17 @@ impl Action {
         if matches!(kind, Kind::Stage | Kind::Unstage) && action.valid() { Ok(action) }
         else { Err(BridgeError::invalid()) }
     }
-    pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch } }
-    pub(crate) fn expected_revision(&self) -> &str { match self { Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision } }
+    pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::Rename(_)=>Kind::BranchRename } }
+    pub(crate) fn expected_revision(&self) -> &str { match self { Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision, Self::Rename(v)=>&v.expected_revision } }
     pub(crate) fn valid(&self) -> bool {
         match self {
-            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(),
+            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(), Self::Rename(v)=>v.valid(),
             Self::Files(v)=>read::digest(&v.expected_revision) && match v.kind {
                 Kind::Commit => v.paths.is_empty()
                     && v.identity.as_ref().is_some_and(Identity::valid)
                     && v.message.as_ref().is_some_and(|m| !m.trim().is_empty() && read::text(m,4096,true) && !m.contains('\r')),
                 Kind::Stage|Kind::Unstage => paths(&v.paths) && v.message.is_none() && v.identity.is_none(),
-                Kind::BranchCreate|Kind::BranchSwitch => false,
+                Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename => false,
             },
         }
     }
@@ -110,12 +110,13 @@ impl Action {
             Self::Files(v)=>PublicAction::Files(PublicFileAction {kind:v.kind,expected_revision:v.expected_revision.clone(),paths:v.paths.clone()}),
             Self::Branch(v)=>PublicAction::Branch(v.clone()),
             Self::Switch(v)=>PublicAction::Switch(v.clone()),
+            Self::Rename(v)=>PublicAction::Rename(v.clone()),
         }
     }
 }
 #[derive(Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub(crate) enum PublicAction { Files(PublicFileAction), Branch(branch::Action), Switch(switch::Action) }
+pub(crate) enum PublicAction { Files(PublicFileAction), Branch(branch::Action), Switch(switch::Action), Rename(rename::Action) }
 #[derive(Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase")]
 pub(crate) struct PublicFileAction { pub(crate) kind:Kind, pub(crate) expected_revision:String, pub(crate) paths:Vec<String> }
@@ -138,7 +139,7 @@ pub(crate) fn decode_command(name: &str, raw: &[u8]) -> Result<Command, BridgeEr
     }
     need(match name {
         "git_local_prepare" => keys(&body,&["projectId","expectedDocumentRevision","action"])
-            && if matches!(body["action"]["kind"].as_str(),Some("branch-create"|"branch-switch")) {
+            && if matches!(body["action"]["kind"].as_str(),Some("branch-create"|"branch-switch"|"branch-rename")) {
                 keys(&body["action"],&["kind","expectedRevision","expectedReferenceRevision","name"])
             } else { keys(&body["action"],&["kind","expectedRevision","paths","message","identity"]) },
         "git_local_apply" => keys(&body,&["projectId","expectedDocumentRevision","reviewId"]),
@@ -159,7 +160,7 @@ pub(crate) fn decode_command(name: &str, raw: &[u8]) -> Result<Command, BridgeEr
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub(crate) enum Review { Files(FileReview), Branch(branch::Review), Switch(switch::Review) }
+pub(crate) enum Review { Files(FileReview), Branch(branch::Review), Switch(switch::Review), Rename(rename::Review) }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct FileReview {
@@ -168,19 +169,20 @@ pub(crate) struct FileReview {
     pub(crate) expected_index: String, pub(crate) review_digest: String,
 }
 impl Review {
-    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch} }
-    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision} }
-    pub(crate) fn head(&self) -> Option<&str> { match self {Self::Files(v)=>v.head.as_deref(), Self::Branch(v)=>Some(&v.head), Self::Switch(v)=>Some(&v.head)} }
-    pub(crate) fn branch(&self) -> Option<&str> { match self {Self::Files(v)=>v.branch.as_deref(), Self::Branch(v)=>v.branch.as_deref(), Self::Switch(v)=>Some(&v.branch)} }
-    pub(crate) fn expected_index(&self) -> &str { match self {Self::Files(v)=>&v.expected_index, Self::Branch(v)=>&v.expected_index, Self::Switch(v)=>&v.expected_index} }
-    pub(crate) fn review_digest(&self) -> &str { match self {Self::Files(v)=>&v.review_digest, Self::Branch(v)=>&v.review_digest, Self::Switch(v)=>&v.review_digest} }
+    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::Rename(_)=>Kind::BranchRename} }
+    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision, Self::Rename(v)=>&v.expected_revision} }
+    pub(crate) fn head(&self) -> Option<&str> { match self {Self::Files(v)=>v.head.as_deref(), Self::Branch(v)=>Some(&v.head), Self::Switch(v)=>Some(&v.head), Self::Rename(v)=>Some(&v.head)} }
+    pub(crate) fn branch(&self) -> Option<&str> { match self {Self::Files(v)=>v.branch.as_deref(), Self::Branch(v)=>v.branch.as_deref(), Self::Switch(v)=>Some(&v.branch), Self::Rename(v)=>Some(&v.branch)} }
+    pub(crate) fn expected_index(&self) -> &str { match self {Self::Files(v)=>&v.expected_index, Self::Branch(v)=>&v.expected_index, Self::Switch(v)=>&v.expected_index, Self::Rename(v)=>&v.expected_index} }
+    pub(crate) fn review_digest(&self) -> &str { match self {Self::Files(v)=>&v.review_digest, Self::Branch(v)=>&v.review_digest, Self::Switch(v)=>&v.review_digest, Self::Rename(v)=>&v.review_digest} }
     pub(crate) fn file(&self) -> Option<&FileReview> { match self {Self::Files(v)=>Some(v),_=>None} }
+    pub(crate) fn rename_details(&self) -> Option<&rename::Review> {match self {Self::Rename(v)=>Some(v),_=>None}}
     pub(crate) fn switch_details(&self) -> Option<&switch::Review> {match self {Self::Switch(v)=>Some(v),_=>None}}
     pub(crate) fn branch_details(&self) -> Option<&branch::Review> { match self {Self::Branch(v)=>Some(v),_=>None} }
     pub(crate) fn valid(&self) -> bool {
         match self {
-            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(),
-            Self::Files(v)=>!matches!(v.action,Kind::BranchCreate|Kind::BranchSwitch) && read::digest(&v.expected_revision)
+            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(), Self::Rename(v)=>v.valid(),
+            Self::Files(v)=>!matches!(v.action,Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename) && read::digest(&v.expected_revision)
                 && read::digest(&v.expected_index) && read::digest(&v.review_digest)
                 && paths(&v.paths) && v.whole_index == (v.action == Kind::Commit)
                 && v.head.as_deref().is_none_or(read::oid) && v.branch.as_deref().is_none_or(read::branch)
@@ -191,6 +193,7 @@ impl Review {
         self.valid() && action.valid() && match (self,action) {
             (Self::Branch(v),Action::Branch(a))=>v.matches(a),
             (Self::Switch(v),Action::Switch(a))=>v.matches(a),
+            (Self::Rename(v),Action::Rename(a))=>v.matches(a),
             (Self::Files(v),Action::Files(a))=>v.action == a.kind && v.expected_revision == a.expected_revision
                 && (a.kind == Kind::Commit || v.paths == a.paths),
             _=>false,
@@ -199,6 +202,8 @@ impl Review {
     fn decode(value:&Value) -> Result<Self,BridgeError> {
         need(if value["action"] == "branch-switch" {
             keys(value,switch::REVIEW_KEYS)
+        } else if value["action"] == "branch-rename" {
+            keys(value,rename::REVIEW_KEYS)
         } else if value["action"] == "branch-create" {
             keys(value,&["action","name","targetRef","expectedRevision","expectedReferenceRevision","head","branch","expectedIndex","reviewDigest"])
         } else { keys(value,&["action","expectedRevision","paths","wholeIndex","head","branch","expectedIndex","reviewDigest"]) })?;
@@ -207,7 +212,7 @@ impl Review {
 }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub(crate) enum Intent { Files(FileIntent), Branch(branch::Intent), Switch(switch::Intent) }
+pub(crate) enum Intent { Files(FileIntent), Branch(branch::Intent), Switch(switch::Intent), Rename(rename::Intent) }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct FileIntent {
@@ -216,19 +221,20 @@ pub(crate) struct FileIntent {
     pub(crate) candidate_index: Option<String>, pub(crate) candidate_commit: Option<String>,
 }
 impl Intent {
-    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action,Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch} }
-    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision,Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision} }
-    pub(crate) fn expected_ref(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_ref.as_deref(),Self::Branch(v)=>v.expected_ref.as_deref(),Self::Switch(v)=>Some(&v.expected_ref)} }
-    pub(crate) fn expected_head(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_head.as_deref(),Self::Branch(v)=>Some(&v.expected_head),Self::Switch(v)=>Some(&v.expected_head)} }
-    pub(crate) fn expected_index(&self) -> &str { match self {Self::Files(v)=>&v.expected_index,Self::Branch(v)=>&v.expected_index, Self::Switch(v)=>&v.expected_index} }
-    pub(crate) fn candidate_index(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_index.as_deref(),Self::Branch(_)=>None,Self::Switch(v)=>Some(&v.candidate_index)} }
-    pub(crate) fn candidate_commit(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_commit.as_deref(),Self::Branch(_)|Self::Switch(_)=>None} }
+    pub(crate) fn action(&self) -> Kind { match self {Self::Files(v)=>v.action,Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch, Self::Rename(_)=>Kind::BranchRename} }
+    pub(crate) fn expected_revision(&self) -> &str { match self {Self::Files(v)=>&v.expected_revision,Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision, Self::Rename(v)=>&v.expected_revision} }
+    pub(crate) fn expected_ref(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_ref.as_deref(),Self::Branch(v)=>v.expected_ref.as_deref(),Self::Switch(v)=>Some(&v.expected_ref),Self::Rename(v)=>Some(&v.expected_ref)} }
+    pub(crate) fn expected_head(&self) -> Option<&str> { match self {Self::Files(v)=>v.expected_head.as_deref(),Self::Branch(v)=>Some(&v.expected_head),Self::Switch(v)=>Some(&v.expected_head),Self::Rename(v)=>Some(&v.expected_head)} }
+    pub(crate) fn expected_index(&self) -> &str { match self {Self::Files(v)=>&v.expected_index,Self::Branch(v)=>&v.expected_index, Self::Switch(v)=>&v.expected_index, Self::Rename(v)=>&v.expected_index} }
+    pub(crate) fn candidate_index(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_index.as_deref(),Self::Branch(_)|Self::Rename(_)=>None,Self::Switch(v)=>Some(&v.candidate_index)} }
+    pub(crate) fn candidate_commit(&self) -> Option<&str> { match self {Self::Files(v)=>v.candidate_commit.as_deref(),Self::Branch(_)|Self::Switch(_)|Self::Rename(_)=>None} }
     pub(crate) fn reference_oid(&self) -> Option<&str> { match self {Self::Files(v) if v.action==Kind::Commit=>v.candidate_commit.as_deref(),Self::Branch(v)=>Some(&v.candidate_ref_oid),_=>None} }
+    pub(crate) fn rename_details(&self) -> Option<&rename::Intent> {match self {Self::Rename(v)=>Some(v),_=>None}}
     pub(crate) fn switch_details(&self) -> Option<&switch::Intent> {match self {Self::Switch(v)=>Some(v),_=>None}}
     pub(crate) fn branch_details(&self) -> Option<&branch::Intent> { match self {Self::Branch(v)=>Some(v),_=>None} }
     pub(crate) fn valid(&self) -> bool {
         match self {
-            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(),
+            Self::Branch(v)=>v.valid(), Self::Switch(v)=>v.valid(), Self::Rename(v)=>v.valid(),
             Self::Files(v)=>read::digest(&v.expected_revision) && read::digest(&v.expected_index)
                 && v.expected_head.as_deref().is_none_or(read::oid) && v.expected_ref.as_deref().is_none_or(read::branch)
                 && (v.expected_head.is_some() || v.expected_ref.is_some()) && match v.action {
@@ -236,7 +242,7 @@ impl Intent {
                         && v.candidate_commit.as_deref().is_some_and(|oid|read::oid(oid)
                             && v.expected_head.as_ref().is_none_or(|h|h.len() == oid.len())),
                     Kind::Stage|Kind::Unstage => v.candidate_commit.is_none() && v.candidate_index.as_deref().is_some_and(read::digest),
-                    Kind::BranchCreate|Kind::BranchSwitch=>false,
+                    Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename=>false,
                 },
         }
     }
@@ -244,6 +250,7 @@ impl Intent {
         self.valid() && review.valid() && match (self,review) {
             (Self::Branch(v),Review::Branch(r))=>v.matches(r),
             (Self::Switch(v),Review::Switch(r))=>v.matches(r),
+            (Self::Rename(v),Review::Rename(r))=>v.matches(r),
             (Self::Files(v),Review::Files(r))=>v.action == r.action && v.expected_revision == r.expected_revision
                 && v.expected_ref == r.branch && v.expected_head == r.head && v.expected_index == r.expected_index,
             _=>false,
@@ -252,6 +259,8 @@ impl Intent {
     fn decode(value:&Value) -> Result<Self,BridgeError> {
         need(if value["action"] == "branch-switch" {
             keys(value,switch::INTENT_KEYS)
+        } else if value["action"] == "branch-rename" {
+            keys(value,rename::INTENT_KEYS)
         } else if value["action"] == "branch-create" {
             keys(value,&["action","expectedRevision","expectedReferenceRevision","expectedRef","expectedHead","expectedIndex","targetRef","expectedTargetAbsent","candidateRefOid"])
         } else { keys(value,&["action","expectedRevision","expectedRef","expectedHead","expectedIndex","candidateIndex","candidateCommit"]) })?;
@@ -262,22 +271,27 @@ pub(crate) struct ApplyBinding { pub(crate) review: Review, pub(crate) journal_r
 pub(crate) struct Request {
     pub(crate) id: String, pub(crate) action: Action, pub(crate) context: Context, pub(crate) clock: Clock,
     pub(crate) phase: Phase, pub(crate) binding: Option<ApplyBinding>, pub(crate) digest: String,
-    pub(crate) native: Native, pub(crate) switch_sources:Option<switch::Sources>, bytes: Vec<u8>,
+    pub(crate) native: Native, pub(crate) switch_sources:Option<switch::Sources>, pub(crate) rename_sources:Option<rename::Sources>, bytes: Vec<u8>,
 }
 impl Request {
     pub(crate) fn from_original(id: &str, action: &Action, context: &Context, native: &Native,
         clock: Clock, binding: Option<ApplyBinding>) -> Result<Self,BridgeError> {
-        Self::from_sources(id,action,context,native,clock,binding,None)
+        Self::from_sources(id,action,context,native,clock,binding,None,None)
     }
     /// Projection from the SAME retained native Book; never public input or a
     /// substitute for the Preparing row/current Doc/actual source checks.
     pub(crate) fn from_switch_original(id:&str,action:&Action,context:&Context,native:&Native,
         clock:Clock,binding:Option<ApplyBinding>,sources:Option<switch::Sources>)->Result<Self,BridgeError> {
         need(action.kind()==Kind::BranchSwitch)?;
-        Self::from_sources(id,action,context,native,clock,binding,sources)
+        Self::from_sources(id,action,context,native,clock,binding,sources,None)
+    }
+    pub(crate) fn from_rename_original(id:&str,action:&Action,context:&Context,native:&Native,
+        clock:Clock,binding:Option<ApplyBinding>,sources:Option<rename::Sources>)->Result<Self,BridgeError> {
+        need(action.kind()==Kind::BranchRename)?;
+        Self::from_sources(id,action,context,native,clock,binding,None,sources)
     }
     fn from_sources(id:&str,action:&Action,context:&Context,native:&Native,
-        clock:Clock,binding:Option<ApplyBinding>,switch_sources:Option<switch::Sources>)->Result<Self,BridgeError> {
+        clock:Clock,binding:Option<ApplyBinding>,switch_sources:Option<switch::Sources>,rename_sources:Option<rename::Sources>)->Result<Self,BridgeError> {
         need(valid_id(id) && action.valid() && valid_id(&context.project_id) && valid_id(&context.revision)
             && native.valid() && clock.work_end_ns > 0 && clock.hard_end_ns <= i64::MAX as u64
             && clock.hard_end_ns.checked_sub(clock.work_end_ns) == Some(10_000_000_000))?;
@@ -296,10 +310,16 @@ impl Request {
             })?;
             value["switch"]=serde_json::to_value(&switch_sources).map_err(|_|BridgeError::protocol())?;
         } else {need(switch_sources.is_none())?;}
+        if action.kind()==Kind::BranchRename {
+            need(match (&binding,&rename_sources) {
+                (None,None)=>true,(Some(b),Some(s))=>b.review.rename_details().is_some_and(|r|s.valid(native,r)),_=>false,
+            })?;
+            value["rename"]=serde_json::to_value(&rename_sources).map_err(|_|BridgeError::protocol())?;
+        } else {need(rename_sources.is_none())?;}
         let mut bytes=serde_json::to_vec(&value).map_err(|_|BridgeError::protocol())?;
         bytes.push(b'\n'); need(bytes.len() <= REQUEST_LIMIT)?;
         let digest = hash(&bytes);
-        Ok(Self {id:id.into(),action:action.clone(),context:context.clone(),clock,phase,binding,digest,native:native.clone(),switch_sources,bytes})
+        Ok(Self {id:id.into(),action:action.clone(),context:context.clone(),clock,phase,binding,digest,native:native.clone(),switch_sources,rename_sources,bytes})
     }
     pub(crate) fn bytes(&self) -> &[u8] { &self.bytes }
     pub(crate) fn go(&self) -> Vec<u8> { format!("MRK-GIT-LOCAL-GO/1 {}\n",self.digest).into_bytes() }
@@ -348,7 +368,7 @@ impl Request {
             if self.phase == Phase::Prepare {
                 need(candidate.is_none() && terminal.first_failure_ns.is_none() && terminal.cleanup_end_ns == self.clock.hard_end_ns
                     && terminal.publication == Publication::NotReported
-                    && keys(&terminal.result,if matches!(self.action.kind(),Kind::BranchCreate|Kind::BranchSwitch) {&["review"]} else {&["review","diff"]}))?;
+                    && keys(&terminal.result,if matches!(self.action.kind(),Kind::BranchCreate|Kind::BranchSwitch|Kind::BranchRename) {&["review"]} else {&["review","diff"]}))?;
                 let review = Review::decode(&terminal.result["review"])?;
                 need(review.matches(&self.action))?;
                 if let Some(review) = review.file() {
@@ -360,10 +380,12 @@ impl Request {
         Ok(terminal)
     }
     fn reason(&self,value:&str)->bool {read::reason(value) || self.action.kind()==Kind::BranchCreate && branch::reason(value)
-        || self.action.kind()==Kind::BranchSwitch && switch::reason(value)}
+        || self.action.kind()==Kind::BranchSwitch && switch::reason(value)
+        || self.action.kind()==Kind::BranchRename && rename::reason(value)}
     fn validate_applied(&self, terminal:&Terminal, candidate:Option<&Candidate>) -> Result<(),BridgeError> {
         let r = &terminal.result;
         need(keys(r,if self.action.kind()==Kind::BranchSwitch {switch::RESULT_KEYS}
+            else if self.action.kind()==Kind::BranchRename {rename::RESULT_KEYS}
             else {&["operationId","action","state","settlement","reason","observation","intent"]})
             && r["operationId"] == self.id && r["action"] == json!(self.action.kind()) && r["settlement"] == "settled")?;
         let state = r["state"].as_str().ok_or_else(BridgeError::protocol)?;
@@ -375,11 +397,12 @@ impl Request {
             need(candidate.request_digest == self.digest && intent == candidate.intent)?;
         }
         if self.action.kind()==Kind::BranchSwitch {return switch::validate_applied(self,terminal,candidate)}
+        if self.action.kind()==Kind::BranchRename {return rename::validate_applied(self,terminal,candidate)}
         if terminal.publication != Publication::NotReported {
             need(candidate.is_some() && terminal.publication == match self.action.kind() {
                 Kind::Commit=>Publication::RefReturned,Kind::BranchCreate=>Publication::BranchRefReturned,
                 Kind::Stage|Kind::Unstage=>Publication::IndexReturned,
-                Kind::BranchSwitch=>return Err(BridgeError::protocol()),
+                Kind::BranchSwitch|Kind::BranchRename=>return Err(BridgeError::protocol()),
             })?;
         }
         if state == "succeeded" {
@@ -398,7 +421,8 @@ pub(crate) struct Candidate { request_digest:String, pub(crate) digest:String, p
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all="kebab-case")]
 pub(crate) enum Publication { NotReported, IndexReturned, RefReturned, BranchRefReturned,
-    SwitchCheckoutReturned, SwitchLogReturned, SwitchHeadReturned, SwitchIndexReturned }
+    SwitchCheckoutReturned, SwitchLogReturned, SwitchHeadReturned, SwitchIndexReturned,
+    RenameNewLogReturned, RenameOldLogReturned, RenameRefReturned, RenameHeadLogReturned, RenameHeadReturned, RenameConfigReturned }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub(crate) struct Terminal {

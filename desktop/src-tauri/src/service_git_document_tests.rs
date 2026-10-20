@@ -92,6 +92,7 @@ fn native_index_action_preserves_private_field_and_exact_selection_checks() {
         local::Kind::Commit,
         local::Kind::BranchCreate,
         local::Kind::BranchSwitch,
+        local::Kind::BranchRename,
     ] {
         assert!(local::Action::index(kind, "a".repeat(64), vec!["app/a".into()]).is_err());
     }
