@@ -174,7 +174,7 @@ pub(super) fn claim_prepare(inner: &Inner, context: &wire::Context, root: &Regis
 
 /// Called by the existing driver after its inspection handle returned, before
 /// runtime transfer/spawn. No Document, IO or native Book lock is taken here.
-pub(super) fn before_transfer(
+pub(in crate::saved_command_owner) fn before_transfer(
     book: &super::super::Resources,
     inner: &Inner,
     owner: &Session,

@@ -566,6 +566,8 @@ mod known {
         agent_android_build_grant: None,lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
             retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,apple_provisioning_ready:None,version_allocation_source:None,version_enrollment:version_enrollment::State::new(),git_local:None,git_local_review:None,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            version_reserve: version_reserve::State::new(),
             session_owner_reason:None,maintenance:macos_maintenance::Closure::default(),context:Some(context),slot:Some(slot),records,assignments,
             quit:None,quit_accepted:false,quit_cleanup_end:None,github:ConnectionState::new(),gh_auth:None,git_read:None,
             evidence:EvidenceRegistry::new(),images:images::Registry::new(),installation:installation::Registry::new(),vault:None};

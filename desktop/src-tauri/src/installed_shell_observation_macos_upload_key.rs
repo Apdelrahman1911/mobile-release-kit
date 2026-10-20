@@ -5,6 +5,7 @@ use super::*;
 use crate::android_toolchain_catalog as catalog;
 use crate::asset_session::{InstalledUploadSample, InstalledUploadTrace};
 use std::sync::Mutex;
+use tauri::Manager;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Case {
