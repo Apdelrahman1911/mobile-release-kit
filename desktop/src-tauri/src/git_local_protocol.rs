@@ -85,6 +85,12 @@ pub(crate) struct FileAction {
     identity: Option<Identity>,
 }
 impl Action {
+    /// Closed index-only DATA construction; no commit draft fields are exposed.
+    pub(crate) fn index(kind: Kind, expected_revision: String, paths: Vec<String>) -> Result<Self, BridgeError> {
+        let action = Self::Files(FileAction { kind, expected_revision, paths, message: None, identity: None });
+        if matches!(kind, Kind::Stage | Kind::Unstage) && action.valid() { Ok(action) }
+        else { Err(BridgeError::invalid()) }
+    }
     pub(crate) fn kind(&self) -> Kind { match self { Self::Files(v)=>v.kind, Self::Branch(_)=>Kind::BranchCreate, Self::Switch(_)=>Kind::BranchSwitch } }
     pub(crate) fn expected_revision(&self) -> &str { match self { Self::Files(v)=>&v.expected_revision, Self::Branch(v)=>&v.expected_revision, Self::Switch(v)=>&v.expected_revision } }
     pub(crate) fn valid(&self) -> bool {

@@ -59,6 +59,51 @@ fn native_consent_codec_rejects_paths_outside_exact_selected_roster() {
     assert!(decode_allow(duplicate).is_err());
 }
 #[test]
+fn native_index_action_preserves_private_field_and_exact_selection_checks() {
+    for kind in [wire::Action::Stage, wire::Action::Unstage] {
+        let selected = selection(&observed(), kind, vec!["app/a".into()]).unwrap();
+        let action = native_action(&selected).unwrap();
+        assert!(same_action(&action, &selected));
+        let value = serde_json::to_value(&action).unwrap();
+        assert!(value["message"].is_null() && value["identity"].is_null());
+        for (field, changed) in [
+            ("kind", serde_json::json!("commit")),
+            ("expectedRevision", serde_json::json!("d".repeat(64))),
+            ("paths", serde_json::json!(["app/b"])),
+            ("message", serde_json::json!("not an index-only action")),
+            (
+                "identity",
+                serde_json::json!({"name":"Fixture","email":"fixture@example.invalid"}),
+            ),
+        ] {
+            let mut changed_value = value.clone();
+            changed_value[field] = changed;
+            let changed_action = serde_json::from_value(changed_value).unwrap();
+            assert!(!same_action(&changed_action, &selected));
+        }
+        let opposite = match kind {
+            wire::Action::Stage => local::Kind::Unstage,
+            wire::Action::Unstage => local::Kind::Stage,
+        };
+        let other = local::Action::index(opposite, "a".repeat(64), vec!["app/a".into()]).unwrap();
+        assert!(!same_action(&other, &selected));
+    }
+    for kind in [
+        local::Kind::Commit,
+        local::Kind::BranchCreate,
+        local::Kind::BranchSwitch,
+    ] {
+        assert!(local::Action::index(kind, "a".repeat(64), vec!["app/a".into()]).is_err());
+    }
+    for (revision, paths) in [
+        ("not-a-revision".into(), vec!["app/a".into()]),
+        ("a".repeat(64), vec![]),
+        ("a".repeat(64), vec!["app/b".into(), "app/a".into()]),
+    ] {
+        assert!(local::Action::index(local::Kind::Stage, revision, paths).is_err());
+    }
+}
+#[test]
 fn dormant_document_or_nonmain_caller_never_starts_a_host_or_native_reader() {
     let bridge = Arc::new(DesktopBridge::new(std::path::PathBuf::from(
         "/inert/git-index-never-opened",

@@ -503,7 +503,7 @@ impl DocumentBinding {
                 local::Prepare {
                     project_id: scope.runtime_id.clone(),
                     expected_document_revision: scope.document_revision,
-                    action: native_action(&scope.selection),
+                    action: native_action(&scope.selection)?,
                 },
                 Some(link),
             ),
@@ -613,20 +613,21 @@ impl DocumentBinding {
     }
 }
 fn same_action(action: &local::Action, selection: &wire::Selection) -> bool {
-    matches!(action,local::Action::Files(v) if v.kind==match selection.summary.action {wire::Action::Stage=>local::Kind::Stage,wire::Action::Unstage=>local::Kind::Unstage}
-        && v.expected_revision==selection.summary.repository_revision && v.paths==selection.paths && v.message.is_none() && v.identity.is_none())
+    // The original action validator enforces absent private commit fields for
+    // Stage/Unstage; this child needs no access to those fields.
+    action.valid()
+        && matches!(action,local::Action::Files(v) if v.kind==match selection.summary.action {wire::Action::Stage=>local::Kind::Stage,wire::Action::Unstage=>local::Kind::Unstage}
+            && v.expected_revision==selection.summary.repository_revision && v.paths==selection.paths)
 }
-fn native_action(selection: &wire::Selection) -> local::Action {
-    local::Action::Files(local::FileAction {
-        kind: match selection.summary.action {
+fn native_action(selection: &wire::Selection) -> Result<local::Action, BridgeError> {
+    local::Action::index(
+        match selection.summary.action {
             wire::Action::Stage => local::Kind::Stage,
             wire::Action::Unstage => local::Kind::Unstage,
         },
-        expected_revision: selection.summary.repository_revision.clone(),
-        paths: selection.paths.clone(),
-        message: None,
-        identity: None,
-    })
+        selection.summary.repository_revision.clone(),
+        selection.paths.clone(),
+    )
 }
 fn flush(service: &ApplicationService) -> Result<(), Error> {
     struct Final<'a>(&'a ApplicationService, bool);
