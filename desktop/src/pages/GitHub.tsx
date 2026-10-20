@@ -7,6 +7,15 @@ import { GITHUB_WORKFLOWS } from '../githubSetupProtocol.ts';
 import type { AppInfo, CredentialHelp, GitHubComparison, GitHubHelpText, GitHubSetupProposed, HelpContent, Page } from '../types.ts';
 import { Badge, DisabledAction, ErrorNotice, HelpButton, Issues, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
+import { ProgressiveDisclosure } from '../components/ProgressiveDisclosure.tsx';
+
+interface GitHubTaskSection {
+  id: 'publication' | 'settings' | 'checks' | 'history' | 'counter';
+  title: string;
+  description: string;
+  needsAttention: boolean;
+  content: ReactNode;
+}
 
 const comparisonLabels: Record<GitHubComparison, string> = {
   'not-supplied': 'Not supplied · presence unknown',
@@ -96,7 +105,7 @@ function Proposal({ result, credentialHelp, onHelp }: { result: GitHubSetupPropo
   </section>;
 }
 
-export function GitHub({ session, state, controller, loading, onReload, onNavigate, credentialHelp, onHelp, nativeReview, connectionView }: {
+export function GitHub({ session, state, controller, loading, onReload, onNavigate, credentialHelp, onHelp, nativeReview, connectionView, remoteTasks }: {
   info: AppInfo | null;
   session: ProjectSession | null;
   state: GitHubSetupState;
@@ -108,6 +117,7 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
   onHelp: (help: HelpContent) => void;
   nativeReview: ReactNode;
   connectionView: ReactNode;
+  remoteTasks: readonly GitHubTaskSection[];
 }) {
   const [inputHelpOpen, setInputHelpOpen] = useState({ repository: false, sha: false, snapshot: false });
   const helpOpened = (field: keyof typeof inputHelpOpen, open: boolean) => setInputHelpOpen((current) => current[field] === open ? current : { ...current, [field]: open });
@@ -115,12 +125,17 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
   const repositoryHelp = state.help?.inputs.find((entry) => entry.id === 'toolingRepository');
   const shaHelp = state.help?.inputs.find((entry) => entry.id === 'toolingSha');
   const snapshotHelp = state.help?.inputs.find((entry) => entry.id === 'suppliedSnapshot');
+  const attention = remoteTasks.filter((task) => task.needsAttention);
   return <>
     <PageHeading eyebrow="GITHUB" title="Connect GitHub and prepare automation." description="Connect your account, review workflow files and choose which repository settings to apply. File changes and online actions have separate approvals. Nothing is published automatically." />
+    {attention.length > 0 && <div className="notice notice-warning" role="status"><Icon name="info" /><div>
+      <strong>GitHub tasks need your attention</strong><p>The original controls stay open below. Review their status before starting another task.</p>
+      <ul>{attention.map((task) => <li key={task.id}><a href={`#github-task-${task.id}`}>{task.title}</a></li>)}</ul>
+    </div></div>}
     {connectionView}
-    <div className="notice notice-info"><Icon name="shield" /><div><strong>Preview first, then review changes</strong><p>The preview below does not change files or contact GitHub. It shows a proposal, not proof that your repository is ready. Use the separate apply and online-check controls when you are ready.</p></div></div>
+    <div className="notice notice-info"><Icon name="shield" /><div><strong>Prepare workflow files on this computer</strong><p>Choose the template source, then use <strong>Review local workflow files</strong> below. That review has its own confirmation before saving. The optional text preview does not save files or contact GitHub.</p></div></div>
     <form className="card github-form" onSubmit={(event) => { event.preventDefault(); void controller.propose(); }}>
-      <SectionHeading title="Preview workflow files" description="Choose the Mobile Release Kit template source below. This is separate from your app’s repository above; use the ? buttons if you need help finding these values."><Badge>{state.pending ? 'Preparing preview…' : 'Not applied'}</Badge></SectionHeading>
+      <SectionHeading title="Choose workflow templates" description="Enter the Mobile Release Kit repository and full commit to use for local workflow files. This is separate from your app’s repository above; the ? buttons explain where to find both values."><Badge>{state.pending ? 'Preparing optional preview…' : 'Not applied'}</Badge></SectionHeading>
       <div className="github-draft">
         <strong>{session?.project.name ?? 'No project selected'} · current draft</strong>
         <dl className="github-facts">
@@ -166,13 +181,25 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
       </fieldset>
       </details>
       {state.help && <section className="github-guidance" aria-label="Core setup guidance available before preview"><h3>Core setup guide · requirements to review</h3><p>Local, core-sourced text only. Links, paths and commands mentioned in guidance are never opened or executed here.</p>{state.help.guidance.map((entry) => <details className="github-help" key={entry.id}><summary>{entry.label}</summary><HelpDefinitions help={entry} /></details>)}</section>}
-      <div className="github-propose-action"><button type="submit" className="button primary" disabled={reason !== null} aria-describedby="github-propose-reason"><Icon name={state.pending ? 'refresh' : 'github'} size={17} />{state.pending ? 'Preparing preview…' : 'Preview GitHub setup'}</button><p id="github-propose-reason">{reason ?? 'Uses the shared core only. No file write, GitHub call, credential access or workflow execution.'}</p></div>
+      <div className="github-propose-action"><button type="submit" className="button secondary" disabled={reason !== null} aria-describedby="github-propose-reason"><Icon name={state.pending ? 'refresh' : 'github'} size={17} />{state.pending ? 'Preparing preview…' : 'Preview without saving (optional)'}</button><p id="github-propose-reason">{reason ?? 'Optional text preview only. You can use the separate local workflow review without running this preview first.'}</p></div>
     </form>
     {state.invalidated && <div className="notice notice-warning" role="status"><Icon name="info" /><div><strong>Previous preview discarded</strong><p>The project, draft, toolkit inputs, comparison or service generation changed. Preview again; an older reply cannot restore stale output.</p></div></div>}
     {state.error && <ErrorNotice error={state.error} title="Setup preview unavailable" />}
     {state.result?.state === 'invalid' && <section className="card"><SectionHeading title="Draft needs correction" description="The passive core returned no workflow or settings proposal. This preview saved or applied nothing and did not contact GitHub."><Badge tone="danger">Format invalid</Badge></SectionHeading><Issues issues={state.result.validation.issues} /><button type="button" className="button secondary" onClick={() => onNavigate('settings')}>Review the draft and field guidance</button></section>}
-    {state.result?.state === 'proposed' && <Proposal result={state.result} credentialHelp={credentialHelp} onHelp={onHelp} />}
     {nativeReview}
+    <ProgressiveDisclosure title={`Optional preview: proposed files and checklist${state.result?.state === 'proposed' ? ' · available' : ''}`}
+      description="Reference text only, not an Apply plan or proof that GitHub is ready. Opening this section does not run a preview.">
+      {state.result?.state === 'proposed' ? <Proposal result={state.result} credentialHelp={credentialHelp} onHelp={onHelp} /> :
+        <p>No current text preview is available. Use the optional preview button above if you want to read one; local workflow review is separate.</p>}
+    </ProgressiveDisclosure>
+    <section aria-label="Optional GitHub tasks">
+      <SectionHeading title="Optional GitHub tasks" description="Open only the task you need. Each keeps its own checks, permissions and approval; saving local workflow files does not publish them." />
+      {remoteTasks.map((task) => <section id={`github-task-${task.id}`} key={task.id} tabIndex={-1} aria-label={task.title}>
+        <ProgressiveDisclosure title={task.title} description={task.description} needsAttention={task.needsAttention}>
+          {task.content}
+        </ProgressiveDisclosure>
+      </section>)}
+    </section>
     <details className="card progressive-disclosure"><summary>Help: what setup changes, and what it does not</summary><SectionHeading title="Saving workflows does not run them" description="Applying workflow files only changes your local repository. GitHub environments, secrets, checks and releases use the separate controls and approvals shown on this page or in Releases." /><div className="github-disabled-actions">
       <p className="save-note">For supported environment protections, secrets and variables, use the separate remote setup card above. It reports current native availability, requires an eligible connection and assigned inputs where needed, and shows a review before each confirmed change. Local file approval never grants remote authority.</p>
       <DisabledAction label="Dispatch from this setup preview" icon="rocket" reason="This preview cannot run checks or dispatch workflows. Use GitHub nonpublishing preflight on this page, or Protected release workflows in Releases; those separate actions may still be unavailable." />
