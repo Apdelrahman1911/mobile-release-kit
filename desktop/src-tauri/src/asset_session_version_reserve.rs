@@ -19,8 +19,11 @@ use crate::{
 };
 use std::path::Path;
 use zeroize::Zeroizing;
+#[path="asset_session_agent_version_reserve.rs"]
+pub(super) mod agent;
 
 struct Review {
+    identity: Arc<()>,
     id: String,
     input: p::Review,
     source: VersionAllocationSource,
@@ -32,6 +35,7 @@ struct Review {
     previous: Option<String>,
 }
 pub(super) struct State {
+    agent: agent::State,
     view: p::Status,
     review: Option<Review>,
     reading: Option<(String, Arc<version_allocation::Lane>)>,
@@ -41,6 +45,7 @@ pub(super) struct State {
 impl State {
     pub(super) fn new() -> Self {
         Self {
+            agent: agent::State::default(),
             view: p::Status::idle(),
             review: None,
             reading: None,
@@ -84,7 +89,7 @@ impl State {
 }
 pub(super) fn retained_bytes(state: &DocumentState) -> Option<usize> {
     let selected = &state.version_reserve;
-    let mut bytes = std::mem::size_of::<State>().checked_add(8192)?;
+    let mut bytes = std::mem::size_of::<State>().checked_add(8192)?.checked_add(agent::BACKING)?;
     if let Some(review) = &selected.review {
         bytes = bytes
             .checked_add(review.native.retained_bytes()?)?
@@ -114,6 +119,7 @@ pub(super) fn retained_bytes(state: &DocumentState) -> Option<usize> {
     Some(bytes)
 }
 pub(super) struct Lane {
+    agent: Option<Arc<crate::service_version_reserve_requests::NativeLink>>,
     id: String,
     pins: Pins,
     control: Arc<VersionReserveControl>,
@@ -236,6 +242,7 @@ impl DocumentBinding {
         lane: &Arc<Lane>,
         edit: &crate::edit_owner::SavedEditGuard<'_>,
     ) -> Result<(), BridgeError> {
+        agent::current(state,lane)?;
         if !state
             .version_reserve
             .lane
@@ -310,6 +317,7 @@ impl DocumentBinding {
         }
         {
             let state = self.lock();
+            agent::gui_current(&state).map_err(p::not_started)?;
             if state
                 .version_reserve
                 .lane
@@ -430,6 +438,7 @@ impl DocumentBinding {
             };
             state.version_reserve.reading = None;
             state.version_reserve.review = Some(Review {
+                identity: Arc::new(()),
                 id: id.clone(),
                 input,
                 source,
@@ -466,7 +475,7 @@ impl DocumentBinding {
         reviewed
     }
 
-    fn reserve_begin(&self, project: &str, review_id: &str) -> Result<Arc<Lane>, BridgeError> {
+    fn reserve_begin(&self, project: &str, review_id: &str, agent: Option<Arc<crate::service_version_reserve_requests::NativeLink>>) -> Result<Arc<Lane>, BridgeError> {
         let started = Instant::now();
         let control = Arc::new(VersionReserveControl::new(started)?);
         let id = crate::service_protocol::Id::random()
@@ -474,6 +483,7 @@ impl DocumentBinding {
             .as_str()
             .to_owned();
         let mut state = self.lock();
+        if agent.is_none() { agent::gui_current(&state)?; }
         if state
             .version_reserve
             .lane
@@ -506,6 +516,7 @@ impl DocumentBinding {
                 r.id == review_id && r.input.project_id == project && Instant::now() < r.end
             })
             .ok_or_else(p::refused)?;
+        if let Some(link) = &agent { agent::admission(&state,review,link)?; }
         let (registration, root) = self
             .inner
             .bridge
@@ -552,7 +563,7 @@ impl DocumentBinding {
             .bridge
             .edits
             .saved_registration_guard(&self.inner.session_identity)?;
-        let review = state.version_reserve.review.take().ok_or_else(p::refused)?;
+        let review = state.version_reserve.review.as_ref().ok_or_else(p::refused)?;
         let (saved, input) = state
             .saved_input
             .as_ref()
@@ -565,7 +576,7 @@ impl DocumentBinding {
         let template = serde_json::json!({"identityRevision":input.configuration_sha256,"source":review.source,
             "baseVersion":{"name":review.store.context().saved_version.name,"build":review.store.context().saved_version.build},
             "platforms":match review.store.context().platform {crate::local_store_preflight_protocol::AccessPlatform::Both=>serde_json::json!(["android","ios"]),one=>serde_json::json!([one])},"policy":review.input.policy(review.store.context().platform),"storeContextRevision":crate::version_allocation_state_native::play_inventory::current_context_digest(review.store.context()).map_err(|_|p::refused())?});
-        let selection = match review.previous {
+        let selection = match review.previous.clone() {
             Some(previous) => Selection::New {
                 previous_request_sha256: previous,
             },
@@ -576,6 +587,7 @@ impl DocumentBinding {
             .and_then(|n| n.checked_add(VersionReserveInvocation::reservation_bytes()?))
             .and_then(|n| n.checked_add(input.retained_bytes()? + 32 * 1024))
             .ok_or_else(p::unavailable)?;
+        let observation = review.store.clone();
         let pins = state.github.begin_version_reserve(
             project,
             registration,
@@ -585,11 +597,12 @@ impl DocumentBinding {
         )?;
         let source = Arc::new_cyclic(|weak| {
             let reserve = Arc::new(Lane {
+                agent,
                 id: id.clone(),
                 pins,
                 control: control.clone(),
                 source: weak.clone(),
-                observation: review.store,
+                observation,
                 template,
                 selection,
                 host_ticket: Mutex::new(None),
@@ -618,6 +631,8 @@ impl DocumentBinding {
             .as_ref()
             .expect("closed reserve constructor")
             .clone();
+        agent::bind(&mut state,&lane); // Before Review take/publication/GO; no fallible work follows.
+        state.version_reserve.review.take();
         state.version_reserve.lane = Some(lane.clone());
         state.version_allocation_source = Some(source);
         state.version_reserve.view.review = None;
@@ -892,7 +907,7 @@ impl DocumentBinding {
         app_data: &Path,
     ) -> Result<p::Status, BridgeError> {
         let lane = self
-            .reserve_begin(project, review_id)
+            .reserve_begin(project, review_id, None)
             .map_err(p::not_started)?;
         let mut guard = WaitGuard {
             lane: lane.clone(),
@@ -1031,6 +1046,10 @@ impl DocumentBinding {
             .filter(|l| l.id == id)
             .ok_or_else(BridgeError::invalid)?;
         if !lane.returned() {
+            if let Some(link) = &lane.agent {
+                link.entry().cancel(crate::service_version_reserve_protocol::Reason::UserCancelled,Instant::now());
+                agent::forward(lane);
+            }
             lane.control.stop();
         }
         state.version_reserve.bump();

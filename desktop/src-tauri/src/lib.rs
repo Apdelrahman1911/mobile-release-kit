@@ -113,6 +113,10 @@ mod git_rename_protocol;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod git_local_state;
 mod service_protocol;
+#[path="service_version_reserve_protocol.rs"]
+mod service_version_reserve_protocol;
+#[path="service_version_reserve_requests.rs"]
+mod service_version_reserve_requests;
 mod service_git_protocol;
 mod service_git_commit_protocol;
 mod service_git_requests;

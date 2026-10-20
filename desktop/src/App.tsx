@@ -696,6 +696,7 @@ export function App() {
   const [versionReserve] = useState(() => new VersionReserveController({ current: () => {
     const service = pathService.current, selected = workspaceRef.current.selectedId;
     return { port: service.api?.mode === 'native' ? service.api.versionReserve ?? null : null,
+      cliAccessPort: service.api?.mode === 'native' ? service.api.agentVersionReserveAccess ?? null : null,
       nativeSession: service.api?.mode === 'native' ? service : null,
       projectId: selected && !connectionPicking.current && Object.hasOwn(workspaceRef.current.projects, selected) ? selected : null,
       preview: service.api?.mode === 'preview', blockedReason: versionReserveAdmission.current(), editor: versionEditControllerRef.current };

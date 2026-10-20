@@ -50,7 +50,11 @@ impl Persisted {
     }
 }
 
-struct Grant { id: Id, projects: BTreeSet<Id>, expires: Instant }
+struct Grant { id: Id, projects: BTreeSet<Id>, expires: Instant,
+    reserve_read: Arc<crate::service_version_reserve_requests::ReadPermission> }
+// Only the original Grant drop/replacement revokes. Cloned facets do not own
+// consent and their Drop cannot revoke/renew the original.
+impl Drop for Grant { fn drop(&mut self) { self.reserve_read.revoke(Instant::now()); } }
 struct State {
     revision: Revision, saved: Persisted,
     // Runtime aliases are NEVER persisted or restored. Each genuine native
@@ -75,9 +79,12 @@ mod agent_ios_archive;
 mod request_catalogue;
 #[path="service_git_application.rs"]
 mod git_index;
+#[path="service_version_reserve_application.rs"]
+mod agent_version_reserve;
 
 pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
     git_index_requests: Arc<crate::service_git_requests::Inbox>,
+    version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
     repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
@@ -110,11 +117,12 @@ impl ApplicationService {
         for project in &mut saved.projects { if let Some(observation) = &mut project.observation { observation.stale = true; } }
         for operation in &mut saved.operations { operation.stale = true; }
         let instance = Id::random()?;
+        let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
         let git_index_requests = Arc::new(crate::service_git_requests::Inbox::new(instance.clone()));
         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
-        Ok(Self { store, instance, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
+        Ok(Self { store, instance, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
     }
     pub(crate) fn instance(&self) -> &Id { &self.instance }
@@ -167,11 +175,14 @@ impl ApplicationService {
     /// Permanent original-service read fence. Native observation callbacks must
     /// not wait for the state mutex, which real store IO can hold. No Allow or
     /// later successful write clears this flag; original cleanup still runs.
-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); }
+    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.version_reserve_requests.fence(); }
     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
+        // Nonblocking: an old facet must not survive an unobserved state
+        // poison while another caller still has not attempted lock().
+        if self.state.is_poisoned() { self.fence_native_history(); }
         if self.native_history_fenced.load(Ordering::Acquire) { Err(Error::StateUnknown) } else { Ok(()) }
     }
-    fn lock(&self) -> Result<MutexGuard<'_, State>, Error> { self.state.lock().map_err(|_| Error::StateUnknown) }
+    fn lock(&self) -> Result<MutexGuard<'_, State>, Error> { self.state.lock().map_err(|_| { self.fence_native_history(); Error::StateUnknown }) }
     fn check(&self, state: &State) -> Result<(), Error> {
         self.native_history_current()?;
         if state.stopped { return Err(Error::Unavailable); }
@@ -185,7 +196,7 @@ impl ApplicationService {
         next.validate(revision)?;
         let bytes = serde_json::to_vec(&next).map_err(|_| Error::StateUnknown)?;
         let stored = self.store.replace(Namespace::Projects, state.revision, &bytes).map_err(|e| e.code)?;
-        if stored.revision != revision { state.stopped = true; return Err(Error::StateUnknown); }
+        if stored.revision != revision { state.stopped = true; self.fence_native_history(); return Err(Error::StateUnknown); }
         state.saved = next; state.revision = revision; Ok(())
     }
 
@@ -318,16 +329,31 @@ impl ApplicationService {
     }
 
     pub(crate) fn allow_agent_read(&self, projects: Vec<Id>, lifetime: Duration) -> Result<ReadAccessStatus, Error> {
+        let intent_at = Instant::now();
         self.native_history_current()?;
+        let read_epoch = self.version_reserve_requests.read_permission_epoch()?;
         if projects.is_empty() || projects.len() > p::PROJECT_LIMIT || lifetime.is_zero() || lifetime > MAX_ACCESS { return Err(Error::InvalidRequest); }
         let mut state = self.lock()?; self.check(&state)?;
         let selected: BTreeSet<_> = projects.into_iter().collect();
         if selected.iter().any(|id| !state.runtime_aliases.values().any(|registered| registered == id)) { return Err(Error::Conflict); }
-        state.grant = Some(Grant { id: Id::random()?, projects: selected, expires: Instant::now().checked_add(lifetime).ok_or(Error::InvalidRequest)? });
+        let expires = Instant::now().checked_add(lifetime).ok_or(Error::InvalidRequest)?;
+        let next = Grant { id: Id::random()?, projects: selected, expires,
+            reserve_read: Arc::new(crate::service_version_reserve_requests::ReadPermission::new(expires)) };
+        // Reject a revoke which overtook original validation/IO. On failure
+        // next drops (revoking only itself); the old Grant remains untouched.
+        self.version_reserve_requests.publish_read_permission(&next.reserve_read, read_epoch)?;
+        if let Some(old) = &state.grant { old.reserve_read.revoke(intent_at); }
+        state.grant = Some(next);
         let status = access_status(&state);
         self.native_history_current()?; Ok(status)
     }
-    pub(crate) fn revoke_agent_read(&self) -> Result<(), Error> { self.lock()?.grant = None; Ok(()) }
+    pub(crate) fn revoke_agent_read(&self) -> Result<(), Error> {
+        let at = Instant::now();
+        self.version_reserve_requests.read_revoked(at); // Memory only, before possible store/IO wait.
+        let mut state = self.lock()?;
+        if let Some(old) = &state.grant { old.reserve_read.revoke(at); }
+        state.grant = None; Ok(())
+    }
     pub(crate) fn read_access_status(&self) -> Result<ReadAccessStatus, Error> {
         self.native_history_current()?;
         let state = self.lock()?; let status = access_status(&state);
@@ -363,6 +389,9 @@ impl ApplicationService {
             // These two fixed routes touch only the bounded proposal inbox.
             // No native callback, executor or GUI approval runs in a socket.
             match &request.request {
+                p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
+                p::RequestBody::VersionReserveStatus(q) => return self.service_version_reserve_query(client,q,false),
+                p::RequestBody::VersionReserveCancel(q) => return self.service_version_reserve_query(client,q,true),
                 p::RequestBody::GitIndexScope(q) => return self.git_index_scope(client, &q.project_id),
                 p::RequestBody::GitCommitScope(q) => return self.git_commit_scope(client, &q.project_id),
                 p::RequestBody::GitIndexPrepare(v) => return self.git_index_prepare(client, v.clone()),
@@ -399,6 +428,7 @@ impl ApplicationService {
             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
+                p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
                 | p::RequestBody::GitIndexStatus(_) | p::RequestBody::GitIndexCancel(_)
                 | p::RequestBody::GitCommitScope(_) | p::RequestBody::GitCommitPrepare(_)
@@ -442,7 +472,7 @@ impl ApplicationService {
     }
     /// The IPC owner must first stop accepting, notify and join all original
     /// workers. This revokes admission but does not pretend to join them.
-    pub(crate) fn stop(&self) -> Result<(), Error> { self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
 }
 
 fn valid_root(path: &Path) -> Result<&str, Error> {

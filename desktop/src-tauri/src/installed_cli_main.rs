@@ -3,6 +3,10 @@
 #![forbid(unsafe_code)]
 
 mod service_protocol;
+#[path="service_version_reserve_protocol.rs"]
+mod service_version_reserve_protocol;
+#[path="service_version_reserve_requests.rs"]
+mod service_version_reserve_requests;
 mod service_git_protocol;
 mod service_git_commit_protocol;
 mod service_git_requests;

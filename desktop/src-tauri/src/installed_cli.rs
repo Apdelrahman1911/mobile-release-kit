@@ -20,10 +20,15 @@ mod ios_archive;
 mod git_index;
 #[path="installed_cli_git_commit.rs"]
 mod git_commit;
+#[path="installed_cli_version_reserve.rs"]
+mod version_reserve;
 
 const HELP: &str = "Mobile Release Kit agent CLI\n\n\
 Usage:\n\
   mrk capabilities [--json]\n\
+  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk status [--json]\n\
   mrk projects [--json]\n\
   mrk observe PROJECT_ID [--json]\n\
@@ -213,6 +218,10 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
                 "readGrantAuthorizesWrites":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
                 "commit":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":GIT_INDEX_COMMANDS},
+            "versionReservation": {"scope":"one-desktop-native-review", "defaultEnabled":false,"oneUse":true,
+                "maxReviewMs":crate::service_version_reserve_protocol::REVIEW_MS,"maxRetainedRequests":crate::service_version_reserve_protocol::REQUEST_LIMIT,
+                "requiresProjectReadGrant":true,"requiresRunningDesktop":true,"readGrantAuthorizesReserve":false,
+                "appliesSourceEdits":false,"nativeAvailabilityChecked":false,"commands":version_reserve::COMMANDS},
             "gitCommits": {"scope":"desktop-approved-whole-staged-index", "defaultEnabled":false,"oneUse":true,
                 "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
                 "sharesGrantAndRequestLimitWithGitIndex":true,"readOrIndexGrantAuthorizesCommit":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
@@ -249,6 +258,8 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
         }
+        text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
+        text.push_str("  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
         text.push_str("\nLocal Git index changes need a separate one-use native Desktop selection. No commit, branch or push grant.\nUse service/project/request IDs returned by Desktop; native Git operation/review IDs are opaque strings.\n");
         text.into_bytes()
     };
@@ -338,6 +349,7 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
+        p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
         p::ResponseBody::GitCommitScope(_) | p::ResponseBody::GitCommitRequest(_) =>
             "Use the named git-commit command and its exact original request IDs to inspect this response.\n".into(),
         p::ResponseBody::GitIndexScope(_) | p::ResponseBody::GitIndexRequest(_) =>
@@ -365,6 +377,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     let args = collect_arguments(args);
     let json = args.iter().any(|a| a == "--json");
     if identity::recognizes(&args) { return identity::run(args); }
+    if version_reserve::recognizes(&args) { return version_reserve::run(args); }
     if git_index::recognizes(&args) { return git_index::run(args); }
     if git_commit::recognizes(&args) { return git_commit::run(args); }
     if identity_actions::recognizes(&args) { return identity_actions::run(args); }

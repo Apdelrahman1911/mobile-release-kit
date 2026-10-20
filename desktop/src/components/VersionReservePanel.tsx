@@ -2,6 +2,7 @@ import { useId, useSyncExternalStore } from 'react';
 import type { VersionReserveController } from '../versionReserveController.ts';
 import type { VersionIncrement } from '../versionReserve.ts';
 import { versionReserveHelp } from '../versionReserve.ts';
+import { AgentVersionReserveAccess } from './AgentVersionReserveAccess.tsx';
 
 // No effect/mount API calls. Root retains this original controller on navigation.
 export function VersionReservePanel({ controller, compact = false }: { controller: VersionReserveController; compact?: boolean }) {
@@ -47,5 +48,6 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
     {!compact && state.enabled && <p className="toolbar-reason">{busy ?? (status?.phase === 'reserved' ? controller.editReason() : status?.phase === 'reviewed' ? controller.reserveReason() : controller.reviewReason()) ??
       'The original reservation has a short, fixed deadline. Open the editor promptly, then review and confirm its separate Save.'}</p>}
     {state.editHandedOff && <p>Continue in the saved-version editor below. Its original status and recovery controls own the file operation.</p>}
+    <AgentVersionReserveAccess controller={controller.cliAccess} check={controller.checkCliAccess} compact={compact} />
   </section>;
 }

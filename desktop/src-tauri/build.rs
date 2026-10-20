@@ -286,6 +286,7 @@ fn main() {
     "agent_git_commit_access",
     "allow_agent_git_commit",
     "revoke_agent_git_commit",
+    "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
     "agent_git_index_access", "allow_agent_git_index", "revoke_agent_git_index",
     "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
     "agent_ios_archive_access", "allow_agent_ios_archive", "revoke_agent_ios_archive",

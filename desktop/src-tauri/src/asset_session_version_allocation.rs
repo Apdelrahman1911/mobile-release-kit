@@ -96,6 +96,8 @@ pub(super) fn retained_bytes(state: &DocumentState) -> Option<usize> {
     }
 }
 pub(super) fn stop(state: &DocumentState) {
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    version_reserve::agent::stop(state,Instant::now());
     if let Some(lane) = &state.version_allocation_source {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(reserve)=&lane.reserve {reserve.stop();}
@@ -309,6 +311,8 @@ impl DocumentBinding {
             return Err(BridgeError::invalid());
         }
         let mut state = self.lock();
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        version_reserve::agent::gui_current(&state)?; // Same admission lock, not a pre-await GUI check.
         if pending(&state) {
             return Err(busy());
         }

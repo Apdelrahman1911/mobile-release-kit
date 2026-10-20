@@ -92,6 +92,7 @@ import { createAgentIOSArchiveApi } from './agentIOSArchive.ts';
 import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
 import { createGitReadApi } from './gitReadProtocol.ts';
 import { createVersionReservePort } from './versionReserve.ts';
+import { createAgentVersionReserveAccessPort } from './agentVersionReserveAccess.ts';
 import { createVersionEnrollmentPort } from './versionEnrollment.ts';
 import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
 import { createGitHubActivityPort } from './githubActivityProtocol.ts';
@@ -417,6 +418,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     githubGhEntry: createGitHubGhApi(mode, invoke),
     gitRead: createGitReadApi(mode, invoke),
     versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+    agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
     githubActivity: createGitHubActivityPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),

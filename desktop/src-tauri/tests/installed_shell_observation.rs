@@ -22,6 +22,10 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../src/git_local_state.rs"] mod git_local_state;
 #[path = "../src/service_protocol.rs"] mod service_protocol;
+#[path="../src/service_version_reserve_protocol.rs"]
+mod service_version_reserve_protocol;
+#[path="../src/service_version_reserve_requests.rs"]
+mod service_version_reserve_requests;
 #[path = "../src/service_git_protocol.rs"] mod service_git_protocol;
 #[path = "../src/service_git_commit_protocol.rs"] mod service_git_commit_protocol;
 #[path = "../src/service_git_requests.rs"] mod service_git_requests;

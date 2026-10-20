@@ -34,6 +34,8 @@ pub(crate) use version_allocation::{VersionAllocationSourceGoGate, VersionAlloca
 mod version_reserve;
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(crate) use version_reserve::ReservedVersionEditGate;
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) use version_reserve::agent::{ReserveRelay,decode_allow as decode_agent_version_reserve_allow,decode_empty as decode_agent_version_reserve_empty};
 #[path = "asset_session_version_enrollment.rs"]
 mod version_enrollment;
 pub(crate) use version_enrollment::VersionEnrollmentGoGate;
@@ -2074,6 +2076,8 @@ mod lookup_memory {
             self.add(crate::service_repository_summary::DOCUMENT_BACKING)?; // Bounded historical DATA, validator scratch and existing IPC replies.
             #[cfg(any(target_os="linux",target_os="macos"))]
             self.add(crate::service_git_requests::DOCUMENT_BACKING + agent_git_index::document_backing())?;
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_version_reserve_requests::DOCUMENT_BACKING)?;
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
@@ -6731,6 +6735,10 @@ impl DocumentBinding {
             (state.stopping && state.quit_accepted && assets_can_exit_locked(&state) && state.github.material_settled()
                 && state.saved_observation.as_ref().is_none_or(|lane| lane.returned())
                 && !version_allocation::pending(&state) && !version_enrollment::pending(&state)
+                && {
+                    #[cfg(any(target_os="linux",target_os="macos"))] { !version_reserve::agent::pending(&state) }
+                    #[cfg(not(any(target_os="linux",target_os="macos")))] { true }
+                }
                 && state.maintenance.can_exit()
                 && self.inner.android_registration_control.can_exit(), state.quit.clone())
         };
