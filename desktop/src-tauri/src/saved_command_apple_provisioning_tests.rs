@@ -297,7 +297,7 @@ fn original_unjoined_session_cannot_publish_history_or_restore_a_review() {
     assert!(!original.driver_joined.load(Ordering::SeqCst));
     // This inert original selected no private material. Its vacuous material
     // retirement is not a worker/watchdog/native join or recovery authority.
-    assert!(original.material.lock().is_none());
+    assert!(original.material.lock().unwrap().is_none());
     assert!(original.material_retired.load(Ordering::SeqCst));
     assert!(!native_complete(&original));
 }
