@@ -10073,6 +10073,10 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "hosted-native-platform")
     need(Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py", "fixed-source-driver")
     ref = environment.get("GITHUB_REF")
+    native_role = None
+    if environment.get("MRK_MACOS_NATIVE_SCOPE", "disabled") != "disabled":
+        native_role = load_data(CHECKOUT, "macos_identity_current_runtime.py",
+            "_mrk_identity_current_package_scope").package_role(environment, phase, target)
     need(xcode_setup_event(environment, phase), "candidate-companion-event-scope")
     scope = environment.get("MRK_MACOS_SAME_PACKAGE_SCOPE", "disabled")
     need(scope in ("disabled", SAME_PACKAGE_PHASE)
@@ -10137,7 +10141,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
                 "GITHUB_WORKSPACE": str(CHECKOUT), "GITHUB_WORKFLOW_SHA": sha,
                 "GITHUB_WORKFLOW_REF": "Apdelrahman1911/mobile-release-kit/.github/workflows/" + workflow + "@" + ref,
                 "MRK_EXPECTED_SHA": sha, "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
-                "MRK_MACOS_PACKAGE_ROLE": "installed-shell-observation" if workflow == "desktop-macos-aqua.yml" else "ordinary-image",
+                "MRK_MACOS_PACKAGE_ROLE": native_role or ("installed-shell-observation" if workflow == "desktop-macos-aqua.yml" else "ordinary-image"),
                 "RUSTUP_TOOLCHAIN": rust_toolchain(target), "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0"}
     if python_phase or tool_phase or support_phase or store_phase:
         del required["MRK_MACOS_PACKAGE_ROLE"]
@@ -10411,6 +10415,9 @@ def tool_selected(stager, target, *, signing_purpose=None, checkout=CHECKOUT):
 
 
 def tool_data_context(environment, phase, target):
+    if environment.get("MRK_MACOS_NATIVE_SCOPE", "disabled") != "disabled":
+        load_data(CHECKOUT, "macos_identity_current_runtime.py",
+            "_mrk_identity_current_package_scope").package_role(environment, phase, target)
     machine, architecture, _ = build_profile(target)
     need(sys.platform == "darwin" and os.uname().machine == machine and os.getuid() != 0
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "tool-data-platform")
