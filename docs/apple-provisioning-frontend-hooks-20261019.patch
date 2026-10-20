@@ -1,0 +1,308 @@
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -9,4 +9,6 @@
+ import { LocalStorePreflightController, localStoreOwnerReason, localStoreProjectObservation } from './localStorePreflight.ts';
+ import { LocalStorePreflight } from './components/LocalStorePreflight.tsx';
++import { AppleProvisioningController } from './appleProvisioningController.ts';
++import { AppleBundleRegistration } from './components/AppleBundleRegistration.tsx';
+ import { GitHubPublicationController, githubPublicationOwnerReason } from './githubPublicationController.ts';
+ import { GitHubPublication } from './components/GitHubPublication.tsx';
+@@ -21,5 +23,5 @@
+ import { metadataImagesApi } from './metadataImagesApi.ts';
+ import { apiError } from './bridge.ts';
+-import { emptyDraft, getValue, isObject } from './catalog.ts';
++import { emptyDraft, getValue, isObject, textValue } from './catalog.ts';
+ import { copyBoundedComparisonData, savedConfigFromSnapshot, sameSavedConfig } from './offlinePreflightProtocol.ts';
+ import { methodReason, projectSelectionReason } from './certainty.ts';
+@@ -188,4 +190,5 @@
+   const localStoreExecuteControllerRef = useRef<LocalStoreExecuteController | null>(null);
+   const localStoreReconcileControllerRef = useRef<LocalStoreReconcileController | null>(null);
++  const appleProvisioningControllerRef = useRef<AppleProvisioningController | null>(null);
+   const offlinePreflightControllerRef = useRef<OfflinePreflightController | null>(null);
+   const toolAcquisitionControllerRef = useRef<ToolAcquisitionController | null>(null);
+@@ -274,5 +277,7 @@
+   const storeExecuteBusy = useCallback(() => localStoreExecuteControllerRef.current ? localStoreExecuteOwnerReason(localStoreExecuteControllerRef.current.getSnapshot()) : null, []);
+   const storeReconcileBusy = useCallback(() => localStoreReconcileControllerRef.current ? localStoreReconcileOwnerReason(localStoreReconcileControllerRef.current.getSnapshot()) : null, []);
+-  const storeBusy = useCallback(() => storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storeReconcileBusy, storeExecuteBusy, storePrepareBusy]);
++  const storeWithoutAppleBusy = useCallback(() => storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storeReconcileBusy, storeExecuteBusy, storePrepareBusy]);
++  const appleProvisioningBusy = useCallback(() => appleProvisioningControllerRef.current?.ownerReason() ?? null, []);
++  const storeBusy = useCallback(() => appleProvisioningBusy() ?? storeWithoutAppleBusy(), [appleProvisioningBusy, storeWithoutAppleBusy]);
+   const toolPreparationBusy = useCallback(() => toolAcquisitionControllerRef.current?.ownerReason() ?? null, []);
+   const preflightBusy = useCallback(() => offlinePreflightControllerRef.current ? offlinePreflightOwnerReason(offlinePreflightControllerRef.current.getSnapshot()) : null, []);
+@@ -331,5 +336,5 @@
+     artifactInspectionControllerRef.current?.beforeWorkspaceAction(action);
+     toolAcquisitionControllerRef.current?.beforeWorkspaceAction(action);
+-    offlinePreflightControllerRef.current?.beforeWorkspaceAction(action); localStoreControllerRef.current?.beforeWorkspaceAction(); localStorePrepareControllerRef.current?.beforeWorkspaceAction(); localStoreExecuteControllerRef.current?.beforeWorkspaceAction(); localStoreReconcileControllerRef.current?.beforeWorkspaceAction(); localHistoryControllerRef.current?.beforeWorkspaceAction();
++    offlinePreflightControllerRef.current?.beforeWorkspaceAction(action); localStoreControllerRef.current?.beforeWorkspaceAction(); localStorePrepareControllerRef.current?.beforeWorkspaceAction(); localStoreExecuteControllerRef.current?.beforeWorkspaceAction(); localStoreReconcileControllerRef.current?.beforeWorkspaceAction(); localHistoryControllerRef.current?.beforeWorkspaceAction(); appleProvisioningControllerRef.current?.beforeWorkspaceAction();
+     androidBuildControllerRef.current?.beforeWorkspaceAction(action);
+     projectRecoveryControllerRef.current?.beforeWorkspaceAction(action);
+@@ -366,5 +371,5 @@
+     diagnosticsControllerRef.current?.syncProject();
+     artifactInspectionControllerRef.current?.syncProject();
+-    offlinePreflightControllerRef.current?.syncProject(); localStoreControllerRef.current?.syncProject(); localStorePrepareControllerRef.current?.syncProject(); localStoreExecuteControllerRef.current?.syncProject(); localStoreReconcileControllerRef.current?.syncProject(); localHistoryControllerRef.current?.syncProject();
++    offlinePreflightControllerRef.current?.syncProject(); localStoreControllerRef.current?.syncProject(); localStorePrepareControllerRef.current?.syncProject(); localStoreExecuteControllerRef.current?.syncProject(); localStoreReconcileControllerRef.current?.syncProject(); localHistoryControllerRef.current?.syncProject(); appleProvisioningControllerRef.current?.syncProject();
+     androidBuildControllerRef.current?.syncProject();
+     toolAcquisitionControllerRef.current?.syncProject();
+@@ -517,5 +522,5 @@
+       retirePathPicker(); releaseVersionControllerRef.current?.saveIntent(); releaseInputControllerRef.current?.saveIntent();
+       toolAcquisitionControllerRef.current?.versionIntent();
+-      androidBuildControllerRef.current?.versionIntent();offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localStoreExecuteControllerRef.current?.versionIntent(); localStoreReconcileControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent();projectRecoveryControllerRef.current?.versionIntent();iosArchiveControllerRef.current?.versionIntent();
++      androidBuildControllerRef.current?.versionIntent();offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localStoreExecuteControllerRef.current?.versionIntent(); localStoreReconcileControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); appleProvisioningControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent();projectRecoveryControllerRef.current?.versionIntent();iosArchiveControllerRef.current?.versionIntent();
+     },
+     onConfirmed:completion=>dispatch({type:'initialization-final',projectId:completion.binding.projectId,completion}),
+@@ -535,5 +540,5 @@
+       releaseVersion.saveIntent(); releaseInputs.saveIntent();
+       toolAcquisitionControllerRef.current?.versionIntent();
+-      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localStoreExecuteControllerRef.current?.versionIntent(); localStoreReconcileControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
++      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localStoreExecuteControllerRef.current?.versionIntent(); localStoreReconcileControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); appleProvisioningControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
+     },
+   }));
+@@ -569,5 +574,5 @@
+       releaseVersion.saveIntent(); releaseInputs.saveIntent();
+       toolAcquisitionControllerRef.current?.versionIntent();
+-      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localStoreExecuteControllerRef.current?.versionIntent(); localStoreReconcileControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
++      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); localStoreControllerRef.current?.versionIntent(); localStorePrepareControllerRef.current?.versionIntent(); localStoreExecuteControllerRef.current?.versionIntent(); localStoreReconcileControllerRef.current?.versionIntent(); localHistoryControllerRef.current?.versionIntent(); appleProvisioningControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
+     },
+   }));
+@@ -694,7 +699,20 @@
+   iosArchiveControllerRef.current = iosArchive;
+   const iosArchiveState = useSyncExternalStore(iosArchive.subscribe, iosArchive.getSnapshot, iosArchive.getSnapshot);
++  // Same saved observation and selected P8 projection as Store reads. These
++  // comparison inputs never create the native key/account/journal authority.
++  const appleOtherOperationReason = () => storeWithoutAppleBusy() ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ??
++    androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason();
++  const [appleProvisioning] = useState(() => new AppleProvisioningController({
++    project: () => { const current = workspaceRef.current; return current.selectedId && Object.hasOwn(current.projects, current.selectedId)
++      ? localStoreProjectObservation(current.projects[current.selectedId]!, releaseVersion.getSnapshot()) : null; },
++    assets: assetSession.getSnapshot,
++    // Do not call storeBusy()/savedCommandBusy(): those include this owner.
++    otherOperationReason: appleOtherOperationReason,
++  }));
++  appleProvisioningControllerRef.current = appleProvisioning;
++  const appleProvisioningState = useSyncExternalStore(appleProvisioning.subscribe, appleProvisioning.getSnapshot, appleProvisioning.getSnapshot);
+   const [localStore] = useState(() => new LocalStorePreflightController({
+     project: () => {const current=workspaceRef.current;return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?localStoreProjectObservation(current.projects[current.selectedId]!,releaseVersion.getSnapshot()):null;}, assets: assetSession.getSnapshot,
+-    otherOperationReason: () => storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
++    otherOperationReason: () => appleProvisioningBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+   }));
+   localStoreControllerRef.current=localStore;
+@@ -713,5 +731,5 @@
+     history: localHistory.getSnapshot,
+     // Exclude this controller's own intent from reciprocal admission.
+-    otherOperationReason: () => storeReconcileBusy() ?? storeExecuteBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
++    otherOperationReason: () => appleProvisioningBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+   }));
+   localStorePrepareControllerRef.current=localStorePrepare;
+@@ -725,5 +743,5 @@
+     history: localHistory.getSnapshot, tools: androidBuild.getSnapshot,
+     // Same reciprocal admission, excluding only this original's own slot.
+-    otherOperationReason: () => storeReconcileBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
++    otherOperationReason: () => appleProvisioningBusy() ?? storeReconcileBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+   }));
+   localStoreExecuteControllerRef.current=localStoreExecute;
+@@ -737,8 +755,9 @@
+     history: localHistory.getSnapshot,
+     // Same reciprocal admission, excluding only this original's own slot.
+-    otherOperationReason: () => storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
++    otherOperationReason: () => appleProvisioningBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+   }));
+   localStoreReconcileControllerRef.current=localStoreReconcile;
+   const localStoreReconcileState=useSyncExternalStore(localStoreReconcile.subscribe,localStoreReconcile.getSnapshot,localStoreReconcile.getSnapshot);
++  const appleOtherReason = appleOtherOperationReason();
+   const identityState = useSyncExternalStore<ProjectIdentityNativeState | null>(identityBinding?.native.subscribe ?? emptyIdentitySubscribe,
+     identityBinding?.native.getState ?? emptyIdentitySnapshot, identityBinding?.native.getState ?? emptyIdentitySnapshot);
+@@ -958,4 +977,6 @@
+       setBootError({ code: 'identity_busy', message: originalIdentity, retryable: false }); return;
+     }
++    const originalApple = appleProvisioningBusy();
++    if (originalApple) { setBootError({ code: 'apple_provisioning_busy', message: originalApple, retryable: false }); return; }
+     const originalTools = toolPreparationBusy();
+     if (originalTools) { setBootError({ code: 'tool_acquisition_busy', message: originalTools, retryable: false }); return; }
+@@ -977,5 +998,5 @@
+     if (projectPathOwnerReason(pathPickerRef.current)) return;
+     artifactInspection.beginConnection();
+-    offlinePreflight.beginConnection(); localStore.beginConnection(); localStorePrepare.beginConnection(); localStoreExecute.beginConnection(); localStoreReconcile.beginConnection(); localHistory.beginConnection();
++    offlinePreflight.beginConnection(); localStore.beginConnection(); localStorePrepare.beginConnection(); localStoreExecute.beginConnection(); localStoreReconcile.beginConnection(); localHistory.beginConnection(); appleProvisioning.beginConnection();
+     androidBuild.beginConnection();
+     toolAcquisition.beginConnection();
+@@ -1018,4 +1039,5 @@
+       void androidBuild.connect(connection);
+       void toolAcquisition.connect(connection.toolAcquisition ?? null);
++      void appleProvisioning.connect(connection.appleProvisioning ?? null);
+       void projectRecovery.connect(connection);
+       void iosArchive.connect(connection);
+@@ -1076,4 +1098,5 @@
+       if (generation === bootGeneration.current) {
+         retireIdentity();
++        appleProvisioning.beginConnection();
+         pathService.current = { api: null, info: null }; syncGitReadRef.current();
+         identityRef.current?.ui.sync();
+@@ -1090,5 +1113,14 @@
+       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); }
+     }
+-  }, [gitReadBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
++  }, [gitReadBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
++
++  // Before bootstrap: retire consent on the actual saved/key projection, and
++  // keep the view responsive to peer-owner changes without renewing an intent.
++  useEffect(() => {
++    const a = assetSession.subscribe(appleProvisioning.syncProject), b = releaseVersion.subscribe(appleProvisioning.syncProject);
++    appleProvisioning.syncProject(); return () => { a(); b(); };
++  }, [assetSession, releaseVersion, appleProvisioning]);
++  useEffect(() => appleProvisioning.syncProject(), [appleProvisioning, appleOtherReason]);
++  useEffect(() => appleProvisioning.setVisible(page === 'dashboard'), [appleProvisioning, page]);
+
+   // Only comparison invalidation. Changed catalogue/source/registration DATA
+@@ -1149,4 +1181,5 @@
+   useEffect(() => () => toolAcquisition.dispose(), [toolAcquisition]);
+   useEffect(() => () => localStore.dispose(), [localStore]);
++  useEffect(() => () => appleProvisioning.dispose(), [appleProvisioning]);
+   useEffect(() => () => localStorePrepare.dispose(), [localStorePrepare]);
+   useEffect(() => () => localStoreExecute.dispose(), [localStoreExecute]);
+@@ -1214,4 +1247,5 @@
+       githubGhEntryRef.current?.beforeContextIntent();
+       void toolAcquisitionControllerRef.current?.cancel();
++      void appleProvisioningControllerRef.current?.cancel();
+       initializationControllerRef.current?.requestClose();
+       editControllerRef.current?.shutdownIntent();
+@@ -1231,5 +1265,5 @@
+   }, []);
+
+-  const navigate = (next: Page) => { externalObserver.beforeWorkspaceAction(); initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localStoreReconcile.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); androidBuild.setToolSetupVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); toolAcquisition.setVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); if (next !== 'settings') { setCliAccessReveal(0); setIdentityReveal(0); } setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
++  const navigate = (next: Page) => { externalObserver.beforeWorkspaceAction(); initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localStoreReconcile.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); appleProvisioning.setVisible(next === 'dashboard'); androidBuild.setVisible(next === 'releases'); androidBuild.setToolSetupVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); toolAcquisition.setVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); if (next !== 'settings') { setCliAccessReveal(0); setIdentityReveal(0); } setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
+   const reviewCredentialChecks = (kind: 'offline' | 'android-signing') => {
+     if (savedCommandBusy() || diagnosticsOwnerReason(diagnostics.getSnapshot())) return;
+@@ -1266,5 +1300,5 @@
+     artifactInspection.snapshotIntent(projectId);
+     toolAcquisition.snapshotIntent(projectId);
+-    offlinePreflight.snapshotIntent(projectId); localStore.snapshotIntent(); localStorePrepare.snapshotIntent(); localStoreExecute.snapshotIntent(); localStoreReconcile.snapshotIntent(); localHistory.snapshotIntent();
++    offlinePreflight.snapshotIntent(projectId); localStore.snapshotIntent(); localStorePrepare.snapshotIntent(); localStoreExecute.snapshotIntent(); localStoreReconcile.snapshotIntent(); localHistory.snapshotIntent(); appleProvisioning.snapshotIntent();
+     androidBuild.snapshotIntent(projectId);
+     projectRecovery.snapshotIntent(projectId);
+@@ -1296,5 +1330,5 @@
+     artifactInspection.selectionIntent();
+     toolAcquisition.selectionIntent();
+-    offlinePreflight.selectionIntent(); localStore.selectionIntent(); localStorePrepare.selectionIntent(); localStoreExecute.selectionIntent(); localStoreReconcile.selectionIntent(); localHistory.selectionIntent();
++    offlinePreflight.selectionIntent(); localStore.selectionIntent(); localStorePrepare.selectionIntent(); localStoreExecute.selectionIntent(); localStoreReconcile.selectionIntent(); localHistory.selectionIntent(); appleProvisioning.selectionIntent();
+     androidBuild.selectionIntent();
+     projectRecovery.selectionIntent();
+@@ -1310,5 +1344,5 @@
+     artifactInspection.setSelectionPending(true);
+     toolAcquisition.setSelectionPending(true);
+-    offlinePreflight.setSelectionPending(true); localStore.setSelectionPending(true); localStorePrepare.setSelectionPending(true); localStoreExecute.setSelectionPending(true); localStoreReconcile.setSelectionPending(true); localHistory.setSelectionPending(true);
++    offlinePreflight.setSelectionPending(true); localStore.setSelectionPending(true); localStorePrepare.setSelectionPending(true); localStoreExecute.setSelectionPending(true); localStoreReconcile.setSelectionPending(true); localHistory.setSelectionPending(true); appleProvisioning.setSelectionPending(true);
+     androidBuild.setSelectionPending(true);
+     projectRecovery.setSelectionPending(true);
+@@ -1326,5 +1360,5 @@
+       if (!alreadyLoaded) await loadSnapshot(project.id);
+     } catch (error) { setChooseError(apiError(error)); }
+-    finally { connectionPicking.current = false; identityRef.current?.ui.sync(); setChoosing(false); syncConnectionContext(); releaseVersion.setSelectionPending(false); releaseInputs.setSelectionPending(false); metadataText.setSelectionPending(false); metadataImages.setSelectionPending(false); versionEdit.setSelectionPending(false); diagnostics.setSelectionPending(false); artifactInspection.setSelectionPending(false); toolAcquisition.setSelectionPending(false); offlinePreflight.setSelectionPending(false); localStore.setSelectionPending(false); localStorePrepare.setSelectionPending(false); localStoreExecute.setSelectionPending(false); localStoreReconcile.setSelectionPending(false); localHistory.setSelectionPending(false); androidBuild.setSelectionPending(false); projectRecovery.setSelectionPending(false); iosArchive.setSelectionPending(false); }
++    finally { connectionPicking.current = false; identityRef.current?.ui.sync(); setChoosing(false); syncConnectionContext(); releaseVersion.setSelectionPending(false); releaseInputs.setSelectionPending(false); metadataText.setSelectionPending(false); metadataImages.setSelectionPending(false); versionEdit.setSelectionPending(false); diagnostics.setSelectionPending(false); artifactInspection.setSelectionPending(false); toolAcquisition.setSelectionPending(false); offlinePreflight.setSelectionPending(false); localStore.setSelectionPending(false); localStorePrepare.setSelectionPending(false); localStoreExecute.setSelectionPending(false); localStoreReconcile.setSelectionPending(false); localHistory.setSelectionPending(false); appleProvisioning.setSelectionPending(false); androidBuild.setSelectionPending(false); projectRecovery.setSelectionPending(false); iosArchive.setSelectionPending(false); }
+   };
+
+@@ -1506,5 +1540,5 @@
+     </aside>
+     <div className="workspace">
+-      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No automatic publishing</span><Badge tone={preview || toolAcquisitionState.issue !== null || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || localStoreExecuteState.blocked || localStoreReconcileState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project setup · see status below' : recoveryBusy() ? 'Recovery · see status below' : androidBusy() ? 'Android build · see status below' : iosBusy() ? 'iOS build · see status below' : artifactBusy() ? 'Build files · see status below' : localHistoryBusy() ? 'Release history · see status below' : storeBusy() ? 'Store operation · see status below' : preflightBusy() ? 'Local checks · see status below' : toolPreparationBusy() ? 'Tool preparation · see status below' : diagnosticsState.status?.active ? 'Build tools · see status below' : saveState.status?.active ? 'Project settings task · see status below' : workflowState.status?.active ? 'GitHub files task · see status below' : metadataImagesOwnerReason(metadataImagesState) ? 'Store images · see status below' : metadataState.edit.status?.active ? 'Store listing task · see status below' : versionEditState.edit.status?.active ? 'Version task · see status below' : localEditingLabel}</Badge></div></header>
++      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No automatic publishing</span><Badge tone={preview || appleProvisioningState.issue !== null || toolAcquisitionState.issue !== null || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || localStoreExecuteState.blocked || localStoreReconcileState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project setup · see status below' : recoveryBusy() ? 'Recovery · see status below' : androidBusy() ? 'Android build · see status below' : iosBusy() ? 'iOS build · see status below' : artifactBusy() ? 'Build files · see status below' : localHistoryBusy() ? 'Release history · see status below' : storeBusy() ? 'Store operation · see status below' : preflightBusy() ? 'Local checks · see status below' : toolPreparationBusy() ? 'Tool preparation · see status below' : diagnosticsState.status?.active ? 'Build tools · see status below' : saveState.status?.active ? 'Project settings task · see status below' : workflowState.status?.active ? 'GitHub files task · see status below' : metadataImagesOwnerReason(metadataImagesState) ? 'Store images · see status below' : metadataState.edit.status?.active ? 'Store listing task · see status below' : versionEditState.edit.status?.active ? 'Version task · see status below' : localEditingLabel}</Badge></div></header>
+       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
+       <main id="main-content" tabIndex={-1} ref={main}>
+@@ -1544,5 +1578,5 @@
+               {externalObservation.notice.next === 'review-settings' && <button type="button" className="button small secondary" onClick={() => navigate('settings')}>Review project settings</button>}
+               {externalObservation.notice.next === 'read-saved-version' && <button type="button" className="button small secondary" disabled={releaseVersion.startReason() !== null}
+-                onClick={() => { navigate('dashboard'); externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); void releaseVersion.read(); }}>Read updated version</button>}
++                onClick={() => { navigate('dashboard'); externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }}>Read updated version</button>}
+               {externalObservation.notice.next === 'refresh-project' && <button type="button" className="button small secondary" disabled={loading || refreshReason !== null}
+                 onClick={() => { if (session) void loadSnapshot(session.project.id); }}>Check saved files again</button>}
+@@ -1565,4 +1599,7 @@
+         {page !== 'artifacts' && <ArtifactInspection state={artifactInspectionState} controller={artifactInspection} compact
+           projectName={session?.project.name??null} onHelp={setHelp} onShow={()=>navigate('artifacts')}/>}
++        {page !== 'dashboard' && <AppleBundleRegistration controller={appleProvisioning} state={appleProvisioningState} compact
++          onCredentials={() => navigate('credentials')} onProjectIdentity={() => { navigate('settings'); setIdentityReveal(n => n + 1); }}
++          onShow={() => navigate('dashboard')} />}
+         {page !== 'releases' && <>
+           <LocalReleaseHistory state={localHistoryState} controller={localHistory} compact onShow={()=>navigate('releases')}/>
+@@ -1621,8 +1658,13 @@
+             workflowOwnerReason(workflowState, session?.project.id ?? '') ?? metadataOwnerReason(metadataState, session?.project.id ?? '') ??
+             (passivePending.current > 0 ? 'An original project read is still pending.' : null)}
++          appleProvisioningPanel={<AppleBundleRegistration controller={appleProvisioning} state={appleProvisioningState}
++            savedBundleId={textValue(getValue(session?.snapshot?.config.data ?? null, 'ios.bundleId'))}
++            configuredTeamId={textValue(getValue(session?.snapshot?.config.data ?? null, 'ios.teamId'))}
++            onCredentials={() => navigate('credentials')} onProjectIdentity={() => { navigate('settings'); setIdentityReveal(n => n + 1); }} />}
++          appleProvisioningNeedsAttention={appleProvisioningState.retained || appleProvisioningState.issue !== null || appleProvisioningState.consent !== null || appleProvisioningState.result?.decision === 'registration-unconfirmed' || appleProvisioningState.status?.operation?.phase === 'terminal' && appleProvisioningState.status.operation.outcome !== 'complete'}
+           initializationState={initializationState} versionEditState={versionEditState}
+           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
+           versionEditor={<ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} />}
+-          releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { externalObserver.beforeWorkspaceAction(); artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); toolAcquisition.versionIntent(); void releaseVersion.read(); }}
++          releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { externalObserver.beforeWorkspaceAction(); artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }}
+           onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
+         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="Set up your project" description="Change your app settings one group at a time. Review the proposed file changes before saving." />{editor()}
+@@ -1709,10 +1751,10 @@
+             projectName={session?.project.name ?? null} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null}
+             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
+-            onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
++            onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
+             onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /></div>}
+           iosArchive={<IOSArchive state={iosArchiveState} controller={iosArchive}
+             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
+             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
+-            onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
++            onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
+             onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />} />}
+         {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} inspectionState={artifactInspectionState} inspectionController={artifactInspection} projectName={session?.project.name ?? null} onHelp={setHelp} />
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -86,7 +86,8 @@
+ import { createGitReadApi } from './gitReadProtocol.ts';
+ import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
++import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
+
+ export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+-export type NativeEditListen = (event: 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
++export type NativeEditListen = (event: 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+
+ function connectionReply(value: unknown): GitHubConnectionStatus {
+@@ -390,4 +391,5 @@
+     gitRead: createGitReadApi(mode, invoke),
+     toolAcquisition: createToolAcquisitionApi(mode, invoke, listen),
++    appleProvisioning: createAppleProvisioningApi(mode, invoke, listen),
+     applicationRead: mode === 'native' ? Object.freeze({
+       status: () => call<unknown>('application_read_status', {}),
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -428,4 +428,5 @@
+   // Fixed original native owner only; no preview or generic transport fallback.
+   readonly toolAcquisition?: import('./toolAcquisitionNative.ts').ToolAcquisitionApi | null;
++  readonly appleProvisioning?: import('./appleProvisioningNative.ts').AppleProvisioningApi | null;
+   appInfo(): Promise<AppInfo>;
+   revealInstallation(): Promise<InstallationRevealResult>;
+diff --git a/desktop/src/pages/Dashboard.tsx b/desktop/src/pages/Dashboard.tsx
+--- a/desktop/src/pages/Dashboard.tsx
++++ b/desktop/src/pages/Dashboard.tsx
+@@ -40,5 +40,5 @@
+
+ export function Dashboard({ session, preview, chooseDisabled, chooseReason, refreshReason, setupReadinessReason, releaseVersionState, releaseVersionReason,
+-  versionEditor, versionEditState, initializationPanel, initializationState, configSaveState, checks, activities,
++  versionEditor, versionEditState, initializationPanel, initializationState, appleProvisioningPanel, appleProvisioningNeedsAttention, configSaveState, checks, activities,
+   onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
+   session: ProjectSession | null; info: AppInfo | null; preview: boolean;
+@@ -47,4 +47,5 @@
+   versionEditor: ReactNode; versionEditState: VersionEditState;
+   initializationPanel: ReactNode; initializationState: ProjectInitializationState;
++  appleProvisioningPanel?: ReactNode; appleProvisioningNeedsAttention?: boolean;
+   configSaveState: ConfigEditState;
+   releaseVersionState: ReleaseVersionState; releaseVersionReason: string | null;
+@@ -114,4 +115,10 @@
+     </ProgressiveDisclosure>
+
++    {appleProvisioningPanel && <ProgressiveDisclosure title="Apple Bundle ID · reuse or register"
++      needsAttention={appleProvisioningNeedsAttention}
++      description="A separate optional Store task. Review an existing ID first; a new registration needs its own approval. This does not make signing or release ready.">
++      {appleProvisioningPanel}
++    </ProgressiveDisclosure>}
++
+     <section className="card" aria-label="Later release tasks">
+       <SectionHeading title="When you’re ready for the next stage" description="GitHub and Store delivery are separate tasks, not prerequisites for exploring local setup." />
