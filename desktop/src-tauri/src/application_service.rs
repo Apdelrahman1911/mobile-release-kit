@@ -73,8 +73,11 @@ mod agent_android_build;
 mod agent_ios_archive;
 #[path = "application_service_request_catalogue.rs"]
 mod request_catalogue;
+#[path="service_git_application.rs"]
+mod git_index;
 
 pub(crate) struct ApplicationService { store: Arc<PrivateStateDirectory>, instance: Id, state: Mutex<State>, native_history_fenced: AtomicBool,
+    git_index_requests: Arc<crate::service_git_requests::Inbox>,
     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
     repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
     identity_requests: Arc<crate::agent_identity_requests::Inbox>,
@@ -107,10 +110,11 @@ impl ApplicationService {
         for project in &mut saved.projects { if let Some(observation) = &mut project.observation { observation.stale = true; } }
         for operation in &mut saved.operations { operation.stale = true; }
         let instance = Id::random()?;
+        let git_index_requests = Arc::new(crate::service_git_requests::Inbox::new(instance.clone()));
         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
-        Ok(Self { store, instance, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
+        Ok(Self { store, instance, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), state: Mutex::new(State { revision: snapshot.revision, saved,
             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
     }
     pub(crate) fn instance(&self) -> &Id { &self.instance }
@@ -359,6 +363,11 @@ impl ApplicationService {
             // These two fixed routes touch only the bounded proposal inbox.
             // No native callback, executor or GUI approval runs in a socket.
             match &request.request {
+                p::RequestBody::GitIndexScope(q) => return self.git_index_scope(client, &q.project_id),
+                p::RequestBody::GitIndexPrepare(v) => return self.git_index_prepare(client, v.clone()),
+                p::RequestBody::GitIndexStart(v) => return self.git_index_start(client, v),
+                p::RequestBody::GitIndexStatus(q) => return self.git_index_query(client, q, false),
+                p::RequestBody::GitIndexCancel(q) => return self.git_index_query(client, q, true),
                 p::RequestBody::Requests(query) => return self.discover_requests(client, &query.project_id),
                 p::RequestBody::AndroidBuildPrepare(input) => return self.prepare_agent_android_build(client, input.clone()),
                 p::RequestBody::AndroidBuildStart(input) => return self.start_agent_android_build(client, input),
@@ -385,7 +394,8 @@ impl ApplicationService {
             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
             Ok(match request.request {
-                p::RequestBody::Requests(_) | p::RequestBody::IdentityPrepare(_) | p::RequestBody::IdentityStart(_) | p::RequestBody::IdentityActionStatus(_) | p::RequestBody::IdentityCancel(_)
+                p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
+                | p::RequestBody::GitIndexStatus(_) | p::RequestBody::GitIndexCancel(_) | p::RequestBody::Requests(_) | p::RequestBody::IdentityPrepare(_) | p::RequestBody::IdentityStart(_) | p::RequestBody::IdentityActionStatus(_) | p::RequestBody::IdentityCancel(_)
                 | p::RequestBody::IdentitySubmit(_) | p::RequestBody::IdentityIntent(_) | p::RequestBody::LocalCheckSubmit(_)
                     | p::RequestBody::LocalCheckStatus(_) | p::RequestBody::LocalCheckCancel(_)
                     | p::RequestBody::AndroidBuildPrepare(_) | p::RequestBody::AndroidBuildStart(_) | p::RequestBody::AndroidBuildStatus(_) | p::RequestBody::AndroidBuildCancel(_)
@@ -425,7 +435,7 @@ impl ApplicationService {
     }
     /// The IPC owner must first stop accepting, notify and join all original
     /// workers. This revokes admission but does not pretend to join them.
-    pub(crate) fn stop(&self) -> Result<(), Error> { self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+    pub(crate) fn stop(&self) -> Result<(), Error> { self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
 }
 
 fn valid_root(path: &Path) -> Result<&str, Error> {

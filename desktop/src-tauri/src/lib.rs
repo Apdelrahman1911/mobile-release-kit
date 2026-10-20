@@ -112,6 +112,8 @@ mod git_switch_protocol;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod git_local_state;
 mod service_protocol;
+mod service_git_protocol;
+mod service_git_requests;
 mod service_setup_guidance;
 mod service_android_tools;
 mod service_request_catalogue;

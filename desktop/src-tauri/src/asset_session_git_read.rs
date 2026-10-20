@@ -17,6 +17,8 @@ struct Selection {
     context: wire::Context,
     document_revision: u32,
     action: wire::Action,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_observation: Option<Arc<agent_git_index::Observation>>,
 }
 #[derive(Clone)]
 pub(crate) struct GitReadGate(Arc<Selection>);
@@ -131,6 +133,12 @@ pub(super) fn reconcile(state: &mut DocumentState) {
         // This is only bounded history after all actual original/native and
         // management joins. Never demote Unknown or detach a pending ticket.
         let result = projection(state.git_read.as_ref().expect("original checked"));
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        if let Some(Entry::Original {gate,..})=&state.git_read {
+            if let Some(document)=gate.0.document.upgrade() {
+                agent_git_index::observe_returned(&document,gate.0.agent_observation.as_ref(),&result);
+            }
+        }
         state.git_read = Some(Entry::Finished(result));
     }
 }
@@ -227,12 +235,16 @@ impl DocumentBinding {
                 generation,
                 revision: format!("document-{}", state.revision),
             };
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            let agent_observation=agent_git_index::observe_admission(&self.inner,&state,&args.project_id,generation,&root,&args.action);
             let gate = GitReadGate(Arc::new(Selection {
                 document: Arc::downgrade(&self.inner),
                 root,
                 context,
                 document_revision: state.revision,
                 action: args.action.clone(),
+                #[cfg(any(target_os="linux",target_os="macos"))]
+                agent_observation,
             }));
             let reservation = GitReadAdmission::reserve(gate.clone(), args.action.clone(), admitted)?;
             let ticket = self.inner.bridge.supervisor.start_git_read(reservation)?;
@@ -277,6 +289,8 @@ mod tests {
         };
         let gate = GitReadGate(Arc::new(Selection {
             document: Weak::new(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_observation: None,
             root,
             context: wire::Context {
                 project_id: "project-1".into(),

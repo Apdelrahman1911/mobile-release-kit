@@ -254,6 +254,8 @@ async fn serve_exchange(stream: &mut UnixStream, service: &ApplicationService, e
     let response = service.dispatch(&client, request);
     let bytes = p::encode_response(&response)?;
     match &response.response {
+        p::ResponseBody::GitIndexScope(view) => service.android_tools_client_current(&client, &view.project_id)?,
+        p::ResponseBody::GitIndexRequest(view) => service.android_tools_client_current(&client, &view.origin.project_id)?,
         p::ResponseBody::AndroidTools(view) => service.android_tools_client_current(&client, &view.project_id)?,
         p::ResponseBody::Requests(view) => service.requests_client_current(&client, &view.project_id)?,
         p::ResponseBody::Repository(view) => service.android_tools_client_current(&client, &view.project_id)?,

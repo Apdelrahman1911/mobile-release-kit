@@ -43,6 +43,9 @@ import { CliReadAccessController } from './cliReadAccessController.ts';
 import { CliReadAccessPanel } from './components/CliReadAccessPanel.tsx';
 import { AgentLocalCheckPermission } from './agentLocalChecks.ts';
 import { AgentAndroidBuildPermission } from './agentAndroidBuild.ts';
+import { GitIndexPermission } from './service_git_permission.ts';
+import { gitReadPathOrder } from './gitReadProtocol.ts';
+import { ServiceGitIndexAccess } from './components/ServiceGitIndexAccess.tsx';
 import { AgentAndroidBuildAccess } from './components/AgentAndroidBuildAccess.tsx';
 import { AgentIOSArchivePermission } from './agentIOSArchive.ts';
 import { AgentIOSArchiveAccess } from './components/AgentIOSArchiveAccess.tsx';
@@ -1091,6 +1094,19 @@ export function App() {
   gitLocalRef.current = gitLocal;
   const gitLocalState = useSyncExternalStore(gitLocal.subscribe, gitLocal.getSnapshot, gitLocal.getSnapshot);
   const gitLocalProjectName = gitLocalState.projectId ? workspace.projects[gitLocalState.projectId]?.project.name : undefined;
+  const [agentGitIndex] = useState(() => new GitIndexPermission((action) => {
+    const service=pathService.current, projectId=workspaceRef.current.selectedId;
+    const repository=gitRepositories.current.find(v=>v.service===service&&v.projectId===projectId)?.controller.getSnapshot();
+    const read=gitReadRef.current?.getSnapshot(), operation=read?.original;
+    const current=!!projectId && !!repository && repository.active && !repository.stale && !repository.blocked && !repository.busy
+      && !!read?.status && !read.stale && !read.uncertain && !read.busy && operation?.action.kind==='observe'
+      && operation.phase==='settled' && operation.outcome==='ok' && operation.context.projectId===projectId;
+    return {api:service.api?.mode==='native'?service.api.agentGitIndex??null:null,
+      project:current&&repository&&read?.status&&operation&&projectId?{projectId,expectedDocumentRevision:read.status.documentRevision,
+        readOperationId:operation.operationId,action,paths:[...repository.selected].sort(gitReadPathOrder)}:null,
+      blocked:!!(gitLocalAdmission.current()??gitLocalRef.current?.ownerReason())};
+  }));
+  useEffect(()=>{agentGitIndex.syncContext();});
   const requests = useRef(0);
   const bootGeneration = useRef(0);
   const [cliReadAccess] = useState(() => new CliReadAccessController({
@@ -2060,7 +2076,8 @@ export function App() {
             <GitHubRepositoryCreate controller={repositoryCreate} state={repositoryCreateState} />
             <LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
             localActions={gitRepository ? <><GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
-              <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} /></> : undefined}
+              <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
+              <ServiceGitIndexAccess controller={agentGitIndex} /></> : undefined}
             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
             {!gitRepository && gitRepositories.current.length >= 64 && <p className="review-caution">The local draft limit has been reached. Earlier drafts are kept; use your Git client for additional projects or service sessions.</p>}
           </>}

@@ -7,6 +7,9 @@
   "permissions": [
     "allow-application-read-status", "allow-allow-application-read", "allow-revoke-application-read",
     "allow-agent-local-check-access", "allow-allow-agent-local-check", "allow-revoke-agent-local-check",
+    "allow-agent-git-index-access",
+    "allow-allow-agent-git-index",
+    "allow-revoke-agent-git-index",
     "allow-agent-android-build-access",
     "allow-allow-agent-android-build",
     "allow-revoke-agent-android-build",

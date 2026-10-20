@@ -16,6 +16,8 @@ mod android_build;
 mod build_requests;
 #[path="installed_cli_ios_archive.rs"]
 mod ios_archive;
+#[path="installed_cli_git_index.rs"]
+mod git_index;
 
 const HELP: &str = "Mobile Release Kit agent CLI\n\n\
 Usage:\n\
@@ -26,6 +28,11 @@ Usage:\n\
   mrk android-tools PROJECT_ID [--json]\n\
   mrk requests PROJECT_ID [--json]\n\
   mrk repository PROJECT_ID [--json]\n\
+  mrk git-index-scope PROJECT_ID [--json]\n\
+  mrk git-index-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID [--json]\n\
+  mrk git-index-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID PREPARE_OPERATION_ID REVIEW_ID [--json]\n\
+  mrk git-index-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+  mrk git-index-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
   mrk operations PROJECT_ID [--json]\n\
   mrk operation PROJECT_ID OPERATION_ID [--json]\n\
   mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin [--json]\n\
@@ -119,6 +126,13 @@ const ANDROID_BUILD_COMMANDS: [CommandCapability; 4] = [
     CommandCapability { command: "android-build-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Inspect the same preparation/build without replay." },
     CommandCapability { command: "android-build-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Request original STOP; no settlement is inferred." },
 ];
+const GIT_INDEX_COMMANDS: [CommandCapability;5] = [
+    CommandCapability {command:"git-index-scope",arguments:&["PROJECT_ID"],description:"Read the exact native Desktop-selected Stage/Unstage permission, not a fresh Git inspection."},
+    CommandCapability {command:"git-index-prepare",arguments:&["PROJECT_ID","SERVICE_INSTANCE","GRANT_ID"],description:"Use one explicit Desktop selection to prepare the original local Git review; no Apply."},
+    CommandCapability {command:"git-index-start",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID","PREPARE_OPERATION_ID","REVIEW_ID"],description:"Apply that exact native Stage/Unstage review once; never commit, switch, push or run arbitrary commands."},
+    CommandCapability {command:"git-index-status",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID"],description:"Inspect the same original request without replay; history is not finality."},
+    CommandCapability {command:"git-index-cancel",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID"],description:"Request STOP of the same original; no cleanup is inferred."},
+];
 const IOS_ARCHIVE_COMMANDS: [CommandCapability; 4] = [
     CommandCapability { command: "ios-archive-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Prepare the exact Desktop-approved saved iOS unsigned archive; no Start or GO." },
     CommandCapability { command: "ios-archive-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID", "OPERATION_ID", "OWNER_GENERATION"], description: "Start that one original build once; project code may have file/network effects." },
@@ -188,6 +202,10 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
                 "requires": {"runningDesktop":true,"projectReadGrant":true,"originalNativeSourceRead":true,"separateExactChangeConsent":true},
                 "commands": IDENTITY_ACTION_COMMANDS,
             },
+            "gitIndex": {"scope":"desktop-selected-stage-or-unstage", "defaultEnabled":false,"oneUse":true,
+                "maxStartWindowSeconds":crate::service_git_protocol::START_WINDOW.as_secs(),"maxRetainedRequests":crate::service_git_protocol::REQUEST_LIMIT,
+                "readGrantAuthorizesWrites":false,"prepareApplies":false,"nativeAvailabilityChecked":false,
+                "commit":false,"branchChanges":false,"push":false,"credentials":false,"requiresRunningDesktop":true,"commands":GIT_INDEX_COMMANDS},
             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
             "requestDiscovery": {"scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "savedHistory":false, "includesReports":false, "grantsExecution":false},
             "identityRequests": {
@@ -215,12 +233,12 @@ fn capabilities(json: bool) -> Result<Vec<u8>, Error> {
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
         }
-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()) {
+        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()) {
             text.push_str("  mrk "); text.push_str(command.command);
             for argument in command.arguments { text.push(' '); text.push_str(argument); }
             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
         }
-        text.push_str("\nUse the nonzero, 32-character lowercase hexadecimal IDs returned by Desktop.\n");
+        text.push_str("\nLocal Git index changes need a separate one-use native Desktop selection. No commit, branch or push grant.\nUse service/project/request IDs returned by Desktop; native Git operation/review IDs are opaque strings.\n");
         text.into_bytes()
     };
     if json { bytes.push(b'\n'); }
@@ -309,6 +327,8 @@ fn human(response: &p::ResponseBody) -> String {
         p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
+        p::ResponseBody::GitIndexScope(_) | p::ResponseBody::GitIndexRequest(_) =>
+            "Use the named git-index command and its exact original request IDs to inspect this response.\n".into(),
         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
         p::ResponseBody::IdentityIntent(value) => identity::human(value),
         p::ResponseBody::IdentityAction(value) => identity_actions::human(value),
@@ -332,6 +352,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> u8 {
     let args = collect_arguments(args);
     let json = args.iter().any(|a| a == "--json");
     if identity::recognizes(&args) { return identity::run(args); }
+    if git_index::recognizes(&args) { return git_index::run(args); }
     if identity_actions::recognizes(&args) { return identity_actions::run(args); }
     if local_checks::recognizes(&args) { return local_checks::run(args); }
     if android_build::recognizes(&args) { return android_build::run(args); }

@@ -55,6 +55,9 @@ pub(crate) mod agent_android_build;
 #[cfg(any(target_os="linux",target_os="macos"))]
 #[path = "asset_session_agent_ios_archive.rs"]
 pub(crate) mod agent_ios_archive;
+#[cfg(any(target_os="linux",target_os="macos"))]
+#[path="service_git_document.rs"]
+pub(crate) mod agent_git_index;
 #[path = "asset_session_android_registration.rs"]
 mod android_registration;
 #[path = "asset_session_macos_maintenance.rs"]
@@ -1117,6 +1120,8 @@ fn quit_question_admitted(state: &DocumentState) -> bool {
 struct Inner {
     state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
     session_identity: Arc<()>,
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    agent_git_index: agent_git_index::NativeState,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     agent_identity_service: std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2062,6 +2067,8 @@ mod lookup_memory {
             self.add(crate::service_request_catalogue::DOCUMENT_BACKING)?; // Same eight IPC request-summary replies, no new inbox.
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             self.add(crate::service_repository_summary::DOCUMENT_BACKING)?; // Bounded historical DATA, validator scratch and existing IPC replies.
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            self.add(crate::service_git_requests::DOCUMENT_BACKING + agent_git_index::document_backing())?;
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
@@ -2795,6 +2802,8 @@ impl DocumentBinding {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_android_build_service: std::sync::OnceLock::new(),
             #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_git_index: agent_git_index::NativeState::default(),
+            #[cfg(any(target_os="linux",target_os="macos"))]
             agent_ios_archive_service: std::sync::OnceLock::new(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             agent_local_check_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
@@ -3490,6 +3499,8 @@ impl DocumentBinding {
         self.inner.bridge.application_service.android_tools_relay_lost(); // Memory-only before original STOP.
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.agent_android_builds_relay_lost();
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        self.git_index_relay_lost();
         // Loss retires consent/STOP under the same gate. It is not settlement,
         // owner deletion, a replacement run or permission to reopen the slot.
         let mut publisher=self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,true).ok();

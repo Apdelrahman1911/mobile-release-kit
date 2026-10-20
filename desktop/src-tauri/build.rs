@@ -283,6 +283,7 @@ fn main() {
             "choose_project", "choose_project_path", "project_snapshot", "catalog",
             "application_read_status", "allow_application_read", "revoke_application_read",
             "agent_local_check_access", "allow_agent_local_check", "revoke_agent_local_check",
+    "agent_git_index_access", "allow_agent_git_index", "revoke_agent_git_index",
     "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
     "agent_ios_archive_access", "allow_agent_ios_archive", "revoke_agent_ios_archive",
             "environment_requirements", "release_version_observe",

@@ -90,6 +90,11 @@ pub(crate) struct GitLocalTicket {owner:Arc<Owner>,receipt:Arc<Mutex<GitLocalRec
 impl GitLocalTicket {
     pub(crate) fn operation_id(&self)->&str {&self.owner.id}
     pub(crate) fn stop(&self) {self.owner.fail(BridgeError::new("cancelled","The original local Git action was stopped."));}
+    pub(crate) fn agent_stop_at(&self,at:Instant) {
+        let mut state=lock(&self.owner.state);if state.terminal {return;}
+        state.fail_at(BridgeError::new("cancelled","The original local Git action was stopped."),at);
+        drop(state);self.owner.stop.send_replace(true);self.owner.changed.notify_waiters();
+    }
     pub(crate) fn receipt(&self)->GitLocalReceipt {lock(&self.receipt).clone()}
     pub(crate) fn settled(&self)->bool {matches!(&*lock(&self.receipt),GitLocalReceipt::Settled {was_unknown:false,..})}
     pub(crate) fn pending_stage(&self)->crate::git_read_protocol::Phase {
@@ -165,11 +170,13 @@ impl Invocation {
     pub(super) fn request(&self)->Result<Arc<wire::Request>,BridgeError> {
         self.request.lock().map_err(|_|BridgeError::cleanup_unknown())?.clone().ok_or_else(BridgeError::cleanup_unknown)
     }
-    pub(super) fn unknown(&self) {*lock(&self.receipt)=GitLocalReceipt::RetainedUnknown;}
+    pub(super) fn unknown(&self) {*lock(&self.receipt)=GitLocalReceipt::RetainedUnknown;
+        #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&GitLocalReceipt::RetainedUnknown);}
     pub(super) fn retire(&self,outcome:Result<(),BridgeError>,was_unknown:bool) {
         let mut receipt=lock(&self.receipt);
         if was_unknown || !matches!(*receipt,GitLocalReceipt::Pending)
-            || outcome.as_ref().is_err_and(|e|e.code=="cleanup_unknown") {*receipt=GitLocalReceipt::RetainedUnknown;return}
+            || outcome.as_ref().is_err_and(|e|e.code=="cleanup_unknown") {*receipt=GitLocalReceipt::RetainedUnknown;drop(receipt);
+            #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&GitLocalReceipt::RetainedUnknown);return}
         let reply=self.child_reply.lock().ok().and_then(|s|s.clone());
         let result=match (outcome,reply) {
             (Ok(()),Some(reply))=>Ok(reply),
@@ -178,6 +185,7 @@ impl Invocation {
             (Err(error),_)=>Err(error),_=>Err(BridgeError::protocol()),
         };
         *receipt=GitLocalReceipt::Settled {outcome:result,was_unknown:false};
+        #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&receipt);
     }
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     pub(super) fn inspect(&self,runtime:&RuntimeConfig,owner:&Owner,preparing:Option<&crate::git_local_state::Ack>)

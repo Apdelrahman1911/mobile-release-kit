@@ -206,6 +206,11 @@ pub struct Empty {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", deny_unknown_fields)]
 pub enum RequestBody {
+    #[serde(rename="git-index.scope")] GitIndexScope(ProjectQuery),
+    #[serde(rename="git-index.prepare")] GitIndexPrepare(crate::service_git_protocol::Prepare),
+    #[serde(rename="git-index.start")] GitIndexStart(crate::service_git_protocol::Start),
+    #[serde(rename="git-index.status")] GitIndexStatus(crate::service_git_protocol::Query),
+    #[serde(rename="git-index.cancel")] GitIndexCancel(crate::service_git_protocol::Query),
     #[serde(rename = "service.info")] Info(Empty),
     #[serde(rename = "projects.list")] Projects(Empty),
     #[serde(rename = "project.observation")] Observe(ProjectQuery),
@@ -249,6 +254,8 @@ pub struct ServiceInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ResponseBody {
+    GitIndexScope(crate::service_git_protocol::Scope),
+    GitIndexRequest(crate::service_git_protocol::Status),
     Info(ServiceInfo), Projects(Vec<ProjectObservation>), Observation(ProjectObservation),
     Operations(Vec<OperationObservation>), Operation(OperationObservation), Error(Error),
     AndroidTools(crate::service_android_tools::View),
@@ -293,6 +300,7 @@ pub fn decode_request(bytes: &[u8]) -> Result<Request, Error> {
     nesting(bytes)?;
     let request: Request = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
     if request.version != VERSION { return Err(Error::InvalidRequest); }
+    if let RequestBody::GitIndexStart(input) = &request.request { input.validate()?; }
     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::LocalCheckSubmit(input) = &request.request { input.validate()?; }
     if let RequestBody::AndroidBuildPrepare(input) = &request.request { input.validate()?; }
@@ -358,6 +366,14 @@ fn validate_response(response: &Response) -> Result<(), Error> {
             let mut seen = std::collections::BTreeSet::new();
             for row in rows { project(row)?; if !seen.insert(&row.project_id) { return Err(Error::InvalidRequest); } }
         }
+        ResponseBody::GitIndexScope(row) => {
+            row.validate()?; if row.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
+            crate::service_git_protocol::response_bound(response, true)?;
+        },
+        ResponseBody::GitIndexRequest(row) => {
+            row.validate()?; if row.origin.service_instance != response.service_instance { return Err(Error::InvalidRequest); }
+            crate::service_git_protocol::response_bound(response, false)?;
+        },
         ResponseBody::Observation(row) => project(row)?,
         ResponseBody::AndroidTools(row) => row.validate()?,
         ResponseBody::Repository(row) => row.validate()?,

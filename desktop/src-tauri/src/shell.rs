@@ -1586,6 +1586,43 @@ async fn revoke_agent_local_check(webview: Webview, request: tauri::ipc::Request
     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent local checks are not supported on this platform.")) }
 }
 #[tauri::command]
+async fn agent_git_index_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.agent_git_index_access(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git index changes are not supported on this platform.")) }
+}
+#[tauri::command]
+async fn allow_agent_git_index(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let raw=match request.body() {tauri::ipc::InvokeBody::Raw(bytes)=>bytes.as_slice(),_=>return Err(BridgeError::invalid())};
+        let args=crate::asset_session::agent_git_index::decode_allow(raw)?;
+        serde_json::to_value(state.document.allow_agent_git_index(window, args)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git index changes are not supported on this platform.")) }
+}
+#[tauri::command]
+async fn revoke_agent_git_index(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_identity::decode(project_identity_request_bytes(&request)?)?;
+        serde_json::to_value(state.document.revoke_agent_git_index(window)?).map_err(|_| BridgeError::protocol())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Git index changes are not supported on this platform.")) }
+}
+#[tauri::command]
 async fn agent_android_build_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
@@ -2906,6 +2943,10 @@ impl Drop for ArtifactInspectionRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.artifact_inspection_relay_lost(); } }
 }
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+struct GitIndexRelayGuard { document: DocumentBinding, closed: bool }
+#[cfg(any(target_os="linux",target_os="macos"))]
+impl Drop for GitIndexRelayGuard {fn drop(&mut self){if !self.closed {self.document.git_index_relay_lost();}}}
+#[cfg(any(target_os="linux",target_os="macos"))]
 struct IdentityActionsRelayGuard { document: DocumentBinding, closed: bool }
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for IdentityActionsRelayGuard {
@@ -2916,6 +2957,8 @@ impl Drop for IdentityActionsRelayGuard {
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let identity_actions_guard = IdentityActionsRelayGuard { document: document.clone(), closed: false };
+    #[cfg(any(target_os="linux",target_os="macos"))]
+    let git_index_guard = GitIndexRelayGuard { document: document.clone(), closed: false };
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let repository_summary_guard = RepositorySummaryRelayGuard { document: document.clone(), closed: false };
     let mut revisions = edits.subscribe();
@@ -2951,6 +2994,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let handle = tauri::async_runtime::spawn(async move {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut identity_actions_guard = identity_actions_guard;
+        #[cfg(any(target_os="linux",target_os="macos"))]
+        let mut git_index_guard = git_index_guard;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut repository_summary_guard = repository_summary_guard;
         let mut local_history_guard = local_history_guard;
@@ -3014,7 +3059,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
         let mut removal_notice_open=removal_notice.is_some();
         loop {
-            if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; repository_summary_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+            if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; repository_summary_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
             document.finish_macos_maintenance(app.clone());
             // Optional history performs bounded synchronous service IO only
@@ -3028,6 +3073,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             document.service_repository_summary_tick();
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             document.service_identity_actions_tick();
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            match app.path().app_local_data_dir() {Ok(location)=>document.service_git_index_tick(&location),Err(_)=>document.git_index_relay_lost()};
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             if !preflight_relay_failed { document.service_local_checks_tick(); }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3367,7 +3414,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             };
             tokio::select! {
                 biased;
-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
+                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
                 result = assets.changed() => { if result.is_err() { return; } },
                 result = diagnostics.changed() => { if result.is_err() { return; } },
@@ -3441,6 +3488,7 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
                     // positively joined above. Drain captured terminal facts
                     // before closing the original service, including on quit.
                     // A history error remains in Host custody; cleanup MUST run.
+                    document.drain_git_index_for_exit();
                     document.drain_identity_actions_for_exit();
                     document.drain_local_checks_for_exit();
                     document.drain_android_builds_for_exit();
@@ -4914,6 +4962,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             allow_agent_identity_action, agent_identity_action_status, revoke_agent_identity_action,
             agent_identity_status, allow_agent_identity, revoke_agent_identity, decline_agent_identity, review_agent_identity, prepare_agent_identity, apply_agent_identity,
             agent_local_check_access, allow_agent_local_check, revoke_agent_local_check,
+            agent_git_index_access, allow_agent_git_index, revoke_agent_git_index,
             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
             agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
             reveal_installation, installation_status, inspect_installation, cancel_installation,

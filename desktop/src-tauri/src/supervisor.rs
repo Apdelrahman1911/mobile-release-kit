@@ -1576,6 +1576,8 @@ impl Supervisor {
             if let Some(reply) = lock(&owner.state).reply.as_ref() { reply.arm()?; }
             if let Some(source) = &owner.version_allocation_source { source.arm(&owner)?; }
             if let Some(enrollment) = &owner.version_enrollment { enrollment.arm(&owner)?; }
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            if let Some(local) = &owner.git_local { local.gate.agent_arm(&owner.id)?; }
             owners.insert(key, owner.clone());
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
