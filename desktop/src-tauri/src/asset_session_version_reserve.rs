@@ -202,6 +202,17 @@ mod host_error_tests {
     use super::*;
 
     #[test]
+    fn reserve_command_future_is_send_without_entering_native_work() {
+        // Check the actual async command's type without constructing a native
+        // session or polling it. Tauri requires the same Send contract.
+        fn contract(document: &DocumentBinding, app_data: &Path) {
+            fn assert_send<T: Send>(_: T) {}
+            assert_send(document.reserve_version("", "", app_data));
+        }
+        let _ = contract;
+    }
+
+    #[test]
     fn reserve_host_refusal_never_returns_or_clears_unknown_control() {
         // Original control DATA only; no Host/ticket/IO/finality is fabricated.
         let control = VersionReserveControl::new(Instant::now()).unwrap();
@@ -827,7 +838,10 @@ impl DocumentBinding {
                 Err(e) => return Err(host_error(&lane.control, e)),
             }
         }
-        if let Some(original) = held(&lane.invocation, &lane.control)?.clone() {
+        // Release the synchronous invocation lock before the asynchronous
+        // retirement owner is awaited. Keep the same original invocation.
+        let original = held(&lane.invocation, &lane.control)?.clone();
+        if let Some(original) = original {
             if let Some(joined) = joined {
                 let mut slot = lane.retirement.lock().await;
                 if slot.handle.is_some() || slot.returned.is_some() || slot.failed {
