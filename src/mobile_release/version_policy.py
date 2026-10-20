@@ -148,6 +148,9 @@ class VersionPolicy:
     rules: tuple[RefRule, ...] = ()
     build_ceiling: int = MAX_BUILD
     store_max_age_seconds: int = 900
+    # v1 is byte-for-byte unchanged. v2 is explicit current-visible iOS scope,
+    # never another spelling of a complete historical Store observation.
+    store_scope: str = "application-all-builds"
 
     def __post_init__(self) -> None:
         _need(type(self.mode) is str and self.mode in {"manual", "automatic"}, "invalid-policy")
@@ -155,6 +158,9 @@ class VersionPolicy:
               and all(type(rule) is RefRule for rule in self.rules), "invalid-policy")
         _integer(self.build_ceiling, MAX_BUILD, 1)
         _integer(self.store_max_age_seconds, MAX_STORE_AGE_SECONDS, 1)
+        _need(type(self.store_scope) is str and self.store_scope in
+              {"application-all-builds", "require-current-ios-inventory"}, "invalid-policy")
+        _need(self.store_scope == "application-all-builds" or self.mode == "automatic", "invalid-policy")
         _need((self.mode == "manual" and not self.rules)
               or (self.mode == "automatic" and bool(self.rules)), "invalid-policy")
         _need(len({rule.ref for rule in self.rules}) == len(self.rules), "ambiguous-rule")
@@ -163,16 +169,30 @@ class VersionPolicy:
     def parse(cls, value: object = None) -> VersionPolicy:
         if value is None:
             return cls()
-        row = _object(value, {"schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds"})
-        _need(type(row["schemaVersion"]) is int and row["schemaVersion"] == 1
+        _need(type(value) is dict and {"schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds"} <= set(value))
+        _need(type(value.get("schemaVersion")) is int
+              and value["schemaVersion"] in {1, 2}, "invalid-policy")
+        newer = value["schemaVersion"] == 2
+        row = _object(value, {"schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds"}
+                      | ({"storeScope"} if newer else set()))
+        _need(not newer or row["storeScope"] == "require-current-ios-inventory", "invalid-policy")
+        _need(type(row["schemaVersion"]) is int
               and type(row["rules"]) is list and len(row["rules"]) <= MAX_RULES, "invalid-policy")
         return cls(row["mode"], tuple(RefRule.parse(rule) for rule in row["rules"]),
-                   row["buildCeiling"], row["storeMaxAgeSeconds"])
+                   row["buildCeiling"], row["storeMaxAgeSeconds"],
+                   row["storeScope"] if newer else "application-all-builds")
 
     def value(self) -> dict[str, Any]:
-        return {"schemaVersion": 1, "mode": self.mode,
+        result = {"schemaVersion": self.schema_version, "mode": self.mode,
                 "rules": [rule.value() for rule in self.rules], "buildCeiling": self.build_ceiling,
                 "storeMaxAgeSeconds": self.store_max_age_seconds}
+        if self.schema_version == 2:
+            result["storeScope"] = self.store_scope
+        return result
+
+    @property
+    def schema_version(self) -> int:
+        return 1 if self.store_scope == "application-all-builds" else 2
 
     @property
     def sha256(self) -> str:
@@ -265,6 +285,7 @@ def store_constraints(observations: tuple[StoreObservation, ...], enabled: tuple
     _integer(now, (1 << 63) - 1)
     _need(type(policy) is VersionPolicy and type(observations) is tuple
           and len(observations) <= 2 and all(type(item) is StoreObservation for item in observations))
+    _need(policy.store_scope == "application-all-builds", "invalid-policy")
     _need(tuple(item.platform for item in observations) == enabled, "store-platform-mismatch")
     for item in observations:
         _need(item.identity_revision == identity_revision, "store-identity-changed")

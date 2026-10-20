@@ -1,0 +1,875 @@
+diff --git a/desktop/src/components/LocalStorePreflight.tsx b/desktop/src/components/LocalStorePreflight.tsx
+--- a/desktop/src/components/LocalStorePreflight.tsx
++++ b/desktop/src/components/LocalStorePreflight.tsx
+@@ -4,6 +4,8 @@
+ import { APPLE_BUNDLE_QUERY, APPLE_PROFILE_QUERY } from '../localStorePreflightProtocol.ts';
+ import { AppleProvisioning } from './AppleProvisioning.tsx';
+ import { AppleProvisioningProfiles } from './AppleProvisioningProfiles.tsx';
++import { IOSStoreVersions } from './IOSStoreVersions.tsx';
++import { IOS_VERSIONS_QUERY } from '../iosStoreVersions.ts';
+ const hints:Record<StoreCheck,string>={
+  'credential-format':'In Credentials, reselect the service-account JSON, keep it and assign it to this exact This Mac context.',
+  'query-prerequisites':'Check the saved Android application ID, version/build number and track configuration, then refresh the saved version.',
+@@ -27,6 +29,7 @@
+  const resultLabels=originalApple?{...labels,'credential-format':'App Store Connect private-key format','store-access':'App Store Connect account access'}:labels;
+  if(op?.context.query===APPLE_BUNDLE_QUERY)return <AppleProvisioning state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
+  if(op?.context.query===APPLE_PROFILE_QUERY)return <AppleProvisioningProfiles state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
++ if(op?.context.query===IOS_VERSIONS_QUERY)return <IOSStoreVersions state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
+  if(compact&&!retained)return null;
+  return <section className="card" aria-label={`Local ${store} access check`}>
+   <div className="inline-heading"><h2>{store} access · This Mac</h2>{compact&&<button onClick={onShow}>Show check</button>}</div>
+@@ -42,6 +45,7 @@
+    <button disabled={!!reason||state.pending} onClick={()=>void controller.prepare()}>Review access check</button>{reason&&<p className="save-note">{reason}</p>}
+    {apple&&<AppleProvisioning state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
+    {apple&&<AppleProvisioningProfiles state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
++   {apple&&<IOSStoreVersions state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
+   </>}
+   {state.consentUntil!==null&&<div className="notice"><p>{originalApple?'Contact App Store Connect to read the saved app identity, existing external TestFlight group and build inventory. Apple may log or rate-limit requests. This does not upload, change testing groups, submit for review or publish a release.':'This creates a temporary, uncommitted Google Play edit, reads app inventory and attempts to delete the edit. It never commits the edit or publishes a release. A cancellation or network failure can leave an uncommitted edit until Google expires it.'}</p><label><input type="checkbox" checked={state.acknowledged} onChange={e=>controller.acknowledge(e.target.checked)}/> I authorize this nonpublishing {originalApple?'App Store Connect':'Google Play'} access check.</label><button disabled={!state.acknowledged||state.pending} onClick={()=>void controller.start()}>Check {originalApple?'App Store Connect':'Google Play'} access</button></div>}
+   {retained&&<div role="status"><p>{op?.phase==='running'?'Checking access. Up to 20 minutes; Cancel stops the original operation.':retained}</p><button onClick={()=>void controller.cancel()}>Cancel original check</button></div>}
+diff --git a/desktop/src/localStorePreflight.ts b/desktop/src/localStorePreflight.ts
+--- a/desktop/src/localStorePreflight.ts
++++ b/desktop/src/localStorePreflight.ts
+@@ -7,6 +7,7 @@
+ import type { AssetDisplayState } from './assetSessionTypes.ts';
+ import { assetStorageWritable } from './assetSessionProtocol.ts';
+ import { sameOfflineData } from './offlinePreflightProtocol.ts';
++import { IOS_VERSIONS_QUERY } from './iosStoreVersions.ts';
+ import { parseLocalStoreRequest, parseLocalStoreStatus, storeConsent, APPLE_BUNDLE_QUERY, APPLE_PROFILE_QUERY } from './localStorePreflightProtocol.ts';
+ import type { BridgeMode } from './types.ts';
+ import type { LocalStoreIdentity, LocalStorePreflightApi, LocalStoreStatus, PrepareLocalStorePreflight } from './localStorePreflightTypes.ts';
+@@ -14,6 +15,7 @@
+ export interface LocalStoreState {mode:BridgeMode;platform:'android'|'ios';request:PrepareLocalStorePreflight|null;status:LocalStoreStatus|null;pending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
+ export type LocalStoreProject=Pick<AndroidBuildProject,'projectId'|'draftRevision'|'baselineGeneration'|'observationGeneration'|'savedConfig'|'savedVersion'|'dirtyDraft'|'snapshotPending'|'versionPending'|'saveRecoveryRequired'|'inputIssue'> & { iosDemoRequired?: boolean | null };
+ interface Source {project:()=>LocalStoreProject|null;assets:()=>AssetDisplayState|null;otherOperationReason:()=>string|null;now?:()=>number}
++interface Attempt {request:PrepareLocalStorePreflight;epoch:number;after:number;previous:LocalStoreIdentity|null;id:LocalStoreIdentity|null;retired:boolean;started:boolean}
+ const active=(s:LocalStoreStatus|null)=>!!s?.operation&&s.operation.phase!=='terminal';
+ const identity=(v:LocalStoreIdentity)=>({operationId:v.operationId,ownerGeneration:v.ownerGeneration});
+ const sameId=(a:LocalStoreIdentity|null|undefined,b:LocalStoreIdentity|null|undefined)=>!!a&&!!b&&a.operationId===b.operationId&&a.ownerGeneration===b.ownerGeneration;
+@@ -31,7 +33,7 @@
+ export class LocalStorePreflightController {
+  private state:LocalStoreState={mode:'unavailable',platform:'android',request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
+  private api:Port|null=null;private unlisten:(()=>void)|null=null;private listeners=new Set<()=>void>();private disposed=false;private epoch=0;private reading=false;
+- private attempt:{request:PrepareLocalStorePreflight;epoch:number;after:number;previous:LocalStoreIdentity|null;id:LocalStoreIdentity|null;retired:boolean;started:boolean}|null=null;
++ private attempt:Attempt|null=null;
+  private cancelClaim:string|null=null;private failedCancel:string|null=null;private timer:ReturnType<typeof setTimeout>|null=null;
+  private readonly source:Source;
+  constructor(source:Source){this.source=source;}
+@@ -63,10 +65,27 @@
+  }
+  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading)return;this.reading=true;try{this.receive(await this.api.localStorePreflightStatus());}catch{this.fail();}finally{this.reading=false;}}
+  prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Stores.';if(localStoreOwnerReason(this.state))return localStoreOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for the local Store check.';if(!this.state.request)return this.state.platform==='ios'?'Read the saved version, then in Credentials choose This Mac → iOS → Store (or Full), select an App Store Connect P8 with its Key ID and Issuer ID, keep and assign it.':'Read the saved version, then in Credentials choose This Mac → Android → Store (or Full), select a Google service-account JSON, keep and assign it.';return this.source.otherOperationReason();}
+- async prepare(query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status||query!==undefined&&((query!==APPLE_BUNDLE_QUERY&&query!==APPLE_PROFILE_QUERY)||this.state.platform!=='ios'))return;const api=this.api,request=query===undefined?this.state.request:parseLocalStoreRequest({...this.state.request,query});if(!request)return;
++ // The new query cannot dispatch from an intent revoked by a synchronous
++ // subscriber. Own pending bookkeeping is not a peer/native-currentness grant.
++ private inventoryInvocationCurrent(api:Port,a:Attempt):boolean{
++  const owned=()=>!this.disposed&&this.api===api&&api.mode==='native'&&this.state.mode==='native'&&this.attempt===a&&!a.retired&&a.epoch===this.epoch&&!this.state.blocked&&this.state.platform==='ios';
++  if(!owned())return false;
++  const base=localStoreRequest(this.source.project(),this.source.assets());
++  const live=base&&parseLocalStoreRequest({...base,query:IOS_VERSIONS_QUERY});
++  const peer=this.source.otherOperationReason();
++  return owned()&&!peer&&sameOfflineData(live,a.request);
++ }
++ async prepare(query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY|typeof IOS_VERSIONS_QUERY){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status||query!==undefined&&((query!==APPLE_BUNDLE_QUERY&&query!==APPLE_PROFILE_QUERY&&query!==IOS_VERSIONS_QUERY)||this.state.platform!=='ios'))return;const api=this.api,request=query===undefined?this.state.request:parseLocalStoreRequest({...this.state.request,query});if(!request)return;
+   this.attempt={request,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
+   this.update({pending:true,unconfirmed:true,error:null,historical:false});
+-  try{this.receive(await api.prepareLocalStorePreflight(request));const op=this.state.status?.operation;
++  try{
++   if(query===IOS_VERSIONS_QUERY&&(!this.inventoryInvocationCurrent(api,a)||a.id!==null||this.state.status?.statusRevision!==a.after)){
++    a.retired=true;
++    if(this.attempt===a&&!a.id){this.attempt=null;this.update({unconfirmed:this.state.blocked||active(this.state.status)});}
++    else if(a.id)void this.cancelOriginal(false);
++    return; // This original Prepare was never invoked; no native promise lost.
++   }
++   this.receive(await api.prepareLocalStorePreflight(request));const op=this.state.status?.operation;
+    if(this.attempt!==a||a.retired||a.epoch!==this.epoch||!sameId(a.id,op)||op?.phase!=='awaiting-consent'||!op.intentUsable){if(a.id)void this.cancelOriginal(false);return;}
+    const deadline=this.now()+60000;this.update({consentUntil:deadline,acknowledged:false});this.timer=setTimeout(()=>{if(this.attempt===a)this.invalidate();},60000);
+   }catch{this.fail();}finally{this.update({pending:false});}}
+@@ -74,8 +93,13 @@
+  async start(){this.syncProject();const a=this.attempt,api=this.api,op=this.state.status?.operation;
+   if(a?.started)return; // A queued second click cannot cancel the original run.
+   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
++  const consentUntil=this.state.consentUntil;
+   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});
+-  try{this.receive(await api.startLocalStorePreflight({...a.id,consentVersion:storeConsent(a.request.platform,a.request.query)}));}catch{this.fail();}finally{this.update({pending:false});}}
++  try{
++   if(a.request.query===IOS_VERSIONS_QUERY&&(this.now()>=consentUntil||!this.inventoryInvocationCurrent(api,a)||!sameId(a.id,this.state.status?.operation)||this.state.status?.operation?.phase!=='awaiting-consent'||!this.state.status.operation.intentUsable)){
++    this.invalidate();return; // Keep/cancel the actual prepared native original.
++   }
++   this.receive(await api.startLocalStorePreflight({...a.id,consentVersion:storeConsent(a.request.platform,a.request.query)}));}catch{this.fail();}finally{this.update({pending:false});}}
+  cancel=()=>{this.invalidate();return this.cancelOriginal(true);};
+  private async cancelOriginal(explicitRetry:boolean){const api=this.api,id=this.attempt?.id??this.state.status?.operation;if(!api||!id||this.state.status?.operation?.phase==='terminal')return;
+   const key=id.operationId+id.ownerGeneration;if(this.cancelClaim===key||!explicitRetry&&this.failedCancel===key)return;this.cancelClaim=key;this.failedCancel=null;this.clearTimer();this.update({acknowledged:false,consentUntil:null});
+
+diff --git a/desktop/src/localStorePreflightProtocol.ts b/desktop/src/localStorePreflightProtocol.ts
+--- a/desktop/src/localStorePreflightProtocol.ts
++++ b/desktop/src/localStorePreflightProtocol.ts
+@@ -1,5 +1,6 @@
+ import { copyBoundedComparisonData, parseSavedConfigContent, sameOfflineData } from './offlinePreflightProtocol.ts';
+ import { parseAndroidBuildSavedVersion } from './androidBuildProtocol.ts';
++import { IOS_VERSIONS_QUERY, IOS_VERSIONS_CONSENT, IOS_VERSIONS_SCOPE, iosVersionsLimitations, parseIOSCurrentVersions } from './iosStoreVersions.ts';
+ import type { ApiError } from './types.ts';
+ import type { LocalStoreStatus, PrepareLocalStorePreflight } from './localStorePreflightTypes.ts';
+ export const STORE_EVENT='local-store-preflight-state-changed';
+@@ -11,7 +12,7 @@
+ export const APPLE_PROFILE_QUERY='app-store-profile-reuse' as const;
+ export const APPLE_PROFILE_CONSENT='local-ios-profile-reuse-read-v1' as const;
+ export const APPLE_PROFILE_SCOPE='local-ios-profile-reuse-metadata-read' as const;
+-export const storeConsent=(platform?:'android'|'ios',query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY)=>platform==='ios'?(query===APPLE_BUNDLE_QUERY?APPLE_BUNDLE_CONSENT:query===APPLE_PROFILE_QUERY?APPLE_PROFILE_CONSENT:APPLE_STORE_CONSENT):STORE_CONSENT;
++export const storeConsent=(platform?:'android'|'ios',query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY|typeof IOS_VERSIONS_QUERY)=>platform==='ios'?(query===APPLE_BUNDLE_QUERY?APPLE_BUNDLE_CONSENT:query===APPLE_PROFILE_QUERY?APPLE_PROFILE_CONSENT:query===IOS_VERSIONS_QUERY?IOS_VERSIONS_CONSENT:APPLE_STORE_CONSENT):STORE_CONSENT;
+ export type StoreCommand='prepare_local_store_preflight'|'start_local_store_preflight'|'local_store_preflight_status'|'cancel_local_store_preflight';
+ const limits=['non-publishing','no-project-commands','no-build-or-signing','no-release-readiness','point-in-time-account-access','saved-inputs-not-atomic'];
+ const bundleLimits=[...limits,'no-team-verification','no-global-availability-claim','no-provisioning-changes'];
+@@ -29,7 +30,7 @@
+ const member=(values:string[],v:unknown)=>typeof v==='string'&&values.includes(v);
+ const contextKeys=['projectId','draftRevision','baselineGeneration','savedConfig','savedVersion','credentialContextRevision','recordId','recordRevision','executionMode'];
+ function request(v:unknown):boolean{
+- return (keys(v,contextKeys)||keys(v,[...contextKeys,'platform'])&&v.platform==='ios'||keys(v,[...contextKeys,'platform','query'])&&v.platform==='ios'&&(v.query===APPLE_BUNDLE_QUERY||v.query===APPLE_PROFILE_QUERY))&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&counter(v.draftRevision)&&counter(v.baselineGeneration)&&!!parseSavedConfigContent(v.savedConfig)&&!!parseAndroidBuildSavedVersion(v.savedVersion)&&counter(v.credentialContextRevision)&&v.credentialContextRevision>0&&counter(v.recordRevision)&&v.recordRevision>0&&token(v.recordId)&&v.executionMode==='local';
++ return (keys(v,contextKeys)||keys(v,[...contextKeys,'platform'])&&v.platform==='ios'||keys(v,[...contextKeys,'platform','query'])&&v.platform==='ios'&&(v.query===APPLE_BUNDLE_QUERY||v.query===APPLE_PROFILE_QUERY||v.query===IOS_VERSIONS_QUERY))&&typeof v.projectId==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.projectId)&&counter(v.draftRevision)&&counter(v.baselineGeneration)&&!!parseSavedConfigContent(v.savedConfig)&&!!parseAndroidBuildSavedVersion(v.savedVersion)&&counter(v.credentialContextRevision)&&v.credentialContextRevision>0&&counter(v.recordRevision)&&v.recordRevision>0&&token(v.recordId)&&v.executionMode==='local';
+ }
+ function profileSummary(value:unknown):boolean{
+  if(!keys(value,['observation','counts','checkedAt'])||!member(bundleObservations,value.observation))return false;
+@@ -47,7 +48,7 @@
+ }
+ export function encodeLocalStoreRequest(command:StoreCommand,input:unknown):Uint8Array|null{
+  try{const v=copyBoundedComparisonData(input,8192);
+- const valid=command==='prepare_local_store_preflight'?request(v):command==='local_store_preflight_status'?keys(v,[]):keys(v,command==='start_local_store_preflight'?['operationId','ownerGeneration','consentVersion']:['operationId','ownerGeneration'])&&token(v.operationId)&&token(v.ownerGeneration)&&(command!=='start_local_store_preflight'||(v.consentVersion===STORE_CONSENT||v.consentVersion===APPLE_STORE_CONSENT||v.consentVersion===APPLE_BUNDLE_CONSENT||v.consentVersion===APPLE_PROFILE_CONSENT));
++ const valid=command==='prepare_local_store_preflight'?request(v):command==='local_store_preflight_status'?keys(v,[]):keys(v,command==='start_local_store_preflight'?['operationId','ownerGeneration','consentVersion']:['operationId','ownerGeneration'])&&token(v.operationId)&&token(v.ownerGeneration)&&(command!=='start_local_store_preflight'||(v.consentVersion===STORE_CONSENT||v.consentVersion===APPLE_STORE_CONSENT||v.consentVersion===APPLE_BUNDLE_CONSENT||v.consentVersion===APPLE_PROFILE_CONSENT||v.consentVersion===IOS_VERSIONS_CONSENT));
+  if(!valid)return null;const bytes=new TextEncoder().encode(JSON.stringify(v));return bytes.length<=8192?bytes:null;
+  }catch{return null;}
+ }
+@@ -62,8 +63,8 @@
+  else if(op.phase==='unknown'){if(op.outcome!=='unknown'||op.reason!=='cleanup-unknown'||op.intentUsable||op.result!==null)return null;}
+  else if(op.outcome!==null||op.result!==null||op.intentUsable&&op.phase!=='awaiting-consent')return null;
+  if(op.result!==null){const r=op.result;
+-  const bundle=c.query===APPLE_BUNDLE_QUERY,profiles=c.query===APPLE_PROFILE_QUERY;
+-  if(op.phase!=='terminal'||op.outcome!=='complete'||!keys(r,['schemaVersion','scope','findings','limitations',...(bundle?['observation']:profiles?['profileReuse']:[])])||r.schemaVersion!==1||r.scope!==(bundle?APPLE_BUNDLE_SCOPE:profiles?APPLE_PROFILE_SCOPE:`local-${c.platform}-store-access-no-publishing`)||!sameOfflineData(r.limitations,bundle?bundleLimits:profiles?profileLimits:limits)||!Array.isArray(r.findings)||r.findings.length>16||r.findings.some(f=>!keys(f,['check','status'])||!member(checks,f.check)||!member(core,f.status)||(bundle||profiles)&&f.check==='store-access')||bundle&&!member(bundleObservations,r.observation)||profiles&&!profileSummary(r.profileReuse))return null;
++  const bundle=c.query===APPLE_BUNDLE_QUERY,profiles=c.query===APPLE_PROFILE_QUERY,versions=c.query===IOS_VERSIONS_QUERY;
++  if(op.phase!=='terminal'||op.outcome!=='complete'||!keys(r,['schemaVersion','scope','findings','limitations',...(bundle?['observation']:profiles?['profileReuse']:versions?['currentVersions']:[])])||r.schemaVersion!==1||r.scope!==(bundle?APPLE_BUNDLE_SCOPE:profiles?APPLE_PROFILE_SCOPE:versions?IOS_VERSIONS_SCOPE:`local-${c.platform}-store-access-no-publishing`)||!sameOfflineData(r.limitations,bundle?bundleLimits:profiles?profileLimits:versions?iosVersionsLimitations:limits)||!Array.isArray(r.findings)||r.findings.length>16||r.findings.some(f=>!keys(f,['check','status'])||!member(checks,f.check)||!member(core,f.status)||(bundle||profiles||versions)&&f.check==='store-access')||bundle&&!member(bundleObservations,r.observation)||profiles&&!profileSummary(r.profileReuse)||versions&&(!parseIOSCurrentVersions(r.currentVersions)||op.reason!=='none'||(r.currentVersions as {observation?:unknown}).observation==='observed'&&r.findings.some(f=>['FAIL','MISSING','BLOCKED','INVALID'].includes(f.status as string))))return null;
+  }else if(op.outcome==='complete')return null;
+  return v as unknown as LocalStoreStatus;
+  }catch{return null;}
+diff --git a/desktop/src/localStorePreflightTypes.ts b/desktop/src/localStorePreflightTypes.ts
+--- a/desktop/src/localStorePreflightTypes.ts
++++ b/desktop/src/localStorePreflightTypes.ts
+@@ -1,8 +1,9 @@
++import type { IOSCurrentVersions } from './iosStoreVersions.ts';
+ import type { AndroidBuildSavedVersion } from './androidBuildTypes.ts';
+ import type { OfflinePreflightAvailability, OfflinePreflightPhase, OfflinePreflightOutcome, OfflineCoreStatus, SavedConfigContent } from './offlinePreflightTypes.ts';
+ export interface PrepareLocalStorePreflight {
+   projectId:string; draftRevision:number; baselineGeneration:number; savedConfig:SavedConfigContent; savedVersion:AndroidBuildSavedVersion;
+-  credentialContextRevision:number; recordId:string; recordRevision:number; executionMode:'local'; platform?:'ios';query?:'bundle-id-registration'|'app-store-profile-reuse';
++  credentialContextRevision:number; recordId:string; recordRevision:number; executionMode:'local'; platform?:'ios';query?:'bundle-id-registration'|'app-store-profile-reuse'|'ios-current-versions';
+ }
+ export interface LocalStoreContext extends Omit<PrepareLocalStorePreflight,'platform'> {platform:'android'|'ios';operation:'local-store-preflight'}
+ export interface LocalStoreIdentity {operationId:string;ownerGeneration:string}
+@@ -10,12 +11,12 @@
+ export type StoreCheck='credential-format'|'query-prerequisites'|'runtime-unavailable'|'bundle-unavailable'|'store-access';
+ export type BundleIdObservation='found'|'not-returned'|'not-permitted'|'inconclusive'|'not-checked';
+ export interface ProfileReuseSummary {observation:BundleIdObservation;counts:{matchingProfiles:number;activeProfiles:number;currentMetadataCandidates:number;relatedCertificates:number}|null;checkedAt:string|null}
+-export interface LocalStoreResult {schemaVersion:1;scope:'local-android-store-access-no-publishing'|'local-ios-store-access-no-publishing'|'local-ios-bundle-id-registration-read'|'local-ios-profile-reuse-metadata-read';findings:{check:StoreCheck;status:OfflineCoreStatus}[];limitations:string[];observation?:BundleIdObservation;profileReuse?:ProfileReuseSummary}
++export interface LocalStoreResult {schemaVersion:1;scope:'local-android-store-access-no-publishing'|'local-ios-store-access-no-publishing'|'local-ios-bundle-id-registration-read'|'local-ios-profile-reuse-metadata-read'|'local-ios-current-version-inventory';findings:{check:StoreCheck;status:OfflineCoreStatus}[];limitations:string[];observation?:BundleIdObservation;profileReuse?:ProfileReuseSummary;currentVersions?:IOSCurrentVersions}
+ export interface LocalStoreOperation extends LocalStoreIdentity {context:LocalStoreContext;phase:OfflinePreflightPhase;intentUsable:boolean;outcome:OfflinePreflightOutcome|null;reason:LocalStoreReason;result:LocalStoreResult|null}
+ export interface LocalStoreStatus {schemaVersion:1;statusRevision:number;availability:OfflinePreflightAvailability;operation:LocalStoreOperation|null}
+ export interface LocalStorePreflightApi {
+  prepareLocalStorePreflight(request:PrepareLocalStorePreflight):Promise<LocalStoreStatus>;
+- startLocalStorePreflight(request:LocalStoreIdentity&{consentVersion:'local-android-store-access-v1'|'local-ios-store-access-v1'|'local-ios-bundle-id-read-v1'|'local-ios-profile-reuse-read-v1'}):Promise<LocalStoreStatus>;
++ startLocalStorePreflight(request:LocalStoreIdentity&{consentVersion:'local-android-store-access-v1'|'local-ios-store-access-v1'|'local-ios-bundle-id-read-v1'|'local-ios-profile-reuse-read-v1'|'local-ios-current-versions-read-v1'}):Promise<LocalStoreStatus>;
+  localStorePreflightStatus():Promise<LocalStoreStatus>;
+  cancelLocalStorePreflight(operationId:string,ownerGeneration:string):Promise<LocalStoreStatus>;
+  subscribeLocalStorePreflight(listener:(status:unknown)=>void):Promise<()=>void>;
+diff --git a/desktop/src-tauri/src/apple_provisioning_bundle_read.rs b/desktop/src-tauri/src/apple_provisioning_bundle_read.rs
+--- a/desktop/src-tauri/src/apple_provisioning_bundle_read.rs
++++ b/desktop/src-tauri/src/apple_provisioning_bundle_read.rs
+@@ -13,6 +13,8 @@
+     BundleIdRegistration,
+     #[serde(rename = "app-store-profile-reuse")]
+     AppStoreProfileReuse,
++    #[serde(rename = "ios-current-versions")]
++    IOSCurrentVersions,
+ }
+
+ impl Query {
+@@ -20,6 +22,7 @@
+         match self {
+             Self::BundleIdRegistration => CONSENT,
+             Self::AppStoreProfileReuse => super::profile_read::CONSENT,
++            Self::IOSCurrentVersions => super::store_versions::CONSENT,
+         }
+     }
+ }
+@@ -64,7 +67,7 @@
+     value.schema_version == 1
+         && value.scope == SCOPE
+         && value.observation.is_some()
+-        && value.profile_reuse.is_none()
++        && value.profile_reuse.is_none() && value.current_versions.is_none()
+         && value.limitations.as_slice() == LIMITATIONS
+         && value.findings.len() <= 16
+         && value
+diff --git a/desktop/src-tauri/src/apple_provisioning_profile_read.rs b/desktop/src-tauri/src/apple_provisioning_profile_read.rs
+--- a/desktop/src-tauri/src/apple_provisioning_profile_read.rs
++++ b/desktop/src-tauri/src/apple_provisioning_profile_read.rs
+@@ -117,7 +117,7 @@
+ pub(super) fn valid_result(value: &ResultData) -> bool {
+     value.schema_version == 1
+         && value.scope == SCOPE
+-        && value.observation.is_none()
++        && value.observation.is_none() && value.current_versions.is_none()
+         && value.profile_reuse.as_ref().is_some_and(Summary::valid)
+         && value.limitations.as_slice() == LIMITATIONS
+         && value.findings.len() <= 16
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -104,7 +104,7 @@
+ pub(crate) use tool_acquisition::ToolAcquisitionDocumentInput;
+ #[path = "asset_session_store_material.rs"]
+ mod store_material;
+-pub(crate) use store_material::{SelectedStoreMaterial, MATERIAL_PREFIX as STORE_MATERIAL_PREFIX, MATERIAL_SUFFIX as STORE_MATERIAL_SUFFIX};
++pub(crate) use store_material::{StoreVersionMaterial, SelectedStoreMaterial, MATERIAL_PREFIX as STORE_MATERIAL_PREFIX, MATERIAL_SUFFIX as STORE_MATERIAL_SUFFIX};
+ #[path = "asset_session_github_secret.rs"]
+ mod github_secret;
+ pub(crate) use github_secret::{GitHubSecretMaterial, GitHubSecretFrame};
+@@ -1965,6 +1965,7 @@
+             self.add(std::mem::size_of::<DocumentState>())?;
+             // Both original Store owners retain continuity across idle/context replacement.
+             self.add(crate::saved_command_owner::identity_continuity_document_backing_bytes().ok_or(Problem::Capacity)?)?;
++            self.add(crate::saved_command_owner::store_versions_document_backing_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(crate::saved_command_owner::apple_provisioning_retained_document_backing_bytes().ok_or(Problem::Capacity)?)?;
+             // This Document binding can outlive every Apple review/input. It
+             // is distinct from the owner's fixed retained comparison buffers.
+diff --git a/desktop/src-tauri/src/asset_session_store_material.rs b/desktop/src-tauri/src/asset_session_store_material.rs
+--- a/desktop/src-tauri/src/asset_session_store_material.rs
++++ b/desktop/src-tauri/src/asset_session_store_material.rs
+@@ -5,6 +5,9 @@
+ use sha2::{Digest, Sha256};
+ #[path="asset_session_apple_provisioning_material.rs"]
+ mod apple_provisioning;
++#[path="asset_session_store_versions.rs"]
++mod store_versions;
++pub(crate) use store_versions::StoreVersionMaterial;
+
+ pub(crate) const MATERIAL_PREFIX: &[u8] = b"MRK-STORE-MATERIAL/1\n";
+ pub(crate) const MATERIAL_SUFFIX: &[u8] = b"\nMRK-STORE-MATERIAL-END\n";
+@@ -337,7 +340,7 @@
+         }
+     }
+
+-    fn apple_model()->DocumentState {
++    pub(super) fn apple_model()->DocumentState {
+         let mut state=model();
+         Arc::get_mut(state.context.as_mut().unwrap()).unwrap().platform=Platform::Ios;
+         // Minimal canonical PKCS8 envelope with inert private octets, NOT a
+diff --git a/desktop/src-tauri/src/local_store_preflight_owner.rs b/desktop/src-tauri/src/local_store_preflight_owner.rs
+--- a/desktop/src-tauri/src/local_store_preflight_owner.rs
++++ b/desktop/src-tauri/src/local_store_preflight_owner.rs
+@@ -39,6 +39,8 @@
+     }
+     pub(crate) fn document_lost(&self) { self.saved.document_lost(); }
+     pub(crate) fn context_changed(&self) { self.saved.context_changed(); }
++    pub(crate) fn current_versions(&self, context:&crate::local_store_preflight_protocol::Context, registration:u32, root:&RegisteredRoot)
++        ->Result<Arc<crate::saved_command_owner::StoreVersionObservation>,BridgeError>{self.saved.current_store_versions(context,registration,root)}
+     pub(crate) fn registration_matches(&self, registration: u32) -> bool { self.saved.registration_matches(registration) }
+     pub(crate) fn request_shutdown(&self) { self.saved.request_shutdown(); }
+     pub(crate) async fn shutdown(&self) -> Result<(), BridgeError> { self.saved.shutdown().await }
+diff --git a/desktop/src-tauri/src/local_store_preflight_protocol.rs b/desktop/src-tauri/src/local_store_preflight_protocol.rs
+--- a/desktop/src-tauri/src/local_store_preflight_protocol.rs
++++ b/desktop/src-tauri/src/local_store_preflight_protocol.rs
+@@ -9,6 +9,8 @@
+ mod bundle_read;
+ #[path = "apple_provisioning_profile_read.rs"]
+ mod profile_read;
++#[path = "ios_store_versions.rs"]
++pub(crate) mod store_versions;
+
+ pub(crate) const PROTOCOL: &str = "mrk-local-store-preflight/1";
+ pub(crate) const CONSENT: &str = "local-android-store-access-v1";
+@@ -105,14 +107,14 @@
+         && !(keys(value, &["projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+             "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "query"])
+             && value.get("platform").and_then(Value::as_str)==Some("ios")
+-            && matches!(value.get("query").and_then(Value::as_str),Some("bundle-id-registration"|"app-store-profile-reuse"))) { return Err(invalid()); }
++            && matches!(value.get("query").and_then(Value::as_str),Some("bundle-id-registration"|"app-store-profile-reuse"|"ios-current-versions"))) { return Err(invalid()); }
+     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
+     if !input.context().valid() { return Err(invalid()); } Ok(input)
+ }
+ pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
+     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
+     let input = Start::deserialize(value).map_err(|_| invalid())?;
+-    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|bundle_read::CONSENT|profile_read::CONSENT) { return Err(invalid()); } Ok(input)
++    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|bundle_read::CONSENT|profile_read::CONSENT|store_versions::CONSENT) { return Err(invalid()); } Ok(input)
+ }
+ impl Start {
+     pub(crate) fn matches_context(&self, context:&Context)->bool {
+@@ -192,7 +194,8 @@
+ #[serde(rename_all = "kebab-case")]
+ pub(crate) enum Limitation { NonPublishing, NoProjectCommands, NoBuildOrSigning, NoReleaseReadiness,
+     PointInTimeAccountAccess, SavedInputsNotAtomic, NoTeamVerification, NoGlobalAvailabilityClaim, NoProvisioningChanges,
+-    MetadataOnly, NoPrivateKeyMatch, NoProfileAuthentication, NoAccountCertificateInventory }
++    MetadataOnly, NoPrivateKeyMatch, NoProfileAuthentication, NoAccountCertificateInventory,
++    CurrentVisibleOnly, NotAtomicStoreSnapshot, HistoricalUniquenessNotEstablished, ExternalUploadersNotCoordinated }
+ const LIMITATIONS: [Limitation; 6] = [Limitation::NonPublishing, Limitation::NoProjectCommands,
+     Limitation::NoBuildOrSigning, Limitation::NoReleaseReadiness, Limitation::PointInTimeAccountAccess,
+     Limitation::SavedInputsNotAtomic];
+@@ -203,14 +206,17 @@
+     observation: Option<bundle_read::Observation>,
+     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "profile_read::optional_summary")]
+     profile_reuse: Option<profile_read::Summary>,
++    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "store_versions::optional_summary")]
++    current_versions: Option<store_versions::Summary>,
+ }
+ impl ResultData {
+     fn valid(&self, context:&Context) -> bool {
+         if let Some(query)=context.query { return context.platform == AccessPlatform::Ios && match query {
+             bundle_read::Query::BundleIdRegistration => bundle_read::valid_result(self),
+             bundle_read::Query::AppStoreProfileReuse => profile_read::valid_result(self),
++            bundle_read::Query::IOSCurrentVersions => store_versions::valid_result(self),
+         }; }
+-        self.observation.is_none() && self.profile_reuse.is_none() && self.schema_version == 1 && self.scope == context.platform.scope()
++        self.observation.is_none() && self.profile_reuse.is_none() && self.current_versions.is_none() && self.schema_version == 1 && self.scope == context.platform.scope()
+             && self.limitations.as_slice() == LIMITATIONS && self.findings.len() <= 16
+     }
+ }
+diff --git a/desktop/src-tauri/src/macos_store_runtime.rs b/desktop/src-tauri/src/macos_store_runtime.rs
+--- a/desktop/src-tauri/src/macos_store_runtime.rs
++++ b/desktop/src-tauri/src/macos_store_runtime.rs
+@@ -14,6 +14,7 @@
+     "store/tooling/fastlane/run_lane.rb", "store/tooling/fastlane/native_process_spawn.rb",
+     "store/tooling/fastlane/apple_provisioning.rb", "store/tooling/fastlane/apple_provisioning_bundle_read.rb",
+     "store/tooling/fastlane/apple_provisioning_profile_read.rb",
++    "store/tooling/fastlane/apple_store_versions.rb",
+     "store/licenses/Ruby-COPYING", "store/licenses/Ruby-BSDL", "store/licenses/Ruby-LEGAL",
+     "store/licenses/OpenSSL-LICENSE.txt", "store/licenses/LibYAML-License",
+     "store/licenses/locked-gem-licenses.txt",
+diff --git a/desktop/src-tauri/src/saved_command_owner.rs b/desktop/src-tauri/src/saved_command_owner.rs
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -38,6 +38,9 @@
+ mod local_history;
+ #[path = "saved_command_identity_continuity.rs"]
+ mod identity_continuity;
++#[path="saved_command_store_versions.rs"]
++mod store_versions;
++pub(crate) use store_versions::{StoreVersionObservation,document_backing_bytes as store_versions_document_backing_bytes};
+ pub(crate) use identity_continuity::document_backing_bytes as identity_continuity_document_backing_bytes;
+ #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+ pub(crate) use local_history::{LocalHistoryClaim,LocalHistoryHelperClaim};
+@@ -1245,6 +1248,7 @@
+     recovery: Option<Arc<IOSRecoveryObservation>>, android_catalog: android_catalog::Catalog, android_sources: android_sources::Sources,
+     android_registration: android_registration::Registration, artifact_inputs: artifact_inputs::Inputs,
+     identity_vetoes: identity_continuity::Vetoes,
++    store_versions: store_versions::Slot,
+ }
+ #[path = "saved_command_agent_local_checks.rs"]
+ mod agent_local_checks;
+@@ -2235,7 +2239,7 @@
+             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified, ios_mode_capabilities: None,
+             prepared: None, active: None, last: None, recovery_review: None, recovery: None, android_catalog: android_catalog::Catalog::default(), android_sources: android_sources::Sources::default(),
+             android_registration: android_registration::Registration::default(), artifact_inputs: artifact_inputs::Inputs::default(),
+-            identity_vetoes: identity_continuity::Vetoes::default() }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
++            store_versions: store_versions::Slot::default(), identity_vetoes: identity_continuity::Vetoes::default() }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
+             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+                 any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
+             fixture: Mutex::new(None),
+@@ -2642,7 +2646,7 @@
+     }
+     pub(crate) fn document_lost_published(&self, publisher: Option<&android_registration::Publisher>) {
+         let at = self.lifecycle_time(publisher);
+-        let mut r = self.inner.lock(); apple_provisioning::invalidate_review(&mut r.apple); if r.document_lost { return; } r.document_lost = true; r.recovery_review = None;
++        let mut r = self.inner.lock(); r.store_versions.invalidate(); apple_provisioning::invalidate_review(&mut r.apple); if r.document_lost { return; } r.document_lost = true; r.recovery_review = None;
+         r.android_catalog.stop(crate::android_toolchain_catalog::Reason::DocumentLost,at);
+         r.android_sources.stop(crate::android_tool_sources::Reason::DocumentLost,at);
+         r.artifact_inputs.stop(artifact_wire::SelectionReason::DocumentLost,at);
+@@ -2660,7 +2664,7 @@
+     }
+     pub(crate) fn context_changed_published(&self, publisher: Option<&android_registration::Publisher>) {
+         let at = self.lifecycle_time(publisher);
+-        let mut r = self.inner.lock(); let apple_history_changed = apple_provisioning::invalidate_review(&mut r.apple); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
++        let mut r = self.inner.lock(); r.store_versions.invalidate(); let apple_history_changed = apple_provisioning::invalidate_review(&mut r.apple); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
+         if r.android_catalog.stop(crate::android_toolchain_catalog::Reason::CatalogChanged,at)
+             | r.android_sources.stop(crate::android_tool_sources::Reason::ContextChanged,at)
+             | r.artifact_inputs.stop(artifact_wire::SelectionReason::ContextChanged,at)
+@@ -2685,7 +2689,7 @@
+     }
+     pub(crate) fn request_shutdown_published(&self, publisher: Option<&android_registration::Publisher>) {
+         let at = self.lifecycle_time(publisher);
+-        let mut r = self.inner.lock(); apple_provisioning::invalidate_review(&mut r.apple); r.stopping = true; r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::Shutdown);
++        let mut r = self.inner.lock(); r.store_versions.invalidate(); apple_provisioning::invalidate_review(&mut r.apple); r.stopping = true; r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::Shutdown);
+         r.android_catalog.stop(crate::android_toolchain_catalog::Reason::Shutdown,at);
+         r.android_sources.stop(crate::android_tool_sources::Reason::Shutdown,at);
+         r.artifact_inputs.stop(artifact_wire::SelectionReason::Shutdown,at);
+@@ -2778,6 +2782,8 @@
+                 // Only this exact positive original watchdog retirement may
+                 // mint sticky Store continuity. Never parse public Status.
+                 r.identity_vetoes.record_original(&active, &owner);
++                let versions_allowed = !r.disabled && !r.exhausted && !r.document_lost && !r.stopping && !self.inner.poisoned.load(Ordering::SeqCst);
++                r.store_versions.record_original(&active, &owner, versions_allowed);
+                 if !active.unknown && !active.context_invalidated && !r.document_lost && !r.stopping {
+                     if let Some(Terminal::IOSArchive(t)) = &active.projection.result {
+                         if t.context.recovery.as_ref().is_some_and(|r| r.action == ios_wire::RecoveryAction::Inspect)
+diff --git a/desktop/src-tauri/src/saved_command_store.rs b/desktop/src-tauri/src/saved_command_store.rs
+--- a/desktop/src-tauri/src/saved_command_store.rs
++++ b/desktop/src-tauri/src/saved_command_store.rs
+@@ -13,6 +13,7 @@
+     pub(crate) fn prepare_store(&self,input:store_wire::Prepare,registration:u32,project:RegisteredRoot,
+         gate:store_wire::Availability,material:Arc<SelectedStoreMaterial>)->Result<store_wire::Status,BridgeError>{
+         self.require_domain(SavedCommandDomain::LocalStorePreflight)?;
++        self.inner.lock().store_versions.invalidate();
+         self.prepare_bound(Context::LocalStorePreflight(input.context()),registration,project,Availability::from_store(gate),Some(PrivateSigningMaterial::Store(material)),None)?.store()
+     }
+     pub(crate) fn prepared_store_material(&self,operation:&str,generation:&str)->Result<Arc<SelectedStoreMaterial>,BridgeError>{
+@@ -27,8 +28,15 @@
+         // Parsed consent is not permission: match the same prepared private loan
+         // before the existing owner may publish GO or private material.
+         if !material.accepts_access_consent(&input){return Err(self.inner.domain.invalid_owner());}
++        let witness=material.version_inventory_witness()?;
++        let id=input.operation_id.clone(); let generation=input.owner_generation.clone();
+         let admitted=self.start_bound(Start{operation_id:input.operation_id,owner_generation:input.owner_generation},admitted_at,registered,
+             Availability::from_store(gate),Some(PrivateSigningMaterial::Store(material)))?;
++        if let Some(witness)=witness {
++            let mut r=self.inner.lock();
++            let owner=r.active.as_ref().filter(|a|a.owner.id==id && a.owner.generation==generation).map(|a|a.owner.clone()).ok_or_else(store_wire::invalid)?;
++            if !r.store_versions.arm(&owner,witness) {self.inner.stop_locked(&mut r,&owner,Reason::ContextChanged,Instant::now());return Err(store_wire::invalid());}
++        }
+         Ok(crate::local_store_preflight_owner::Admitted::new(admitted.status.store()?,admitted.release))
+     }
+     pub(crate) fn status_store(&self,gate:store_wire::Availability)->Result<store_wire::Status,BridgeError>{
+diff --git a/desktop/src-tauri/src/version_allocation_protocol_native.rs b/desktop/src-tauri/src/version_allocation_protocol_native.rs
+--- a/desktop/src-tauri/src/version_allocation_protocol_native.rs
++++ b/desktop/src-tauri/src/version_allocation_protocol_native.rs
+@@ -4,7 +4,7 @@
+ //! opener, candidate selector, general byte writer, credential or GO authority.
+ //! The Supervisor must retain/join the actual state job and rematch the original
+ //! Document admission before releasing an ACK. Parsed frames prove none of that.
+-use super::{canonical, closed, decode, hash, hex, observation_shape, Authority, Checkpoint,
++use super::{canonical, closed, decode, hash, hex, Authority, Checkpoint,
+     Pending, Request as AllocationRequest, Reservation, Revision, StateError, Transition,
+     VersionAllocationStatePort, WriteAck};
+ use crate::{application_service::ProjectBinding, application_state_store::PrivateStateDirectory,
+@@ -78,9 +78,13 @@
+ impl Request {
+     pub(crate) fn from_port(port: &VersionAllocationStatePort, id: &str, kind: Kind,
+         account_id: &str, clock: Clock, observations: &[Value]) -> Result<Self> {
+-        require(valid_id(id) && numeric_id(account_id) && observations.len() <= 2
+-            && observations.iter().all(observation_shape))?;
++        require(valid_id(id) && numeric_id(account_id) && observations.len() <= 2)?;
+         let selected = AllocationRequest(data(port.selected_request())?.clone());
++        // Exact pending reconciliation is read-only and must remain possible
++        // after the original Store observation/key expires. It cannot PUT or
++        // prepare a new edit merely because it recovered the same DATA.
++        require((kind == Kind::Reconcile && observations.is_empty())
++            || selected.observations_valid(observations))?;
+         let row = data(port.enrolled())?;
+         require((kind == Kind::Reconcile) == row.pending.is_some()
+             && row.pending.as_ref().is_none_or(|p| p.reservation.request == selected))?;
+@@ -90,7 +94,7 @@
+         let local_project_id = port.project.project_id.as_str().to_owned();
+         let initial = encoded(&json!({"protocol":PROTOCOL,"id":id,"action":{
+             "kind":kind,"localProjectId":local_project_id,"authority":authority,"accountId":account_id,
+-            "candidateId":selected.candidate(),"requestSha256":data(hash(b"mrk:allocation-request:1\0", &selected))?,"clock":clock}}), INITIAL_LIMIT)?;
++            "candidateId":selected.candidate(),"requestSha256":data(selected.request_hash())?,"clock":clock}}), INITIAL_LIMIT)?;
+         let initial_digest = digest(&initial);
+         let public = json!({"observations":observations,"request":selected,
+             "requestSha256":initial_digest,"state":{"revision":snapshot.revision.0,"payload":base64(&snapshot.bytes)?}});
+diff --git a/desktop/src-tauri/src/version_allocation_state_native.rs b/desktop/src-tauri/src/version_allocation_state_native.rs
+--- a/desktop/src-tauri/src/version_allocation_state_native.rs
++++ b/desktop/src-tauri/src/version_allocation_state_native.rs
+@@ -29,6 +29,8 @@
+ pub(crate) mod jobs;
+ #[path = "version_enrollment_state_native.rs"]
+ pub(crate) mod enrollment;
++#[path="version_allocation_ios_inventory.rs"]
++pub(crate) mod ios_inventory;
+
+ const PROTOCOL: &str = "mrk-version-allocation-state/1";
+ const ALLOCATION_PROTOCOL: &str = "mrk-version-allocation/1";
+@@ -116,20 +118,32 @@
+ impl Request {
+     fn project(&self) -> &str { self.0["projectId"].as_str().unwrap_or("") }
+     fn candidate(&self) -> &str { self.0["candidateId"].as_str().unwrap_or("") }
++    fn schema_version(&self) -> u32 { if self.0["policy"]["schemaVersion"] == 2 { 2 } else { 1 } }
++    fn request_hash(&self) -> Result<String> { hash(if self.schema_version() == 2 { ios_inventory::REQUEST_DOMAIN } else { b"mrk:allocation-request:1\0" }, self) }
++    fn reservation_domain(&self) -> &'static [u8] { if self.schema_version() == 2 { ios_inventory::RESERVATION_DOMAIN } else { b"mrk:allocation-reservation:1\0" } }
++    fn observations_valid(&self, values: &[Value]) -> bool {
++        if self.schema_version() == 2 { values.len() == 1 && values.iter().all(|v| ios_inventory::observation_shape(v,self)) }
++        else { values.len() <= 2 && values.iter().all(observation_shape) }
++    }
+     fn valid(&self) -> bool {
+         let v = &self.0;
+         let source = &v["source"]; let policy = &v["policy"];
++        let newer = policy["schemaVersion"].as_u64() == Some(2);
+         let rules = policy["rules"].as_array();
+         let mut refs = BTreeSet::new();
+-        closed(v, &["projectId", "candidateId", "identityRevision", "source", "baseVersion", "platforms", "policy"])
++        closed(v, if newer { &["projectId", "candidateId", "identityRevision", "source", "baseVersion", "platforms", "policy", "storeContextRevision"] }
++            else { &["projectId", "candidateId", "identityRevision", "source", "baseVersion", "platforms", "policy"] })
+             && shared_id(self.project()) && uuid(self.candidate()) && string(&v["identityRevision"], |s| hex(s, 64))
+             && closed(source, &["commit", "tree", "ref", "configurationSha256", "versionSha256"])
+             && ["commit", "tree"].into_iter().all(|k| string(&source[k], |s| hex(s, 40)))
+             && ["configurationSha256", "versionSha256"].into_iter().all(|k| string(&source[k], |s| hex(s, 64)))
+             && string(&source["ref"], full_ref) && version_shape(&v["baseVersion"])
+             && [json!(["android"]), json!(["ios"]), json!(["android", "ios"])].contains(&v["platforms"])
+-            && closed(policy, &["schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds"])
+-            && policy["schemaVersion"].as_u64() == Some(1) && policy["mode"] == "automatic"
++            && closed(policy, if newer { &["schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds", "storeScope"] }
++                else { &["schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds"] })
++            && (if newer { v["platforms"] == json!(["ios"]) && policy["storeScope"] == ios_inventory::POLICY_SCOPE
++                && string(&v["storeContextRevision"], |s| hex(s, 64)) } else { policy["schemaVersion"].as_u64() == Some(1) })
++            && policy["mode"] == "automatic"
+             && integer(&policy["buildCeiling"], 1, 2_100_000_000) && integer(&policy["storeMaxAgeSeconds"], 1, 3600)
+             && rules.is_some_and(|rules| !rules.is_empty() && rules.len() <= 32 && rules.iter().all(|r|
+                 closed(r, &["ref", "increment"]) && string(&r["ref"], |s| full_ref(s) && refs.insert(s.to_owned()))
+@@ -161,11 +175,11 @@
+     fn valid(&self) -> Result<()> {
+         need((1..=64).contains(&self.sequence) && hex(&self.previous_sha256, 64) && self.request.valid()
+             && version_shape(&self.version) && self.store_observations.len() <= 2
+-            && self.store_observations.iter().all(observation_shape) && self.allocated_at <= i64::MAX as u64)?;
+-        need(self.request_sha256 == hash(b"mrk:allocation-request:1\0", &self.request)?)?;
++            && self.request.observations_valid(&self.store_observations) && self.allocated_at <= i64::MAX as u64)?;
++        need(self.request_sha256 == self.request.request_hash()?)?;
+         let mut value = serde_json::to_value(self).map_err(|_| StateError::from(Error::InvalidRequest))?;
+         value.as_object_mut().ok_or_else(|| StateError::from(Error::InvalidRequest))?.remove("sha256");
+-        need(self.sha256 == hash(b"mrk:allocation-reservation:1\0", &value)?)
++        need(self.sha256 == hash(self.request.reservation_domain(), &value)?)
+     }
+     fn at_or_before(&self, checkpoint: &Checkpoint) -> bool {
+         self.sequence <= checkpoint.sequence && (self.sequence != checkpoint.sequence || self.sha256 == checkpoint.head_sha256)
+@@ -179,7 +193,9 @@
+ }
+ impl Pending {
+     fn valid(&self) -> Result<()> {
+-        need(self.schema_version == 1 && self.protocol == ALLOCATION_PROTOCOL && self.authority.valid()
++        need(self.schema_version == self.reservation.request.schema_version()
++            && self.protocol == if self.schema_version == 2 { ios_inventory::PROTOCOL } else { ALLOCATION_PROTOCOL }
++            && self.authority.valid()
+             && self.checkpoint.valid() && hex(&self.expected_blob, 40)
+             && self.reservation.request.project() == self.authority.project_id
+             && self.reservation.sequence == self.checkpoint.sequence + 1
+@@ -418,7 +434,9 @@
+     /// refresh/retry uses selected_request instead. OS randomness is consumed
+     /// once, then the FULL request is retained through the actual durable CAS.
+     pub(crate) fn select_new(&mut self, mut template: Value, previous_request: Option<&Value>) -> Result<WriteAck> {
+-        need(closed(&template, &["projectId", "identityRevision", "source", "baseVersion", "platforms", "policy"]))?;
++        need(closed(&template, if template["policy"]["schemaVersion"] == 2 {
++            &["projectId", "identityRevision", "source", "baseVersion", "platforms", "policy", "storeContextRevision"]
++        } else { &["projectId", "identityRevision", "source", "baseVersion", "platforms", "policy"] }))?;
+         template["candidateId"] = json!("00000000-0000-4000-8000-000000000000");
+         let mut request: Request = decode(template)?;
+         need(request.valid() && request.project() == self.authority.project_id && self.enrolled()?.pending.is_none())?;
+@@ -510,7 +528,7 @@
+             "genesisSha256":"a".repeat(64),"protectedBranch":true})
+     }
+     fn checkpoint() -> Value { json!({"sequence":0,"headSha256":"a".repeat(64),"commit":"c".repeat(40)}) }
+-    fn request() -> Value {
++    pub(super) fn request() -> Value {
+         json!({"projectId":"11111111-1111-4111-8111-111111111111",
+             "candidateId":"22222222-2222-4222-8222-222222222222","identityRevision":"b".repeat(64),
+             "source":{"commit":"d".repeat(40),"tree":"e".repeat(40),"ref":"refs/heads/main",
+@@ -525,13 +543,13 @@
+     fn project(local: &str) -> ProjectBinding {
+         ProjectBinding { project_id: Id::parse(local).unwrap(), canonical_root: "/synthetic/project".to_owned(), device: 1, inode: 2 }
+     }
+-    fn prepared(fixture: &Fixture) -> (Arc<PrivateStateDirectory>, VersionAllocationStatePort) {
++    pub(super) fn prepared(fixture: &Fixture) -> (Arc<PrivateStateDirectory>, VersionAllocationStatePort) {
+         let store = Arc::new(PrivateStateDirectory::open(&fixture.app).unwrap());
+         let mut port = VersionAllocationStatePort::new(store.clone(), project(&"a".repeat(32)), authority()).unwrap();
+         port.load().unwrap(); port.enroll(checkpoint()).unwrap(); port.select_new(template(), None).unwrap();
+         (store, port)
+     }
+-    fn pending(request: &Value) -> Value {
++    pub(super) fn pending(request: &Value) -> Value {
+         let mut reservation = json!({"sequence":1,"previousSha256":"a".repeat(64),"request":request,
+             "requestSha256":hash(b"mrk:allocation-request:1\0", request).unwrap(),
+             "version":{"name":"1.2.3","build":41},"storeObservations":[{
+@@ -542,7 +560,7 @@
+         json!({"schemaVersion":1,"protocol":ALLOCATION_PROTOCOL,"authority":authority(),
+             "checkpoint":checkpoint(),"expectedBlob":"d".repeat(40),"reservation":reservation})
+     }
+-    fn advanced(pending: &Value) -> Value {
++    pub(super) fn advanced(pending: &Value) -> Value {
+         json!({"sequence":1,"headSha256":pending["reservation"]["sha256"],"commit":"e".repeat(40)})
+     }
+     fn persisted(value: &Value) -> Vec<u8> {
+diff --git a/fastlane/apple_provisioning.rb b/fastlane/apple_provisioning.rb
+--- a/fastlane/apple_provisioning.rb
++++ b/fastlane/apple_provisioning.rb
+@@ -95,11 +95,26 @@
+                    when "download_profile"
+                      AppleProvisioning.require!(@path.match?(%r{\A/v1/profiles/[A-Za-z0-9_-]{1,128}\z}))
+                      PROFILE_RELATIONS.merge("fields[profiles]" => PROFILE_FIELDS + ",profileContent")
++                   when "current_app_before", "current_app_after"
++                     AppleProvisioning.require!(@path.match?(%r{\A/v1/apps/[1-9][0-9]{0,19}\z}))
++                     { "fields[apps]" => "bundleId" }
++                   when "current_builds"
++                     app = @query["filter[app]"]
++                     AppleProvisioning.require!(@path == "/v1/builds" && app.instance_of?(String) && app.match?(/\A[1-9][0-9]{0,19}\z/))
++                     { "filter[app]" => app, "include" => "app,preReleaseVersion",
++                       "fields[builds]" => "version,app,preReleaseVersion", "fields[apps]" => "bundleId",
++                       "fields[preReleaseVersions]" => "version,platform,app", "limit" => "200" }
++                   when "current_buildUploads"
++                     AppleProvisioning.require!(@path.match?(%r{\A/v1/apps/[1-9][0-9]{0,19}/buildUploads\z}))
++                     { "fields[buildUploads]" => "cfBundleVersion,cfBundleShortVersionString,platform,build", "limit" => "200" }
++                   when "current_appStoreVersions"
++                     AppleProvisioning.require!(@path.match?(%r{\A/v1/apps/[1-9][0-9]{0,19}/appStoreVersions\z}))
++                     { "fields[appStoreVersions]" => "versionString,platform", "limit" => "200" }
+                    else raise Error
+                    end
+         if @query.key?("cursor")
+           cursor = @query["cursor"]
+-          AppleProvisioning.require!(@kind != "download_profile" && cursor.bytesize <= 1024 && cursor.match?(/\A[!-~]+\z/))
++          AppleProvisioning.require!(!%w[download_profile current_app_before current_app_after].include?(@kind) && cursor.bytesize <= 1024 && cursor.match?(/\A[!-~]+\z/))
+           expected = expected.merge("cursor" => cursor)
+         end
+         AppleProvisioning.require!(@query == expected)
+diff --git a/fastlane/apple_provisioning_bundle_read.rb b/fastlane/apple_provisioning_bundle_read.rb
+--- a/fastlane/apple_provisioning_bundle_read.rb
++++ b/fastlane/apple_provisioning_bundle_read.rb
+@@ -26,7 +26,8 @@
+
+     def self.supported_input?(input)
+       input.instance_of?(Input) ||
+-        (defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input))
++        (defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input)) ||
++        (defined?(AppleStoreVersions::Input) && input.instance_of?(AppleStoreVersions::Input))
+     end
+
+     class Input
+@@ -117,7 +118,11 @@
+         AppleBundleRead.require!(AppleBundleRead.supported_input?(input))
+         @input, @token, @client, @thread = input, token, client, Thread.current
+         @request = AppleProvisioning::Request.new(input.request)
+-        AppleBundleRead.require!(@request.kind == (input.instance_of?(Input) ? "list_bundle_ids" : "list_profiles"))
++        kind = if input.instance_of?(Input) then "list_bundle_ids"
++               elsif defined?(AppleProfileRead::Input) && input.instance_of?(AppleProfileRead::Input) then "list_profiles"
++               else "current_app_before"
++               end
++        AppleBundleRead.require!(@request.kind == kind)
+         @connection, @builder = client.client, client.client.builder
+         @admitted = @sent = @captured = @finished = false
+         @raw = @status = nil
+diff --git a/src/mobile_release/_desktop_store_preflight_protocol.py b/src/mobile_release/_desktop_store_preflight_protocol.py
+--- a/src/mobile_release/_desktop_store_preflight_protocol.py
++++ b/src/mobile_release/_desktop_store_preflight_protocol.py
+@@ -8,6 +8,7 @@
+ from ._desktop_android_build_protocol import saved_version
+ from . import apple_provisioning_bundle_read as bundle_read
+ from . import apple_provisioning_profile_read as profile_read
++from . import ios_store_versions as store_versions
+
+ PROTOCOL = "mrk-local-store-preflight/1"
+ CONSENT = "local-android-store-access-v1"
+@@ -39,7 +40,7 @@
+     query_keys = {"query"} if type(value) is dict and "query" in value else set()
+     # This explicit access-only opt-in stays false for Prepare/Execute/Reconcile.
+     require(not query_keys or apple_access and bundle_query and value.get("platform") == "ios"
+-            and value["query"] in (bundle_read.QUERY, profile_read.QUERY))
++            and value["query"] in (bundle_read.QUERY, profile_read.QUERY, store_versions.QUERY))
+     value = _keys(value, {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
+                          "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "operation"} | query_keys)
+     require(type(value["projectId"]) is str and _PROJECT.fullmatch(value["projectId"]) is not None
+@@ -101,7 +102,8 @@
+ def validate_result(value, *, platform="android", query=None):
+     if query is not None:
+         require(platform == "ios" and (query == bundle_read.QUERY and bundle_read.valid_result(value)
+-                or query == profile_read.QUERY and profile_read.valid_result(value)))
++                or query == profile_read.QUERY and profile_read.valid_result(value)
++                or query == store_versions.QUERY and store_versions.valid_result(value)))
+         return
+     require(platform in ("android", "ios"))
+     value=_keys(value,{"schemaVersion","scope","findings","limitations"})
+diff --git a/src/mobile_release/_desktop_version_allocation_protocol.py b/src/mobile_release/_desktop_version_allocation_protocol.py
+--- a/src/mobile_release/_desktop_version_allocation_protocol.py
++++ b/src/mobile_release/_desktop_version_allocation_protocol.py
+@@ -102,7 +102,7 @@
+     token: str
+     request: allocation.AllocationRequest
+     snapshot: state.NativeStateSnapshot
+-    observations: tuple[policy.StoreObservation, ...]
++    observations: allocation.StoreObservations
+
+
+ def bound_request(initial: Initial, request: allocation.AllocationRequest) -> None:
+@@ -139,7 +139,9 @@
+         require(selected.pending.reservation.request == request)
+     require(type(go["observations"]) is list and len(go["observations"]) <= 2
+             and len(policy.canonical(go["observations"])) <= OBSERVATIONS_LIMIT)
+-    observations = tuple(policy.StoreObservation.parse(item) for item in go["observations"])
++    observations = allocation.parse_observations(request, go["observations"])
++    require(request.version_policy.schema_version == 1 or len(observations) == 1
++            or (initial.kind == "reconcile" and not observations))
+     return Go(token, request, snapshot, observations)
+
+
+diff --git a/src/mobile_release/_desktop_version_allocation_runtime.py b/src/mobile_release/_desktop_version_allocation_runtime.py
+--- a/src/mobile_release/_desktop_version_allocation_runtime.py
++++ b/src/mobile_release/_desktop_version_allocation_runtime.py
+@@ -322,11 +322,18 @@
+     journal.admit_request(initial.authority, go.request)
+     candidate = journal.selected_candidate(initial.authority)
+     if initial.kind == "reserve" and candidate.reservation is None:
+-        # No unknown/partial/all-trains assumption may even construct the live
+-        # factory for a new reservation. Reconciliation returns DATA only.
+-        try:
+-            policy.store_constraints(go.observations, go.request.enabled_platforms, go.request.identity_revision,
+-                                     go.request.version_policy, now=math.floor(time.time()))
++        # No unknown/partial inventory may even construct the live factory for
++        # a new reservation. v2 is explicitly current-visible, never silently
++        # promoted to v1's all-history scope. Reconciliation returns DATA only.
++        try:
++            if go.request.version_policy.schema_version == 2:
++                from .ios_store_versions import constraints
++                constraints(go.observations, go.request.enabled_platforms, go.request.identity_revision,
++                            go.request.store_context_revision, go.request.version_policy,
++                            now=math.floor(time.time()))
++            else:
++                policy.store_constraints(go.observations, go.request.enabled_platforms, go.request.identity_revision,
++                                         go.request.version_policy, now=math.floor(time.time()))
+         except policy.VersionPolicyError as error:
+             return allocation.AllocationOutcome("rejected", error.reason, control=_control()), port
+     original = _make_allocation_transport(go.token, started=dialogue.started, runtime_dir=runtime_dir,
+diff --git a/src/mobile_release/apple_provisioning_bundle_read.py b/src/mobile_release/apple_provisioning_bundle_read.py
+--- a/src/mobile_release/apple_provisioning_bundle_read.py
++++ b/src/mobile_release/apple_provisioning_bundle_read.py
+@@ -34,7 +34,8 @@
+
+ def selected_read(context: dict) -> bool:
+     from . import apple_provisioning_profile_read as profiles
+-    return selected_query(context) or profiles.selected_query(context)
++    from . import ios_store_versions as versions
++    return selected_query(context) or profiles.selected_query(context) or versions.selected_query(context)
+
+
+ def fixed_argv(tooling_root: Path) -> tuple[str, ...]:
+@@ -43,8 +44,11 @@
+
+ def fixed_read_argv(tooling_root: Path, context: dict) -> tuple[str, ...]:
+     from . import apple_provisioning_profile_read as profiles
++    from . import ios_store_versions as versions
+     if selected_query(context):
+         return fixed_argv(tooling_root)
++    if versions.selected_query(context):
++        return versions.fixed_argv(tooling_root)
+     api.require(profiles.selected_query(context), "invalid_provisioning_read")
+     return profiles.fixed_argv(tooling_root)
+
+@@ -162,23 +166,29 @@
+     from .stores import _require_fastlane_bundle, _runtime_environment
+     from .tooling import _complete_tooling_root
+     from . import apple_provisioning_profile_read as profiles
+-
+-    api.require(expected_query in {QUERY, profiles.QUERY} and type(operation) is StorePreflightRun
++    from . import ios_store_versions as versions
++
++    api.require(expected_query in {QUERY, profiles.QUERY, versions.QUERY} and type(operation) is StorePreflightRun
+                 and selected_read(operation.request.context) and operation.request.context.get("query") == expected_query
+                 and operation.source.require_operation() is operation and type(material) is SelectedStoreMaterial,
+                 "bundle_read_original_unavailable")
+     operation.checkpoint()
+     runtime, invocation = operation.runtime, operation.invocation
+     api.require(type(runtime) is StoreRuntimeContext and query_prerequisites(config), "bundle_read_original_unavailable")
++    inventory = expected_query == versions.QUERY
++    api.require(not inventory or versions.query_prerequisites(config), "bundle_read_original_unavailable")
+     material.require(config=config, platforms=("ios",), invocation=invocation)
+     runtime.require(root=config.root, invocation=invocation)
+     bundle_id = config.section("ios")["bundleId"]
+-    request = api.list_bundle_ids(bundle_id) if expected_query == QUERY else api.list_profiles()
++    request = (versions.request("app-before", config.section("ios")["appStoreAppId"]) if inventory else
++               api.list_bundle_ids(bundle_id) if expected_query == QUERY else api.list_profiles())
+     context_sha256 = api.digest(api.canonical(operation.request.context))
+     tooling = runtime.tooling_root
+     needed = ("fastlane/apple_provisioning.rb", "fastlane/apple_provisioning_bundle_read.rb")
+     if expected_query == profiles.QUERY:
+         needed += ("fastlane/apple_provisioning_profile_read.rb",)
++    elif inventory:
++        needed += ("fastlane/apple_store_versions.rb",)
+     if not _complete_tooling_root(tooling) or any(
+         (tooling / name).is_symlink() or not (tooling / name).is_file()
+         for name in needed
+@@ -199,7 +209,8 @@
+         material.require(config=config, platforms=("ios",), invocation=invocation)
+         runtime.require(root=config.root, invocation=invocation)
+         api.require(config.section("ios")["bundleId"] == bundle_id
+-                    and (api.list_bundle_ids(bundle_id) if expected_query == QUERY else api.list_profiles()) == request,
++                    and (versions.request("app-before", config.section("ios")["appStoreAppId"]) if inventory else
++                         api.list_bundle_ids(bundle_id) if expected_query == QUERY else api.list_profiles()) == request,
+                     "bundle_read_original_changed")
+
+     with finite_scratch(layout="online-runner", cancellation=operation.guard,
+@@ -215,10 +226,13 @@
+                             "FASTLANE_SKIP_DOCS": "true", "FASTLANE_SKIP_UPDATE_CHECK": "true",
+                             "MOBILE_RELEASE_ASC_BUNDLE_ID": bundle_id,
+                             "MOBILE_RELEASE_ASC_BUNDLE_READ_CONTEXT": context_sha256})
++        if inventory:
++            environment["MOBILE_RELEASE_ASC_APP_ID"] = config.section("ios")["appStoreAppId"]
+         argv = fixed_read_argv(tooling, operation.request.context)
+         with runtime.command(argv, capture=True):
+             completed = run_owned(argv, cwd=runner._path, environ=environment, capture=True, text=False,
+-                                  timeout=QUERY_SECONDS, output_limit=FRAME_LIMIT, cancellation=operation.guard)
++                                  timeout=QUERY_SECONDS, output_limit=versions.FRAME_LIMIT if inventory else FRAME_LIMIT,
++                                  cancellation=operation.guard)
+         current()
+         if (type(completed.returncode) is not int or completed.returncode != 0
+                 or type(completed.stdout) is not bytes or completed.stderr != b""):
+diff --git a/src/mobile_release/desktop_store_preflight.py b/src/mobile_release/desktop_store_preflight.py
+--- a/src/mobile_release/desktop_store_preflight.py
++++ b/src/mobile_release/desktop_store_preflight.py
+@@ -32,6 +32,7 @@
+ from .stores import _fastlane_probe_commands, online_preflight_findings
+ from . import apple_provisioning_bundle_read as bundle_read
+ from . import apple_provisioning_profile_read as profile_read
++from . import ios_store_versions as store_versions
+
+
+ class _Refused(Exception):
+@@ -257,7 +258,9 @@
+         require(self._pending is not None and capture is self._pending_capture and self._command_claimed)
+         query = self._pending == self._lane_index and bundle_read.selected_read(self.request.context)
+         maximum = 60 if self._pending < self._lane_index or query else 900
+-        return min(timeout, maximum), min(output_limit, bundle_read.FRAME_LIMIT if query else 2 * 1024 * 1024)
++        limit = (store_versions.FRAME_LIMIT if query and store_versions.selected_query(self.request.context)
++                 else bundle_read.FRAME_LIMIT if query else 2 * 1024 * 1024)
++        return min(timeout, maximum), min(output_limit, limit)
+
+     def require_query_timing(self, timeout):
+         self.checkpoint()
+@@ -293,18 +296,24 @@
+                             findings.extend(material.validate(runtime_context=self.runtime) if platform == "ios" else material.validate())
+                             if bundle_read.selected_read(self.request.context):
+                                 profiles = profile_read.selected_query(self.request.context)
+-                                observation = profile_read.unavailable("not-checked") if profiles else "not-checked"
+-                                if not bundle_read.query_prerequisites(config) or any(row.status in FAILING_STATUSES for row in findings):
++                                versions = store_versions.selected_query(self.request.context)
++                                observation = (store_versions.unavailable("not-checked") if versions else
++                                               profile_read.unavailable("not-checked") if profiles else "not-checked")
++                                prerequisites = store_versions.query_prerequisites(config) if versions else bundle_read.query_prerequisites(config)
++                                if not prerequisites or any(row.status in FAILING_STATUSES for row in findings):
+                                     findings.append(Finding("store.online.gate", Status.BLOCKED,
+-                                        "Configure the saved iOS Bundle ID and selected API key.", category="store-access"))
++                                        "Configure the saved iOS app identity and selected API key.", category="store-access"))
+                                 else:
+-                                    if profiles:
++                                    if versions:
++                                        extra, observation = store_versions.read_saved_versions(self, config, material)
++                                    elif profiles:
+                                         extra, observation = profile_read.read_saved_profiles(self, config, material)
+                                     else:
+                                         extra, observation = bundle_read.read_saved_bundle_id(self, config, material)
+                                     findings.extend(extra)
+                                 self._source_post(); self._received_post()
+-                                self.report = (profile_read.project_result(findings, observation) if profiles else
++                                self.report = (store_versions.project_result(findings, observation) if versions else
++                                               profile_read.project_result(findings, observation) if profiles else
+                                                bundle_read.project_result(findings, observation))
+                             else:
+                                 blockers = _online_query_blockers(config, (platform,), findings)
+diff --git a/src/mobile_release/tooling.py b/src/mobile_release/tooling.py
+--- a/src/mobile_release/tooling.py
++++ b/src/mobile_release/tooling.py
+@@ -20,6 +20,7 @@
+     "fastlane/apple_provisioning.rb",
+     "fastlane/apple_provisioning_bundle_read.rb",
+     "fastlane/apple_provisioning_profile_read.rb",
++    "fastlane/apple_store_versions.rb",
+     "fastlane/apple_production.rb",
+     "fastlane/apple_asset_upload.rb",
+     "fastlane/apple_create_retry.rb",

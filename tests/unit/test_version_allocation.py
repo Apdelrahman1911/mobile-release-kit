@@ -14,6 +14,7 @@ from dataclasses import replace
 
 from mobile_release import version_allocation as a
 from mobile_release import version_policy as p
+from mobile_release import ios_store_versions as current_ios
 from mobile_release._github_connection_transport import ReadFailure, ReadResult, _control
 from mobile_release.config import ReleaseVersion
 
@@ -559,6 +560,89 @@ class VersionAllocationTests(unittest.TestCase):
                 enabled=request().enabled_platforms, identity_revision=IDENTITY, observations=newer, now=NOW)
         self.assertEqual(raised.exception.reason, "reservation-consumed")
         self.assertEqual(len(self.remote.writes), 1)
+
+
+class CurrentInventoryLedgerTests(unittest.TestCase):
+    def selected(self, candidate="00000000-0000-4000-8000-000000000004", increment="build"):
+        return request(candidate, increment, enabled_platforms=("ios",), store_context_revision="9" * 64,
+            version_policy=p.VersionPolicy("automatic", (p.RefRule("refs/heads/main", increment),),
+                                           store_scope=current_ios.POLICY_SCOPE))
+
+    def observed(self, build=10, name="1.4.0", counts=(1, 0, 1)):
+        return (current_ios.CurrentInventory(IDENTITY, "9" * 64, "a" * 64, NOW, build, name, counts),)
+
+    def test_immutable_v1_data_hashes_and_mixed_v2_replay_same_genesis_highwater(self):
+        empty, authority = initial()
+        legacy = empty.append(request(), observations(), now=NOW)
+        # DATA golden values from the accepted v1 codec, not source hashes.
+        self.assertEqual(request().version_policy.sha256, "248fdd8a77dcec05ea81ab9b5bb0b7c93b5a4d82773b5e9f7fea35d11f45e9e4")
+        self.assertEqual(request().sha256, "752e9190cc56daf9c89d2ce97d838f98734a5fd3c6b47af0e0643c1a684b5f6d")
+        self.assertEqual(legacy.head_sha256, "81d47254594af98db1cf8b177479a00041c794b222689a20eebbbbfaab8b2795")
+        self.assertEqual(hashlib.sha256(legacy.to_bytes()).hexdigest(), "db9e823bf66bf14dd79f50576562002a2c5043d512624064cbe48945093e0897")
+        before = legacy.to_bytes()
+        mixed = legacy.append(self.selected(), self.observed(), now=NOW)
+        self.assertEqual(mixed.value()["schemaVersion"], 2)
+        self.assertEqual(mixed.value()["protocol"], a.PROTOCOL_V2)
+        self.assertEqual(mixed.genesis, legacy.genesis)
+        self.assertEqual(mixed.reservations[0].value(), legacy.reservations[0].value())
+        self.assertEqual(a.Ledger(mixed.genesis, mixed.reservations[:-1]).to_bytes(), before)
+        self.assertEqual(mixed.last_version, ReleaseVersion("1.4.0", 11))
+        self.assertEqual(a.Ledger.parse(mixed.to_bytes(), authority), mixed)
+        mixed.admit(authority, a.Checkpoint(1, legacy.head_sha256, COMMIT))
+        # An envelope downgrade cannot disguise the v2 row as old-client data.
+        downgraded = mixed.value(); downgraded.update(schemaVersion=1, protocol=a.PROTOCOL)
+        with self.assertRaises(a.VersionAllocationError): a.Ledger.parse(p.canonical(downgraded) + b"\n", authority)
+        v1_hash = a._hash(b"mrk:allocation-reservation:1\0", mixed.reservations[-1]._value())
+        self.assertNotEqual(v1_hash, mixed.head_sha256)
+
+    def test_marketing_only_inventory_bumps_each_exact_policy_without_lowering_counter(self):
+        empty, authority = initial()
+        for increment, expected in (("build", "3.0.0"), ("patch", "3.0.1"), ("minor", "3.1.0"), ("major", "4.0.0")):
+            selected = self.selected(increment=increment)
+            observed = self.observed(0, "3.0.0", (0, 0, 1))
+            ledger = empty.append(selected, observed, now=NOW)
+            self.assertEqual(ledger.last_version, ReleaseVersion(expected, BASE.build + 1))
+            self.assertEqual(a.Ledger.parse(ledger.to_bytes(), authority), ledger)
+        first = empty.append(self.selected(), self.observed(99), now=NOW)
+        second = first.append(self.selected("00000000-0000-4000-8000-000000000005"),
+                              self.observed(0, None, (0, 0, 0)), now=NOW)
+        self.assertEqual(second.last_version.build, 101)  # disappearance is not counter reset
+
+    def test_same_candidate_retry_persists_and_never_reallocates_on_consumed_floor(self):
+        empty, authority = initial()
+        journal = Journal(authority, a.Checkpoint(0, empty.head_sha256, COMMIT))
+        remote = Repository(empty, authority)
+        selected = self.selected()
+        original = a.allocate_version(selected, authority=authority, journal=journal, transport=remote,
+                                      observations=self.observed(), clock=lambda: NOW)
+        self.assertEqual(original.status, "reserved")
+        higher = self.observed(100)
+        repeated = a.allocate_version(selected, authority=authority, journal=journal.restarted(), transport=remote,
+                                      observations=higher, clock=lambda: NOW)
+        self.assertEqual(repeated.reservation, original.reservation)
+        self.assertEqual(len(remote.writes), 1)
+        with self.assertRaises(p.VersionPolicyError):
+            current_ios.check_reserved(repeated.reservation.version, selected.version_policy, enabled=("ios",),
+                identity_revision=IDENTITY, context_revision=selected.store_context_revision, observations=higher, now=NOW)
+        changed = replace(selected, store_context_revision="b" * 64)
+        with self.assertRaises(a.VersionAllocationError): remote.ledger.find(changed)
+
+    def test_v2_pending_unknown_reconciles_without_put_or_new_candidate(self):
+        empty, authority = initial()
+        journal = Journal(authority, a.Checkpoint(0, empty.head_sha256, COMMIT))
+        remote = Repository(empty, authority)
+        selected = self.selected()
+        # Actual fixture publishes then loses its acknowledgement.
+        remote.write_mode = "timeout-after"
+        result = a.allocate_version(selected, authority=authority, journal=journal, transport=remote,
+                                    observations=self.observed(), clock=lambda: NOW)
+        self.assertEqual(result.status, "recovery-required")
+        self.assertEqual(len(remote.writes), 1)
+        repeated = a.allocate_version(selected, authority=authority, journal=journal.restarted(), transport=remote,
+                                      observations=(), clock=lambda: NOW + 99999)
+        self.assertEqual(repeated.status, "reserved")
+        self.assertEqual(len(remote.writes), 1)
+        self.assertEqual(repeated.reservation.request.candidate_id, selected.candidate_id)
 
 
 if __name__ == "__main__":
