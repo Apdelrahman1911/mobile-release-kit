@@ -22,7 +22,7 @@ const assets = () => ({ mode: 'native', scope: { executionMode: 'local', platfor
 const status = (revision = 1, operation = null, availability = operation && operation.phase !== 'terminal' ? 'busy' : 'available') =>
   ({ schemaVersion: 1, statusRevision: revision, availability, operation });
 const operation = (request, digit = '1') => ({ ...id(digit), context: appleProvisioningContext(copy(request)), phase: 'awaiting-consent',
-  intentUsable: true, outcome: null, reason: 'none', result: null });
+  intentUsable: true, outcome: null, reason: 'none', result: null, recovery: null });
 const result = (mode, observation = 'not-returned', decision = mode === 'reconcile' ? 'comparison-only' : 'review-required') =>
   ({ schemaVersion: 1, scope: 'local-ios-bundle-provisioning', mode, observation, decision, attempt: null,
     comparison: mode === 'reconcile' ? 'not-returned' : null, limitations: [...APPLE_PROVISIONING_LIMITATIONS] });

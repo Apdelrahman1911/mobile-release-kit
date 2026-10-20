@@ -37,9 +37,21 @@ export interface AppleProvisioningResult {
   observation: AppleBundleObservation; decision: AppleBundleDecision; attempt: AppleAttemptSummary | null;
   comparison: AppleBundleComparison | null; limitations: readonly string[];
 }
+// Local historical records only, not an adopted operation or current account
+// disposition. Readback does not change any recorded settlement below.
+export interface AppleRecoveryAttempt {
+  reference: AppleProvisioningIdentity; displayName: string; observedAt: string;
+  status: AppleAttemptStatus; reason: AppleAttemptReason;
+  nativeSettlement: 'pending' | 'known' | 'unknown'; cancellationRequested: boolean;
+}
+export interface AppleRecoveryHistory {
+  schemaVersion: 1; scope: 'local-ios-bundle-attempts';
+  attempts: readonly AppleRecoveryAttempt[]; hiddenUnresolved: number;
+}
 export interface AppleProvisioningOperation extends AppleProvisioningIdentity {
   context: AppleProvisioningContext; phase: OfflinePreflightPhase; intentUsable: boolean;
   outcome: OfflinePreflightOutcome | null; reason: AppleProvisioningReason; result: AppleProvisioningResult | null;
+  recovery: AppleRecoveryHistory | null;
 }
 export interface AppleProvisioningStatus {
   schemaVersion: 1; statusRevision: number; availability: OfflinePreflightAvailability;

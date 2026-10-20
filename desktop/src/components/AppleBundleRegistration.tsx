@@ -94,9 +94,22 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
       <p>Complete means the bounded native operation and cleanup finished—not that signing is ready. No private-key match or authenticated profile has been established.</p>
       {result.attempt && <p>Recorded attempt: {result.attempt.status.replaceAll('_', ' ')} · {result.attempt.reason.replaceAll('_', ' ')}. Retry and credential-ready flags remain false.</p>}
     </div>}
+    {state.previousAttempts && <section aria-label="Previous Bundle ID setup">
+      <h3>Continue previous setup</h3>
+      <p>MRK found these saved attempts for this project and Bundle ID. Choose one to check with Apple again, without registering again.</p>
+      {state.previousAttempts.attempts.length === 0 && <p>No matching attempt was recorded in this journal snapshot. This does not prove that Apple received no earlier request.</p>}
+      <ul>{state.previousAttempts.attempts.map(row => <li key={`${row.reference.operationId}:${row.reference.ownerGeneration}`}>
+        <strong>{row.displayName}</strong> — recorded {row.observedAt}
+        <p>{row.nativeSettlement !== 'known' ? 'The earlier request or cleanup is still unconfirmed. Checking with Apple will not clear that uncertainty.' :
+          row.status === 'succeeded' ? 'MRK recorded a confirmed registration. This check will not register it again.' : 'Review this earlier attempt with a read-only check.'}</p>
+        <button disabled={!!state.continueReason} onClick={() => void controller.continuePrevious(row.reference.operationId, row.reference.ownerGeneration)}>Continue previous setup</button>
+      </li>)}</ul>
+      {state.previousAttempts.hiddenUnresolved > 0 && <p>Another saved context has an unresolved attempt for this App Store Connect account. Its details are not shown here. Do not start another registration to bypass it.</p>}
+      <details><summary>What these saved records mean</summary><p>These are historical local records, not a new Apple result or permission to register. The selected key and current project are checked again. A missing, denied or incomplete response never clears an uncertain attempt.</p></details>
+    </section>}
     <details open={!!state.registrationReference}>
       <summary>Read back a prior registration without retrying</summary>
-      <p>This uses the exact retained registration reference in the same saved/key context. Missing history, a pending native owner or uncertain cleanup never means the account is safe for another write.</p>
+      <p>This checks the selected prior attempt without repeating its write. Missing history or uncertain cleanup never means it is safe to register again.</p>
       <button disabled={!state.ios || !!state.reconcileReason} onClick={() => void controller.prepare('reconcile')}>Prepare read-only reconciliation</button>
       {state.reconcileReason && <p className="save-note">{state.reconcileReason}</p>}
     </details>

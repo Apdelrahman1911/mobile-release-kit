@@ -2660,7 +2660,7 @@ impl SavedCommandOwner {
     }
     pub(crate) fn context_changed_published(&self, publisher: Option<&android_registration::Publisher>) {
         let at = self.lifecycle_time(publisher);
-        let mut r = self.inner.lock(); apple_provisioning::invalidate_review(&mut r.apple); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
+        let mut r = self.inner.lock(); let apple_history_changed = apple_provisioning::invalidate_review(&mut r.apple); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
         if r.android_catalog.stop(crate::android_toolchain_catalog::Reason::CatalogChanged,at)
             | r.android_sources.stop(crate::android_tool_sources::Reason::ContextChanged,at)
             | r.artifact_inputs.stop(artifact_wire::SelectionReason::ContextChanged,at)
@@ -2668,6 +2668,7 @@ impl SavedCommandOwner {
         r.recovery = None;
         if let Some(a) = r.active.as_mut() { a.context_invalidated = true; }
         if let Some(owner) = r.active.as_ref().map(|a| a.owner.clone()) { self.inner.stop_locked(&mut r, &owner, Reason::ContextChanged, at); }
+        if apple_history_changed { self.inner.bump(&mut r); }
     }
     pub(crate) fn registration_matches(&self, registration: u32) -> bool {
         let r = self.inner.lock(); r.active.as_ref().is_none_or(|a| a.owner.registration == registration)
@@ -3152,8 +3153,10 @@ impl Inner {
         match self.domain {
             SavedCommandDomain::GenerateUploadKey => Ok(Status::GenerateUploadKey(upload_key::snapshot(r.revision,reason,operation))),
             SavedCommandDomain::AppleProvisioning => {
+                let mut operation = operation.map(RunProjection::apple).transpose()?;
+                if let Some(projection) = &mut operation { apple_provisioning::project_recovery(&r.apple, projection); }
                 let status=apple_wire::Status{schema_version:1,status_revision:r.revision,availability:reason.store()?,
-                    operation:operation.map(RunProjection::apple).transpose()?};
+                    operation};
                 crate::edit_protocol::bounded(&status,apple_wire::STATUS_LIMIT)?;Ok(Status::AppleProvisioning(status))
             },
             SavedCommandDomain::ToolAcquisition => {

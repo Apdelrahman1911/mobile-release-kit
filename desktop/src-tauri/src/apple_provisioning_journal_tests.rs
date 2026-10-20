@@ -260,6 +260,45 @@ fn lost_update_ack_and_identical_readback_never_restore_a_writable_original() {
 }
 
 #[test]
+fn historical_selection_after_real_store_reopen_preserves_unknown_and_native_fence() {
+    let (fixture, store, native) = opened(true);
+    let value = intent();
+    let mut first = AppleProvisioningJournal::new(store.clone(), native.clone());
+    let ack = first.reserve(Revision(0), value.clone(), armed(&value)).unwrap();
+    first.record_attempt(ack.revision, &ack.original, unknown_attempt(&value)).unwrap();
+    // Only the actual synchronous Store calls above ran. No worker, native
+    // joined receipt or provider authority is constructed by this fixture.
+    close(&store, &native);
+
+    let reopened = Arc::new(PrivateStateDirectory::open(&fixture.app).unwrap());
+    let later_use = Arc::new(reopened.begin_native_use().unwrap());
+    let mut later = AppleProvisioningJournal::new(reopened.clone(), later_use.clone());
+    let before = reopened.read(Namespace::AppleProvisioning).unwrap();
+    let found = later.inspect_account(&value.context.account_ref).unwrap();
+    let mut current = crate::apple_provisioning_protocol::ScopeData {
+        provisioning: value.context.clone(), provenance: value.provenance.clone(),
+        target: value.target.clone(), reviewed_at: None,
+    };
+    // Runtime aliases, current key revision and the explicit display name may
+    // differ. The stable original project/root/issuer and target must match.
+    current.provisioning.project_id = "new-runtime-alias".into();
+    current.provisioning.credential_revision += 1;
+    current.target.display_name = "New review label".into();
+    let history = crate::apple_provisioning_protocol::recovery_history(&found, &current).unwrap();
+    assert!(history.attempts.len() == 1 && history.hidden_unresolved == 0);
+    assert!(history.attempts[0].reference.operation_id == value.context.operation_id);
+    assert!(history.attempts[0].status == AttemptStatus::Unknown);
+    assert!(history.attempts[0].native_settlement == NativeSettlement::Pending);
+    assert!(later.retained_reservation().is_none());
+    let after = reopened.read(Namespace::AppleProvisioning).unwrap();
+    assert_eq!(before.revision, after.revision);
+    assert_eq!(before.bytes, after.bytes);
+    let another = variant(2, 1);
+    assert_eq!(later.reserve(found.revision, another.clone(), armed(&another)).err().unwrap().code, Error::RecoveryRequired);
+    close(&reopened, &later_use);
+}
+
+#[test]
 fn wrong_store_or_retired_use_cannot_read_or_update_the_namespace() {
     let (_a, first, native_a) = opened(true);
     let (_b, second, native_b) = opened(true);

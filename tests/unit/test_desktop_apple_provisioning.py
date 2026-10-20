@@ -189,10 +189,17 @@ class BundleWorkerTests(unittest.TestCase):
                     status, failure = 403, "provider_request_unconfirmed"
                 elif fault == "post-unknown" and request.method == "POST":
                     status, failure = 503, "provider_request_unconfirmed"
+                elif fault == "incomplete-page":
+                    document["meta"]["paging"]["total"] += 1
+                elif fault == "foreign-identifier":
+                    document["data"][0]["attributes"]["identifier"] = "com.other.inert"
+                body = api.canonical(document)
+                if fault == "truncated-body":
+                    body = body[:-1]
                 raw = encode({"schemaVersion": 1, "contextSha256": api.digest(api.canonical(wire.core_context_wire(operation.context))),
                     "operationId": OP, "bundleId": operation.target.bundle_id, "requestSha256": api.request_sha256(request),
                     "ackSha256": engine.input._pending_ack if request.method == "POST" else None,
-                    "response": {"status": status, "failure": failure, "bodyBase64": None if failure else __import__("base64").b64encode(api.canonical(document)).decode()}})
+                    "response": {"status": status, "failure": failure, "bodyBase64": None if failure else __import__("base64").b64encode(body).decode()}})
                 if fault == "stop-post" and request.method == "POST":
                     engine.input.stop("cancelled")
                 return subprocess.CompletedProcess(argv, 0, raw, b"")

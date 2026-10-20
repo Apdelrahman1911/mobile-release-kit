@@ -827,3 +827,21 @@ pub(super) fn complete(owner: &Session) -> bool {
         .try_lock()
         .is_ok_and(|jobs| jobs.complete && jobs.sealed && jobs.slots.iter().all(Slot::known))
 }
+
+// Called only from the SAME positive retirement arm, not a status/IO getter.
+// All slots, including the actual NativeUse-retirement call, have returned and
+// joined. No restored row or new observer creates these original facts.
+pub(super) fn history(owner: &Session) -> Option<apple_wire::RecoveryHistory> {
+    if owner.apple.input().ok()?.context().mode != apple_wire::Mode::Review {
+        return None;
+    }
+    let binding = owner.apple.request_binding().ok()?;
+    let jobs = owner.apple.native.try_lock().ok()?;
+    if !jobs.complete || !jobs.sealed || !jobs.slots.iter().all(Slot::known) {
+        return None;
+    }
+    let Some(Ok(Value::Account(account))) = jobs.slots[INITIAL].returned.as_ref() else {
+        return None;
+    };
+    apple_wire::recovery_history(account, &binding.scope).ok()
+}

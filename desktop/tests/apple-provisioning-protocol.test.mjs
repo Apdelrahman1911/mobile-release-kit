@@ -16,7 +16,7 @@ const request = (mode = 'review') => ({ projectId: 'fixture', draftRevision: 2, 
   credentialContextRevision: 5, recordId: RECORD, recordRevision: 6, executionMode: 'local', platform: 'ios', mode,
   reference: mode === 'review' ? null : reference(), newApplication: mode === 'register', displayName: 'Explicit 🍎 name' });
 const operation = (mode = 'review') => ({ ...reference(), context: appleProvisioningContext(request(mode)), phase: 'awaiting-consent',
-  intentUsable: true, outcome: null, reason: 'none', result: null });
+  intentUsable: true, outcome: null, reason: 'none', result: null, recovery: null });
 const result = (mode = 'review') => ({ schemaVersion: 1, scope: 'local-ios-bundle-provisioning', mode,
   observation: 'not-returned', decision: mode === 'reconcile' ? 'comparison-only' : 'review-required', attempt: null,
   comparison: mode === 'reconcile' ? 'not-returned' : null, limitations: [...APPLE_PROVISIONING_LIMITATIONS] });

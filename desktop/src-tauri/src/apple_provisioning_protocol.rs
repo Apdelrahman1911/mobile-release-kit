@@ -27,6 +27,14 @@ pub(crate) use crate::local_store_preflight_protocol::{
     Availability, ExecutionMode, Outcome, Phase, Profile,
 };
 
+#[path = "apple_provisioning_recovery_selection.rs"]
+mod recovery_selection;
+pub(crate) use recovery_selection::{
+    recovery_history, recovery_scope_matches, RecoveryHistory, RECOVERY_LIMIT,
+};
+#[cfg(test)]
+pub(crate) use recovery_selection::tests::sample as recovery_comparison_fixture;
+
 pub(crate) const PROTOCOL: &str = "mrk-apple-bundle-provisioning/1";
 pub(crate) const EVENT: &str = "apple-bundle-provisioning-state-changed";
 pub(crate) const IPC_LIMIT: usize = 8192;
@@ -35,7 +43,8 @@ pub(crate) const RESPONSE_LIMIT: usize = 128 * 1024;
 pub(crate) const EVENT_LIMIT: usize = 16 * 1024;
 pub(crate) const FRAME_LIMIT: usize = 32 * 1024;
 pub(crate) const ACK_LIMIT: usize = 2048;
-pub(crate) const STATUS_LIMIT: usize = 16 * 1024;
+// The bounded native historical list is not part of any worker frame.
+pub(crate) const STATUS_LIMIT: usize = 64 * 1024;
 pub(crate) const MAX_EVENTS: u32 = 3;
 
 pub(crate) fn invalid() -> BridgeError {
@@ -428,6 +437,7 @@ pub(crate) fn request(
             account.rows.iter().any(|row| row == prior)
                 && prior.intent.provenance.operation_id.as_str() == reference.operation_id
                 && prior.intent.provenance.owner_generation.as_str() == reference.owner_generation
+                && recovery_scope_matches(prior, &scope)
                 && prior.intent.target == scope.target,
         )?;
     } else {
@@ -1056,6 +1066,7 @@ pub(crate) struct Projection {
     pub(crate) outcome: Option<Outcome>,
     pub(crate) reason: Reason,
     pub(crate) result: Option<ResultData>,
+    pub(crate) recovery: Option<RecoveryHistory>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

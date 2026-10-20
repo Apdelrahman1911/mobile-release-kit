@@ -90,6 +90,15 @@ pub(super) struct Intent {
 #[derive(Default)]
 pub(super) struct Registry {
     review: Option<Arc<AppleProvisioningReview>>,
+    recovery: Option<RecoveryPublication>,
+}
+
+// Detached historical DATA only. It must not keep a finished Session,
+// NativeUse, material loan or runtime alive after original retirement.
+struct RecoveryPublication {
+    reference: apple_wire::Reference,
+    context: apple_wire::Context,
+    history: apple_wire::RecoveryHistory,
 }
 
 impl Reason {
@@ -176,12 +185,42 @@ impl RunProjection {
             outcome: self.outcome.map(Outcome::store),
             reason: self.reason.apple(),
             result,
+            recovery: None,
         })
     }
 }
 
-pub(super) fn invalidate_review(registry: &mut Registry) {
+pub(super) fn invalidate_review(registry: &mut Registry) -> bool {
     registry.review = None;
+    // Public historical DATA may be withdrawn, never replaced or upgraded.
+    // Idle context invalidation must advance the same original status revision.
+    registry.recovery.take().is_some()
+}
+
+pub(super) fn project_recovery(registry: &Registry, projection: &mut apple_wire::Projection) {
+    projection.recovery = None;
+    if let Some(stored) = &registry.recovery {
+        if projection.operation_id == stored.reference.operation_id
+            && projection.owner_generation == stored.reference.owner_generation
+            && projection.context == stored.context
+            && projection.context.mode == apple_wire::Mode::Review
+            && projection.phase == apple_wire::Phase::Terminal
+            && projection.outcome == Some(apple_wire::Outcome::Complete)
+            && projection.reason == apple_wire::Reason::None
+            && projection.result.is_some()
+        {
+            projection.recovery = Some(stored.history.clone());
+        }
+    }
+}
+
+fn recovery_backing_bytes() -> Option<usize> {
+    // Original list plus its bounded construction scratch. The ordinary two
+    // status copies below cover serialized/projected replies and events.
+    apple_wire::RECOVERY_LIMIT
+        .checked_mul(2)?
+        .checked_add(apple_wire::IPC_LIMIT)?
+        .checked_add(std::mem::size_of::<RecoveryPublication>())
 }
 
 pub(crate) const APPLE_PROVISIONING_INPUT_LIMIT: usize = 128 * 1024;
@@ -192,6 +231,7 @@ pub(crate) fn retained_document_backing_bytes() -> Option<usize> {
     store::document_backing_bytes()?
         .checked_add(APPLE_PROVISIONING_INPUT_LIMIT)?
         .checked_add(2 * apple_wire::STATUS_LIMIT)?
+        .checked_add(recovery_backing_bytes()?)?
         .checked_add(8192)
 }
 /// Finite representations, NOT RSS or a replacement for the installed
@@ -215,6 +255,7 @@ pub(crate) fn document_backing_bytes() -> Option<usize> {
         total = total.checked_add(count.checked_mul(size)?)?;
     }
     total
+        .checked_add(recovery_backing_bytes()?)?
         .checked_add(std::mem::size_of::<State>())?
         .checked_add(std::mem::size_of::<Intent>())?
         .checked_add(std::mem::size_of::<AppleProvisioningReview>())?
@@ -583,6 +624,7 @@ pub(super) fn complete(owner: &Session) -> bool {
 /// while that exact Active is still held. No status getter invokes this.
 pub(super) fn retire_review(registry: &mut Registry, active: &super::Active, owner: &Arc<Session>) {
     registry.review = None;
+    registry.recovery = None;
     if owner.domain != SavedCommandDomain::AppleProvisioning
         || active.unknown
         || active.context_invalidated
@@ -606,15 +648,29 @@ pub(super) fn retire_review(registry: &mut Registry, active: &super::Active, own
     let Some(Terminal::AppleProvisioning(terminal)) = &active.projection.result else {
         return;
     };
-    if !terminal.lifetime.settled()
-        || terminal.result.as_ref().is_none_or(|result| {
-            result.observation != apple_wire::Observation::NotReturned
-                || result.decision != apple_wire::Decision::ReviewRequired
-        })
-    {
+    if !terminal.lifetime.settled() || terminal.result.is_none() {
         return;
     }
     if !native_complete(owner) {
+        return;
+    }
+    // A denied/inconclusive provider query may accompany a known joined local
+    // journal read. Publish only that historical DATA, never a Register review.
+    if let Some(history) = native_history(owner) {
+        registry.recovery = Some(RecoveryPublication {
+            reference: apple_wire::Reference {
+                operation_id: owner.id.clone(),
+                owner_generation: owner.generation.clone(),
+            },
+            context: context.clone(),
+            history,
+        });
+    }
+    // Preserve the original private one-use Register-review predicate exactly.
+    if terminal.result.as_ref().is_none_or(|result| {
+        result.observation != apple_wire::Observation::NotReturned
+            || result.decision != apple_wire::Decision::ReviewRequired
+    }) {
         return;
     }
     let Ok(input) = owner.apple.input() else {
@@ -813,6 +869,26 @@ fn native_complete(owner: &Session) -> bool {
     {
         let _ = owner;
         false
+    }
+}
+
+fn native_history(owner: &Session) -> Option<apple_wire::RecoveryHistory> {
+    #[cfg(all(
+        target_os = "macos",
+        target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    {
+        native::history(owner)
+    }
+    #[cfg(not(all(
+        target_os = "macos",
+        target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )))]
+    {
+        let _ = owner;
+        None
     }
 }
 

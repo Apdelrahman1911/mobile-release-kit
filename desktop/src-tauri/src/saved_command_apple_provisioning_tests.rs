@@ -214,6 +214,91 @@ fn apple_projection_hides_child_data_until_original_terminal_complete() {
 }
 
 #[test]
+fn historical_projection_requires_the_exact_complete_review_and_never_mints_consent() {
+    // Only the private cached DATA projection is exercised positively here.
+    // No test creates the original retirement, NativeUse or a Register review.
+    let (account, scope) = apple_wire::recovery_comparison_fixture();
+    let baseline = projection();
+    let Context::AppleProvisioning(context) = &baseline.context else { panic!("fixture context") };
+    let mut registry = Registry::default();
+    registry.recovery = Some(RecoveryPublication {
+        reference: apple_wire::Reference {
+            operation_id: baseline.operation_id.clone(), owner_generation: baseline.owner_generation.clone(),
+        }, context: context.clone(), history: apple_wire::recovery_history(&account, &scope).unwrap(),
+    });
+    let mut projected = baseline.clone().public().apple().unwrap();
+    project_recovery(&registry, &mut projected);
+    assert!(projected.recovery.is_some() && registry.review.is_none());
+    for field in 0..8 {
+        let mut value = baseline.clone();
+        match field {
+            0 => value.operation_id = "1".repeat(32),
+            1 => value.owner_generation = "2".repeat(32),
+            2 => value.phase = Phase::Running,
+            3 => value.phase = Phase::Unknown,
+            4 => value.outcome = Some(Outcome::Failed),
+            5 => value.reason = Reason::ContextChanged,
+            6 => { let Context::AppleProvisioning(c) = &mut value.context else { unreachable!() }; c.mode = apple_wire::Mode::Reconcile; }
+            _ => { let Context::AppleProvisioning(c) = &mut value.context else { unreachable!() }; c.record_revision += 1; }
+        }
+        let mut projected = value.public().apple().unwrap();
+        project_recovery(&registry, &mut projected);
+        assert!(projected.recovery.is_none() && registry.review.is_none());
+    }
+    invalidate_review(&mut registry);
+    let mut projected = baseline.public().apple().unwrap();
+    project_recovery(&registry, &mut projected);
+    assert!(projected.recovery.is_none());
+}
+
+#[test]
+fn original_idle_context_loss_withdraws_only_history_and_advances_status() {
+    let application = SavedCommandOwner::apple_provisioning(RuntimeConfig::packaged(
+        std::path::PathBuf::from("/unopened-apple-history-withdrawal-runtime"),
+    ));
+    let (account, scope) = apple_wire::recovery_comparison_fixture();
+    let baseline = projection();
+    let Context::AppleProvisioning(context) = &baseline.context else { panic!("fixture context") };
+    {
+        // Stored projection DATA only; no original operation, join witness,
+        // material loan, Register review or native-positive fixture is created.
+        let mut registry = application.inner.lock();
+        registry.apple.recovery = Some(RecoveryPublication {
+            reference: apple_wire::Reference {
+                operation_id: baseline.operation_id.clone(), owner_generation: baseline.owner_generation.clone(),
+            }, context: context.clone(), history: apple_wire::recovery_history(&account, &scope).unwrap(),
+        });
+        registry.last = Some(baseline);
+    }
+    let before = application.status_apple_provisioning(apple_wire::Availability::Busy).unwrap();
+    assert!(before.operation.as_ref().unwrap().recovery.is_some());
+    application.context_changed();
+    let after = application.status_apple_provisioning(apple_wire::Availability::Busy).unwrap();
+    assert!(after.status_revision > before.status_revision);
+    assert!(after.operation.as_ref().unwrap().recovery.is_none());
+    assert_eq!(serde_json::to_value(before.operation.as_ref().unwrap().result.as_ref()).unwrap(),
+        serde_json::to_value(after.operation.as_ref().unwrap().result.as_ref()).unwrap());
+    let registry = application.inner.lock();
+    assert!(registry.prepared.is_none() && registry.active.is_none() && registry.apple.review.is_none());
+}
+
+#[test]
+fn original_unjoined_session_cannot_publish_history_or_restore_a_review() {
+    let application = SavedCommandOwner::apple_provisioning(RuntimeConfig::packaged(
+        std::path::PathBuf::from("/unopened-apple-history-runtime"),
+    ));
+    let (application, original) = super::super::tests::active_with_context(application, Context::AppleProvisioning(context()));
+    let parent = application.inner.lock();
+    let active = parent.active.as_ref().unwrap();
+    let mut registry = Registry::default();
+    retire_review(&mut registry, active, &original);
+    assert!(registry.recovery.is_none() && registry.review.is_none());
+    assert!(!original.watchdog_joined.load(Ordering::SeqCst));
+    assert!(!original.material_retired.load(Ordering::SeqCst));
+    assert!(!native_complete(&original));
+}
+
+#[test]
 fn apple_unadmitted_original_status_cannot_start_state_or_borrow_access_consent() {
     let owner = SavedCommandOwner::apple_provisioning(RuntimeConfig::packaged(
         std::path::PathBuf::from("/unopened-apple-provisioning-runtime"),

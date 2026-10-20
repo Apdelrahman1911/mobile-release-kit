@@ -8,7 +8,7 @@ import { appleDisplayName, appleProvisioningConsent, appleProvisioningContext, a
   parseAppleProvisioningRequest, parseAppleProvisioningStatus, sameAppleIdentity } from './appleProvisioningProtocol.ts';
 import type { AppleProvisioningApi } from './appleProvisioningNative.ts';
 import type { AppleProvisioningIdentity, AppleProvisioningMode, AppleProvisioningOperation, AppleProvisioningResult,
-  AppleProvisioningStatus, PrepareAppleProvisioning } from './appleProvisioningTypes.ts';
+  AppleProvisioningStatus, AppleRecoveryHistory, PrepareAppleProvisioning } from './appleProvisioningTypes.ts';
 
 interface Source {
   project(): LocalStoreProject | null;
@@ -33,6 +33,7 @@ export interface AppleProvisioningState {
   native: boolean; visible: boolean; listening: boolean; initialized: boolean; reading: boolean;
   pending: 'prepare' | 'start' | null; requestPending: boolean; cancelPending: boolean;
   status: AppleProvisioningStatus | null; projectId: string | null; ios: boolean;
+  previousAttempts: AppleRecoveryHistory | null; continueReason: string | null;
   displayName: string; newApplication: boolean; issue: Issue | null; historical: boolean;
   consent: (AppleProvisioningIdentity & { mode: AppleProvisioningMode; acknowledged: boolean }) | null;
   result: AppleProvisioningResult | null; reviewReference: AppleProvisioningIdentity | null;
@@ -62,6 +63,7 @@ export class AppleProvisioningController {
   private attempt: Attempt | null = null;
   private review: Reference | null = null;
   private registration: Reference | null = null;
+  private restored: Reference | null = null;
   private witness: Witness | null = null;
   private status: AppleProvisioningStatus | null = null;
   private issue: Issue | null = null;
@@ -120,13 +122,22 @@ export class AppleProvisioningController {
     return !!value && sameWitness(value.witness, this.witness) && value.displayName === this.displayName &&
       (value.expires === null || this.now() < value.expires);
   }
+  private reconciliationReference(): Reference | null {
+    return this.referenceCurrent(this.restored) ? this.restored : this.referenceCurrent(this.registration) ? this.registration : null;
+  }
+  private previousAttempts(): AppleRecoveryHistory | null {
+    const a = this.attempt, op = this.status?.operation;
+    if (!a?.terminalRead || !a.startClaimed || !this.current(a) || this.action || this.read || this.cancellation || this.issue ||
+        !sameAppleIdentity(a.identity, op) || a.request.mode !== 'review' || op?.phase !== 'terminal' || op.outcome !== 'complete') return null;
+    return op.recovery;
+  }
   private reason(mode: AppleProvisioningMode): string | null {
     const base = this.baseReason(); if (base) return base;
     if (mode === 'register') {
       if (!this.referenceCurrent(this.review)) return 'First finish a current reuse-first review. A key-only not-returned result is not global availability or permission.';
       if (!this.declaredNew) return 'Explicitly declare this is a new application, not a change to an existing store identity.';
     }
-    if (mode === 'reconcile' && !this.referenceCurrent(this.registration)) return 'Readback requires the exact retained prior registration in this same saved/key context. It never retries the write.';
+    if (mode === 'reconcile' && !this.reconciliationReference()) return 'Choose a saved attempt below, or use the prior registration from this session. Readback never repeats the write.';
     return null;
   }
   private startReason(): string | null {
@@ -150,7 +161,8 @@ export class AppleProvisioningController {
       consent: a?.identity && this.consentUntil !== null && current && !a.startClaimed ?
         Object.freeze({ ...identity(a.identity), mode: a.request.mode, acknowledged: this.acknowledged }) : null,
       result: readResult, reviewReference: this.referenceCurrent(this.review) ? this.review.identity : null,
-      registrationReference: this.registration?.identity ?? null,
+      registrationReference: this.restored?.identity ?? this.registration?.identity ?? null,
+      previousAttempts: this.previousAttempts(), continueReason: this.baseReason(),
       reviewReason: this.reason('review'), registerReason: this.reason('register'), reconcileReason: this.reason('reconcile'),
       startReason: this.startReason(), canRead: !!this.original && !this.read && (!this.connectionRetired || !this.settled()),
       canCancel: !!this.original && !!cancelId && !this.cancellation && !sameAppleIdentity(this.cancelClaim, cancelId) && active(op),
@@ -162,7 +174,7 @@ export class AppleProvisioningController {
     if (this.consentTimer !== null) clearTimeout(this.consentTimer); this.consentTimer = null;
   }
   private fail(issue: Issue = 'unconfirmed'): void {
-    this.issue ??= issue; this.clearConsent(); this.review = null;
+    this.issue ??= issue; this.clearConsent(); this.review = null; this.restored = null;
     if (this.attempt) this.attempt.retired = true;
     this.cancelRequested = true; this.publish(); void this.cancelOriginal();
   }
@@ -174,7 +186,7 @@ export class AppleProvisioningController {
     this.publish();
   };
   invalidate = (): void => {
-    this.epoch++; this.clearConsent(); this.review = null; this.declaredNew = false;
+    this.epoch++; this.clearConsent(); this.review = null; this.restored = null; this.declaredNew = false;
     if (this.attempt) this.attempt.retired = true;
     if (this.action || active(this.status?.operation)) { this.cancelRequested = true; void this.cancelOriginal(); }
     this.publish();
@@ -211,7 +223,7 @@ export class AppleProvisioningController {
       try { this.off?.(); } catch { this.fail(); return; }
     }
     this.original = api; this.off = null; this.connectionRetired = false; this.initialized = false;
-    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.clearConsent(); this.witness = this.capture(); this.publish();
+    this.status = null; this.attempt = null; this.review = null; this.registration = null; this.restored = null; this.clearConsent(); this.witness = this.capture(); this.publish();
     if (!api) return;
     const pending = (async () => {
       try {
@@ -268,9 +280,33 @@ export class AppleProvisioningController {
     const previous = this.read?.promise; if (previous) await previous;
     await this.checkStatus();
   }
-  prepare = (mode: AppleProvisioningMode): Promise<void> => {
-    this.syncProject(); if (this.disposed || !this.visible || this.reason(mode) || !this.original || !this.witness || !this.status) return Promise.resolve();
-    const reference = mode === 'review' ? null : mode === 'register' ? this.review?.identity : this.registration?.identity;
+  continuePrevious = (operationId: string, ownerGeneration: string): Promise<void> => {
+    this.syncProject();
+    if (this.disposed || !this.visible || this.baseReason() || !this.original || !this.witness) return Promise.resolve();
+    const row = this.previousAttempts()?.attempts.find(candidate => sameAppleIdentity(candidate.reference, { operationId, ownerGeneration }));
+    if (!row) return Promise.resolve();
+    const continuation = { api: this.original, witness: this.witness, epoch: this.epoch + 1 };
+    const sameContinuation = () => this.original === continuation.api && this.witness === continuation.witness &&
+      this.epoch === continuation.epoch && !this.disposed && !this.connectionRetired;
+    this.invalidate();
+    if (!sameContinuation()) return Promise.resolve();
+    // Only this explicit UI choice adopts a DISPLAY name and historical IDs.
+    // No saved identity/key/state is edited, and no Register review is minted.
+    this.displayName = row.displayName;
+    this.restored = freeze({ identity: identity(row.reference), witness: continuation.witness, displayName: row.displayName, expires: null });
+    this.publish();
+    if (!sameContinuation()) return Promise.resolve();
+    return this.prepareIntent('reconcile', continuation);
+  };
+  prepare = (mode: AppleProvisioningMode): Promise<void> => this.prepareIntent(mode);
+  private prepareIntent(mode: AppleProvisioningMode, continuation?: { api: AppleProvisioningApi; witness: Witness; epoch: number }): Promise<void> {
+    this.syncProject();
+    // syncProject publishes too. A subscriber's cancellation/currentness veto
+    // must survive that seam, not become a new continuation epoch or reference.
+    if (continuation && (this.original !== continuation.api || this.witness !== continuation.witness ||
+        this.epoch !== continuation.epoch)) return Promise.resolve();
+    if (this.disposed || !this.visible || this.reason(mode) || !this.original || !this.witness || !this.status) return Promise.resolve();
+    const reference = mode === 'review' ? null : mode === 'register' ? this.review?.identity : this.reconciliationReference()?.identity;
     const request = parseAppleProvisioningRequest({ ...this.witness.base, mode, reference, newApplication: mode === 'register', displayName: this.displayName });
     if (!request) return Promise.resolve();
     const api = this.original, a: Attempt = { request: freeze(request), witness: this.witness, epoch: this.epoch, after: this.status.statusRevision,
@@ -298,7 +334,7 @@ export class AppleProvisioningController {
         this.cleanupListener(); this.publish();
       }
     })(); this.publish(); return slot.promise;
-  };
+  }
   start = (operationId: string, ownerGeneration: string): Promise<void> => {
     this.syncProject(); const a = this.attempt, api = this.original;
     if (!a || !api || a.startClaimed || !sameAppleIdentity(a.identity, { operationId, ownerGeneration }) || this.startReason()) return Promise.resolve();
