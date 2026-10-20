@@ -72,10 +72,10 @@ jobs:
     # Explicit current-runtime identity4 alone selects the nonshipping observer.
     # Conservative selected step maxima (minutes), NOT an expected duration:
     # setup13 + compiler/argv9 + signed suppliers/current-runtime39 +
-    # helper/vault/app/assembly64 + REQUIRED notary/package/install98 +
-    # identity4 15 =238; the independent250 cap leaves12 for job overhead.
+    # helper/vault/app/assembly78 + REQUIRED notary/package/install98 +
+    # identity4 15 =252; the independent264 cap leaves12 for job overhead.
     # No per-case renewal, legacy suite, ordinary prepared export or final image.
-    timeout-minutes: ${{ matrix.native_scope == 'project-identity-native' && 250 || github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
+    timeout-minutes: ${{ matrix.native_scope == 'project-identity-native' && 264 || github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -1150,10 +1150,12 @@ jobs:
               output.write("MRK_MACOS_SOURCE_SIGNER_SHA1=" + row["leafCertificateSha1"] + "\n")
               output.write("MRK_MACOS_SOURCE_PACKAGE_VERSION=" + row["packageVersion"] + "\n")
           PY_PACKAGING_SELECTION
-      # Intel fetch120 is separate; compile720 and containing job caps are unchanged.
+      # ARM acquisition/release compilation needs more than the observed480s.
+      # Build1200 and step24 remain independent ceilings, not a fit guarantee
+      # when later signing consumes its maximum. Intel fetch120/build720 unchanged.
       - name: Build and sign the fixed resident image and C facades
         id: android_helper
-        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 26 || 10 }}
+        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 26 || 24 }}
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
