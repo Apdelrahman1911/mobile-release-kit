@@ -7,6 +7,8 @@ use crate::{vault_crypto as crypto, vault_format as format, vault_store as store
 mod assignment_native;
 use assignment_native::upload_key;
 pub(crate) use upload_key::controls as upload_key_controls;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) use upload_key::observation as installed_upload_observation;
 pub(crate) use upload_key::{UploadKeyClock, UploadKeyGoGate, PreparedGenerationGo, UploadKeyDisposal};
 pub(super) use upload_key::parent_stop as upload_key_parent_stop;
 #[path = "credential_backup_native.rs"]

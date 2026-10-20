@@ -1,5 +1,7 @@
 //! Actual process main, not a libtest worker or a shipping automation switch.
 #![forbid(unsafe_code)]
+// Same finite Send/Sync traversal limit as the accepted current shipping lib.
+#![recursion_limit = "256"]
 #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
     not(feature = "macos-android-registration-helper"),
@@ -8,6 +10,54 @@
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc", feature = "windows-installed-observation",
             not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"))))))]
 compile_error!("installed-shell observation requires debug test + desktop-shell + custom-protocol on Linux x86_64 GNU, observed Mac ARM64/Intel LP64 or observed Windows x86_64 MSVC, without development-runtime, publisher or installer");
+// SAME current application module graph, still the original nonshipping
+// observer executable. No library duplicate owner, helper/publisher/CLI entry.
+#[path = "../src/git_read_protocol.rs"] mod git_read_protocol;
+#[path = "../src/service_protocol.rs"] mod service_protocol;
+#[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
+#[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "../src/version_allocation_state_native.rs"] mod version_allocation_state_native;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "../src/application_state_store.rs"] mod application_state_store;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "../src/apple_provisioning_journal.rs"] mod apple_provisioning_journal;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "../src/application_service.rs"] mod application_service;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "../src/application_service_host.rs"] mod application_service_host;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "../src/installed_cli_ipc.rs"] mod installed_cli_ipc;
+#[path = "../src/tool_preparation.rs"] mod tool_preparation;
+#[path = "../src/tool_acquisition_protocol.rs"] mod tool_acquisition_protocol;
+#[path = "../src/tool_preparation_adapters.rs"] mod tool_preparation_adapters;
+#[path = "../src/tool_preparation_protocol.rs"] mod tool_preparation_protocol;
+#[path = "../src/local_release_history_protocol.rs"] mod local_release_history_protocol;
+#[path = "../src/local_release_history_owner.rs"] mod local_release_history_owner;
+#[path = "../src/apple_provisioning_protocol.rs"] mod apple_provisioning_protocol;
+#[path = "../src/local_store_preflight_protocol.rs"] mod local_store_preflight_protocol;
+#[path = "../src/local_store_preflight_owner.rs"] mod local_store_preflight_owner;
+#[path = "../src/local_store_prepare_protocol.rs"] mod local_store_prepare_protocol;
+#[path = "../src/local_store_execute_protocol.rs"] mod local_store_execute_protocol;
+#[path = "../src/local_store_reconcile_protocol.rs"] mod local_store_reconcile_protocol;
+#[path = "../src/local_store_prepare_owner.rs"] mod local_store_prepare_owner;
+#[path = "../src/local_store_execute_owner.rs"] mod local_store_execute_owner;
+#[path = "../src/local_store_reconcile_owner.rs"] mod local_store_reconcile_owner;
+#[path = "../src/android_upload_key_protocol.rs"] mod android_upload_key_protocol;
+#[path = "../src/macos_store_runtime.rs"] mod macos_store_runtime;
+#[path = "../src/macos_history_inventory.rs"] mod macos_history_inventory;
+#[path = "../src/macos_applications_launcher.rs"] mod macos_applications_launcher;
+#[path = "../src/macos_remove_record.rs"] mod macos_remove_record;
+#[path = "../src/project_identity_commands.rs"] mod project_identity_commands;
+#[path = "../src/project_identity_edit_protocol.rs"] mod project_identity_edit_protocol;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+#[path = "../src/credential_setup.rs"] mod credential_setup;
+#[path = "../src/github_auth_capture_wire.rs"] mod github_auth_capture_wire;
+#[path = "../src/github_auth_nomination.rs"] mod github_auth_nomination;
+#[path = "../src/github_auth_native_owner.rs"] mod github_auth_native_owner;
+#[path = "../src/github_auth_entry_protocol.rs"] mod github_auth_entry_protocol;
+#[path = "../src/github_publication_protocol.rs"] mod github_publication_protocol;
 #[path = "../src/error.rs"] mod error;
 #[path = "../src/protocol.rs"] mod protocol;
 #[path = "../src/environment.rs"] mod environment;

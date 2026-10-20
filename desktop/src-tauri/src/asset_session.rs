@@ -6747,14 +6747,14 @@ mod installed_macos_observation {
     /// receipts or custody owners. Slots are never removed or reused. Keeping
     /// the original work book does not retain its retired private payloads.
     pub(super) struct SessionBook {
-        originals: Vec<(Arc<OriginalWork>, Option<Operation>)>,
+        pub(super) originals: Vec<(Arc<OriginalWork>, Option<Operation>)>,
         // A distinct one-use instrumented P2 admission, never an asset/iOS
         // session grant. The same existing history retains actual originals.
         pub(super) project_fields: Option<Arc<crate::shell::installed_observation::project_fields::Control>>,
         // Historical Case returned by the original one-use registration. It
         // does not confer native/private-input availability or a live permit.
         input_case: Option<crate::shell::installed_observation::ios::Case>,
-        vault: Option<Arc<crate::shell::installed_observation::vault::Control>>,
+        pub(super) vault: Option<Arc<crate::shell::installed_observation::vault::Control>>,
     }
     fn session_original_limit(project_fields: bool, input_case: Option<crate::shell::installed_observation::ios::Case>) -> Option<u32> {
         match (project_fields, input_case) {
@@ -7049,6 +7049,11 @@ mod installed_macos_observation {
                     (2..=7, None) => true,
                     _ => false,
                 };
+                let expected = if matches!(control.case,crate::shell::installed_observation::vault::Case::UploadKey(_)) {
+                    matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,Some(Operation::OpenVault))
+                        |(3,Some(Operation::PrepareInitialize))|(4,Some(Operation::Initialize))|(5,Some(Operation::GenerateUploadKey))
+                        |(6,Some(Operation::OpenVault))|(7,Some(Operation::Unlock))|(8,Some(Operation::Prepare))|(2..=9,None))
+                }else{expected};
                 if !expected || !control.bound(&self.inner.session_identity) { return Err(AssetError::new(Reason::Unqualified)); }
             }
             // Closed original-registration bound: Android input journey18,
@@ -9459,3 +9464,6 @@ pub(crate) fn github_setup_consent_data_checks() {
     state.github.reconcile_setup(now,GitHubReason::None,None);
     assert_eq!(state.github.setup_status(false,now,GitHubReason::None).reason,crate::github_setup_protocol::Reason::CleanupUnknown);
 }
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) use vault::installed_upload_observation::{Sample as InstalledUploadSample, Trace as InstalledUploadTrace, ProducerSample as InstalledUploadProducerSample};

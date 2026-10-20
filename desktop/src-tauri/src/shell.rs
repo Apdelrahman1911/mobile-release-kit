@@ -2589,7 +2589,10 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 let _ = app.emit_to(MAIN_WINDOW, EDIT_EVENT, &status);
             }
             #[cfg(any(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))), all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "windows-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
-            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.tick(&app); }
+            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() {
+                #[cfg(target_os="macos")] q.tick_original(&app).await;
+                #[cfg(not(target_os="macos"))] q.tick(&app);
+            }
             if let Ok(status) = edits.workflow_status() {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
                 if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.workflow_status(&status, &edits); }

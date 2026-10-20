@@ -81,7 +81,7 @@ const FAILURE_REASONS: &[&str] = &[
     "session-request-contract", "session-result-contract", "session-original-contract", "session-dom-contract",
     "project-fields-request-contract", "project-fields-result-contract", "project-fields-original-contract",
     "project-fields-fixture-contract", "project-fields-dom-contract",
-    "vault-request-contract", "vault-result-contract", "vault-original-contract", "vault-finality-contract",
+    "vault-request-contract", "vault-result-contract", "vault-original-contract", "vault-finality-contract", "upload-key-original-contract", "upload-key-expected-retention",
     "installation-request-contract", "installation-status-contract", "installation-first-read-contract",
     "installation-original-contract", "installation-finality-contract",
     "bootstrap-attach-thread", "bootstrap-attach-duplicate", "bootstrap-window-result",
@@ -304,7 +304,7 @@ enum Step {
     ReadbackPage, Refresh, Readback, SavedSettings, ChangeDraft, ChangedDraft, MutateIgnore,
     CloseCancel, QuitCancel, QuitCancelled, RetainedReview, Close, Quit, Exit,
     PickerPending, Reload, Lost,
-    Ios(ios::Step), Recovery(recovery::Step), Session(session::Step), ProjectFields(project_fields::Step), Vault(vault::Step), Installation(installation_check::Step), LocalEdits(local_edits::Step), Checks(checks::Step),
+    Ios(ios::Step), Recovery(recovery::Step), Session(session::Step), ProjectFields(project_fields::Step), Vault(vault::Step), UploadKey(vault::upload_key::Step), Installation(installation_check::Step), LocalEdits(local_edits::Step), Checks(checks::Step),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DomDispatch { step: Step, sequence: u16 }
@@ -875,7 +875,7 @@ impl Fixture {
                 config: fixture.file("release/mobile-release.json"), release: fixture.dir("release"),
                 ios: None, project_fields: Some(fixture), recovery: None, local_edits: None, checks: None, written: false, mutated: false });
         }
-        let saved = case == Case::NoopStale;
+        let saved = case == Case::NoopStale || matches!(case,Case::Vault(vault::Case::UploadKey(_)));
         let root_identity = directory(&root, uid, 0o700, if saved {
             &[".gitignore", "app", "keep.txt", "release", "version.properties"]
         } else { &[".gitignore", "app", "keep.txt", "version.properties"] })?;
@@ -976,6 +976,7 @@ struct Record {
     step: Step, pending: Option<Pending>, evaluations: u16, attached: bool, started: bool, loaded: bool,
     bootstrap_failure: Option<BootstrapSample>,
     vault_failure: Option<vault::FailureSample>,
+    upload_failure: Option<vault::upload_key::FailureSample>,
     last_project_chooser: Option<ProjectChooserSample>,
     original_window: Option<OriginalWindowSample>,
     native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
@@ -1091,6 +1092,7 @@ struct FailureSnapshot {
     input_body_admission: Option<Option<bool>>,
     bootstrap: Option<BootstrapSample>,
     vault: Option<vault::FailureSample>,
+    upload: Option<vault::upload_key::FailureSample>,
     dom: Option<(u16, Option<ProjectChooserSample>)>,
     original_window: Option<OriginalWindowSample>,
     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
@@ -1101,7 +1103,7 @@ struct FailureSnapshot {
 impl FailureSnapshot {
     fn from_record(r: &Record) -> Self {
         Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch, input_body_admission: None,
-            bootstrap: r.bootstrap_failure, vault: r.vault_failure,
+            bootstrap: r.bootstrap_failure, vault: r.vault_failure, upload: r.upload_failure,
             dom: Some((r.evaluations, r.last_project_chooser)), original_window: r.original_window,
             last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
             project_selection: r.project_selection, completion_selection: r.completion_selection,
@@ -1119,6 +1121,7 @@ impl FailureSnapshot {
         self.input_body_admission = None;
         self.dom = None; // No fresh DOM/counter observation at this cached expiry.
         self.bootstrap = None; // A pre-arm cache is not the first failure's Record sample.
+        self.upload = None;
         self.vault = None; // Never attach a later original vault sample to an earlier cache.
         self.project_selection = None; // Never attach fresh return DATA to a pre-arm snapshot.
         self.completion_selection = None;
@@ -1163,6 +1166,7 @@ impl FailureSnapshot {
         if self.bootstrap.is_some() && (self.source != "record" || !bootstrap_failure_reason(reason)) { return None; }
         if self.vault.is_some_and(|sample| self.source != "record" || reason != "vault-finality-contract"
             || self.step != Step::Vault(sample.step)) { return None; }
+        if self.upload.is_some() && (self.source != "record" || reason != "upload-key-expected-retention" || !matches!(self.step,Step::UploadKey(_))) {return None;}
         let mut frame = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
         let tail = b"\nMRK_MACOS_AQUA=failed\n";
         let context = bounded_failure_context(failure_context(&self), self.press_timing(), frame.len().checked_add(tail.len())?)?;
@@ -1225,6 +1229,7 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     // context still describes the later report snapshot, not that earlier time.
     if let Some(sample) = r.bootstrap { value["bootstrap"] = sample.value(); }
     if let Some(sample) = r.vault { value["vault"] = sample.value(); }
+    if let Some(sample) = r.upload { value["uploadKey"] = sample.value(); }
     if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
     if let Some(admitted) = r.input_body_admission { value["inputBodyAdmission"] = json!(admitted); }
@@ -1309,7 +1314,7 @@ impl Observation {
         let local_config=if let Case::Checks(c)=case{Some(checks::config(c)?)}else if let Case::LocalEdits(c)=case{Some(local_edits::config(c)?)}else{None};
         let base = crate::protocol::strict_json(if let Some(bytes)=local_config.as_deref(){bytes}else if let Case::Ios(case) = case { ios::config(case) } else { CONFIG }).map_err(|_| ())?;
         let started = Instant::now();
-        let end = started + Duration::from_secs(if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
+        let end = started + Duration::from_secs(if let Case::Checks(c)=case { c.seconds() } else if let Case::LocalEdits(c)=case { c.seconds() } else if case == Case::Ios(ios::Case::RecoveryPending) { 515 } else if case == Case::PendingRecovery || matches!(case, Case::Ios(c) if !c.input_only()) { 315 } else if matches!(case, Case::Vault(vault::Case::UploadKey(_))) { 480 } else if matches!(case, Case::Vault(_)) { 120 } else if case == Case::Installation { 80 } else { 45 });
         let ios = if let Case::Ios(case) = case { Some(ios::Control::new(case)) } else { None };
         let project_fields = (case == Case::ProjectFields).then(project_fields::Control::new);
         let recovery = (case == Case::PendingRecovery).then(recovery::Control::new);
@@ -1319,7 +1324,7 @@ impl Observation {
         let field_paths = if case == Case::ProjectFields { project_fields::targets(&project_path).ok_or(())? } else { Vec::new() };
         let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
-                bootstrap_failure: None, vault_failure: None,
+                bootstrap_failure: None, vault_failure: None, upload_failure: None,
                 last_project_chooser: None, original_window: None,
                 native_dispatch: None, last_panel: None, native_action: None,
                 ax_trusted: false, prepared_open: None, accessibility: None, open_progress: None, identity_binding: None, completion_selection: None,
@@ -1604,7 +1609,7 @@ impl Observation {
     }
     pub(super) fn snapshot(&self, project: &str, result: &Result<Value, BridgeError>) {
         let Some(mut r) = self.record() else { return; };
-        let saved = matches!(self.case, Case::NoopStale | Case::ProjectFields | Case::LocalEdits(_) | Case::Checks(_)) || r.snapshot_requests == 2;
+        let saved = matches!(self.case, Case::NoopStale | Case::ProjectFields | Case::LocalEdits(_) | Case::Checks(_) | Case::Vault(vault::Case::UploadKey(_))) || r.snapshot_requests == 2;
         let failure = match result {
             Ok(value) => if let Case::Checks(case)=self.case {
                     match checks::config(case){Ok(bytes)=>snapshot_value_failure_bytes(value,&self.project_path,true,&self.base,&bytes),Err(())=>Some("snapshot-config-content")}
@@ -3213,7 +3218,7 @@ impl Observation {
             // Same completed originals/normal Quit and bounded fixture DATA
             // must survive the real final readback outside this Record guard.
             if !installation_readback.as_ref()?.matches(&r) { return None; }
-        } else if r.fixture.verify(matches!(self.case,Case::FirstSave|Case::NoopStale|Case::ProjectFields)).is_err() { return None; }
+        } else if r.fixture.verify(matches!(self.case,Case::FirstSave|Case::NoopStale|Case::ProjectFields|Case::Vault(vault::Case::UploadKey(_)))).is_err() { return None; }
         let sessions: Vec<_> = r.sessions.iter().map(|s| {
             let f = s.finality.as_ref()?; let p = s.projection.prepared.as_ref()?;
             Some(json!({"draftRevision":p.draft_revision,"baselineGeneration":p.baseline_generation,
@@ -3819,7 +3824,8 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
     let expected = Path::new(crate::macos_install_paths::PAYLOAD_EXECUTABLE);
     if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread() { return None; }
     let uid = mrk_macos_installed_native::real_user().ok()?;
-    let suffix = if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
+    let upload_suffix;
+    let suffix = if let Case::Vault(vault::Case::UploadKey(case))=case {upload_suffix=format!("-{}",case.name());upload_suffix.as_str()}else if matches!(case,Case::Checks(_)){"-doctor-preflight"}else if matches!(case,Case::LocalEdits(_)){"-local-edits"}else if case == Case::ProjectFields { "-project-fields" } else if matches!(case,Case::Vault(_)) { "-vault-helper" }
         else if case == Case::Installation { "-installation-inspection" } else if case == Case::PendingRecovery { "-project-recovery" } else { "" };
     let root = PathBuf::from(format!("/private/tmp/mrk-macos-aqua-{source}-{run}-{attempt}{suffix}"));
     if matches!(case,Case::Checks(_)){
@@ -3830,6 +3836,8 @@ fn route(case: Case) -> Option<(PathBuf,u32)> {
         if case == ios::Case::AndroidInputs { directory(&root,uid,0o700,ANDROID_INPUT_ROSTER).ok()?; }
         else if case == ios::Case::RecoveryPending { directory(&root,uid,0o700,PENDING_ACCOUNT_ROSTER).ok()?; }
         else { directory_rosters(&root,uid,0o700,CURRENT_IOS_ROSTER,ios_alternate_roster(case),None).ok()?; }
+    } else if let Case::Vault(vault::Case::UploadKey(case))=case {
+        directory(&root,uid,0o700,&[case.name(),"state"]).ok()?;
     } else if matches!(case,Case::Vault(_)) {
         directory(&root,uid,0o700,&["vault-helper-roundtrip","vault-helper-stop-before-go","vault-helper-stop-after-add","state"]).ok()?;
     } else if case == Case::ProjectFields {
@@ -3882,7 +3890,7 @@ fn press_diagnostic_data_check(full: OpenInputSample) -> bool {
         parent_references_panel: Some(true), panel_references_parent: Some(true), panel_visible: Some(true),
         directory_bound: true, directory_returned: true, directory_ready: true, directory_readiness: "ready", wait_location: None };
     let snapshot = FailureSnapshot { source: "record", step: Step::OpenProject, pending: None, native_dispatch: Some(native),
-        input_body_admission: None, bootstrap: None, vault: None, dom: None, original_window: None, last_panel: Some(panel),
+        input_body_admission: None, bootstrap: None, vault: None, upload:None, dom: None, original_window: None, last_panel: Some(panel),
         native_action: None, accessibility: Some(failed), identity_binding: Some(identity),
         completion_selection: None, project_selection: None, field_preparation: None };
     if snapshot.press_timing() != Some(timing) || snapshot.frame("native-default-input").is_none() { return false; }
@@ -4074,7 +4082,7 @@ fn bootstrap_diagnostic_data_checks() -> bool {
     latch_bootstrap(&first, &failed, &mut detail, "bootstrap-info-duplicate", later);
     if detail.is_some() || first_failure_reason(&first) != Some("bootstrap-info-methods-shape") { return false; }
     let snapshot = FailureSnapshot { source: "record", step: Step::Bootstrap, pending: None, native_dispatch: None, input_body_admission: None,
-        bootstrap: Some(sample), vault: None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
+        bootstrap: Some(sample), vault: None, upload:None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
         accessibility: None, identity_binding: None, completion_selection: None, project_selection: None, field_preparation: None };
     if snapshot.frame("bootstrap-info-available-count").is_none() || snapshot.frame("observer-invariant").is_some()
         || (FailureSnapshot { source: "prearm-open-progress", ..snapshot }).frame("bootstrap-info-available-count").is_some() { return false; }

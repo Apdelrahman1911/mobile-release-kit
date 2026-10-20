@@ -5,17 +5,19 @@ use std::{path::{Path, PathBuf}, sync::{Arc, OnceLock, Weak, atomic::{AtomicBool
 use serde_json::{json, Value};
 use crate::{asset_session::{DocumentBinding, InstalledMacVaultSnapshot}, error::BridgeError};
 use super::{Case as OuterCase, Observation};
+#[path = "installed_shell_observation_macos_upload_key.rs"]
+pub(crate) mod upload_key;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Case { RoundTrip, StopBeforeGo, StopAfterAdd }
+pub(crate) enum Case { RoundTrip, StopBeforeGo, StopAfterAdd, UploadKey(upload_key::Case) }
 impl Case {
     pub(super) const ALL: [Self; 3] = [Self::RoundTrip, Self::StopBeforeGo, Self::StopAfterAdd];
     pub(super) fn name(self) -> &'static str { match self {
         Self::RoundTrip => "vault-helper-roundtrip", Self::StopBeforeGo => "vault-helper-stop-before-go",
-        Self::StopAfterAdd => "vault-helper-stop-after-add",
+        Self::StopAfterAdd => "vault-helper-stop-after-add", Self::UploadKey(case) => case.name(),
     } }
-    pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> { Self::ALL.into_iter().find(|c| value == std::ffi::OsStr::new(c.name())) }
-    pub(crate) fn maximum_original(self) -> u32 { if self == Self::RoundTrip { 7 } else { 5 } }
+    pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> { Self::ALL.into_iter().find(|c| value == std::ffi::OsStr::new(c.name())).or_else(|| upload_key::Case::parse(value).map(Self::UploadKey)) }
+    pub(crate) fn maximum_original(self) -> u32 { if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,14 +61,17 @@ pub(crate) struct Control {
     original: OnceLock<Weak<Observation>>, document: OnceLock<Weak<()>>,
     claimed: AtomicBool, returned: AtomicBool, next: AtomicU8, checkpoint: AtomicBool,
     complete: AtomicBool, quit: AtomicU8,
+    pub(crate) upload: upload_key::Flow,
 }
 fn fixture_root(home: &Path, source: &str, run: &str, attempt: &str, case: Case) -> Option<PathBuf> {
     let decimal = |v: &str| !v.is_empty() && v.len() <= 20 && !v.starts_with('0') && v.bytes().all(|b| b.is_ascii_digit());
     if !crate::asset_session::installed_macos_selection_path_bounded(home) || home == Path::new("/")
         || source.len() != 40 || !source.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         || !decimal(run) || !decimal(attempt) { return None; }
+    let namespace=if let Case::UploadKey(case)=case {format!("mrk-macos-aqua-upload-key-{source}-{run}-{attempt}-{}",case.name())}
+        else{format!("mrk-macos-aqua-vault-{source}-{run}-{attempt}")};
     Some(home.join("Library/Application Support")
-        .join(format!("mrk-macos-aqua-vault-{source}-{run}-{attempt}"))
+        .join(namespace)
         .join(case.name()).join("dev.mobile-release-kit.desktop"))
 }
 impl Control {
@@ -79,7 +84,7 @@ impl Control {
             option_env!("GITHUB_RUN_ID").ok_or(())?, option_env!("GITHUB_RUN_ATTEMPT").ok_or(())?, case).ok_or(())?;
         Ok(Arc::new(Self { case, root, project: project.to_path_buf(), original: OnceLock::new(), document: OnceLock::new(),
             claimed: AtomicBool::new(false), returned: AtomicBool::new(false), next: AtomicU8::new(0),
-            checkpoint: AtomicBool::new(false), complete: AtomicBool::new(false), quit: AtomicU8::new(case.maximum_original() as u8) }))
+            checkpoint: AtomicBool::new(false), complete: AtomicBool::new(false), quit: AtomicU8::new(case.maximum_original() as u8), upload:upload_key::Flow::default() }))
     }
     fn observation(&self) -> Option<Arc<Observation>> {
         self.original.get()?.upgrade().filter(|q| q.case == OuterCase::Vault(self.case)
@@ -114,6 +119,10 @@ impl Control {
     pub(crate) fn quit_id(&self) -> u32 { u32::from(self.quit.load(Ordering::SeqCst)) }
     pub(crate) fn completed(&self) -> bool { self.complete.load(Ordering::SeqCst) }
     fn finish(&self, originals: usize) -> bool {
+        if matches!(self.case, Case::UploadKey(_)) && self.upload.finished(originals) {
+            if self.complete.swap(true,Ordering::SeqCst){return false;}
+            self.quit.store((originals+1) as u8,Ordering::SeqCst);return true;
+        }
         let expected = if originals == 6 { 7 } else if originals == 4 { 5 } else { return false; };
         if self.next.load(Ordering::SeqCst) != if originals == 6 { 7 } else { 4 }
             || expected == 7 && self.case != Case::RoundTrip || self.complete.swap(true, Ordering::SeqCst) { return false; }
@@ -163,6 +172,7 @@ pub(super) struct Record {
     opened: bool, preview_consumed: bool, initialized: bool, locked: bool, reopened: bool, unlocked: bool,
     relocked: bool, not_executed: bool, original_count: usize, final_originals: bool,
     initialization: Option<Value>, lookup: Option<Value>, storage: Option<Value>,
+    upload: upload_key::Record,
 }
 
 impl Observation {
@@ -213,7 +223,7 @@ impl Observation {
                 record.initialization = Some(helper.value()); record.storage = Some(storage.value());
                 if !record.preview_consumed || !helper.final_settlement() || !storage.reservation_durable() { self.fail_with("vault-result-contract"); return; }
                 let stopped = control.stopped_at_checkpoint();
-                if control.case == Case::RoundTrip && helper.successful_consumption()
+                if matches!(control.case,Case::RoundTrip|Case::UploadKey(_)) && helper.successful_consumption()
                     && snapshot.state == Some("unlocked") && snapshot.key_present && storage.header_durable() {
                     record.initialized = true;
                 } else if control.case != Case::RoundTrip && stopped && helper.stopped_without_application_candidate()
@@ -228,6 +238,9 @@ impl Observation {
                     // is a genuine negative, NOT a positive shipping-helper pass.
                     record.not_executed = true;
                 } else { self.fail_with("vault-result-contract"); return; }
+                if matches!(control.case,Case::UploadKey(_)) && record.initialized {
+                    r.step=super::Step::UploadKey(upload_key::Step::Context);return;
+                }
                 Some(Step::Lock)
             },
             Step::Locked if snapshot.originals == 4 && snapshot.empty => {
@@ -249,7 +262,7 @@ impl Observation {
         };
         if let Some(next) = next { r.step = super::Step::Vault(next); }
         else {
-            if !control.finish(snapshot.originals) || r.fixture.verify(false).is_err() { self.fail_with("vault-finality-contract"); return; }
+            if !control.finish(snapshot.originals) || r.fixture.verify(matches!(control.case,Case::UploadKey(_))).is_err() { self.fail_with("vault-finality-contract"); return; }
             r.file_readback = true; r.step = super::Step::Close;
         }
     }
@@ -261,6 +274,7 @@ impl Record {
         self.final_originals = true; true
     }
     pub(super) fn report(&self, control: &Control) -> Option<Value> {
+        if matches!(control.case,Case::UploadKey(_)){return upload_key::report(self,control);}
         if !self.final_originals || !self.opened || !self.preview_consumed || !self.locked
             || !control.completed() || self.initialization.is_none() || self.storage.is_none()
             || control.case == Case::RoundTrip && !self.not_executed && !(self.initialized && self.reopened && self.unlocked && self.relocked && self.lookup.is_some()) { return None; }
@@ -270,7 +284,7 @@ impl Record {
             "normalPersistenceEnabled":crate::runtime::INSTALLED_MAC_PERSISTENCE_QUALIFIED,
             "execution":if self.not_executed {"not-executed-provider-prerequisite"} else {"executed"},
             "testResult":if self.not_executed {"not-executed"} else if control.case == Case::RoundTrip {"positive"} else {"expected-stop"},
-            "checkpoint":match control.case {Case::RoundTrip=>"none",Case::StopBeforeGo=>"before-helper-go",Case::StopAfterAdd=>"successful-add-terminal-before-application-candidate"},
+            "checkpoint":match control.case {Case::RoundTrip=>"none",Case::StopBeforeGo=>"before-helper-go",Case::StopAfterAdd=>"successful-add-terminal-before-application-candidate",Case::UploadKey(_)=>return None},
             "checkpointObserved":control.stopped_at_checkpoint(),
             "nativeLookupMayAlreadyHaveConsumed":control.case == Case::StopAfterAdd,
             "openedEmpty":self.opened,"previewConsumedOnce":self.preview_consumed,
@@ -294,7 +308,7 @@ pub(super) fn data_checks() -> bool {
     let root = fixture_root(Path::new("/Users/runner"), source, "1", "2", Case::RoundTrip).unwrap();
     let inert = |case: Case, next: u8| Arc::new(Control { case,root:root.clone(),project:PathBuf::from("/private/tmp/fixed-project"),
         original:OnceLock::new(),document:OnceLock::new(),claimed:AtomicBool::new(false),returned:AtomicBool::new(false),
-        next:AtomicU8::new(next),checkpoint:AtomicBool::new(false),complete:AtomicBool::new(false),quit:AtomicU8::new(case.maximum_original() as u8) });
+        next:AtomicU8::new(next),checkpoint:AtomicBool::new(false),complete:AtomicBool::new(false),quit:AtomicU8::new(case.maximum_original() as u8),upload:upload_key::Flow::default() });
     let document=Arc::new(());let other=Arc::new(());let control=inert(Case::RoundTrip,1);
     let selection=Selection {control:control.clone(),document:Arc::downgrade(&document),action:Action::Open,serial:1,spent:AtomicBool::new(false)};
     if control.permits(&document) // An unregistered/inert owner can never use core methods.
@@ -341,5 +355,5 @@ pub(super) fn data_checks() -> bool {
     let roundtrip=inert(Case::RoundTrip,7);
     roundtrip.finish(6) && roundtrip.quit_id()==7 && crate::vault_keyring_macos::qualification_data_checks()
         && Action::Open.previous_original() == 1 && Action::Initialize.previous_original() == 3
-        && Action::Reopen.previous_original() == 4 && Action::LockUnlocked.previous_original() == 6
+        && Action::Reopen.previous_original() == 4 && Action::LockUnlocked.previous_original() == 6 && upload_key::data_checks()
 }

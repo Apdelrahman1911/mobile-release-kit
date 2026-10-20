@@ -6,6 +6,53 @@ use super::*;
 use crate::application_service_host::{NativeProject, NativeStateLease, NativeStateReady};
 use crate::edit_owner::SavedEditStamp;
 
+// Nonshipping selector is consumed INSIDE the same bodies. Registration alone
+// cannot enable renderer status/prepare/create; ordinary qualification is unchanged.
+#[cfg(feature = "desktop-shell")]
+pub(in crate::asset_session) enum Qualification {
+    Ordinary,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    Installed(crate::shell::installed_observation::vault::upload_key::Selection),
+}
+#[derive(Default)]
+struct Admission {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    installed: Option<Arc<crate::shell::installed_observation::vault::Control>>,
+}
+#[cfg(feature = "desktop-shell")]
+#[derive(Clone,Copy)]
+pub(in crate::asset_session) enum SelectedAction { Prepare, Create }
+impl Admission {
+    fn qualified(&self, document: &DocumentBinding) -> bool {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        if let Some(control)=&self.installed {return control.permits(&document.inner.session_identity);}
+        available(document)
+    }
+    fn same(&self, other: &Self) -> bool {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { return match (&self.installed,&other.installed) {(None,None)=>true,(Some(a),Some(b))=>Arc::ptr_eq(a,b),_=>false}; }
+        #[allow(unreachable_code)]
+        { let _=other; true }
+    }
+}
+#[cfg(feature = "desktop-shell")]
+impl Qualification {
+    fn admit(self, document:&DocumentBinding, action:SelectedAction, path:Option<&std::path::Path>) -> Result<Admission,AssetError> {
+        match self {
+            Self::Ordinary if available(document) => Ok(Admission::default()),
+            Self::Ordinary => Err(AssetError::new(Reason::Unqualified)),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            Self::Installed(selection) => {
+                use crate::shell::installed_observation::vault::upload_key::Action;
+                if !matches!((action,selection.action()),(SelectedAction::Prepare,Action::Prepare))
+                    && !(matches!(action,SelectedAction::Create) && selection.action().creates()) {return Err(AssetError::invalid());}
+                let control=document.installed_upload_consume(selection,path)?;
+                Ok(Admission{installed:Some(control)})
+            },
+        }
+    }
+}
+
 const DECLARATION: &str = "new-application-no-existing-upload-key";
 
 pub(crate) struct ContextRequest {
@@ -80,6 +127,7 @@ impl SetupFlight {
     }
 }
 pub(in crate::asset_session) struct PreparedSetup {
+    admission: Admission,
     flight: Arc<SetupFlight>,
     ready: Arc<NativeStateReady>,
     preference: persistence::PreferenceSnapshot,
@@ -101,6 +149,8 @@ impl Setup {
     }
 }
 impl PreparedSetup {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(super) fn installed_control(&self) -> Option<&Arc<crate::shell::installed_observation::vault::Control>> {self.admission.installed.as_ref()}
     pub(super) fn retained_bytes(&self) -> Option<usize> {
         // Preference is bounded reference DATA. Count its actual strings rather
         // than treating a serialized reference as a credential loan.
@@ -156,8 +206,10 @@ impl PreparedSetup {
 pub(in crate::asset_session) struct Consent {
     prepared: Arc<PreparedSetup>,
     revision: u32,
+    admission: Admission,
 }
 impl Consent {
+    pub(super) fn qualified(&self,document:&DocumentBinding)->bool {self.admission.qualified(document) && self.admission.same(&self.prepared.admission)}
     pub(super) fn preparation(&self) -> &Arc<PreparedSetup> {
         &self.prepared
     }
@@ -920,9 +972,11 @@ impl DocumentBinding {
         request: ContextRequest,
         app_data: &std::path::Path,
     ) -> Result<UploadKeyStatus, AssetError> {
-        if !available(self) {
-            return Err(AssetError::new(Reason::Unqualified));
-        }
+        self.prepare_upload_key_setup_selected(request,app_data,Qualification::Ordinary).await
+    }
+    pub(in crate::asset_session) async fn prepare_upload_key_setup_selected(&self,
+        request:ContextRequest,app_data:&std::path::Path,selection:Qualification) -> Result<UploadKeyStatus,AssetError> {
+        let admission=selection.admit(self,SelectedAction::Prepare,Some(app_data))?;
         self.reconcile();
         let (flight, ticket) = {
             let mut state = self.lock();
@@ -1056,6 +1110,7 @@ impl DocumentBinding {
                 .with(|observation| setup::classify(observation, preference.preference.as_ref()))
                 .map_err(data_error)?;
             let prepared = Arc::new(PreparedSetup {
+                admission,
                 flight: flight.clone(),
                 ready,
                 preference,
@@ -1116,9 +1171,10 @@ impl DocumentBinding {
         &self,
         request: CreateRequest,
     ) -> Result<UploadKeyStatus, AssetError> {
-        if !available(self) {
-            return Err(AssetError::new(Reason::Unqualified));
-        }
+        self.create_upload_key_selected(request,Qualification::Ordinary)
+    }
+    pub(in crate::asset_session) fn create_upload_key_selected(&self,request:CreateRequest,selection:Qualification)->Result<UploadKeyStatus,AssetError> {
+        let admission=selection.admit(self,SelectedAction::Create,None)?;
         let (consent, service, tools) = {
             let mut state = self.lock();
             self.expire(&mut state, Instant::now());
@@ -1137,6 +1193,7 @@ impl DocumentBinding {
                 .as_ref()
                 .and_then(|vault| vault.upload_key_setup.ready.clone())
                 .ok_or_else(|| AssetError::new(Reason::ContextStale))?;
+            if !admission.same(&prepared.admission) {return Err(AssetError::new(Reason::Unqualified));}
             current_prepared(self, &state, &prepared)?;
             let original = self
                 .service_allow_current_locked(
@@ -1167,6 +1224,7 @@ impl DocumentBinding {
             }
             (
                 Consent {
+                    admission,
                     prepared,
                     revision: request.expected_revision,
                 },

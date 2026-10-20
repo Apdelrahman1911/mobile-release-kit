@@ -18,6 +18,9 @@ use std::sync::{OnceLock, Weak};
 const NATIVE_UPLOAD_KEY_QUALIFIED: bool = false;
 #[path = "credential_upload_key_controls.rs"]
 pub(crate) mod controls;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[path = "credential_upload_key_observation.rs"]
+pub(crate) mod observation;
 // The generated container is fixed and small. Reserving the entire remaining
 // vault allowance before the real inspector returns would spuriously deny a
 // normal measured native graph. This smaller, source-derived workspace grants
@@ -703,6 +706,8 @@ impl Work {
             // This is after actual private disposal AND every original job,
             // including final journal readback/publication. No token-first cycle.
             if !controls::retire_use(held) { return false; }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            if observation::disposed(held).is_err(){return false;}
             let clock = held.clock.clone();
             self.inner = None; // Actual zeroizing private Fields/candidate holding dropped first.
                                // Only the same-original publication + all-join disposal proof can
@@ -875,6 +880,8 @@ impl UploadKeyGoGate {
             if !self.preparation.current() || owner.interrupted() {
                 return Err(Reason::ContextStale);
             }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+            observation::checkpoint(&held,observation::Cut::BeforeGo)?;
             Ok(PreparedGenerationGo {
                 gate: self.clone(),
                 consumed: false,
@@ -906,7 +913,7 @@ impl DocumentBinding {
         native_availability: wire::Availability,
         consent: controls::Consent,
     ) -> Result<AssetStatus, AssetError> {
-        if !available(self) || native_availability != wire::Availability::Available {
+        if !consent.qualified(self) || native_availability != wire::Availability::Available {
             return Err(AssetError::new(Reason::Unqualified));
         }
         self.reconcile();
@@ -1572,6 +1579,8 @@ async fn run_inner(
         let state = document.lock();
         rematch(document, &state, owner, held, false)?;
     }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    observation::bind(held)?;
     controls::begin_use(held)?; // SAME original coordinator, before any journal/private work.
     controls::check_use(held)?;
     held.progress()?
@@ -1732,6 +1741,8 @@ async fn run_inner(
         let state = document.lock();
         rematch(document, &state, owner, held, true)?;
     }
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    { observation::stored(held)?; observation::checkpoint(held,observation::Cut::AfterNew)?; }
     let (reference, certificate) = {
         let mut p = held.progress()?;
         p.enter(ProgressPhase::Stored, ProgressPhase::Recording)?;
