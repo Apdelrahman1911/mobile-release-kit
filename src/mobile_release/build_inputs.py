@@ -685,6 +685,9 @@ _LAYOUTS = {
     "store-metadata": {"metadata": _ScratchSpec("store-metadata.zip", 512 * 1024**2)},
     "ios-snapshot": {},  # Fixed bounded tree implementation lives in ios_artifacts.
     "online-runner": {},
+    # Fixed input for bundled Apple PKCS8/CSR/SPKI verification only. Existing
+    # private _FD/FiniteScratch publication, identity checks and cleanup apply.
+    "apple-distribution-key": {"pending-key": _ScratchSpec("pending-apple-key.mrk", 8233)},
     "online-readback": {platform: _ScratchSpec(platform + ".json", _SMALL, "exclusive-output")
                         for platform in ("android", "ios")},
 }

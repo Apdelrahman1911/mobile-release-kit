@@ -4,6 +4,8 @@ import type { ApiError, JsonObject } from './types.ts';
 export type AssetFileKind = 'android-keystore' | 'android-firebase' | 'ios-firebase' | 'apple-p12' | 'apple-profile' | 'asc-p8' | 'google-service-account';
 export type AssetScalarKind = 'google-wif' | 'project-read-token' | 'apple-review-contact' | 'apple-review-demo' | 'operation-commitment';
 export type AssetKind = AssetFileKind | AssetScalarKind;
+// Encrypted descriptor-only row; never an input/assessment/assignment kind.
+export type StoredAssetKind = AssetKind | 'apple-distribution-key';
 export type AssetPlatform = 'android' | 'ios' | 'project';
 export type AssetStage = 'candidate' | 'external-testing' | 'production';
 export type AssetPurpose = 'full' | 'signing' | 'store' | 'provisioning';
@@ -92,7 +94,7 @@ export interface AssetStatus {
     selectionToken: string | null; assessment: CredentialAssessment | null;
     preview: { token: string; action: AssetPreviewAction; expiresInMs: number; subject: AssetPreviewSubject } | null;
   } | null;
-  records: { recordId: string; revision: number; kind: AssetKind; availability: 'unassigned' | 'assigned' | 'mutation-pending'; storage: 'session' | 'encrypted'; label: string | null; payloadState: 'not-checked' | 'assessed' }[];
+  records: { recordId: string; revision: number; kind: StoredAssetKind; availability: 'unassigned' | 'assigned' | 'mutation-pending'; storage: 'session' | 'encrypted'; label: string | null; payloadState: 'not-checked' | 'assessed' }[];
   assignments: { kind: AssetKind; recordId: string; recordRevision: number; contextRevision: number; availability: 'available' | 'unavailable' }[];
 }
 

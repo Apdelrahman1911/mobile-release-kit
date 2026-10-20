@@ -261,7 +261,7 @@ impl Payload {
         RECORD_METADATA_BYTES.saturating_add(self.material.as_ref().map_or(0, |m| m.retained_bytes().unwrap_or(usize::MAX)))
             .saturating_add(self.fields.as_ref().map_or(0, Fields::byte_count))
     }
-    fn usable_source(&self) -> bool { self.kind.file().is_none() || self.material.as_ref().is_some_and(|m| m.observation.is_observed()) }
+    fn usable_source(&self) -> bool { self.kind != Kind::AppleDistributionKey && (self.kind.file().is_none() || self.material.as_ref().is_some_and(|m| m.observation.is_observed())) }
 }
 struct Record { key: RecordKey, payload: Arc<Payload>, mutation_pending: bool }
 struct Candidate { payload: Arc<Payload>, record_id: Token, existing: Option<RecordKey> }
@@ -2622,6 +2622,7 @@ fn macos_session_kind(platform: Platform, stage: Stage, purpose: Purpose, kind: 
     }
 }
 fn session_kind_gate(context: &NativeContext, kind: Kind) -> Result<(), AssetError> {
+    if kind == Kind::AppleDistributionKey { return Err(AssetError::new(Reason::UnsupportedFormat)); }
     if kind == Kind::GoogleServiceAccount {
         return if context.execution_mode == commands::ExecutionMode::Local && context.platform == Platform::Android
             && matches!(context.purpose, Purpose::Full | Purpose::Store) && kind.enabled() { Ok(()) }

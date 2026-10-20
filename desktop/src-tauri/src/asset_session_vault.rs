@@ -260,9 +260,10 @@ pub(super) fn summaries(state: &DocumentState) -> Vec<RecordStatus> {
     if vault.revoked || vault.key.is_none() || !matches!(vault.state, State::Unlocked | State::Mutating | State::Interrupted) { return Vec::new(); }
     vault.rows.iter().map(|row| {
         let key = row.key();
-        let assigned = vault.writable() && state.assignments.iter().any(|assignment| assignment.record_id == key.id && assignment.record_revision == key.revision
+        let pending_key = row.authenticated.descriptor.kind == Kind::AppleDistributionKey;
+        let assigned = !pending_key && vault.writable() && state.assignments.iter().any(|assignment| assignment.record_id == key.id && assignment.record_revision == key.revision
             && assignment_available(state, assignment));
-        let assessed = vault.writable() && record_assessed(state, &key);
+        let assessed = !pending_key && vault.writable() && record_assessed(state, &key);
         RecordStatus { record_id: key.id, revision: key.revision, kind: row.authenticated.descriptor.kind,
             availability: if row.mutation_pending { "mutation-pending" } else if assigned { "assigned" } else { "unassigned" },
             storage: "encrypted", label: row.authenticated.descriptor.label.clone(), payload_state: if assessed { "assessed" } else { "not-checked" } }
@@ -2243,6 +2244,9 @@ impl DocumentBinding {
         let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
         let row = session.row(&key).filter(|row| !row.mutation_pending).ok_or_else(AssetError::invalid)?;
         let reference = row.reference(session.identity.ok_or_else(AssetError::invalid)?); let kind = row.authenticated.descriptor.kind;
+        // A pending signing key is recovered by its original intent owner,
+        // never by ordinary assessment/Bind or generic removal.
+        if kind == Kind::AppleDistributionKey { return Err(AssetError::new(Reason::UnsupportedFormat)); }
         let roster = self.vault_roster(state)?;
         if roster.generation != context.registry_generation { return Err(AssetError::new(Reason::ContextStale)); }
         let mut slot = self.vault_owner(state, Operation::Prepare, Some(context.clone()), Some(key), Some(Instant::now() + REVIEW), true)?;
@@ -2259,6 +2263,9 @@ impl DocumentBinding {
         let session = state.vault.as_ref().ok_or_else(AssetError::invalid)?;
         let row = session.row(&key).filter(|row| !row.mutation_pending).ok_or_else(AssetError::invalid)?;
         let reference = row.reference(session.identity.ok_or_else(AssetError::invalid)?); let kind = row.authenticated.descriptor.kind;
+        // A pending signing key is recovered by its original intent owner,
+        // never by ordinary assessment/Bind or generic removal.
+        if kind == Kind::AppleDistributionKey { return Err(AssetError::new(Reason::UnsupportedFormat)); }
         let roster = self.vault_roster(&mut state)?;
         let mut slot = self.vault_owner(&mut state, Operation::PrepareDelete, None, Some(key.clone()), Some(Instant::now() + REVIEW), true)?;
         slot.kind = Some(kind); slot.vault.reference = Some(reference); slot.vault.generation = Some(roster.generation);

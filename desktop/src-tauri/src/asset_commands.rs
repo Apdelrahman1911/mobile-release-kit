@@ -14,6 +14,14 @@ mod upload_key_fields;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) use upload_key_fields::UploadKeySecrets;
 
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+#[path = "credential_apple_distribution_key_fields.rs"]
+mod apple_distribution_key_fields;
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(crate) use apple_distribution_key_fields::{AppleDistributionKeyFields, AppleDistributionKeyMetadata,
+    PRIVATE_FRAME_LIMIT as APPLE_KEY_PRIVATE_FRAME_LIMIT, CONSTRUCTION_BYTES as APPLE_KEY_CONSTRUCTION_BYTES,
+    public_parts_match as apple_distribution_key_public_matches};
+
 pub(crate) const POLICY: &str = "credential-policy-v1";
 pub(crate) const DRAFT_LIMIT: usize = 512 * 1024;
 const SMALL_LIMIT: usize = 1024;
@@ -23,6 +31,8 @@ const PREPARE_LIMIT: usize = 128 * 1024;
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Kind {
     AndroidKeystore, AndroidFirebase, AppleP12, AppleProfile, AscP8,
+    // Native storage only: deliberately absent from kind()/enabled()/FileKind.
+    AppleDistributionKey,
     IosFirebase, GoogleWif, ProjectReadToken, AppleReviewContact, AppleReviewDemo, OperationCommitment, GoogleServiceAccount,
 }
 impl Kind {
@@ -35,6 +45,7 @@ impl Kind {
             Self::AppleReviewDemo => "apple-review-demo",
             Self::OperationCommitment => "operation-commitment",
             Self::GoogleServiceAccount => "google-service-account",
+            Self::AppleDistributionKey => "apple-distribution-key",
         }
     }
     pub(crate) fn enabled(self) -> bool {
@@ -328,6 +339,7 @@ pub(crate) fn field_names(kind: Kind) -> &'static [&'static str] {
     match kind {
         Kind::AndroidKeystore => &["storePassword", "keyAlias", "keyPassword"],
         Kind::AndroidFirebase | Kind::IosFirebase | Kind::AppleProfile | Kind::GoogleServiceAccount => &[],
+        Kind::AppleDistributionKey => &["privateKeyPkcs8Base64", "csrPem", "publicKeySpkiBase64"],
         Kind::AppleP12 => &["password"], Kind::GoogleWif => &["provider", "serviceAccount"], Kind::ProjectReadToken => &["token"],
         Kind::AscP8 => &["keyId", "issuerId"],
         Kind::AppleReviewContact => &["contactFirstName", "contactLastName", "contactEmail", "contactPhone"],
@@ -359,6 +371,13 @@ pub(crate) fn own_fields(kind: Kind, value: &Value) -> Result<Fields, AssetError
         else { values.push(Some(copy_text(text(source)?)?)); }
     }
     Ok(Fields { kind, values })
+}
+// Called only by authenticated vault/portable-backup decoding. It does not
+// widen ordinary renderer field admission, assessment or session kinds.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+pub(crate) fn stored_fields(kind: Kind, value: &Value) -> Result<Fields, AssetError> {
+    if kind == Kind::AppleDistributionKey { apple_distribution_key_fields::stored_fields(value) }
+    else { validate_fields(kind, value)?; own_fields(kind, value) }
 }
 pub(crate) fn copy_text(text: &str) -> Result<String, AssetError> {
     let mut copy = String::new(); copy.try_reserve_exact(text.len()).map_err(|_| AssetError::new(Reason::Capacity))?;

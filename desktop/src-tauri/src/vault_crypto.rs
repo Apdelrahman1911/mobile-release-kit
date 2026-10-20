@@ -15,6 +15,9 @@ use zeroize::{Zeroize, Zeroizing};
 // key and does not turn a restored record into an assessment or assignment.
 #[path = "vault_backup.rs"]
 pub(crate) mod backup;
+#[path = "vault_crypto_apple_distribution_key.rs"]
+mod apple_distribution_key;
+pub(crate) use apple_distribution_key::{ReservedAppleDistributionKey, KEY_CRYPTO_BYTES as APPLE_KEY_CRYPTO_BYTES};
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 type WrappingKeyCandidate = secret_service::checked_lookup::WrappingKeyCandidate;
@@ -161,6 +164,13 @@ impl VaultKey {
     }
     fn seal_record_with(&self, record: Id, previous: Option<Revision>, descriptor: &Descriptor,
         fields: &Fields, file: Option<&[u8]>, allowance: usize, random: &mut impl Entropy) -> Result<SealedRecord> {
+        self.seal_record_with_revision(record, previous, descriptor, fields, file, allowance, random, None)
+    }
+    // SAME parent-private seam used by the fixed Apple-profile reservation.
+    // Root composes that child's separate kind arm, never an arbitrary kind.
+    fn seal_record_with_revision(&self, record: Id, previous: Option<Revision>, descriptor: &Descriptor,
+        fields: &Fields, file: Option<&[u8]>, allowance: usize, random: &mut impl Entropy,
+        reserved: Option<Revision>) -> Result<SealedRecord> {
         capacity(0, allowance)?;
         if descriptor.kind != fields.vault_kind() || descriptor.presence() != fields.vault_presence()
             || descriptor.has_file() != file.is_some() { return Err(Error::Format); }
@@ -175,7 +185,11 @@ impl VaultKey {
         let payload_length = 8usize.checked_add(scalars).and_then(|value| value.checked_add(file_length)).ok_or(Error::Bounds)?;
         let descriptor_bytes = Zeroizing::new(descriptor.encode()?);
         let counter = previous.map_or(Some(1), |previous| previous.counter.checked_add(1)).ok_or(Error::Bounds)?;
-        let revision = Revision::new(fresh_id(random)?, counter)?;
+        let revision = match reserved {
+            Some(value) if previous.is_none() && value.counter == 1 && descriptor.kind == commands::Kind::AppleDistributionKey => value,
+            Some(_) => return Err(Error::Format),
+            None => Revision::new(fresh_id(random)?, counter)?,
+        };
         if previous.is_some_and(|previous| previous.random == revision.random) { return Err(Error::Random); }
         let data_key = random_key(random)?; let nonces = [nonce(random)?, nonce(random)?, nonce(random)?];
         if nonces[0] == self.header_nonce { return Err(Error::Random); }
@@ -391,8 +405,7 @@ fn decode_payload(descriptor: &Descriptor, payload: &[u8]) -> Result<(Fields, Op
     let mut decoder = serde_json::Deserializer::from_slice(&payload[8..scalar_end]);
     let values = ScalarSeed { kind: descriptor.kind }.deserialize(&mut decoder).map_err(|_| Error::Format)?;
     decoder.end().map_err(|_| Error::Format)?;
-    commands::validate_fields(descriptor.kind, &values.0).map_err(|_| Error::Format)?;
-    let fields = commands::own_fields(descriptor.kind, &values.0).map_err(|_| Error::Format)?;
+    let fields = commands::stored_fields(descriptor.kind, &values.0).map_err(|_| Error::Format)?;
     if fields.vault_presence() != descriptor.presence() { return Err(Error::Format); }
     Ok((fields, file))
 }
