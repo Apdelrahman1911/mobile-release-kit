@@ -23,6 +23,7 @@ pub(crate) struct Connect {
     pub(crate) selected_login: String,
     pub(crate) expected_document_revision: u32,
     pub(crate) expected_connection_revision: u32,
+    pub(crate) accounts_observation_id: Option<String>,
 }
 impl Connect {
     pub(crate) fn bounded(&self) -> bool {
@@ -31,11 +32,13 @@ impl Connect {
             && login(&self.selected_login)
             && revision(self.expected_document_revision)
             && revision(self.expected_connection_revision)
+            && self.accounts_observation_id.as_ref().is_none_or(|id| valid_id(id))
             && self
                 .project_id
                 .capacity()
                 .checked_add(self.repository.capacity())
                 .and_then(|bytes| bytes.checked_add(self.selected_login.capacity()))
+                .and_then(|bytes| bytes.checked_add(self.accounts_observation_id.as_ref().map_or(0, String::capacity)))
                 .is_some_and(|bytes| bytes <= REQUEST_LIMIT)
     }
 }
@@ -90,6 +93,8 @@ fn decode_command_value(name: &str, value: &Value) -> Result<Command, BridgeErro
                 "selectedLogin",
                 "expectedDocumentRevision",
                 "expectedConnectionRevision",
+            ]) || exact(&[
+                "projectId", "repository", "selectedLogin", "expectedDocumentRevision", "expectedConnectionRevision", "accountsObservationId",
             ]) =>
         {
             // Check each borrowed scalar before copying. No generic recursive
@@ -108,6 +113,10 @@ fn decode_command_value(name: &str, value: &Value) -> Result<Command, BridgeErro
                 selected_login: selected.into(),
                 expected_document_revision: count("expectedDocumentRevision")?,
                 expected_connection_revision: count("expectedConnectionRevision")?,
+                accounts_observation_id: if fields.contains_key("accountsObservationId") {
+                    let id = text("accountsObservationId")?;
+                    if !valid_id(id) { return Err(BridgeError::invalid()); } Some(id.into())
+                } else { None },
             };
             if !input.bounded() {
                 return Err(BridgeError::invalid());

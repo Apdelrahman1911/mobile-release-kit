@@ -276,6 +276,7 @@ mod github_auth_capture_wire;
 mod github_auth_nomination;
 mod github_auth_native_owner;
 mod github_auth_entry_protocol;
+mod github_auth_accounts;
 mod github_connection_session;
 mod github_preflight_protocol;
 mod github_preflight_session;

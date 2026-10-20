@@ -1811,10 +1811,20 @@ fn github_auth_command(name: &str, webview: &Webview, request: &tauri::ipc::Requ
         .map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))
 }
 #[tauri::command]
-async fn github_auth_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_entry_protocol::Status, BridgeError> {
+async fn github_auth_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_accounts::PublicStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
     github_auth_command("github_auth_status", &webview, &request)?;
-    Ok(state.document.github_auth_status())
+    Ok(state.document.github_auth_public_status())
+}
+#[tauri::command]
+async fn github_auth_accounts(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_accounts::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
+    let tauri::ipc::InvokeBody::Raw(raw) = request.body() else { return Err(BridgeError::invalid()); };
+    let input = crate::github_auth_accounts::decode(raw)?;
+    let observer = state.document.github_auth_accounts(input)?;
+    drop(request); drop(state); drop(webview);
+    observer.returned().await
 }
 #[tauri::command]
 async fn github_auth_connect(app: AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_entry_protocol::ConnectResult, BridgeError> {
@@ -1829,13 +1839,13 @@ async fn github_auth_connect(app: AppHandle, webview: Webview, request: tauri::i
     observer.returned().await
 }
 #[tauri::command]
-async fn github_auth_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_entry_protocol::Status, BridgeError> {
+async fn github_auth_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_auth_accounts::PublicStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
     let crate::github_auth_entry_protocol::Command::Cancel { operation_id } =
         github_auth_command("github_auth_cancel", &webview, &request)?
         else { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); };
     // No stale observation revision can make STOP unreachable.
-    state.document.github_auth_cancel(&operation_id)
+    state.document.github_auth_public_cancel(&operation_id)
 }
 
 #[tauri::command]
@@ -4470,7 +4480,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             project_identity_open, project_identity_prepare, project_identity_apply,
             project_identity_close, project_identity_status,
             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
-            github_auth_status, github_auth_connect, github_auth_cancel,
+            github_auth_status, github_auth_connect, github_auth_cancel, github_auth_accounts,
             git_read_status, git_read_start, git_read_cancel,
             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,

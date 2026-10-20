@@ -13,6 +13,7 @@ use mrk_macos_installed_native::{
 use sha2::{Digest, Sha256};
 use std::time::Instant;
 use zeroize::Zeroizing;
+use crate::github_auth_accounts as accounts;
 
 const SOURCE_LIMIT: usize = 64;
 pub(crate) struct GhAuthSources {
@@ -25,6 +26,7 @@ pub(crate) struct GhAuthSources {
     close_failed: bool,
     first: Option<Reason>,
     native: Option<wire::Native>,
+    accounts: Option<accounts::Witness>,
     indices: [Option<usize>; 3],
 }
 impl Drop for GhAuthSources {
@@ -50,6 +52,7 @@ impl GhAuthSources {
             close_failed: false,
             first: None,
             native: None,
+            accounts: None,
             indices: [None; 3],
         }
     }
@@ -74,7 +77,7 @@ impl GhAuthSources {
             .checked_mul(std::mem::size_of::<Descriptor>() + 255)?
             .checked_add(std::mem::size_of::<Self>())?
             // Hash scratch + private full config snapshot + finite parser stack.
-            .checked_add(32768 + wire::CONFIG_LIMIT as usize + 3 * 4096 + 4096)?
+            .checked_add(32768 + wire::CONFIG_LIMIT as usize + 3 * 4096 + 4096 + 16384)?
             .checked_add(mrk_macos_installed_native::vault_filesystem::SNAPSHOT_FRAME_BYTES)
     }
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
@@ -90,13 +93,18 @@ impl GhAuthSources {
                 self.native
                     .as_ref()
                     .map_or(Some(0), wire::Native::retained_bytes)?,
-            )
+            )?
+            .checked_add(self.accounts.as_ref().map_or(Some(0), accounts::Witness::retained_bytes)?)
     }
     fn snapshot(
         &self,
         index: usize,
         stop: &mut dyn FnMut() -> bool,
     ) -> Result<wire::Snapshot, Reason> {
+        self.snapshot_read(index, stop, false).map(|(snapshot, _)| snapshot)
+    }
+    fn snapshot_read(&self, index: usize, stop: &mut dyn FnMut() -> bool, collect: bool)
+        -> Result<(wire::Snapshot, Option<Vec<String>>), Reason> {
         checkpoint(stop)?;
         let actual = stat::fstat(self.book.fd(index)?).map_err(|_| Reason::SourceChanged)?;
         checkpoint(stop)?;
@@ -137,7 +145,7 @@ impl GhAuthSources {
         let mut buffer = Zeroizing::new([0u8; 32768]);
         // The same held bytes/hash, never a later path reopen or claimed schema.
         // Retain no plaintext beyond this bounded native call; parser borrows.
-        let mut config = if Some(index) == self.indices[1] {
+        let mut config = if Some(index) == self.indices[1] || collect {
             Some(Zeroizing::new(vec![0u8; id.size as usize]))
         } else {
             None
@@ -172,16 +180,19 @@ impl GhAuthSources {
         if file_identity(&after)? != id {
             return Err(Reason::SourceChanged);
         }
-        if config
+        if Some(index) == self.indices[1] && config
             .as_ref()
             .is_some_and(|raw| !wire::config_schema_one(raw))
         {
             return Err(Reason::SourceRefused);
         }
-        Ok(wire::Snapshot {
+        let names = if collect {
+            Some(accounts::names(config.as_ref().ok_or(Reason::SourceRefused)?).ok_or(Reason::SourceRefused)?)
+        } else { None };
+        Ok((wire::Snapshot {
             identity,
             sha256: hash.finalize().iter().map(|b| format!("{b:02x}")).collect(),
-        })
+        }, names))
     }
     // Reuse SourceBook's actual reserve/adopt/held descriptor states. No image,
     // archive, credential or SavedConfiguration authority is borrowed as gh.
@@ -307,6 +318,39 @@ impl GhAuthSources {
         })();
         self.remember(result)
     }
+    // SAME finite SourceBook/account/ACL facet; config-only mode never mints
+    // Native/tool/capture authority and never opens a keyring or gh executable.
+    pub(crate) fn inspect_accounts(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
+        if !self.not_started() { return Err(Reason::CleanupUnknown); }
+        self.started = true;
+        let result = (|| {
+            checkpoint(stop)?; self.account.acquire().map_err(|_| Reason::SourceRefused)?; checkpoint(stop)?;
+            let (home, uid, gid) = self.account.selected().map_err(|_| Reason::SourceChanged)?;
+            let home = PathBuf::from(home); let config = home.join(".config/gh");
+            let config_parts = parts(&config)?;
+            let slots = roster_limit(std::iter::once(config_parts.len()), 2)?;
+            if slots > SOURCE_LIMIT || slots.checked_add(32).is_none_or(|n| n > 256) { return Err(Reason::Capacity); }
+            self.book.begin(slots, 0, 0)?; self.acl_entered = true; self.acl = Some(SnapshotBook::new()); self.book.root(stop)?;
+            let (parents, _) = self.book.chain(&config_parts, false, stop)?;
+            let parent = *parents.last().ok_or(Reason::SourceRefused)?;
+            if self.book.directory(parent)?.uid != uid { return Err(Reason::SourceRefused); }
+            let config_index = self.book.child(parent, b"config.yml", true, stop)?; self.indices[1] = Some(config_index);
+            let hosts_index = self.book.child(parent, b"hosts.yml", true, stop)?; self.indices[2] = Some(hosts_index);
+            let config_snapshot = self.snapshot(config_index, stop)?; // original prelaunch schema guard unchanged
+            let (hosts, logins) = self.snapshot_read(hosts_index, stop, true)?;
+            let witness = accounts::Witness { uid, gid, home: home.to_str().ok_or(Reason::SourceRefused)?.into(),
+                config: config.to_str().ok_or(Reason::SourceRefused)?.into(), files: wire::Files { config: config_snapshot, hosts },
+                logins: logins.ok_or(Reason::SourceRefused)? };
+            if !witness.valid() { return Err(Reason::SourceRefused); }
+            self.accounts = Some(witness); self.post_inner(stop)?;
+            if self.retained_bytes().zip(Self::working_bytes()).is_none_or(|(n, limit)| n > limit) { return Err(Reason::Capacity); }
+            Ok(())
+        })(); self.remember(result)
+    }
+    pub(crate) fn accounts_witness(&self) -> Result<&accounts::Witness, Reason> {
+        if self.finished || self.first.is_some() { return Err(Reason::SourceChanged); }
+        self.accounts.as_ref().ok_or(Reason::SourceRefused)
+    }
     fn post_inner(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {
         checkpoint(stop)?;
         let (_, uid, _) = self.account.selected().map_err(|_| Reason::SourceChanged)?;
@@ -367,16 +411,15 @@ impl GhAuthSources {
                 })?;
             checkpoint(stop)?;
         }
-        let native = self.native.as_ref().ok_or(Reason::SourceChanged)?;
-        for (index, expected) in
-            self.indices
-                .iter()
-                .zip([&native.tool, &native.files.config, &native.files.hosts])
-        {
-            if &self.snapshot(index.ok_or(Reason::SourceChanged)?, stop)? != expected {
-                return Err(Reason::SourceChanged);
+        if let Some(native) = &self.native {
+            for (index, expected) in self.indices.iter().zip([&native.tool, &native.files.config, &native.files.hosts]) {
+                if &self.snapshot(index.ok_or(Reason::SourceChanged)?, stop)? != expected { return Err(Reason::SourceChanged); }
             }
-        }
+        } else if let Some(accounts) = &self.accounts {
+            for (index, expected) in self.indices[1..].iter().zip([&accounts.files.config, &accounts.files.hosts]) {
+                if &self.snapshot(index.ok_or(Reason::SourceChanged)?, stop)? != expected { return Err(Reason::SourceChanged); }
+            }
+        } else { return Err(Reason::SourceChanged); }
         Ok(())
     }
     pub(crate) fn post(&mut self, stop: &mut dyn FnMut() -> bool) -> Result<(), Reason> {

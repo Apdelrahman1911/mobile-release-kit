@@ -3,6 +3,8 @@
 //! admission, PATH discovery, or substitute History provider. This entry stays
 //! unavailable without the distinct installed stock nomination/profile.
 use super::*;
+#[path = "asset_session_gh_auth_accounts.rs"]
+mod accounts;
 use crate::{
     github_auth_capture_wire as wire, github_auth_entry_protocol as entry_wire,
     github_auth_native_owner::NativeGhProvider,
@@ -26,12 +28,14 @@ const FAILURE_CLEANUP: Duration = Duration::from_secs(10);
 pub(super) enum Entry {
     Original(Arc<Registration>),
     Finished(GitHubAuthStatus),
+    Accounts(Arc<accounts::Read>),
+    AccountsFinished(accounts::Finished),
 }
 impl Entry {
     fn original(&self) -> Option<&Arc<Registration>> {
         match self {
             Self::Original(original) => Some(original),
-            Self::Finished(_) => None,
+            Self::Finished(_) | Self::Accounts(_) | Self::AccountsFinished(_) => None,
         }
     }
 }
@@ -288,6 +292,7 @@ pub(super) struct Registration {
     idle_connection_epoch: u32,
     root: asset_source::RegisteredRoot,
     request: GitHubAuthRequest,
+    accounts_witness: Option<crate::github_auth_accounts::Witness>,
     // Only the actual SAME original GUI may fill this cell, after its native
     // close/release dispatches join. This is not supplied by the command DTO.
     physical_executable: Mutex<Option<PathBuf>>,
@@ -868,6 +873,7 @@ impl GitHubAuthConnectionHold {
 }
 
 pub(super) fn pending(state: &DocumentState) -> bool {
+    if accounts::pending(state) { return true; }
     state
         .gh_auth
         .as_ref()
@@ -880,6 +886,7 @@ pub(super) fn pending(state: &DocumentState) -> bool {
         })
 }
 pub(super) fn can_exit(state: &DocumentState) -> bool {
+    if !accounts::can_exit(state) { return false; }
     state
         .gh_auth
         .as_ref()
@@ -887,6 +894,7 @@ pub(super) fn can_exit(state: &DocumentState) -> bool {
         .is_none_or(|original| original.actual_settled())
 }
 pub(super) fn stop(state: &DocumentState, cause: GitHubReason) {
+    accounts::stop(state, cause);
     if let Some(original) = state.gh_auth.as_ref().and_then(Entry::original) {
         if !original.actual_settled() {
             original.fail(github_session::refused(cause), Instant::now());
@@ -897,6 +905,7 @@ fn observation_scope_only(stage: Stage, body_returned: bool) -> bool {
     body_returned || matches!(stage, Stage::Closing | Stage::BodyReturned)
 }
 pub(super) fn observe_locked(document: &DocumentBinding, state: &mut DocumentState, now: Instant) {
+    accounts::observe(document, state, now);
     let Some(original) = state.gh_auth.as_ref().and_then(Entry::original).cloned() else {
         return;
     };
@@ -980,6 +989,7 @@ pub(super) fn observe_locked(document: &DocumentBinding, state: &mut DocumentSta
 /// same Document lock. Neither body return nor a result-shaped /user message
 /// may discard these originals. Unknown originals are never replaced here.
 pub(super) fn retire_joined(document: &DocumentBinding, state: &mut DocumentState) {
+    accounts::retire(document, state);
     let Some(original) = state.gh_auth.as_ref().and_then(Entry::original).cloned() else {
         return;
     };
@@ -1027,7 +1037,8 @@ pub(super) fn retire_joined(document: &DocumentBinding, state: &mut DocumentStat
 pub(super) fn retained_bytes(state: &DocumentState) -> Option<usize> {
     match &state.gh_auth {
         None => Some(0),
-        Some(Entry::Original(_)) => None,
+        Some(Entry::Original(_)) | Some(Entry::Accounts(_)) => None,
+        Some(Entry::AccountsFinished(finished)) => finished.retained_bytes(),
         Some(Entry::Finished(status)) => {
             std::mem::size_of::<Entry>().checked_add(status.retained_bytes()?)
         }
@@ -1112,6 +1123,7 @@ impl DocumentBinding {
             if !request.bounded() {
                 return Err(BridgeError::invalid());
             }
+            let accounts_witness = accounts::selected(self, &mut state, &request)?;
             let idle_connection_epoch = state
                 .github
                 .gh_auth_idle_epoch()
@@ -1187,6 +1199,7 @@ impl DocumentBinding {
                 idle_connection_epoch,
                 root,
                 request,
+                accounts_witness,
                 physical_executable: Mutex::new(None),
                 result,
                 context,
@@ -1311,7 +1324,7 @@ fn status(document: &DocumentBinding, state: &DocumentState) -> GitHubAuthStatus
             connection_revision: state.github.snapshot().revision,
             ..status.clone()
         },
-        None => GitHubAuthStatus {
+        None | Some(Entry::Accounts(_)) | Some(Entry::AccountsFinished(_)) => GitHubAuthStatus {
             schema_version: 1,
             document_revision: state.revision,
             connection_revision: state.github.snapshot().revision,
@@ -1418,9 +1431,9 @@ pub(super) enum ChildStep {
     target_pointer_width = "64",
     any(target_arch = "aarch64", target_arch = "x86_64")
 ))]
-pub(super) struct ChildCall {
-    original: Arc<Registration>,
-    step: ChildStep,
+pub(super) enum ChildCall {
+    Connect { original: Arc<Registration>, step: ChildStep },
+    Accounts(accounts::ChildCall),
 }
 #[cfg(all(
     target_os = "macos",
@@ -1429,7 +1442,7 @@ pub(super) struct ChildCall {
 ))]
 impl ChildCall {
     pub(super) fn cleanup(&self) -> bool {
-        self.step == ChildStep::Close
+        match self { Self::Connect { step, .. } => *step == ChildStep::Close, Self::Accounts(call) => call.close }
     }
 }
 
@@ -1465,7 +1478,10 @@ fn source_native_failure(
     any(target_arch = "aarch64", target_arch = "x86_64")
 ))]
 pub(super) fn execute_child(owner: &Arc<OriginalWork>, call: ChildCall) -> Result<(), Reason> {
-    let original = call.original;
+    let (original, step) = match call {
+        ChildCall::Connect { original, step } => (original, step),
+        ChildCall::Accounts(call) => return accounts::execute_child(owner, call),
+    };
     if !Arc::ptr_eq(owner, &original.original) {
         return Err(Reason::CleanupUnknown);
     }
@@ -1475,7 +1491,7 @@ pub(super) fn execute_child(owner: &Arc<OriginalWork>, call: ChildCall) -> Resul
                 .facts
                 .lock()
                 .map_err(|_| BridgeError::cleanup_unknown())?;
-            let entered = match call.step {
+            let entered = match step {
                 ChildStep::Inspect => &mut facts.source_entered,
                 ChildStep::BeforeHttp => &mut facts.before_http_entered,
                 ChildStep::Finish => &mut facts.finish_entered,
@@ -1486,7 +1502,7 @@ pub(super) fn execute_child(owner: &Arc<OriginalWork>, call: ChildCall) -> Resul
             }
             *entered = true;
         }
-        if call.step != ChildStep::Close {
+        if step != ChildStep::Close {
             original.gate().check_current(&original.context)?;
         } else {
             if original.cleanup_expired()
@@ -1504,7 +1520,7 @@ pub(super) fn execute_child(owner: &Arc<OriginalWork>, call: ChildCall) -> Resul
             .sources
             .lock()
             .map_err(|_| BridgeError::cleanup_unknown())?;
-        let result = match call.step {
+        let result = match step {
             ChildStep::Inspect => {
                 let selected = original
                     .physical_executable
@@ -1518,7 +1534,12 @@ pub(super) fn execute_child(owner: &Arc<OriginalWork>, call: ChildCall) -> Resul
                     &original.nomination,
                     crate::installed_runtime::GitHubAuthRuntimeSlots::source_runtime_fd_bound(),
                     &mut || owner.interrupted(),
-                )
+                ).and_then(|()| {
+                    let native = source.native_snapshot()?;
+                    if original.accounts_witness.as_ref().is_some_and(|w| !w.matches(native, &original.context.login)) {
+                        Err(Reason::SourceChanged)
+                    } else { Ok(()) }
+                })
             }
             ChildStep::BeforeHttp | ChildStep::Finish => source.post(&mut || owner.interrupted()),
             ChildStep::Close => source.close(&mut |first| {
@@ -1528,7 +1549,7 @@ pub(super) fn execute_child(owner: &Arc<OriginalWork>, call: ChildCall) -> Resul
         };
         source_native_failure(&original, source.first_failure());
         result.map_err(source_error)?;
-        if call.step == ChildStep::Close && !source.settled() {
+        if step == ChildStep::Close && !source.settled() {
             return Err(BridgeError::cleanup_unknown());
         }
         drop(source);
@@ -1536,10 +1557,10 @@ pub(super) fn execute_child(owner: &Arc<OriginalWork>, call: ChildCall) -> Resul
             .facts
             .lock()
             .map_err(|_| BridgeError::cleanup_unknown())?;
-        if call.step == ChildStep::Inspect {
+        if step == ChildStep::Inspect {
             facts.source_returned = true;
         }
-        if call.step == ChildStep::BeforeHttp {
+        if step == ChildStep::BeforeHttp {
             facts.before_http_returned = true;
         }
         Ok(())
@@ -1563,7 +1584,7 @@ pub(super) fn execute_child(owner: &Arc<OriginalWork>, call: ChildCall) -> Resul
 async fn source_call(original: &Arc<Registration>, step: ChildStep) -> Result<(), BridgeError> {
     match child(
         &original.original,
-        ChildJob::GitHubAuth(ChildCall {
+        ChildJob::GitHubAuth(ChildCall::Connect {
             original: original.clone(),
             step,
         }),
@@ -1886,7 +1907,8 @@ mod tests {
             root: asset_source::RegisteredRoot { path: "/unopened-gh-project".into(),
                 identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
             request: GitHubAuthRequest { project_id: context.project_id.clone(), repository: context.repository.clone(),
-                selected_login: context.login.clone(), expected_document_revision: 1, expected_connection_revision: 1 },
+                selected_login: context.login.clone(), expected_document_revision: 1, expected_connection_revision: 1, accounts_observation_id: None },
+            accounts_witness: None,
             physical_executable: Mutex::new(None), result: Arc::new(ResultSlot::new(initial)), context, end,
             provider: Mutex::new(None), active: Mutex::new(None), http: Mutex::new(None),
             facts: Mutex::new(Facts { stage: Stage::Picking, failure: None, cleanup_end: None, unknown: false,
@@ -2012,6 +2034,7 @@ mod tests {
             selected_login: "fixture-login".into(),
             expected_document_revision: 1,
             expected_connection_revision: 1,
+            accounts_observation_id: None,
         };
         assert!(request.bounded());
         request.selected_login = String::with_capacity(16385);
