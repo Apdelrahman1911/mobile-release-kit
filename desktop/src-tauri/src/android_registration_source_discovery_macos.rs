@@ -1,9 +1,11 @@
-//! Three fixed conventional locations, on the SAME acquisition SourceSlots.
+//! Fixed conventional locations, on the SAME acquisition SourceSlots.
 //! No PATH/environment scan, process, SourceSnapshot constructor or tool lease.
 use super::*;
 use crate::tool_acquisition_protocol::discovery::{self as data, Discovery};
 use mrk_macos_installed_native::local_account::Account;
 use std::path::PathBuf;
+#[path = "android_registration_source_sdkman_macos.rs"]
+mod sdkman;
 
 pub(super) const HEAP_BOUND: usize = 3 * (4096 + 255);
 pub(super) const PATH_WORK: usize = 4096;
@@ -15,8 +17,11 @@ pub(super) struct DiscoveryWork {
     // Retained BEFORE getpwuid_r. The containing original worker owns its call
     // and return; the later native joins cannot be replaced by this DATA.
     account: Account,
-    paths: [Option<PathBuf>; 3],
-    absent: [Option<Absent>; 3],
+    account_entered: bool,
+    // Slot3 is only the exact SDKMAN fallback for role2. The original fixed
+    // Gradle path/absence stays in slot2 through POST and consuming closes.
+    paths: [Option<PathBuf>; 4],
+    absent: [Option<Absent>; 4],
     searched: u8,
     present: u8,
     finding: Option<Discovery>,
@@ -25,6 +30,7 @@ impl DiscoveryWork {
     pub(super) fn new() -> Self {
         Self {
             account: Account::new(),
+            account_entered: false,
             paths: std::array::from_fn(|_| None),
             absent: std::array::from_fn(|_| None),
             searched: 0,
@@ -52,6 +58,7 @@ fn fixed_path(role: usize, home: Option<&str>) -> Result<PathBuf> {
         0 => (data::JDK, ""),
         1 => (home.ok_or(AdmissionFailure::Ownership)?, data::SDK_SUFFIX),
         2 => (data::GRADLE, ""),
+        sdkman::SLOT => (home.ok_or(AdmissionFailure::Ownership)?, sdkman::SUFFIX),
         _ => return Err(AdmissionFailure::Inventory),
     };
     let bytes = base
@@ -76,13 +83,100 @@ fn fixed_path(role: usize, home: Option<&str>) -> Result<PathBuf> {
     text.try_reserve_exact(bytes).map_err(native_error)?;
     text.push_str(base);
     text.push_str(suffix);
-    if text.capacity() > 4096 || text[1..].split('/').count() >= ANCESTORS {
+    if text.capacity() > bytes || text[1..].split('/').count() >= ANCESTORS {
         return Err(AdmissionFailure::Bounds);
     }
     Ok(text.into())
 }
 
 impl SourceSlots {
+    fn discovery_path(
+        &mut self,
+        location: usize,
+        end: Instant,
+        stop: &watch::Receiver<bool>,
+    ) -> Result<()> {
+        self.point(end, stop)?;
+        let work = &mut self.acquisition.as_mut().ok_or(AdmissionFailure::Unknown)?.discovery;
+        if location >= work.paths.len() || work.paths[location].is_some() {
+            return Err(AdmissionFailure::Inventory);
+        }
+        let needs_home = matches!(location, 1 | sdkman::SLOT);
+        if needs_home && !work.account_entered {
+            work.account_entered = true; // One original call, including failed entry.
+            work.account.acquire().map_err(|_| AdmissionFailure::Ownership)?;
+        }
+        self.point(end, stop)?;
+        let work = &mut self.acquisition.as_mut().ok_or(AdmissionFailure::Unknown)?.discovery;
+        let home = if needs_home {
+            let (home, uid, _) = work.account.selected().map_err(|_| AdmissionFailure::Ownership)?;
+            if Some(uid) != self.account { return Err(AdmissionFailure::Ownership); }
+            Some(home)
+        } else { None };
+        work.paths[location] = Some(fixed_path(location, home)?);
+        // Same reservation, not a fourth4096-byte allocation allowance.
+        work.heap_bytes().ok_or(AdmissionFailure::Bounds)?;
+        Ok(())
+    }
+    /// One retained fixed path. None means only actual held-parent ENOENT;
+    /// failed/unsafe/present-but-incompatible sources never take the fallback.
+    fn discovery_location(
+        &mut self,
+        location: usize,
+        end: Instant,
+        stop: &watch::Receiver<bool>,
+    ) -> Result<Option<usize>> {
+        let work = &self.acquisition.as_ref().ok_or(AdmissionFailure::Unknown)?.discovery;
+        let path = work.paths.get(location).and_then(Option::as_ref)
+            .and_then(|p| p.to_str()).ok_or(AdmissionFailure::Bounds)?;
+        // The path stays retained on every failure. Only its bounded stack
+        // copy is used while the SAME source arrays mutate below.
+        let mut bytes = [0u8; PATH_WORK];
+        bytes[..path.len()].copy_from_slice(path.as_bytes());
+        let path = std::str::from_utf8(&bytes[..path.len()]).map_err(native_error)?;
+        let slash = self.open(None, Name::Static("/"), true, false, false, end, stop)?;
+        self.originals[slash].retained = true;
+        let mut parent = slash;
+        for part in path[1..].split('/') {
+            self.check(parent, end, stop)?;
+            let absent = absent_entry(
+                stat::fstatat(self.fd(parent)?, part, AtFlags::AT_SYMLINK_NOFOLLOW).map(|_| ()),
+            )?;
+            self.check(parent, end, stop)?;
+            if absent {
+                self.acquisition.as_mut().ok_or(AdmissionFailure::Unknown)?.discovery.absent[location] =
+                    Some(Absent { parent, name: text_owned(part, 255)? });
+                return Ok(None);
+            }
+            parent = self.open(Some(parent), Name::Owned(text_owned(part, 255)?),
+                true, false, false, end, stop)?;
+            self.originals[parent].retained = true;
+        }
+        self.originals[parent].selected = true;
+        self.check(parent, end, stop)?;
+        Ok(Some(parent))
+    }
+    fn discovery_check_absent(
+        &mut self,
+        location: usize,
+        end: Instant,
+        stop: &watch::Receiver<bool>,
+    ) -> Result<()> {
+        let absent = self.acquisition.as_ref().ok_or(AdmissionFailure::Unknown)?.discovery
+            .absent.get(location).and_then(Option::as_ref).ok_or(AdmissionFailure::Inventory)?;
+        let parent = absent.parent;
+        let mut bytes = [0u8; 255];
+        let len = absent.name.len();
+        bytes[..len].copy_from_slice(absent.name.as_bytes());
+        let name = std::str::from_utf8(&bytes[..len]).map_err(native_error)?;
+        self.check(parent, end, stop)?;
+        let absent = absent_entry(
+            stat::fstatat(self.fd(parent)?, name, AtFlags::AT_SYMLINK_NOFOLLOW).map(|_| ()),
+        )?;
+        self.check(parent, end, stop)?;
+        if !absent { return Err(AdmissionFailure::Identity); }
+        Ok(())
+    }
     /// Prepare ONLY unchosen fixed paths; explicit picks always win. Opening
     /// these read-only originals never installs a selected-source snapshot.
     pub(super) fn discovery_begin(
@@ -91,84 +185,28 @@ impl SourceSlots {
         end: Instant,
         stop: &watch::Receiver<bool>,
     ) -> Result<()> {
+        // Preserve the existing SDK lookup's account-call order. With an
+        // explicit SDK pick, the account is needed only after primary Gradle
+        // absence; the fallback uses this same one-shot original below.
         if roots[1].is_none() {
             self.point(end, stop)?;
-            let work = self.acquisition.as_mut().ok_or(AdmissionFailure::Unknown)?;
-            work.discovery
-                .account
-                .acquire()
-                .map_err(|_| AdmissionFailure::Ownership)?;
+            let work = &mut self.acquisition.as_mut().ok_or(AdmissionFailure::Unknown)?.discovery;
+            if work.account_entered { return Err(AdmissionFailure::Inventory); }
+            work.account_entered = true;
+            work.account.acquire().map_err(|_| AdmissionFailure::Ownership)?;
             self.point(end, stop)?;
         }
         for (role, root) in roots.iter().enumerate() {
             if root.is_some() {
                 continue;
             }
-            self.point(end, stop)?;
-            let work = self.acquisition.as_mut().ok_or(AdmissionFailure::Unknown)?;
-            let home = if role == 1 {
-                let (home, uid, _) = work
-                    .discovery
-                    .account
-                    .selected()
-                    .map_err(|_| AdmissionFailure::Ownership)?;
-                if Some(uid) != self.account {
-                    return Err(AdmissionFailure::Ownership);
-                }
-                Some(home)
-            } else {
-                None
-            };
-            if work.discovery.paths[role].is_some() {
-                return Err(AdmissionFailure::Inventory);
+            self.discovery_path(role, end, stop)?;
+            self.acquisition.as_mut().ok_or(AdmissionFailure::Unknown)?.discovery.searched |= 1 << role;
+            let mut selected = self.discovery_location(role, end, stop)?;
+            if role == 2 && selected.is_none() {
+                selected = self.discovery_sdkman_gradle(end, stop)?;
             }
-            work.discovery.paths[role] = Some(fixed_path(role, home)?);
-            work.discovery.searched |= 1 << role;
-            // The path stays retained on every failure. Only its bounded stack
-            // copy is used while the SAME source arrays mutate below.
-            let path = work.discovery.paths[role]
-                .as_ref()
-                .and_then(|p| p.to_str())
-                .ok_or(AdmissionFailure::Bounds)?;
-            let mut bytes = [0u8; PATH_WORK];
-            bytes[..path.len()].copy_from_slice(path.as_bytes());
-            let path = std::str::from_utf8(&bytes[..path.len()]).map_err(native_error)?;
-            let slash = self.open(None, Name::Static("/"), true, false, false, end, stop)?;
-            self.originals[slash].retained = true;
-            let mut parent = slash;
-            let mut missing = false;
-            for part in path[1..].split('/') {
-                self.check(parent, end, stop)?;
-                let absent = absent_entry(
-                    stat::fstatat(self.fd(parent)?, part, AtFlags::AT_SYMLINK_NOFOLLOW).map(|_| ()),
-                )?;
-                self.check(parent, end, stop)?;
-                if absent {
-                    self.acquisition
-                        .as_mut()
-                        .ok_or(AdmissionFailure::Unknown)?
-                        .discovery
-                        .absent[role] = Some(Absent {
-                        parent,
-                        name: text_owned(part, 255)?,
-                    });
-                    missing = true;
-                    break;
-                }
-                parent = self.open(
-                    Some(parent),
-                    Name::Owned(text_owned(part, 255)?),
-                    true,
-                    false,
-                    false,
-                    end,
-                    stop,
-                )?;
-                self.originals[parent].retained = true;
-            }
-            if !missing {
-                self.originals[parent].selected = true;
-                self.check(parent, end, stop)?;
+            if let Some(parent) = selected {
                 self.roots[role] = Some(parent);
                 self.acquisition
                     .as_mut()
@@ -185,29 +223,9 @@ impl SourceSlots {
         end: Instant,
         stop: &watch::Receiver<bool>,
     ) -> Result<()> {
-        for role in 0..3 {
-            let Some(absent) = self
-                .acquisition
-                .as_ref()
-                .ok_or(AdmissionFailure::Unknown)?
-                .discovery
-                .absent[role]
-                .as_ref()
-            else {
-                continue;
-            };
-            let parent = absent.parent;
-            let mut bytes = [0u8; 255];
-            let len = absent.name.len();
-            bytes[..len].copy_from_slice(absent.name.as_bytes());
-            let name = std::str::from_utf8(&bytes[..len]).map_err(native_error)?;
-            self.check(parent, end, stop)?;
-            let absent = absent_entry(
-                stat::fstatat(self.fd(parent)?, name, AtFlags::AT_SYMLINK_NOFOLLOW).map(|_| ()),
-            )?;
-            self.check(parent, end, stop)?;
-            if !absent {
-                return Err(AdmissionFailure::Identity);
+        for location in 0..4 {
+            if self.acquisition.as_ref().ok_or(AdmissionFailure::Unknown)?.discovery.absent[location].is_some() {
+                self.discovery_check_absent(location, end, stop)?;
             }
         }
         self.point(end, stop)?;
@@ -262,7 +280,9 @@ impl SourceSlots {
         if role >= 3 || finding.candidate_roles() & (1 << role) == 0 {
             return None;
         }
-        self.acquisition.as_ref()?.discovery.paths[role].as_deref()
+        let work = &self.acquisition.as_ref()?.discovery;
+        let location = if role == 2 && work.paths[sdkman::SLOT].is_some() { sdkman::SLOT } else { role };
+        work.paths[location].as_deref()
     }
 }
 
@@ -286,7 +306,7 @@ mod tests {
         ] {
             assert!(fixed_path(1, home).is_err());
         }
-        assert!(fixed_path(3, Some("/Users/inert-fixture")).is_err());
+        assert!(fixed_path(4, Some("/Users/inert-fixture")).is_err());
         let work = DiscoveryWork::new(); // No native call, FD or fake positive source.
         assert!(work.call_settled());
         assert_eq!(work.heap_bytes(), Some(0));

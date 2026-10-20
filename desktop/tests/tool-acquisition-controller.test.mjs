@@ -426,3 +426,22 @@ test('native source refusal keeps incompatible, unreadable and stale distinct wi
     assert.equal(h.state.consent,null);
   }
 });
+
+test('SDKMAN compatible Gradle observation prevents a duplicate download until an ordinary choice and new check', async (t) => {
+  const h = harness(t); await h.ready;
+  const flow = h.controller.inspect(), prepare = h.calls.at(-1), op = operation(prepare.request);
+  h.reply(prepare,status(2,op)); await flush();
+  const done = terminal(op);
+  done.result.components = partition(['sdk-build-tools']);
+  done.result.discoveredSources = {scope:'fixed-macos-locations-v2',searched:['gradle'],present:['gradle'],compatibleComponents:['gradle']};
+  h.reply(h.calls.at(-1),status(3,done)); await flow;
+  assert.equal(h.state.issue,null);
+  assert.deepEqual(h.state.inspection.components.missing,['sdk-build-tools']);
+  assert.match(h.state.reviewReason,/No duplicate download/);
+  await h.controller.reviewDownload(); h.controller.setAcknowledged(ACQUIRE,ACQUIRE_OWNER,true);
+  await h.controller.download(ACQUIRE,ACQUIRE_OWNER);
+  assert.deepEqual(h.calls.map((call)=>call.kind),['prepare','start']);
+  assert.equal(h.state.consent,null);
+  h.known(); await h.controller.reviewDownload();
+  assert.equal(h.state.inspection,null); assert.equal(h.calls.length,2);
+});

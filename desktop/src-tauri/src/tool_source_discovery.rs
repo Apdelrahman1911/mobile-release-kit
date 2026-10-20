@@ -4,7 +4,7 @@
 use super::components::Partition;
 use serde_json::{json, Value};
 
-pub(crate) const SCOPE: &str = "fixed-macos-locations-v1";
+pub(crate) const SCOPE: &str = "fixed-macos-locations-v2";
 pub(crate) const ROLES: [&str; 3] = ["jdk", "sdk", "gradle"];
 pub(crate) const JDK: &str = "/Library/Java/JavaVirtualMachines/temurin-17.jdk";
 pub(crate) const GRADLE: &str = "/opt/gradle/gradle-8.14.5";

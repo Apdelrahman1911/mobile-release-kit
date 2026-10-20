@@ -71,8 +71,9 @@ fn reservation(checked: supplier::acquisition::PickedRoster) -> Option<SourceRes
         return None;
     }
     // One selected read pass only. The spill covers three full ancestor chains,
-    // fixed JDK/SDK prefix/release/optional-XML opens and alias targets. There is
-    // NO canonical payload second pass or synthetic registration proposal.
+    // the fixed primary Gradle absence before SDKMAN, JDK/SDK prefix/release/
+    // optional-XML opens and alias targets. There is NO canonical payload second
+    // pass or synthetic registration proposal; LIVE_FDS remains64.
     shape.originals = shape
         .members
         .checked_sub(shape.aliases)?
