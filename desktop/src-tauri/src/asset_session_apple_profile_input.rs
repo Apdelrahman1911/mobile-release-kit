@@ -117,3 +117,35 @@ impl AppleProvisioningDocumentInput {
         })
     }
 }
+
+// The transport-only installed CLI still links the shared Saved owner, but it
+// cannot enter the desktop-owned Asset jobs. Refusal is never a native join,
+// a no-save result, or permission to release the original retained work.
+#[cfg(not(feature = "desktop-shell"))]
+impl AppleProvisioningDocumentInput {
+    pub(crate) async fn check_profile_before_pending(&self) -> Result<(), BridgeError> {
+        Err(BridgeError::unavailable(
+            "Apple profile source checks require the desktop application.",
+        ))
+    }
+
+    pub(crate) async fn check_profile_before_save(&self) -> Result<(), BridgeError> {
+        Err(BridgeError::unavailable(
+            "Apple profile source checks require the desktop application.",
+        ))
+    }
+
+    pub(crate) async fn join_profile_asset(
+        &self,
+        _original: &Arc<OriginalWork>,
+    ) -> Result<Option<KeyReference>, BridgeError> {
+        Err(BridgeError::cleanup_unknown())
+    }
+
+    pub(crate) async fn retire_profile_asset(
+        &self,
+        _original: &Arc<OriginalWork>,
+    ) -> Result<(), BridgeError> {
+        Err(BridgeError::cleanup_unknown())
+    }
+}
