@@ -1141,7 +1141,9 @@ FAILURE_STEPS |= frozenset(f"Recovery({name})" for name in ("Navigate Ready Insp
 FAILURE_STEPS |= frozenset(f"Identity({name})" for name in (
     "Open WaitOpen Prepare WaitReview Submit WaitFinal Done").split())
 FAILURE_STEPS |= frozenset(f"UploadKey({step})" for step in (
-    "Context Refresh Refreshed Recovered Saved Prepare Create Running Repeat Lock Locked Reopen Reopened Unlock Unlocked Recontext Read Readback Relock Relocked Missing MissingLocked").split())
+    "Context Refresh Refreshed Recovered Saved Prepare Create Running Repeat Lock Locked Reopen Reopened Unlock Unlocked Recontext "
+    "Read Readback BindSaved BoundReadback BoundSaved BoundPrepare RememberBound BoundRecoveryReadback "
+    "RecoverySaved RecoveryPrepare AcknowledgeUnstarted RecoveryReadback Relock Relocked Missing MissingLocked").split())
 FAILURE_REASONS = frozenset((
     "identity-original-contract upload-key-original-contract upload-key-expected-retention observer-invariant observer-deadline observer-record-unavailable observer-data-check "
     "dom-dispatch-refused dom-pending-custody dom-callback-size dom-callback-json "
@@ -2924,7 +2926,7 @@ def _native_action_context(value, native, panel, *, case=None):
         elif value["step"] == "Quit" and type(case) is str and (case in SESSION_CASES or case == PROJECT_FIELDS_CASE):
             spec = ("quit-confirm", "quit", (18 if case == ANDROID_INPUT_CASE else 12,), 16)
         elif value["step"] == "Quit" and case in UPLOAD.CASES:
-            spec = ("quit-confirm", "quit", (5,9), 16)
+            spec = ("quit-confirm", "quit", (5, 11) if case == UPLOAD.CASES[2] else (5, 9), 16)
         elif value["step"] == "Quit" and case in VAULT_HELPER_CASES:
             spec = ("quit-confirm", "quit", (5, 7) if case == VAULT_HELPER_CASES[0] else (5,), 16)
         elif value["step"] == "Session(Native(6))" and case in ("ios-signing-inputs", ANDROID_INPUT_CASE):
@@ -3913,7 +3915,7 @@ def _vault_failure_context(value, source, step, reason, case):
     need(type(snapshot) is dict and set(snapshot) == flags | fields
          and all(type(snapshot[k]) is bool for k in flags) and snapshot["unknown"]
          and snapshot["unknown"] == (snapshot["documentUnknown"] or snapshot["exhausted"] or snapshot["lostObserved"] or not snapshot["originalBound"])
-         and type(snapshot["originals"]) is int and 0 <= snapshot["originals"] <= (9 if case in UPLOAD.CASES else 7 if case == VAULT_HELPER_CASES[0] else 5), "failure-context")
+         and type(snapshot["originals"]) is int and 0 <= snapshot["originals"] <= (11 if case == UPLOAD.CASES[2] else 9 if case in UPLOAD.CASES else 7 if case == VAULT_HELPER_CASES[0] else 5), "failure-context")
     phases = {"idle", "admitting", "picking", "capturing", "selected", "assessing", "preview", "mutating", "stopping", "unknown"}
     reasons = {"none", "closed", "unqualified", "unsupported-platform", "unsupported-filesystem", "unsupported-format",
                "invalid-request", "busy", "source-refused", "source-changed", "material-limit", "parser-limit", "project-overlap",

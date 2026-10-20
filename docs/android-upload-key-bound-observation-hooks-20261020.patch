@@ -1,0 +1,510 @@
+diff --git a/desktop/src-tauri/src/credential_upload_key_observation.rs b/desktop/src-tauri/src/credential_upload_key_observation.rs
+--- a/desktop/src-tauri/src/credential_upload_key_observation.rs
++++ b/desktop/src-tauri/src/credential_upload_key_observation.rs
+@@ -4,6 +4,8 @@
+ use super::*;
+ #[path = "credential_upload_key_cancel_observation.rs"]
+ mod cancelled;
++#[path = "credential_upload_key_bound_observation.rs"]
++mod bound_recovery;
+ pub(super) use cancelled::cancelled_disposed;
+ use crate::shell::installed_observation::vault::{
+     upload_key::{Action, Case, Selection},
+@@ -70,6 +72,7 @@
+     cancelled_disposal: bool,
+     stopped_preference_revision: Option<u64>,
+     recovery_request: Option<controls::RecoveryRequest>,
++    bound_preference_revision: Option<u64>,
+ }
+
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -446,7 +449,7 @@
+         self.installed_upload_saved_action(Action::Saved).await
+     }
+     async fn installed_upload_saved_action(&self, action: Action) -> Result<(), AssetError> {
+-        if !matches!(action, Action::Saved | Action::RecoverySaved) { return Err(AssetError::invalid()); }
++        if !matches!(action, Action::Saved | Action::RecoverySaved | Action::BoundSaved) { return Err(AssetError::invalid()); }
+         let selection = self.installed_upload_select(action)?;
+         self.installed_upload_consume(selection, None)?;
+         let project = self
+@@ -523,7 +526,7 @@
+         let path = (action == Action::Reopen).then(|| control.root());
+         self.installed_upload_consume(selection, path)?;
+         match action {
+-            Action::Lock | Action::Relock | Action::RecoveredRelock | Action::Missing => {
++            Action::Lock | Action::Relock | Action::RecoveredRelock | Action::BoundRelock | Action::Missing => {
+                 self.lock_session()?;
+             }
+             Action::Reopen => {
+diff --git a/desktop/src-tauri/src/credential_upload_key_controls.rs b/desktop/src-tauri/src/credential_upload_key_controls.rs
+--- a/desktop/src-tauri/src/credential_upload_key_controls.rs
++++ b/desktop/src-tauri/src/credential_upload_key_controls.rs
+@@ -33,7 +33,12 @@
+     }
+     fn recovery_action(&self, action: recovery::Action) -> bool {
+ #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-        if self.installed.is_some() { return action == recovery::Action::AcknowledgeUnstarted; }
++        if let Some(control) = &self.installed {
++            use crate::shell::installed_observation::vault::upload_key::Case;
++            return matches!((control.upload.case(control.case), action),
++                (Some(Case::StopBeforeGo), recovery::Action::AcknowledgeUnstarted)
++                | (Some(Case::StopAfterNew), recovery::Action::RememberBound));
++        }
+         let _ = action;
+         true
+     }
+@@ -54,8 +59,8 @@
+             Self::Installed(selection) => {
+                 use crate::shell::installed_observation::vault::upload_key::Action;
+                 if !matches!((action,selection.action()),
+-                    (SelectedAction::Prepare,Action::Prepare | Action::RecoveryPrepare)
+-                    | (SelectedAction::Recover,Action::AcknowledgeUnstarted))
++                    (SelectedAction::Prepare,Action::Prepare | Action::RecoveryPrepare | Action::BoundPrepare)
++                    | (SelectedAction::Recover,Action::AcknowledgeUnstarted | Action::RememberBound))
+                     && !(matches!(action,SelectedAction::Create) && selection.action().creates()) {return Err(AssetError::invalid());}
+                 let control=document.installed_upload_consume(selection,path)?;
+                 Ok(Admission{installed:Some(control)})
+diff --git a/desktop/src-tauri/src/credential_upload_key_recovery.rs b/desktop/src-tauri/src/credential_upload_key_recovery.rs
+--- a/desktop/src-tauri/src/credential_upload_key_recovery.rs
++++ b/desktop/src-tauri/src/credential_upload_key_recovery.rs
+@@ -953,6 +953,59 @@
+             && vault.bound.iter().all(Option::is_none)))
+ }
+
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++pub(in crate::asset_session) fn installed_bound_request(
++    status: &UploadKeyStatus, expected: StoredRef,
++) -> Result<(RecoveryRequest, u64), AssetError> {
++    let recovery = &status.recovery;
++    let revision = recovery.preference_revision.as_deref().ok_or_else(AssetError::invalid)?;
++    let parsed = revision.parse::<u64>().map_err(|_| AssetError::invalid())?;
++    if parsed == 0 || parsed.checked_add(1).is_none() || parsed.to_string() != revision
++        || recovery.state != "remember-bound" || recovery.operation.is_some()
++        || recovery.record.as_ref() != Some(&KeyReference::native(expected.identity, expected.record, expected.revision))
++    { return Err(AssetError::new(Reason::ContextStale)); }
++    let context = status.assets.context.as_ref().ok_or_else(AssetError::invalid)?;
++    // This is only the exact response comparison for the next explicit call.
++    // The unchanged owner still captures/revalidates the actual BoundLoan.
++    Ok((RecoveryRequest { context_revision: context.revision,
++        status_revision: status.assets.status_revision, preference_revision: parsed,
++        action: Action::RememberBound }, parsed))
++}
++
++#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++pub(in crate::asset_session) fn installed_remembered(
++    document: &DocumentBinding, state: &DocumentState, expected: StoredRef, previous_revision: u64,
++) -> Option<bool> {
++    let slot = state.slot.as_ref()?;
++    if slot.operation != Operation::RecoverUploadKey || slot.owner.id != 10
++        || state.unknown || slot.owner.stopped() || slot.reason != Reason::None
++        || slot.error.is_some() || slot.settlement == Settlement::Unknown
++    { return Some(false); }
++    let status = projection(document, state, None);
++    let operation = status.operation?;
++    if operation.phase == "pending" { return None; }
++    let matching_reference = slot.vault.upload_key_recovery.as_ref().is_some_and(|completion|
++        completion.action == Action::RememberBound
++        && completion.disposed.load(Ordering::SeqCst)
++        && completion.reference.is_some_and(|reference| same_reference(reference, expected))
++        && previous_revision.checked_add(1) == Some(completion.preference_revision));
++    let current_bound = state.vault.as_ref().is_some_and(|session| {
++        let mut current = session.bound.iter().flatten().filter(|loan|
++            loan.payload.kind == Kind::AndroidKeystore && loan.current(state, session));
++        current.next().is_some_and(|loan| same_reference(loan.reference, expected))
++            && current.next().is_none()
++    });
++    // projection() requires actual publication/disposal, original resources
++    // and empty recovery backing. A phase, saved hash or missing worker alone
++    // cannot make this true. The current BoundLoan remains independently real.
++    Some(operation.operation_id == 10 && operation.action == Action::RememberBound
++        && operation.phase == "completed" && matching_reference && current_bound
++        && state.context.as_ref().is_some_and(|context|
++            document.context_matches(state, context).unwrap_or(false))
++        && previous_revision.checked_add(1).is_some_and(|revision|
++            operation.preference_revision.as_deref() == Some(revision.to_string().as_str())))
++}
++
+ pub(in crate::asset_session) fn persist_stopped(
+     held: &super::super::Holding,
+     write: &mut StoppedWrite,
+diff --git a/desktop/src-tauri/src/installed_shell_observation_macos_upload_key.rs b/desktop/src-tauri/src/installed_shell_observation_macos_upload_key.rs
+--- a/desktop/src-tauri/src/installed_shell_observation_macos_upload_key.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos_upload_key.rs
+@@ -48,6 +48,11 @@
+     RecoveryPrepare,
+     AcknowledgeUnstarted,
+     RecoveredRelock,
++    BindSaved,
++    BoundSaved,
++    BoundPrepare,
++    RememberBound,
++    BoundRelock,
+     Missing,
+ }
+ impl Action {
+@@ -71,6 +76,11 @@
+             Self::RecoveryPrepare => 13,
+             Self::AcknowledgeUnstarted => 14,
+             Self::RecoveredRelock => 15,
++            Self::BindSaved => 13,
++            Self::BoundSaved => 14,
++            Self::BoundPrepare => 15,
++            Self::RememberBound => 16,
++            Self::BoundRelock => 17,
+             Self::Missing => 254,
+         }
+     }
+@@ -79,14 +89,18 @@
+             Self::RefuseRepeat | Self::Lock | Self::Reopen => 5,
+             Self::Unlock => 6,
+             Self::Recontext | Self::Read | Self::RecoverySaved | Self::RecoveryPrepare | Self::AcknowledgeUnstarted => 7,
+-            Self::Relock | Self::RecoveredRelock => 8,
++            Self::Relock | Self::RecoveredRelock | Self::BindSaved => 8,
++            Self::BoundSaved | Self::BoundPrepare | Self::RememberBound => 9,
++            Self::BoundRelock => 10,
+             _ => 4,
+         }
+     }
+     fn allowed(self, case: Case) -> bool {
+         match self {
+             Self::RecoverySaved | Self::RecoveryPrepare | Self::AcknowledgeUnstarted | Self::RecoveredRelock => case == Case::StopBeforeGo,
+-            Self::Read | Self::Relock => case != Case::StopBeforeGo,
++            Self::Read => case != Case::StopBeforeGo,
++            Self::Relock => case == Case::RoundTrip,
++            Self::BindSaved | Self::BoundSaved | Self::BoundPrepare | Self::RememberBound | Self::BoundRelock => case == Case::StopAfterNew,
+             _ => true,
+         }
+     }
+@@ -147,9 +161,13 @@
+             spent: AtomicBool::new(false),
+         })
+     }
+-    pub(super) fn finished(&self, originals: usize) -> bool {
+-        (originals == 8 && matches!(self.next.load(Ordering::SeqCst), 14 | 16))
+-            || (originals == 4 && self.next.load(Ordering::SeqCst) == 255)
++    pub(super) fn finished(&self, case: Case, originals: usize) -> bool {
++        let next = self.next.load(Ordering::SeqCst);
++        (originals == 4 && next == 255) || match case {
++            Case::RoundTrip => originals == 8 && next == 14,
++            Case::StopBeforeGo => originals == 8 && next == 16,
++            Case::StopAfterNew => originals == 10 && next == 18,
++        }
+     }
+ }
+
+@@ -191,7 +209,7 @@
+                 .is_some_and(|same| Arc::ptr_eq(&same, document))
+             && original == self.action.original()
+             && self.control.upload.next.load(Ordering::SeqCst) == self.serial
+-            && if matches!(self.action, Action::Prepare | Action::RecoveryPrepare | Action::Reopen) {
++            && if matches!(self.action, Action::Prepare | Action::RecoveryPrepare | Action::BoundPrepare | Action::Reopen) {
+                 path == Some(self.control.root())
+             } else {
+                 path.is_none()
+@@ -220,6 +238,12 @@
+     Recontext,
+     Read,
+     Readback,
++    BindSaved,
++    BoundReadback,
++    BoundSaved,
++    BoundPrepare,
++    RememberBound,
++    BoundRecoveryReadback,
+     RecoverySaved,
+     RecoveryPrepare,
+     AcknowledgeUnstarted,
+@@ -235,6 +259,8 @@
+     repeated_refused: bool,
+     readback: bool,
+     acknowledged: bool,
++    bound: bool,
++    remembered: bool,
+     not_executed: bool,
+ }
+ #[derive(Clone, Copy)]
+@@ -517,6 +543,42 @@
+                             .ok_or_else(BridgeError::invalid)?
+                             .upload
+                             .readback = true;
++                        Some(if case == Case::StopAfterNew { Step::BindSaved } else { Step::Relock })
++                    }
++                    Some(false) => return Err(BridgeError::invalid()),
++                    None => None,
++                },
++                Step::BindSaved => {
++                    document.installed_upload_bind_saved().map_err(asset)?;
++                    Some(Step::BoundReadback)
++                }
++                Step::BoundReadback => match document.installed_upload_bound_saved() {
++                    Some(true) => {
++                        self.record().ok_or_else(BridgeError::invalid)?
++                            .vault_record.as_mut().ok_or_else(BridgeError::invalid)?
++                            .upload.bound = true;
++                        Some(Step::BoundSaved)
++                    }
++                    Some(false) => return Err(BridgeError::invalid()),
++                    None => None,
++                },
++                Step::BoundSaved => {
++                    document.installed_upload_bound_saved_input().await.map_err(asset)?;
++                    Some(Step::BoundPrepare)
++                }
++                Step::BoundPrepare => {
++                    document.installed_upload_bound_prepare().await.map_err(asset)?;
++                    Some(Step::RememberBound)
++                }
++                Step::RememberBound => {
++                    document.installed_upload_remember_bound().map_err(asset)?;
++                    Some(Step::BoundRecoveryReadback)
++                }
++                Step::BoundRecoveryReadback => match document.installed_upload_remembered_bound() {
++                    Some(true) => {
++                        self.record().ok_or_else(BridgeError::invalid)?
++                            .vault_record.as_mut().ok_or_else(BridgeError::invalid)?
++                            .upload.remembered = true;
+                         Some(Step::Relock)
+                     }
+                     Some(false) => return Err(BridgeError::invalid()),
+@@ -546,7 +608,11 @@
+                 },
+                 Step::Relock => {
+                     document
+-                        .installed_upload_vault(if case == Case::StopBeforeGo { Action::RecoveredRelock } else { Action::Relock })
++                        .installed_upload_vault(match case {
++                            Case::RoundTrip => Action::Relock,
++                            Case::StopBeforeGo => Action::RecoveredRelock,
++                            Case::StopAfterNew => Action::BoundRelock,
++                        })
+                         .map_err(asset)?;
+                     Some(Step::Relocked)
+                 }
+@@ -616,34 +682,40 @@
+         || !record.opened
+         || !record.preview_consumed
+         || !record.locked
++        || data.bound != (case == Case::StopAfterNew && !not_executed)
++        || data.remembered != (case == Case::StopAfterNew && !not_executed)
+         || (!not_executed
+             && (!data.sample.is_some_and(|sample| if case == Case::RoundTrip { sample.positive() } else { sample.cancelled(case) })
+                 || !data.repeated_refused
+                 || data.readback != (case != Case::StopBeforeGo)
+                 || data.acknowledged != (case == Case::StopBeforeGo)
+-                || record.original_count != 8))
++                || record.original_count != if case == Case::StopAfterNew { 10 } else { 8 }))
+     {
+         return None;
+     }
+-    Some(
+-        json!({"mechanism":"same-original-upload-key-v1","normalGenerationEnabled":false,
++    let mut value = json!({"mechanism":"same-original-upload-key-v1","normalGenerationEnabled":false,
+         "execution":if not_executed{"not-executed-prerequisite"}else{"executed"},
+         "testResult":if not_executed{"not-executed"}else if case == Case::RoundTrip{"positive"}else{"cancelled-cleanup"},
+         "initializeHelper":record.initialization,"storage":record.storage,
+         "generated":data.sample,"repeatedCreateRefused":data.repeated_refused,"authenticatedReopenReadback":data.readback,"stoppedIntentAcknowledged":data.acknowledged,
+         "originalCount":record.original_count+1,"allOriginalsSettled":true,"finalDocumentEmpty":true,
+         "automaticallyAssigned":false,"backupCreated":false,"releaseSigningQualified":false,
+-        "physicalMacEvidence":false,"privateContentsExported":false,"rowRetirement":"disposable-hosted-account-only"}),
+-    )
++        "physicalMacEvidence":false,"privateContentsExported":false,"rowRetirement":"disposable-hosted-account-only"});
++    if case == Case::StopAfterNew && !not_executed {
++        let object = value.as_object_mut()?;
++        object.insert("explicitlyBoundSavedKey".into(), Value::Bool(data.bound));
++        object.insert("rememberedBoundSavedKey".into(), Value::Bool(data.remembered));
++    }
++    Some(value)
+ }
+
+ pub(super) fn data_checks() -> bool {
+     // Pure selector DATA, not a registered Control or native availability.
+     // No User lookup, directory, private scalar or process is constructed.
+     let root = PathBuf::from("/Users/inert/upload-key-native-test");
+-    let inert = || {
++    let inert = |case| {
+         Arc::new(Control {
+-            case: super::Case::UploadKey(Case::RoundTrip),
++            case: super::Case::UploadKey(case),
+             root: root.clone(),
+             project: PathBuf::from("/private/tmp/inert-project"),
+             original: OnceLock::new(),
+@@ -657,7 +729,7 @@
+             upload: Flow::default(),
+         })
+     };
+-    let control = inert();
++    let control = inert(Case::RoundTrip);
+     let document = Arc::new(());
+     let other = Arc::new(());
+     let select = |document: &Arc<()>, action: Action| Selection {
+@@ -702,27 +774,51 @@
+     let dead = Arc::new(());
+     let lost = select(&dead, Action::Prepare);
+     drop(dead);
+-    if lost.claim(&document, 4, Some(&root)) || control.upload.finished(5) {
++    if lost.claim(&document, 4, Some(&root)) || control.upload.finished(Case::RoundTrip, 5) {
+         return false;
+     }
+-    control.upload.next.store(14, Ordering::SeqCst);
+-    if !control.upload.finished(8) || control.upload.finished(7) || control.upload.finished(9) {
+-        return false;
+-    }
+-    control.upload.next.store(255, Ordering::SeqCst);
+-    if !control.upload.finished(4) || control.upload.finished(5) {
+-        return false;
++    for case in Case::ALL {
++        for next in [14, 16, 18, 255] {
++            control.upload.next.store(next, Ordering::SeqCst);
++            for originals in [4, 5, 7, 8, 9, 10, 11] {
++                let expected = (originals == 4 && next == 255) || match case {
++                    Case::RoundTrip => originals == 8 && next == 14,
++                    Case::StopBeforeGo => originals == 8 && next == 16,
++                    Case::StopAfterNew => originals == 10 && next == 18,
++                };
++                if control.upload.finished(case, originals) != expected { return false; }
++            }
++        }
+     }
+     if Action::AcknowledgeUnstarted.allowed(Case::RoundTrip)
+         || Action::RecoveryPrepare.allowed(Case::StopAfterNew)
+         || Action::Read.allowed(Case::StopBeforeGo)
+         || Action::Relock.allowed(Case::StopBeforeGo)
++        || Action::Relock.allowed(Case::StopAfterNew)
+         || !Action::AcknowledgeUnstarted.allowed(Case::StopBeforeGo)
+         || Action::AcknowledgeUnstarted.original() != 7
+         || Action::RecoveredRelock.original() != 8
+     { return false; }
+-    control.upload.next.store(16, Ordering::SeqCst);
+-    if !control.upload.finished(8) || control.upload.finished(9) { return false; }
++    for (action, original, index) in [
++        (Action::BindSaved, 8, 13), (Action::BoundSaved, 9, 14),
++        (Action::BoundPrepare, 9, 15), (Action::RememberBound, 9, 16),
++        (Action::BoundRelock, 10, 17),
++    ] {
++        if !action.allowed(Case::StopAfterNew) || action.allowed(Case::RoundTrip)
++            || action.allowed(Case::StopBeforeGo)
++            || action.original() != original || action.index() != index
++        { return false; }
++    }
++    let after = inert(Case::StopAfterNew);
++    after.upload.next.store(16, Ordering::SeqCst);
++    let bound = Selection { control: after, document: Arc::downgrade(&document),
++        action: Action::BoundPrepare, serial: 16, spent: AtomicBool::new(false) };
++    if bound.claim(&other, 9, Some(&root)) || bound.claim(&document, 8, Some(&root))
++        || bound.claim(&document, 9, None)
++        || bound.claim(&document, 9, Some(Path::new("/Users/inert/other")))
++        || !bound.claim(&document, 9, Some(&root))
++        || bound.claim(&document, 9, Some(&root))
++    { return false; }
+     Action::Create.original() == 4
+         && Action::RefuseRepeat.original() == 5
+         && Action::Read.original() == 7
+diff --git a/desktop/src-tauri/src/installed_shell_observation_macos_vault.rs b/desktop/src-tauri/src/installed_shell_observation_macos_vault.rs
+--- a/desktop/src-tauri/src/installed_shell_observation_macos_vault.rs
++++ b/desktop/src-tauri/src/installed_shell_observation_macos_vault.rs
+@@ -17,7 +17,7 @@
+         Self::StopAfterAdd => "vault-helper-stop-after-add", Self::UploadKey(case) => case.name(),
+     } }
+     pub(super) fn parse(value: &std::ffi::OsStr) -> Option<Self> { Self::ALL.into_iter().find(|c| value == std::ffi::OsStr::new(c.name())).or_else(|| upload_key::Case::parse(value).map(Self::UploadKey)) }
+-    pub(crate) fn maximum_original(self) -> u32 { if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
++    pub(crate) fn maximum_original(self) -> u32 { if self == Self::UploadKey(upload_key::Case::StopAfterNew) { 11 } else if matches!(self,Self::UploadKey(_)) { 9 } else if self == Self::RoundTrip { 7 } else { 5 } }
+ }
+
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -119,8 +119,8 @@
+     pub(crate) fn quit_id(&self) -> u32 { u32::from(self.quit.load(Ordering::SeqCst)) }
+     pub(crate) fn completed(&self) -> bool { self.complete.load(Ordering::SeqCst) }
+     fn finish(&self, originals: usize) -> bool {
+-        if matches!(self.case, Case::UploadKey(_)) && self.upload.finished(originals) {
+-            if self.complete.swap(true,Ordering::SeqCst){return false;}
++        if let Case::UploadKey(case) = self.case {
++            if !self.upload.finished(case, originals) || self.complete.swap(true, Ordering::SeqCst) { return false; }
+             self.quit.store((originals+1) as u8,Ordering::SeqCst);return true;
+         }
+         let expected = if originals == 6 { 7 } else if originals == 4 { 5 } else { return false; };
+diff --git a/desktop/tools/macos_upload_key_observation.py b/desktop/tools/macos_upload_key_observation.py
+--- a/desktop/tools/macos_upload_key_observation.py
++++ b/desktop/tools/macos_upload_key_observation.py
+@@ -22,6 +22,7 @@
+                          "generated", "repeatedCreateRefused", "authenticatedReopenReadback", "stoppedIntentAcknowledged", "originalCount",
+                          "allOriginalsSettled", "finalDocumentEmpty", "automaticallyAssigned", "backupCreated",
+                          "releaseSigningQualified", "physicalMacEvidence", "privateContentsExported", "rowRetirement"))
++AFTER_NEW_FIELDS = frozenset(("explicitlyBoundSavedKey", "rememberedBoundSavedKey"))
+
+
+ def need(test, label="upload-key-observation"):
+@@ -114,7 +115,11 @@
+
+
+ def report(value, case):
+-    need(case in CASES and type(value) is dict and value.keys() == REPORT_FIELDS)
++    need(case in CASES and type(value) is dict)
++    after_new = case == CASES[2] and value.get("execution") == "executed"
++    need(value.keys() == REPORT_FIELDS | (AFTER_NEW_FIELDS if after_new else frozenset()))
++    if after_new:
++        need(all(value[key] is True for key in AFTER_NEW_FIELDS))
+     need(value["mechanism"] == "same-original-upload-key-v1" and value["normalGenerationEnabled"] is False)
+     need(value["allOriginalsSettled"] is True and value["finalDocumentEmpty"] is True)
+     for key in ("automaticallyAssigned", "backupCreated", "releaseSigningQualified", "physicalMacEvidence", "privateContentsExported"):
+@@ -127,7 +132,8 @@
+              and not value["repeatedCreateRefused"] and not value["authenticatedReopenReadback"]
+              and not value["stoppedIntentAcknowledged"] and value["originalCount"] == 5)
+     else:
+-        need(value["execution"] == "executed" and value["repeatedCreateRefused"] and value["originalCount"] == 9)
++        need(value["execution"] == "executed" and value["repeatedCreateRefused"]
++             and value["originalCount"] == (11 if after_new else 9))
+         if case == CASES[0]:
+             need(value["testResult"] == "positive" and value["authenticatedReopenReadback"]
+                  and not value["stoppedIntentAcknowledged"])
+diff --git a/desktop/tools/macos_aqua_qualification.py b/desktop/tools/macos_aqua_qualification.py
+--- a/desktop/tools/macos_aqua_qualification.py
++++ b/desktop/tools/macos_aqua_qualification.py
+@@ -1141,7 +1141,9 @@
+ FAILURE_STEPS |= frozenset(f"Identity({name})" for name in (
+     "Open WaitOpen Prepare WaitReview Submit WaitFinal Done").split())
+ FAILURE_STEPS |= frozenset(f"UploadKey({step})" for step in (
+-    "Context Refresh Refreshed Recovered Saved Prepare Create Running Repeat Lock Locked Reopen Reopened Unlock Unlocked Recontext Read Readback Relock Relocked Missing MissingLocked").split())
++    "Context Refresh Refreshed Recovered Saved Prepare Create Running Repeat Lock Locked Reopen Reopened Unlock Unlocked Recontext "
++    "Read Readback BindSaved BoundReadback BoundSaved BoundPrepare RememberBound BoundRecoveryReadback "
++    "RecoverySaved RecoveryPrepare AcknowledgeUnstarted RecoveryReadback Relock Relocked Missing MissingLocked").split())
+ FAILURE_REASONS = frozenset((
+     "identity-original-contract upload-key-original-contract upload-key-expected-retention observer-invariant observer-deadline observer-record-unavailable observer-data-check "
+     "dom-dispatch-refused dom-pending-custody dom-callback-size dom-callback-json "
+@@ -2924,7 +2926,7 @@
+         elif value["step"] == "Quit" and type(case) is str and (case in SESSION_CASES or case == PROJECT_FIELDS_CASE):
+             spec = ("quit-confirm", "quit", (18 if case == ANDROID_INPUT_CASE else 12,), 16)
+         elif value["step"] == "Quit" and case in UPLOAD.CASES:
+-            spec = ("quit-confirm", "quit", (5,9), 16)
++            spec = ("quit-confirm", "quit", (5, 11) if case == UPLOAD.CASES[2] else (5, 9), 16)
+         elif value["step"] == "Quit" and case in VAULT_HELPER_CASES:
+             spec = ("quit-confirm", "quit", (5, 7) if case == VAULT_HELPER_CASES[0] else (5,), 16)
+         elif value["step"] == "Session(Native(6))" and case in ("ios-signing-inputs", ANDROID_INPUT_CASE):
+@@ -3913,7 +3915,7 @@
+     need(type(snapshot) is dict and set(snapshot) == flags | fields
+          and all(type(snapshot[k]) is bool for k in flags) and snapshot["unknown"]
+          and snapshot["unknown"] == (snapshot["documentUnknown"] or snapshot["exhausted"] or snapshot["lostObserved"] or not snapshot["originalBound"])
+-         and type(snapshot["originals"]) is int and 0 <= snapshot["originals"] <= (9 if case in UPLOAD.CASES else 7 if case == VAULT_HELPER_CASES[0] else 5), "failure-context")
++         and type(snapshot["originals"]) is int and 0 <= snapshot["originals"] <= (11 if case == UPLOAD.CASES[2] else 9 if case in UPLOAD.CASES else 7 if case == VAULT_HELPER_CASES[0] else 5), "failure-context")
+     phases = {"idle", "admitting", "picking", "capturing", "selected", "assessing", "preview", "mutating", "stopping", "unknown"}
+     reasons = {"none", "closed", "unqualified", "unsupported-platform", "unsupported-filesystem", "unsupported-format",
+                "invalid-request", "busy", "source-refused", "source-changed", "material-limit", "parser-limit", "project-overlap",
+diff --git a/tests/desktop/test_macos_upload_key_cancel_observation.py b/tests/desktop/test_macos_upload_key_cancel_observation.py
+--- a/tests/desktop/test_macos_upload_key_cancel_observation.py
++++ b/tests/desktop/test_macos_upload_key_cancel_observation.py
+@@ -26,6 +26,8 @@
+     value = original_report()
+     value.update(testResult="cancelled-cleanup", generated=cancelled(case),
+                  authenticatedReopenReadback=case == AFTER, stoppedIntentAcknowledged=case == BEFORE)
++    if case == AFTER:
++        value.update(originalCount=11, explicitlyBoundSavedKey=True, rememberedBoundSavedKey=True)
+     return value
+
+
+@@ -85,7 +87,7 @@
+                 value = report(case)
+                 value[field] = not value[field]
+                 self.refused(U.report, value, case)
+-            for count in (5, 8, 10, True):
++            for count in ((5, 8, 9, 10, True) if case == AFTER else (5, 8, 10, 11, True)):
+                 value = report(case)
+                 value["originalCount"] = count
+                 self.refused(U.report, value, case)

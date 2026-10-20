@@ -26,6 +26,8 @@ def report(case):
     value = original_report()
     value.update(testResult="cancelled-cleanup", generated=cancelled(case),
                  authenticatedReopenReadback=case == AFTER, stoppedIntentAcknowledged=case == BEFORE)
+    if case == AFTER:
+        value.update(originalCount=11, explicitlyBoundSavedKey=True, rememberedBoundSavedKey=True)
     return value
 
 
@@ -85,7 +87,7 @@ class UploadKeyCancelObservationTests(unittest.TestCase):
                 value = report(case)
                 value[field] = not value[field]
                 self.refused(U.report, value, case)
-            for count in (5, 8, 10, True):
+            for count in ((5, 8, 9, 10, True) if case == AFTER else (5, 8, 10, 11, True)):
                 value = report(case)
                 value["originalCount"] = count
                 self.refused(U.report, value, case)

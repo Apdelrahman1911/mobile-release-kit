@@ -33,7 +33,12 @@ impl Admission {
     }
     fn recovery_action(&self, action: recovery::Action) -> bool {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-        if self.installed.is_some() { return action == recovery::Action::AcknowledgeUnstarted; }
+        if let Some(control) = &self.installed {
+            use crate::shell::installed_observation::vault::upload_key::Case;
+            return matches!((control.upload.case(control.case), action),
+                (Some(Case::StopBeforeGo), recovery::Action::AcknowledgeUnstarted)
+                | (Some(Case::StopAfterNew), recovery::Action::RememberBound));
+        }
         let _ = action;
         true
     }
@@ -54,8 +59,8 @@ impl Qualification {
             Self::Installed(selection) => {
                 use crate::shell::installed_observation::vault::upload_key::Action;
                 if !matches!((action,selection.action()),
-                    (SelectedAction::Prepare,Action::Prepare | Action::RecoveryPrepare)
-                    | (SelectedAction::Recover,Action::AcknowledgeUnstarted))
+                    (SelectedAction::Prepare,Action::Prepare | Action::RecoveryPrepare | Action::BoundPrepare)
+                    | (SelectedAction::Recover,Action::AcknowledgeUnstarted | Action::RememberBound))
                     && !(matches!(action,SelectedAction::Create) && selection.action().creates()) {return Err(AssetError::invalid());}
                 let control=document.installed_upload_consume(selection,path)?;
                 Ok(Admission{installed:Some(control)})

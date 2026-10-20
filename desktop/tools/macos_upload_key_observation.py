@@ -22,6 +22,7 @@ REPORT_FIELDS = frozenset(("mechanism", "normalGenerationEnabled", "execution", 
                          "generated", "repeatedCreateRefused", "authenticatedReopenReadback", "stoppedIntentAcknowledged", "originalCount",
                          "allOriginalsSettled", "finalDocumentEmpty", "automaticallyAssigned", "backupCreated",
                          "releaseSigningQualified", "physicalMacEvidence", "privateContentsExported", "rowRetirement"))
+AFTER_NEW_FIELDS = frozenset(("explicitlyBoundSavedKey", "rememberedBoundSavedKey"))
 
 
 def need(test, label="upload-key-observation"):
@@ -114,7 +115,11 @@ def retained_stop(value, case):
 
 
 def report(value, case):
-    need(case in CASES and type(value) is dict and value.keys() == REPORT_FIELDS)
+    need(case in CASES and type(value) is dict)
+    after_new = case == CASES[2] and value.get("execution") == "executed"
+    need(value.keys() == REPORT_FIELDS | (AFTER_NEW_FIELDS if after_new else frozenset()))
+    if after_new:
+        need(all(value[key] is True for key in AFTER_NEW_FIELDS))
     need(value["mechanism"] == "same-original-upload-key-v1" and value["normalGenerationEnabled"] is False)
     need(value["allOriginalsSettled"] is True and value["finalDocumentEmpty"] is True)
     for key in ("automaticallyAssigned", "backupCreated", "releaseSigningQualified", "physicalMacEvidence", "privateContentsExported"):
@@ -127,7 +132,8 @@ def report(value, case):
              and not value["repeatedCreateRefused"] and not value["authenticatedReopenReadback"]
              and not value["stoppedIntentAcknowledged"] and value["originalCount"] == 5)
     else:
-        need(value["execution"] == "executed" and value["repeatedCreateRefused"] and value["originalCount"] == 9)
+        need(value["execution"] == "executed" and value["repeatedCreateRefused"]
+             and value["originalCount"] == (11 if after_new else 9))
         if case == CASES[0]:
             need(value["testResult"] == "positive" and value["authenticatedReopenReadback"]
                  and not value["stoppedIntentAcknowledged"])

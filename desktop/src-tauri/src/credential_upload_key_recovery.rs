@@ -953,6 +953,59 @@ pub(in crate::asset_session) fn installed_acknowledged(
             && vault.bound.iter().all(Option::is_none)))
 }
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(in crate::asset_session) fn installed_bound_request(
+    status: &UploadKeyStatus, expected: StoredRef,
+) -> Result<(RecoveryRequest, u64), AssetError> {
+    let recovery = &status.recovery;
+    let revision = recovery.preference_revision.as_deref().ok_or_else(AssetError::invalid)?;
+    let parsed = revision.parse::<u64>().map_err(|_| AssetError::invalid())?;
+    if parsed == 0 || parsed.checked_add(1).is_none() || parsed.to_string() != revision
+        || recovery.state != "remember-bound" || recovery.operation.is_some()
+        || recovery.record.as_ref() != Some(&KeyReference::native(expected.identity, expected.record, expected.revision))
+    { return Err(AssetError::new(Reason::ContextStale)); }
+    let context = status.assets.context.as_ref().ok_or_else(AssetError::invalid)?;
+    // This is only the exact response comparison for the next explicit call.
+    // The unchanged owner still captures/revalidates the actual BoundLoan.
+    Ok((RecoveryRequest { context_revision: context.revision,
+        status_revision: status.assets.status_revision, preference_revision: parsed,
+        action: Action::RememberBound }, parsed))
+}
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(in crate::asset_session) fn installed_remembered(
+    document: &DocumentBinding, state: &DocumentState, expected: StoredRef, previous_revision: u64,
+) -> Option<bool> {
+    let slot = state.slot.as_ref()?;
+    if slot.operation != Operation::RecoverUploadKey || slot.owner.id != 10
+        || state.unknown || slot.owner.stopped() || slot.reason != Reason::None
+        || slot.error.is_some() || slot.settlement == Settlement::Unknown
+    { return Some(false); }
+    let status = projection(document, state, None);
+    let operation = status.operation?;
+    if operation.phase == "pending" { return None; }
+    let matching_reference = slot.vault.upload_key_recovery.as_ref().is_some_and(|completion|
+        completion.action == Action::RememberBound
+        && completion.disposed.load(Ordering::SeqCst)
+        && completion.reference.is_some_and(|reference| same_reference(reference, expected))
+        && previous_revision.checked_add(1) == Some(completion.preference_revision));
+    let current_bound = state.vault.as_ref().is_some_and(|session| {
+        let mut current = session.bound.iter().flatten().filter(|loan|
+            loan.payload.kind == Kind::AndroidKeystore && loan.current(state, session));
+        current.next().is_some_and(|loan| same_reference(loan.reference, expected))
+            && current.next().is_none()
+    });
+    // projection() requires actual publication/disposal, original resources
+    // and empty recovery backing. A phase, saved hash or missing worker alone
+    // cannot make this true. The current BoundLoan remains independently real.
+    Some(operation.operation_id == 10 && operation.action == Action::RememberBound
+        && operation.phase == "completed" && matching_reference && current_bound
+        && state.context.as_ref().is_some_and(|context|
+            document.context_matches(state, context).unwrap_or(false))
+        && previous_revision.checked_add(1).is_some_and(|revision|
+            operation.preference_revision.as_deref() == Some(revision.to_string().as_str())))
+}
+
 pub(in crate::asset_session) fn persist_stopped(
     held: &super::super::Holding,
     write: &mut StoppedWrite,

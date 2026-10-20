@@ -4,6 +4,8 @@
 use super::*;
 #[path = "credential_upload_key_cancel_observation.rs"]
 mod cancelled;
+#[path = "credential_upload_key_bound_observation.rs"]
+mod bound_recovery;
 pub(super) use cancelled::cancelled_disposed;
 use crate::shell::installed_observation::vault::{
     upload_key::{Action, Case, Selection},
@@ -70,6 +72,7 @@ pub(crate) struct Trace {
     cancelled_disposal: bool,
     stopped_preference_revision: Option<u64>,
     recovery_request: Option<controls::RecoveryRequest>,
+    bound_preference_revision: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,7 +449,7 @@ impl DocumentBinding {
         self.installed_upload_saved_action(Action::Saved).await
     }
     async fn installed_upload_saved_action(&self, action: Action) -> Result<(), AssetError> {
-        if !matches!(action, Action::Saved | Action::RecoverySaved) { return Err(AssetError::invalid()); }
+        if !matches!(action, Action::Saved | Action::RecoverySaved | Action::BoundSaved) { return Err(AssetError::invalid()); }
         let selection = self.installed_upload_select(action)?;
         self.installed_upload_consume(selection, None)?;
         let project = self
@@ -523,7 +526,7 @@ impl DocumentBinding {
         let path = (action == Action::Reopen).then(|| control.root());
         self.installed_upload_consume(selection, path)?;
         match action {
-            Action::Lock | Action::Relock | Action::RecoveredRelock | Action::Missing => {
+            Action::Lock | Action::Relock | Action::RecoveredRelock | Action::BoundRelock | Action::Missing => {
                 self.lock_session()?;
             }
             Action::Reopen => {
