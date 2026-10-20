@@ -1890,11 +1890,7 @@ export function App() {
         {page === 'metadata' && <Metadata catalog={catalog} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}
           imageEditor={<MetadataImagesEditor state={metadataImagesState} controller={metadataImages} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} credentialHelp={catalog?.credentials ?? null} onHelp={setHelp} nativeReview={workflowPanel(true)}
-          connectionView={<><LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
-            localActions={gitRepository ? <><GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
-              <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} /></> : undefined}
-            originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
-            {!gitRepository && gitRepositories.current.length >= 64 && <p className="review-caution">The local draft limit has been reached. Earlier drafts are kept; use your Git client for additional projects or service sessions.</p>}
+          connectionView={<>
             <GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp} nativeBusyReason={savedCommandBusy()}
             repositoryInput={applicationRepository} onRepository={changeApplicationRepository} projectSelected={session !== null && !choosing}
             handoff={connectionHandoffRef.current}
@@ -1902,13 +1898,43 @@ export function App() {
               originalProjectName={githubGhState.originalProjectId ? workspace.projects[githubGhState.originalProjectId]?.project.name : undefined} />} />
             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}
             <GitHubRepositoryCreate controller={repositoryCreate} state={repositoryCreateState} />
-            <ProgressiveDisclosure title="Advanced · shared version counter" needsAttention={versionEnrollmentBusy() !== null || versionEnrollmentState.issue !== null}>
-              <VersionEnrollmentPanel controller={versionEnrollment} />
-            </ProgressiveDisclosure>
-            <GitHubPublication state={githubPublicationState} controller={githubPublication} />
-            <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} assets={assetState} projectId={workspace.selectedId ?? null} onCredentials={() => navigate('credentials')} onHelp={setHelp} />
-            <GitHubPreflight state={githubPreflightState} controller={githubPreflight} onHelp={setHelp} />
-            <GitHubHistory state={githubHistoryState} controller={githubHistory} onHelp={setHelp} /></>} />}
+            <LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
+            localActions={gitRepository ? <><GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} />
+              <GitBranches reader={gitRead} controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} /></> : undefined}
+            originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
+            {!gitRepository && gitRepositories.current.length >= 64 && <p className="review-caution">The local draft limit has been reached. Earlier drafts are kept; use your Git client for additional projects or service sessions.</p>}
+          </>}
+          remoteTasks={[
+            { id: 'publication', title: 'Publish setup as a draft pull request',
+              description: 'Review the five supported setup files before publishing them. This does not upload your application source.',
+              needsAttention: githubPublicationOwnerReason(githubPublicationState) !== null || githubPublicationState.observing || githubPublicationState.error !== null ||
+                !!githubPublicationState.status?.pending.length || !!githubPublicationState.status?.operation && (githubPublicationState.status.operation.reason !== 'none' ||
+                  ['potentially-applied', 'unresolved', 'branch-observed'].includes(githubPublicationState.status.operation.effect)),
+              content: <GitHubPublication state={githubPublicationState} controller={githubPublication} /> },
+            { id: 'settings', title: 'Configure repository settings and required inputs',
+              description: 'Review Actions settings, environment protections, or one assigned secret or variable. Every change needs its own approval.',
+              needsAttention: githubRemoteSetupOwnerReason(githubRemoteSetupState) !== null || githubRemoteSetupState.observing || githubRemoteSetupState.error !== null ||
+                !!githubRemoteSetupState.status?.operation && (githubRemoteSetupState.status.operation.reason !== 'none' || githubRemoteSetupState.status.operation.effect === 'unknown'),
+              content: <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} assets={assetState} projectId={workspace.selectedId ?? null} onCredentials={() => navigate('credentials')} onHelp={setHelp} /> },
+            { id: 'checks', title: 'Run a nonpublishing check on GitHub',
+              description: 'Choose an existing branch and platform, review the workflow, then explicitly request one run. No Store release is requested.',
+              needsAttention: githubPreflightOwnerReason(githubPreflightState) !== null || githubPreflightState.observing || githubPreflightState.error !== null ||
+                githubPreflightState.status?.prepared != null || !!githubPreflightState.status?.pending.length ||
+                !!githubPreflightState.status?.operation && (githubPreflightState.status.operation.reason !== 'none' || githubPreflightState.status.operation.effect === 'potentially-applied') ||
+                !!githubPreflightState.status?.run && (githubPreflightState.status.run.status !== 'completed' || githubPreflightState.status.run.conclusion !== 'success'),
+              content: <GitHubPreflight state={githubPreflightState} controller={githubPreflight} onHelp={setHelp} /> },
+            { id: 'history', title: 'Read release history from a GitHub run',
+              description: 'Check retained evidence for one exact run and attempt. This does not run a workflow or check current Store state.',
+              needsAttention: githubHistoryOwnerReason(githubHistoryState) !== null || githubHistoryState.observing || githubHistoryState.error !== null ||
+                !!githubHistoryState.status?.operation && githubHistoryState.status.operation.reason !== 'none' ||
+                !!githubHistoryState.status?.result && githubHistoryState.status.result.verification !== 'verified',
+              content: <GitHubHistory state={githubHistoryState} controller={githubHistory} onHelp={setHelp} /> },
+            { id: 'counter', title: 'Advanced: connect a shared version counter',
+              description: 'Optional. Manual versions remain the default; connecting a counter does not reserve or change a version.',
+              needsAttention: versionEnrollmentBusy() !== null || versionEnrollmentState.issue !== null ||
+                versionEnrollmentState.status?.phase === 'reviewed' || versionEnrollmentState.status?.phase === 'refused',
+              content: <VersionEnrollmentPanel controller={versionEnrollment} /> },
+          ]} />}
         {page === 'releases' && <Releases onOpenGitHub={() => navigate('github')}
           storeNeedsAttention={!!(localHistoryBusy() ?? storeBusy()) || [localHistoryState, localStoreState, localStorePrepareState, localStoreExecuteState, localStoreReconcileState].some((state) => state.error !== null || state.status?.operation?.phase === 'terminal' && state.status.operation.outcome !== 'complete')}
           workflowNeedsAttention={githubReleaseOwnerReason(githubReleaseState) !== null || githubReleaseState.error !== null || githubRelease.currentPrepared() !== null}
