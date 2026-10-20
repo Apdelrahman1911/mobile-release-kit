@@ -67,13 +67,21 @@ jobs:
     # then one removal owner990 (fixed segment sum963); no budget restart.
     # App-signature: ARM99 / Intel139 timed preparation +14 bounded setup
     # +7 summary/cleanup/upload;7 overhead. Independent110 hard cap takes precedence.
-    timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
+    # Explicit current-runtime identity4 alone selects the nonshipping observer.
+    # Conservative selected step maxima (minutes), NOT an expected duration:
+    # setup13 + compiler/argv9 + signed suppliers/current-runtime39 +
+    # helper/vault/app/assembly64 + REQUIRED notary/package/install98 +
+    # identity4 15 =238; the independent250 cap leaves12 for job overhead.
+    # No per-case renewal, legacy suite, ordinary prepared export or final image.
+    timeout-minutes: ${{ matrix.native_scope == 'project-identity-native' && 250 || github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
         # Corrected candidate: ARM only; other routes retain both targets and all removal cases.
-        include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-candidate' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"}]' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"ordinary"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"abrupt"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"abrupt"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635"}]') }}
+        # native_scope is SOURCE-owned and disabled by default. Only a reviewed
+        # verification-source change may select the literal project-identity-native.
+        include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-candidate' && '[{"native_scope":"disabled","target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"}]' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"ordinary"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"abrupt"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"abrupt"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635"}]') }}
     env:
       RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target] }}
       MRK_MACOS_TARGET: ${{ matrix.target }}
@@ -82,7 +90,8 @@ jobs:
       MRK_MACOS_HOSTED_JOB: ${{ matrix.hosted_job }}
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
-      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_NATIVE_SCOPE: ${{ matrix.native_scope || 'disabled' }}
+      MRK_MACOS_PACKAGE_ROLE: ${{ matrix.native_scope == 'project-identity-native' && 'installed-shell-observation' || 'ordinary-image' }}
       # Separate reviewed activation only; baseline and later UI remain independent.
       MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}
       MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}
@@ -113,13 +122,22 @@ jobs:
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
     steps:
       - name: Admit only this exact disposable-hosted source route
-        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 1 || 350 }}
+        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 1 || 350 }}
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1
+          case "$MRK_MACOS_NATIVE_SCOPE" in
+            disabled) [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image ]] || exit 1 ;;
+            project-identity-native)
+              [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate && "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation ]] || exit 1
+              [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_REMOVAL_CASE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+              [[ "${MRK_MACOS_AQUA_SCOPE:-disabled}" == disabled && "${MRK_MACOS_XCODE_SETUP_SCOPE:-disabled}" == disabled ]] || exit 1
+              ;;
+            *) exit 1 ;;
+          esac
           case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in
             disabled) ;;
             same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
@@ -193,7 +211,7 @@ jobs:
           [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
           [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]] || exit 1
       - name: Check out exact reviewed source without retained credentials
-        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 3 || 350 }}
+        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 3 || 350 }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         env:
           GIT_CONFIG_COUNT: '1'
@@ -203,7 +221,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Select DATA stager Python, not the packaged interpreter
-        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 2 || 350 }}
+        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 2 || 350 }}
         id: python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -302,13 +320,13 @@ jobs:
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" TMPDIR="$RUNNER_TEMP" LANG=C LC_ALL=C TZ=UTC \
             "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py store-signing-selection --target "$MRK_MACOS_TARGET"
       - name: Select fixed frontend compiler
-        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 2 || 350 }}
+        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 2 || 350 }}
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.20.0'
           package-manager-cache: false
       - name: Reserve fresh work and record exact source and actual tool bindings
-        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 2 || 350 }}
+        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 2 || 350 }}
         id: work
         shell: bash
         env:
@@ -388,6 +406,9 @@ jobs:
               value.update(scope="current-macos-candidate", fixedFixtureCases=0, aclPrimitiveCases=0,
                   selectedRegressionGroups=[], instrumented=False, applicationLaunched=False,
                   fullUIQualified=False, distributionQualified=False, actualAquaSaveGate="not-selected")
+          if os.environ["MRK_MACOS_NATIVE_SCOPE"] == "project-identity-native":
+              # Preparation only: actual launch/Apply/recovery is not yet observed.
+              value.update(instrumented=True, applicationLaunched=False)
           if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-installed":
               # Source-admission facts for the ordinary, separately built app;
               # never a completed launch, UI, distribution or consumer verdict.
@@ -429,7 +450,7 @@ jobs:
           finally: os.close(fd)
           PY
       - name: Bind the complete reviewed first-party checkout before compilation
-        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 3 || 350 }}
+        timeout-minutes: ${{ (matrix.native_scope == 'project-identity-native' || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 3 || 350 }}
         id: source
         shell: bash
         run: &mrk_installed_source_inventory |
@@ -496,7 +517,9 @@ jobs:
         shell: bash
         run: &mrk_installed_direct_rust /bin/bash desktop/tools/macos_installed_direct_rust.sh
       - name: Check the corrected macOS minimum and actual native host before signing
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate'
+        # Identity4 reaches the actual native host checks in the existing owners;
+        # do not schedule the separate DATA/platform test pair for that scope.
+        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'disabled'
         timeout-minutes: 10
         shell: bash
         run: |
@@ -1232,7 +1255,7 @@ jobs:
               output.write("MRK_MACOS_VAULT_HELPER_BYTES=" + str(len(body)) + "\n")
           PY_HELPER
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
-      - name: Build the ordinary selected-target desktop image and embedded frontend
+      - name: ${{ matrix.native_scope == 'project-identity-native' && 'Build the current nonshipping observer and embedded frontend' || 'Build the ordinary selected-target desktop image and embedded frontend' }}
         id: app_build
         timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
         shell: bash
@@ -1245,6 +1268,54 @@ jobs:
           npm run build
           cd src-tauri
           set -o noclobber
+          if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native ]]; then
+          # Same fixed observer target and original Cargo artifact checks;
+          # no ordinary cdylib, fallback executable or test execution.
+          set +e
+          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features --features desktop-shell,custom-protocol,macos-installed-observation \
+            --target "$MRK_MACOS_TARGET" --test installed-shell-observation --no-run --message-format=json \
+            > "$MRK_MACOS_WORK/observer-build.jsonl" 2> "$MRK_MACOS_WORK/observer-build.stderr"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/observer-build.status"
+          if [[ "$status" != 0 ]]; then
+            printf 'Observer compiler failed with original status %s; bounded diagnostics are retained.\n' "$status" >&2
+            exit "$status"
+          fi
+          "$MRK_PYTHON" -I -S -B - <<'PY_BUILD'
+          import hashlib, json, os, pathlib, re, stat
+          root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
+          path = root / "observer-build.jsonl"
+          if path.stat().st_size > 4 * 1024 * 1024: raise ValueError("compiler record bound")
+          rows = [json.loads(line) for line in path.read_bytes().splitlines()]
+          if [r.get("success") for r in rows if r.get("reason") == "build-finished"] != [True]: raise ValueError("original compiler did not finish")
+          targets = [r for r in rows if r.get("reason") == "compiler-artifact" and r.get("target", {}).get("name") == "installed-shell-observation" and r["target"].get("kind") == ["test"] and r.get("executable")]
+          if len(targets) != 1 or targets[0].get("profile", {}).get("test") is not True: raise ValueError("one actual-main test target required")
+          binary = pathlib.Path(targets[0]["executable"])
+          expected = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / os.environ["MRK_MACOS_TARGET"] / "debug/deps"
+          if binary.parent != expected or not re.fullmatch(r"installed_shell_observation-[0-9a-f]+", binary.name): raise ValueError("fixed observation target path")
+          m = binary.lstat()
+          if not stat.S_ISREG(m.st_mode) or m.st_nlink != 1 or m.st_mode & 0o111 == 0: raise ValueError("original compiler artifact type")
+          identity = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+          fd = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+          try:
+              before = os.fstat(fd)
+              if identity(before) != identity(m) or not 0 < before.st_size <= 512 * 1024 * 1024:
+                  raise ValueError("original observer artifact changed or oversized")
+              h = hashlib.sha256()
+              for offset in range(0, before.st_size, 65536):
+                  block = os.read(fd, min(65536, before.st_size - offset))
+                  if len(block) != min(65536, before.st_size - offset): raise ValueError("short original artifact read")
+                  h.update(block)
+              if (os.read(fd, 1) or identity(before) != identity(os.fstat(fd))
+                      or identity(before) != identity(os.stat(binary, follow_symlinks=False))):
+                  raise ValueError("original observer artifact changed")
+          finally: os.close(fd)
+          with open(os.environ["GITHUB_ENV"], "a") as stream:
+              stream.write("MRK_MACOS_OBSERVER_BINARY=" + str(binary) + "\n")
+              stream.write("MRK_MACOS_OBSERVER_SHA256=" + h.hexdigest() + "\n")
+          PY_BUILD
+          else
           set +e
           PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib \
             --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
@@ -1260,6 +1331,7 @@ jobs:
           image_sha=${image_sha%% *}
           [[ "$image_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
           printf 'MRK_MACOS_DESKTOP_IMAGE_SHA256=%s\n' "$image_sha" >> "$GITHUB_ENV"
+          fi
           remover_features=macos-installed-remover
           if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle && "$MRK_MACOS_REMOVAL_CASE" == abrupt ]]; then
             remover_features=macos-installed-removal-abrupt-fixture
@@ -1325,7 +1397,8 @@ jobs:
           checkout = Path(os.environ["GITHUB_WORKSPACE"])
           cwd = checkout / "desktop/src-tauri"
           root = Path(os.environ["MRK_MACOS_WORK"])
-          if (root / "normal-build.status").read_bytes() != b"0\n":
+          status_name = "observer-build.status" if os.environ["MRK_MACOS_NATIVE_SCOPE"] == "project-identity-native" else "normal-build.status"
+          if (root / status_name).read_bytes() != b"0\n":
               raise ValueError("effective versions require the original successful build")
           repository_default = tomllib.loads((checkout / "desktop/rust-toolchain.toml").read_text())["toolchain"]["channel"]
           selected_toolchain = os.environ.get("RUSTUP_TOOLCHAIN")
@@ -1377,7 +1450,7 @@ jobs:
         shell: bash
         run: |
           builtin source ./desktop/tools/macos_installed_data_contracts.sh
-      - name: Assemble the ordinary image app and sign code inside-out (never --deep)
+      - name: ${{ matrix.native_scope == 'project-identity-native' && 'Assemble the current observer and sign code inside-out (never --deep)' || 'Assemble the ordinary image app and sign code inside-out (never --deep)' }}
         id: app_assemble
         timeout-minutes: 20
         shell: bash
@@ -1395,6 +1468,7 @@ jobs:
           export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           set -euo pipefail
           set -o noclobber
+          if [[ "$MRK_MACOS_NATIVE_SCOPE" == disabled ]]; then
           # Current compiler-derived program, not an installer alias. The
           # same fixed signing owner returns a digest only after known finality.
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/applications-launcher"
@@ -1406,6 +1480,7 @@ jobs:
           [[ "$launcher_result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
           MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256=${launcher_result#sha256=}
           printf 'MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256=%s\n' "$MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256" >> "$GITHUB_ENV"
+          fi
           remover_result=$(MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
           MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-remover --target "$MRK_MACOS_TARGET")
@@ -1427,9 +1502,24 @@ jobs:
             github_seal_arguments=(--github-seal "$MRK_MACOS_WORK/github-seal-capsule/mrk-github-seal"
               --expected-github-seal "$MRK_MACOS_GITHUB_SEAL_SHA256" --expected-github-seal-bytes "$MRK_MACOS_GITHUB_SEAL_BYTES")
           fi
+          if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native ]]; then
+            app_binary_arguments=(--binary "$MRK_MACOS_OBSERVER_BINARY"
+              --expected-app-binary "$MRK_MACOS_OBSERVER_SHA256"
+              --observer-cargo-messages "$MRK_MACOS_WORK/observer-build.jsonl"
+              --observer-cargo-target-dir "$CARGO_TARGET_DIR")
+          else
+            app_binary_arguments=(--binary "$MRK_MACOS_WORK/mobile-release-kit-desktop"
+            --expected-app-binary "$MRK_MACOS_DESKTOP_FACADE_SHA256"
+            --desktop-image "$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/libmrk_desktop_image.dylib"
+            --expected-desktop-image "$MRK_MACOS_DESKTOP_IMAGE_SHA256"
+            --desktop-image-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl"
+            --desktop-image-cargo-target-dir "$CARGO_TARGET_DIR"
+            --applications-launcher "$MRK_MACOS_WORK/applications-launcher/MobileReleaseKitLauncher.app"
+            --expected-applications-launcher "$MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256")
+          fi
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" ${removal_arguments[@]+"${removal_arguments[@]}"} ${github_seal_arguments[@]+"${github_seal_arguments[@]}"} \
-            --package-role ordinary-image \
+            --package-role "$MRK_MACOS_PACKAGE_ROLE" \
             --entry-binary "$MRK_MACOS_WORK/mrk-macos-entry" --expected-entry "$MRK_MACOS_ENTRY_SHA256" \
             --vault-helper "$MRK_MACOS_WORK/vault-helper-target/$MRK_MACOS_TARGET/release/mrk-vault-keychain" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
@@ -1448,17 +1538,11 @@ jobs:
             --bundletool-archive "$MRK_MACOS_WORK/signed-android-transport/bundletool-all-1.18.3.jar" \
             --aapt2-archive "$MRK_MACOS_WORK/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \
             --android-support-signed-receipt "$MRK_MACOS_WORK/signed-android-transport/android-support-signed-receipt.json" \
-            --binary "$MRK_MACOS_WORK/mobile-release-kit-desktop" \
-            --expected-app-binary "$MRK_MACOS_DESKTOP_FACADE_SHA256" \
-            --desktop-image "$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/libmrk_desktop_image.dylib" \
-            --expected-desktop-image "$MRK_MACOS_DESKTOP_IMAGE_SHA256" \
-            --desktop-image-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl" \
-            --desktop-image-cargo-target-dir "$CARGO_TARGET_DIR" \
-            --applications-launcher "$MRK_MACOS_WORK/applications-launcher/MobileReleaseKitLauncher.app" \
-            --expected-applications-launcher "$MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256" \
+            "${app_binary_arguments[@]}" \
             --output "$MRK_MACOS_WORK/app/Mobile Release Kit.app" > "$MRK_MACOS_WORK/app-result.json"
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-before --target "$MRK_MACOS_TARGET"
           payload="$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app"
+          if [[ "$MRK_MACOS_NATIVE_SCOPE" == disabled ]]; then
           # Resident image/facade and vault helper are already signed. Sign
           # the copied desktop dylib before its C facade bundle and outer entry.
           desktop_image="$payload/Contents/Frameworks/libmrk_desktop_image.dylib"
@@ -1469,6 +1553,7 @@ jobs:
           desktop_image_sha=$(/usr/bin/shasum -a 256 "$desktop_image")
           desktop_image_sha=${desktop_image_sha%% *}
           [[ "$desktop_image_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          fi
           MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
           MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-desktop-payload --target "$MRK_MACOS_TARGET"
@@ -1481,7 +1566,9 @@ jobs:
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-root-app --target "$MRK_MACOS_TARGET"
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-after --target "$MRK_MACOS_TARGET"
           # verify-after independently rebinds the unchanged signed resident image.
-          /usr/bin/codesign --verify --strict "$desktop_image"
+          if [[ "$MRK_MACOS_NATIVE_SCOPE" == disabled ]]; then
+            /usr/bin/codesign --verify --strict "$desktop_image"
+          fi
           /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-vault-keychain"
           if [[ '${{ steps.github_tools.outputs.seal-enabled }}' == true ]]; then
             /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-github-seal"
@@ -1496,7 +1583,11 @@ jobs:
           entry_sha=$(/usr/bin/shasum -a 256 "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/MacOS/mrk-macos-entry")
           entry_sha=${entry_sha%% *}
           [[ "$entry_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native ]]; then
+            printf 'MRK_MACOS_SIGNED_ENTRY_SHA256=%s\nMRK_MACOS_SIGNED_PAYLOAD_SHA256=%s\n' "$entry_sha" "$payload_sha" >> "$GITHUB_ENV"
+          else
           printf 'MRK_MACOS_SIGNED_ENTRY_SHA256=%s\nMRK_MACOS_SIGNED_PAYLOAD_SHA256=%s\nMRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256=%s\n' "$entry_sha" "$payload_sha" "$desktop_image_sha" >> "$GITHUB_ENV"
+          fi
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Summarize only completed whole-app signatures and observed bytes
         id: app_signature_summary
@@ -1891,7 +1982,7 @@ jobs:
           # This root-owned Scripts component is not final P. The next fixed owner
           # first productbuilds the SOURCE ReadMe envelope, then signs the outer package.
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
-      - name: Build fixed Installer presentation then sign and notarize the completed outer package before final P
+      - name: ${{ matrix.native_scope == 'project-identity-native' && 'Sign and notarize the same completed observer package before final P' || 'Build fixed Installer presentation then sign and notarize the completed outer package before final P' }}
         if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
         timeout-minutes: 32
         shell: bash
@@ -1933,7 +2024,7 @@ jobs:
 
       - name: Publish only the prepared signed input checkpoint; not installed
         id: prepared_export
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate'
+        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'disabled'
         timeout-minutes: 5
         shell: bash
         env:
@@ -2132,7 +2223,7 @@ jobs:
           phase summary
 
       - name: Standard Installer only is privileged; never execute the app or Python as root
-        if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-positive-update' || steps.update_p0_credentials.outcome == 'success')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-positive-update' || steps.update_p0_credentials.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation')
         id: package_install
         timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' && 32 || 18 }}
         shell: bash
@@ -2168,6 +2259,25 @@ jobs:
           # saved Installer0, same-request readback and known detach permit use.
           # Unknown resources remain retained; no forced detach or root Python.
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Observe four original identity edits on the current installed observer
+        id: identity_native
+        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'
+        timeout-minutes: 15
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          # Actual finalized+installed source/runtime is re-admitted by the
+          # existing Fixtures owner. Original four case clocks total525s plus
+          # two30s controlled pending precursors; this step never renews them.
+          # The helper alone emits bounded public case/finality JSON to the
+          # job log. Failure/unknown stops later cases and preserves originals.
+          # No UI automation, raw output export, compiler deletion, shipping
+          # claim, synthesized completion or retry after an uncertain return.
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET"
       - name: Verify credential continuity and owned-record deletion on P1
         id: update_p1_credentials
         if: github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success'
