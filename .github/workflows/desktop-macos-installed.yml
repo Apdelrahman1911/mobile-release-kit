@@ -1274,10 +1274,11 @@ jobs:
           set -o noclobber
           if [[ "$MRK_MACOS_NATIVE_SCOPE" == project-identity-native ]]; then
           # Same fixed observer target and original Cargo artifact checks;
-          # no ordinary cdylib, fallback executable or test execution.
+          # no ordinary cdylib, fallback executable or test execution. Render
+          # diagnostics to stderr, not repeated warning payloads in the artifact JSON.
           set +e
           PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features --features desktop-shell,custom-protocol,macos-installed-observation \
-            --target "$MRK_MACOS_TARGET" --test installed-shell-observation --no-run --message-format=json \
+            --target "$MRK_MACOS_TARGET" --test installed-shell-observation --no-run --message-format=json-render-diagnostics \
             > "$MRK_MACOS_WORK/observer-build.jsonl" 2> "$MRK_MACOS_WORK/observer-build.stderr"
           status=$?
           set -e
@@ -1290,7 +1291,7 @@ jobs:
           import hashlib, json, os, pathlib, re, stat
           root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
           path = root / "observer-build.jsonl"
-          if path.stat().st_size > 4 * 1024 * 1024: raise ValueError("compiler record bound")
+          if path.stat().st_size > 4 * 1024 * 1024: raise ValueError(f"compiler record bound ({path.stat().st_size} bytes)")
           rows = [json.loads(line) for line in path.read_bytes().splitlines()]
           if [r.get("success") for r in rows if r.get("reason") == "build-finished"] != [True]: raise ValueError("original compiler did not finish")
           targets = [r for r in rows if r.get("reason") == "compiler-artifact" and r.get("target", {}).get("name") == "installed-shell-observation" and r["target"].get("kind") == ["test"] and r.get("executable")]
