@@ -104,6 +104,7 @@ compile_error!("installed remover requires its isolated nonsigning LP64 Mac role
 pub mod error;
 pub mod protocol;
 mod git_read_protocol;
+mod version_enrollment_protocol;
 mod service_protocol;
 mod service_setup_guidance;
 mod agent_identity_requests;

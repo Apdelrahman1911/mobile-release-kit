@@ -36,6 +36,7 @@ impl GitReadGate {
             && !state.lock_pending
             && !state.maintenance.closed()
             && !version_allocation::pending(state)
+            && !version_enrollment::pending(state)
             && state.revision == self.0.document_revision
             && matches!(&state.git_read, Some(Entry::Original { ticket, gate })
                 if ticket.operation_id() == id && Arc::ptr_eq(&gate.0, &self.0))

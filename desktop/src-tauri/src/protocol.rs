@@ -158,6 +158,25 @@ pub(crate) fn strict_version_allocation_state_json(bytes: &[u8]) -> Result<Value
     strict_json_with_limits(bytes, 50_000, 20)
 }
 
+// Fixed enrollment-only subset of the SAME VersionAllocations namespace.
+// The original full Snapshot is retained by its caller before this parse.
+// A smaller node cap bounds hostile tiny-container expansion before canonical
+// roundtrips; ordinary/recovery decoding above remains 1MiB / 50,000 nodes.
+pub(crate) fn strict_version_enrollment_state_json(bytes: &[u8]) -> Result<Value, BridgeError> {
+    let limit = || BridgeError::new("version_enrollment_state_limit", "The saved counter state exceeds this bounded connection path.");
+    if bytes.len() > 256 * 1024 { return Err(limit()); }
+    std::str::from_utf8(bytes).map_err(|_| BridgeError::protocol())?;
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    let mut nodes = 0usize;
+    let parsed = Seed { nodes: &mut nodes, depth: 0, node_limit: 4096, depth_limit: 20 }.deserialize(&mut decoder);
+    // The SAME Seed increments this original counter before allocating the
+    // rejected node. Do not classify malformed JSON as a size refusal.
+    if nodes > 4096 { return Err(limit()); }
+    let value = parsed.map_err(|_| BridgeError::protocol())?;
+    decoder.end().map_err(|_| BridgeError::protocol())?;
+    Ok(value)
+}
+
 // Signed Mac inventory DATA only. Seven nodes/runtime row and nine/install
 // row, including keys: 16,384 rows fit these fixed bounds. No renderer caller.
 pub(crate) fn strict_macos_runtime_manifest_json(bytes: &[u8]) -> Result<Value, BridgeError> {

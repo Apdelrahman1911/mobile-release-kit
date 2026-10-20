@@ -15,7 +15,7 @@ use crate::{
     application_state_store::{Cleanup, Durability, Effect, Namespace, PrivateStateDirectory, Revision, Snapshot, StateError},
     github_connection_protocol::{coordinate, numeric_id},
     github_preflight_protocol::{branch, hex},
-    protocol::strict_version_allocation_state_json,
+    protocol::{strict_version_allocation_state_json, strict_version_enrollment_state_json},
     service_protocol::{Error, Id},
 };
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,8 @@ use std::{collections::BTreeSet, fmt::Write as _, sync::Arc};
 pub(crate) mod dialogue;
 #[path = "version_allocation_state_jobs.rs"]
 pub(crate) mod jobs;
+#[path = "version_enrollment_state_native.rs"]
+pub(crate) mod enrollment;
 
 const PROTOCOL: &str = "mrk-version-allocation-state/1";
 const ALLOCATION_PROTOCOL: &str = "mrk-version-allocation/1";
@@ -204,13 +206,18 @@ impl State {
     fn empty() -> Self {
         Self { schema_version: 3, protocol: PROTOCOL.to_owned(), authorities: Vec::new(), enrollments: Vec::new(), candidates: Vec::new() }
     }
-    fn parse(snapshot: &Snapshot) -> Result<Self> {
+    fn parse(snapshot: &Snapshot) -> Result<Self> { Self::parse_original(snapshot, false) }
+    fn parse_original(snapshot: &Snapshot, enrollment: bool) -> Result<Self> {
         if snapshot.revision == Revision(0) && snapshot.bytes.is_empty() { return Ok(Self::empty()); }
         let bytes = &snapshot.bytes;
         need(!bytes.is_empty() && bytes.len() <= STATE_LIMIT && bytes.last() == Some(&b'\n')
             && bytes.iter().filter(|b| **b == b'\n').count() == 1)?;
-        let mut value = strict_version_allocation_state_json(&bytes[..bytes.len() - 1])
-            .map_err(|_| StateError::from(Error::RecoveryRequired))?;
+        let parsed = if enrollment {
+            strict_version_enrollment_state_json(&bytes[..bytes.len() - 1])
+        } else { strict_version_allocation_state_json(&bytes[..bytes.len() - 1]) };
+        let mut value = parsed.map_err(|error| StateError::from(
+            if enrollment && error.code == "version_enrollment_state_limit" { Error::Unavailable }
+            else { Error::RecoveryRequired }))?;
         let version = value["schemaVersion"].as_u64().ok_or_else(|| StateError::from(Error::RecoveryRequired))?;
         let keys: &[&str] = match version {
             1 => &["schemaVersion", "protocol", "authorities"],
@@ -324,8 +331,11 @@ impl VersionAllocationStatePort {
     pub(crate) fn snapshot(&self) -> Result<&Snapshot> {
         self.usable()?; self.snapshot.as_ref().ok_or_else(|| Error::Unavailable.into())
     }
-    pub(crate) fn load(&mut self) -> Result<()> {
-        self.usable()?; need(self.snapshot.is_none())?;
+    pub(crate) fn load(&mut self) -> Result<()> { self.load_bounded(STATE_LIMIT) }
+    // Private child-only enrollment subset; ordinary/recovery callers retain
+    // the exact 1MiB / 50k-node behavior. There is no caller-selected decoder.
+    fn load_bounded(&mut self, limit: usize) -> Result<()> {
+        self.usable()?; need(self.snapshot.is_none() && [256 * 1024, STATE_LIMIT].contains(&limit))?;
         self.poisoned = true;
         let loaded = self.store.read(Namespace::VersionAllocations);
         match loaded {
@@ -333,7 +343,11 @@ impl VersionAllocationStatePort {
             Ok(snapshot) => self.snapshot = Some(snapshot),
         }
         let result = (|| {
-            let state = State::parse(self.snapshot.as_ref().ok_or_else(unknown)?)?;
+            let snapshot = self.snapshot.as_ref().ok_or_else(unknown)?;
+            // Keep the FULL original before either byte or complexity refusal.
+            if snapshot.bytes.len() > limit { return Err(Error::Unavailable.into()); }
+            let state = if limit == STATE_LIMIT { State::parse(snapshot)? }
+                else { State::parse_original(snapshot, true)? };
             if state.enrollments.iter().any(|e| e.local_project_id == self.project.project_id.as_str()) {
                 need(state.enrolled(self.project.project_id.as_str(), &self.authority.project_id)?.authority == self.authority)?;
             }

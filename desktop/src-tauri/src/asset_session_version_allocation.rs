@@ -231,6 +231,7 @@ impl DocumentBinding {
         // Source-aware peers use passive_document_gate, while this exact owner
         // uses its existing pure base. It does not visit Resources or services.
         passive_document_state_gate(state)?;
+        if version_enrollment::pending(state) { return Err(changed()); }
         if state.maintenance.closed()
             || !state.lifetime.original_bound()
             || state.lost_observed

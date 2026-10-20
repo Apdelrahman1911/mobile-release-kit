@@ -1811,6 +1811,43 @@ fn github_connection_body<'a>(webview: &Webview, request: &'a tauri::ipc::Reques
     if webview.label() != MAIN_WINDOW { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); }
     request_body(request).map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))
 }
+fn version_enrollment_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::version_enrollment_protocol::Command, BridgeError> {
+    edit_window(webview)?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
+    crate::version_enrollment_protocol::decode_command(name, bytes)
+}
+#[tauri::command]
+async fn version_enrollment_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_enrollment_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Counter enrollment has no fixture admission."));
+    version_enrollment_command("version_enrollment_status", &webview, &request)?;
+    Ok(state.document.version_enrollment_status())
+}
+#[tauri::command]
+async fn version_enrollment_review(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_enrollment_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Counter enrollment has no fixture admission."));
+    let crate::version_enrollment_protocol::Command::Review(project) = version_enrollment_command("version_enrollment_review", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    state.document.review_version_enrollment(&project).await
+}
+#[tauri::command]
+async fn version_enrollment_confirm(app: tauri::AppHandle, webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_enrollment_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Counter enrollment has no fixture admission."));
+    let crate::version_enrollment_protocol::Command::Confirm { project_id, review_id } = version_enrollment_command("version_enrollment_confirm", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    // Native fixed path only, resolved before the explicit Document admission.
+    // It is never an input supplied by the renderer or a service grant.
+    let location = app.path().app_local_data_dir().map_err(|_| crate::version_enrollment_protocol::not_started(
+        crate::version_enrollment_protocol::refused(crate::version_enrollment_protocol::Reason::RuntimeUnavailable)))?;
+    state.document.confirm_version_enrollment(&project_id, &review_id, &location).await
+}
+#[tauri::command]
+async fn version_enrollment_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::version_enrollment_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Counter enrollment has no fixture admission."));
+    let crate::version_enrollment_protocol::Command::Cancel(id) = version_enrollment_command("version_enrollment_cancel", &webview, &request)?
+        else { return Err(BridgeError::invalid()); };
+    state.document.cancel_version_enrollment(&id)
+}
+
 fn git_read_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::git_read_protocol::Command, BridgeError> {
     if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
@@ -4522,6 +4559,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
             github_auth_status, github_auth_connect, github_auth_cancel, github_auth_accounts,
             git_read_status, git_read_start, git_read_cancel,
+            version_enrollment_status, version_enrollment_review, version_enrollment_confirm, version_enrollment_cancel,
             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
             github_release_status, github_release_prepare, github_release_dispatch, github_release_track,

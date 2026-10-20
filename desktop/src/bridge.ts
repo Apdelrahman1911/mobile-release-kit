@@ -86,6 +86,7 @@ import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdent
 import { createAgentLocalCheckApi } from './agentLocalChecks.ts';
 import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
 import { createGitReadApi } from './gitReadProtocol.ts';
+import { createVersionEnrollmentPort } from './versionEnrollment.ts';
 import { createGitLocalApi } from './gitLocalProtocol.ts';
 import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
 import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
@@ -399,6 +400,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     agentLocalChecks: createAgentLocalCheckApi(mode, invoke),
     githubGhEntry: createGitHubGhApi(mode, invoke),
     gitRead: createGitReadApi(mode, invoke),
+    versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
     gitLocal: createGitLocalApi(mode, invoke),
     toolAcquisition: createToolAcquisitionApi(mode, invoke, listen),
     appleProvisioning: createAppleProvisioningApi(mode, invoke, listen),

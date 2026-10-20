@@ -13,6 +13,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 // SAME current application module graph, still the original nonshipping
 // observer executable. No library duplicate owner, helper/publisher/CLI entry.
 #[path = "../src/git_read_protocol.rs"] mod git_read_protocol;
+#[path = "../src/version_enrollment_protocol.rs"] mod version_enrollment_protocol;
 #[path = "../src/service_protocol.rs"] mod service_protocol;
 #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
 #[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;

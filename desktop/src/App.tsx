@@ -37,6 +37,8 @@ import { CliReadAccessController } from './cliReadAccessController.ts';
 import { CliReadAccessPanel } from './components/CliReadAccessPanel.tsx';
 import { AgentLocalCheckPermission } from './agentLocalChecks.ts';
 import { AgentLocalCheckAccess } from './components/AgentLocalCheckAccess.tsx';
+import { VersionEnrollmentController } from './versionEnrollmentController.ts';
+import { VersionEnrollmentPanel } from './components/VersionEnrollmentPanel.tsx';
 import { ProjectIdentityNativeController, bindAgentIdentityApi, parseAgentIdentityGuiStatus } from './projectIdentityNative.ts';
 import type { ProjectIdentityNativeState, AgentIdentityProposal, AgentIdentityGuiStatus } from './projectIdentityNative.ts';
 import { ProjectIdentityController } from './projectIdentityController.ts';
@@ -205,6 +207,9 @@ export function App() {
   const [, setPassivePending] = useState(0);
   const externalObserverRef = useRef<ExternalProjectObservationController | null>(null);
   const cliReadAccessControllerRef = useRef<CliReadAccessController | null>(null);
+  const versionEnrollmentRef = useRef<VersionEnrollmentController | null>(null);
+  const versionEnrollmentAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
+  const versionEnrollmentBusy = useCallback(() => versionEnrollmentRef.current?.ownerReason() ?? null, []);
   // One read coordinator owns the original promises across all pages. Local
   // commit drafts belong to immutable native-service/project ports, not rows.
   const gitLocalRef = useRef<GitLocalController | null>(null);
@@ -242,6 +247,7 @@ export function App() {
     ? 'The original app ID connection could not be closed reliably. Other tasks remain paused; keep the app open and preserve its project files.'
     : identityRef.current?.native.ownerReason() ?? null, []);
   const retireIdentity = useCallback(() => {
+    versionEnrollmentRef.current?.beforeContextIntent();
     retireGitRead();
     identityEpoch.current = Math.min(Number.MAX_SAFE_INTEGER, identityEpoch.current + 1);
     identityRef.current?.native.beforeContextIntent();
@@ -312,7 +318,7 @@ export function App() {
   // Every existing new-action/read admission includes the actual passive
   // original. Only the observer itself uses the underlying owner-only helper.
   const savedCommandBusy = useCallback((...args: Parameters<typeof savedOwnersBusy>) =>
-    gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null, [gitBusy, githubGhBusy, identityBusy, savedOwnersBusy, externalBusy]);
+    versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null, [versionEnrollmentBusy, gitBusy, githubGhBusy, identityBusy, savedOwnersBusy, externalBusy]);
   const syncConnectionContext = useCallback(() => {
     const selected = workspaceRef.current.selectedId;
     const project = selected && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] : null;
@@ -324,6 +330,7 @@ export function App() {
         projectGeneration: connectionProjectGeneration.current, repository: applicationRepositoryRef.current,
       } : null);
     githubGhEntryRef.current?.syncContext();
+    versionEnrollmentRef.current?.syncContext();
   }, [connectionDocumentId]);
   const advanceConnectionContext = () => {
     if (connectionProjectGeneration.current === 0xffff_ffff) connectionGenerationLost.current = true;
@@ -372,6 +379,7 @@ export function App() {
     syncGitReadRef.current();
     identityRef.current?.ui.sync();
     cliReadAccessControllerRef.current?.syncContext();
+    versionEnrollmentRef.current?.syncContext();
     externalObserverRef.current?.syncContext();
     environmentControllerRef.current?.syncProject();
     releaseVersionControllerRef.current?.syncProject();
@@ -401,7 +409,7 @@ export function App() {
       (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null),
     selectedProject: () => { const w = workspaceRef.current; return w.selectedId ? w.projects[w.selectedId] ?? null : null; },
-    recoveryUnavailable: () => gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
+    recoveryUnavailable: () => versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
       !pathService.current.api || !pathService.current.info ? 'Wait for the current service capabilities.' : null),
     onRecovered: (completion) => dispatch({ type: 'config-recovery-final', projectId: completion.binding.projectId, completion }),
     onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
@@ -464,6 +472,16 @@ export function App() {
   githubGhEntryRef.current = githubGhEntry;
   const githubGhState = useSyncExternalStore(githubGhEntry.subscribe, githubGhEntry.getSnapshot, githubGhEntry.getSnapshot);
   const originalConnection = connectionState.status ?? connectionState.retained;
+  const [versionEnrollment] = useState(() => new VersionEnrollmentController({ current: () => {
+    const service = pathService.current;
+    return { port: service.api?.mode === 'native' ? service.api.versionEnrollment ?? null : null,
+      nativeSession: service.api?.mode === 'native' ? service : null,
+      projectId: connectionPicking.current ? null : workspaceRef.current.selectedId,
+      preview: service.api?.mode === 'preview', blockedReason: versionEnrollmentAdmission.current() };
+  } }));
+  versionEnrollmentRef.current = versionEnrollment;
+  const versionEnrollmentState = useSyncExternalStore(versionEnrollment.subscribe, versionEnrollment.getSnapshot, versionEnrollment.getSnapshot);
+  useEffect(() => { versionEnrollment.syncContext(); });
   const [githubPublication] = useState(() => new GitHubPublicationController(githubConnection.getSnapshot, () => {
     const projectId = workspaceRef.current.selectedId ?? '';
     const session = projectId ? workspaceRef.current.projects[projectId] : null;
@@ -628,22 +646,37 @@ export function App() {
       return 'An original passive project query is still pending. Wait for it to settle before reviewing saved checks.';
     return null;
   };
+  // This one action borrows the current authenticated connection, not a
+  // saved-code grant. Exclude only enrollment itself from reciprocal busy checks.
+  versionEnrollmentAdmission.current = () => {
+    const blocked = gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+      savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy() ??
+      cliReadAccessControllerRef.current?.pendingReason();
+    if (blocked) return blocked;
+    if (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared)
+      return 'Finish the prepared GitHub review before connecting a shared counter.';
+    const connection = githubConnection.getSnapshot(), selected = workspaceRef.current.selectedId;
+    const current = connection.status;
+    return current?.session?.state === 'connected' && current.session.projectId === selected &&
+      connection.context?.projectId === selected && current.account.state === 'observed' &&
+      current.repository.state === 'observed' ? null : 'Connect the intended GitHub account and repository first.';
+  };
   // Identity excludes ONLY itself; all original passive/private/build owners
   // and retained GitHub reviews still block a new source edit.
-  identityAdmission.current = () => gitBusy() ?? githubGhBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
+  identityAdmission.current = () => versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
     cliReadAccessControllerRef.current?.pendingReason() ??
     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
       ? 'Finish the prepared GitHub review before editing the app ID.' : null);
   // This coupled entry excludes only its own picker work and the existing
   // Connect latch. That controller independently checks its original idle
   // session before latching, then retains the exact handoff before native IPC.
-  githubGhAdmission.current = () => gitBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+  githubGhAdmission.current = () => versionEnrollmentBusy() ?? gitBusy() ?? identityBusy() ?? savedOwnersBusy() ??
     savedOwnersPrerequisiteReason(false, false, undefined, false, false, true) ?? externalBusy() ??
     cliReadAccessControllerRef.current?.pendingReason() ??
     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
       ? 'Finish the prepared GitHub review before connecting another account.' : null);
   const savedCommandPrerequisiteReason = (...args: Parameters<typeof savedOwnersPrerequisiteReason>): string | null =>
-    gitBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
+    versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
   const [artifactInspection] = useState(() => new ArtifactInspectionController({
     selectedProject: () => {
       const current=workspaceRef.current;
@@ -678,7 +711,7 @@ export function App() {
       const current = workspaceRef.current;
       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
     },
-    otherOperationReason: () => gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersWithoutToolsBusy() ?? savedOwnersPrerequisiteReason() ??
+    otherOperationReason: () => versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersWithoutToolsBusy() ?? savedOwnersPrerequisiteReason() ??
       externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null,
     knownTools: () => {
       const state = androidBuildControllerRef.current?.getSnapshot();
@@ -829,7 +862,7 @@ export function App() {
     const port = service.api?.mode === 'native' ? service.api.agentIdentity : null;
     const book = agentRequestWork.current, slot = action === 'revoke' ? 'revoke' : 'normal';
     const project = workspaceRef.current.selectedId;
-    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || gitBusy() || identityBusy())) return;
+    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || versionEnrollmentBusy() || gitBusy() || identityBusy())) return;
     if (book.epoch === Number.MAX_SAFE_INTEGER && action !== 'revoke') { setAgentMessage({ service, text: 'Request controls need attention. Keep the original Desktop task; do not replay.' }); return; }
     const epoch = book.epoch = Math.min(Number.MAX_SAFE_INTEGER, book.epoch + 1);
     // Bound normal+revoke slots; revoke remains available during first Allow.
@@ -854,14 +887,14 @@ export function App() {
       if (book[slot] === work) book[slot] = null;
       setAgentRequestPending(book.normal !== null || book.revoke !== null);
     }
-  }, [gitBusy, identityBusy]);
+  }, [versionEnrollmentBusy, gitBusy, identityBusy]);
   identityInvalidation.current = (projectId) => {
     snapshotIntentBatch(projectId);
     dispatch({ type: 'project-identity-intent', projectId });
     releaseVersion.saveIntent(); releaseInputs.saveIntent();
     assetSession.savedProjectChanged(projectId);
   };
-  gitReadAdmission.current = () => gitLocalRef.current?.ownerReason() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
+  gitReadAdmission.current = () => versionEnrollmentBusy() ?? gitLocalRef.current?.ownerReason() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
     cliReadAccessControllerRef.current?.pendingReason() ??
     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
       ? 'Finish the prepared GitHub review before reading local project files.' : null);
@@ -897,7 +930,7 @@ export function App() {
     }, 1000);
     return () => window.clearInterval(timer); // Stops observation only, not the original native read.
   }, [gitRead]);
-  gitLocalAdmission.current = () => gitReadRef.current?.ownerReason() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+  gitLocalAdmission.current = () => versionEnrollmentBusy() ?? gitReadRef.current?.ownerReason() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
     savedOwnersPrerequisiteReason() ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ??
     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
       ? 'Finish the prepared GitHub review before reviewing local Git changes.' : null);
@@ -935,7 +968,7 @@ export function App() {
         // Only OTHER original owners. In particular, Revoke stays available
         // during Allow and during unrelated work. A connected GitHub session
         // alone is not execution and does not prevent this limited read grant.
-        busy: service !== pathService.current || !!(gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy()),
+        busy: service !== pathService.current || !!(versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy()),
       };
     },
   }));
@@ -965,7 +998,7 @@ export function App() {
       return { api: pathService.current.api, session: current.selectedId ? current.projects[current.selectedId] ?? null : null,
         versionState: releaseVersionControllerRef.current?.getSnapshot() ?? null };
     },
-    otherOperationReason: () => gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? cliReadAccessControllerRef.current?.pendingReason() ??
+    otherOperationReason: () => versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? cliReadAccessControllerRef.current?.pendingReason() ??
       (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
         ? 'Review or retire the prepared GitHub task before refreshing saved files.' : null) ??
       methodReason(pathService.current.info, 'project.snapshot', pathService.current.api?.mode ?? 'unavailable'),
@@ -1016,6 +1049,8 @@ export function App() {
   const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
 
   const bootstrap = useCallback(async () => {
+    const originalCounter = versionEnrollmentBusy();
+    if (originalCounter) { setBootError({ code: 'version_enrollment_busy', message: originalCounter, retryable: false }); return; }
     const originalGit = gitBusy();
     if (originalGit) { setBootError({ code: 'git_read_busy', message: originalGit, retryable: false }); return; }
     const originalGh = githubGhBusy();
@@ -1161,7 +1196,7 @@ export function App() {
       passivePending.current -= 1; setPassivePending(passivePending.current);
       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); }
     }
-  }, [gitBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
+  }, [versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
 
   // Before bootstrap: retire consent on the actual saved/key projection, and
   // keep the view responsive to peer-owner changes without renewing an intent.
@@ -1181,6 +1216,22 @@ export function App() {
   // Subscribe before bootstrap. A version read/replacement retires consent
   // synchronously, before React publishes another frame of the review.
   useEffect(() => releaseVersion.subscribe(() => androidBuild.syncReleaseVersion()), [releaseVersion, androidBuild]);
+  useEffect(() => {
+    // Original connection intent/pins, not every status timestamp. This retires
+    // a UI review on account/repository/session ABA before another handoff.
+    const key = () => {
+      const c = githubConnection.getSnapshot(), s = c.status;
+      return JSON.stringify([c.context, c.busy, c.blocked, c.uncertain, c.retirementPending,
+        s?.session?.id, s?.session?.state, s?.account.state, s?.account.value?.id,
+        s?.repository.state, s?.repository.value?.id]);
+    };
+    let original = key();
+    return githubConnection.subscribe(() => {
+      const next = key();
+      if (next !== original) { original = next; versionEnrollment.beforeContextIntent(); }
+      versionEnrollment.syncContext();
+    });
+  }, [githubConnection, versionEnrollment]);
   useEffect(() => githubConnection.subscribe(githubPublication.syncContext), [githubConnection, githubPublication]);
   useEffect(() => githubConnection.subscribe(githubRemoteSetup.syncContext), [githubConnection, githubRemoteSetup]);
   useEffect(() => githubConnection.subscribe(githubPreflight.syncContext), [githubConnection, githubPreflight]);
@@ -1219,6 +1270,7 @@ export function App() {
   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
   useEffect(() => () => configEdit.dispose(), [configEdit]);
   useEffect(() => () => cliReadAccess.dispose(), [cliReadAccess]);
+  useEffect(() => () => versionEnrollment.dispose(), [versionEnrollment]);
   useEffect(() => () => { identityRef.current?.ui.dispose(); identityRef.current?.native.dispose(); }, []);
   useEffect(() => () => githubSetup.dispose(), [githubSetup]);
   useEffect(() => () => environment.dispose(), [environment]);
@@ -1412,6 +1464,7 @@ export function App() {
   };
 
   const changeApplicationRepository = (value: string) => {
+    if (versionEnrollmentBusy()) return;
     githubGhEntry.beforeContextIntent();
     retireIdentity();
     if (value === applicationRepositoryRef.current) return;
@@ -1515,7 +1568,7 @@ export function App() {
     reviewReason={loading ? 'Engine capabilities are being loaded.' : reviewReason}
     suggestReason={loading ? 'Engine capabilities are being loaded.' : suggestReason}
     saveReason={loading ? 'Application capabilities are being loaded.' : savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState) ?? (session ? workflowOwnerReason(workflowState, session.project.id) ?? metadataOwnerReason(metadataState, session.project.id) : null) ?? editStartReason(saveState, session)}
-    discardReason={session && draftRetained(session.project.id) ? 'Keep this draft until the original native file-edit session has settled. Closing a review is separate from discarding draft data.' : null}
+    discardReason={versionEnrollmentBusy() ?? (session && draftRetained(session.project.id) ? 'Keep this draft until the original native file-edit session has settled. Closing a review is separate from discarding draft data.' : null)}
     onChoose={() => void chooseProject()} onEdit={edit} onValidate={() => void validate()}
     onReview={() => void review()} onSuggest={() => void suggest()}
     onPrepareSave={() => { if (session) { dispatch({ type: 'config-save-intent', projectId: session.project.id }); releaseInputs.saveIntent(); releaseVersion.saveIntent(); if (workspaceRef.current.selectedId === session.project.id) configEdit.start(session.project.id); } }}
@@ -1687,6 +1740,7 @@ export function App() {
                 <button type="button" className="button small secondary" onClick={() => navigate('github')}>Show GitHub connection</button>
               </div>
             </div></div>}
+        {page !== 'github' && <VersionEnrollmentPanel controller={versionEnrollment} compact />}
         {page !== 'github' && <GitHubPublication state={githubPublicationState} controller={githubPublication} compact onShow={() => navigate('github')} />}
         {page !== 'github' && <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'github' && <GitHubPreflight state={githubPreflightState} controller={githubPreflight} compact onShow={() => navigate('github')} onHelp={setHelp} />}
@@ -1783,6 +1837,9 @@ export function App() {
             ghEntry={<GitHubGhEntry controller={githubGhEntry}
               originalProjectName={githubGhState.originalProjectId ? workspace.projects[githubGhState.originalProjectId]?.project.name : undefined} />} />
             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}
+            <ProgressiveDisclosure title="Advanced · shared version counter" needsAttention={versionEnrollmentBusy() !== null || versionEnrollmentState.issue !== null}>
+              <VersionEnrollmentPanel controller={versionEnrollment} />
+            </ProgressiveDisclosure>
             <GitHubPublication state={githubPublicationState} controller={githubPublication} />
             <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} assets={assetState} projectId={workspace.selectedId ?? null} onCredentials={() => navigate('credentials')} onHelp={setHelp} />
             <GitHubPreflight state={githubPreflightState} controller={githubPreflight} onHelp={setHelp} />
@@ -1826,8 +1883,8 @@ export function App() {
     </div>
     <HelpDialog content={help} onClose={() => setHelp(null)} />
     {discardProject && <ConfirmDialog onCancel={() => setDiscardProject(null)}
-      blockedReason={draftRetained(discardProject) ? 'An original native file-edit session is still active or unverified. Keep this draft; closing a review is not draft deletion.' : null}
+      blockedReason={versionEnrollmentBusy() ?? (draftRetained(discardProject) ? 'An original native file-edit session is still active or unverified. Keep this draft; closing a review is not draft deletion.' : null)}
       observationPredatesSave={workspace.projects[discardProject]?.snapshotPredatesSave ?? false}
-      onConfirm={() => { if (!draftRetained(discardProject)) dispatch({ type: 'reset', projectId: discardProject }); setDiscardProject(null); }} />}
+      onConfirm={() => { if (!versionEnrollmentBusy() && !draftRetained(discardProject)) dispatch({ type: 'reset', projectId: discardProject }); setDiscardProject(null); }} />}
   </div>;
 }

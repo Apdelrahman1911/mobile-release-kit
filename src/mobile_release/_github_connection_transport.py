@@ -53,9 +53,16 @@ class _ExchangeProfile(Enum):
     SETUP = "setup"
     PUBLICATION = "publication"
     VERSION_ALLOCATION = "version-allocation"
+    VERSION_ENROLLMENT = "version-enrollment"
 
 
 class _ResponseRole(Enum):
+    VERSION_ENROLLMENT_ACCOUNT = "version-enrollment-account"
+    VERSION_ENROLLMENT_REPOSITORY = "version-enrollment-repository"
+    VERSION_ENROLLMENT_PROTECTION = "version-enrollment-protection"
+    VERSION_ENROLLMENT_REF = "version-enrollment-ref"
+    VERSION_ENROLLMENT_LEDGER = "version-enrollment-ledger"
+    VERSION_ENROLLMENT_COMPARE = "version-enrollment-compare"
     VERSION_ALLOCATION_REPOSITORY = "version-allocation-repository"
     VERSION_ALLOCATION_REF = "version-allocation-ref"
     VERSION_ALLOCATION_COMPARE = "version-allocation-compare"
@@ -83,6 +90,10 @@ class _ResponseRole(Enum):
     SETUP_VARIABLE_REPLACE = "setup-variable-replace"
 
 
+_ENROLLMENT_ROLES = frozenset({_ResponseRole.VERSION_ENROLLMENT_ACCOUNT, _ResponseRole.VERSION_ENROLLMENT_REPOSITORY,
+    _ResponseRole.VERSION_ENROLLMENT_PROTECTION, _ResponseRole.VERSION_ENROLLMENT_REF,
+    _ResponseRole.VERSION_ENROLLMENT_LEDGER, _ResponseRole.VERSION_ENROLLMENT_COMPARE})
+
 _PUBLICATION_ROLES = frozenset({_ResponseRole.PUBLICATION_READ, _ResponseRole.PUBLICATION_CREATE, _ResponseRole.PUBLICATION_LIST})
 _ALLOCATION_ROLES = frozenset({_ResponseRole.VERSION_ALLOCATION_REPOSITORY, _ResponseRole.VERSION_ALLOCATION_REF,
     _ResponseRole.VERSION_ALLOCATION_COMPARE, _ResponseRole.VERSION_ALLOCATION_LEDGER_READ,
@@ -100,6 +111,10 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
     """Closed private roles, never caller-provided numeric limits."""
     if type(profile) is not _ExchangeProfile or type(role) is not _ResponseRole:
         raise ValueError("Invalid fixed GitHub response role")
+    if role in _ENROLLMENT_ROLES:
+        if profile is not _ExchangeProfile.VERSION_ENROLLMENT:
+            raise ValueError("Fixed version enrollment role belongs to another action")
+        return MAX_BODY_BYTES, 1024
     if role in _ALLOCATION_ROLES:
         if profile is not _ExchangeProfile.VERSION_ALLOCATION:
             raise ValueError("Fixed version allocation role belongs to another action")
@@ -119,6 +134,10 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
 
 def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str, path: str) -> tuple[int, int]:
     limits = _role_limits(profile, role)
+    if profile is _ExchangeProfile.VERSION_ENROLLMENT:
+        from .version_enrollment import validate_endpoint
+        validate_endpoint(role.value, method, path)
+        return limits
     if profile is _ExchangeProfile.VERSION_ALLOCATION:
         from .version_allocation_transport import validate_endpoint
         validate_endpoint(role.value, method, path)
@@ -288,7 +307,7 @@ class _Budget:
         if type(started) not in (int, float):
             raise ReadFailure("network-unavailable")
         self.started = started
-        self.end = started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION} else READ_SECONDS)
+        self.end = started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT} else READ_SECONDS)
         self.monotonic = monotonic
         self.wall = wall
         self.body_bytes = 0
@@ -303,7 +322,7 @@ class _Budget:
     def claim_request(self) -> None:
         # Other existing profiles retain their own original finite schedules.
         # Allocation adds a second private bound, never a logical retry owner.
-        if self.profile is _ExchangeProfile.VERSION_ALLOCATION:
+        if self.profile in {_ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT}:
             self.remaining()
             if self.requests >= 10:
                 raise ReadFailure("response-limit")
@@ -1029,7 +1048,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             or not 1 <= len(token) <= 4096 or any(not 0x21 <= ord(c) <= 0x7e for c in token)):
         raise ValueError("Invalid fixed GitHub transport input")
     _role_limits(_profile, _ResponseRole.STANDARD)
-    if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION} and api_version != "2026-03-10":
+    if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT} and api_version != "2026-03-10":
         raise ValueError("Fixed Setup API version differs")
     if _setup_budget is not None:
         if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION}
@@ -1065,7 +1084,12 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             _setup_body(_profile, _role, body, path=path)
         elif _profile is _ExchangeProfile.VERSION_ALLOCATION:
             _allocation_body(_profile, _role, body, path=path)
+        elif _profile is _ExchangeProfile.VERSION_ENROLLMENT:
+            from .version_enrollment import validate_body
+            validate_body(_role.value, body, path=path)
         methods = {"GET", "PUT"} if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.VERSION_ALLOCATION} else {"GET", "POST"}
+        if _profile is _ExchangeProfile.VERSION_ENROLLMENT:
+            methods = {"GET"}
         if _profile is _ExchangeProfile.SETUP and _role in _VARIABLE_ROLES:
             methods = {"GET", "POST", "PATCH"}  # Exact method/path was already checked above.
         if (method not in methods or type(path) is not str or not path.startswith("/")

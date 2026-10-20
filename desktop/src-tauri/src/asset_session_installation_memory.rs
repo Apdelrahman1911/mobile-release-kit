@@ -480,7 +480,7 @@ mod known {
         fn document_state_gate(&self,state:&DocumentState)->Count<()>{
             if state.unknown || state.exhausted || state.stopping || state.retiring || state.lock_pending
                 || state.quit_pending || state.compatibility_picker_pending
-                || state.session_owner_reason == Some(Reason::CleanupUnknown) || version_allocation::pending(state) { return Err(Reason::Capacity); }
+                || state.session_owner_reason == Some(Reason::CleanupUnknown) || version_allocation::pending(state) || version_enrollment::pending(state) { return Err(Reason::Capacity); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
                 target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -498,6 +498,7 @@ mod known {
             if let Some(binding) = &state.saved_input { self.saved_observation(&binding.lane)?; }
             if let Some(ready) = &state.apple_provisioning_ready { self.native_state_ready(ready)?; }
             self.add(capacity(version_allocation::retained_bytes(state))?)?;
+            self.add(capacity(version_enrollment::retained_bytes(state))?)?;
             self.records(&state.records)?; self.assignments(&state.assignments)?;
             if let Some(context) = &state.context { self.context(context)?; }
             if let Some(slot) = &state.slot { self.slot(slot)?; }
