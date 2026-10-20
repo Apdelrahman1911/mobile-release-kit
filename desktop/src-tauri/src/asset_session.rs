@@ -7383,10 +7383,8 @@ mod installed_macos_observation {
                     (2..=7, None) => true,
                     _ => false,
                 };
-                let expected = if matches!(control.case,crate::shell::installed_observation::vault::Case::UploadKey(_)) {
-                    matches!((owner.id,operation),(1,Some(Operation::ChooseProject))|(2,Some(Operation::OpenVault))
-                        |(3,Some(Operation::PrepareInitialize))|(4,Some(Operation::Initialize))|(5,Some(Operation::GenerateUploadKey))
-                        |(6,Some(Operation::OpenVault))|(7,Some(Operation::Unlock))|(8,Some(Operation::Prepare))|(2..=9,None))
+                let expected = if let crate::shell::installed_observation::vault::Case::UploadKey(case) = control.case {
+                    vault::installed_upload_observation::original_allowed(case, owner.id, operation)
                 }else{expected};
                 if !expected || !control.bound(&self.inner.session_identity) { return Err(AssetError::new(Reason::Unqualified)); }
             }

@@ -2,6 +2,9 @@
 //! No private value, user path, tool pathname or result-shaped grant is accepted.
 //! All observation storage is fixed, nonsecret DATA; it cannot settle anything.
 use super::*;
+#[path = "credential_upload_key_original_table.rs"]
+mod original_table;
+pub(in crate::asset_session) use original_table::original_allowed;
 #[path = "credential_upload_key_cancel_observation.rs"]
 mod cancelled;
 #[path = "credential_upload_key_bound_observation.rs"]
