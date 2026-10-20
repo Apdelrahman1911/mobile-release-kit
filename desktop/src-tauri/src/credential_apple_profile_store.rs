@@ -1011,7 +1011,16 @@ pub(in crate::asset_session) fn retirement_ready(owner: &Arc<OriginalWork>) -> b
     })
 }
 
-#[cfg(all(test, debug_assertions))]
+// The real stored-loan fixture deliberately uses AppleP12. That credential kind
+// is enabled only on supported Mac targets; do not replace it with another kind
+// or weaken Descriptor validation to run the fixture elsewhere.
+#[cfg(all(
+    test,
+    debug_assertions,
+    target_os = "macos",
+    target_pointer_width = "64",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
 mod tests {
     use super::*;
 
