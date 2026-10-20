@@ -51,6 +51,8 @@ jobs:
     environment: macos-developer-id
     name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
     runs-on: ${{ matrix.runner }}
+    outputs:
+      prepared-input-ready: ${{ steps.prepared_upload.outcome == 'success' }}
     # Historical pre-installed-UI raw timed-step union602min (ARM) /642min (Intel) includes the retained42min alternative.
     # Late installed-only DATA adds mutually exclusive28 nominal minutes; no current-route fit is claimed.
     # Remaining-three additionally requires ordinary saved-checks2; both cohorts are independent.
@@ -5746,7 +5748,10 @@ jobs:
 
   prepared-install:
     needs: engineering-install
-    if: always() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'prepared-install'))
+    # The native observer never exports an ordinary prepared package. A failed
+    # producer before upload is likewise not an installation input. Explicit
+    # failed-job/checkpoint recovery still selects its retained artifact below.
+    if: always() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && ((github.event_name == 'push' && needs.engineering-install.outputs['prepared-input-ready'] == 'true') || (github.event_name == 'workflow_dispatch' && inputs.operation == 'prepared-install'))
     environment: macos-developer-id
     name: prepared-installed-${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
