@@ -225,6 +225,10 @@ impl Publisher {
     pub(crate) fn same_slot(&self, slot: &Arc<ControlSlot>) -> bool { Arc::ptr_eq(&self.slot, slot) }
     /// Read-only comparison for the exact ordinary source-picker publisher.
     /// epoch() remains strict for every other caller. No acceptance or renewal.
+    pub(crate) fn git_local_epoch(&self) -> Result<u64, BridgeError> {
+        // Same exact sole-publisher proof, no widening of ordinary epoch().
+        self.tool_source_epoch()
+    }
     pub(crate) fn tool_source_epoch(&self) -> Result<u64, BridgeError> {
         let book = self.slot.book.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
         if self.finished || self.index >= 8 || self.slot.is_unknown() || book.cancel.is_some()

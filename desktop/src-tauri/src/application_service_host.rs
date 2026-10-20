@@ -510,6 +510,12 @@ impl ApplicationHost {
         Ok(())
     }
     pub(crate) fn finish_native_state(&self, ticket: NativeStateTicket, current: &NativeProject) -> Result<NativeStateReady, Error> {
+        self.finish_native_state_retained(&ticket, current)
+    }
+    /// The GitLocal original job retains its sole ticket on a refused or
+    /// uncertain handoff. Same pending/epoch/current checks, no cloned ticket
+    /// or new authority; an error is not proof that pending remained intact.
+    pub(crate) fn finish_native_state_retained(&self, ticket: &NativeStateTicket, current: &NativeProject) -> Result<NativeStateReady, Error> {
         let mut state = self.try_native_lock()?;
         self.check_startup(&state, &ticket.0)?;
         state.pending = None;
@@ -1272,3 +1278,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path="application_service_git_local_tests.rs"]
+mod git_local_lock_tests;

@@ -1874,6 +1874,45 @@ async fn git_read_cancel(webview: Webview, request: tauri::ipc::Request<'_>, sta
     state.document.git_read_cancel(&id)
 }
 
+// Closed RAW-only local Git commands. No caller process/path or persisted
+// review DTO can replace the original native review/selection/publisher.
+fn git_local_command(name:&str,webview:&Webview,request:&tauri::ipc::Request<'_>)->Result<crate::git_local_protocol::Command,BridgeError> {
+    if webview.label()!=MAIN_WINDOW {return Err(BridgeError::invalid());}
+    let tauri::ipc::InvokeBody::Raw(bytes)=request.body() else {return Err(BridgeError::invalid());};
+    crate::git_local_protocol::decode_command(name,bytes)
+}
+#[tauri::command]
+async fn git_local_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::git_local_protocol::Status,BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Local Git writes have no fixture admission."));
+    git_local_command("git_local_status",&webview,&request)?;
+    Ok(state.document.git_local_status())
+}
+#[tauri::command]
+async fn git_local_prepare(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::git_local_protocol::StartResult,BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Local Git writes have no fixture admission."));
+    let crate::git_local_protocol::Command::Prepare(args)=git_local_command("git_local_prepare",&webview,&request)? else {return Err(BridgeError::invalid());};
+    state.document.git_local_prepare(args)
+}
+#[tauri::command]
+async fn git_local_apply(app:AppHandle,webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::git_local_protocol::StartResult,BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Local Git writes have no fixture admission."));
+    let crate::git_local_protocol::Command::Apply(args)=git_local_command("git_local_apply",&webview,&request)? else {return Err(BridgeError::invalid());};
+    let app_data=app.path().app_local_data_dir().map_err(|_|BridgeError::unavailable("The application's private data folder is unavailable."))?;
+    state.document.git_local_apply(args,&app_data)
+}
+#[tauri::command]
+async fn git_local_discard(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::git_local_protocol::Status,BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Local Git writes have no fixture admission."));
+    let crate::git_local_protocol::Command::Discard(id)=git_local_command("git_local_discard",&webview,&request)? else {return Err(BridgeError::invalid());};
+    state.document.git_local_discard(&id)
+}
+#[tauri::command]
+async fn git_local_cancel(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::git_local_protocol::Status,BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Local Git writes have no fixture admission."));
+    let crate::git_local_protocol::Command::Cancel(id)=git_local_command("git_local_cancel",&webview,&request)? else {return Err(BridgeError::invalid());};
+    state.document.git_local_cancel(&id)
+}
+
 fn github_auth_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::github_auth_entry_protocol::Command, BridgeError> {
     if webview.label() != MAIN_WINDOW { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); }
     // These three new routes admit RAW UTF-8 JSON only. Tauri's JSON Value
@@ -4560,6 +4599,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_auth_status, github_auth_connect, github_auth_cancel, github_auth_accounts,
             git_read_status, git_read_start, git_read_cancel,
             version_enrollment_status, version_enrollment_review, version_enrollment_confirm, version_enrollment_cancel,
+            git_local_status, git_local_prepare, git_local_apply, git_local_discard, git_local_cancel,
             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
             github_release_status, github_release_prepare, github_release_dispatch, github_release_track,

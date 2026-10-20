@@ -38,7 +38,7 @@ fn keys(value: &Value, names: &[&str]) -> bool {
         .as_object()
         .is_some_and(|v| v.len() == names.len() && names.iter().all(|name| v.contains_key(*name)))
 }
-fn text(value: &str, limit: usize, multiline: bool) -> bool {
+pub(crate) fn text(value: &str, limit: usize, multiline: bool) -> bool {
     value.len() <= limit
         && !value
             .chars()
@@ -47,10 +47,10 @@ fn text(value: &str, limit: usize, multiline: bool) -> bool {
 pub(crate) fn digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn oid(value: &str) -> bool {
+pub(crate) fn oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn relative(value: &str) -> bool {
+pub(crate) fn relative(value: &str) -> bool {
     !value.is_empty()
         && text(value, 1024, false)
         && !value.contains('\\')
@@ -69,7 +69,7 @@ fn reference(value: &str) -> bool {
             .split('/')
             .all(|v| !v.is_empty() && !v.starts_with('.') && !v.ends_with('.') && !v.ends_with(".lock"))
 }
-fn branch(value: &str) -> bool {
+pub(crate) fn branch(value: &str) -> bool {
     value.starts_with("refs/heads/") && reference(value)
 }
 
@@ -447,7 +447,7 @@ fn string_array(v: &Value, max: usize, check: impl Fn(&str) -> bool) -> bool {
             && rows.iter().filter_map(Value::as_str).collect::<BTreeSet<_>>().len() == rows.len()
     })
 }
-fn observation(v: &Value) -> bool {
+pub(crate) fn observation(v: &Value) -> bool {
     if !keys(
         v,
         &[
@@ -526,7 +526,7 @@ fn tracking(v: &Value) -> bool {
         _ => false,
     }
 }
-fn validate_result(action: &Action, v: &Value) -> Result<(), BridgeError> {
+pub(crate) fn validate_result(action: &Action, v: &Value) -> Result<(), BridgeError> {
     match action.kind {
         Kind::Observe => need(
             keys(v, &["observation", "referenceRevision", "tracking", "basis"])

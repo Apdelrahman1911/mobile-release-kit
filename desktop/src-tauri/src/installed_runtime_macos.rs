@@ -1135,6 +1135,9 @@ impl Book {
         if selection.bootstrap == selection.cwd.join("git_read_bootstrap.py") && !files.contains_key("git_read_bootstrap.py") {
             return Err(AdmissionFailure::Inventory);
         }
+        if selection.bootstrap == selection.cwd.join("git_local_bootstrap.py") && !files.contains_key("git_local_bootstrap.py") {
+            return Err(AdmissionFailure::Inventory);
+        }
         if self.history_nomination.is_some() && (!files.contains_key("tools/gh") || !files.contains_key("github_history_bootstrap.py")){
             return Err(AdmissionFailure::Inventory);
         }
@@ -1333,6 +1336,9 @@ slots!(GitHubAuthRuntimeSlots, GitHubAuthInstalledRuntime, runtime::GitHubAuthIn
 slots!(GitReadRuntimeSlots, GitReadInstalledRuntime, runtime::GitReadInstalledProfile);
 #[path = "git_read_runtime_macos.rs"]
 mod git_read_runtime;
+slots!(GitLocalRuntimeSlots, GitLocalInstalledRuntime, runtime::GitLocalInstalledProfile);
+#[path = "git_local_runtime_macos.rs"]
+mod git_local_runtime;
 // Distinct SOURCE original, not a Setup or GitRead slot. The existing fixed
 // github_setup_bootstrap.py inventory row is required for every Book inspection.
 slots!(VersionAllocationSourceRuntimeSlots, VersionAllocationSourceInstalledRuntime, runtime::VersionAllocationSourceInstalledProfile);

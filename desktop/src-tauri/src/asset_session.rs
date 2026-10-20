@@ -115,6 +115,10 @@ mod gh_auth;
 #[path = "asset_session_git_read.rs"]
 mod git_read;
 pub(crate) use git_read::GitReadGate;
+#[cfg_attr(any(target_os="linux",target_os="macos"),path="asset_session_git_local.rs")]
+#[cfg_attr(not(any(target_os="linux",target_os="macos")),path="asset_session_git_local_unavailable.rs")]
+mod git_local;
+pub(crate) use git_local::GitLocalGate;
 pub(crate) use gh_auth::{GitHubAuthGoGate, GitHubAuthRequest, GitHubAuthStatus, GitHubAuthConnectionHold, GitHubAuthCustody};
 #[path = "asset_session_github_publication.rs"]
 mod github_publication;
@@ -806,6 +810,8 @@ struct DocumentState {
     github: ConnectionState,
     gh_auth: Option<gh_auth::Entry>,
     git_read: Option<git_read::Entry>,
+    git_local: Option<git_local::Entry>,
+    git_local_review: Option<git_local::ReadyReview>,
     evidence: EvidenceRegistry,
     images: images::Registry,
     installation: installation::Registry,
@@ -1039,7 +1045,7 @@ fn slot_private_data_empty(_slot: &Slot) -> bool {
 }
 fn assets_can_exit_locked(state: &DocumentState) -> bool {
     !state.retiring && session_data_empty(state) && state.slot.as_ref().is_none_or(|slot| slot.owner.resources_settled())
-        && gh_auth::can_exit(state)
+        && gh_auth::can_exit(state) && !git_local::pending(state)
 }
 fn complete_empty_session_lock(state: &mut DocumentState) -> bool {
     // The caller must have reinserted its exact original slot. Empty data alone
@@ -1972,6 +1978,7 @@ mod lookup_memory {
             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+            self.add(git_local::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(version_allocation::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             self.add(version_enrollment::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
@@ -2041,6 +2048,12 @@ mod lookup_memory {
     // Storage arithmetic only; no History authority or live-owner census.
     pub(super) fn git_read_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
         history_admission_bytes(document,state,future)
+    }
+    // Storage arithmetic only; GitLocal retains its OWN publisher, sources,
+    // NativeUse and fixed runtime. The read facet supplies no mutation grant.
+    pub(super) fn git_local_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+        let retained=retained_document_bytes(document,state)?;
+        crate::git_local_protocol::admission_bytes(retained,future).ok_or(Problem::Capacity)
     }
     pub(super) fn github_auth_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
         history_admission_bytes(document,state,future)
@@ -2456,7 +2469,7 @@ fn lookup_allocation_gate(state: &DocumentState) -> Result<(), AssetError> {
     // lock/loss and reconciliation intentionally do not call this predicate.
     allocation_conflict_gate(
         state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()),
-        state.github.setup_secret_work_pending() || state.github.history_work_pending() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state))
+        state.github.setup_secret_work_pending() || state.github.history_work_pending() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state))
 }
 fn allocation_conflict_gate(lookup_held:bool,secret_original_pending:bool)->Result<(),AssetError>{
     if lookup_held||secret_original_pending{return Err(AssetError::new(Reason::Busy))}
@@ -2474,7 +2487,7 @@ fn passive_document_state_gate(state: &DocumentState) -> Result<(), BridgeError>
     // The caller still holds this same document mutex through Supervisor claim.
     if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
     if state.stopping { return Err(BridgeError::shutdown()); }
-    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) || installation::pending(state) || gh_auth::pending(state) || git_read::pending(state) {
+    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) || installation::pending(state) || gh_auth::pending(state) || git_read::pending(state) || git_local::pending(state) {
         return Err(BridgeError::new("busy", "Finish the original native operation first."));
     }
     Ok(())
@@ -2500,7 +2513,7 @@ fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl F
     if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
     if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
     owner_gate()?;
-    if state.compatibility_picker_pending || installation::pending(state) || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) { return Err(AssetError::new(Reason::Busy)); }
+    if state.compatibility_picker_pending || installation::pending(state) || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state) { return Err(AssetError::new(Reason::Busy)); }
     if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact() || slot.operation.images())
         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
@@ -2664,7 +2677,7 @@ impl DocumentBinding {
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
-            github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+            github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2875,6 +2888,7 @@ impl DocumentBinding {
         }
     }
     fn bump(&self, state: &mut DocumentState) {
+        git_local::invalidate(state);
         git_read::stop(state); // A real Document revision change retires only original eligibility.
         version_enrollment::stop(state);
         git_read::reconcile(state);
@@ -2989,7 +3003,7 @@ impl DocumentBinding {
             || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
         if !state.lifetime.original_bound() || state.lost_observed
             || !self.inner.bridge.diagnostics.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state)
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
             || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()
             || !self.inner.bridge.supervisor.can_exit() || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))
@@ -3014,7 +3028,7 @@ impl DocumentBinding {
         if let Some(reason) = preflight_document_gate(state, crate::offline_preflight_protocol::Profile::current()) { return reason; }
         // Saved checks require Disconnect, not merely an idle GitHub ticket.
         // Observe the actual retained private session, never a public tombstone.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state)
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -3043,7 +3057,7 @@ impl DocumentBinding {
         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
         // Saved checks require Disconnect, not merely an idle GitHub ticket.
         // Observe the actual retained private session, never a public tombstone.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state)
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -3065,7 +3079,7 @@ impl DocumentBinding {
         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
         // Saved checks require Disconnect, not merely an idle GitHub ticket.
         // Observe the actual retained private session, never a public tombstone.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state)
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -3087,7 +3101,7 @@ impl DocumentBinding {
         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
         // Saved checks require Disconnect, not merely an idle GitHub ticket.
         // Observe the actual retained private session, never a public tombstone.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state)
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -3109,7 +3123,7 @@ impl DocumentBinding {
         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
         // Saved checks require Disconnect, not merely an idle GitHub ticket.
         // Observe the actual retained private session, never a public tombstone.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state)
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -3128,7 +3142,7 @@ impl DocumentBinding {
         if state.lost_observed{return Availability::DocumentLost;}if !state.lifetime.original_bound(){return Availability::Busy;}
         // Saved checks require Disconnect, not merely an idle GitHub ticket.
         // Observe the actual retained private session, never a public tombstone.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state)
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -3246,7 +3260,7 @@ impl DocumentBinding {
         // Require actual Disconnect, not an idle/retired public GitHub ticket.
         // Asset phase AND original resources must settle, as must all edits,
         // recovery attention, passive queries and the other saved-command owner.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state)
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -3395,7 +3409,7 @@ impl DocumentBinding {
         // Require actual Disconnect, not an idle/retired public GitHub ticket.
         // Asset phase AND original resources must settle, as must all edits,
         // recovery attention, passive queries and the other saved-command owner.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state)
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -3455,7 +3469,7 @@ impl DocumentBinding {
         // Require actual Disconnect, not an idle/retired public GitHub ticket.
         // Asset phase AND original resources must settle, as must all edits,
         // recovery attention, passive queries and the other saved-command owner.
-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state)
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
@@ -3837,7 +3851,7 @@ impl DocumentBinding {
     }
     fn github_gate(&self, state: &DocumentState) -> GitHubReason {
         let base = self.github_base_gate(state);
-        if base == GitHubReason::None && (gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state)) { GitHubReason::Busy } else { base }
+        if base == GitHubReason::None && (gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)) { GitHubReason::Busy } else { base }
     }
     // Only the retained gh-auth original uses this companion to avoid treating
     // its OWN pending capture as unrelated new-work admission.
@@ -4295,7 +4309,7 @@ impl DocumentBinding {
         if state.stopping || self.inner.bridge.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.inner.bridge.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
         // SAME Document lock: reject reciprocal edits before publisher/context side effects.
-        if gh_auth::pending(state) || git_read::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) { return Err(BridgeError::new("busy", "Finish the original native connection or saved-source inspection first.")); }
+        if gh_auth::pending(state) || git_read::pending(state) || git_local::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) { return Err(BridgeError::new("busy", "Finish the original native connection or saved-source inspection first.")); }
         if domain == crate::edit_protocol::EditDomain::ProjectIdentity {
             // Retire an already-ready positive Store original BEFORE a context
             // invalidation could downgrade it and hide its continuity veto.
@@ -4393,6 +4407,7 @@ impl DocumentBinding {
     }
     fn expire(&self, state: &mut DocumentState, now: Instant) {
         git_read::reconcile(state);
+        git_local::reconcile(&self.inner,state);
         let owner_reason = self.live_session_owner_reason();
         // Display changes advance the existing native revision. This is
         // capability DATA, not a fabricated asset cleanup result, and does
@@ -4717,6 +4732,7 @@ fn project_path_idle_gate(state: &DocumentState, installed_profile: bool) -> Res
 }
 fn invalidate_all(state: &mut DocumentState) {
     git_read::stop(state);
+    git_local::invalidate(state);
     version_allocation::stop(state);
     version_enrollment::stop(state);
     gh_auth::stop(state, if state.unknown { GitHubReason::CleanupUnknown }
@@ -8086,7 +8102,7 @@ pub(crate) fn assert_project_path_document_contracts() {
                 agent_local_check_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -8221,7 +8237,7 @@ pub(crate) fn assert_project_selection_gate_contract() {
                 agent_local_check_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -8320,7 +8336,7 @@ mod tests {
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), session_owner_reason: None,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
-            github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+            github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: None,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

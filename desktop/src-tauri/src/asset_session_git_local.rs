@@ -67,7 +67,7 @@ impl GitLocalGate {
     fn original_locked(&self,document:&Arc<Inner>,state:&DocumentState,id:&str)->bool {
         self.0.document.upgrade().is_some_and(|d|Arc::ptr_eq(&d,document))
             &&scope_current(document,state,&self.0.context,&self.0.root,self.0.document_revision)
-            &&!version_allocation::pending(state)&&!gh_auth::pending(state)&&!git_read::pending(state)
+            &&!version_allocation::pending(state)&&!version_enrollment::pending(state)&&!gh_auth::pending(state)&&!git_read::pending(state)
             &&matches!(&state.git_local,Some(Entry::Original {ticket,gate}) if ticket.operation_id()==id&&Arc::ptr_eq(&gate.0,&self.0))
     }
     fn project(&self,document:&Arc<Inner>,epoch:u64)->Result<NativeProject,BridgeError> {

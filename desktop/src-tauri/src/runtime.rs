@@ -382,6 +382,20 @@ impl GitReadInstalledProfile {
     }
 }
 
+// Fixed local-write bootstrap. Selection alone is not mutation authority;
+// the original Doc/Publisher, source, NativeUse and joins remain mandatory.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitLocalInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitLocalInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("git_local_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
 // SOURCE uses the existing required bootstrap's closed source-only protocol
 // arm. This profile does not borrow Setup consent, credentials or HTTP roles.
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -1863,6 +1877,18 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         if !self.git_read_profile_available() { return Err(unavailable()); }
         originals.inspect_once(GitReadInstalledProfile { _private: () }, end, stop)
+    }
+    pub(crate) fn git_local_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_git_local_installed(&self, originals: &mut crate::installed_runtime::GitLocalRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !self.git_local_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(GitLocalInstalledProfile { _private: () }, end, stop)
     }
     pub(crate) fn version_allocation_source_profile_available(&self) -> bool {
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
