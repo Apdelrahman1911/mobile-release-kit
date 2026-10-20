@@ -593,6 +593,10 @@ def parse_project_sources(
     if android:
         result["android"] = android
     if ios:
+        # Optional target-name DATA from the SAME passive inventory. This does
+        # not choose a target or grant source-edit/build authority.
+        from .project_target_hints import ios_app_target_hints
+        ios["appTargets"] = ios_app_target_hints(sources, ios["projects"])
         result["ios"] = ios
     return result
 

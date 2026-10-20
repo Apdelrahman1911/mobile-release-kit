@@ -93,10 +93,14 @@ def _admit_hints(hints: object) -> dict[str, Any]:
     ios = hints.get("ios")
     if "ios" in hints:
         lists = {"projects", "workspaces", "schemes", "bundleIds", "generatedProjectSources"}
-        if type(ios) is not dict or set(ios) - (lists | {"bundleId", "project", "workspace", "scheme"}):
+        if type(ios) is not dict or set(ios) - (lists | {"bundleId", "project", "workspace", "scheme", "appTargets"}):
             raise _invalid()
         for key, value in ios.items():
-            if key in lists:
+            if key == "appTargets":
+                from ..project_target_hints import valid_ios_app_targets
+                if not valid_ios_app_targets(value):
+                    raise _invalid()
+            elif key in lists:
                 if type(value) is not list or len(value) > 128 or not all(_text(item) for item in value):
                     raise _invalid()
             elif not _text(value):

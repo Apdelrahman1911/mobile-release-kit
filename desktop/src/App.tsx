@@ -46,6 +46,9 @@ import type { ProjectIdentityUiState } from './projectIdentityController.ts';
 import { parseIdentityContext } from './projectIdentity.ts';
 import type { IdentitySelection, IdentityUiContext } from './projectIdentity.ts';
 import { ProjectIdentityEditor } from './components/ProjectIdentityEditor.tsx';
+import { IosAppTargetField } from './components/IosAppTargetField.tsx';
+import { copyIosAppTarget, iosAppTargetHints } from './iosAppTargetHints.ts';
+import type { IosTargetChoiceContext } from './iosAppTargetHints.ts';
 import { ProgressiveDisclosure } from './components/ProgressiveDisclosure.tsx';
 import { ReleaseVersionEditController, versionOwnerReason, versionProjectDirty, versionRetainsDraft } from './releaseVersionEditController.ts';
 import { versionEditError } from './releaseVersionEdit.ts';
@@ -1611,6 +1614,23 @@ export function App() {
     retireIdentity(); identityInputs.current.set(session.project.id, next);
     identityRef.current?.ui.sync(); updateIdentityInputs((value) => value + 1);
   };
+  const identityTargetHints = iosAppTargetHints(session);
+  const currentIdentityTargetChoice = (): IosTargetChoiceContext => {
+    const w = workspaceRef.current, selected = w.selectedId ? w.projects[w.selectedId] ?? null : null;
+    const binding = identityRef.current, service = pathService.current;
+    return { session: selected, service, binding, epoch: identityEpoch.current,
+      platform: savedIdentityInput(selected, selected ? identityInputs.current.get(selected.project.id) : undefined).platform,
+      blocked: service.api?.mode !== 'native' || !binding || binding.service !== service || !!binding.proposal ||
+        connectionPicking.current || bootstrapPending.current || identityBusy() !== null || identityAdmission.current() !== null };
+  };
+  // Pin the rendered saved observation, not whichever project a late click sees.
+  const shownIdentityTargetChoice = { ...currentIdentityTargetChoice(), session, platform: identityInput.platform };
+  const chooseIdentityTarget = (name: string) => copyIosAppTarget(identityTargetHints, shownIdentityTargetChoice, name,
+    currentIdentityTargetChoice, retireIdentity, (target) => {
+      if (!session) return;
+      identityInputs.current.set(session.project.id, { platform: 'ios', target });
+      identityRef.current?.ui.sync(); updateIdentityInputs(value => value + 1);
+    });
   const keepIdentityText = (text: string) => {
     const current = identityRef.current?.ui.getSnapshot().context;
     if (current?.projectId && text.length <= 255 && Object.hasOwn(workspaceRef.current.projects, current.projectId))
@@ -1780,10 +1800,8 @@ export function App() {
                 <label className="field"><span className="field-label">Platform</span><select value={identityInput.platform}
                   onChange={(event) => changeIdentityInput({ platform: event.target.value === 'ios' ? 'ios' : 'android', target: identityInput.target })}>
                   <option value="android">Android</option><option value="ios">iOS</option></select></label>
-                {identityInput.platform === 'ios' && <label className="field"><span className="field-label">iOS app target</span>
-                  <input type="text" autoComplete="off" spellCheck={false} maxLength={255} value={identityInput.target}
-                    onChange={(event) => changeIdentityInput({ platform: 'ios', target: event.target.value })} />
-                  <span className="field-help">In Xcode, select the project, then copy the app’s exact name under Targets. Do not use the scheme name. This choice is kept locally and is not written into project settings.</span></label>}
+                {identityInput.platform === 'ios' && <IosAppTargetField value={identityInput.target} hints={identityTargetHints} choiceDisabled={shownIdentityTargetChoice.blocked}
+                  onChange={target => changeIdentityInput({ platform: 'ios', target })} onChoose={chooseIdentityTarget} />}
                 {identityInput.project && <p className="subtle-note">Saved Xcode project: <code>{identityInput.project}</code></p>}
               </fieldset>
               {identityInput.reason && <p className="review-caution">{identityInput.reason}</p>}
