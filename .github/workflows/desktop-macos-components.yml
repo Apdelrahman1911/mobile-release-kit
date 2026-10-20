@@ -569,7 +569,7 @@ jobs:
               android_service_prepare::tests::fixed_layout_role_and_reserved_bytes_cannot_alias \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-native-contracts.log"
             grep -Eq '^test result: ok\. 3 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-native-contracts.log"
-            # Twenty-six Mac-only cache, acquisition, Git-source and Apple
+            # Twenty-eight Mac-only cache, acquisition, Git-source and Apple
             # credential/codec cases in the ordinary library, not the shipping
             # image. These open no files, services or tools; native operations
             # and persisted credential storage are verified separately.
@@ -601,8 +601,10 @@ jobs:
               asset_session::vault::provisioning_native::profile_store::tests::known_storage_effect_alone_cannot_retire_unknown_original_or_rearm_save \
               asset_session::vault::provisioning_native::profile_store::tests::no_save_requires_unattempted_original_even_after_known_refusal \
               vault_crypto::apple_profile::tests::profile_cipher_uses_the_reserved_revision_and_full_authenticated_bytes \
+              vault_store::macos::tests::apple_key_full_read_is_bound_before_body_allocation \
+              vault_store::macos::tests::apple_key_inventory_compares_old_full_witnesses_and_only_one_new_record \
               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
-            grep -Eq '^test result: ok\. 26 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
+            grep -Eq '^test result: ok\. 28 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
             # Real synthetic-record backup backend, not picker/Keychain/signing
             # or Desktop lifecycle qualification. The injected lost-close receipt
             # is retained until this exact, synchronous test process has exited.
