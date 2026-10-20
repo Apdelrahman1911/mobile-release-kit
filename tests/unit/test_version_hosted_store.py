@@ -48,6 +48,7 @@ class HostedOriginalBoundaries(unittest.TestCase):
     def source_data(self):
         source = h._Source(self.root, self.context, SimpleNamespace(check=lambda: None))
         source.binding = self.fixture.request.source
+        source.enabled = self.fixture.platforms
         source.identity = self.fixture.request.identity_revision
         source.app_id, source.bundle_id = '1234567890', 'com.example.inert'
         self.source = source

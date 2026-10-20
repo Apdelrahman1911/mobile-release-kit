@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Build an internal candidate, or reserve an iOS version only (no build/upload)
+        description: Build an internal candidate, or reserve a version only (Android creates/deletes a temporary Play edit)
         required: false
         default: candidate
         type: choice
@@ -12,7 +12,7 @@ on:
         - candidate
         - reserve-version
       platform:
-        description: Platform to build once and upload to internal testing
+        description: Platforms enabled in the saved configuration
         required: true
         type: choice
         options:
@@ -20,7 +20,7 @@ on:
         - ios
         - both
       confirmation:
-        description: candidate:<platform>:<version>:<build>, or reserve-version:ios
+        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit (may invalidate another Play edit)
         required: true
         type: string
       recovery_run_id:

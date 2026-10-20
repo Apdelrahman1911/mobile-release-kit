@@ -59,7 +59,9 @@ class HostedVersionWorkflowTest < Minitest::Test
     end
     validation = jobs.fetch("validate-platform").fetch("steps").first
     assert_includes validation.fetch("run"), '[[ "$MOBILE_RELEASE_OPERATION" =~ ^(candidate|reserve-version)$ ]]'
-    assert_includes validation.fetch("run"), '"$MOBILE_RELEASE_PLATFORM" == "ios" && "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:ios"'
+    assert_includes validation.fetch("run"), 'if [[ "$MOBILE_RELEASE_PLATFORM" == "ios" ]]; then'
+    assert_includes validation.fetch("run"), '[[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:ios" ]]'
+    assert_includes validation.fetch("run"), '[[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:$MOBILE_RELEASE_PLATFORM:temporary-play-edit" ]]'
     assert_includes validation.fetch("run"), '[[ -z "$MOBILE_RELEASE_RECOVERY_RUN_ID$MOBILE_RELEASE_RECOVERY_CONFIRMATION$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]'
     %w[OPERATION CONFIRMATION RECOVERY_RUN_ID RECOVERY_CONFIRMATION].each do |suffix|
       assert validation.fetch("env").key?("MOBILE_RELEASE_#{suffix}")
@@ -67,8 +69,8 @@ class HostedVersionWorkflowTest < Minitest::Test
   end
 
   def test_single_protected_read_and_reserve_job_has_no_build_upload_source_write_or_other_secret
-    reserve = @reusable.fetch("jobs").fetch("ios_version_reserve")
-    assert_equal "inputs.operation == 'reserve-version' && inputs.platform == 'ios'", reserve.fetch("if")
+    reserve = @reusable.fetch("jobs").fetch("version_reserve")
+    assert_equal "inputs.operation == 'reserve-version' && (inputs.platform == 'android' || inputs.platform == 'ios' || inputs.platform == 'both')", reserve.fetch("if")
     assert_equal "validate-platform", reserve.fetch("needs")
     assert_equal "mobile-candidate", reserve.fetch("environment")
     assert_equal({ "actions" => "read", "contents" => "read" }, reserve.fetch("permissions"))
@@ -84,7 +86,7 @@ class HostedVersionWorkflowTest < Minitest::Test
     assert_equal 2, steps.count { |step| step.key?("run") } # original pin validation, one closed entry
     invoke = steps.last
     assert_equal "python -P -m mobile_release.version_hosted reserve", invoke.fetch("run")
-    assert_equal ["MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"], invoke.fetch("env").select { |_, v| v.include?("secrets.") }.keys
+    assert_equal %w[MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64], invoke.fetch("env").select { |_, v| v.include?("secrets.") }.keys
     refute invoke.fetch("env").key?("GH_TOKEN")
     assert_equal "${{ steps.version-token.outputs.token }}", invoke.fetch("env").fetch("MOBILE_RELEASE_VERSION_GITHUB_TOKEN")
     %w[AUTHORITY POLICY].each do |name|
@@ -105,7 +107,7 @@ class HostedVersionWorkflowTest < Minitest::Test
     assert_equal %w[version_allocation_app_id version_allocation_app_private_key], call.fetch("secrets").keys
     assert call.fetch("secrets").values.all? { |input| input.fetch("required") == false }
     jobs = @reusable.fetch("jobs")
-    steps = jobs.fetch("ios_version_reserve").fetch("steps")
+    steps = jobs.fetch("version_reserve").fetch("steps")
     mint = steps[-2]
     assert_equal "version-token", mint.fetch("id")
     assert_equal({
@@ -116,12 +118,32 @@ class HostedVersionWorkflowTest < Minitest::Test
       "permission-administration" => "read", "permission-contents" => "write", "permission-actions" => "read",
       "github-api-url" => "https://api.github.com"
     }, mint.fetch("with")) # No all-repos default, skip-revoke or permission fallback.
-    ordinary = Psych.dump(jobs.reject { |name, _| name == "ios_version_reserve" })
-    %w[version_allocation_app MOBILE_RELEASE_VERSION_GITHUB_TOKEN create-github-app-token].each do |private_input|
+    ordinary = Psych.dump(jobs.reject { |name, _| name == "version_reserve" })
+    %w[version_allocation_app MOBILE_RELEASE_VERSION_GITHUB_TOKEN create-github-app-token MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64].each do |private_input|
       refute_includes ordinary, private_input
     end
     steps[0...-2].each { |step| refute_includes Psych.dump(step), "version_allocation_app" }
     refute_includes Psych.dump(steps.last), "version_allocation_app"
-    refute_includes Psych.dump(jobs.fetch("ios_version_reserve")), "GITHUB_OUTPUT"
+    refute_includes Psych.dump(jobs.fetch("version_reserve")), "GITHUB_OUTPUT"
+  end
+
+  def test_store_secrets_project_only_selected_platforms_without_wif_fallback
+    jobs = @reusable.fetch("jobs")
+    reserve = jobs.fetch("version_reserve")
+    refute jobs.key?("ios_version_reserve")
+    environment = reserve.fetch("steps").last.fetch("env")
+    %w[KEY_ID ISSUER_ID PRIVATE_KEY_P8_BASE64].each do |suffix|
+      name = "MOBILE_RELEASE_ASC_#{suffix}"
+      source = suffix == "PRIVATE_KEY_P8_BASE64" ? "secrets" : "vars"
+      assert_equal "${{ (inputs.platform == 'ios' || inputs.platform == 'both') && #{source}.#{name} || '' }}", environment.fetch(name)
+    end
+    name = "MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64"
+    assert_equal "${{ (inputs.platform == 'android' || inputs.platform == 'both') && secrets.#{name} || '' }}", environment.fetch(name)
+    refute environment.key?("GOOGLE_APPLICATION_CREDENTIALS")
+    refute environment.key?("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    refute_includes Psych.dump(reserve), "google-github-actions/auth"
+    # The unrelated candidate route retains its actual WIF entry, not the new key.
+    assert_includes Psych.dump(jobs.fetch("android_online")), "google-github-actions/auth@"
+    assert_includes inputs(@caller, "workflow_dispatch").fetch("confirmation").fetch("description"), "may invalidate another Play edit"
   end
 end

@@ -1,0 +1,121 @@
+diff --git a/.github/workflows/reusable-candidate.yml b/.github/workflows/reusable-candidate.yml
+index 742d9760..62102681 100644
+--- a/.github/workflows/reusable-candidate.yml
++++ b/.github/workflows/reusable-candidate.yml
+@@ -3,7 +3,7 @@ on:
+   workflow_call:
+     inputs:
+       operation:
+-        description: candidate (default), or reserve-version (iOS only; no build/upload).
++        description: candidate (default), or reserve-version (no build/upload; Android opens and deletes a temporary Play edit).
+         required: false
+         default: candidate
+         type: string
+@@ -20,7 +20,7 @@ on:
+         required: true
+         type: string
+       confirmation:
+-        description: candidate:<platform>:<version>:<build>, or reserve-version:ios. Reserve rejects recovery/Desktop inputs.
++        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit. Reserve rejects recovery/Desktop inputs.
+         required: true
+         type: string
+       recovery_run_id:
+@@ -103,7 +103,11 @@ jobs:
+         [[ "$MOBILE_RELEASE_OPERATION" =~ ^(candidate|reserve-version)$ ]]
+         [[ "$MOBILE_RELEASE_PLATFORM" =~ ^(android|ios|both)$ ]]
+         if [[ "$MOBILE_RELEASE_OPERATION" == "reserve-version" ]]; then
+-          [[ "$MOBILE_RELEASE_PLATFORM" == "ios" && "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:ios" ]]
++          if [[ "$MOBILE_RELEASE_PLATFORM" == "ios" ]]; then
++            [[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:ios" ]]
++          else
++            [[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:$MOBILE_RELEASE_PLATFORM:temporary-play-edit" ]]
++          fi
+           [[ -z "$MOBILE_RELEASE_RECOVERY_RUN_ID$MOBILE_RELEASE_RECOVERY_CONFIRMATION$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]
+         fi
+         [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == "github-hosted" ]]
+@@ -1453,9 +1457,9 @@ jobs:
+     outputs:
+       evidence_run_id: ${{ steps.resolve.outputs.evidence_run_id || (steps.upload_final.outputs['artifact-id'] != '' && github.run_id) || '' }}
+       evidence_artifact_id: ${{ steps.resolve.outputs.evidence_artifact_id || steps.upload_final.outputs['artifact-id'] }}
+-  ios_version_reserve:
++  version_reserve:
+     needs: validate-platform
+-    if: inputs.operation == 'reserve-version' && inputs.platform == 'ios'
++    if: inputs.operation == 'reserve-version' && (inputs.platform == 'android' || inputs.platform == 'ios' || inputs.platform == 'both')
+     runs-on: macos-26
+     timeout-minutes: 15
+     environment: mobile-candidate
+@@ -1542,7 +1546,8 @@ jobs:
+         MOBILE_RELEASE_TOOLING_ROOT: ${{ github.workspace }}/tooling
+         MOBILE_RELEASE_VERSION_AUTHORITY: ${{ vars.MOBILE_RELEASE_VERSION_AUTHORITY }}
+         MOBILE_RELEASE_VERSION_POLICY: ${{ vars.MOBILE_RELEASE_VERSION_POLICY }}
+-        MOBILE_RELEASE_ASC_KEY_ID: ${{ vars.MOBILE_RELEASE_ASC_KEY_ID }}
+-        MOBILE_RELEASE_ASC_ISSUER_ID: ${{ vars.MOBILE_RELEASE_ASC_ISSUER_ID }}
+-        MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64: ${{ secrets.MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 }}
++        MOBILE_RELEASE_ASC_KEY_ID: ${{ (inputs.platform == 'ios' || inputs.platform == 'both') && vars.MOBILE_RELEASE_ASC_KEY_ID || '' }}
++        MOBILE_RELEASE_ASC_ISSUER_ID: ${{ (inputs.platform == 'ios' || inputs.platform == 'both') && vars.MOBILE_RELEASE_ASC_ISSUER_ID || '' }}
++        MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64: ${{ (inputs.platform == 'ios' || inputs.platform == 'both') && secrets.MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 || '' }}
++        MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ (inputs.platform == 'android' || inputs.platform == 'both') && secrets.MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 || '' }}
+       run: python -P -m mobile_release.version_hosted reserve
+diff --git a/src/mobile_release/_github_connection_transport.py b/src/mobile_release/_github_connection_transport.py
+index 3dba4f12..8908b300 100644
+--- a/src/mobile_release/_github_connection_transport.py
++++ b/src/mobile_release/_github_connection_transport.py
+@@ -414,7 +414,7 @@ class _Budget:
+         # Allocation adds a second private bound, never a logical retry owner.
+         if self.profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}:
+             self.remaining()
+-            if self.requests >= (40 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile is _ExchangeProfile.GIT_REMOTE else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
++            if self.requests >= (44 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile is _ExchangeProfile.GIT_REMOTE else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
+                 raise ReadFailure("response-limit")
+             self.requests += 1
+
+diff --git a/src/mobile_release/workflow.py b/src/mobile_release/workflow.py
+index 39315362..9c752b70 100644
+--- a/src/mobile_release/workflow.py
++++ b/src/mobile_release/workflow.py
+@@ -975,7 +975,12 @@ class Context:
+
+     @classmethod
+     def current(cls, stage: str, platform: str) -> "Context":
+-        _require(stage in STAGES and platform in PLATFORMS, "workflow stage/platform is invalid")
++        paired_reserve = (stage == "candidate" and platform == "both"
++            and os.environ.get("GITHUB_JOB") == "version_reserve"
++            and os.environ.get("MOBILE_RELEASE_OPERATION") == "reserve-version"
++            and os.environ.get("MOBILE_RELEASE_SELECTED_PLATFORM") == "both"
++            and os.environ.get("MOBILE_RELEASE_CONFIRMATION") == "reserve-version:both:temporary-play-edit")
++        _require(stage in STAGES and (platform in PLATFORMS or paired_reserve), "workflow stage/platform is invalid")
+         _require(os.environ.get("GITHUB_ACTIONS") == "true", "workflow orchestration is restricted to GitHub Actions")
+         _require(os.environ.get("GITHUB_SERVER_URL", "https://github.com") == "https://github.com" and os.environ.get("GITHUB_API_URL", "https://api.github.com") == "https://api.github.com", "workflow recovery currently supports github.com only")
+         repository = os.environ.get("GITHUB_REPOSITORY", "")
+diff --git a/templates/workflows/mobile-candidate.yml b/templates/workflows/mobile-candidate.yml
+index f480169a..8a0b4937 100644
+--- a/templates/workflows/mobile-candidate.yml
++++ b/templates/workflows/mobile-candidate.yml
+@@ -4,7 +4,7 @@ on:
+   workflow_dispatch:
+     inputs:
+       operation:
+-        description: Build an internal candidate, or reserve an iOS version only (no build/upload)
++        description: Build an internal candidate, or reserve a version only (Android creates/deletes a temporary Play edit)
+         required: false
+         default: candidate
+         type: choice
+@@ -12,7 +12,7 @@ on:
+         - candidate
+         - reserve-version
+       platform:
+-        description: Platform to build once and upload to internal testing
++        description: Platforms enabled in the saved configuration
+         required: true
+         type: choice
+         options:
+@@ -20,7 +20,7 @@ on:
+         - ios
+         - both
+       confirmation:
+-        description: candidate:<platform>:<version>:<build>, or reserve-version:ios
++        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit (may invalidate another Play edit)
+         required: true
+         type: string
+       recovery_run_id:

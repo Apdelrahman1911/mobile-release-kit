@@ -99,7 +99,7 @@ class MemoryRepository:
                 "visibility": "private", "default_branch": "main"})
         if suffix.startswith("actions/runs/"):
             context = self.context
-            return reply({"id": int(context.authority["runId"]), "run_attempt": 1,
+            return reply({"id": int(context.authority["runId"]), "run_attempt": context.authority["attempt"],
                 "repository": {"id": int(context.repository["id"]), "full_name": context.repository["fullName"]},
                 "head_repository": {"id": int(context.repository["id"]), "full_name": context.repository["fullName"]},
                 "path": context.authority["callerPath"], "head_sha": context.authority["headSha"],
@@ -131,11 +131,14 @@ class SourceData:
     def __init__(self, fixture):
         self.binding = fixture.request.source
         self.base, self.identity = fixture.request.base_version, fixture.request.identity_revision
+        self.enabled = fixture.platforms
         self.selection = h.version_text.public_version_selection(fixture.config_raw.decode())
         self.version_raw = fixture.before
         self.checks, self.expired = 0, False
-        self.context = replace(fixture.context, current_job="ios_version_reserve", platform="ios", selected_platform="ios",
-            confirmation="reserve-version:ios", authority={"workflow": "Mobile internal candidate", "runId": "50", "attempt": 1,
+        platform = "both" if len(self.enabled) == 2 else self.enabled[0]
+        self.context = replace(fixture.context, current_job="version_reserve", platform=platform, selected_platform=platform,
+            confirmation="reserve-version:" + platform + (":temporary-play-edit" if platform != "ios" else ""),
+            authority={"workflow": "Mobile internal candidate", "runId": "50", "attempt": 1,
             "callerPath": ".github/workflows/mobile-candidate.yml", "reusableRepository": "trusted/tooling",
             "reusablePath": ".github/workflows/reusable-candidate.yml", "reusableCommit": "e" * 40,
             "headSha": fixture.before_commit, "ref": BRANCH, "event": "workflow_dispatch"})
@@ -407,7 +410,7 @@ class HostedAllocationTests(unittest.TestCase):
             h.validate_endpoint("standard", "GET", "/repos/fixture/ci-reservation")
         budget = transport._Budget(100, monotonic=lambda: 101, _profile=transport._ExchangeProfile.HOSTED_VERSION)
         self.assertEqual((budget.end, budget.body_total_limit), (160, 10 * 1024 * 1024))
-        for _ in range(40):
+        for _ in range(44):
             budget.claim_request()
         with self.assertRaises(transport.ReadFailure):
             budget.claim_request()

@@ -414,7 +414,7 @@ class _Budget:
         # Allocation adds a second private bound, never a logical retry owner.
         if self.profile in {_ExchangeProfile.HOSTED_VERSION, _ExchangeProfile.GIT_REMOTE, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST, _ExchangeProfile.ACTIONS_RETRY}:
             self.remaining()
-            if self.requests >= (40 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile is _ExchangeProfile.GIT_REMOTE else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
+            if self.requests >= (44 if self.profile is _ExchangeProfile.HOSTED_VERSION else 7 if self.profile is _ExchangeProfile.GIT_REMOTE else 12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.ACTIONS_RETRY} else 10):
                 raise ReadFailure("response-limit")
             self.requests += 1
 

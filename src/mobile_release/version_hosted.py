@@ -1,8 +1,9 @@
-"""Explicit iOS reservation in the pinned protected candidate workflow.
+"""Explicit shared reservation in the pinned protected candidate workflow.
 
 ONE existing ledger/allocator; the fixed repository journal is the hosted
 implementation of its pending-before-send port, not a native durability ACK.
-No build, Store write, source edit/push, counter bootstrap or implicit retry.
+No build/upload, source edit/push, counter bootstrap or implicit retry. Play
+inventory has explicit temporary-edit consent and a durable pre-effect fence.
 """
 from __future__ import annotations
 
@@ -18,6 +19,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from . import ios_store_versions as ios
+from . import android_store_versions as android
+from . import paired_store_versions as paired
 from . import version_allocation as a
 from . import version_allocation_state as state
 from . import version_allocation_transport as wire
@@ -38,8 +41,8 @@ POLICY_ENV = "MOBILE_RELEASE_VERSION_POLICY"
 TOKEN_ENV = "MOBILE_RELEASE_VERSION_GITHUB_TOKEN"
 MAX_STATE_BYTES = 128 * 1024
 MAX_STATE_NODES = 4096
-MAX_REQUESTS = 40
-MAX_WRITES = 5  # selection + checkpoint/pending/checkpoint/resolved (or reused)
+MAX_REQUESTS = 44
+MAX_WRITES = 7  # existing five + one Play pending and one confirmed cleanup
 CA_PATH = "desktop/cpython-source-inputs/github-ca.pem"
 READ = "hosted-version-read"
 HISTORY = "hosted-version-history"
@@ -49,8 +52,11 @@ LEDGER_WRITE = "hosted-version-ledger-write"
 _ROLES = {READ, HISTORY, JOURNAL_READ, JOURNAL_WRITE, LEDGER_WRITE}
 _SHA = r"[0-9a-f]{40}"
 _MESSAGE = "Retain Mobile Release Kit hosted version intent"
+_PLATFORMS = {"ios": ("ios",), "android": ("android",), "both": paired.PLATFORMS}
+_SCHEMAS = {"ios": 2, "android": 3, "both": 4}
+_KEEP = object()
 _DIAGNOSTICS = {
-    "admission": "Use the protected iOS Reserve version action with an enrolled counter and explicit automatic policy. This action does not build or upload.",
+    "admission": "Use the protected Reserve version action with the exact enabled platforms, enrolled counter and automatic policy. Android/shared reservation also requires explicit temporary Play edit confirmation. This action does not build or upload.",
     "source": "The exact branch, source or selected version changed. Preserve the candidate; commit other changes before selecting another reservation.",
     "journal": "The hosted journal write/read is unconfirmed or conflicts. Preserve it and retry only the exact source/request explicitly; pending attempts never resend the ledger write. Do not delete or reset it.",
     "missing": "The hosted journal is missing but first creation could not be proved. Preserve repository history; do not recreate the journal.",
@@ -58,7 +64,9 @@ _DIAGNOSTICS = {
     "authority": "The enrolled repository, protected counter branch or checkpoint could not be verified. No counter is created or reset.",
     "credential": "Hosted reservation needs its dedicated repository-scoped GitHub App token: Administration read, Contents write and Actions read. Ordinary GITHUB_TOKEN is not a fallback. Preserve any existing candidate and journal.",
     "candidate": "This source already has a different full candidate request. Reuse the exact original policy and inputs; a retry never changes the candidate or number.",
-    "store": "Current App Store inventory or its original private input is unavailable. No manual/counter-only fallback is selected.",
+    "store": "Current Store inventory or its original private input is unavailable. No manual/counter-only or single-platform fallback is selected.",
+    "google": "Hosted Android/shared reservation requires the selected protected MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 service-account key (at most 16 KiB). This fixed reader does not accept WIF/ambient ADC. Normal candidate WIF is unchanged.",
+    "play-pending": "A temporary Play edit has an unconfirmed outcome in the hosted journal. Preserve the journal and original operation. Do not retry, recreate an edit, reset or clear the fence; automatic remote cleanup recovery is not available here.",
     "read": "The original bounded hosted operation did not finish. Preserve its journal and candidate; do not replay an uncertain write.",
 }
 
@@ -79,14 +87,52 @@ def _blob(raw: bytes) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class PlayQuery:
+    """Pending DATA only; not a cleanup receipt or a second version counter."""
+    candidate_id: str
+    request_sha256: str
+    attempt_id: str
+
+    def __post_init__(self):
+        a._uuid(self.candidate_id)
+        p._match(self.request_sha256, p._DIGEST)
+        a._uuid(self.attempt_id)
+
+    def value(self):
+        return {"candidateId": self.candidate_id, "requestSha256": self.request_sha256,
+                "attemptId": self.attempt_id}
+
+    @classmethod
+    def parse(cls, value):
+        row = p._object(value, {"candidateId", "requestSha256", "attemptId"})
+        return cls(row["candidateId"], row["requestSha256"], row["attemptId"])
+
+    def require_state(self, original):
+        matches = [row.request for row in original.candidates if row.request.candidate_id == self.candidate_id]
+        need(len(matches) == 1 and matches[0].sha256 == self.request_sha256
+             and "android" in matches[0].enabled_platforms, "journal")
+
+
+@dataclass(frozen=True, slots=True)
 class Envelope:
     revision: int
     state: state.AllocationState
+    play_query: PlayQuery | None = None
+    schema_version: int = 1
 
     def to_bytes(self) -> bytes:
         p._integer(self.revision, state.MAX_REVISION, 1)
         need(type(self.state) is state.AllocationState and len(self.state.authorities) == 1, "journal")
-        raw = p.canonical({"revision": self.revision, "state": self.state.value()}) + b"\n"
+        need(type(self.schema_version) is int and self.schema_version in (1, 2), "journal")
+        need(self.play_query is None or type(self.play_query) is PlayQuery, "journal")
+        if self.play_query is not None:
+            self.play_query.require_state(self.state)
+        value = {"revision": self.revision, "state": self.state.value()}
+        if self.schema_version == 1:
+            need(self.play_query is None, "journal")
+        else:
+            value.update(schemaVersion=2, playQuery=None if self.play_query is None else self.play_query.value())
+        raw = p.canonical(value) + b"\n"
         # Bound BOTH incoming and prospective outgoing bytes/nodes before the
         # existing state codec/canonical copies. Never write a too-large row.
         self._decode(raw)
@@ -97,10 +143,15 @@ class Envelope:
         need(type(raw) is bytes and 0 < len(raw) <= MAX_STATE_BYTES, "size")
         need(raw.endswith(b"\n") and raw.count(b"\n") == 1, "journal")
         try:
-            return p._object(_decode_json(raw[:-1], limit=MAX_STATE_BYTES - 1,
-                nodes=MAX_STATE_NODES, depth=20, exact=True), {"revision", "state"})
+            value = _decode_json(raw[:-1], limit=MAX_STATE_BYTES - 1,
+                nodes=MAX_STATE_NODES, depth=20, exact=True)
         except (ValueError, TypeError, RecursionError, UnicodeError):
             raise Refused("size") from None
+        need(type(value) is dict, "journal")
+        if "schemaVersion" in value:
+            need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 2, "journal")
+            return p._object(value, {"schemaVersion", "revision", "state", "playQuery"})
+        return p._object(value, {"revision", "state"})
 
     @classmethod
     def parse(cls, raw: bytes) -> Envelope:
@@ -108,7 +159,8 @@ class Envelope:
         try:
             p._integer(row["revision"], state.MAX_REVISION, 1)
             need(type(row["state"]) is dict and row["state"].get("schemaVersion") == 3, "journal")
-            result = cls(row["revision"], state.AllocationState.parse(p.canonical(row["state"]) + b"\n"))
+            result = cls(row["revision"], state.AllocationState.parse(p.canonical(row["state"]) + b"\n"),
+                None if row.get("playQuery") is None else PlayQuery.parse(row["playQuery"]), row.get("schemaVersion", 1))
             need(result.to_bytes() == raw, "journal")
             return result
         except (ValueError, TypeError, KeyError, RecursionError, UnicodeError):
@@ -241,6 +293,8 @@ class _Journal(state._AllocationTransitions):
         self.commit = None
         self._local_project_id = self._bound_request = None
         self._loaded = False
+        self._schema_version = 1
+        self.play_query = self._play_original = None
 
     def load(self):
         self._usable()
@@ -264,6 +318,7 @@ class _Journal(state._AllocationTransitions):
             raw = _journal_content(body)
             original = Envelope.parse(raw)
             self.revision, self.blob, self._state = original.revision, body["sha"], original.state
+            self._schema_version, self.play_query = original.schema_version, original.play_query
             retained = self._state.selected(settings.authority)
             ledger.ledger.admit(settings.authority, retained.checkpoint)
             if retained.checkpoint.commit != current:
@@ -274,6 +329,7 @@ class _Journal(state._AllocationTransitions):
     def choose(self, make_request):
         """Find immutable source key first; only a genuinely absent key mints."""
         self._usable()
+        need(self.play_query is None, "play-pending")
         source = self.remote.source.binding
         matches = [row for row in self._state.candidates
                    if (row.request.source.ref, row.request.source.commit) == (source.ref, source.commit)]
@@ -297,10 +353,38 @@ class _Journal(state._AllocationTransitions):
         self._store(after.selecting(state.SelectedCandidate(self._local_project_id, request)))
         return request
 
-    def _store(self, after):
+    def begin_play(self, request):
+        self.admit_request(self.settings.authority, request)
+        need("android" in request.enabled_platforms and self.play_query is None
+             and self._play_original is None, "play-pending")
+        original = PlayQuery(request.candidate_id, request.sha256, str(uuid4()))
+        self._play_original = original  # Retained before the sole pending CAS.
+        self._store(self._state, play_query=original)
+        return original
+
+    def finish_play(self, request, source, original):
+        from .version_hosted_store import Material
+        self.admit_request(self.settings.authority, request)
+        need(type(original) is PlayQuery and original is self._play_original and self.play_query == original
+             and original.request_sha256 == request.sha256, "play-pending")
+        need(type(source.material) is Material, "play-pending")
+        # This consumes SAME Material's actual joined/closed attempt, never a
+        # frame/summary supplied by a caller. A failed CAS cannot consume again.
+        source.material._consume_play_cleanup(source, original)
+        self._store(self._state, play_query=None)
+
+    def _store(self, after, *, play_query=_KEEP):
         self._usable()
         need(self.revision < state.MAX_REVISION and self.writes < MAX_WRITES, "journal")
-        raw = Envelope(self.revision + 1, after).to_bytes()
+        if play_query is _KEEP:
+            need(self.play_query is None, "play-pending")
+        else:
+            need(after is self._state and self._play_original is not None
+                 and ((self.play_query is None and play_query is self._play_original)
+                      or (self.play_query is self._play_original and play_query is None)), "play-pending")
+        selected_play = self.play_query if play_query is _KEEP else play_query
+        schema = 2 if self._schema_version == 2 or play_query is not _KEEP else 1
+        raw = Envelope(self.revision + 1, after, selected_play, schema).to_bytes()
         body = {"branch": a.LEDGER_BRANCH, "message": _MESSAGE, "content": base64.b64encode(raw).decode("ascii")}
         if self.blob is not None:
             body["sha"] = self.blob
@@ -318,6 +402,7 @@ class _Journal(state._AllocationTransitions):
             readback = self.remote.read("contents/" + JOURNAL_PATH + "?ref=" + commit, role=JOURNAL_READ)
             need(_journal_content(readback) == raw, "journal")
             self.revision, self.blob, self.commit, self._state = self.revision + 1, _blob(raw), commit, after
+            self._schema_version, self.play_query = schema, selected_play
             candidate = after.candidate(self._local_project_id)
             need(candidate is not None and candidate.request == self._bound_request, "journal")
         except Exception:
@@ -358,18 +443,30 @@ class _Source(ci._Read):
         tree, _, _ = self.commit(commit)
         config_raw = self.entry(commit, version_text.CONFIG_PATH, MAX_CONFIG_BYTES)
         self.config = parse_config_text(config_raw.decode("utf-8"))
-        need(tuple(k for k in ("android", "ios") if self.config[k].get("enabled") is True) == ("ios",), "admission")
-        selected = self.config["ios"]
-        need(selected.get("identityStatus") != "blocked", "admission")
-        self.app_id, self.bundle_id = selected.get("appStoreAppId"), selected.get("bundleId")
-        ios.app_identity(self.app_id, self.bundle_id)
+        self.enabled = tuple(k for k in paired.PLATFORMS if self.config[k].get("enabled") is True)
+        need(self.context.platform in _PLATFORMS and self.enabled == _PLATFORMS[self.context.platform], "admission")
+        for platform in self.enabled:
+            need(self.config[platform].get("identityStatus") != "blocked", "admission")
+        if "ios" in self.enabled:
+            selected = self.config["ios"]
+            self.app_id, self.bundle_id = selected.get("appStoreAppId"), selected.get("bundleId")
+            ios.app_identity(self.app_id, self.bundle_id)
+        if "android" in self.enabled:
+            self.package = self.config["android"].get("applicationId")
+            android.package_identity(self.package)
         self.selection = version_text.public_version_selection(config_raw.decode("utf-8"))
         self.version_raw = self.entry(commit, self.selection.source, MAX_VERSION_BYTES)
         original = version_text.original_text(self.selection, self.version_raw)
         self.base = ReleaseVersion(original.values[0], int(original.values[1]))
         self.binding = p.SourceBinding(commit, tree, reference, hashlib.sha256(config_raw).hexdigest(),
                                        hashlib.sha256(self.version_raw).hexdigest())
-        self.identity = p.digest({"platform": "ios", "appId": self.app_id, "bundleId": self.bundle_id})
+        if self.enabled == ("ios",):
+            self.identity = p.digest({"platform": "ios", "appId": self.app_id, "bundleId": self.bundle_id})
+        else:
+            identity = {"platform": self.context.platform, "packageName": self.package}
+            if "ios" in self.enabled:
+                identity.update(appId=self.app_id, bundleId=self.bundle_id)
+            self.identity = p.digest(identity)
 
     def checked_ca(self, tooling):
         # Same original command budget; a fixed tooling leaf, not caller path.
@@ -388,8 +485,9 @@ class _Source(ci._Read):
 
 
 def _admit(context):
-    need(context.stage == "candidate" and context.platform == "ios" and context.current_job == "ios_version_reserve"
-         and context.confirmation == "reserve-version:ios" and context.selected_platform == "ios"
+    confirmation = "reserve-version:" + context.platform + (":temporary-play-edit" if context.platform != "ios" else "")
+    need(context.stage == "candidate" and context.platform in _PLATFORMS and context.current_job == "version_reserve"
+         and context.confirmation == confirmation and context.selected_platform == context.platform
          and os.environ.get("MOBILE_RELEASE_OPERATION") == "reserve-version", "admission")
     need(all(not os.environ.get(key, "") for key in ("MOBILE_RELEASE_RECOVERY_RUN_ID",
         "MOBILE_RELEASE_RECOVERY_CONFIRMATION", "MOBILE_RELEASE_DESKTOP_REQUEST", "MOBILE_RELEASE_DESKTOP_SOURCE_SHA",
@@ -403,7 +501,7 @@ def _admit(context):
          and settings.authority.repository_id == context.repository["id"], "authority")
     policy = p.VersionPolicy.parse(_decode_json(os.environ.get(POLICY_ENV, "").encode("ascii"),
         limit=16 * 1024, nodes=256, depth=6, exact=True))
-    need(policy.schema_version == 2 and policy.mode == "automatic", "admission")
+    need(policy.schema_version == _SCHEMAS[context.platform] and policy.mode == "automatic", "admission")
     policy.increment_for(context.authority["ref"])
     return settings, policy
 
@@ -438,11 +536,32 @@ def _reserve(source, settings, selected_policy, remote, material):
     need(commit.get("sha") == source.binding.commit and type(commit.get("tree")) is dict
          and commit["tree"].get("sha") == source.binding.tree, "source")
     context_revision = material.context(source)
-    source.check()
+    # New Play modes move this HEAD check to after the durable Play pending
+    # ACK. Selection retains immutable DATA; it cannot authorize a Store call.
+    if source.enabled == ("ios",):
+        source.check()
+    else:
+        source.remaining()
     request = journal.choose(lambda candidate: a.AllocationRequest(settings.authority.project_id, candidate,
-        source.identity, source.binding, source.base, ("ios",), selected_policy, context_revision))
-    inventory = material.observe(source, context_revision)
-    need(type(inventory) is ios.CurrentInventory, "store")
+        source.identity, source.binding, source.base, source.enabled, selected_policy, context_revision))
+    if source.enabled == ("ios",):
+        inventory = material.observe(source, context_revision)
+        need(type(inventory) is ios.CurrentInventory, "store")
+        observations = (inventory,)
+    else:
+        first = material.observe_ios(source, context_revision) if "ios" in source.enabled else None
+        if first is not None:
+            need(type(first) is ios.CurrentInventory, "store")
+        original = journal.begin_play(request)
+        source.check()
+        remote.source_current()
+        remote.journal_current(journal.commit)
+        summary = material.observe_android(source, context_revision, original)
+        journal.finish_play(request, source, original)
+        need(summary["observation"] == "observed", "store")
+        current = android.CurrentInventory(source.identity, context_revision, summary["revision"],
+            source.observed_at, summary["maxBuild"], tuple(summary["counts"][kind] for kind in android.COUNTS))
+        observations = (current,) if first is None else (current, first)
     pending = journal.pending_for(settings.authority, request.candidate_id)
 
     def send(role, http):
@@ -459,7 +578,7 @@ def _reserve(source, settings, selected_policy, remote, material):
     transport = wire._FixedAllocationTransport(request, settings.authority, journal.checkpoint(settings.authority),
         send, reconcile=pending is not None)
     outcome = a.allocate_version(request, settings.authority, transport, journal,
-        observations=(inventory,), clock=source.epoch)
+        observations=observations, clock=source.epoch)
     need(outcome.status == "reserved" and outcome.reason == "none" and outcome.reservation is not None, "journal")
     source.check()
     remote.source_current()
@@ -467,9 +586,9 @@ def _reserve(source, settings, selected_policy, remote, material):
     a._repository_identity(remote.read(""), settings.authority)
     journal.admit_request(settings.authority, request)
     need(journal.selected_candidate(settings.authority).reservation == outcome.reservation, "journal")
-    ios.check_reserved(outcome.reservation.version, selected_policy, enabled=("ios",),
+    a.current_inventory_policy(request).check_reserved(outcome.reservation.version, selected_policy, enabled=source.enabled,
         identity_revision=request.identity_revision, context_revision=context_revision,
-        observations=(inventory,), now=source.epoch())
+        observations=observations, now=source.epoch())
     _, after, values = version_text.prepare_payload(source.selection, source.version_raw, "edit",
         {"name": outcome.reservation.version.name, "build": str(outcome.reservation.version.build)})
     source.remaining()
@@ -490,7 +609,9 @@ def _reserve(source, settings, selected_policy, remote, material):
 
 def reserve(app_root: Path, tooling_root: Path):
     from .version_hosted_store import Material
-    context = workflow.Context.current("candidate", "ios")
+    selected = os.environ.get("MOBILE_RELEASE_SELECTED_PLATFORM", "")
+    need(selected in _PLATFORMS, "admission")
+    context = workflow.Context.current("candidate", selected)
     settings, policy = _admit(context)
     root, tooling = workflow._safe_path(app_root), workflow._safe_path(tooling_root)
     need(root.is_dir() and tooling.is_dir() and (root / ".git").is_dir()
@@ -506,7 +627,7 @@ def reserve(app_root: Path, tooling_root: Path):
                 guard.activate()
             source = _Source(root, context, guard)
             source.capture()
-            material = Material(tooling)
+            material = Material(tooling, platform=selected)
             source.material = material
             remote = _Remote(settings.authority, source, _live(source, tooling, os.environ[TOKEN_ENV]))
             result = _reserve(source, settings, policy, remote, material)

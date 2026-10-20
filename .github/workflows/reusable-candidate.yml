@@ -3,7 +3,7 @@ on:
   workflow_call:
     inputs:
       operation:
-        description: candidate (default), or reserve-version (iOS only; no build/upload).
+        description: candidate (default), or reserve-version (no build/upload; Android opens and deletes a temporary Play edit).
         required: false
         default: candidate
         type: string
@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       confirmation:
-        description: candidate:<platform>:<version>:<build>, or reserve-version:ios. Reserve rejects recovery/Desktop inputs.
+        description: candidate:<platform>:<version>:<build>; reserve-version:ios; or reserve-version:<android|both>:temporary-play-edit. Reserve rejects recovery/Desktop inputs.
         required: true
         type: string
       recovery_run_id:
@@ -103,7 +103,11 @@ jobs:
         [[ "$MOBILE_RELEASE_OPERATION" =~ ^(candidate|reserve-version)$ ]]
         [[ "$MOBILE_RELEASE_PLATFORM" =~ ^(android|ios|both)$ ]]
         if [[ "$MOBILE_RELEASE_OPERATION" == "reserve-version" ]]; then
-          [[ "$MOBILE_RELEASE_PLATFORM" == "ios" && "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:ios" ]]
+          if [[ "$MOBILE_RELEASE_PLATFORM" == "ios" ]]; then
+            [[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:ios" ]]
+          else
+            [[ "$MOBILE_RELEASE_CONFIRMATION" == "reserve-version:$MOBILE_RELEASE_PLATFORM:temporary-play-edit" ]]
+          fi
           [[ -z "$MOBILE_RELEASE_RECOVERY_RUN_ID$MOBILE_RELEASE_RECOVERY_CONFIRMATION$MOBILE_RELEASE_DESKTOP_REQUEST$MOBILE_RELEASE_DESKTOP_SOURCE_SHA$MOBILE_RELEASE_DESKTOP_EXPECTED_REF" ]]
         fi
         [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == "github-hosted" ]]
@@ -1453,9 +1457,9 @@ jobs:
     outputs:
       evidence_run_id: ${{ steps.resolve.outputs.evidence_run_id || (steps.upload_final.outputs['artifact-id'] != '' && github.run_id) || '' }}
       evidence_artifact_id: ${{ steps.resolve.outputs.evidence_artifact_id || steps.upload_final.outputs['artifact-id'] }}
-  ios_version_reserve:
+  version_reserve:
     needs: validate-platform
-    if: inputs.operation == 'reserve-version' && inputs.platform == 'ios'
+    if: inputs.operation == 'reserve-version' && (inputs.platform == 'android' || inputs.platform == 'ios' || inputs.platform == 'both')
     runs-on: macos-26
     timeout-minutes: 15
     environment: mobile-candidate
@@ -1542,7 +1546,8 @@ jobs:
         MOBILE_RELEASE_TOOLING_ROOT: ${{ github.workspace }}/tooling
         MOBILE_RELEASE_VERSION_AUTHORITY: ${{ vars.MOBILE_RELEASE_VERSION_AUTHORITY }}
         MOBILE_RELEASE_VERSION_POLICY: ${{ vars.MOBILE_RELEASE_VERSION_POLICY }}
-        MOBILE_RELEASE_ASC_KEY_ID: ${{ vars.MOBILE_RELEASE_ASC_KEY_ID }}
-        MOBILE_RELEASE_ASC_ISSUER_ID: ${{ vars.MOBILE_RELEASE_ASC_ISSUER_ID }}
-        MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64: ${{ secrets.MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 }}
+        MOBILE_RELEASE_ASC_KEY_ID: ${{ (inputs.platform == 'ios' || inputs.platform == 'both') && vars.MOBILE_RELEASE_ASC_KEY_ID || '' }}
+        MOBILE_RELEASE_ASC_ISSUER_ID: ${{ (inputs.platform == 'ios' || inputs.platform == 'both') && vars.MOBILE_RELEASE_ASC_ISSUER_ID || '' }}
+        MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64: ${{ (inputs.platform == 'ios' || inputs.platform == 'both') && secrets.MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64 || '' }}
+        MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64: ${{ (inputs.platform == 'android' || inputs.platform == 'both') && secrets.MOBILE_RELEASE_PLAY_SERVICE_ACCOUNT_JSON_BASE64 || '' }}
       run: python -P -m mobile_release.version_hosted reserve
