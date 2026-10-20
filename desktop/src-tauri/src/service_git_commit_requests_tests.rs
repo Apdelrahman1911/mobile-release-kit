@@ -188,18 +188,25 @@ fn same_claim_links_prepare_and_apply_then_unknown_blocks_both_families() {
     apply.arm("git-local-2").unwrap();
     claim.returned(Ok(()));
     apply.retired(OperationState::Unknown);
-    assert_eq!(
-        inbox
-            .query_commit(&request.origin, true)
-            .unwrap()
-            .0
-            .settlement,
-        Settlement::Unknown
-    );
+    let unknown = inbox.query_commit(&request.origin, true).unwrap();
+    assert_eq!(unknown.0.state, p::State::Unknown);
+    assert_eq!(unknown.0.settlement, Settlement::Unknown);
+    let first_stop = apply.entry().stop_at().unwrap();
+    // Exact repeated Start is an idempotent observation of this retained row,
+    // not a second native admission or permission to clear its uncertainty.
+    assert_eq!(inbox.start_commit(&start(&request)).unwrap(), unknown);
+    assert!(inbox.claim().unwrap().is_none());
+    let entries = inbox.entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(Arc::ptr_eq(&entries[0], apply.entry()));
+    assert_eq!(apply.entry().stop_at().unwrap(), first_stop);
+    let mut changed = start(&request);
+    changed.review_id = "git-local-other-review".into();
+    assert!(inbox.start_commit(&changed).is_err());
+    assert_eq!(inbox.query_commit(&request.origin, false).unwrap(), unknown);
     for family in [Family::Index, Family::Commit] {
         assert!(inbox.allow_for(scope(&doc, family), family).is_err());
     }
-    assert!(inbox.start_commit(&start(&request)).is_err());
 }
 #[test]
 fn expired_start_consent_keeps_original_status_stop_and_first_failure() {
