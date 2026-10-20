@@ -321,12 +321,22 @@ class RenameTransaction(local._LocalTransaction):
             return b""
         core._need(stamp.kind == "file" and len(raw) <= rename.MAX_LOG and raw.startswith(original), "recovery-required")
         identity = self.plan._controls.identity
-        prefix = (self.plan._snapshot.public.head + " " + self.plan._snapshot.public.head + " "
-                  + identity.name + " <" + identity.email + "> ").encode("utf-8")
+        head = self.plan._snapshot.public.head.encode("ascii")
+        actor = (identity.name + " <" + identity.email + "> ").encode("utf-8")
         message = ("Branch: renamed " + self.plan.source + " to " + self.plan.target).encode("ascii")
         tail = raw[len(original):]
-        core._need(re.fullmatch(re.escape(prefix) + rb"[0-9]{1,12} [+-][0-9]{4}\t" + re.escape(message) + rb"\n", tail)
-                   is not None and len(tail) <= 2048, "recovery-required")
+        clock = rb"(?P<clock>[0-9]{1,12} [+-][0-9]{4})"
+        suffix = rb"\t" + re.escape(message) + rb"\n"
+        valid = re.fullmatch(re.escape(head + b" " + head + b" " + actor) + clock + suffix, tail) is not None
+        if not valid and name == "logs/HEAD":
+            # Stock Git can record its attached HEAD rename as removal then
+            # restoration. Only this exact same-commit pair is a successor;
+            # it grants no intermediate public state or arbitrary extra log.
+            zero = b"0" * len(head)
+            pair = (re.escape(head + b" " + zero + b" " + actor) + clock + suffix
+                    + re.escape(zero + b" " + head + b" " + actor) + rb"(?P=clock)" + suffix)
+            valid = re.fullmatch(pair, tail) is not None
+        core._need(valid and len(tail) <= 2048, "recovery-required")
         self._adopt_private(name, raw)
         return raw
 

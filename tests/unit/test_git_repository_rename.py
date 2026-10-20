@@ -161,6 +161,69 @@ class RenameTests(unittest.TestCase):
             callback()
         self.assertEqual(raised.exception.reason, reason)
 
+    def model_stock_head_pair(self, change=None, *, branch=False):
+        # Model only the actual two-line stock-Git result from the separately
+        # owned Linux fixture. Every command here remains explicitly inert.
+        tails = []
+        def after(args, directory, index):
+            if args[0] != "branch":
+                return
+            path = directory / ("logs/refs/heads/next" if branch else "logs/HEAD")
+            raw = path.read_bytes()
+            line = raw.splitlines(keepends=True)[-1]
+            head, zero = fixture.HEAD.encode(), b"0" * len(fixture.HEAD)
+            prefix = head + b" " + head + b" "
+            self.assertTrue(line.startswith(prefix))
+            suffix = line[len(prefix):]
+            pair = head + b" " + zero + b" " + suffix + zero + b" " + head + b" " + suffix
+            selected = pair if change is None else change(pair)
+            tails.append(selected)
+            self.fake.atomic(path, raw[:-len(line)] + selected)
+        self.fake.after = after
+        return tails
+
+    def reject_modeled_pair(self, change=None, *, branch=False):
+        repo, review, owner = self.prepared()
+        self.model_stock_head_pair(change, branch=branch)
+        result = self.apply(repo, review, owner)
+        self.assertNotEqual(result.state, "succeeded")
+        self.assertEqual(owner.intents, [])
+        self.assertEqual(repo._transaction.returns, [])
+        self.assertEqual((self.root / ".git/HEAD").read_bytes(), b"ref: refs/heads/main\n")
+        self.assertFalse((self.root / ".git/refs/heads/next").exists())
+        self.assertEqual(self.fake.rename_calls, 1)
+        self.refusal("already-used", lambda: self.apply(repo, review, owner))
+
+    def test_stock_head_pair_preserves_prefix_and_exact_commit(self):
+        repo, review, owner = self.prepared()
+        tails = self.model_stock_head_pair()
+        result = self.apply(repo, review, owner)
+        self.assertEqual((result.state, result.settlement), ("succeeded", "settled"))
+        self.assertEqual(result.observation.head, fixture.HEAD)
+        self.assertEqual((self.root / ".git/logs/HEAD").read_bytes(), b"private HEAD log prefix\n" + tails[0])
+        self.assertEqual(owner.intents, [result.intent])
+        self.assertEqual(tuple(row.step for row in repo._transaction.returns), rename.steps(review.plan))
+        self.assertTrue(repo._ref_locks.closed)
+        self.assertFalse(repo._unknown or repo._retained)
+
+    def test_head_pair_wrong_oid_refuses_before_intent(self):
+        self.reject_modeled_pair(lambda pair: pair.replace(b"0" * len(fixture.HEAD), b"f" * len(fixture.HEAD), 1))
+
+    def test_head_pair_reversed_order_refuses_before_intent(self):
+        self.reject_modeled_pair(lambda pair: b"".join(reversed(pair.splitlines(keepends=True))))
+
+    def test_head_pair_different_timestamp_refuses_before_intent(self):
+        self.reject_modeled_pair(lambda pair: pair.replace(b"1700000000", b"1700000001", 1))
+
+    def test_head_pair_different_zone_refuses_before_intent(self):
+        self.reject_modeled_pair(lambda pair: pair.replace(b"+0000", b"+0100", 1))
+
+    def test_head_pair_extra_record_refuses_before_intent(self):
+        self.reject_modeled_pair(lambda pair: pair + pair.splitlines(keepends=True)[0])
+
+    def test_branch_pair_remains_unsupported(self):
+        self.reject_modeled_pair(branch=True)
+
     def test_one_private_candidate_exact_rename_preserves_dirty_index_config_upstream_logs(self):
         repo, review, owner = self.prepared()
         index, a, b = [(self.root / n).read_bytes() for n in (".git/index", "a.txt", "b.txt")]
