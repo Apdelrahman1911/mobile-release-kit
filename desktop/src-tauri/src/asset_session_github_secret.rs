@@ -28,12 +28,12 @@ pub(super) fn assigned<'a>(state:&'a DocumentState,key:&RecordKey,kind:Kind,nati
     #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
     {None}
 }
-fn platform(value:Platform)->wire::SecretPlatform{match value{Platform::Android=>wire::SecretPlatform::Android,
-    Platform::Ios=>wire::SecretPlatform::Ios,Platform::Project=>wire::SecretPlatform::Project}}
+fn platform(value:Platform)->Result<wire::SecretPlatform,BridgeError>{match value{Platform::Android=>Ok(wire::SecretPlatform::Android),
+    Platform::Ios=>Ok(wire::SecretPlatform::Ios),Platform::Project=>Ok(wire::SecretPlatform::Project),Platform::Both=>Err(refused(wire::Reason::MaterialChanged))}}
 fn purpose(value:Purpose)->Result<wire::SecretPurpose,BridgeError>{match value{
     Purpose::Full=>Ok(wire::SecretPurpose::Full), Purpose::Signing=>Ok(wire::SecretPurpose::Signing),
     Purpose::Store=>Ok(wire::SecretPurpose::Store),
-    Purpose::Provisioning=>Err(refused(wire::Reason::MaterialChanged)),
+    Purpose::Provisioning|Purpose::VersionInventory=>Err(refused(wire::Reason::MaterialChanged)),
 }}
 fn stage(value:Stage)->wire::EnvironmentStage{match value{Stage::Candidate=>wire::EnvironmentStage::Candidate,
     Stage::ExternalTesting=>wire::EnvironmentStage::ExternalTesting,Stage::Production=>wire::EnvironmentStage::Production}}
@@ -97,7 +97,7 @@ pub(super) fn borrow_material(state:&DocumentState,selection:&wire::SecretSelect
     let native=state.context.as_ref().ok_or_else(||refused(wire::Reason::MaterialUnavailable))?.clone();
     if native.execution_mode != commands::ExecutionMode::Github { return Err(refused(wire::Reason::MaterialChanged)); }
     if native.project_id!=project_id||native.registry_generation!=registration||native.project!=*root||native.revision!=selection.source.context_revision
-        ||stage(native.stage)!=selection.stage||platform(native.platform)!=selection.requirement.platform()
+        ||stage(native.stage)!=selection.stage||platform(native.platform)?!=selection.requirement.platform()
         ||native.draft.is_empty()||native.draft.len()>524288{return Err(refused(wire::Reason::MaterialChanged))}
     let key=RecordKey{id:Token(selection.source.record_id.clone()),revision:selection.source.record_revision};
     let assignment=state.assignments.iter().find(|a|a.record_id==key.id&&a.record_revision==key.revision
@@ -112,7 +112,7 @@ pub(super) fn borrow_material(state:&DocumentState,selection:&wire::SecretSelect
     let identity=root.identity.posix().map_err(|_|refused(wire::Reason::TargetChanged))?.preflight_identity();
     let source=wire::SecretSource{root:path.to_owned(),root_identity:wire::SecretRootIdentity{device:identity.device,inode:identity.inode,
         mode:identity.mode,uid:identity.uid,gid:identity.gid},draft:wire::SecretContent{bytes:native.draft.len()as u32,
-        sha256:format!("{:x}",Sha256::digest(&native.draft))},platform:platform(native.platform),purpose:purpose(native.purpose)?,
+        sha256:format!("{:x}",Sha256::digest(&native.draft))},platform:platform(native.platform)?,purpose:purpose(native.purpose)?,
         material:wire::SecretMaterialFacts{encoding:selection.requirement.encoding(),plaintext_bytes:plaintext as u32}};
     let result=Arc::new(GitHubSecretMaterial{native,key,payload,selection:selection.clone(),source});
     if !result.current(state,project_id,registration,root){return Err(refused(wire::Reason::MaterialChanged))}

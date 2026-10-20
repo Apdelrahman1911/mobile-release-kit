@@ -32,7 +32,7 @@ class HandoffData:
     reservation: allocation.Reservation
     authority: allocation.AuthorityRegistration
     checkpoint: allocation.Checkpoint
-    observation: allocation.CurrentInventory
+    observation: allocation.CurrentInventory | tuple[allocation.CurrentInventory, allocation.CurrentInventory]
     clock: dict
 
     @classmethod
@@ -46,20 +46,30 @@ class HandoffData:
         request = reservation.request
         authority = allocation.AuthorityRegistration.parse(row["authority"])
         checkpoint = allocation.Checkpoint.parse(row["checkpoint"])
-        observation = allocation.current_inventory_policy(request).CurrentInventory.parse(row["observation"])
-        wire.require(request.version_policy.schema_version in {2, 3}
+        observation = (allocation.parse_observations(request, row["observation"]) if request.version_policy.schema_version == 4 else
+                       allocation.current_inventory_policy(request).CurrentInventory.parse(row["observation"]))
+        observations = observation if type(observation) is tuple else (observation,)
+        wire.require(request.version_policy.schema_version in {2, 3, 4}
+                     and len(observations) == (2 if request.version_policy.schema_version == 4 else 1)
                      and source.matches(request.source) and authority.project_id == request.project_id
                      and authority.protected_branch and checkpoint.sequence >= reservation.sequence
                      and (checkpoint.sequence != reservation.sequence or checkpoint.head_sha256 == reservation.sha256)
-                     and observation.identity_revision == request.identity_revision
-                     and observation.context_revision == request.store_context_revision)
+                     and all(item.identity_revision == request.identity_revision
+                             and item.context_revision == request.store_context_revision for item in observations)
+                     and (len(observations) == 1 or observations[0].observed_at == observations[1].observed_at))
         return cls(source, Provider.parse(row["provider"], source), reservation, authority, checkpoint,
                    observation, dialogue_wire._clock(row["clock"]))
 
     def value(self):
         return {"schemaVersion": 1, "source": self.source.value(), "provider": self.provider.value(),
                 "reservation": self.reservation.value(), "authority": self.authority.value(),
-                "checkpoint": self.checkpoint.value(), "observation": self.observation.value(), "clock": self.clock}
+                "checkpoint": self.checkpoint.value(),
+                "observation": ([item.value() for item in self.observation] if type(self.observation) is tuple else self.observation.value()),
+                "clock": self.clock}
+
+    @property
+    def observations(self):
+        return self.observation if type(self.observation) is tuple else (self.observation,)
 
 
 class BorrowedReservedVersionInput:
@@ -373,7 +383,7 @@ class ReservedVersionEdit:
         with self.source("prepare"):
             self.plan = allocation.prepare_reserved_version_edit(self.lease, checkout, params["revision"],
                 params["expectedBaseline"], self.data.reservation, self.data.reservation.request,
-                current_inventory=(self.data.observation,), now=int(time.time()))
+                current_inventory=self.data.observations, now=int(time.time()))
         return self.plan
 
     def apply(self, plan):
@@ -381,7 +391,7 @@ class ReservedVersionEdit:
         allocation.current_inventory_policy(self.data.reservation.request).check_reserved(self.data.reservation.version, self.data.reservation.request.version_policy,
             enabled=self.data.reservation.request.enabled_platforms, identity_revision=self.data.reservation.request.identity_revision,
             context_revision=self.data.reservation.request.store_context_revision,
-            observations=(self.data.observation,), now=int(time.time()))
+            observations=self.data.observations, now=int(time.time()))
         with self.source("apply") as source:
             self.outcome = edit.apply_release_version_edit(self.lease, plan)
             self.engine.outcome = self.outcome  # Preserve real effect BEFORE any source postcheck.

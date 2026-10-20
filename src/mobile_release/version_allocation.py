@@ -23,6 +23,7 @@ from uuid import UUID
 from . import version_policy as policy
 from . import ios_store_versions as current_ios
 from . import android_store_versions as current_android
+from . import paired_store_versions as current_pair
 from ._desktop_github_engine import _check_control, _decode_json
 from ._github_connection_transport import ReadFailure, ReadResult, _control
 from .api._github_connection import _coordinate, _id, _repository
@@ -33,7 +34,8 @@ from .github_preflight import HttpRequest
 PROTOCOL = "mrk-version-allocation/1"
 PROTOCOL_V2 = "mrk-version-allocation/2"
 PROTOCOL_V3 = "mrk-version-allocation/3"
-_PROTOCOLS = {1: PROTOCOL, 2: PROTOCOL_V2, 3: PROTOCOL_V3}
+PROTOCOL_V4 = "mrk-version-allocation/4"
+_PROTOCOLS = {1: PROTOCOL, 2: PROTOCOL_V2, 3: PROTOCOL_V3, 4: PROTOCOL_V4}
 LEDGER_BRANCH = "mrk-version-allocations"
 LEDGER_PATH = "release/.mrk-version-allocations-v1.json"
 MAX_RESERVATIONS = 64
@@ -110,7 +112,8 @@ class AllocationRequest:
         _need(type(self.source) is policy.SourceBinding and type(self.version_policy) is policy.VersionPolicy)
         policy.version(self.base_version, self.enabled_platforms)
         if self.version_policy.schema_version != 1:
-            _need(self.enabled_platforms == ({2: "ios", 3: "android"}[self.version_policy.schema_version],),
+            _need(self.enabled_platforms == {2: ("ios",), 3: ("android",),
+                  4: current_pair.PLATFORMS}[self.version_policy.schema_version],
                   "store-platform-mismatch")
             policy._match(self.store_context_revision, policy._DIGEST)
         else:
@@ -141,7 +144,7 @@ class AllocationRequest:
     @property
     def sha256(self) -> str:
         return _hash({1: b"mrk:allocation-request:1\0", 2: b"mrk:allocation-request:2\0",
-                      3: b"mrk:allocation-request:3\0"}[self.version_policy.schema_version], self.value())
+                      3: b"mrk:allocation-request:3\0", 4: b"mrk:allocation-request:4\0"}[self.version_policy.schema_version], self.value())
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,10 +242,15 @@ class Reservation:
         policy._match(self.previous_sha256, policy._DIGEST)
         _need(type(self.request) is AllocationRequest and self.request.version_policy.mode == "automatic")
         policy.version(self.version, self.request.enabled_platforms, automatic=True)
-        expected_type = _observation_type(self.request)
-        _need(type(self.store_observations) is tuple and len(self.store_observations) <= 2
-              and (self.request.version_policy.schema_version == 1 or len(self.store_observations) == 1)
-              and all(type(item) is expected_type for item in self.store_observations))
+        if self.request.version_policy.schema_version == 4:
+            _need(type(self.store_observations) is tuple and len(self.store_observations) == 2
+                  and type(self.store_observations[0]) is current_android.CurrentInventory
+                  and type(self.store_observations[1]) is current_ios.CurrentInventory)
+        else:
+            expected_type = _observation_type(self.request)
+            _need(type(self.store_observations) is tuple and len(self.store_observations) <= 2
+                  and (self.request.version_policy.schema_version == 1 or len(self.store_observations) == 1)
+                  and all(type(item) is expected_type for item in self.store_observations))
         policy._integer(self.allocated_at, (1 << 63) - 1)
 
     @classmethod
@@ -266,7 +274,7 @@ class Reservation:
     @property
     def sha256(self) -> str:
         return _hash({1: b"mrk:allocation-reservation:1\0", 2: b"mrk:allocation-reservation:2\0",
-                      3: b"mrk:allocation-reservation:3\0"}[self.request.version_policy.schema_version], self._value())
+                      3: b"mrk:allocation-reservation:3\0", 4: b"mrk:allocation-reservation:4\0"}[self.request.version_policy.schema_version], self._value())
 
     def value(self) -> dict[str, Any]:
         return {**self._value(), "sha256": self.sha256}
@@ -367,17 +375,20 @@ def _propose(request: AllocationRequest, allocated: ReleaseVersion,
 
 def current_inventory_policy(request: AllocationRequest):
     """Closed DATA dispatch. This does not select credentials or acquire a receipt."""
-    _need(type(request) is AllocationRequest and request.version_policy.schema_version in {2, 3})
-    return current_ios if request.version_policy.schema_version == 2 else current_android
+    _need(type(request) is AllocationRequest and request.version_policy.schema_version in {2, 3, 4})
+    return {2: current_ios, 3: current_android, 4: current_pair}[request.version_policy.schema_version]
 
 
 def _observation_type(request: AllocationRequest):
+    _need(request.version_policy.schema_version != 4)
     return (policy.StoreObservation if request.version_policy.schema_version == 1
             else current_inventory_policy(request).CurrentInventory)
 
 
 def parse_observations(request: AllocationRequest, value: object) -> StoreObservations:
     _need(type(request) is AllocationRequest and type(value) is list and len(value) <= 2)
+    if request.version_policy.schema_version == 4:
+        return current_pair.parse_observations(value) if value else ()
     selected = _observation_type(request)
     return tuple(selected.parse(item) for item in value)
 
@@ -730,7 +741,7 @@ def prepare_reserved_version_edit(lease: object, checkout: object, expected_revi
     No allocation DTO authorizes this edit. The caller still needs its original
     lease/checkout, mutation authorization and a rechecked source intent. Apply
     uses the unchanged release_version_edit.apply_release_version_edit function.
-    Explicit v2/v3 requires a CURRENT inventory, not the reservation's historical
+    Explicit v2/v3/v4 requires a CURRENT inventory, not the reservation's historical
     observations. Its original native credential/Doc/clock must also be rechecked before
     Apply; this DATA check cannot replace that gate or authorize recovery.
     After applying, bind the final clean committed source separately before a

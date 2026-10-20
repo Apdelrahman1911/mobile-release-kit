@@ -122,7 +122,7 @@ impl Slot {
             return false;
         };
         if original.domain != SavedCommandDomain::LocalStorePreflight
-            || !(wire::selected(context)||play_versions::selected(context))
+            || !(wire::selected(context)||play_versions::selected(context)||store_wire::paired_versions::selected(context))
             || !material.matches_context(context)
         {
             return false;
@@ -291,13 +291,16 @@ mod tests {
     }
     #[test]
     fn normal_terminal_transport_close_is_not_a_failure_or_receipt() {
-        for android in [false, true] {
+        for platform in 0..3 {
+            let android=platform==1;let paired=platform==2;
             // Existing inert Session DATA and the ACTUAL terminal/stop handlers.
             // No runtime, credential, watchdog join or positive receipt is made.
             let mut input = serde_json::to_value(store_wire::tests::context()).unwrap();
             input.as_object_mut().unwrap().remove("operation");
             input["platform"] = serde_json::json!(if android {"android"} else {"ios"});
             input["query"] = serde_json::json!(if android {play_versions::QUERY} else {wire::QUERY});
+            if paired { input["platform"]=serde_json::json!("both");input["query"]=serde_json::json!(store_wire::paired_versions::QUERY);
+                input["iosRecord"]=serde_json::json!({"recordId":"c".repeat(32),"recordRevision":1}); }
             let context = store_wire::prepare(&input).unwrap().context();
             let application = SavedCommandOwner::new(
                 RuntimeConfig::packaged("/unopened-store-version-runtime".into()),
@@ -309,14 +312,15 @@ mod tests {
             );
             let mut value = store_wire::tests::complete();
             value["context"] = serde_json::json!(context);
-            value["lifetime"]["commands"] = serde_json::json!(if android { 6 } else { 7 });
+            value["lifetime"]["commands"] = serde_json::json!(if paired {13} else if android { 6 } else { 7 });
             value["lifetime"]["commandDispatched"] = serde_json::json!(true);
             value["result"] = serde_json::json!({"schemaVersion":1,"scope":wire::SCOPE,
                 "findings":[],"limitations":wire::LIMITATIONS,"currentVersions":{
                     "observation":"observed","coverage":wire::COVERAGE,"revision":"a".repeat(64),
                     "counts":{"builds":0,"buildUploads":0,"appStoreVersions":0},"maxBuild":0,
                     "marketingVersion":null,"historicalUniqueness":"not-established"}});
-            if android {
+            let ios_summary=value["result"]["currentVersions"].clone();
+            if android || paired {
                 value["result"] = serde_json::json!({"schemaVersion":1,"scope":play_versions::SCOPE,
                     "findings":[],"limitations":play_versions::LIMITATIONS,"currentVersions":{
                         "observation":"observed","coverage":play_versions::COVERAGE,"revision":"a".repeat(64),
@@ -324,12 +328,16 @@ mod tests {
                         "maxBuild":11000,"marketingVersion":null,"temporaryEdit":"deleted",
                         "historicalUniqueness":"not-established"}});
             }
+            if paired { let android=value["result"]["currentVersions"].clone();
+                value["result"]["scope"]=serde_json::json!(store_wire::paired_versions::SCOPE);
+                value["result"]["currentVersions"]=serde_json::json!({"android":android,"ios":ios_summary}); }
             let terminal: store_wire::Terminal = serde_json::from_value(value.clone()).unwrap();
             assert!(terminal.current_inventory_data(&context).is_some());
-            assert_eq!(terminal.current_versions_data(&context).is_some(), !android);
+            assert_eq!(terminal.current_versions_data(&context).is_some(), !android && !paired);
             // The other valid query/context cannot borrow this platform's result.
             input["platform"] = serde_json::json!(if android { "ios" } else { "android" });
             input["query"] = serde_json::json!(if android { wire::QUERY } else { play_versions::QUERY });
+            input.as_object_mut().unwrap().remove("iosRecord");
             let other = store_wire::prepare(&input).unwrap().context();
             let mut crossed = value.clone();
             crossed["context"] = serde_json::json!(other);

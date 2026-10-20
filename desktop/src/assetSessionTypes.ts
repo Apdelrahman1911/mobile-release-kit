@@ -6,11 +6,12 @@ export type AssetScalarKind = 'google-wif' | 'project-read-token' | 'apple-revie
 export type AssetKind = AssetFileKind | AssetScalarKind;
 // Encrypted descriptor-only row; never an input/assessment/assignment kind.
 export type StoredAssetKind = AssetKind | 'apple-distribution-key';
-export type AssetPlatform = 'android' | 'ios' | 'project';
+export type AssetPlatform = 'android' | 'ios' | 'project' | 'both';
 export type AssetStage = 'candidate' | 'external-testing' | 'production';
-export type AssetPurpose = 'full' | 'signing' | 'store' | 'provisioning';
+export type AssetPurpose = 'full' | 'signing' | 'store' | 'provisioning' | 'version-inventory';
 export type AssetExecutionMode = 'github' | 'local';
 export interface AssetScope { platform: AssetPlatform; stage: AssetStage; purpose: AssetPurpose; executionMode?: AssetExecutionMode }
+export interface CoreAssetScope extends Omit<AssetScope,'platform'|'purpose'> { platform: Exclude<AssetPlatform,'both'>; purpose: Exclude<AssetPurpose,'version-inventory'> }
 export interface AssetContextRequest extends AssetScope { projectId: string; draft: JsonObject }
 export interface AssetRecordRef { recordId: string; expectedRevision: number }
 export type AssetBackupExportRequest = { contextRevision: number; record: AssetRecordRef };
@@ -63,7 +64,7 @@ export interface CredentialAssessment {
   schemaVersion: 1;
   policyVersion: 'credential-policy-v1';
   kind: AssetKind;
-  context: AssetScope;
+  context: CoreAssetScope;
   applicability: { state: 'required' | 'not-applicable'; reason: 'selected' | 'wrong-platform' | 'platform-disabled' | 'not-required' };
   state: CredentialState;
   fields: { id: CredentialFieldId; requirement: string; presence: 'missing' | 'supplied'; state: CredentialState; issues: CredentialIssue[]; checks: { scope: CredentialCheckScope; outcome: 'passed' | 'failed' | 'asserted-pass' | 'asserted-fail' }[] }[];

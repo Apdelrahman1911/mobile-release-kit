@@ -13,6 +13,8 @@ mod profile_read;
 pub(crate) mod store_versions;
 #[path = "android_store_versions.rs"]
 pub(crate) mod play_versions;
+#[path="paired_store_versions.rs"]
+pub(crate) mod paired_versions;
 
 pub(crate) const PROTOCOL: &str = "mrk-local-store-preflight/1";
 pub(crate) const CONSENT: &str = "local-android-store-access-v1";
@@ -44,11 +46,11 @@ pub(crate) enum Platform { Android }
 // retained for Prepare/Execute/Reconcile; their serde grammar never widens.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum AccessPlatform { Android, Ios }
+pub(crate) enum AccessPlatform { Android, Ios, Both }
 impl AccessPlatform {
-    pub(crate) fn consent(self)->&'static str { match self {Self::Android=>CONSENT,Self::Ios=>APPLE_CONSENT} }
-    fn commands(self)->u32 {match self {Self::Android=>6,Self::Ios=>7}}
-    fn scope(self)->&'static str {match self {Self::Android=>"local-android-store-access-no-publishing",Self::Ios=>"local-ios-store-access-no-publishing"}}
+    pub(crate) fn consent(self)->&'static str { match self {Self::Android=>CONSENT,Self::Ios=>APPLE_CONSENT,Self::Both=>paired_versions::CONSENT} }
+    fn commands(self)->u32 {match self {Self::Android=>6,Self::Ios=>7,Self::Both=>13}}
+    fn scope(self)->&'static str {match self {Self::Android=>"local-android-store-access-no-publishing",Self::Ios=>"local-ios-store-access-no-publishing",Self::Both=>paired_versions::SCOPE}}
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -65,13 +67,16 @@ pub(crate) struct Context {
     pub(crate) execution_mode: ExecutionMode, pub(crate) platform: AccessPlatform, pub(crate) operation: Operation,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "bundle_read::optional_query")]
     pub(crate) query: Option<bundle_read::Query>,
+    #[serde(default,skip_serializing_if="Option::is_none",deserialize_with="paired_versions::optional_record")]
+    pub(crate) ios_record: Option<paired_versions::Record>,
 }
 impl Context {
     fn valid(&self) -> bool { valid_id(&self.project_id) && self.draft_revision < u32::MAX
         && self.baseline_generation < u32::MAX && self.saved_config.valid() && self.saved_version.valid()
         && self.credential_context_revision > 0 && self.credential_context_revision < u32::MAX
         && token(&self.record_id) && self.record_revision > 0 && self.record_revision < u32::MAX
-        && (self.query.is_none() || self.query.is_some_and(|q| q.platform()==self.platform)) }
+        && (self.query.is_none() || self.query.is_some_and(|q| q.platform()==self.platform))
+        && (if self.platform==AccessPlatform::Both {paired_versions::selected(self)}else{self.ios_record.is_none()}) }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -82,6 +87,7 @@ pub(crate) struct Prepare {
     pub(crate) execution_mode: ExecutionMode,
     #[serde(default)] platform: Option<AccessPlatform>,
     #[serde(default, deserialize_with = "bundle_read::optional_query")] query: Option<bundle_read::Query>,
+    #[serde(default,deserialize_with="paired_versions::optional_record")] ios_record:Option<paired_versions::Record>,
 }
 impl Prepare {
     pub(crate) fn context(&self) -> Context { Context { project_id: self.project_id.clone(), draft_revision: self.draft_revision,
@@ -89,7 +95,7 @@ impl Prepare {
         saved_version: self.saved_version.clone(), credential_context_revision: self.credential_context_revision,
         record_id: self.record_id.clone(), record_revision: self.record_revision, execution_mode: self.execution_mode,
         platform: self.platform.unwrap_or(AccessPlatform::Android), operation: Operation::LocalStorePreflight,
-        query: self.query } }
+        query: self.query, ios_record:self.ios_record.clone() } }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -107,14 +113,16 @@ pub(crate) fn prepare(value: &Value) -> Result<Prepare, BridgeError> {
             "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "query"])
             && matches!((value.get("platform").and_then(Value::as_str),value.get("query").and_then(Value::as_str)),
                 (Some("ios"),Some("bundle-id-registration"|"app-store-profile-reuse"|"ios-current-versions"))
-                |(Some("android"),Some("android-current-versions")))) { return Err(invalid()); }
+                |(Some("android"),Some("android-current-versions"))))
+        && !(keys(value,&["projectId","draftRevision","baselineGeneration","savedConfig","savedVersion","credentialContextRevision","recordId","recordRevision","executionMode","platform","query","iosRecord"])
+            && value["platform"]=="both" && value["query"]==paired_versions::QUERY) { return Err(invalid()); }
     let input = Prepare::deserialize(value).map_err(|_| invalid())?;
     if !input.context().valid() { return Err(invalid()); } Ok(input)
 }
 pub(crate) fn start(value: &Value) -> Result<Start, BridgeError> {
     if !keys(value, &["operationId", "ownerGeneration", "consentVersion"]) { return Err(invalid()); }
     let input = Start::deserialize(value).map_err(|_| invalid())?;
-    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|bundle_read::CONSENT|profile_read::CONSENT|store_versions::CONSENT|play_versions::CONSENT) { return Err(invalid()); } Ok(input)
+    if !token(&input.operation_id) || !token(&input.owner_generation) || !matches!(input.consent_version.as_str(),CONSENT|APPLE_CONSENT|bundle_read::CONSENT|profile_read::CONSENT|store_versions::CONSENT|play_versions::CONSENT|paired_versions::CONSENT) { return Err(invalid()); } Ok(input)
 }
 impl Start {
     pub(crate) fn matches_context(&self, context:&Context)->bool {
@@ -216,6 +224,7 @@ impl ResultData {
             bundle_read::Query::AppStoreProfileReuse => profile_read::valid_result(self),
             bundle_read::Query::IOSCurrentVersions => store_versions::valid_result(self),
             bundle_read::Query::AndroidCurrentVersions => play_versions::valid_result(self),
+            bundle_read::Query::PairedCurrentVersions => paired_versions::valid_result(self),
         }; }
         self.observation.is_none() && self.profile_reuse.is_none() && self.current_versions.is_none() && self.schema_version == 1 && self.scope == context.platform.scope()
             && self.limitations.as_slice() == LIMITATIONS && self.findings.len() <= 16

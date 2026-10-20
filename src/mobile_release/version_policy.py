@@ -148,8 +148,8 @@ class VersionPolicy:
     rules: tuple[RefRule, ...] = ()
     build_ceiling: int = MAX_BUILD
     store_max_age_seconds: int = 900
-    # v1 is byte-for-byte unchanged. v2/v3 are explicit current-visible iOS /
-    # Android scopes, not complete historical Store observations.
+    # v1 is byte-for-byte unchanged. v2/v3/v4 are explicit current-visible iOS,
+    # Android and same-context paired inventories, not historical observations.
     store_scope: str = "application-all-builds"
 
     def __post_init__(self) -> None:
@@ -160,7 +160,7 @@ class VersionPolicy:
         _integer(self.store_max_age_seconds, MAX_STORE_AGE_SECONDS, 1)
         _need(type(self.store_scope) is str and self.store_scope in
               {"application-all-builds", "require-current-ios-inventory",
-               "require-current-android-inventory"}, "invalid-policy")
+               "require-current-android-inventory", "require-current-shared-inventory"}, "invalid-policy")
         _need(self.store_scope == "application-all-builds" or self.mode == "automatic", "invalid-policy")
         _need((self.mode == "manual" and not self.rules)
               or (self.mode == "automatic" and bool(self.rules)), "invalid-policy")
@@ -172,12 +172,12 @@ class VersionPolicy:
             return cls()
         _need(type(value) is dict and {"schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds"} <= set(value))
         _need(type(value.get("schemaVersion")) is int
-              and value["schemaVersion"] in {1, 2, 3}, "invalid-policy")
+              and value["schemaVersion"] in {1, 2, 3, 4}, "invalid-policy")
         newer = value["schemaVersion"] != 1
         row = _object(value, {"schemaVersion", "mode", "rules", "buildCeiling", "storeMaxAgeSeconds"}
                       | ({"storeScope"} if newer else set()))
         _need(not newer or row["storeScope"] == {2: "require-current-ios-inventory",
-            3: "require-current-android-inventory"}[row["schemaVersion"]], "invalid-policy")
+            3: "require-current-android-inventory", 4: "require-current-shared-inventory"}[row["schemaVersion"]], "invalid-policy")
         _need(type(row["schemaVersion"]) is int
               and type(row["rules"]) is list and len(row["rules"]) <= MAX_RULES, "invalid-policy")
         return cls(row["mode"], tuple(RefRule.parse(rule) for rule in row["rules"]),
@@ -195,7 +195,7 @@ class VersionPolicy:
     @property
     def schema_version(self) -> int:
         return {"application-all-builds": 1, "require-current-ios-inventory": 2,
-                "require-current-android-inventory": 3}[self.store_scope]
+                "require-current-android-inventory": 3, "require-current-shared-inventory": 4}[self.store_scope]
 
     @property
     def sha256(self) -> str:

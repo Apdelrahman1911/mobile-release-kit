@@ -125,7 +125,7 @@ def bound_request(initial: Initial, request: allocation.AllocationRequest) -> No
             and request.sha256 == initial.request_sha256 and request.candidate_id == initial.candidate_id
             and request.project_id == initial.authority.project_id)
     if initial.source is not None:
-        require(request.version_policy.schema_version in {2, 3}
+        require(request.version_policy.schema_version in {2, 3, 4}
                 and initial.source.matches(request.source))  # AllocationRequest pins the exact platform/scope.
 
 
@@ -163,7 +163,8 @@ def parse_go(raw: bytes, initial: Initial) -> Go:
     require(type(go["observations"]) is list and len(go["observations"]) <= 2
             and len(policy.canonical(go["observations"])) <= OBSERVATIONS_LIMIT)
     observations = allocation.parse_observations(request, go["observations"])
-    require(request.version_policy.schema_version == 1 or len(observations) == 1
+    require(request.version_policy.schema_version == 1
+            or len(observations) == (2 if request.version_policy.schema_version == 4 else 1)
             or (initial.kind == "reconcile" and not observations))
     return Go(token, request, snapshot, observations)
 

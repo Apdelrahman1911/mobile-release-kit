@@ -2670,12 +2670,16 @@ fn ordinary_asset_platform_gate() -> Result<(), AssetError> {
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
     Ok(())
 }
+#[path="asset_session_paired_versions.rs"]
+mod paired_versions;
 fn macos_session_context(platform: Platform, stage: Stage, purpose: Purpose) -> bool {
+    if platform == Platform::Both || purpose == Purpose::VersionInventory { return paired_versions::scope(platform,stage,purpose,commands::ExecutionMode::Local); }
     if purpose == Purpose::Provisioning { return platform == Platform::Ios && stage == Stage::Candidate; }
     match platform {
         // These are implemented input routes, not a copy of core requiredness.
         // The core alone decides whether this stage/purpose needs the input.
         Platform::Android | Platform::Project => true,
+        Platform::Both => false,
         Platform::Ios => matches!(purpose, Purpose::Full | Purpose::Store)
             || stage == Stage::Candidate && purpose == Purpose::Signing,
     }
@@ -2683,6 +2687,7 @@ fn macos_session_context(platform: Platform, stage: Stage, purpose: Purpose) -> 
 fn macos_session_kind(platform: Platform, stage: Stage, purpose: Purpose, kind: Kind) -> bool {
     if !macos_session_context(platform, stage, purpose) { return false; }
     match platform {
+        Platform::Both => matches!(kind,Kind::GoogleServiceAccount|Kind::AscP8),
         Platform::Android => matches!(kind, Kind::AndroidKeystore | Kind::AndroidFirebase | Kind::GoogleWif),
         Platform::Project => kind == Kind::ProjectReadToken,
         Platform::Ios => match purpose {
@@ -2690,10 +2695,15 @@ fn macos_session_kind(platform: Platform, stage: Stage, purpose: Purpose, kind: 
                 || stage != Stage::Candidate && matches!(kind, Kind::AppleReviewContact | Kind::AppleReviewDemo | Kind::OperationCommitment),
             Purpose::Signing => matches!(kind, Kind::AppleP12 | Kind::AppleProfile | Kind::IosFirebase | Kind::ProjectReadToken),
             Purpose::Provisioning => matches!(kind, Kind::AscP8 | Kind::AppleP12 | Kind::AppleProfile),
+            Purpose::VersionInventory => false,
         },
     }
 }
 fn session_kind_gate(context: &NativeContext, kind: Kind) -> Result<(), AssetError> {
+    if context.platform == Platform::Both || context.purpose == Purpose::VersionInventory {
+        return if paired_versions::selected(context) && matches!(kind,Kind::GoogleServiceAccount|Kind::AscP8) && kind.enabled() { Ok(()) }
+            else { Err(AssetError::new(Reason::UnsupportedFormat)) };
+    }
     if kind == Kind::AppleDistributionKey { return Err(AssetError::new(Reason::UnsupportedFormat)); }
     if context.purpose == Purpose::Provisioning && (context.execution_mode != commands::ExecutionMode::Local
         || context.platform != Platform::Ios || context.stage != Stage::Candidate
@@ -4714,6 +4724,10 @@ impl DocumentBinding {
         } else { Ok(self.snapshot(&state)) }
     }
     pub(crate) fn context(&self, args: commands::Context<'_>) -> Result<AssetStatus, AssetError> {
+        if !paired_versions::boundary(args.platform,args.stage,args.purpose,args.execution_mode)
+            || args.platform == Platform::Both && (args.draft["android"]["enabled"] != true || args.draft["ios"]["enabled"] != true) {
+            return Err(AssetError::invalid());
+        }
         if args.execution_mode == commands::ExecutionMode::Local && !cfg!(all(target_os="macos", target_pointer_width="64", any(target_arch="aarch64",target_arch="x86_64"))) {
             return Err(AssetError::new(Reason::UnsupportedPlatform));
         }
@@ -5186,10 +5200,11 @@ fn assemble_request(payload: &Payload, context: &NativeContext) -> Result<Assess
     let observation = match &payload.material { Some(material) => serde_json::to_value(&material.observation).map_err(|_| AssetError::invalid())?, None => Value::Null };
     // Move Values into maps. json! on an already-owned Value can add a hidden
     // overlapping tree. Drop the entire assembled Value before awaiting R1.
+    let (platform,purpose)=paired_versions::assessment_scope(payload.kind,context,&draft)?;
     let mut ctx = Map::new(); ctx.insert("draft".into(), draft);
-    ctx.insert("platform".into(), serde_json::to_value(context.platform).map_err(|_| AssetError::invalid())?);
+    ctx.insert("platform".into(), serde_json::to_value(platform).map_err(|_| AssetError::invalid())?);
     ctx.insert("stage".into(), serde_json::to_value(context.stage).map_err(|_| AssetError::invalid())?);
-    ctx.insert("purpose".into(), serde_json::to_value(context.purpose).map_err(|_| AssetError::invalid())?);
+    ctx.insert("purpose".into(), serde_json::to_value(purpose).map_err(|_| AssetError::invalid())?);
     if context.execution_mode != commands::ExecutionMode::Github {
         ctx.insert("executionMode".into(), serde_json::to_value(context.execution_mode).map_err(|_| AssetError::invalid())?);
     }
@@ -9009,7 +9024,7 @@ mod tests {
                         let allowed = match platform {
                             Platform::Android => [Kind::AndroidKeystore, Kind::AndroidFirebase, Kind::GoogleWif].contains(&kind),
                             Platform::Project => kind == Kind::ProjectReadToken,
-                            Platform::Ios => unreachable!(),
+                            Platform::Ios | Platform::Both => unreachable!(),
                         };
                         assert_eq!(macos_session_kind(platform, stage, purpose, kind), allowed);
                         assert_eq!(session_kind_gate(&context, kind).is_ok(),

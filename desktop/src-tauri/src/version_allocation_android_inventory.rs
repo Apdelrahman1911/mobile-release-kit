@@ -59,6 +59,7 @@ pub(crate) fn current_observation_data(
     if crate::local_store_preflight_protocol::store_versions::selected(original.context()) {
         return ios_inventory::observation_data(original, port);
     }
+    if crate::local_store_preflight_protocol::paired_versions::selected(original.context()) { return paired_inventory::observation_data(original,port); }
     let request = Request(port.selected_request()?.clone());
     need(
         request_context_matches(&request, original.context())
@@ -99,6 +100,7 @@ pub(crate) fn current_context_digest(context: &Context) -> Result<String> {
     if crate::local_store_preflight_protocol::store_versions::selected(context) {
         return ios_inventory::context_digest(context);
     }
+    if crate::local_store_preflight_protocol::paired_versions::selected(context) { return paired_inventory::context_digest(context); }
     need(wire::selected(context))?;
     Ok(format!(
         "{:x}",

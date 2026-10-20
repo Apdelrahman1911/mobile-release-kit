@@ -112,8 +112,10 @@ impl Summary {
 pub(crate) enum Inventory {
     Ios(super::store_versions::Summary),
     Android(Summary),
+    Pair(super::paired_versions::Summary),
 }
 impl Inventory {
+    pub(crate) fn pair(&self)->Option<&super::paired_versions::Summary>{if let Self::Pair(v)=self{Some(v)}else{None}}
     pub(crate) fn ios(&self) -> Option<&super::store_versions::Summary> {
         if let Self::Ios(v) = self {
             Some(v)
@@ -132,6 +134,7 @@ impl Inventory {
         match self {
             Self::Ios(v) => v.observed(),
             Self::Android(v) => v.observed(),
+            Self::Pair(v) => v.observed(),
         }
     }
 }
@@ -174,7 +177,7 @@ pub(super) fn valid_result(value: &ResultData) -> bool {
 impl Terminal {
     /// Still DATA: only actual SavedCommandOwner final retirement mints a receipt.
     pub(crate) fn current_inventory_data(&self, context: &Context) -> Option<&Inventory> {
-        if !(selected(context) || super::store_versions::selected(context))
+        if !(selected(context) || super::store_versions::selected(context) || super::paired_versions::selected(context))
             || !self.valid(context)
             || self.outcome != super::Outcome::Complete
             || self.reason != super::Reason::None

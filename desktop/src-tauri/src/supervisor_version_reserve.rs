@@ -263,6 +263,8 @@ impl VersionReserveInvocation {
         let initial: Value = protocol::strict_json(&source.initial[..source.initial.len() - 1])?;
         let observations = if kind == wire::Kind::Reconcile {
             Vec::new()
+        } else if self.store_observation.context().platform==crate::local_store_preflight_protocol::AccessPlatform::Both {
+            observation.as_array().filter(|v|v.len()==2).ok_or_else(changed)?.clone()
         } else {
             vec![observation]
         };

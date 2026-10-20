@@ -8,12 +8,13 @@ import type { AssetDisplayState } from './assetSessionTypes.ts';
 import { assetStorageWritable } from './assetSessionProtocol.ts';
 import { sameOfflineData } from './offlinePreflightProtocol.ts';
 import { ANDROID_VERSIONS_QUERY } from './androidStoreVersions.ts';
+import { PAIRED_VERSIONS_QUERY, pairedVersionScope } from './pairedStoreVersions.ts';
 import { IOS_VERSIONS_QUERY } from './iosStoreVersions.ts';
 import { parseLocalStoreRequest, parseLocalStoreStatus, storeConsent, APPLE_BUNDLE_QUERY, APPLE_PROFILE_QUERY } from './localStorePreflightProtocol.ts';
 import type { BridgeMode } from './types.ts';
 import type { LocalStoreIdentity, LocalStorePreflightApi, LocalStoreStatus, PrepareLocalStorePreflight } from './localStorePreflightTypes.ts';
 type Port=LocalStorePreflightApi&{mode:BridgeMode};
-export interface LocalStoreState {mode:BridgeMode;platform:'android'|'ios';request:PrepareLocalStorePreflight|null;status:LocalStoreStatus|null;pending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
+export interface LocalStoreState {mode:BridgeMode;platform:'android'|'ios'|'both';request:PrepareLocalStorePreflight|null;status:LocalStoreStatus|null;pending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
 export type LocalStoreProject=Pick<AndroidBuildProject,'projectId'|'draftRevision'|'baselineGeneration'|'observationGeneration'|'savedConfig'|'savedVersion'|'dirtyDraft'|'snapshotPending'|'versionPending'|'saveRecoveryRequired'|'inputIssue'> & { iosDemoRequired?: boolean | null; versionPlatforms?: readonly ('android'|'ios')[] | null };
 interface Source {project:()=>LocalStoreProject|null;assets:()=>AssetDisplayState|null;otherOperationReason:()=>string|null;now?:()=>number}
 interface Attempt {request:PrepareLocalStorePreflight;epoch:number;after:number;previous:LocalStoreIdentity|null;id:LocalStoreIdentity|null;retired:boolean;started:boolean}
@@ -24,12 +25,16 @@ const error='The original Store check is unverified. Keep its status and cancel;
 export function localStoreOwnerReason(s:LocalStoreState):string|null{return s.blocked||s.unconfirmed||s.pending||active(s.status)?'A local Store access-check intent or operation is retained. Cancel or finish it before other work.':null;}
 export function localStoreRequest(project:LocalStoreProject|null,assets:AssetDisplayState|null):PrepareLocalStorePreflight|null{
  const status=assets?.status,c=status?.context;
- if(!project||project.inputIssue||project.dirtyDraft||project.snapshotPending||project.versionPending||project.saveRecoveryRequired||!project.savedConfig||!project.savedVersion||!assets||assets.mode!=='native'||assets.blocked||assets.busy||assets.updatingContext||assets.observationFailed||assets.originPending||!assets.contextCurrent||!status||!status.capability.available||!assetStorageWritable(status)||status.operation&&(status.operation.phase!=='idle'||status.operation.settlement!=='known')||!c||c.projectId!==project.projectId||!['android','ios'].includes(c.platform)||assets.scope.platform!==c.platform||c.executionMode!=='local'||!['full','store'].includes(c.purpose)||assets.scope.executionMode!=='local')return null;
+ const pair=!!c&&pairedVersionScope(c);
+ if(!project||project.inputIssue||project.dirtyDraft||project.snapshotPending||project.versionPending||project.saveRecoveryRequired||!project.savedConfig||!project.savedVersion||!assets||assets.mode!=='native'||assets.blocked||assets.busy||assets.updatingContext||assets.observationFailed||assets.originPending||!assets.contextCurrent||!status||!status.capability.available||!assetStorageWritable(status)||status.operation&&(status.operation.phase!=='idle'||status.operation.settlement!=='known')||!c||c.projectId!==project.projectId||!['android','ios','both'].includes(c.platform)||assets.scope.platform!==c.platform||c.executionMode!=='local'||(!pair&&!['full','store'].includes(c.purpose))||assets.scope.executionMode!=='local')return null;
+ if((c.platform==='both'||c.purpose==='version-inventory')&&!pair||pair&&(!pairedVersionScope(assets.scope)||!sameOfflineData(project.versionPlatforms,['android','ios'])))return null;
  const kind=c.platform==='ios'?'asc-p8':'google-service-account';
  const rows=status.assignments.filter(r=>r.kind===kind&&r.availability==='available'&&r.contextRevision===c.revision);
  if(rows.length!==1)return null;const row=rows[0]!;
  if(!status.records.some(r=>r.kind===kind&&r.recordId===row.recordId&&r.revision===row.recordRevision&&r.availability==='assigned'))return null;
- return parseLocalStoreRequest({projectId:project.projectId,draftRevision:project.draftRevision,baselineGeneration:project.baselineGeneration,savedConfig:project.savedConfig,savedVersion:project.savedVersion,credentialContextRevision:c.revision,recordId:row.recordId,recordRevision:row.recordRevision,executionMode:'local',...(c.platform==='ios'?{platform:'ios'}:{})});
+ let iosRecord: {recordId:string;recordRevision:number}|undefined;
+ if(pair){const matches=status.assignments.filter(r=>r.kind==='asc-p8'&&r.availability==='available'&&r.contextRevision===c.revision);if(matches.length!==1)return null;const p8=matches[0]!;if(p8.recordId===row.recordId||!status.records.some(r=>r.kind==='asc-p8'&&r.recordId===p8.recordId&&r.revision===p8.recordRevision&&r.availability==='assigned'))return null;iosRecord={recordId:p8.recordId,recordRevision:p8.recordRevision};}
+ return parseLocalStoreRequest({projectId:project.projectId,draftRevision:project.draftRevision,baselineGeneration:project.baselineGeneration,savedConfig:project.savedConfig,savedVersion:project.savedVersion,credentialContextRevision:c.revision,recordId:row.recordId,recordRevision:row.recordRevision,executionMode:'local',...(pair?{platform:'both',query:PAIRED_VERSIONS_QUERY,iosRecord}:c.platform==='ios'?{platform:'ios'}:{})});
 }
 export class LocalStorePreflightController {
  private state:LocalStoreState={mode:'unavailable',platform:'android',request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
@@ -43,7 +48,7 @@ export class LocalStorePreflightController {
  private now(){return(this.source.now??(()=>performance.now()))();}
  private update(patch:Partial<LocalStoreState>){this.state=Object.freeze({...this.state,...patch});if(!this.disposed)for(const listener of this.listeners)listener();}
  private clearTimer(){if(this.timer!==null)clearTimeout(this.timer);this.timer=null;}
- syncProject=()=>{const assets=this.source.assets(),next=localStoreRequest(this.source.project(),assets),platform=assets?.scope.platform==='ios'?'ios':'android';if(!sameOfflineData(next,this.state.request)||platform!==this.state.platform){this.invalidate();this.update({request:next,platform});}};
+ syncProject=()=>{const assets=this.source.assets(),next=localStoreRequest(this.source.project(),assets),platform=assets?.scope.platform==='both'?'both':assets?.scope.platform==='ios'?'ios':'android';if(!sameOfflineData(next,this.state.request)||platform!==this.state.platform){this.invalidate();this.update({request:next,platform});}};
  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
  setSelectionPending=(pending:boolean)=>{if(pending)this.invalidate();else this.syncProject();};
@@ -65,22 +70,22 @@ export class LocalStorePreflightController {
   if(ours&&op?.phase==='terminal'){this.clearTimer();this.update({unconfirmed:false,pending:false,acknowledged:false,consentUntil:null});if(this.disposed){this.unlisten?.();this.unlisten=null;}}
  }
  async checkStatus(){if(!this.api||this.api.mode!=='native'||this.reading)return;this.reading=true;try{this.receive(await this.api.localStorePreflightStatus());}catch{this.fail();}finally{this.reading=false;}}
- prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Stores.';if(localStoreOwnerReason(this.state))return localStoreOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for the local Store check.';if(!this.state.request)return this.state.platform==='ios'?'Read the saved version, then in Credentials choose This Mac → iOS → Store (or Full), select an App Store Connect P8 with its Key ID and Issuer ID, keep and assign it.':'Read the saved version, then in Credentials choose This Mac → Android → Store (or Full), select a Google service-account JSON, keep and assign it.';return this.source.otherOperationReason();}
+ prepareReason():string|null{if(this.state.mode!=='native')return'Use the installed Mac app; browser preview cannot contact Stores.';if(localStoreOwnerReason(this.state))return localStoreOwnerReason(this.state);if(!this.state.status||this.state.status.availability!=='available')return'This installed runtime is not ready for the local Store check.';if(!this.state.request)return this.state.platform==='both'?'Read the current saved shared version. In Credentials choose Use shared-version credentials, then assess and assign both the Google service-account JSON and App Store Connect P8 in that same context.':this.state.platform==='ios'?'Read the saved version, then in Credentials choose This Mac → iOS → Store (or Full), select an App Store Connect P8 with its Key ID and Issuer ID, keep and assign it.':'Read the saved version, then in Credentials choose This Mac → Android → Store (or Full), select a Google service-account JSON, keep and assign it.';return this.source.otherOperationReason();}
  // The new query cannot dispatch from an intent revoked by a synchronous
  // subscriber. Own pending bookkeeping is not a peer/native-currentness grant.
  private inventoryInvocationCurrent(api:Port,a:Attempt):boolean{
-  const owned=()=>!this.disposed&&this.api===api&&api.mode==='native'&&this.state.mode==='native'&&this.attempt===a&&!a.retired&&a.epoch===this.epoch&&!this.state.blocked&&this.state.platform===(a.request.query===ANDROID_VERSIONS_QUERY?'android':'ios');
+  const owned=()=>!this.disposed&&this.api===api&&api.mode==='native'&&this.state.mode==='native'&&this.attempt===a&&!a.retired&&a.epoch===this.epoch&&!this.state.blocked&&this.state.platform===(a.request.query===PAIRED_VERSIONS_QUERY?'both':a.request.query===ANDROID_VERSIONS_QUERY?'android':'ios');
   if(!owned())return false;
   const base=localStoreRequest(this.source.project(),this.source.assets());
   const live=base&&parseLocalStoreRequest({...base,...(a.request.query===ANDROID_VERSIONS_QUERY?{platform:'android'}:{}),query:a.request.query});
   const peer=this.source.otherOperationReason();
   return owned()&&!peer&&sameOfflineData(live,a.request);
  }
- async prepare(query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY|typeof IOS_VERSIONS_QUERY|typeof ANDROID_VERSIONS_QUERY){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status||query!==undefined&&!((this.state.platform==='ios'&&(query===APPLE_BUNDLE_QUERY||query===APPLE_PROFILE_QUERY||query===IOS_VERSIONS_QUERY))||(this.state.platform==='android'&&query===ANDROID_VERSIONS_QUERY)))return;const api=this.api,request=query===undefined?this.state.request:parseLocalStoreRequest({...this.state.request,...(query===ANDROID_VERSIONS_QUERY?{platform:'android'}:{}),query});if(!request)return;
+ async prepare(query?:typeof APPLE_BUNDLE_QUERY|typeof APPLE_PROFILE_QUERY|typeof IOS_VERSIONS_QUERY|typeof ANDROID_VERSIONS_QUERY|typeof PAIRED_VERSIONS_QUERY){this.syncProject();if(this.prepareReason()||!this.api||!this.state.request||!this.state.status||this.state.platform==='both'&&query!==PAIRED_VERSIONS_QUERY||query!==undefined&&!((this.state.platform==='ios'&&(query===APPLE_BUNDLE_QUERY||query===APPLE_PROFILE_QUERY||query===IOS_VERSIONS_QUERY))||(this.state.platform==='android'&&query===ANDROID_VERSIONS_QUERY)||(this.state.platform==='both'&&query===PAIRED_VERSIONS_QUERY)))return;const api=this.api,request=query===undefined?this.state.request:parseLocalStoreRequest({...this.state.request,...(query===ANDROID_VERSIONS_QUERY?{platform:'android'}:{}),query});if(!request)return;
   this.attempt={request,epoch:this.epoch,after:this.state.status.statusRevision,previous:this.state.status.operation?identity(this.state.status.operation):null,id:null,retired:false,started:false};const a=this.attempt;
   this.update({pending:true,unconfirmed:true,error:null,historical:false});
   try{
-   if((query===IOS_VERSIONS_QUERY||query===ANDROID_VERSIONS_QUERY)&&(!this.inventoryInvocationCurrent(api,a)||a.id!==null||this.state.status?.statusRevision!==a.after)){
+   if((query===IOS_VERSIONS_QUERY||query===ANDROID_VERSIONS_QUERY||query===PAIRED_VERSIONS_QUERY)&&(!this.inventoryInvocationCurrent(api,a)||a.id!==null||this.state.status?.statusRevision!==a.after)){
     a.retired=true;
     if(this.attempt===a&&!a.id){this.attempt=null;this.update({unconfirmed:this.state.blocked||active(this.state.status)});}
     else if(a.id)void this.cancelOriginal(false);
@@ -97,7 +102,7 @@ export class LocalStorePreflightController {
   const consentUntil=this.state.consentUntil;
   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});
   try{
-   if((a.request.query===IOS_VERSIONS_QUERY||a.request.query===ANDROID_VERSIONS_QUERY)&&(this.now()>=consentUntil||!this.inventoryInvocationCurrent(api,a)||!sameId(a.id,this.state.status?.operation)||this.state.status?.operation?.phase!=='awaiting-consent'||!this.state.status.operation.intentUsable)){
+   if((a.request.query===IOS_VERSIONS_QUERY||a.request.query===ANDROID_VERSIONS_QUERY||a.request.query===PAIRED_VERSIONS_QUERY)&&(this.now()>=consentUntil||!this.inventoryInvocationCurrent(api,a)||!sameId(a.id,this.state.status?.operation)||this.state.status?.operation?.phase!=='awaiting-consent'||!this.state.status.operation.intentUsable)){
     this.invalidate();return; // Keep/cancel the actual prepared native original.
    }
    this.receive(await api.startLocalStorePreflight({...a.id,consentVersion:storeConsent(a.request.platform,a.request.query)}));}catch{this.fail();}finally{this.update({pending:false});}}

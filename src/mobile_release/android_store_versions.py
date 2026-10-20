@@ -98,13 +98,16 @@ def read_saved_versions(operation, config, material):
     from .reporting import Finding, Status
     from .stores import _require_fastlane_bundle, _runtime_environment
     from .tooling import _complete_tooling_root
+    from . import paired_store_versions as paired
 
-    _need(type(operation) is StorePreflightRun and selected_query(operation.request.context)
+    _need(type(operation) is StorePreflightRun and (selected_query(operation.request.context)
+          or paired.selected_query(operation.request.context))
           and operation.source.require_operation() is operation and type(material) is SelectedStoreMaterial)
     operation.checkpoint()
     runtime, invocation = operation.runtime, operation.invocation
     _need(type(runtime) is StoreRuntimeContext and query_prerequisites(config))
-    material.require(config=config, platforms=("android",), invocation=invocation)
+    platforms = paired.PLATFORMS if paired.selected_query(operation.request.context) else ("android",)
+    material.require(config=config, platforms=platforms, invocation=invocation)
     runtime.require(root=config.root, invocation=invocation)
     package = config.section("android")["applicationId"]
     context = policy.digest(operation.request.context)
@@ -124,7 +127,7 @@ def read_saved_versions(operation, config, material):
     def current():
         operation._source_post()
         operation._received_post()
-        material.require(config=config, platforms=("android",), invocation=invocation)
+        material.require(config=config, platforms=platforms, invocation=invocation)
         runtime.require(root=config.root, invocation=invocation)
         _need(config.section("android")["applicationId"] == package and policy.digest(operation.request.context) == context)
 

@@ -167,9 +167,11 @@ def _read_raw_frame(operation, config, material, *, expected_query: str) -> tupl
     from .tooling import _complete_tooling_root
     from . import apple_provisioning_profile_read as profiles
     from . import ios_store_versions as versions
+    from . import paired_store_versions as paired
 
     api.require(expected_query in {QUERY, profiles.QUERY, versions.QUERY} and type(operation) is StorePreflightRun
-                and selected_read(operation.request.context) and operation.request.context.get("query") == expected_query
+                and (selected_read(operation.request.context) and operation.request.context.get("query") == expected_query
+                     or expected_query == versions.QUERY and paired.selected_query(operation.request.context))
                 and operation.source.require_operation() is operation and type(material) is SelectedStoreMaterial,
                 "bundle_read_original_unavailable")
     operation.checkpoint()
@@ -177,7 +179,8 @@ def _read_raw_frame(operation, config, material, *, expected_query: str) -> tupl
     api.require(type(runtime) is StoreRuntimeContext and query_prerequisites(config), "bundle_read_original_unavailable")
     inventory = expected_query == versions.QUERY
     api.require(not inventory or versions.query_prerequisites(config), "bundle_read_original_unavailable")
-    material.require(config=config, platforms=("ios",), invocation=invocation)
+    platforms = paired.PLATFORMS if paired.selected_query(operation.request.context) else ("ios",)
+    material.require(config=config, platforms=platforms, invocation=invocation)
     runtime.require(root=config.root, invocation=invocation)
     bundle_id = config.section("ios")["bundleId"]
     request = (versions.request("app-before", config.section("ios")["appStoreAppId"]) if inventory else
@@ -206,7 +209,7 @@ def _read_raw_frame(operation, config, material, *, expected_query: str) -> tupl
     def current():
         operation._source_post()
         operation._received_post()
-        material.require(config=config, platforms=("ios",), invocation=invocation)
+        material.require(config=config, platforms=platforms, invocation=invocation)
         runtime.require(root=config.root, invocation=invocation)
         api.require(config.section("ios")["bundleId"] == bundle_id
                     and (versions.request("app-before", config.section("ios")["appStoreAppId"]) if inventory else
@@ -228,7 +231,7 @@ def _read_raw_frame(operation, config, material, *, expected_query: str) -> tupl
                             "MOBILE_RELEASE_ASC_BUNDLE_READ_CONTEXT": context_sha256})
         if inventory:
             environment["MOBILE_RELEASE_ASC_APP_ID"] = config.section("ios")["appStoreAppId"]
-        argv = fixed_read_argv(tooling, operation.request.context)
+        argv = versions.fixed_argv(tooling) if paired.selected_query(operation.request.context) else fixed_read_argv(tooling, operation.request.context)
         with runtime.command(argv, capture=True):
             completed = run_owned(argv, cwd=runner._path, environ=environment, capture=True, text=False,
                                   timeout=QUERY_SECONDS, output_limit=versions.FRAME_LIMIT if inventory else FRAME_LIMIT,

@@ -1,5 +1,6 @@
 // Closed presentation/wire checks. Core alone judges credential policy. These
 // limits apply to already-materialized JS data, not upstream IPC allocations.
+import { assessmentMatchesNative } from './pairedStoreVersions.ts';
 import type { ApiError } from './types.ts';
 import { credentialBackupRequestFits, isCredentialBackupOperation } from './credentialBackup.ts';
 import type { AssetFileKind, AssetKind, AssetReason, AssetStatus, CredentialAssessment } from './assetSessionTypes.ts';
@@ -57,10 +58,11 @@ export function isAssetFileKind(value: unknown): value is AssetFileKind { return
 export function assetCounter(value: unknown): value is number { return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffff_ffff; }
 function token(value: unknown): value is string { return typeof value === 'string' && value.length === 32 && /^[0-9a-f]{32}$/u.test(value); }
 function projectId(value: unknown): value is string { return typeof value === 'string' && value.length >= 1 && value.length <= 64 && /^[A-Za-z0-9_-]+$/u.test(value); }
-function scope(value: unknown): boolean {
+function scope(value: unknown, native = true): boolean {
   const names = object(value) && Object.hasOwn(value, 'executionMode') ? ['platform', 'stage', 'purpose', 'executionMode'] : ['platform', 'stage', 'purpose'];
-  if (!keys(value, names) || !one(value.platform, ASSET_PLATFORMS) || !one(value.stage, ASSET_STAGES) ||
+  if (!keys(value, names) || !(one(value.platform, ASSET_PLATFORMS) || native && value.platform === 'both') || !one(value.stage, ASSET_STAGES) ||
       Object.hasOwn(value, 'executionMode') && !one(value.executionMode, ASSET_EXECUTION_MODES)) return false;
+  if (value.platform === 'both' || value.purpose === 'version-inventory') return native && value.platform === 'both' && value.purpose === 'version-inventory' && value.stage === 'candidate' && value.executionMode === 'local';
   // Apple setup is a separate local scope, not another generic release mode.
   // Omitted executionMode still means GitHub for the existing three purposes.
   return value.purpose === 'provisioning'
@@ -124,7 +126,7 @@ export function assetJsonFits(value: unknown, limit: number): boolean {
 function assessment(value: unknown): value is CredentialAssessment {
   if (!keys(value, ['schemaVersion', 'policyVersion', 'kind', 'context', 'applicability', 'state', 'fields', 'identity', 'assurance']) ||
       value.schemaVersion !== 1 || value.policyVersion !== 'credential-policy-v1' || !one(value.kind, ASSET_KINDS) ||
-      !scope(value.context) || !one(value.state, states) || !one(value.identity, ['not-applicable', 'not-assessed', 'match', 'mismatch']) ||
+      !scope(value.context, false) || !one(value.state, states) || !one(value.identity, ['not-applicable', 'not-assessed', 'match', 'mismatch']) ||
       !keys(value.applicability, ['state', 'reason']) || !one(value.applicability.state, ['required', 'not-applicable']) ||
       !one(value.applicability.reason, ['selected', 'wrong-platform', 'platform-disabled', 'not-required'])) return false;
   if ((value.context as ObjectValue).purpose === 'provisioning' && !one(value.kind, ['asc-p8', 'apple-p12', 'apple-profile'])) return false;
@@ -222,7 +224,7 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
     // observable even before all its originals settle.
     if (typed.mode === 'closed' && (typed.context !== null || typed.records.length || typed.assignments.length ||
         typed.operation?.selectionToken || evaluated || typed.operation?.preview)) return null;
-    if (evaluated && (!typed.context || !['platform', 'stage', 'purpose'].every((key) => evaluated.context[key as keyof typeof evaluated.context] === typed.context![key as keyof typeof evaluated.context]) || (evaluated.context.executionMode ?? 'github') !== (typed.context.executionMode ?? 'github'))) return null;
+    if (evaluated && (!typed.context || !assessmentMatchesNative(evaluated, typed.context))) return null;
     const preview = typed.operation?.preview;
     if (preview && ['save', 'bind'].includes(preview.action) && (!evaluated || evaluated.applicability.state !== 'required' || !['configured', 'format-valid'].includes(evaluated.state))) return null;
     if (preview) {
@@ -274,7 +276,7 @@ export function assetRequestFits(command: AssetCommand, value: unknown): boolean
     case 'vault_prepare_delete': return recordRef(value);
     case 'vault_backup_export': case 'vault_backup_import': return credentialBackupRequestFits(command, value);
     case 'asset_context': return keys(value, object(value) && Object.hasOwn(value, 'executionMode') ? ['projectId', 'draft', 'platform', 'stage', 'purpose', 'executionMode'] : ['projectId', 'draft', 'platform', 'stage', 'purpose']) && projectId(value.projectId) && object(value.draft) &&
-      assetJsonFits(value.draft, 524288) && scope({ platform: value.platform, stage: value.stage, purpose: value.purpose, ...(Object.hasOwn(value, 'executionMode') ? { executionMode: value.executionMode } : {}) });
+      assetJsonFits(value.draft, 524288) && (value.platform !== 'both' || object(value.draft.android) && value.draft.android.enabled === true && object(value.draft.ios) && value.draft.ios.enabled === true) && scope({ platform: value.platform, stage: value.stage, purpose: value.purpose, ...(Object.hasOwn(value, 'executionMode') ? { executionMode: value.executionMode } : {}) });
     case 'asset_choose': return keys(value, ['contextRevision', 'kind', 'replacement']) && assetCounter(value.contextRevision) && isAssetFileKind(value.kind) &&
       (value.replacement === null || recordRef(value.replacement));
     case 'credential_prepare': {

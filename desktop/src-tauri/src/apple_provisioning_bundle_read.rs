@@ -17,16 +17,19 @@ pub(crate) enum Query {
     IOSCurrentVersions,
     #[serde(rename = "android-current-versions")]
     AndroidCurrentVersions,
+    #[serde(rename="paired-current-versions")]
+    PairedCurrentVersions,
 }
 
 impl Query {
-    pub(super) fn platform(self)->super::AccessPlatform { match self { Self::AndroidCurrentVersions=>super::AccessPlatform::Android,_=>super::AccessPlatform::Ios } }
+    pub(super) fn platform(self)->super::AccessPlatform { match self { Self::AndroidCurrentVersions=>super::AccessPlatform::Android,Self::PairedCurrentVersions=>super::AccessPlatform::Both,_=>super::AccessPlatform::Ios } }
     pub(super) fn consent(self) -> &'static str {
         match self {
             Self::BundleIdRegistration => CONSENT,
             Self::AppStoreProfileReuse => super::profile_read::CONSENT,
             Self::IOSCurrentVersions => super::store_versions::CONSENT,
             Self::AndroidCurrentVersions => super::play_versions::CONSENT,
+            Self::PairedCurrentVersions => super::paired_versions::CONSENT,
         }
     }
 }

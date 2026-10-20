@@ -31,9 +31,14 @@ impl Review {
             && self.acknowledge_limitations
     }
     pub(crate) fn policy(&self, platform:crate::local_store_preflight_protocol::AccessPlatform) -> Value {
-        let ios=platform==crate::local_store_preflight_protocol::AccessPlatform::Ios;
-        json!({"schemaVersion":if ios{2}else{3},"mode":"automatic","rules":[{"ref":self.reference,"increment":self.increment}],
-            "buildCeiling":if ios{9999}else{2_100_000_000},"storeMaxAgeSeconds":900,"storeScope":if ios{"require-current-ios-inventory"}else{"require-current-android-inventory"}})
+        use crate::local_store_preflight_protocol::AccessPlatform;
+        let (schema,ceiling,scope)=match platform {
+            AccessPlatform::Ios=>(2,9999,"require-current-ios-inventory"),
+            AccessPlatform::Android=>(3,2_100_000_000,"require-current-android-inventory"),
+            AccessPlatform::Both=>(4,9999,"require-current-shared-inventory"),
+        };
+        json!({"schemaVersion":schema,"mode":"automatic","rules":[{"ref":self.reference,"increment":self.increment}],
+            "buildCeiling":ceiling,"storeMaxAgeSeconds":900,"storeScope":scope})
     }
 }
 pub(crate) enum Command {
@@ -166,7 +171,7 @@ pub(crate) fn refused() -> BridgeError {
     BridgeError::new("version_reserve_changed","Read the saved version and current Android or iOS Store inventory again. The existing reservation is never recycled.")
 }
 pub(crate) fn unavailable() -> BridgeError {
-    BridgeError::new("version_reserve_unavailable","Automatic reservations need one enabled platform, its current Store inventory, the installed runtime and a connected shared counter. Manual versions are unchanged.")
+    BridgeError::new("version_reserve_unavailable","Automatic reservations need current Store inventory for every enabled platform, the installed runtime and a connected shared counter. Manual versions are unchanged.")
 }
 pub(crate) fn not_started(error: BridgeError) -> BridgeError {
     if error.code == "cleanup_unknown" {

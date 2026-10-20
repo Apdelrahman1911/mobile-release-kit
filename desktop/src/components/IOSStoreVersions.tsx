@@ -22,7 +22,7 @@ export function IOSStoreVersions({ state, controller, compact = false, onCredent
     ...state.request, platform: state.request.platform ?? 'android', query: IOS_VERSIONS_QUERY, operation: 'local-store-preflight',
   });
   const result = op.result?.scope === IOS_VERSIONS_SCOPE ? op.result : null;
-  const summary = result?.currentVersions?.coverage === IOS_VERSIONS_COVERAGE ? result.currentVersions : null, copy = summary ? iosVersionDescriptions[summary.observation] : null;
+  const summary = result?.currentVersions && 'coverage' in result.currentVersions && result.currentVersions.coverage === IOS_VERSIONS_COVERAGE ? result.currentVersions : null, copy = summary ? iosVersionDescriptions[summary.observation] : null;
   return <section className="card" aria-label="Current App Store versions">
     <div className="inline-heading"><h2>Current App Store versions · This Mac</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
     {!compact && <>

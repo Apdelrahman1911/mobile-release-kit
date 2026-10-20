@@ -201,7 +201,7 @@ test('Android range in reserved DATA does not widen native iOS policy or create 
   for (const build of [0, -0, -1, true, 2_100_000_001]) assert.equal(parseReservedVersion({ ...value, build }), null);
   const saved = { ...project(), versionPlatforms: ['android'] };
   assert.equal(versionReserveProjectIssue(saved), null); // Negative UI guidance only; no port/counter call.
-  assert.match(versionReserveProjectIssue({ ...saved, versionPlatforms: ['android', 'ios'] }), /paired.*not supported/);
+  assert.equal(versionReserveProjectIssue({ ...saved, versionPlatforms: ['android', 'ios'] }), null); // UI input only: native still requires one genuine paired receipt.
   assert.ok(versionReserveProjectIssue({ ...saved, versionPlatforms: null }));
   assert.ok(versionReserveProjectIssue({ ...saved, dirtyDraft: true }));
 });

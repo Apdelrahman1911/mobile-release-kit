@@ -4,6 +4,8 @@ import type { StoreCheck } from '../localStorePreflightTypes.ts';
 import { APPLE_BUNDLE_QUERY, APPLE_PROFILE_QUERY } from '../localStorePreflightProtocol.ts';
 import { AppleProvisioning } from './AppleProvisioning.tsx';
 import { AppleProvisioningProfiles } from './AppleProvisioningProfiles.tsx';
+import { PairedStoreVersions } from './PairedStoreVersions.tsx';
+import { PAIRED_VERSIONS_QUERY } from '../pairedStoreVersions.ts';
 import { AndroidStoreVersions } from './AndroidStoreVersions.tsx';
 import { ANDROID_VERSIONS_QUERY } from '../androidStoreVersions.ts';
 import { IOSStoreVersions } from './IOSStoreVersions.tsx';
@@ -31,6 +33,7 @@ export function LocalStorePreflight({state,controller,compact=false,onCredential
  const resultLabels=originalApple?{...labels,'credential-format':'App Store Connect private-key format','store-access':'App Store Connect account access'}:labels;
  if(op?.context.query===APPLE_BUNDLE_QUERY)return <AppleProvisioning state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
  if(op?.context.query===APPLE_PROFILE_QUERY)return <AppleProvisioningProfiles state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
+ if(op?.context.query===PAIRED_VERSIONS_QUERY||state.platform==='both'&&(!op||!retained))return <PairedStoreVersions state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
  if(op?.context.query===ANDROID_VERSIONS_QUERY)return <AndroidStoreVersions state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
  if(op?.context.query===IOS_VERSIONS_QUERY)return <IOSStoreVersions state={state} controller={controller} compact={compact} onCredentials={onCredentials} onShow={onShow}/>;
  if(compact&&!retained)return null;

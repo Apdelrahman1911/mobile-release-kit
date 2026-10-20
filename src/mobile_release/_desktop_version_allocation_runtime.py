@@ -345,7 +345,7 @@ def execute(dialogue: _Dialogue, go: wire.Go, *, runtime_dir: str, source=None,
         # a new reservation. v2 is explicitly current-visible, never silently
         # promoted to v1's all-history scope. Reconciliation returns DATA only.
         try:
-            if go.request.version_policy.schema_version in {2, 3}:
+            if go.request.version_policy.schema_version in {2, 3, 4}:
                 allocation.current_inventory_policy(go.request).constraints(go.observations, go.request.enabled_platforms, go.request.identity_revision,
                             go.request.store_context_revision, go.request.version_policy,
                             now=math.floor(time.time()))

@@ -63,13 +63,13 @@ impl Kind {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Platform { Android, Ios, Project }
+pub(crate) enum Platform { Android, Ios, Project, Both }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Stage { Candidate, ExternalTesting, Production }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Purpose { Full, Signing, Store, Provisioning }
+pub(crate) enum Purpose { Full, Signing, Store, Provisioning, #[serde(rename="version-inventory")] VersionInventory }
 #[derive(Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ExecutionMode { #[default] Github, Local }
@@ -412,11 +412,16 @@ pub(crate) fn context(body: &Value) -> Result<Context<'_>, AssetError> {
         .map_err(|_| AssetError::invalid())).transpose()?.unwrap_or_default();
     let project_id = text(&object["projectId"])?;
     if !protocol::valid_id(project_id) || !object["draft"].is_object() || !within(&object["draft"], DRAFT_LIMIT) { return Err(AssetError::invalid()); }
-    let platform = match text(&object["platform"])? { "android" => Platform::Android, "ios" => Platform::Ios, "project" => Platform::Project, _ => return Err(AssetError::invalid()) };
+    let platform = match text(&object["platform"])? { "android" => Platform::Android, "ios" => Platform::Ios, "project" => Platform::Project, "both" => Platform::Both, _ => return Err(AssetError::invalid()) };
     let stage = match text(&object["stage"])? { "candidate" => Stage::Candidate, "external-testing" => Stage::ExternalTesting, "production" => Stage::Production, _ => return Err(AssetError::invalid()) };
-    let purpose = match text(&object["purpose"])? { "full" => Purpose::Full, "signing" => Purpose::Signing, "store" => Purpose::Store, "provisioning" => Purpose::Provisioning, _ => return Err(AssetError::invalid()) };
+    let purpose = match text(&object["purpose"])? { "full" => Purpose::Full, "signing" => Purpose::Signing, "store" => Purpose::Store, "provisioning" => Purpose::Provisioning, "version-inventory" => Purpose::VersionInventory, _ => return Err(AssetError::invalid()) };
     if purpose == Purpose::Provisioning && (execution_mode != ExecutionMode::Local
         || platform != Platform::Ios || stage != Stage::Candidate) { return Err(AssetError::invalid()); }
+    if platform == Platform::Both || purpose == Purpose::VersionInventory {
+        if platform != Platform::Both || purpose != Purpose::VersionInventory || stage != Stage::Candidate
+            || execution_mode != ExecutionMode::Local || object["draft"]["android"]["enabled"] != true
+            || object["draft"]["ios"]["enabled"] != true { return Err(AssetError::invalid()); }
+    }
     Ok(Context { project_id, draft: &object["draft"], platform, stage, purpose, execution_mode })
 }
 pub(crate) fn choose(body: &Value) -> Result<Choose<'_>, AssetError> {

@@ -34,10 +34,11 @@ from . import apple_provisioning_bundle_read as bundle_read
 from . import apple_provisioning_profile_read as profile_read
 from . import ios_store_versions as store_versions
 from . import android_store_versions as play_versions
+from . import paired_store_versions as paired_versions
 
 
 def _captured_query(context):
-    return bundle_read.selected_read(context) or play_versions.selected_query(context)
+    return bundle_read.selected_read(context) or play_versions.selected_query(context) or paired_versions.selected_query(context)
 
 
 class _Refused(Exception):
@@ -95,7 +96,9 @@ class StorePreflightRun:
 
     def bind_scratch(self, scratch):
         layouts = ("online-runner", "store-selection", "store-selection", "online-runner", "online-readback")
-        if _captured_query(self.request.context):
+        if paired_versions.selected_query(self.request.context):
+            layouts = (*layouts[:4], "online-runner")  # Two sequential fixed readers, no readback file.
+        elif _captured_query(self.request.context):
             layouts = layouts[:4]  # Private capture, never a Store-access output file.
         require(type(scratch) is FiniteScratch and scratch.cancellation is self.guard
                 and len(self.scratches) < len(layouts) and scratch.layout == layouts[len(self.scratches)]
@@ -134,7 +137,8 @@ class StorePreflightRun:
                 raise _Refused("saved-source-changed")
             config = ReleaseConfig(path=self.root / "release/mobile-release.json", root=self.root, data=data)
             spec, saved = config.section("version"), self.request.context["savedVersion"]
-            if not config.platform_enabled(self.request.context["platform"]) or spec["source"] != saved["source"]:
+            platforms = paired_versions.PLATFORMS if paired_versions.selected_query(self.request.context) else (self.request.context["platform"],)
+            if not all(config.platform_enabled(p) for p in platforms) or spec["source"] != saved["source"]:
                 raise _Refused("saved-source-invalid")
             raw = self._read(saved["source"], MAX_VERSION_BYTES)
             if len(raw) != saved["bytes"] or hashlib.sha256(raw).hexdigest() != saved["sha256"]:
@@ -199,19 +203,32 @@ class StorePreflightRun:
                 and re.fullmatch(rb"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}", issuer)):
             raise _Refused("credentials-unavailable")
 
+    @staticmethod
+    def validate_pair_shape(parts):
+        require(type(parts) is tuple and len(parts) == 4)
+        StorePreflightRun.validate_material_shape(parts[0])
+        StorePreflightRun.validate_apple_shape(parts[1:])
+
     def _received_post(self):
         if self._received is not None:
             scratch, snapshot = self._received
             require(self.source._material is self._received_material)
-            scratch.require(snapshot)
+            if paired_versions.selected_query(self.request.context):
+                require(type(snapshot) is tuple and len(snapshot) == 2)
+                for item in snapshot:
+                    scratch.require(item)
+                self.validate_pair_shape(self._received_material)
+            else:
+                scratch.require(snapshot)
             if self.request.context["platform"] == "ios":
                 self.validate_apple_shape(self._received_material)
 
     def apple_material_command(self, material):
         from .credentials import SelectedStoreMaterial, APPLE_P8_CHECK
         self.checkpoint()
-        require(self.request.context["platform"] == "ios" and type(material) is SelectedStoreMaterial
-                and material._invocation is self.invocation and material._platforms == ("ios",)
+        pair = paired_versions.selected_query(self.request.context)
+        require((self.request.context["platform"] == "ios" or pair) and type(material) is SelectedStoreMaterial
+                and material._invocation is self.invocation and material._platforms == (paired_versions.PLATFORMS if pair else ("ios",))
                 and len(self.scratches) >= 3 and material._scratch is self.scratches[2]
                 and material._scratch.cancellation is self.guard and material._state == "validating"
                 and self._apple_material in (None, material))
@@ -230,11 +247,17 @@ class StorePreflightRun:
         require(runtime is self.runtime and type(runtime) is StoreRuntimeContext and self._pending is None
                 and self._next_command <= self._lane_index and type(capture) is bool)
         query = _captured_query(self.request.context)
-        final = (play_versions.fixed_argv(runtime.tooling_root) if play_versions.selected_query(self.request.context) else
-                 bundle_read.fixed_read_argv(runtime.tooling_root, self.request.context) if query else
-                 ("bundle", "exec", "ruby", str(runtime.tooling_root / "fastlane/run_lane.rb"), self.request.context["platform"] + "_online_preflight"))
-        expected = (*_fastlane_probe_commands(runtime.tooling_root), final)
         index = self._next_command
+        if paired_versions.selected_query(self.request.context):
+            probes = tuple(_fastlane_probe_commands(runtime.tooling_root))
+            expected = ((self.apple_material_command(self._apple_material) if index == 0 else ()),
+                        *probes, store_versions.fixed_argv(runtime.tooling_root),
+                        *probes, play_versions.fixed_argv(runtime.tooling_root))
+        else:
+            final = (play_versions.fixed_argv(runtime.tooling_root) if play_versions.selected_query(self.request.context) else
+                     bundle_read.fixed_read_argv(runtime.tooling_root, self.request.context) if query else
+                     ("bundle", "exec", "ruby", str(runtime.tooling_root / "fastlane/run_lane.rb"), self.request.context["platform"] + "_online_preflight"))
+            expected = (*_fastlane_probe_commands(runtime.tooling_root), final)
         if self.request.context["platform"] == "ios":
             # Only the first command consumes the still-validating material.
             expected = ((self.apple_material_command(self._apple_material) if index == 0 else ()), *expected)
@@ -262,9 +285,11 @@ class StorePreflightRun:
     def command_limits(self, timeout, capture, output_limit):
         self.checkpoint()
         require(self._pending is not None and capture is self._pending_capture and self._command_claimed)
-        query = self._pending == self._lane_index and _captured_query(self.request.context)
+        pair = paired_versions.selected_query(self.request.context)
+        query = (self._pending in (6, 12) if pair else self._pending == self._lane_index) and _captured_query(self.request.context)
         maximum = 60 if self._pending < self._lane_index or query else 900
-        limit = (play_versions.FRAME_LIMIT if query and play_versions.selected_query(self.request.context) else
+        limit = (store_versions.FRAME_LIMIT if pair and query else
+                 play_versions.FRAME_LIMIT if query and play_versions.selected_query(self.request.context) else
                  store_versions.FRAME_LIMIT if query and store_versions.selected_query(self.request.context)
                  else bundle_read.FRAME_LIMIT if query else 2 * 1024 * 1024)
         return min(timeout, maximum), min(output_limit, limit)
@@ -290,18 +315,36 @@ class StorePreflightRun:
                         platform = self.request.context["platform"]
                         self._received = (received, original)
                         self._received_material = self.source._material
-                        if platform == "android":
+                        pair = paired_versions.selected_query(self.request.context)
+                        platforms = paired_versions.PLATFORMS if pair else (platform,)
+                        if pair:
+                            self._received_post()
+                            values = {"GOOGLE_APPLICATION_CREDENTIALS": str(received.require(original[0])),
+                                      "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH": str(received.require(original[1])),
+                                      "MOBILE_RELEASE_ASC_KEY_ID": self.source._material[2].decode("ascii"),
+                                      "MOBILE_RELEASE_ASC_ISSUER_ID": self.source._material[3].decode("ascii")}
+                        elif platform == "android":
                             values = {"GOOGLE_APPLICATION_CREDENTIALS": str(received.require(original))}
                         else:
                             self._received_post()
                             values = {"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH": str(received.require(original)),
                                       "MOBILE_RELEASE_ASC_KEY_ID": self.source._material[1].decode("ascii"),
                                       "MOBILE_RELEASE_ASC_ISSUER_ID": self.source._material[2].decode("ascii")}
-                        findings = store_material_prerequisite_findings(values=values, platforms=(platform,))
-                        with _selected_store_material(config, values=values, platforms=(platform,),
+                        findings = store_material_prerequisite_findings(values=values, platforms=platforms)
+                        with _selected_store_material(config, values=values, platforms=platforms,
                                                       invocation=invocation, scratch_parent=home._path) as material:
-                            findings.extend(material.validate(runtime_context=self.runtime) if platform == "ios" else material.validate())
-                            if play_versions.selected_query(self.request.context):
+                            findings.extend(material.validate(runtime_context=self.runtime) if platform == "ios" or pair else material.validate())
+                            if pair:
+                                observation = paired_versions.unavailable()
+                                if not paired_versions.query_prerequisites(config) or any(row.status in FAILING_STATUSES for row in findings):
+                                    findings.append(Finding("store.online.gate", Status.BLOCKED,
+                                        "Configure both saved app identities and bind both Store keys in this inventory context.", category="store-access"))
+                                else:
+                                    extra, observation = paired_versions.read_saved_versions(self, config, material)
+                                    findings.extend(extra)
+                                self._source_post(); self._received_post()
+                                self.report = paired_versions.project_result(findings, observation)
+                            elif play_versions.selected_query(self.request.context):
                                 observation = play_versions.unavailable("not-checked")
                                 if not play_versions.query_prerequisites(config) or any(row.status in FAILING_STATUSES for row in findings):
                                     findings.append(Finding("store.online.gate", Status.BLOCKED,

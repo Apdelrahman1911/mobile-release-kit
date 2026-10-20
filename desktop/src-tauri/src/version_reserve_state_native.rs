@@ -132,7 +132,8 @@ impl Capture {
         template["projectId"] = json!(port.authority.project_id);
         need(
             ((template["policy"]["schemaVersion"] == 2 && template["platforms"] == json!(["ios"]))
-                 || (template["policy"]["schemaVersion"] == 3 && template["platforms"] == json!(["android"])))
+                 || (template["policy"]["schemaVersion"] == 3 && template["platforms"] == json!(["android"]))
+                 || (template["policy"]["schemaVersion"] == 4 && template["platforms"] == json!(["android","ios"])))
                 && template["source"]["ref"]
                     .as_str()
                     .is_some_and(|v| v.starts_with("refs/heads/") && full_ref(v)),

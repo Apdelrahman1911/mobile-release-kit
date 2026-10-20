@@ -93,9 +93,9 @@ export function versionReserveProjectIssue(project: LocalStoreProject | null): s
   if (project.inputIssue) return project.inputIssue;
   if (project.dirtyDraft || project.snapshotPending || project.versionPending || project.saveRecoveryRequired) return 'Finish the saved-input review before reserving a version.';
   const platforms = project.versionPlatforms;
-  if (platforms?.length === 2 && platforms[0] === 'android' && platforms[1] === 'ios') return 'Shared Android+iOS version sources need paired current Store observations and are not supported here yet. Keep manual versioning.';
+  if (platforms?.length === 2 && platforms[0] === 'android' && platforms[1] === 'ios') return null; // Same native paired receipt is still mandatory.
   return platforms?.length === 1 && (platforms[0] === 'android' || platforms[0] === 'ios') ? null :
-    'Read the current saved configuration and version for exactly one enabled platform.';
+    'Read the current saved configuration and version for Android, iOS or their shared version source.';
 }
 export function versionReserveHelp(reason: VersionReserveStatus['reason'] | null): string {
   switch (reason) {

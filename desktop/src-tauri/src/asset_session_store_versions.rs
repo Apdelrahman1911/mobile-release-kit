@@ -8,6 +8,7 @@ pub(crate) struct StoreVersionMaterial {
     payload: Weak<Payload>,
     key: RecordKey,
     context: wire::Context,
+    paired: Option<(RecordKey,Weak<Payload>)>,
 }
 impl SelectedStoreMaterial {
     pub(crate) fn version_inventory_witness(
@@ -16,7 +17,7 @@ impl SelectedStoreMaterial {
         let Some(StoreCommand::Access(context)) = &self.command else {
             return Err(refused());
         };
-        if !(wire::store_versions::selected(context)||wire::play_versions::selected(context)) {
+        if !(wire::store_versions::selected(context)||wire::play_versions::selected(context)||wire::paired_versions::selected(context)) {
             return Ok(None);
         }
         if !self.matches(
@@ -24,7 +25,7 @@ impl SelectedStoreMaterial {
             self.native.registry_generation,
             &self.native.project,
         ) || !inventory_material(context.platform, &self.payload)
-            || self.supplemental.iter().any(Option::is_some)
+            || (if self.paired_context().is_some(){self.pair_parts().is_err()}else{self.supplemental.iter().any(Option::is_some)})
         {
             return Err(refused());
         }
@@ -33,11 +34,12 @@ impl SelectedStoreMaterial {
             payload: Arc::downgrade(&self.payload),
             key: self.key.clone(),
             context: context.clone(),
+            paired:self.supplemental[0].as_ref().map(|(k,p)|(k.clone(),Arc::downgrade(p))),
         }))
     }
 }
 fn inventory_material(platform:wire::AccessPlatform,payload:&Payload)->bool {
-    match platform {wire::AccessPlatform::Ios=>apple_parts(payload).is_some(),wire::AccessPlatform::Android=>bytes(payload).is_some()}
+    match platform {wire::AccessPlatform::Ios=>apple_parts(payload).is_some(),wire::AccessPlatform::Android|wire::AccessPlatform::Both=>bytes(payload).is_some()}
 }
 impl StoreVersionMaterial {
     pub(crate) fn matches_context(&self, context: &wire::Context) -> bool {
@@ -57,15 +59,23 @@ impl StoreVersionMaterial {
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, &native))
             && native.execution_mode == commands::ExecutionMode::Local
-            && native.platform == match self.context.platform {wire::AccessPlatform::Ios=>Platform::Ios,wire::AccessPlatform::Android=>Platform::Android}
-            && matches!(native.purpose, Purpose::Store | Purpose::Full)
+            && (if wire::paired_versions::selected(&self.context){paired_versions::selected(&native)}else{
+                native.platform == match self.context.platform {wire::AccessPlatform::Ios=>Platform::Ios,wire::AccessPlatform::Android=>Platform::Android,wire::AccessPlatform::Both=>return false}
+                && matches!(native.purpose,Purpose::Store|Purpose::Full)})
+            && match (&self.context.ios_record,&self.paired) {
+                (None,None)=>true,
+                (Some(r),Some((key,payload)))=>wire::paired_versions::selected(&self.context) && r.record_id==key.id.0 && r.record_revision==key.revision
+                    && payload.upgrade().is_some_and(|payload| apple_parts(&payload).is_some()
+                        && github_secret::assigned(state,key,Kind::AscP8,&native).is_some_and(|current|Arc::ptr_eq(current,&payload))),
+                _=>false,
+            }
             && native.project_id == self.context.project_id
             && native.registry_generation == registration
             && native.project == *root
             && native.revision == self.context.credential_context_revision
             && self.key.id.0 == self.context.record_id
             && self.key.revision == self.context.record_revision
-            && github_secret::assigned(state, &self.key, match self.context.platform {wire::AccessPlatform::Ios=>Kind::AscP8,wire::AccessPlatform::Android=>Kind::GoogleServiceAccount}, &native)
+            && github_secret::assigned(state, &self.key, match self.context.platform {wire::AccessPlatform::Ios=>Kind::AscP8,wire::AccessPlatform::Android|wire::AccessPlatform::Both=>Kind::GoogleServiceAccount}, &native)
                 .is_some_and(|assigned| Arc::ptr_eq(assigned, &payload))
             && inventory_material(self.context.platform,&payload)
     }
@@ -74,10 +84,10 @@ impl StoreVersionMaterial {
         // Payload fields/material or NativeContext heap. Include those cells.
         std::mem::size_of::<Self>()
             + std::mem::size_of::<NativeContext>()
-            + std::mem::size_of::<Payload>()
-            + 6 * std::mem::size_of::<usize>()
+            + 2 * std::mem::size_of::<Payload>()
+            + 8 * std::mem::size_of::<usize>()
             + wire::IPC_LIMIT
-            + 32
+            + 64
     }
 }
 impl DocumentBinding {

@@ -10,6 +10,7 @@ from . import apple_provisioning_bundle_read as bundle_read
 from . import apple_provisioning_profile_read as profile_read
 from . import ios_store_versions as store_versions
 from . import android_store_versions as play_versions
+from . import paired_store_versions as paired_versions
 
 PROTOCOL = "mrk-local-store-preflight/1"
 CONSENT = "local-android-store-access-v1"
@@ -17,8 +18,8 @@ SCOPE = "local-android-store-access-no-publishing"
 APPLE_SCOPE = "local-ios-store-access-no-publishing"
 
 def command_count(platform):
-    require(platform in ("android", "ios"))
-    return 7 if platform == "ios" else 6
+    require(platform in ("android", "ios", "both"))
+    return {"android": 6, "ios": 7, "both": paired_versions.COMMANDS}[platform]
 REQUEST_LIMIT, RESPONSE_LIMIT = 16 * 1024, 16 * 1024
 WORK_SECONDS, FINALITY_SECONDS = 1200, 1210
 PROFILES = {"macos-x86_64": ("macos", "x86_64"), "macos-arm64": ("macos", "arm64")}
@@ -39,20 +40,27 @@ def require(ok):
 def context(value, *, apple_access=False, bundle_query=False):
     require(type(apple_access) is bool and type(bundle_query) is bool)
     query_keys = {"query"} if type(value) is dict and "query" in value else set()
+    paired = type(value) is dict and paired_versions.selected_query(value)
     # This explicit access-only opt-in stays false for Prepare/Execute/Reconcile.
     require(not query_keys or apple_access and bundle_query and (
         value.get("platform") == "ios" and value["query"] in (bundle_read.QUERY, profile_read.QUERY, store_versions.QUERY)
-        or value.get("platform") == "android" and value["query"] == play_versions.QUERY))
+        or value.get("platform") == "android" and value["query"] == play_versions.QUERY or paired))
     value = _keys(value, {"projectId", "draftRevision", "baselineGeneration", "savedConfig", "savedVersion",
-                         "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "operation"} | query_keys)
+                         "credentialContextRevision", "recordId", "recordRevision", "executionMode", "platform", "operation"}
+                         | query_keys | ({"iosRecord"} if paired else set()))
+    if paired:
+        ios = _keys(value["iosRecord"], {"recordId", "recordRevision"})
+        require(type(ios["recordId"]) is str and _TOKEN.fullmatch(ios["recordId"]) is not None
+                and integer(ios["recordRevision"], 2**32-2, 1) and ios["recordId"] != value["recordId"])
     require(type(value["projectId"]) is str and _PROJECT.fullmatch(value["projectId"]) is not None
             and integer(value["draftRevision"], 2**32-2) and integer(value["baselineGeneration"], 2**32-2)
             and integer(value["credentialContextRevision"], 2**32-2, 1)
             and integer(value["recordRevision"], 2**32-2, 1)
             and type(value["recordId"]) is str and _TOKEN.fullmatch(value["recordId"]) is not None
-            and value["executionMode"] == "local" and (value["platform"] == "android" or apple_access and value["platform"] == "ios")
+            and value["executionMode"] == "local" and (value["platform"] == "android" or apple_access and value["platform"] == "ios" or paired)
             and value["operation"] == "local-store-preflight")
-    return {**value, "savedConfig": content(value["savedConfig"]), "savedVersion": saved_version(value["savedVersion"])}
+    return {**value, "savedConfig": content(value["savedConfig"]), "savedVersion": saved_version(value["savedVersion"]),
+            **({"iosRecord": dict(ios)} if paired else {})}
 
 @dataclass(frozen=True)
 class StorePreflightRequest:
@@ -104,6 +112,7 @@ def project_result(findings, *, platform="android"):
 def validate_result(value, *, platform="android", query=None):
     if query is not None:
         require(platform == "android" and query == play_versions.QUERY and play_versions.valid_result(value)
+                or platform == "both" and query == paired_versions.QUERY and paired_versions.valid_result(value)
                 or platform == "ios" and (query == bundle_read.QUERY and bundle_read.valid_result(value)
                 or query == profile_read.QUERY and profile_read.valid_result(value)
                 or query == store_versions.QUERY and store_versions.valid_result(value)))

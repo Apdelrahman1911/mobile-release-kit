@@ -22,7 +22,7 @@ export function AndroidStoreVersions({ state, controller, compact = false, onCre
     ...state.request, platform: 'android', query: ANDROID_VERSIONS_QUERY, operation: 'local-store-preflight',
   });
   const result = op.result?.scope === ANDROID_VERSIONS_SCOPE ? op.result : null;
-  const summary = result?.currentVersions?.coverage === ANDROID_VERSIONS_COVERAGE ? result.currentVersions : null;
+  const summary = result?.currentVersions && 'coverage' in result.currentVersions && result.currentVersions.coverage === ANDROID_VERSIONS_COVERAGE ? result.currentVersions : null;
   const copy = summary ? androidVersionDescriptions[summary.observation] : null;
   return <section className="card" aria-label="Current Google Play versions">
     <div className="inline-heading"><h2>Current Play versions · This Mac</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
@@ -33,7 +33,7 @@ export function AndroidStoreVersions({ state, controller, compact = false, onCre
       <details><summary>Limits of this check</summary>
         <p>All returned release statuses count. Duplicate codes on different tracks are normal. Up to 400 records per collection, 400 releases and 4,000 code references are supported; unknown pagination or partial results stop the check.</p>
         <p>These lists are not atomic or a complete historical record. The shared counter coordinates only clients using that counter. Other uploaders can still cause a conflict; a retry never silently chooses a new number.</p>
-        <p>Android-only and iOS-only reservations are separate supported cases. A shared Android+iOS source needs two simultaneously current native Store witnesses and is not supported here yet. Manual versioning stays the default.</p>
+        <p>Android-only and iOS-only reservations are separate supported cases. For a shared Android+iOS source, choose Use shared-version credentials and run the single paired Store check instead. Two earlier independent results cannot be combined. Manual versioning stays the default.</p>
         <button onClick={onCredentials}>Open local credentials</button>
       </details>
       <button disabled={state.platform !== 'android' || !!reason || state.pending} onClick={() => void controller.prepare(ANDROID_VERSIONS_QUERY)}>Review another Play version check</button>
