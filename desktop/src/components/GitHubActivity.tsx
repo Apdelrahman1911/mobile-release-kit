@@ -88,7 +88,7 @@ export function GitHubActivity({ controller, state, branchSuggestion = null, com
       <ProgressiveDisclosure title="Help: access, limits and separate write actions">
         <p>The connected account needs read access to this repository’s Pull requests, Actions, Checks and commit statuses. Organization SSO and token restrictions still apply. Missing access is not an empty or successful result.</p>
         <p>Each explicit read uses one bounded page per section. GitHub can change between reads; the selected head or attempt is checked again at the end. Provider links, raw bodies, patches, logs and artifact contents are not shown here.</p>
-        <p>Creating a pull request and rerunning failed jobs are separate planned actions with their own review and authorization. Reading this view does not enable them. Existing toolkit publication and release tasks remain separate below.</p>
+        <p>Draft pull request creation has a separate explicit review below. Marking a PR ready for review and rerunning failed jobs remain unfinished actions with their own authorization. Reading this view does not enable them. Existing toolkit publication and release tasks remain separate below.</p>
       </ProgressiveDisclosure>
     </>}
   </section>;

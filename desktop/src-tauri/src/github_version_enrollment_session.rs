@@ -145,6 +145,7 @@ impl ConnectionState {
         self.setup.revoke_consent();
         self.setup.finish(before);
         self.publication.revoke_consent();self.repository_create.context_changed();
+        self.pull_request.context_changed();
         Ok(pins)
     }
     pub(crate) fn version_enrollment_current(
@@ -162,7 +163,7 @@ impl ConnectionState {
             || self.release.native_work_pending()
             || self.setup.native_work_pending()
             || self.history.native_work_pending()
-            || (self.publication.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
+            || (self.publication.native_work_pending() || self.pull_request.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
         {
             return Err(p::refused(p::Reason::TargetChanged));
         }

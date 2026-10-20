@@ -298,6 +298,7 @@ mod github_setup_protocol;
 mod github_publication_protocol;
 mod github_repository_create_protocol;
 mod github_activity_protocol;
+mod github_pull_request_protocol;
 mod github_setup_session;
 mod github_history_protocol;
 mod github_history_session;

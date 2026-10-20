@@ -105,7 +105,7 @@ function Proposal({ result, credentialHelp, onHelp }: { result: GitHubSetupPropo
   </section>;
 }
 
-export function GitHub({ session, state, controller, loading, onReload, onNavigate, credentialHelp, onHelp, nativeReview, connectionView, activityView, remoteTasks }: {
+export function GitHub({ session, state, controller, loading, onReload, onNavigate, credentialHelp, onHelp, nativeReview, connectionView, activityView, pullRequestView, remoteTasks }: {
   info: AppInfo | null;
   session: ProjectSession | null;
   state: GitHubSetupState;
@@ -118,6 +118,7 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
   nativeReview: ReactNode;
   connectionView: ReactNode;
   activityView: ReactNode;
+  pullRequestView: ReactNode;
   remoteTasks: readonly GitHubTaskSection[];
 }) {
   const [inputHelpOpen, setInputHelpOpen] = useState({ repository: false, sha: false, snapshot: false });
@@ -135,6 +136,7 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
     </div></div>}
     {connectionView}
     {activityView}
+    {pullRequestView}
     <div className="notice notice-info"><Icon name="shield" /><div><strong>Prepare workflow files on this computer</strong><p>Choose the template source, then use <strong>Review local workflow files</strong> below. That review has its own confirmation before saving. The optional text preview does not save files or contact GitHub.</p></div></div>
     <form className="card github-form" onSubmit={(event) => { event.preventDefault(); void controller.propose(); }}>
       <SectionHeading title="Choose workflow templates" description="Enter the Mobile Release Kit repository and full commit to use for local workflow files. This is separate from your app’s repository above; the ? buttons explain where to find both values."><Badge>{state.pending ? 'Preparing optional preview…' : 'Not applied'}</Badge></SectionHeading>

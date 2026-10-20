@@ -411,6 +411,7 @@ impl ConnectionState {
         let old = self.setup.snapshot();
         self.setup.revoke_consent();
         self.setup.finish(old);
+        self.pull_request.context_changed();
         self.publication.revoke_consent();
         self.publication.view.pending.clear();
         self.publication.view.pull = None;
@@ -662,6 +663,7 @@ impl ConnectionState {
             return Err(refused(p::Reason::InvalidInput));
         }
         self.publication.context_changed();
+        self.pull_request.context_changed();
         Ok(self.publication.view.clone())
     }
     pub(crate) fn publication_discard(
@@ -714,7 +716,7 @@ impl ConnectionState {
         if self.preflight.native_work_pending()
             || self.release.native_work_pending()
             || self.setup.native_work_pending()
-            || (self.history.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
+            || (self.history.native_work_pending() || self.pull_request.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
         {
             return Err(refused(p::Reason::Busy));
         }

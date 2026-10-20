@@ -56,9 +56,13 @@ class _ExchangeProfile(Enum):
     VERSION_ENROLLMENT = "version-enrollment"
     REPOSITORY_CREATE = "repository-create"
     ACTIVITY = "activity"
+    PULL_REQUEST = "pull-request"
 
 
 class _ResponseRole(Enum):
+    PULL_REQUEST_OBJECT = "pull-request-object"
+    PULL_REQUEST_LIST = "pull-request-list"
+    PULL_REQUEST_WRITE = "pull-request-write"
     ACTIVITY_OBJECT = "activity-object"
     ACTIVITY_LIST = "activity-list"
     REPOSITORY_CREATE_ACCOUNT = "repository-create-account"
@@ -122,6 +126,10 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
     """Closed private roles, never caller-provided numeric limits."""
     if type(profile) is not _ExchangeProfile or type(role) is not _ResponseRole:
         raise ValueError("Invalid fixed GitHub response role")
+    if role in {_ResponseRole.PULL_REQUEST_OBJECT, _ResponseRole.PULL_REQUEST_LIST, _ResponseRole.PULL_REQUEST_WRITE}:
+        if profile is not _ExchangeProfile.PULL_REQUEST:
+            raise ValueError("Fixed draft-PR role belongs to another action")
+        return 256 * 1024, 1024
     if role in {_ResponseRole.ACTIVITY_OBJECT, _ResponseRole.ACTIVITY_LIST}:
         if profile is not _ExchangeProfile.ACTIVITY:
             raise ValueError("Fixed activity role belongs to another action")
@@ -153,6 +161,10 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
 
 def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str, path: str) -> tuple[int, int]:
     limits = _role_limits(profile, role)
+    if profile is _ExchangeProfile.PULL_REQUEST:
+        from ._github_pull_request_transport import validate_endpoint
+        validate_endpoint(role, method, path)
+        return limits
     if profile is _ExchangeProfile.ACTIVITY:
         from ._github_activity_transport import validate_endpoint
         validate_endpoint(role, method, path)
@@ -334,7 +346,7 @@ class _Budget:
         if type(started) not in (int, float):
             raise ReadFailure("network-unavailable")
         self.started = started
-        self.end = started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else READ_SECONDS)
+        self.end = started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} else READ_SECONDS)
         self.monotonic = monotonic
         self.wall = wall
         self.body_bytes = 0
@@ -342,16 +354,16 @@ class _Budget:
         self.profile = _profile
         self.requests = 0
         self.body_total_limit = (4 * 1024 * 1024 if _profile is _ExchangeProfile.PUBLICATION else
-                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else MAX_BODY_TOTAL)
+                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} else MAX_BODY_TOTAL)
         if not math.isfinite(started) or not math.isfinite(self.end):
             raise ReadFailure("network-unavailable")
 
     def claim_request(self) -> None:
         # Other existing profiles retain their own original finite schedules.
         # Allocation adds a second private bound, never a logical retry owner.
-        if self.profile in {_ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY}:
+        if self.profile in {_ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST}:
             self.remaining()
-            if self.requests >= (8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else 10):
+            if self.requests >= (12 if self.profile is _ExchangeProfile.PULL_REQUEST else 8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else 10):
                 raise ReadFailure("response-limit")
             self.requests += 1
 
@@ -747,7 +759,8 @@ def _header_control(head: _Head, budget: _Budget, *,
             delays.append(delay)
     delay = None if blocked else max(delays) if delays else 60 if recognized else None
     base = _status_reason(head.status)
-    if (head.status in {201, 409, 422} and _role is _ResponseRole.REPOSITORY_CREATE_WRITE
+    if (head.status in {201, 409, 422} and _role is _ResponseRole.PULL_REQUEST_WRITE
+            or head.status in {201, 409, 422} and _role is _ResponseRole.REPOSITORY_CREATE_WRITE
             or head.status == 404 and _role is _ResponseRole.REPOSITORY_CREATE_LOOKUP
             or head.status == 201 and _role is _ResponseRole.PUBLICATION_CREATE
             or head.status == 404 and _role is _ResponseRole.PUBLICATION_READ
@@ -835,7 +848,7 @@ def _response_result(response: _ResponseBody, budget: _Budget) -> ReadResult:
             return _failed("response-invalid", control)
         except ReadFailure as error:
             return _failed(error.reason, control)
-    if head.status != 200 and not (head.status == 201 and response.role in {_ResponseRole.PUBLICATION_CREATE, _ResponseRole.REPOSITORY_CREATE_WRITE}):
+    if head.status != 200 and not (head.status == 201 and response.role in {_ResponseRole.PUBLICATION_CREATE, _ResponseRole.REPOSITORY_CREATE_WRITE, _ResponseRole.PULL_REQUEST_WRITE}):
         # Never read/parse/retain arbitrary error bodies, even JSON-looking ones.
         if head.status == 403 and control["reason"] == "rate-limited":
             return _failed("rate-limited", control)
@@ -850,10 +863,16 @@ def _response_result(response: _ResponseBody, budget: _Budget) -> ReadResult:
                 break
             chunks.append(block)
         body = _decode_json(b"".join(chunks), limit=response.maximum, nodes=20_000, depth=24)
-        expected = list if response.role in {_ResponseRole.PUBLICATION_LIST, _ResponseRole.ACTIVITY_LIST} else dict
+        expected = list if response.role in {_ResponseRole.PUBLICATION_LIST, _ResponseRole.ACTIVITY_LIST, _ResponseRole.PULL_REQUEST_LIST} else dict
         maximum_rows = 30 if response.role is _ResponseRole.ACTIVITY_LIST else 2
         if type(body) is not expected or expected is list and len(body) > maximum_rows:
             raise ReadFailure("response-invalid")
+        if response.role is _ResponseRole.PULL_REQUEST_LIST and body == []:
+            _, present, valid = _single(head.headers, "link")
+            if present or not valid:
+                # An empty page with any continuation/ambiguous Link cannot
+                # become the draft-PR pre-send empty-window observation.
+                raise ReadFailure("response-limit")
         return ReadResult({"status": head.status, "body": body, "failure": "none"}, control)
     except _JsonLimit:
         return _failed("response-limit", control)
@@ -1078,13 +1097,13 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             or not 1 <= len(token) <= 4096 or any(not 0x21 <= ord(c) <= 0x7e for c in token)):
         raise ValueError("Invalid fixed GitHub transport input")
     _role_limits(_profile, _ResponseRole.STANDARD)
-    if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} and api_version != "2026-03-10":
+    if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} and api_version != "2026-03-10":
         raise ValueError("Fixed Setup API version differs")
     if _setup_budget is not None:
-        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY}
+        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST}
                 or _setup_budget.profile is not _profile
                 or _setup_budget.started != started
-                or _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else READ_SECONDS)
+                or _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY, _ExchangeProfile.PULL_REQUEST} else READ_SECONDS)
                 or getattr(_setup_budget, "_secret_exchange_claimed", False)):
             raise ValueError("Invalid same-original Setup budget")
         _setup_budget._secret_exchange_claimed = True
@@ -1114,6 +1133,9 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             _setup_body(_profile, _role, body, path=path)
         elif _profile is _ExchangeProfile.VERSION_ALLOCATION:
             _allocation_body(_profile, _role, body, path=path)
+        elif _profile is _ExchangeProfile.PULL_REQUEST:
+            from ._github_pull_request_transport import validate_body
+            validate_body(_role, body)
         elif _profile is _ExchangeProfile.REPOSITORY_CREATE:
             from ._github_repository_create_transport import validate_body
             validate_body(_role, body)
@@ -1130,7 +1152,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                 or "#" in path or "\\" in path
                 or method == "GET" and body is not None
                 or method == "POST" and _profile is not _ExchangeProfile.SETUP
-                and (type(body) is not bytes or not 1 <= len(body) <= (384 * 1024 if _profile is _ExchangeProfile.PUBLICATION else 2048))):
+                and (type(body) is not bytes or not 1 <= len(body) <= (384 * 1024 if _profile is _ExchangeProfile.PUBLICATION else 32 * 1024 if _profile is _ExchangeProfile.PULL_REQUEST else 2048))):
             raise ValueError("Invalid fixed GitHub transport request")
         budget.claim_request()  # Before any native/socket send, including a failed one.
         original_response: list[Any] = [None]

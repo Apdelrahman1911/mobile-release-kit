@@ -60,6 +60,10 @@ use crate::github_repository_create_protocol as repository_create_protocol;
 #[path = "supervisor_repository_create.rs"]
 mod repository_create;
 pub(crate) use repository_create::{RepositoryCreateReceipt, RepositoryCreateTicket};
+use crate::github_pull_request_protocol as pull_request_protocol;
+#[path = "supervisor_github_pull_request.rs"]
+mod pull_request;
+pub(crate) use pull_request::{GitHubPullRequestReceipt, GitHubPullRequestTicket};
 use crate::github_activity_protocol;
 #[path = "supervisor_github_activity.rs"]
 mod activity;
@@ -247,6 +251,9 @@ struct Owner {
     repository_create_receipt: Option<Arc<Mutex<RepositoryCreateReceipt>>>,
     repository_create_request: Option<repository_create_protocol::Request>,
     repository_create_gate: Option<crate::asset_session::RepositoryCreateGoGate>,
+    pull_request_receipt: Option<Arc<Mutex<GitHubPullRequestReceipt>>>,
+    pull_request_request: Option<pull_request_protocol::Request>,
+    pull_request_gate: Option<crate::asset_session::GitHubPullRequestGoGate>,
     github_activity_receipt: Option<Arc<Mutex<GitHubActivityReceipt>>>,
     github_activity_request: Option<github_activity_protocol::Request>,
     github_activity_gate: Option<crate::asset_session::GitHubActivityGoGate>,
@@ -312,11 +319,11 @@ impl ManagementJoin {
     }
 }
 #[derive(Debug, PartialEq)]
-enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), RepositoryCreate(repository_create_protocol::Reply), GitHubActivity(github_activity_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), GitLocal, VersionAllocationSource, VersionEnrollment(crate::version_enrollment_protocol::Reply) }
+enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), RepositoryCreate(repository_create_protocol::Reply), GitHubPullRequest(pull_request_protocol::Reply), GitHubActivity(github_activity_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), GitLocal, VersionAllocationSource, VersionEnrollment(crate::version_enrollment_protocol::Reply) }
 enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
 
 #[derive(Clone, Copy)]
-enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, RepositoryCreate, GitHubActivity, GitHubHistory, GitHubAuth, GitRead, GitLocal, VersionAllocationSource, VersionEnrollment }
+enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, RepositoryCreate, GitHubPullRequest, GitHubActivity, GitHubHistory, GitHubAuth, GitRead, GitLocal, VersionAllocationSource, VersionEnrollment }
 impl Profile {
     fn stdout_limit(self) -> usize {
         match self {
@@ -328,6 +335,7 @@ impl Profile {
             Self::GitHubSetup => setup_protocol::RESPONSE_LIMIT,
             Self::GitHubPublication => publication_protocol::RESPONSE_LIMIT,
             Self::RepositoryCreate => repository_create_protocol::RESPONSE_LIMIT,
+            Self::GitHubPullRequest => pull_request_protocol::RESPONSE_LIMIT,
             Self::GitHubActivity => github_activity_protocol::RESPONSE_LIMIT,
             Self::GitHubHistory => 64*1024,
             Self::GitHubAuth => crate::github_auth_capture_wire::RESPONSE_LIMIT,
@@ -352,7 +360,7 @@ impl Profile {
             Self::GitHubPublication => publication_protocol::decode_reply(id, bytes,
                 publication.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Publication),
             // Only drive's actual sealed-source branch may decode History.
-            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::GitLocal | Self::VersionAllocationSource | Self::VersionEnrollment | Self::RepositoryCreate | Self::GitHubActivity => Err(BridgeError::protocol()),
+            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::GitLocal | Self::VersionAllocationSource | Self::VersionEnrollment | Self::RepositoryCreate | Self::GitHubPullRequest | Self::GitHubActivity => Err(BridgeError::protocol()),
         }
     }
 }
@@ -367,6 +375,7 @@ enum AdmissionRequest<'a> {
     Setup { request: setup_protocol::Request, gate: crate::asset_session::GitHubSetupGoGate, material: Option<SetupNativeAdmission> },
     Publication { request: publication_protocol::Request, gate: crate::asset_session::GitHubPublicationGoGate, end: Instant },
     RepositoryCreate { request: repository_create_protocol::Request, gate: crate::asset_session::RepositoryCreateGoGate, end: Instant },
+    GitHubPullRequest { request: pull_request_protocol::Request, gate: crate::asset_session::GitHubPullRequestGoGate, end: Instant },
     GitHubActivity { request: github_activity_protocol::Request, gate: crate::asset_session::GitHubActivityGoGate, end: Instant },
     History(GitHubHistoryAdmission),
     GitHubAuth(GitHubAuthAdmission),
@@ -378,13 +387,13 @@ enum AdmissionRequest<'a> {
 impl AdmissionRequest<'_> {
     fn profile(&self) -> Profile {
         match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly,
-            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::RepositoryCreate { .. } => Profile::RepositoryCreate, Self::GitHubActivity { .. } => Profile::GitHubActivity, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::GitLocal(_) => Profile::GitLocal, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource, Self::VersionEnrollment(_) => Profile::VersionEnrollment }
+            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::RepositoryCreate { .. } => Profile::RepositoryCreate, Self::GitHubPullRequest { .. } => Profile::GitHubPullRequest, Self::GitHubActivity { .. } => Profile::GitHubActivity, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::GitLocal(_) => Profile::GitLocal, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource, Self::VersionEnrollment(_) => Profile::VersionEnrollment }
     }
     fn encode(self, id: &str) -> Result<(Vec<u8>, Option<preflight_protocol::Request>, Option<crate::asset_session::GitHubPreflightGoGate>,
         Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>,
         Option<setup_protocol::Request>, Option<crate::asset_session::GitHubSetupGoGate>, Option<SetupNativeAdmission>), BridgeError> {
         match self {
-            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::GitLocal(_) | Self::VersionAllocationSource(_) | Self::VersionEnrollment(_) | Self::Publication { .. } | Self::RepositoryCreate { .. } | Self::GitHubActivity { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
+            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::GitLocal(_) | Self::VersionAllocationSource(_) | Self::VersionEnrollment(_) | Self::Publication { .. } | Self::RepositoryCreate { .. } | Self::GitHubPullRequest { .. } | Self::GitHubActivity { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
             Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None, None, None, None)),
             Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
                 Ok((github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?, None, None, None, None, None, None, None)),
@@ -458,6 +467,7 @@ enum CompletionTarget {
     Setup(Arc<Mutex<GitHubSetupReceipt>>),
     Publication(Arc<Mutex<GitHubPublicationReceipt>>),
     RepositoryCreate(Arc<Mutex<RepositoryCreateReceipt>>),
+    GitHubPullRequest(Arc<Mutex<GitHubPullRequestReceipt>>),
     GitHubActivity(Arc<Mutex<GitHubActivityReceipt>>),
     History(Arc<Mutex<GitHubHistoryReceipt>>),
     GitHubAuth,
@@ -949,6 +959,10 @@ impl Owner {
             let mut receipt = lock(receipt);
             if matches!(&*receipt, RepositoryCreateReceipt::Pending) { *receipt = RepositoryCreateReceipt::RetainedUnknown; }
         }
+        if let Some(receipt) = &self.pull_request_receipt {
+            let mut receipt = lock(receipt);
+            if matches!(&*receipt, GitHubPullRequestReceipt::Pending) { *receipt = GitHubPullRequestReceipt::RetainedUnknown; }
+        }
         if let Some(receipt) = &self.github_activity_receipt {
             let mut receipt = lock(receipt);
             if matches!(&*receipt, GitHubActivityReceipt::Pending) { *receipt = GitHubActivityReceipt::RetainedUnknown; }
@@ -1118,6 +1132,21 @@ impl Owner {
                     let was_unknown = was_unknown || matches!(&*receipt, RepositoryCreateReceipt::RetainedUnknown);
                     if !matches!(&*receipt, RepositoryCreateReceipt::Settled { .. }) {
                         *receipt = RepositoryCreateReceipt::Settled {
+                            outcome: if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome }, settled_at, was_unknown,
+                        };
+                    }
+                }
+            }
+            Profile::GitHubPullRequest => {
+                drop(reply);
+                let outcome = result.and_then(|value| match value {
+                    ReadOutcome::GitHubPullRequest(value) => Ok(value), _ => Err(BridgeError::protocol()),
+                });
+                if let Some(receipt) = &self.pull_request_receipt {
+                    let mut receipt = lock(receipt);
+                    let was_unknown = was_unknown || matches!(&*receipt, GitHubPullRequestReceipt::RetainedUnknown);
+                    if !matches!(&*receipt, GitHubPullRequestReceipt::Settled { .. }) {
+                        *receipt = GitHubPullRequestReceipt::Settled {
                             outcome: if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome }, settled_at, was_unknown,
                         };
                     }
@@ -1363,13 +1392,14 @@ impl Supervisor {
         let version_allocation_source_endpoints = match &request { AdmissionRequest::VersionAllocationSource(admission) => Some(admission.endpoints), _ => None };
         let gh_auth_endpoints = match &request { AdmissionRequest::GitHubAuth(admission) => Some(admission.endpoints), _ => None };
         let history_endpoints=match &request{AdmissionRequest::History(admission)=>Some(admission.endpoints),_=>None};
-        let publication_end=match &request{AdmissionRequest::Publication{end,..}|AdmissionRequest::RepositoryCreate{end,..}|AdmissionRequest::GitHubActivity{end,..}=>Some(*end),
+        let publication_end=match &request{AdmissionRequest::Publication{end,..}|AdmissionRequest::RepositoryCreate{end,..}|AdmissionRequest::GitHubPullRequest{end,..}|AdmissionRequest::GitHubActivity{end,..}=>Some(*end),
             AdmissionRequest::VersionEnrollment(admission)=>Some(admission.work_end),_=>None};
         let now=Instant::now();
         if publication_end.is_some_and(|end|end<=now || end>now+Duration::from_secs(60)){return Err(BridgeError::invalid())}
         let endpoint = git_local_endpoints.map_or_else(|| version_allocation_source_endpoints.map_or_else(|| git_read_endpoints.map_or_else(|| gh_auth_endpoints.map_or_else(|| publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work)), |original| original.work), |original| original.work), |original| original.work), |original| original.work);
         let profile = request.profile();
         let repository_create_receipt = match &completion { CompletionTarget::RepositoryCreate(value) => Some(value.clone()), _ => None };
+        let pull_request_receipt = match &completion { CompletionTarget::GitHubPullRequest(value) => Some(value.clone()), _ => None };
         let github_activity_receipt = match &completion { CompletionTarget::GitHubActivity(value) => Some(value.clone()), _ => None };
         let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt,publication_receipt) = match (profile, completion) {
             (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
@@ -1383,6 +1413,7 @@ impl Supervisor {
             (Profile::GitHubHistory,CompletionTarget::History(receipt))=>(None,None,None,None,None,Some(receipt),None),
             (Profile::GitHubPublication,CompletionTarget::Publication(receipt))=>(None,None,None,None,None,None,Some(receipt)),
             (Profile::RepositoryCreate,CompletionTarget::RepositoryCreate(_))=>(None,None,None,None,None,None,None),
+            (Profile::GitHubPullRequest,CompletionTarget::GitHubPullRequest(_))=>(None,None,None,None,None,None,None),
             (Profile::GitHubActivity,CompletionTarget::GitHubActivity(_))=>(None,None,None,None,None,None,None),
             (Profile::GitHubAuth, CompletionTarget::GitHubAuth) | (Profile::GitRead, CompletionTarget::GitRead) | (Profile::GitLocal, CompletionTarget::GitLocal) | (Profile::VersionAllocationSource, CompletionTarget::VersionAllocationSource) | (Profile::VersionEnrollment, CompletionTarget::VersionEnrollment) => (None,None,None,None,None,None,None),
             _ => return Err(BridgeError::invalid()),
@@ -1396,13 +1427,17 @@ impl Supervisor {
         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
         let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}"),
-            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::RepositoryCreate=>format!("repository-create-{key}"),Profile::GitHubActivity=>format!("github-activity-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::GitLocal=>format!("git-local-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}"),Profile::VersionEnrollment=>format!("version-enrollment-{key}") };
+            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::RepositoryCreate=>format!("repository-create-{key}"),Profile::GitHubPullRequest=>format!("github-pull-request-{key}"),Profile::GitHubActivity=>format!("github-activity-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::GitLocal=>format!("git-local-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}"),Profile::VersionEnrollment=>format!("version-enrollment-{key}") };
         let (version_enrollment,request)=match request {
             AdmissionRequest::VersionEnrollment(admission)=>(Some(admission.invocation),None),
             other=>(None,Some(other)),
         };
         let (repository_create,request)=match request {
             Some(AdmissionRequest::RepositoryCreate{request,gate,..})=>(Some((request,gate)),None),
+            other=>(None,other),
+        };
+        let (pull_request,request)=match request {
+            Some(AdmissionRequest::GitHubPullRequest{request,gate,..})=>(Some((request,gate)),None),
             other=>(None,other),
         };
         let (github_activity,request)=match request {
@@ -1423,6 +1458,10 @@ impl Supervisor {
         if let Some(original)=&version_enrollment { bytes=crate::version_enrollment_protocol::encode_initial(&id,&original.request)?; }
         let (repository_create_request,repository_create_gate)=match repository_create {
             Some((request,gate))=>{bytes=repository_create_protocol::encode_initial(&id,&request)?;(Some(request),Some(gate))},
+            None=>(None,None),
+        };
+        let (pull_request_request,pull_request_gate)=match pull_request {
+            Some((request,gate))=>{bytes=pull_request_protocol::encode_initial(&id,&request)?;(Some(request),Some(gate))},
             None=>(None,None),
         };
         let (github_activity_request,github_activity_gate)=match github_activity {
@@ -1471,6 +1510,7 @@ impl Supervisor {
             key, id, profile, github_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate, setup_receipt, setup_request, setup_gate,
             publication_receipt,publication_request,publication_gate,
             repository_create_receipt,repository_create_request,repository_create_gate,
+            pull_request_receipt,pull_request_request,pull_request_gate,
             github_activity_receipt,github_activity_request,github_activity_gate,
             setup_material, setup_first_bound, secret_sealed: Mutex::new(secret_cipher),
             history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, git_read, git_read_endpoints, git_local, git_local_endpoints, version_allocation_source, version_allocation_source_endpoints, version_enrollment,
@@ -1808,7 +1848,7 @@ async fn write_request(mut writer: tokio::process::ChildStdin, bytes: Vec<u8>, m
 }
 
 #[derive(Clone, Copy)]
-enum ReadyKind { Preflight(preflight_protocol::Kind), Release(preflight_protocol::Kind), Setup, Publication, RepositoryCreate, GitHubActivity, History, VersionEnrollment }
+enum ReadyKind { Preflight(preflight_protocol::Kind), Release(preflight_protocol::Kind), Setup, Publication, RepositoryCreate, GitHubPullRequest, GitHubActivity, History, VersionEnrollment }
 
 async fn read_preflight<R: AsyncRead + Unpin>(mut reader: R, id: String, digest: String,
     kind: ReadyKind, profile: Profile, ready: oneshot::Sender<Result<(), BridgeError>>,
@@ -1834,6 +1874,7 @@ async fn read_preflight<R: AsyncRead + Unpin>(mut reader: R, id: String, digest:
                         (Profile::GitHubSetup, ReadyKind::Setup) => setup_protocol::decode_ready(&header, &id, &digest),
                         (Profile::GitHubPublication,ReadyKind::Publication)=>publication_protocol::decode_ready(&header,&id,&digest),
                         (Profile::RepositoryCreate,ReadyKind::RepositoryCreate)=>repository_create_protocol::decode_ready(&header,&id,&digest),
+                        (Profile::GitHubPullRequest,ReadyKind::GitHubPullRequest)=>pull_request_protocol::decode_ready(&header,&id,&digest),
                         (Profile::GitHubActivity,ReadyKind::GitHubActivity)=>github_activity_protocol::decode_ready(&header,&id,&digest),
                         (Profile::VersionEnrollment,ReadyKind::VersionEnrollment)=>crate::version_enrollment_protocol::decode_ready(&header,&id,&digest),
                         (Profile::GitHubHistory, ReadyKind::History) => history_protocol::decode_ready(&header, &id, &digest),
@@ -1933,6 +1974,13 @@ async fn write_preflight(mut writer: tokio::process::ChildStdin, initial: Vec<u8
                 && owner.release_gate.is_none() && owner.release_request.is_none() && owner.setup_gate.is_none()
                 && owner.setup_request.is_none() && owner.publication_gate.is_none() && owner.publication_request.is_none()
                 => gate.claim(&owner.id,&digest,request,||claim_preflight_go(&inner,&owner,Profile::RepositoryCreate)),
+            _=>Err(BridgeError::cleanup_unknown()),
+        },
+        Profile::GitHubPullRequest => match (&owner.pull_request_gate,&owner.pull_request_request) {
+            (Some(gate),Some(request)) if owner.preflight_gate.is_none() && owner.preflight_request.is_none()
+                && owner.release_gate.is_none() && owner.release_request.is_none() && owner.setup_gate.is_none()
+                && owner.setup_request.is_none() && owner.publication_gate.is_none() && owner.publication_request.is_none()
+                => gate.claim(&owner.id,&digest,request,||claim_preflight_go(&inner,&owner,Profile::GitHubPullRequest)),
             _=>Err(BridgeError::cleanup_unknown()),
         },
         Profile::GitHubActivity => match (&owner.github_activity_gate,&owner.github_activity_request) {
@@ -2038,14 +2086,14 @@ fn github_auth_selected(profile: Profile) -> bool {
 }
 fn github_setup_selected(profile: Profile) -> bool {
     cfg!(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))) && !cfg!(all(feature = "development-runtime", debug_assertions))
-        && matches!(profile, Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment)
+        && matches!(profile, Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment)
 }
 
 fn preflight_claim_clear(original: bool, profile: Profile, expected: Profile, state: &OwnerState, now: Instant,
     stopping: bool, disabled: bool, stop: bool) -> bool {
     original && matches!((profile, expected), (Profile::GitHubPreflight, Profile::GitHubPreflight)
         | (Profile::GitHubRelease, Profile::GitHubRelease) | (Profile::GitHubSetup, Profile::GitHubSetup)
-        | (Profile::GitHubPublication,Profile::GitHubPublication) | (Profile::RepositoryCreate,Profile::RepositoryCreate) | (Profile::GitHubActivity,Profile::GitHubActivity) | (Profile::VersionEnrollment,Profile::VersionEnrollment)
+        | (Profile::GitHubPublication,Profile::GitHubPublication) | (Profile::RepositoryCreate,Profile::RepositoryCreate) | (Profile::GitHubPullRequest,Profile::GitHubPullRequest) | (Profile::GitHubActivity,Profile::GitHubActivity) | (Profile::VersionEnrollment,Profile::VersionEnrollment)
         | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth) | (Profile::GitRead, Profile::GitRead) | (Profile::GitLocal, Profile::GitLocal)) && !state.terminal && !state.unknown && state.error.is_none()
         && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
 }
@@ -2539,7 +2587,7 @@ fn transfer_installed(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) 
             let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
             let owners = lock(&inner.owners); let state = lock(&owner.state);
             if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
-                match owner.profile { Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment=>owner.profile, _=>return Err(BridgeError::protocol()) }, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                match owner.profile { Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment=>owner.profile, _=>return Err(BridgeError::protocol()) }, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
                 return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
             }
             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
@@ -2742,7 +2790,7 @@ fn acquire_setup_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<
     // no environment/native call is added between claim and child creation.
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     crate::runtime::macos_installed_environment(&mut command).map_err(AcquisitionError::from)?;
-    let expected=match owner.profile{Profile::GitHubSetup=>Profile::GitHubSetup,Profile::GitHubPublication=>Profile::GitHubPublication,Profile::RepositoryCreate=>Profile::RepositoryCreate,Profile::GitHubActivity=>Profile::GitHubActivity,Profile::VersionEnrollment=>Profile::VersionEnrollment,
+    let expected=match owner.profile{Profile::GitHubSetup=>Profile::GitHubSetup,Profile::GitHubPublication=>Profile::GitHubPublication,Profile::RepositoryCreate=>Profile::RepositoryCreate,Profile::GitHubPullRequest=>Profile::GitHubPullRequest,Profile::GitHubActivity=>Profile::GitHubActivity,Profile::VersionEnrollment=>Profile::VersionEnrollment,
         _=>return Err(AcquisitionError::unsupported("Unexpected Setup runtime profile"))};
     let owners = lock(&inner.owners); let state = lock(&owner.state);
     if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
@@ -3153,7 +3201,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 }
                 return Err(BridgeError::unavailable("The GitHub release action runtime is not qualified."));
             },
-            Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment => {
+            Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment => {
                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 if github_setup_selected(profile) {
                     let native = inspection_setup.ok_or_else(|| {
@@ -3275,7 +3323,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         #[cfg(all(windows, test, feature = "development-runtime"))]
         let runtime = match profile {
             Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
-            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
+            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
         };
         Ok(runtime)
     }));
@@ -3351,7 +3399,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         if acquire_enter.blocking_recv().is_err() {
             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource) {
+            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource) {
                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
             }
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -3581,10 +3629,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             Ok(value)=>(Some(value.candidate),Some(value.ack)),Err(error)=>{owner.fail(error);owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;}
         }
     }else{(None,None)};
-    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal) {
+    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal) {
         let (send, receive) = oneshot::channel(); (Some(send), Some(receive))
     } else { (None, None) };
-    let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
+    let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::RepositoryCreate | Profile::GitHubPullRequest | Profile::GitHubActivity | Profile::VersionEnrollment | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
     // History/Auth/GitRead share this fixed POST/wait slot; SOURCE retains its separate posts.
     let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal){
         let (send,receive)=oneshot::channel();(Some(send),Some(receive))
@@ -3672,6 +3720,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 Profile::GitHubSetup => owner.setup_request.as_ref().map(|_| ReadyKind::Setup),
                 Profile::GitHubPublication=>owner.publication_request.as_ref().map(|_|ReadyKind::Publication),
                 Profile::RepositoryCreate=>owner.repository_create_request.as_ref().map(|_|ReadyKind::RepositoryCreate),
+                Profile::GitHubPullRequest=>owner.pull_request_request.as_ref().map(|_|ReadyKind::GitHubPullRequest),
                 Profile::GitHubActivity=>owner.github_activity_request.as_ref().map(|_|ReadyKind::GitHubActivity),
                 Profile::VersionEnrollment=>owner.version_enrollment.as_ref().map(|_|ReadyKind::VersionEnrollment),
                 Profile::GitHubHistory => owner.history_nomination.as_ref().map(|_| ReadyKind::History), _ => None,
@@ -4046,6 +4095,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         Some(output) if matches!(profile,Profile::RepositoryCreate)=>owner.repository_create_request.as_ref().ok_or_else(BridgeError::protocol)
             .and_then(|request|repository_create_protocol::decode_reply(&owner.id,&output.bytes,request))
             .map(ReadOutcome::RepositoryCreate),
+        Some(output) if matches!(profile,Profile::GitHubPullRequest)=>owner.pull_request_request.as_ref().ok_or_else(BridgeError::protocol)
+            .and_then(|request|pull_request_protocol::decode_reply(&owner.id,&output.bytes,request))
+            .map(ReadOutcome::GitHubPullRequest),
         Some(output) if matches!(profile,Profile::GitHubActivity)=>owner.github_activity_request.as_ref().ok_or_else(BridgeError::protocol)
             .and_then(|request|github_activity_protocol::decode_reply(&owner.id,&output.bytes,request))
             .map(ReadOutcome::GitHubActivity),
@@ -6332,6 +6384,7 @@ mod tests {
             preflight_receipt: None, preflight_request: None, preflight_gate: None, release_receipt: None, release_request: None, release_gate: None, setup_receipt: None, setup_request: None, setup_gate: None,
             publication_receipt:None,publication_request:None,publication_gate:None,
             repository_create_receipt:None,repository_create_request:None,repository_create_gate:None,
+            pull_request_receipt:None,pull_request_request:None,pull_request_gate:None,
             github_activity_receipt:None,github_activity_request:None,github_activity_gate:None,
             history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, git_read:None, git_read_endpoints:None, git_local:None, git_local_endpoints:None, version_allocation_source:None, version_enrollment:None, version_allocation_source_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
