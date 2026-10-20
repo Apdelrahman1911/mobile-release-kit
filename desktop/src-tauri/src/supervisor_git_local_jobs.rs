@@ -204,12 +204,12 @@ impl Jobs {
     }
     pub(super) async fn startup(&mut self,inner:&Inner,owner:&Arc<Owner>)->Result<(),BridgeError> {
         let invocation=owner.git_local.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
-        unit(&self.run(inner,owner,Task::Publisher).await?)?;
+        unit((self.run(inner,owner,Task::Publisher).await?).as_ref())?;
         // Actual publisher job join precedes the same-Doc post-epoch/stamp and
         // TRY-only Host ticket. No Host/Store IO is performed under that Doc.
         let ticket=Arc::new(invocation.gate.publisher_joined_begin_host(&owner.id,owner.endpoint())?);
         self.host_ticket=Some(ticket.clone());
-        unit(&self.run(inner,owner,Task::Host(ticket)).await?)?;
+        unit((self.run(inner,owner,Task::Host(ticket)).await?).as_ref())?;
         // Keep the SAME ticket through TRY/currentness/handoff failure. Host
         // may clear pending before a later check fails; absence or a cancel
         // Conflict is not a successful returned handoff. Only positive
@@ -257,8 +257,8 @@ impl Jobs {
             let result=self.run(inner,owner,Task::Finish {expected,original,joined}).await?;ack(&result)?;
         }
         let has_use=self.held.lock().map_err(|_|BridgeError::cleanup_unknown())?.lease.is_some();
-        if has_use {unit(&self.run(inner,owner,Task::RetireUse).await?)?;}
-        unit(&self.run(inner,owner,Task::FinishPublisher).await?)?;
+        if has_use {unit((self.run(inner,owner,Task::RetireUse).await?).as_ref())?;}
+        unit((self.run(inner,owner,Task::FinishPublisher).await?).as_ref())?;
         self.publisher_finished=true;Ok(())
     }
 }

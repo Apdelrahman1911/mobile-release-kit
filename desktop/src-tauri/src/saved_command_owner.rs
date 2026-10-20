@@ -5203,7 +5203,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                 && book.out_end.as_ref().is_some_and(|r| r.protocol_settled_for(&owner.context))
                 && book.err_end.as_ref().is_some_and(|r| r.frames == 0 && !r.failed)
                 && (book.write_end.as_ref().is_some_and(|r| r.sent && !r.failed)
-                    || r.active.as_ref().is_some_and(|a| upload_key::cancelled_no_go_writer(owner, a, &book)))
+                    || r.active.as_ref().is_some_and(|a| upload_key::cancelled_no_go_writer(&owner, a, &book)))
         } else { true };
         let dependents=manager_joined && startup_settled && io_joined && io && protocol
             && owner.driver_joined.load(Ordering::SeqCst)
