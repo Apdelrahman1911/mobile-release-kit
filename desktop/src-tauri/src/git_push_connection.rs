@@ -7,6 +7,7 @@ use crate::{
     asset_session::GitLocalGate,
     git_local_protocol::{self as local, push_worker::Target},
     git_push_protocol as push,
+    github_connection_protocol::Permission,
     supervisor::{GitLocalPushHold, GitLocalReceipt},
 };
 use std::sync::Arc;

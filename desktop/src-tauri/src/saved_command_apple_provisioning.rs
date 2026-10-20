@@ -210,7 +210,7 @@ impl RunProjection {
             result,
             recovery: None,
             profile_recovery: None, certificate_recovery: None,
-            saved_profile:None, saved_key:None,
+            saved_profile:None, saved_key:None, saved_p12:None,
         })
     }
 }
