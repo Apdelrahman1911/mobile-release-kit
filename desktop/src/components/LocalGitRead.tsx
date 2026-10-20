@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import type { ReactNode } from 'react';
 import type { GitReadController } from '../gitReadController.ts';
 import type { GitRepositoryController } from '../gitRepositoryController.ts';
 import { GIT_ISSUE_HELP } from '../gitRepositoryProtocol.ts';
@@ -40,8 +41,8 @@ export function LocalGitReadControls({ controller, compact = false, originalProj
   </section>;
 }
 
-export function LocalGitRead({ controller, repository, projectName, originalProjectName }: {
-  controller: GitReadController; repository: GitRepositoryController | null; projectName: string; originalProjectName?: string;
+export function LocalGitRead({ controller, repository, projectName, originalProjectName, localActions }: {
+  controller: GitReadController; repository: GitRepositoryController | null; projectName: string; originalProjectName?: string; localActions?: ReactNode;
 }) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const observation = !state.stale && state.observationProject === repository?.getSnapshot().projectId ? state.observation : null;
@@ -49,7 +50,7 @@ export function LocalGitRead({ controller, repository, projectName, originalProj
   const tracking = observation?.tracking;
   return <>
     <LocalGitReadControls controller={controller} originalProjectName={originalProjectName} />
-    {repository ? <GitRepositoryPanel controller={repository} projectName={projectName} /> :
+    {repository ? <GitRepositoryPanel controller={repository} projectName={projectName} localActions={localActions} /> :
       <p className="save-note">Select a registered project to read its local changes. Existing drafts are kept; a different service session cannot adopt them.</p>}
     {repository && <section className="card" aria-label="Local branch and commit history">
       <SectionHeading title="Local branch and history" description="These are files and references already on this computer, not a fresh check of GitHub." />

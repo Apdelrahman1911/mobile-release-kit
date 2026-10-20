@@ -64,21 +64,21 @@ function loaded(id = 'a') {
   return reduce(state, { type: 'snapshot-done', projectId: id, requestId: 1, snapshot: snapshot(id), observedAt: 1 });
 }
 
-test('identity saved-file invalidation preserves clean and dirty drafts without manufacturing a save or read', () => {
-  for (const dirty of [false, true]) {
+test('identity and Git saved-file invalidation preserves clean and dirty drafts without manufacturing a save or read', () => {
+  for (const type of ['project-identity-intent', 'git-local-intent']) for (const dirty of [false, true]) {
     let state = loaded();
     if (dirty) state = reduce(state, { type: 'edit', projectId: 'a', path: 'android.applicationId', value: 'com.example.local' });
     const current = state.projects.a;
     current.savedConfigContent = { bytes: 123, sha256: 'a'.repeat(64) };
     current.lastSave = { sessionId: 'original', statusRevision: 1, draftRevision: current.revision,
       baselineGeneration: current.baselineGeneration, resultingBaselineGeneration: current.baselineGeneration, result: 'saved' };
-    const next = reduce(state, { type: 'project-identity-intent', projectId: 'a' }).projects.a;
+    const next = reduce(state, { type, projectId: 'a' }).projects.a;
     for (const key of ['snapshot', 'baseline', 'draft', 'revision', 'baselineGeneration', 'removedFields', 'nextRemovalId', 'lastInitialization'])
       assert.equal(next[key], current[key], key);
     assert.equal(next.snapshotRequest, null); assert.equal(next.savedConfigContent, null); assert.equal(next.snapshotPredatesSave, true);
     assert.equal(next.lastSave.resultingBaselineGeneration, null); assert.equal(next.validation, null); assert.equal(next.review, null);
     assert.equal(isDirty(next), dirty);
-    assert.equal(reduce(state, { type: 'project-identity-intent', projectId: 'other' }), state);
+    assert.equal(reduce(state, { type, projectId: 'other' }), state);
   }
 });
 

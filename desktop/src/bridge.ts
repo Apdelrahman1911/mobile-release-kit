@@ -85,6 +85,7 @@ import { cliReadAccessProjectIdFits } from './cliReadAccess.ts';
 import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdentityNative.ts';
 import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
 import { createGitReadApi } from './gitReadProtocol.ts';
+import { createGitLocalApi } from './gitLocalProtocol.ts';
 import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
 import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
 
@@ -396,6 +397,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     agentIdentity: createAgentIdentityApi(mode, invoke),
     githubGhEntry: createGitHubGhApi(mode, invoke),
     gitRead: createGitReadApi(mode, invoke),
+    gitLocal: createGitLocalApi(mode, invoke),
     toolAcquisition: createToolAcquisitionApi(mode, invoke, listen),
     appleProvisioning: createAppleProvisioningApi(mode, invoke, listen),
     applicationRead: mode === 'native' ? Object.freeze({

@@ -133,6 +133,7 @@ export type WorkspaceAction =
   | { type: 'config-save-intent'; projectId: string }
   | { type: 'initialization-intent'; projectId: string }
   | { type: 'project-identity-intent'; projectId: string }
+  | { type: 'git-local-intent'; projectId: string }
   | { type: 'initialization-final'; projectId: string; completion: ConfirmedInitialization }
   | { type: 'config-save-final'; projectId: string; receipt: ConfirmedConfigSave }
   | { type: 'config-save-recovery'; projectId: string; attention: ConfigRecoveryAttention }
@@ -357,6 +358,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       // Retire an in-flight snapshot too; only a new explicit refresh can bind.
       next = { ...session, savedConfigContent: null, snapshotRequest: null };
       break;
+    case 'git-local-intent':
     case 'project-identity-intent':
     case 'initialization-intent':
       next={...session,snapshotRequest:null,snapshotPredatesSave:true,savedConfigContent:null,

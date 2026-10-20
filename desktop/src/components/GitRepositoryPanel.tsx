@@ -1,4 +1,5 @@
 import { useId, useState, useSyncExternalStore } from 'react';
+import type { ReactNode } from 'react';
 import { GIT_ISSUE_HELP, gitStagedPaths } from '../gitRepositoryProtocol.ts';
 import type { GitDiff } from '../gitRepositoryProtocol.ts';
 import type { GitRepositoryController, GitReview } from '../gitRepositoryController.ts';
@@ -49,8 +50,8 @@ function Review({ review, controller }: { review: GitReview; controller: GitRepo
 
 // Root supplies and retains the original bound controller. Unmounting this view
 // unsubscribes rendering only: it never cancels, discards, retries or adopts work.
-export function GitRepositoryPanel({ controller, projectName, onRecovery }: {
-  controller: GitRepositoryController; projectName: string; onRecovery?: () => void;
+export function GitRepositoryPanel({ controller, projectName, onRecovery, localActions }: {
+  controller: GitRepositoryController; projectName: string; onRecovery?: () => void; localActions?: ReactNode;
 }) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const messageId = useId(), authorNameId = useId(), authorEmailId = useId();
@@ -62,13 +63,13 @@ export function GitRepositoryPanel({ controller, projectName, onRecovery }: {
   const next = !observation || state.stale ? 'refresh' : state.selected.some((path) => observation.changes.some((row) => row.path === path && row.worktree !== ' ')) ?
     'stage' : staged.length ? 'commit' : 'select';
   return <section className="card" aria-label="Local Git changes">
-    <SectionHeading title="Source changes" description={controller.hasWriter() ? 'Review your local files, stage only what you choose, then create a commit.' :
+    <SectionHeading title="Source changes" description={localActions ? 'Read changed files and selected differences. Review local Git changes below when available.' : controller.hasWriter() ? 'Review your local files, stage only what you choose, then create a commit.' :
       'Read changed files and selected differences. Staging and commits are not enabled in this session.'}>
       <Icon name="branch" size={24} />
     </SectionHeading>
     <p>Project: <strong>{projectName}</strong>. {observation && <>{observation.detached ? 'Not on a branch' :
       <>Branch: <bdi>{observation.branch?.slice('refs/heads/'.length)}</bdi></>}{observation.unborn && ' · No commits yet'}.</>}</p>
-    {!controller.hasWriter() && <p className="save-note">Git writes are unavailable in this session. A read-only view does not enable them.</p>}
+    {!localActions && !controller.hasWriter() && <p className="save-note">Git writes are unavailable in this session. A read-only view does not enable them.</p>}
     {state.issue && <p className="review-caution" role="status">{GIT_ISSUE_HELP[state.issue]}</p>}
     {state.blocked && state.issue !== state.blocked && <p className="review-caution" role="alert">{GIT_ISSUE_HELP[state.blocked]}</p>}
     {state.blocked && !attempt && onRecovery && <button type="button" className="text-button" onClick={onRecovery}>View retained recovery</button>}
@@ -122,7 +123,7 @@ export function GitRepositoryPanel({ controller, projectName, onRecovery }: {
         <p className="save-note">Only bounded text is displayed. Known sensitive content is withheld; this is not a guarantee that a file contains no secrets.</p>
       </div>
     </>}
-    <ProgressiveDisclosure title={controller.hasWriter() ? 'Stage files and create a commit' : 'Advanced: local commit draft (writes unavailable)'}
+    {localActions ?? <ProgressiveDisclosure title={controller.hasWriter() ? 'Stage files and create a commit' : 'Advanced: local commit draft (writes unavailable)'}
       needsAttention={!!state.review || !!state.attempt && state.attempt.phase !== 'settled' ||
         state.busy === 'review' || state.busy === 'discard' || state.busy === 'apply' || !!state.blocked}>
     <div className="button-row">
@@ -149,7 +150,7 @@ export function GitRepositoryPanel({ controller, projectName, onRecovery }: {
       <button type="submit" className={`button ${next === 'commit' && !state.review ? 'primary' : 'secondary'}`} disabled={commitReason !== null}>Review commit</button>
       {commitReason && !state.review && <p className="save-note">{GIT_ISSUE_HELP[commitReason]}</p>}
     </form>
-    </ProgressiveDisclosure>
+    </ProgressiveDisclosure>}
     {state.review && <Review key={state.review.plan.planId} review={state.review} controller={controller} />}
     {observation && <details><summary>Repository details</summary><p>Observed commit: <code>{observation.head ?? 'none yet'}</code>.</p>
       <p>Observation revision: <code>{observation.revision}</code>.</p>

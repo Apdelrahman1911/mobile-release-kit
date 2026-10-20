@@ -64,6 +64,8 @@ import { iosArchiveError } from './iosArchiveProtocol.ts';
 import { GitHubRemoteSetupController, githubRemoteSetupOwnerReason } from './GitHubRemoteSetupController.ts';
 import { GitHubRemoteSetup } from './components/GitHubRemoteSetup.tsx';
 import { GitReadController } from './gitReadController.ts';
+import { GitLocalController } from './gitLocalController.ts';
+import { GitLocalChanges, GitLocalControls } from './components/GitLocalChanges.tsx';
 import { GitRepositoryController } from './gitRepositoryController.ts';
 import { LocalGitRead, LocalGitReadControls } from './components/LocalGitRead.tsx';
 import { GitHubConnectionController } from './githubConnectionController.ts';
@@ -203,6 +205,8 @@ export function App() {
   const cliReadAccessControllerRef = useRef<CliReadAccessController | null>(null);
   // One read coordinator owns the original promises across all pages. Local
   // commit drafts belong to immutable native-service/project ports, not rows.
+  const gitLocalRef = useRef<GitLocalController | null>(null);
+  const gitLocalAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
   const gitReadRef = useRef<GitReadController | null>(null);
   const gitReadAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
   const gitReadEpoch = useRef(0);
@@ -210,10 +214,13 @@ export function App() {
   const gitRepositories = useRef<{ service: object; projectId: string; controller: GitRepositoryController }[]>([]);
   const [gitRepository, setGitRepository] = useState<GitRepositoryController | null>(null);
   const syncGitReadRef = useRef<() => void>(() => {});
-  const gitReadBusy = useCallback(() => gitReadRef.current?.ownerReason() ?? null, []);
+  // All peers/reconnection include BOTH Git owners. Their own admission below
+  // excludes only themselves, never the other original or a retained review.
+  const gitBusy = useCallback(() => gitLocalRef.current?.ownerReason() ?? gitReadRef.current?.ownerReason() ?? null, []);
   const retireGitRead = useCallback(() => {
     if (gitReadEpoch.current === Number.MAX_SAFE_INTEGER) gitReadGenerationLost.current = true;
     else gitReadEpoch.current += 1;
+    gitLocalRef.current?.beforeContextIntent();
     gitReadRef.current?.beforeContextIntent();
     for (const entry of gitRepositories.current) entry.controller.invalidate();
   }, []);
@@ -303,7 +310,7 @@ export function App() {
   // Every existing new-action/read admission includes the actual passive
   // original. Only the observer itself uses the underlying owner-only helper.
   const savedCommandBusy = useCallback((...args: Parameters<typeof savedOwnersBusy>) =>
-    gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null, [gitReadBusy, githubGhBusy, identityBusy, savedOwnersBusy, externalBusy]);
+    gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null, [gitBusy, githubGhBusy, identityBusy, savedOwnersBusy, externalBusy]);
   const syncConnectionContext = useCallback(() => {
     const selected = workspaceRef.current.selectedId;
     const project = selected && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] : null;
@@ -392,7 +399,7 @@ export function App() {
       (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null),
     selectedProject: () => { const w = workspaceRef.current; return w.selectedId ? w.projects[w.selectedId] ?? null : null; },
-    recoveryUnavailable: () => gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
+    recoveryUnavailable: () => gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
       !pathService.current.api || !pathService.current.info ? 'Wait for the current service capabilities.' : null),
     onRecovered: (completion) => dispatch({ type: 'config-recovery-final', projectId: completion.binding.projectId, completion }),
     onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
@@ -621,20 +628,20 @@ export function App() {
   };
   // Identity excludes ONLY itself; all original passive/private/build owners
   // and retained GitHub reviews still block a new source edit.
-  identityAdmission.current = () => gitReadBusy() ?? githubGhBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
+  identityAdmission.current = () => gitBusy() ?? githubGhBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
     cliReadAccessControllerRef.current?.pendingReason() ??
     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
       ? 'Finish the prepared GitHub review before editing the app ID.' : null);
   // This coupled entry excludes only its own picker work and the existing
   // Connect latch. That controller independently checks its original idle
   // session before latching, then retains the exact handoff before native IPC.
-  githubGhAdmission.current = () => gitReadBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+  githubGhAdmission.current = () => gitBusy() ?? identityBusy() ?? savedOwnersBusy() ??
     savedOwnersPrerequisiteReason(false, false, undefined, false, false, true) ?? externalBusy() ??
     cliReadAccessControllerRef.current?.pendingReason() ??
     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
       ? 'Finish the prepared GitHub review before connecting another account.' : null);
   const savedCommandPrerequisiteReason = (...args: Parameters<typeof savedOwnersPrerequisiteReason>): string | null =>
-    gitReadBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
+    gitBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
   const [artifactInspection] = useState(() => new ArtifactInspectionController({
     selectedProject: () => {
       const current=workspaceRef.current;
@@ -669,7 +676,7 @@ export function App() {
       const current = workspaceRef.current;
       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
     },
-    otherOperationReason: () => gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersWithoutToolsBusy() ?? savedOwnersPrerequisiteReason() ??
+    otherOperationReason: () => gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersWithoutToolsBusy() ?? savedOwnersPrerequisiteReason() ??
       externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null,
     knownTools: () => {
       const state = androidBuildControllerRef.current?.getSnapshot();
@@ -820,7 +827,7 @@ export function App() {
     const port = service.api?.mode === 'native' ? service.api.agentIdentity : null;
     const book = agentRequestWork.current, slot = action === 'revoke' ? 'revoke' : 'normal';
     const project = workspaceRef.current.selectedId;
-    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || gitReadBusy() || identityBusy())) return;
+    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || gitBusy() || identityBusy())) return;
     if (book.epoch === Number.MAX_SAFE_INTEGER && action !== 'revoke') { setAgentMessage({ service, text: 'Request controls need attention. Keep the original Desktop task; do not replay.' }); return; }
     const epoch = book.epoch = Math.min(Number.MAX_SAFE_INTEGER, book.epoch + 1);
     // Bound normal+revoke slots; revoke remains available during first Allow.
@@ -845,14 +852,14 @@ export function App() {
       if (book[slot] === work) book[slot] = null;
       setAgentRequestPending(book.normal !== null || book.revoke !== null);
     }
-  }, [gitReadBusy, identityBusy]);
+  }, [gitBusy, identityBusy]);
   identityInvalidation.current = (projectId) => {
     snapshotIntentBatch(projectId);
     dispatch({ type: 'project-identity-intent', projectId });
     releaseVersion.saveIntent(); releaseInputs.saveIntent();
     assetSession.savedProjectChanged(projectId);
   };
-  gitReadAdmission.current = () => githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
+  gitReadAdmission.current = () => gitLocalRef.current?.ownerReason() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
     cliReadAccessControllerRef.current?.pendingReason() ??
     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
       ? 'Finish the prepared GitHub review before reading local project files.' : null);
@@ -877,6 +884,7 @@ export function App() {
     }
     for (const value of gitRepositories.current) value.controller.setActive(value === entry);
     setGitRepository(entry?.controller ?? null);
+    gitLocalRef.current?.syncContext();
   }, [gitRead]);
   syncGitReadRef.current = syncGitRead;
   useEffect(() => { syncGitRead(); });
@@ -887,6 +895,30 @@ export function App() {
     }, 1000);
     return () => window.clearInterval(timer); // Stops observation only, not the original native read.
   }, [gitRead]);
+  gitLocalAdmission.current = () => gitReadRef.current?.ownerReason() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+    savedOwnersPrerequisiteReason() ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ??
+    (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
+      ? 'Finish the prepared GitHub review before reviewing local Git changes.' : null);
+  const [gitLocal] = useState(() => new GitLocalController({
+    current: () => {
+      const service = pathService.current, projectId = workspaceRef.current.selectedId;
+      const entry = gitRepositories.current.find((value) => value.service === service && value.projectId === projectId);
+      return { api: service.api?.gitLocal ?? null,
+        session: service.api?.mode === 'native' && !gitReadGenerationLost.current ? service : null,
+        projectId, epoch: gitReadEpoch.current, repository: entry?.controller ?? null, blocked: gitLocalAdmission.current() };
+    },
+    onMutationSubmitted: (projectId) => {
+      // After actual Apply entry, including a lost/throwing acknowledgement.
+      // These invalidate eligibility only; no draft/old baseline is replaced.
+      snapshotIntentBatch(projectId);
+      dispatch({ type: 'git-local-intent', projectId });
+      releaseVersion.saveIntent(); releaseInputs.saveIntent();
+      assetSession.savedProjectChanged(projectId);
+    },
+  }));
+  gitLocalRef.current = gitLocal;
+  const gitLocalState = useSyncExternalStore(gitLocal.subscribe, gitLocal.getSnapshot, gitLocal.getSnapshot);
+  const gitLocalProjectName = gitLocalState.projectId ? workspace.projects[gitLocalState.projectId]?.project.name : undefined;
   const requests = useRef(0);
   const bootGeneration = useRef(0);
   const [cliReadAccess] = useState(() => new CliReadAccessController({
@@ -901,7 +933,7 @@ export function App() {
         // Only OTHER original owners. In particular, Revoke stays available
         // during Allow and during unrelated work. A connected GitHub session
         // alone is not execution and does not prevent this limited read grant.
-        busy: service !== pathService.current || !!(gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy()),
+        busy: service !== pathService.current || !!(gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy()),
       };
     },
   }));
@@ -917,7 +949,7 @@ export function App() {
       return { api: pathService.current.api, session: current.selectedId ? current.projects[current.selectedId] ?? null : null,
         versionState: releaseVersionControllerRef.current?.getSnapshot() ?? null };
     },
-    otherOperationReason: () => gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? cliReadAccessControllerRef.current?.pendingReason() ??
+    otherOperationReason: () => gitBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? cliReadAccessControllerRef.current?.pendingReason() ??
       (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
         ? 'Review or retire the prepared GitHub task before refreshing saved files.' : null) ??
       methodReason(pathService.current.info, 'project.snapshot', pathService.current.api?.mode ?? 'unavailable'),
@@ -968,7 +1000,7 @@ export function App() {
   const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
 
   const bootstrap = useCallback(async () => {
-    const originalGit = gitReadBusy();
+    const originalGit = gitBusy();
     if (originalGit) { setBootError({ code: 'git_read_busy', message: originalGit, retryable: false }); return; }
     const originalGh = githubGhBusy();
     if (originalGh) { setBootError({ code: 'github_cli_busy', message: originalGh, retryable: false }); return; }
@@ -1113,7 +1145,7 @@ export function App() {
       passivePending.current -= 1; setPassivePending(passivePending.current);
       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); }
     }
-  }, [gitReadBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
+  }, [gitBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
 
   // Before bootstrap: retire consent on the actual saved/key projection, and
   // keep the view responsive to peer-owner changes without renewing an intent.
@@ -1265,7 +1297,7 @@ export function App() {
     return () => window.removeEventListener('beforeunload', warn);
   }, []);
 
-  const navigate = (next: Page) => { externalObserver.beforeWorkspaceAction(); initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localStoreReconcile.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); appleProvisioning.setVisible(next === 'dashboard'); androidBuild.setVisible(next === 'releases'); androidBuild.setToolSetupVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); toolAcquisition.setVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); if (next !== 'settings') { setCliAccessReveal(0); setIdentityReveal(0); } setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
+  const navigate = (next: Page) => { if (next !== page) gitLocal.beforeContextIntent(); externalObserver.beforeWorkspaceAction(); initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localStoreReconcile.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); appleProvisioning.setVisible(next === 'dashboard'); androidBuild.setVisible(next === 'releases'); androidBuild.setToolSetupVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); toolAcquisition.setVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); if (next !== 'settings') { setCliAccessReveal(0); setIdentityReveal(0); } setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
   const reviewCredentialChecks = (kind: 'offline' | 'android-signing') => {
     if (savedCommandBusy() || diagnosticsOwnerReason(diagnostics.getSnapshot())) return;
     // Navigation selects a review only. The existing controller still owns
@@ -1560,6 +1592,8 @@ export function App() {
         {page !== 'github' && <LocalGitReadControls controller={gitRead} compact
           originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined}
           onShow={() => navigate('github')} />}
+        {(page !== 'github' || !gitRepository) && <GitLocalControls controller={gitLocal} compact={page !== 'github'}
+          originalProjectName={gitLocalProjectName} onShow={() => navigate('github')} />}
         {catalogError && <ErrorNotice error={catalogError} title="The field catalogue could not be loaded" />}
         {chooseError && <ErrorNotice error={chooseError} title="The project could not be selected" />}
         {page !== 'settings' && cliReadNeedsAttention && <div className={`notice ${cliReadState.issue ? 'notice-warning' : 'notice-info'}`} role={cliReadState.issue ? 'alert' : 'status'}>
@@ -1723,6 +1757,7 @@ export function App() {
           imageEditor={<MetadataImagesEditor state={metadataImagesState} controller={metadataImages} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} credentialHelp={catalog?.credentials ?? null} onHelp={setHelp} nativeReview={workflowPanel(true)}
           connectionView={<><LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
+            localActions={gitRepository ? <GitLocalChanges controller={gitLocal} repository={gitRepository} originalProjectName={gitLocalProjectName} /> : undefined}
             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
             {!gitRepository && gitRepositories.current.length >= 64 && <p className="review-caution">The local draft limit has been reached. Earlier drafts are kept; use your Git client for additional projects or service sessions.</p>}
             <GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp} nativeBusyReason={savedCommandBusy()}
