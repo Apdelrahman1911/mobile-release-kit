@@ -2167,7 +2167,7 @@ _FAILURE_REASONS = frozenset((*_APP_ABSENCE_BASELINE_REASONS, *_FAILURE_SETUP_RE
     'entry-pie-no-executable-stack', 'entry-segment-command', 'entry-segment-sections',
     'entry-source-changed', 'exact-detached-checkout', 'exclusive-output-original',
     'facade-compiler-artifact-close-unknown', 'facade-compiler-original-changed', 'facade-source-changed',
-    'file-original-changed', 'file-original-read-changed', 'file-original-shape', 'final-image-configured-purpose',
+    'file-original-changed', 'file-original-read-changed', 'file-original-shape', 'file-original-size', 'final-image-configured-purpose',
     'fixed-facade-role', 'fixed-signing-requirement', 'fixed-source-driver',
     'full-package-scope-only', 'helper-absolute-apple-system-dependency', 'helper-dyld-command',
     'helper-dyld-offset', 'helper-dyld-terminated', 'helper-dylib-command',
@@ -2197,6 +2197,7 @@ _FAILURE_REASONS = frozenset((*_APP_ABSENCE_BASELINE_REASONS, *_FAILURE_SETUP_RE
 ))
 _FAILURE_STAGES = (
     *_FAILURE_SETUP_STAGES,
+    *SIGNING_PHASES,
     *FINAL_IMAGE_STAPLE_STAGES, *FINAL_IMAGE_INPUT_STAGES,
     *notary_roles(True), 'notary-preflight-input', 'notary-final-input', 'notary-known-private-retirement',
     "package-producer-tests", "package-final-audit", "package-explicit-producer-compiler",
@@ -3319,7 +3320,8 @@ class Operation:
         before = os.fstat(fd)
         need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_gid == os.getgid()
              and before.st_nlink in ((1, 2) if alias else (1,))
-             and stat.S_IMODE(before.st_mode) in modes and 0 < before.st_size <= limit, "file-original-shape")
+             and stat.S_IMODE(before.st_mode) in modes, "file-original-shape")
+        need(0 < before.st_size <= limit, "file-original-size")
         entry["identity"] = signature(before)
         return entry
 
@@ -4256,6 +4258,7 @@ class Operation:
     def fixed_sign(self):
         """Fixed workflow roles, never a user-selected path/argv."""
         need(self.phase in SIGNING_PHASES and self.signing is not None, "fixed-signing-purpose")
+        self.stage = self.phase
         base = "app/Mobile Release Kit.app"
         payload = base + "/Contents/Helpers/MobileReleaseKitPayload.app"
         selected = {
@@ -4295,7 +4298,10 @@ class Operation:
         binary_name = ("mrk-macos-launcher" if launcher else "mobile-release-kit-desktop" if self.phase == "sign-desktop-payload" else ENTRY)
         binary = selected + "/Contents/MacOS/" + binary_name if bundled else selected
         parent = self.descend(self.work_entry, tuple(binary.split("/")[:-1]))
-        old = self.original(parent, binary.split("/")[-1], "fixed-sign-input", 64 * 1024 * 1024, (0o555, 0o700, 0o755), alias=not bundled)
+        limit = (self.stager.OBSERVER_BINARY_BYTES if self.phase == "sign-desktop-payload"
+                 and self.environment.get("MRK_MACOS_PACKAGE_ROLE") == "installed-shell-observation"
+                 else 64 * 1024 * 1024)
+        old = self.original(parent, binary.split("/")[-1], "fixed-sign-input", limit, (0o555, 0o700, 0o755), alias=not bundled)
         original = self.read(old)
         if self.phase == "sign-desktop-image":
             self.stager.image_macho(original, "desktop", target=self.target)
@@ -4315,14 +4321,13 @@ class Operation:
             arguments += ["--identifier", identifier]
         verify_arguments = (["-R", "=" + signing_requirement(self.signing, identifier)] if identifier is not None else [])
         with self.credential_scope(self.phase):
-            self.stage = self.phase
             self.signing_mutation_pending = True
             self.call(self.phase, ["/usr/bin/codesign", "--force", "--sign", self.signing[1], *arguments, "--timestamp", str(path)],
                       self.native_environment(), cwd=self.work, timeout=30, limit=65536)
             if root is not None:
                 self.recheck_directory(root)
             self.recheck_directory(parent)
-            signed = self.original(parent, binary.split("/")[-1], "fixed-sign-output", 64 * 1024 * 1024,
+            signed = self.original(parent, binary.split("/")[-1], "fixed-sign-output", limit,
                                    (0o555, 0o700, 0o755), alias=not bundled)
             body = self.read(signed)
             matcher.macho_content_valid(original, body, self.arch, signing=True)

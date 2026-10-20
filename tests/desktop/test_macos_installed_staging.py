@@ -3179,7 +3179,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                      "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "MRK_MACOS_PACKAGE_ROLE": "ordinary-image"}, TOOL)
                 try:
                     if len(body) > source_cap:
-                        with self.assertRaisesRegex(module.Refused, "^file-original-shape$"):
+                        with self.assertRaisesRegex(module.Refused, "^file-original-size$"):
                             port.source_original("desktop/tools/macos_android_helper_package.py", "SOURCE-test", module.HELPER_SOURCE_BYTES)
                     else:
                         entry = port.source_original("desktop/tools/macos_android_helper_package.py", "SOURCE-test", module.HELPER_SOURCE_BYTES)
@@ -7436,10 +7436,26 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         # files, same original calls, credential scope, POST and target cleanup.
         # These tiny Mach-O/Keychain return values remain inert DATA only.
         _transport, matcher, _parser = self.python_data_functions()
+        self.assertEqual(TOOL.OBSERVER_BINARY_BYTES, 256 * 1024 * 1024)
         for target in (module.ARM_TARGET, module.INTEL_TARGET):
-            for phase, failed_verify in ([(value, False) for value in module.SIGNING_PHASES] + [("sign-installed-cli", True), ("sign-remover", True), ("sign-applications-launcher", True), ("sign-xcode-setup", True)]):
-                with self.subTest(fixedSigning=phase, target=target, failedVerify=failed_verify), tempfile.TemporaryDirectory() as directory:
+            cases = [(value, False, "ordinary-image", None) for value in module.SIGNING_PHASES]
+            cases += [(value, True, "ordinary-image", None) for value in
+                      ("sign-installed-cli", "sign-remover", "sign-applications-launcher", "sign-xcode-setup")]
+            if target == module.ARM_TARGET:
+                cases += [("sign-desktop-payload", False, "installed-shell-observation", "above64"),
+                          ("sign-desktop-payload", False, "ordinary-image", "above64"),
+                          ("sign-root-app", False, "installed-shell-observation", "above64"),
+                          ("sign-desktop-payload", False, "installed-shell-observation", "oversize"),
+                          ("sign-desktop-payload", False, "installed-shell-observation", "metadata-and-oversize"),
+                          ("sign-desktop-payload", False, "installed-shell-observation", "signed-oversize")]
+            for phase, failed_verify, role, size_case in cases:
+                with self.subTest(fixedSigning=phase, target=target, failedVerify=failed_verify,
+                                  role=role, sizeCase=size_case), tempfile.TemporaryDirectory() as directory:
                     checkout, work, environment, _owner, _observations = self.fixture(Path(directory), build_target=target)
+                    environment["MRK_MACOS_PACKAGE_ROLE"] = role
+                    observer = phase == "sign-desktop-payload" and role == "installed-shell-observation"
+                    refused_input = size_case in ("oversize", "metadata-and-oversize") or size_case == "above64" and not observer
+                    refused_output = size_case == "signed-oversize"
                     environment["CARGO_TARGET_DIR"] = str(work / ("xcode-setup-target" if phase == "sign-xcode-setup" else "cargo-target"))
                     for relative, body in (("desktop/packaging/macos-empty-entitlements.plist",
                             (Path(__file__).absolute().parents[2] / "desktop/packaging/macos-empty-entitlements.plist").read_bytes()),
@@ -7463,8 +7479,17 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     binary.parent.mkdir(mode=0o700, parents=True)
                     original = (image_macho_fixture("desktop", target=target) if phase == "sign-desktop-image"
                                 else entry_macho_fixture(target=target)) + bytes(64)
+                    if size_case == "above64" and observer:
+                        # One real >64MiB read/signature-match/readback case.
+                        # Refusal cases below are sparse and never read their bodies.
+                        original += bytes(64 * 1024 * 1024 + 1 - len(original))
                     signed = self.signed_macho_fixture(original)
                     binary.write_bytes(original); binary.chmod(0o755)
+                    if refused_input:
+                        with binary.open("r+b") as stream:
+                            stream.truncate((64 * 1024 * 1024 if size_case == "above64" else TOOL.OBSERVER_BINARY_BYTES) + 1)
+                        if size_case == "metadata-and-oversize":
+                            binary.chmod(0o644)
                     if launcher:
                         for name, relative in (("Contents/Info.plist", "desktop/native/macos-applications-launcher/Info.plist"),
                                                ("Contents/Resources/icon.png", "desktop/src-tauri/icons/icon.png")):
@@ -7486,7 +7511,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                             self.assertEqual(argv, expected_sign + ["--timestamp", str(selected)])
                             self.assertIn("--timestamp", argv)
                             replacement = binary.with_name(binary.name + ".replacement")
-                            replacement.write_bytes(signed); replacement.chmod(0o755); replacement.replace(binary)
+                            replacement.write_bytes(signed); replacement.chmod(0o755)
+                            if refused_output:
+                                with replacement.open("r+b") as stream:
+                                    stream.truncate(TOOL.OBSERVER_BINARY_BYTES + 1)
+                            replacement.replace(binary)
                             if launcher:
                                 seal = selected / "Contents/_CodeSignature/CodeResources"
                                 seal.parent.mkdir(); seal.write_bytes(b"INERT launcher signature"); seal.chmod(0o644)
@@ -7506,8 +7535,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         self.assertEqual((root, filename, name), (checkout, "macos_cpython_orchestrator.py", "_mrk_credential_signing_content"))
                         return matcher
                     original_loader = module.load_data
-                    with self.credential_fixture_call(operation, credentials), mock.patch.object(module, "load_data", side_effect=parser):
-                        if failed_verify:
+                    read_roles, original_read = [], operation.read
+                    def read(entry):
+                        read_roles.append(entry["role"])
+                        return original_read(entry)
+                    with self.credential_fixture_call(operation, credentials), mock.patch.object(module, "load_data", side_effect=parser), \
+                            mock.patch.object(operation, "read", side_effect=read):
+                        if failed_verify or refused_input or refused_output:
                             with self.assertRaises(module.Refused): operation.execute()
                         else:
                             try:
@@ -7515,8 +7549,29 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                             except module.Refused:
                                 self.fail(str(operation.receipt.get("failure")))
                             self.assertEqual(value, module.digest(signed))
-                    self.assertEqual(operation.receipt["passed"], not failed_verify)
+                    self.assertEqual(operation.receipt["passed"], not (failed_verify or refused_input or refused_output))
                     self.assertIs(module.load_data, original_loader)
+                    if refused_input or refused_output:
+                        self.assertEqual(operation.receipt["failure"]["stage"], phase)
+                        self.assertEqual(operation.receipt["failure"]["reason"],
+                            "file-original-shape" if size_case == "metadata-and-oversize" else "file-original-size")
+                        refused_role = "fixed-sign-output" if refused_output else "fixed-sign-input"
+                        refused_entries = [entry for entry in operation.entries if entry["role"] == refused_role]
+                        self.assertEqual(len(refused_entries), 1)
+                        self.assertTrue(refused_entries[0]["closed"] and refused_entries[0]["fd"] is None)
+                        self.assertNotIn(refused_role, read_roles)
+                        self.assertFalse(operation.fixed_sign_complete)
+                        if refused_input:
+                            self.assertFalse(calls or operation.credential_calls or operation.credential_contexts)
+                            self.assertTrue(operation.receipt["originalClosesKnown"] and operation.receipt["targetRetired"])
+                            self.assertFalse(operation.signing_mutation_pending)
+                        else:
+                            self.assertEqual([row["role"] for row in operation.calls], [phase])
+                            self.assertTrue(operation.calls[0]["returned"] and operation.calls[0]["capturesSettled"])
+                            self.assertTrue(operation.signing_mutation_pending and operation.credential_unknown)
+                            self.assertFalse(operation.receipt["originalClosesKnown"] or operation.receipt["targetRetired"])
+                            self.assertFalse(operation.credential_contexts[0]["retired"])
+                        continue
                     self.assertEqual(len(calls), 2)
                     self.assertEqual([row["role"] for row in operation.calls], [phase, phase + "-verify"])
                     self.assertTrue(operation.receipt["originalClosesKnown"] and operation.receipt["targetRetired"])
@@ -18685,6 +18740,59 @@ class MacNormalPreviewData(unittest.TestCase):
                 TOOL.remover_cargo_artifact(cargo_lines(*rows), binary, target, body, target=selected_target, package_version="0.1.2")
             with self.assertRaises(TOOL.Refused):
                 TOOL.remover_cargo_artifact(cargo_lines(*rows, final), binary.with_name("mrk-macos-install"), target, body, target=selected_target, package_version="0.1.2")
+
+    def test_observer_binary_bound_precedes_allocation_and_cargo_projection(self):
+        cap = TOOL.OBSERVER_BINARY_BYTES
+        self.assertEqual(cap, 256 * 1024 * 1024)
+        target, binary, rows, body = observer_cargo_fixture()
+        messages = cargo_lines(*rows, {"reason": "build-finished", "success": True})
+        # Exercise the exact byte boundary with the real existing parser and a
+        # reduced test constant; no quarter-GiB DATA allocation is necessary.
+        with mock.patch.object(TOOL, "OBSERVER_BINARY_BYTES", len(body)):
+            admitted = TOOL.observer_cargo_artifact(messages, binary, target, body, package_version="0.1.2")
+            self.assertEqual(admitted["binarySize"], len(body))
+            for value in (body + b"\0", body[:31], bytearray(body), None):
+                with self.subTest(bodyType=type(value).__name__), mock.patch.object(TOOL, "cargo_records") as parser, \
+                        self.assertRaisesRegex(TOOL.Refused, "^observer-cargo-binary-bound$"):
+                    TOOL.observer_cargo_artifact(messages, binary, target, value, package_version="0.1.2")
+                parser.assert_not_called()
+
+        with tempfile.TemporaryDirectory(prefix="mrk-observer-size-") as temporary:
+            path = Path(temporary) / "observer"
+            # Real sparse oversized file: the staging reader must refuse the
+            # original stat BEFORE opening/allocating/reading its large body.
+            with path.open("wb") as stream:
+                stream.truncate(cap + 1)
+            path.chmod(0o755)
+            args = SimpleNamespace(target=TOOL.ARM_TARGET, package_role="installed-shell-observation",
+                binary=path, observer_cargo_messages=Path(temporary) / "cargo.jsonl",
+                observer_cargo_target_dir=Path(temporary) / "target",
+                android_helper=Path(temporary) / "helper", resident_image=Path(temporary) / "resident")
+            selection = SimpleNamespace(package_version="0.1.2")
+            with mock.patch.object(TOOL, "source_build_selection", return_value=selection), \
+                    mock.patch.object(TOOL.os, "read", wraps=TOOL.os.read) as reader, \
+                    mock.patch.object(TOOL, "observer_cargo_artifact") as parser, \
+                    mock.patch.object(TOOL, "write_tree") as output:
+                with self.assertRaisesRegex(TOOL.Refused, "^ordinary-file-bound$"):
+                    TOOL.app_with_github_seal(args, None)
+                reader.assert_not_called(); parser.assert_not_called(); output.assert_not_called()
+
+            # The ordinary facade's existing default read is unchanged. Only
+            # the explicit observer role selects the new finite staging bound.
+            for role in TOOL.PACKAGE_ROLES:
+                request = SimpleNamespace(**vars(args)); request.package_role = role
+                if role == "ordinary-image":
+                    request.observer_cargo_messages = request.observer_cargo_target_dir = None
+                    for key in ("desktop_image", "expected_desktop_image", "desktop_image_cargo_messages", "desktop_image_cargo_target_dir"):
+                        setattr(request, key, "inert-present-input")
+                with mock.patch.object(TOOL, "source_build_selection", return_value=selection), \
+                        mock.patch.object(TOOL, "read", side_effect=TOOL.Refused("inert-first-read")) as reader:
+                    with self.assertRaisesRegex(TOOL.Refused, "^inert-first-read$"):
+                        TOOL.app_with_github_seal(request, None)
+                    if role == "ordinary-image":
+                        reader.assert_called_once_with(path)
+                    else:
+                        reader.assert_called_once_with(path, cap)
 
     def test_observer_ignores_only_the_exact_cargo_auxiliary_main_binary(self):
         final = {"reason": "build-finished", "success": True}

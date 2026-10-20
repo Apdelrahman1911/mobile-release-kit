@@ -72,6 +72,8 @@ APP_BINARY = PAYLOAD_CONTENTS + "MacOS/mobile-release-kit-desktop"
 DESKTOP_IMAGE = PAYLOAD_CONTENTS + "Frameworks/libmrk_desktop_image.dylib"
 RESIDENT_IMAGE = PAYLOAD_CONTENTS + "Frameworks/libmrk_resident_image.dylib"
 PACKAGE_ROLES = ("ordinary-image", "installed-shell-observation")
+# Only the nonshipping test executable shares the signing matcher's ceiling.
+OBSERVER_BINARY_BYTES = 256 * 1024 * 1024
 IMAGE_INSTALL_NAMES = {
     "desktop": str(INSTALL_ROOT / APP_NAME / DESKTOP_IMAGE),
     "resident": str(INSTALL_ROOT / APP_NAME / RESIDENT_IMAGE),
@@ -2320,6 +2322,7 @@ def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM
 
 def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TARGET, package_version):
     target = mac_target(target)
+    need(type(body) is bytes and 32 <= len(body) <= OBSERVER_BINARY_BYTES, "observer-cargo-binary-bound")
     root, name = DESKTOP / "src-tauri", "installed-shell-observation"
     binary, target_dir = Path(binary), Path(target_dir)
     need(binary.is_absolute() and target_dir.is_absolute()
@@ -3483,7 +3486,8 @@ def app_with_github_seal(args, seal):
          "package-role-artifact-inputs")
     need(getattr(args, "android_helper", None) is not None and getattr(args, "resident_image", None) is not None,
          "package-role-resident-required")
-    body = read(args.binary)
+    body = (read(args.binary, OBSERVER_BINARY_BYTES) if role == "installed-shell-observation"
+            else read(args.binary))
     need(sha(getattr(args, "expected_app_binary", None)) and digest(body) == args.expected_app_binary,
          "app-original-compiler-digest")
     desktop_body = None
