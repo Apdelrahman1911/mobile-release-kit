@@ -334,6 +334,7 @@ fn main() {
             "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",
             "github_release_reconcile", "github_release_pending", "github_release_cancel",
             "github_remote_setup_status", "github_remote_setup_prepare", "github_remote_setup_apply", "github_remote_setup_discard", "github_remote_setup_cancel",
+            "github_activity_status", "github_activity_read", "github_activity_cancel",
             "github_repository_create_status", "github_repository_create_prepare", "github_repository_create_create", "github_repository_create_pending", "github_repository_create_reconcile", "github_repository_create_discard", "github_repository_create_cancel",
             "github_setup_publication_status", "github_setup_publication_prepare", "github_setup_publication_publish", "github_setup_publication_pending", "github_setup_publication_reconcile", "github_setup_publication_discard", "github_setup_publication_cancel",
             "github_history_status", "github_history_start", "github_history_cancel",

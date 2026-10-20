@@ -79,6 +79,11 @@ def main(*, started: float, runtime_dir: str) -> int:
             end = started + 60.0
             run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
             request = None
+        elif type(header) is dict and header.get("protocol") == "mrk-github-activity/1":
+            from ._desktop_github_activity import run_owned
+            end = started + 60.0
+            run_owned(control, output, initial, started=started, runtime_dir=runtime_dir)
+            request = None
         elif type(header) is dict and header.get("protocol") == "mrk-github-repository-create/1":
             from ._desktop_github_repository_create import run_owned
             end = started + 60.0

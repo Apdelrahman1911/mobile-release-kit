@@ -724,6 +724,7 @@ impl ConnectionState {
             || self.setup.native_work_pending()
             || self.history.native_work_pending()
             || self.publication.native_work_pending()
+            || self.activity.native_work_pending()
             || self.enrollment.is_some()
         {
             return Err(refused(p::Reason::Busy));

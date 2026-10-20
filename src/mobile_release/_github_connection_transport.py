@@ -55,9 +55,12 @@ class _ExchangeProfile(Enum):
     VERSION_ALLOCATION = "version-allocation"
     VERSION_ENROLLMENT = "version-enrollment"
     REPOSITORY_CREATE = "repository-create"
+    ACTIVITY = "activity"
 
 
 class _ResponseRole(Enum):
+    ACTIVITY_OBJECT = "activity-object"
+    ACTIVITY_LIST = "activity-list"
     REPOSITORY_CREATE_ACCOUNT = "repository-create-account"
     REPOSITORY_CREATE_OWNER = "repository-create-owner"
     REPOSITORY_CREATE_LOOKUP = "repository-create-lookup"
@@ -119,6 +122,10 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
     """Closed private roles, never caller-provided numeric limits."""
     if type(profile) is not _ExchangeProfile or type(role) is not _ResponseRole:
         raise ValueError("Invalid fixed GitHub response role")
+    if role in {_ResponseRole.ACTIVITY_OBJECT, _ResponseRole.ACTIVITY_LIST}:
+        if profile is not _ExchangeProfile.ACTIVITY:
+            raise ValueError("Fixed activity role belongs to another action")
+        return MAX_BODY_BYTES, 1024
     if role in _REPOSITORY_CREATE_ROLES:
         if profile is not _ExchangeProfile.REPOSITORY_CREATE:
             raise ValueError("Fixed repository creation role belongs to another action")
@@ -146,6 +153,10 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
 
 def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str, path: str) -> tuple[int, int]:
     limits = _role_limits(profile, role)
+    if profile is _ExchangeProfile.ACTIVITY:
+        from ._github_activity_transport import validate_endpoint
+        validate_endpoint(role, method, path)
+        return limits
     if profile is _ExchangeProfile.REPOSITORY_CREATE:
         from ._github_repository_create_transport import validate_endpoint
         validate_endpoint(role, method, path)
@@ -323,7 +334,7 @@ class _Budget:
         if type(started) not in (int, float):
             raise ReadFailure("network-unavailable")
         self.started = started
-        self.end = started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE} else READ_SECONDS)
+        self.end = started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else READ_SECONDS)
         self.monotonic = monotonic
         self.wall = wall
         self.body_bytes = 0
@@ -331,16 +342,16 @@ class _Budget:
         self.profile = _profile
         self.requests = 0
         self.body_total_limit = (4 * 1024 * 1024 if _profile is _ExchangeProfile.PUBLICATION else
-                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE} else MAX_BODY_TOTAL)
+                                 2 * 1024 * 1024 if _profile in {_ExchangeProfile.RELEASE_PREPARE, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else MAX_BODY_TOTAL)
         if not math.isfinite(started) or not math.isfinite(self.end):
             raise ReadFailure("network-unavailable")
 
     def claim_request(self) -> None:
         # Other existing profiles retain their own original finite schedules.
         # Allocation adds a second private bound, never a logical retry owner.
-        if self.profile in {_ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE}:
+        if self.profile in {_ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY}:
             self.remaining()
-            if self.requests >= (8 if self.profile is _ExchangeProfile.REPOSITORY_CREATE else 10):
+            if self.requests >= (8 if self.profile in {_ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else 10):
                 raise ReadFailure("response-limit")
             self.requests += 1
 
@@ -839,8 +850,9 @@ def _response_result(response: _ResponseBody, budget: _Budget) -> ReadResult:
                 break
             chunks.append(block)
         body = _decode_json(b"".join(chunks), limit=response.maximum, nodes=20_000, depth=24)
-        expected = list if response.role is _ResponseRole.PUBLICATION_LIST else dict
-        if type(body) is not expected or expected is list and len(body) > 2:
+        expected = list if response.role in {_ResponseRole.PUBLICATION_LIST, _ResponseRole.ACTIVITY_LIST} else dict
+        maximum_rows = 30 if response.role is _ResponseRole.ACTIVITY_LIST else 2
+        if type(body) is not expected or expected is list and len(body) > maximum_rows:
             raise ReadFailure("response-invalid")
         return ReadResult({"status": head.status, "body": body, "failure": "none"}, control)
     except _JsonLimit:
@@ -1066,13 +1078,13 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             or not 1 <= len(token) <= 4096 or any(not 0x21 <= ord(c) <= 0x7e for c in token)):
         raise ValueError("Invalid fixed GitHub transport input")
     _role_limits(_profile, _ResponseRole.STANDARD)
-    if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE} and api_version != "2026-03-10":
+    if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.VERSION_ALLOCATION, _ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} and api_version != "2026-03-10":
         raise ValueError("Fixed Setup API version differs")
     if _setup_budget is not None:
-        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE}
+        if (type(_setup_budget) is not _Budget or _profile not in {_ExchangeProfile.SETUP, _ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY}
                 or _setup_budget.profile is not _profile
                 or _setup_budget.started != started
-                or _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE} else READ_SECONDS)
+                or _setup_budget.end != started + (60.0 if _profile in {_ExchangeProfile.PUBLICATION, _ExchangeProfile.REPOSITORY_CREATE, _ExchangeProfile.ACTIVITY} else READ_SECONDS)
                 or getattr(_setup_budget, "_secret_exchange_claimed", False)):
             raise ValueError("Invalid same-original Setup budget")
         _setup_budget._secret_exchange_claimed = True
@@ -1109,7 +1121,7 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
             from .version_enrollment import validate_body
             validate_body(_role.value, body, path=path)
         methods = {"GET", "PUT"} if _profile in {_ExchangeProfile.SETUP, _ExchangeProfile.VERSION_ALLOCATION} else {"GET", "POST"}
-        if _profile is _ExchangeProfile.VERSION_ENROLLMENT:
+        if _profile in {_ExchangeProfile.VERSION_ENROLLMENT, _ExchangeProfile.ACTIVITY}:
             methods = {"GET"}
         if _profile is _ExchangeProfile.SETUP and _role in _VARIABLE_ROLES:
             methods = {"GET", "POST", "PATCH"}  # Exact method/path was already checked above.

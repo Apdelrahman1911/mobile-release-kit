@@ -714,7 +714,7 @@ impl ConnectionState {
         if self.preflight.native_work_pending()
             || self.release.native_work_pending()
             || self.setup.native_work_pending()
-            || (self.history.native_work_pending() || self.repository_create.native_work_pending())
+            || (self.history.native_work_pending() || self.activity.native_work_pending() || self.repository_create.native_work_pending())
         {
             return Err(refused(p::Reason::Busy));
         }
